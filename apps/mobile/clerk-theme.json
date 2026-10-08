@@ -2,7 +2,7 @@
   "colors": {
     "primary": "#1b4ed8",
     "background": "#fcfcfc",
-    "input": "#ffffff",
+    "input": "#fcfcfc",
     "danger": "#c10007",
     "success": "#059669",
     "warning": "#bb4d00",
@@ -19,7 +19,7 @@
   "darkColors": {
     "primary": "#346bf1",
     "background": "#0a0a0a",
-    "input": "#111111",
+    "input": "#131313",
     "danger": "#ff6467",
     "success": "#34d399",
     "warning": "#ffb900",

@@ -2,8 +2,12 @@ import type { ViewStyle } from "react-native";
 import type { MobileThemeVariables } from "../../lib/mobileTheme";
 
 export const THREAD_LIST_V2_MONO_FONT = "Menlo";
-export const THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME = "px-5 py-2.5";
-export const THREAD_LIST_V2_ROW_DIVIDERS = true;
+export const THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME = "px-3 py-2.5";
+// nckrtl shell: rows are rounded pills on the pane, like the desktop sidebar,
+// so no hairlines between them.
+export const THREAD_LIST_V2_ROW_DIVIDERS = false;
+/** Phone rows inset from the screen edge so their rounded surface reads. */
+export const THREAD_LIST_V2_ROW_INSET = 8;
 
 export const selectedThreadRowColors = {
   foregroundClassName: "text-thread-selected-foreground",
@@ -22,19 +26,22 @@ export function getThreadListV2RowAppearance(
   selected: boolean,
 ) {
   const selectedBackgroundColor = theme["--color-thread-selected"];
-  const style: ViewStyle | undefined = sidebarPane
-    ? {
-        backgroundColor: selected ? selectedBackgroundColor : theme["--color-drawer"],
-        borderRadius: 12,
-      }
-    : undefined;
-  const swipeContainerStyle: ViewStyle | undefined = sidebarPane
+  const paneColor = theme[sidebarPane ? "--color-drawer" : "--color-screen"];
+  const style: ViewStyle = {
+    backgroundColor: selected ? selectedBackgroundColor : paneColor,
+    borderRadius: 12,
+  };
+  const swipeContainerStyle: ViewStyle = sidebarPane
     ? { borderRadius: 12, overflow: "hidden" }
-    : undefined;
+    : {
+        borderRadius: 12,
+        overflow: "hidden",
+        marginHorizontal: THREAD_LIST_V2_ROW_INSET,
+      };
 
   return {
-    className: sidebarPane ? undefined : "bg-screen",
-    interactionClassName: sidebarPane ? "bg-thread-hover" : "bg-row-hover",
+    className: undefined,
+    interactionClassName: "bg-thread-hover",
     interactionOpacity: selected ? 0 : 1,
     foregroundClassName: sidebarPane ? "text-drawer-foreground" : "text-foreground",
     mutedForegroundClassName: sidebarPane
@@ -50,14 +57,10 @@ export function getThreadListV2RowAppearance(
       ? "accent-drawer-foreground-muted"
       : "accent-foreground-tertiary",
     style,
-    cardStyle: sidebarPane ? { ...style, paddingHorizontal: 12, paddingVertical: 10 } : undefined,
+    cardStyle: { ...style, paddingHorizontal: 12, paddingVertical: 10 },
     swipeContainerStyle,
-    swipeBackgroundColor: theme[sidebarPane ? "--color-drawer" : "--color-screen"],
+    swipeBackgroundColor: paneColor,
     // Provider badges blend into the surface beneath them.
-    providerIconSurfaceColor: sidebarPane
-      ? selected
-        ? selectedBackgroundColor
-        : theme["--color-drawer"]
-      : theme["--color-screen"],
+    providerIconSurfaceColor: selected ? selectedBackgroundColor : paneColor,
   };
 }

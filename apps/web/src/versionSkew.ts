@@ -106,6 +106,14 @@ export function supportsDesktopAppUpdate(
   return serverConfig?.environment.capabilities.desktopAppUpdate === true;
 }
 
+/** True when the server runs under a supervisor that starts it again after
+    server.restart stops it. */
+export function supportsServerRestart(
+  serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+): boolean {
+  return serverConfig?.environment.capabilities.serverRestart === true;
+}
+
 /** True when the connected server can recover opted-in running turns after
     its self-update restart. */
 export function supportsServerUpdateThreadContinuation(

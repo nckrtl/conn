@@ -908,3 +908,20 @@ export class ServerSelfUpdateError extends Schema.TaggedError<ServerSelfUpdateEr
     return `Server update failed: ${this.reason}`;
   }
 }
+
+/** Acknowledges server.restart; the server stops right after this reaches the client. */
+export const ServerRestartResult = Schema.Struct({
+  accepted: Schema.Literal(true),
+});
+export type ServerRestartResult = typeof ServerRestartResult.Type;
+
+export class ServerRestartError extends Schema.TaggedError<ServerRestartError>()(
+  "ServerRestartError",
+  {
+    reason: TrimmedNonEmptyString,
+  },
+) {
+  override get message(): string {
+    return `Server restart failed: ${this.reason}`;
+  }
+}

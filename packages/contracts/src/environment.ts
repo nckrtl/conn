@@ -185,6 +185,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       desktop servers whose app predates the remote trigger, where clients
       must keep telling the user to update the app on that machine. */
   desktopAppUpdate: Schema.optionalKey(Schema.Boolean),
+  /** Server accepts server.restart: it runs under a supervisor that starts it
+      again after it exits (a launchd KeepAlive job). Absent on older servers
+      and on servers nothing would bring back, so clients hide the action. */
+  serverRestart: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

@@ -127,6 +127,7 @@ import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import * as HeapSnapshot from "./observability/HeapSnapshot.ts";
 import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+import * as ServerRestart from "./serverRestart.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import { authHttpApiLayer, environmentAuthenticatedAuthLayer } from "./auth/http.ts";
 import * as ReplayMarkers from "./auth/replayMarkers.ts";
@@ -453,7 +454,10 @@ const ProjectFaviconResolverLayerLive = ProjectFaviconResolver.layer.pipe(
   Layer.provide(T3ProjectFileLoader.layer),
 );
 
+// Exposes ServerRestart too, so the descriptor's capability and the RPC
+// handler share one instance.
 const ServerEnvironmentLayerLive = ServerEnvironment.layer.pipe(
+  Layer.provideMerge(ServerRestart.layer),
   Layer.provide(ServerSecretStore.layer),
 );
 

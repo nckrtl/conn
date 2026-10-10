@@ -3,6 +3,7 @@ import {
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
+  ServerRestartError,
   WS_METHODS,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -41,6 +42,7 @@ import {
   resolveServerConfigValue,
   resolveServerWelcomeState,
   resolveServerUpdateProgressResult,
+  restartAndAwaitReconnect,
   serverUpdateStateForProgressEvent,
   serverUpdateStateForServerVersion,
   validateServerUpdateReadyEvent,
@@ -234,6 +236,70 @@ describe("update restart reconnect nudges", () => {
       });
 
       expect(yield* Ref.get(retries)).toBe(1);
+    }),
+  );
+});
+
+describe("server restart", () => {
+  const restartWith = <E>(
+    restart: Effect.Effect<{ readonly accepted: true }, E>,
+    afterRestart: ReadonlyArray<{ readonly phase: string }>,
+  ) =>
+    Effect.gen(function* () {
+      const states = yield* Queue.unbounded<{ readonly phase: string }>();
+      yield* Queue.offer(states, { phase: "connected" });
+      return yield* restartAndAwaitReconnect({
+        environmentId: "environment-1",
+        stateChanges: Stream.fromQueue(states),
+        restart: restart.pipe(Effect.ensuring(Queue.offerAll(states, afterRestart))),
+        retryNow: Effect.void,
+      }).pipe(Effect.exit);
+    });
+
+  it.effect("resolves once the restarted server is connected again", () =>
+    Effect.gen(function* () {
+      const exit = yield* restartWith(Effect.succeed({ accepted: true as const }), [
+        { phase: "backoff" },
+        { phase: "connected" },
+      ]);
+      expect(Exit.isSuccess(exit)).toBe(true);
+    }),
+  );
+
+  it.effect("treats a socket drop before the acknowledgement as restarting", () =>
+    Effect.gen(function* () {
+      const socketDropped = new RpcClientError.RpcClientError({
+        reason: new Socket.SocketCloseError({ code: 1006 }),
+      });
+      const exit = yield* restartWith(Effect.fail(socketDropped), [
+        { phase: "backoff" },
+        { phase: "connected" },
+      ]);
+      expect(Exit.isSuccess(exit)).toBe(true);
+    }),
+  );
+
+  it.effect("surfaces a refusal without waiting for a reconnect", () =>
+    Effect.gen(function* () {
+      const refusal = new ServerRestartError({ reason: "Not supervised." });
+      const exit = yield* restartWith(Effect.fail(refusal), []);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(Cause.squash(exit.cause)).toBe(refusal);
+      }
+    }),
+  );
+
+  it.effect("fails after 30 seconds when the server does not come back", () =>
+    Effect.gen(function* () {
+      const fiber = yield* restartWith(Effect.succeed({ accepted: true as const }), [
+        { phase: "backoff" },
+      ]).pipe(Effect.forkChild);
+      yield* TestClock.adjust("29 seconds");
+      expect(fiber.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust("2 seconds");
+      const exit = yield* Fiber.join(fiber);
+      expect(Exit.isFailure(exit)).toBe(true);
     }),
   );
 });

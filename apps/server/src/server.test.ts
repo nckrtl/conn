@@ -167,6 +167,7 @@ import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+import * as ServerRestart from "./serverRestart.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
@@ -561,6 +562,7 @@ const buildAppUnderTest = (options?: {
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
     serverRuntimeStartup?: Partial<ServerRuntimeStartup.ServerRuntimeStartup["Service"]>;
     serverEnvironment?: Partial<ServerEnvironment.ServerEnvironment["Service"]>;
+    serverRestart?: Partial<ServerRestart.ServerRestart["Service"]>;
     repositoryIdentityResolver?: Partial<
       RepositoryIdentityResolver.RepositoryIdentityResolver["Service"]
     >;
@@ -1171,11 +1173,17 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ServerEnvironment.ServerEnvironment)({
-          getEnvironmentId: Effect.succeed(testEnvironmentDescriptor.environmentId),
-          getDescriptor: Effect.succeed(testEnvironmentDescriptor),
-          ...options?.layers?.serverEnvironment,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getEnvironmentId: Effect.succeed(testEnvironmentDescriptor.environmentId),
+            getDescriptor: Effect.succeed(testEnvironmentDescriptor),
+            ...options?.layers?.serverEnvironment,
+          }),
+          Layer.mock(ServerRestart.ServerRestart)({
+            available: false,
+            ...options?.layers?.serverRestart,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
@@ -4600,6 +4608,48 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       if (rpcError._tag === "EnvironmentAuthorizationError") {
         assert.equal(rpcError.requiredScope, "orchestration:read");
       }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("restarts only for operate-scoped clients on a restart-capable server", () =>
+    Effect.gen(function* () {
+      let restarts = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          serverRestart: {
+            available: true,
+            restart: Effect.sync(() => {
+              restarts += 1;
+              return { accepted: true as const };
+            }),
+          },
+        },
+      });
+
+      const { body: readTokenBody } = yield* exchangeAccessToken(defaultDesktopBootstrapToken, {
+        scope: "orchestration:read",
+      });
+      const readTicketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+        headers: { authorization: `Bearer ${readTokenBody.access_token ?? ""}` },
+      });
+      const readTicket = (yield* readTicketResponse.json) as { readonly ticket: string };
+      const readWsUrl = `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(readTicket.ticket)}`;
+      const denied = yield* Effect.flip(
+        Effect.scoped(withWsRpcClient(readWsUrl, (client) => client[WS_METHODS.serverRestart]({}))),
+      );
+      assert.equal(denied._tag, "EnvironmentAuthorizationError");
+      if (denied._tag === "EnvironmentAuthorizationError") {
+        assert.equal(denied.requiredScope, "orchestration:operate");
+      }
+      assert.equal(restarts, 0);
+
+      const accepted = yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          client[WS_METHODS.serverRestart]({}),
+        ),
+      );
+      assert.deepEqual(accepted, { accepted: true });
+      assert.equal(restarts, 1);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

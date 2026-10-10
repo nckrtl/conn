@@ -129,6 +129,31 @@ export class ServerUpdateTerminalError extends Schema.TaggedError<ServerUpdateTe
 // version when the trial rolls back.
 const SERVER_UPDATE_RESUME_TIMEOUT = Duration.minutes(4);
 
+// A supervised restart is a stop plus a cold start, well under this.
+const SERVER_RESTART_RECONNECT_TIMEOUT = Duration.seconds(30);
+
+export class ServerRestartReconnectTimeoutError extends Schema.TaggedError<ServerRestartReconnectTimeoutError>()(
+  "ServerRestartReconnectTimeoutError",
+  {
+    environmentId: Schema.String,
+  },
+) {
+  override get message(): string {
+    return "The server did not come back within 30 seconds.";
+  }
+}
+
+export interface ServerRestartTarget {
+  readonly environmentId: EnvironmentId;
+}
+
+const serverRestartingAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make(false).pipe(Atom.withLabel(`environment-data:server:restarting:${environmentId}`)),
+);
+const NOT_RESTARTING_ATOM = Atom.make(false).pipe(
+  Atom.withLabel("environment-data:server:restarting:empty"),
+);
+
 export function matchesServerUpdateReadyEvent(
   result: ServerSelfUpdateResult,
   event: ServerLifecycleStreamReadyEvent,
@@ -215,6 +240,48 @@ export function nudgeReconnectDuringUpdateRestart(input: {
     Effect.ignore,
   );
 }
+
+/**
+ * Asks a supervised server to restart, then resolves once this client is
+ * connected to it again. The reconnect observer is armed before the request,
+ * so a server that drops the socket before its acknowledgement arrives still
+ * counts as restarting; any other failure means it refused.
+ */
+export const restartAndAwaitReconnect = Effect.fn("restartAndAwaitReconnect")(function* <
+  EState,
+  ERestart,
+>(input: {
+  readonly environmentId: string;
+  readonly stateChanges: Stream.Stream<
+    { readonly phase: string; readonly lastFailure?: { readonly reason: string } | null },
+    EState
+  >;
+  readonly restart: Effect.Effect<unknown, ERestart>;
+  readonly retryNow: Effect.Effect<void>;
+}) {
+  const armed = yield* Deferred.make<void>();
+  const reconnected = yield* input.stateChanges.pipe(
+    Stream.tap(() => Deferred.succeed(armed, undefined)),
+    waitForNextEnvironmentReconnect,
+    Effect.forkChild,
+  );
+  yield* Deferred.await(armed);
+  const exit = yield* input.restart.pipe(Effect.exit);
+  if (Exit.isFailure(exit) && !isLegacyUpdateHandoffLoss(exit.cause)) {
+    return yield* Effect.failCause(exit.cause);
+  }
+  yield* nudgeReconnectDuringUpdateRestart({
+    stateChanges: input.stateChanges,
+    retryNow: input.retryNow,
+  }).pipe(Effect.forkChild);
+  yield* Fiber.join(reconnected).pipe(
+    Effect.timeoutOrElse({
+      duration: SERVER_RESTART_RECONNECT_TIMEOUT,
+      orElse: () =>
+        Effect.fail(new ServerRestartReconnectTimeoutError({ environmentId: input.environmentId })),
+    }),
+  );
+});
 
 export function waitForNextEnvironmentReconnect<E>(
   stateChanges: Stream.Stream<{ readonly phase: string }, E>,
@@ -908,6 +975,34 @@ export function createServerEnvironmentAtoms<R, E>(
       );
     },
   });
+  const restartServer = createRuntimeCommand<
+    EnvironmentRegistry | R,
+    E,
+    ServerRestartTarget,
+    void,
+    unknown
+  >(runtime, {
+    label: "environment-data:server:restart-server",
+    scheduler: updateScheduler,
+    concurrency: configConcurrency,
+    execute: ({ environmentId }, atomRegistry) =>
+      Effect.gen(function* () {
+        const environmentRegistry = yield* EnvironmentRegistry;
+        atomRegistry.set(serverRestartingAtom(environmentId), true);
+        yield* restartAndAwaitReconnect({
+          environmentId,
+          stateChanges: environmentRegistry.stateChanges(environmentId),
+          restart: environmentRegistry.run(environmentId, request(WS_METHODS.serverRestart, {})),
+          retryNow: environmentRegistry.retryNow(environmentId),
+        });
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => atomRegistry.set(serverRestartingAtom(environmentId), false)),
+        ),
+      ),
+  });
+  const restartingAtom = (environmentId: EnvironmentId | null) =>
+    environmentId === null ? NOT_RESTARTING_ATOM : serverRestartingAtom(environmentId);
   const settingsValueAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) => get(configValueAtom(environmentId))?.settings ?? null).pipe(
       Atom.withLabel(`environment-data:server:settings:${environmentId}`),
@@ -972,6 +1067,7 @@ export function createServerEnvironmentAtoms<R, E>(
   return {
     configValueAtom,
     updateStateAtom,
+    restartingAtom,
     settingsValueAtom,
     providersValueAtom,
     providerAuthState: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
@@ -1115,6 +1211,7 @@ export function createServerEnvironmentAtoms<R, E>(
       concurrency: configConcurrency,
     }),
     updateServer,
+    restartServer,
     upsertKeybinding: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:upsert-keybinding",
       tag: WS_METHODS.serverUpsertKeybinding,

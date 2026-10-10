@@ -140,6 +140,7 @@ import {
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
   supportsDesktopAppUpdate,
+  supportsServerRestart,
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
@@ -176,6 +177,7 @@ import {
   ServerUpdatesAction,
   type ServerUpdateTarget,
 } from "../ServerUpdateAction";
+import { ServerRestartMenuItem } from "../ServerRestartAction";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import {
@@ -1516,8 +1518,10 @@ function SavedBackendListRow({
   );
   const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
+  const restartingServer = useAtomValue(serverEnvironment.restartingAtom(environmentId));
   const resumingServerUpdate =
-    serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
+    restartingServer ||
+    (serverUpdateState.status === "running" && serverUpdateState.stage === "resuming");
   const status = savedBackendStatus(environment);
   const serverVersion = environment.serverConfig?.environment.serverVersion ?? null;
   // A saved T3 Connect machine this device has never reached (unsupported,
@@ -1649,6 +1653,14 @@ function SavedBackendListRow({
           />
           {errorTraceId ? (
             <MenuItem onClick={() => copyTraceId(errorTraceId)}>Copy trace ID</MenuItem>
+          ) : null}
+          {enabled &&
+          (isConnected || restartingServer) &&
+          supportsServerRestart(environment.serverConfig) ? (
+            <ServerRestartMenuItem
+              environmentId={environmentId}
+              serverLabel={`${environment.label} server`}
+            />
           ) : null}
           <MenuSeparator />
           <MenuItem variant="destructive" onClick={() => onRemove(environment)}>
@@ -3326,6 +3338,14 @@ export function ConnectionsSettings() {
                       environmentId={primaryEnvironmentId}
                       serverConfig={primaryServerConfig}
                     />
+                    {supportsServerRestart(primaryServerConfig) ? (
+                      <ServerRestartMenuItem
+                        environmentId={primaryEnvironmentId}
+                        serverLabel={
+                          primaryEnvironment ? `${primaryEnvironment.label} server` : "server"
+                        }
+                      />
+                    ) : null}
                   </MenuPopup>
                 </Menu>
               ) : null

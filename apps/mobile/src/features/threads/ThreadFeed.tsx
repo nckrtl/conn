@@ -91,7 +91,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, { FadeIn, type SharedValue } from "react-native-reanimated";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { IOS_NAV_BAR_HEIGHT } from "../../lib/layoutMetrics";
-import { useFontFamily } from "../../lib/useFontFamily";
+import { MONO_FONT_FAMILY, SANS_FONT_FAMILY } from "../../lib/fonts";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
@@ -601,12 +601,6 @@ function ThreadMarkdownVideo(props: { readonly source: MediaVideoPreviewSource }
   );
 }
 
-const MARKDOWN_MONO_FONT = Platform.select({
-  ios: "ui-monospace",
-  android: "monospace",
-  default: "monospace",
-});
-
 interface MarkdownStyleSets {
   readonly user: MarkdownStyleSet;
   readonly assistant: MarkdownStyleSet;
@@ -984,8 +978,6 @@ function useMarkdownStyles(
   const inlineSkillForeground = theme["--color-inline-skill-foreground"];
   const userBubbleSkillForeground = theme["--color-user-bubble-skill-foreground"];
   const userBubbleForegroundMuted = theme["--color-user-bubble-foreground-muted"];
-  const regularFontFamily = useFontFamily("regular");
-  const boldFontFamily = useFontFamily("bold");
 
   return useMemo(() => {
     const baseTheme: PartialMarkdownTheme = {
@@ -1022,9 +1014,9 @@ function useMarkdownStyles(
         h6: markdownFontSizes.h6,
       },
       fontFamilies: {
-        regular: regularFontFamily,
-        heading: boldFontFamily,
-        mono: MARKDOWN_MONO_FONT,
+        regular: SANS_FONT_FAMILY,
+        heading: SANS_FONT_FAMILY,
+        mono: MONO_FONT_FAMILY,
       },
       headingWeight: "700",
       borderRadius: {
@@ -1045,7 +1037,6 @@ function useMarkdownStyles(
       bold: {
         fontWeight: "700",
         color: markdownStrongColor,
-        fontFamily: boldFontFamily,
       },
       italic: { fontStyle: "italic" },
       link: {
@@ -1061,7 +1052,6 @@ function useMarkdownStyles(
         marginVertical: 10,
       },
       heading: {
-        fontFamily: boldFontFamily,
         color: markdownStrongColor,
         marginTop: 18,
         marginBottom: 8,
@@ -1222,7 +1212,6 @@ function useMarkdownStyles(
       bold: {
         fontWeight: "700",
         color: markdownUserBodyColor,
-        fontFamily: boldFontFamily,
       },
       heading: {
         ...baseStyles.heading,
@@ -1279,9 +1268,7 @@ function useMarkdownStyles(
           fontSize: nativeMarkdownTypography.fontSize,
           lineHeight: nativeMarkdownTypography.lineHeight,
           headingFontSizes: nativeMarkdownTypography.headingFontSizes,
-          fontFamily: regularFontFamily,
-          headingFontFamily: boldFontFamily,
-          boldFontFamily,
+          fontFamily: SANS_FONT_FAMILY,
         },
       },
       assistant: {
@@ -1313,14 +1300,11 @@ function useMarkdownStyles(
           fontSize: nativeMarkdownTypography.fontSize,
           lineHeight: nativeMarkdownTypography.lineHeight,
           headingFontSizes: nativeMarkdownTypography.headingFontSizes,
-          fontFamily: regularFontFamily,
-          headingFontFamily: boldFontFamily,
-          boldFontFamily,
+          fontFamily: SANS_FONT_FAMILY,
         },
       },
     };
   }, [
-    boldFontFamily,
     contextChipBorderColor,
     iconSubtleColor,
     inlineSkillForeground,
@@ -1342,7 +1326,6 @@ function useMarkdownStyles(
     markdownUserInlineCodeText,
     nativeMarkdownTypography,
     onLinkPress,
-    regularFontFamily,
     renderImage,
     themeMode,
     userBubbleForegroundMuted,

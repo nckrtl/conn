@@ -11,7 +11,7 @@ import {
 import { RefreshControl, ScrollView, Text as NativeText, View } from "react-native";
 
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
-import { useFontFamily } from "../../lib/useFontFamily";
+import { MONO_FONT_FAMILY, SANS_FONT_FAMILY } from "../../lib/fonts";
 import {
   resolveMarkdownFontSizes,
   resolveNativeMarkdownTypography,
@@ -56,9 +56,6 @@ function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): Markdown
   const codeBackground = theme["--color-md-code-bg"];
   const codeText = theme["--color-md-code-text"];
   const horizontalRule = theme["--color-md-hr"];
-  const regularFontFamily = useFontFamily("regular");
-  const mediumFontFamily = useFontFamily("medium");
-  const boldFontFamily = useFontFamily("bold");
 
   return useMemo(() => {
     const renderers: CustomRenderers = {
@@ -111,21 +108,21 @@ function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): Markdown
       styles: {
         text: {
           color: body,
-          fontFamily: regularFontFamily,
+          fontFamily: SANS_FONT_FAMILY,
           fontSize: markdownFontSizes.m,
           lineHeight: markdownFontSizes.bodyLineHeight,
         },
         heading: {
           color: strong,
-          fontFamily: boldFontFamily,
+          fontWeight: "700",
         },
         strong: {
           color: strong,
-          fontFamily: boldFontFamily,
+          fontWeight: "700",
         },
         link: {
           color: link,
-          fontFamily: mediumFontFamily,
+          fontWeight: "500",
         },
         blockquote: {
           backgroundColor: blockquoteBackground,
@@ -136,13 +133,13 @@ function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): Markdown
         code: {
           backgroundColor: codeBackground,
           color: codeText,
-          fontFamily: "ui-monospace",
+          fontFamily: MONO_FONT_FAMILY,
         },
         codeBlock: {
           backgroundColor: codeBackground,
           borderRadius: 12,
           color: codeText,
-          fontFamily: "ui-monospace",
+          fontFamily: MONO_FONT_FAMILY,
           padding: 12,
         },
         hr: {
@@ -166,9 +163,7 @@ function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): Markdown
         fontSize: nativeMarkdownTypography.fontSize,
         lineHeight: nativeMarkdownTypography.lineHeight,
         headingFontSizes: nativeMarkdownTypography.headingFontSizes,
-        fontFamily: regularFontFamily,
-        headingFontFamily: boldFontFamily,
-        boldFontFamily,
+        fontFamily: SANS_FONT_FAMILY,
       },
     };
   }, [
@@ -180,12 +175,9 @@ function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): Markdown
     horizontalRule,
     link,
     markdownFontSizes,
-    mediumFontFamily,
     nativeMarkdownTypography,
-    regularFontFamily,
     renderImage,
     strong,
-    boldFontFamily,
   ]);
 }
 

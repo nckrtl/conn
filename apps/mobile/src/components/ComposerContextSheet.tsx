@@ -19,7 +19,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { REVIEW_MONO_FONT_FAMILY } from "../features/review/reviewDiffRendering";
+import { MONO_FONT_FAMILY } from "../lib/fonts";
 import { ReviewCommentCard, useReviewCommentColors } from "../features/review/ReviewCommentCard";
 import {
   composerAttachmentInlineUri,
@@ -54,7 +54,7 @@ function ContextField(props: { label: string; value: string | null | undefined; 
         <Text
           selectable
           className={props.code ? "text-sm text-foreground" : "text-base text-foreground"}
-          style={props.code ? { fontFamily: REVIEW_MONO_FONT_FAMILY } : undefined}
+          style={props.code ? { fontFamily: MONO_FONT_FAMILY } : undefined}
         >
           {props.value}
         </Text>
@@ -274,7 +274,7 @@ export function ComposerContextSheet(props: {
                         selectable
                         className="text-sm text-foreground"
                         style={{
-                          fontFamily: REVIEW_MONO_FONT_FAMILY,
+                          fontFamily: MONO_FONT_FAMILY,
                           fontSize: 13,
                           lineHeight: 20,
                         }}

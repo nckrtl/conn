@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.text.TextPaint
+import com.facebook.react.common.assets.ReactFontManager
 import kotlin.math.max
 import kotlin.math.min
 
@@ -392,10 +393,13 @@ internal class ReviewDiffCanvasDrawing(context: Context) {
     Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 }
 
+/** JetBrains Mono, registered with ReactFontManager by expo-font in app.config.ts. */
 private object ReviewDiffTypefaces {
-  val regular: Typeface = Typeface.create("monospace", Typeface.NORMAL)
-  private val medium: Typeface = Typeface.create("monospace-medium", Typeface.NORMAL)
-  val bold: Typeface = Typeface.create("monospace", Typeface.BOLD)
+  private const val FAMILY = "JetBrains Mono"
+
+  val regular: Typeface = ReactFontManager.getInstance().getTypeface(FAMILY, 400, false, null)
+  private val medium: Typeface = ReactFontManager.getInstance().getTypeface(FAMILY, 500, false, null)
+  val bold: Typeface = ReactFontManager.getInstance().getTypeface(FAMILY, 700, false, null)
 
   fun forWeight(weight: String): Typeface = when (weight.lowercase()) {
     "medium", "semibold", "semi-bold" -> medium

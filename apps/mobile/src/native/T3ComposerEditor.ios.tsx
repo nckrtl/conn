@@ -26,7 +26,7 @@ import {
 import { resolveMarkdownFileIcon } from "@t3tools/mobile-markdown-text/links";
 import { useUniwindTheme } from "../lib/useUniwindTheme";
 import { createNativeComposerTheme } from "../lib/nativeComposerTheme";
-import { useFontFamily } from "../lib/useFontFamily";
+import { SANS_FONT_FAMILY } from "../lib/fonts";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import {
   acknowledgeComposerNativeEvent,
@@ -143,7 +143,6 @@ export function ComposerEditor({
   const confirmedTokensRef = useRef(collectComposerInlineTokens(props.value));
   const bodyText = useScaledTextRole("body");
   const theme = useUniwindTheme();
-  const fontFamily = useFontFamily("regular");
 
   useImperativeHandle(
     ref,
@@ -270,7 +269,9 @@ export function ComposerEditor({
       themeJson={themeJson}
       placeholder={props.placeholder ?? ""}
       fontFamily={
-        typeof resolvedTextStyle.fontFamily === "string" ? resolvedTextStyle.fontFamily : fontFamily
+        typeof resolvedTextStyle.fontFamily === "string"
+          ? resolvedTextStyle.fontFamily
+          : SANS_FONT_FAMILY
       }
       fontSize={
         typeof resolvedTextStyle.fontSize === "number"

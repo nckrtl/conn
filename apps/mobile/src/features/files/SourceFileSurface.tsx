@@ -19,7 +19,8 @@ import {
   resolveNativeReviewDiffView,
 } from "../diffs/nativeReviewDiffSurface";
 import { createNativeReviewDiffTheme } from "../review/nativeReviewDiffAdapter";
-import { REVIEW_MONO_FONT_FAMILY, renderVisibleWhitespace } from "../review/reviewDiffRendering";
+import { MONO_FONT_FAMILY } from "../../lib/fonts";
+import { renderVisibleWhitespace } from "../review/reviewDiffRendering";
 import type { ReviewHighlightedToken } from "../review/shikiReviewHighlighter";
 import { cn } from "../../lib/cn";
 import type { ResolvedMobileCodeSurface } from "../../lib/appearancePreferences";
@@ -65,7 +66,7 @@ const HighlightedSourceLine = memo(function HighlightedSourceLine(props: {
         className="select-none pr-3 text-right text-foreground-tertiary"
         style={{
           width: props.codeSurface.gutterWidth,
-          fontFamily: REVIEW_MONO_FONT_FAMILY,
+          fontFamily: MONO_FONT_FAMILY,
           fontSize: props.codeSurface.lineNumberFontSize,
           lineHeight: props.codeSurface.rowHeight,
         }}
@@ -78,7 +79,7 @@ const HighlightedSourceLine = memo(function HighlightedSourceLine(props: {
         numberOfLines={props.wordBreak ? undefined : 1}
         className="flex-1 font-normal text-foreground"
         style={{
-          fontFamily: REVIEW_MONO_FONT_FAMILY,
+          fontFamily: MONO_FONT_FAMILY,
           fontSize: props.codeSurface.fontSize,
           lineHeight: props.codeSurface.rowHeight,
           minWidth: props.wordBreak ? undefined : 320,
@@ -109,7 +110,7 @@ const HighlightedSourceLine = memo(function HighlightedSourceLine(props: {
                     }
                     style={{
                       color: token.color ?? undefined,
-                      fontFamily: REVIEW_MONO_FONT_FAMILY,
+                      fontFamily: MONO_FONT_FAMILY,
                       fontWeight,
                       fontStyle,
                     }}
@@ -282,7 +283,7 @@ function JavaScriptSourceFileSurface(props: SourceFileSurfaceProps) {
       selectionColorClassName={Platform.OS === "android" ? "accent-focus/32" : undefined}
       style={{
         color: foreground,
-        fontFamily: REVIEW_MONO_FONT_FAMILY,
+        fontFamily: MONO_FONT_FAMILY,
         fontSize: codeSurface.fontSize,
         lineHeight: codeSurface.rowHeight,
       }}

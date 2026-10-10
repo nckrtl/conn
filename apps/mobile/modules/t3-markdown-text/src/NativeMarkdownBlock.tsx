@@ -22,11 +22,8 @@ import { useHighlightedCode, type HighlightedCode } from "./useHighlightedCode";
 /** Set by SelectableMarkdownText so images anywhere in the block tree can use it. */
 export const MarkdownImageRendererContext = createContext<MarkdownImageRenderer | null>(null);
 
-const MONO_FONT_FAMILY = Platform.select({
-  ios: "ui-monospace",
-  android: "monospace",
-  default: "monospace",
-});
+// Registered by expo-font in app.config.ts.
+const MONO_FONT_FAMILY = "JetBrains Mono";
 
 function nodeKey(node: MarkdownNode, index: number): string {
   return `${node.type}:${nativeMarkdownNodePosition(node, index)}`;

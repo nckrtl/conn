@@ -1203,15 +1203,24 @@ private final class ReviewDiffContentView: UIView, UIGestureRecognizerDelegate {
   }
 
   private var codeFont: UIFont {
-    UIFont.monospacedSystemFont(ofSize: style.codeFontSize, weight: style.codeFontWeight)
+    Self.monoFont(ofSize: style.codeFontSize, weight: style.codeFontWeight)
   }
 
   private var lineNumberFont: UIFont {
-    UIFont.monospacedSystemFont(ofSize: style.lineNumberFontSize, weight: style.lineNumberFontWeight)
+    Self.monoFont(ofSize: style.lineNumberFontSize, weight: style.lineNumberFontWeight)
   }
 
   private var hunkFont: UIFont {
-    UIFont.monospacedSystemFont(ofSize: style.hunkFontSize, weight: style.hunkFontWeight)
+    Self.monoFont(ofSize: style.hunkFontSize, weight: style.hunkFontWeight)
+  }
+
+  /// JetBrains Mono, registered by expo-font in app.config.ts, in the three bundled weights.
+  private static func monoFont(ofSize size: CGFloat, weight: UIFont.Weight) -> UIFont {
+    let name = weight >= .bold
+      ? "JetBrainsMono-Bold"
+      : weight >= .medium ? "JetBrainsMono-Medium" : "JetBrainsMono-Regular"
+    return UIFont(name: name, size: size)
+      ?? UIFont.monospacedSystemFont(ofSize: size, weight: weight)
   }
 
   private var fileHeaderFont: UIFont {

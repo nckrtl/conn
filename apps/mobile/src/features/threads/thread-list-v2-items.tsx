@@ -1,5 +1,5 @@
+import { MONO_FONT_FAMILY as MONO_FONT } from "../../lib/fonts";
 import {
-  THREAD_LIST_V2_MONO_FONT as MONO_FONT,
   THREAD_LIST_V2_ROW_INSET,
   selectedThreadRowColors,
   getThreadListV2NewBranchMenuTitle,

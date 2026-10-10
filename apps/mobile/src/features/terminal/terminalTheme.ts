@@ -1,3 +1,4 @@
+import { MONO_FONT_FAMILY } from "../../lib/fonts";
 import {
   getMobileThemeColors,
   getMobileThemeVariables,
@@ -122,6 +123,8 @@ export function getMobileTerminalTheme(
 
 export function buildGhosttyThemeConfig(theme: TerminalTheme): string {
   const lines = [
+    // Registered by expo-font; libghostty also embeds JetBrains Mono and Nerd Font symbols.
+    `font-family = ${MONO_FONT_FAMILY}`,
     `background = ${theme.background}`,
     `foreground = ${theme.foreground}`,
     `cursor-color = ${theme.cursorForeground}`,

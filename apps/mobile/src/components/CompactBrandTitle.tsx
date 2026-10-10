@@ -3,6 +3,7 @@ import type { NativeStackNavigationOptions } from "@react-navigation/native-stac
 import { Platform, View } from "react-native";
 
 import { AppText as Text } from "./AppText";
+import { ConnMark } from "./ConnMark";
 import { T3Wordmark } from "./T3Wordmark";
 import { IPAD_HOME_TITLE_OFFSET } from "../lib/layoutMetrics";
 import { resolveMobileStageLabel } from "../lib/mobileBranding";
@@ -26,25 +27,33 @@ export function CompactBrandTitle(
   } = {},
 ) {
   const stageLabel = resolveMobileStageLabel(Constants.expoConfig?.extra?.appVariant);
+  // A renamed build (the nckrtl fork ships as Conn) shows its own mark and name.
+  const brandName: string | null = Constants.expoConfig?.extra?.brandName ?? null;
   const titleOffset = brandTitleOffset();
   const { scale } = useAndroidControlSizing();
 
   return (
     <View
       aria-level={1}
-      accessibilityLabel="T3 Code, Threads"
+      accessibilityLabel={`${brandName ?? "T3 Code"}, Threads`}
       accessible
       role="heading"
       className="flex-row items-center gap-1.5"
       style={[{ marginLeft: titleOffset }, Platform.OS === "android" && { gap: 5.25 * scale }]}
     >
-      <T3Wordmark colorClassName="accent-icon" height={Math.round(15 * scale)} />
+      {brandName ? (
+        <ConnMark colorClassName="accent-icon" size={Math.round(18 * scale)} />
+      ) : (
+        <T3Wordmark colorClassName="accent-icon" height={Math.round(15 * scale)} />
+      )}
       <Text
         allowFontScaling={props.allowFontScaling}
-        className="font-t3-medium text-foreground-muted"
+        className={
+          brandName ? "font-t3-bold text-foreground" : "font-t3-medium text-foreground-muted"
+        }
         style={{ fontSize: 21 * scale, letterSpacing: -0.5 * scale }}
       >
-        Code
+        {brandName ?? "Code"}
       </Text>
       <View
         className="rounded-full bg-subtle px-1.5 py-0.5"

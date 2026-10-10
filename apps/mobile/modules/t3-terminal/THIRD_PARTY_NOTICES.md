@@ -27,9 +27,9 @@ The web terminal vendors a WebAssembly build from the same revision and uses the
 Ghostty's MIT license applies to the vendored Android and web libraries. Keep this notice and both
 artifacts in sync when updating the repository-root `native/libghostty-vt`.
 
-## MesloLGS NF (Android terminal font)
+## JetBrains Mono Nerd Font Mono (Android terminal font)
 
-- Files: `android/src/main/assets/fonts/MesloLGS-NF-{Regular,Bold}.ttf`
-- Source: https://github.com/romkatv/powerlevel10k-media (Meslo LG patched with Nerd Fonts glyphs)
-- Upstream: Meslo LG by André Berg (customization of Apple's Menlo), Nerd Fonts patcher
-- License: Apache License 2.0
+- Files: `android/src/main/assets/fonts/JetBrainsMonoNerdFontMono-{Regular,Bold}.ttf`
+- Source: https://github.com/ryanoasis/nerd-fonts/releases/tag/v3.4.0 (`JetBrainsMono.tar.xz`)
+- Upstream: JetBrains Mono by JetBrains, patched with Nerd Fonts glyphs
+- License: SIL Open Font License 1.1 (`android/JetBrainsMonoNerdFont-OFL.txt`)

@@ -50,11 +50,8 @@ const SKILL_ICON_PLACEHOLDER = "\uFFFC";
 // for the chip attachment either way.
 const IOS_CHIP_PLACEHOLDER = "\u200B";
 const PARAGRAPH_STYLE_ENCODING_OFFSET = 1000;
-const MONO_FONT_FAMILY = Platform.select({
-  ios: "ui-monospace",
-  android: "monospace",
-  default: "monospace",
-});
+// Registered by expo-font in app.config.ts.
+const MONO_FONT_FAMILY = "JetBrains Mono";
 const styles = StyleSheet.create({
   inlineIcon: {
     width: 14,
@@ -140,15 +137,7 @@ function runStyle(run: NativeMarkdownTextRun, textStyle: NativeMarkdownTextStyle
                           ? textStyle.strongColor
                           : textStyle.color,
     fontFamily:
-      isFile || isSkill
-        ? textStyle.boldFontFamily
-        : run.code || isCodeBlock
-          ? MONO_FONT_FAMILY
-          : isHeading
-            ? textStyle.headingFontFamily
-            : run.bold
-              ? textStyle.boldFontFamily
-              : textStyle.fontFamily,
+      !isFile && !isSkill && (run.code || isCodeBlock) ? MONO_FONT_FAMILY : textStyle.fontFamily,
     fontSize:
       run.role === "spacer"
         ? (run.spacing ?? 10)

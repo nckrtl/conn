@@ -8,7 +8,7 @@ import { formatComposerContextReference } from "@t3tools/shared/composerContextR
 import { useState } from "react";
 import { Alert, Modal, Platform, Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { REVIEW_MONO_FONT_FAMILY } from "../review/reviewDiffRendering";
+import { MONO_FONT_FAMILY } from "../../lib/fonts";
 import { AppText as Text } from "../../components/AppText";
 import { uuidv4 } from "../../lib/uuid";
 import { insertComposerDraftContext } from "../../state/use-composer-drafts";
@@ -90,10 +90,7 @@ export function TerminalContextSheet(props: {
               }}
               className={index >= range.start && index <= range.end ? "bg-subtle py-1" : "py-1"}
             >
-              <Text
-                className="text-sm text-foreground"
-                style={{ fontFamily: REVIEW_MONO_FONT_FAMILY }}
-              >
+              <Text className="text-sm text-foreground" style={{ fontFamily: MONO_FONT_FAMILY }}>
                 {index + 1} {line || " "}
               </Text>
             </Pressable>

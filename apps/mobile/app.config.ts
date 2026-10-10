@@ -161,10 +161,11 @@ const ownVariantAppName = ownAppName
   ? `${ownAppName}${{ development: " Dev", preview: " Preview", production: "" }[APP_VARIANT]}`
   : undefined;
 
-const dmSansFonts = {
-  regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
-  medium: "@expo-google-fonts/dm-sans/500Medium/DMSans_500Medium.ttf",
-  bold: "@expo-google-fonts/dm-sans/700Bold/DMSans_700Bold.ttf",
+// Sans text uses the system font; only the mono font ships with the app.
+const jetBrainsMonoFonts = {
+  regular: "@expo-google-fonts/jetbrains-mono/400Regular/JetBrainsMono_400Regular.ttf",
+  medium: "@expo-google-fonts/jetbrains-mono/500Medium/JetBrainsMono_500Medium.ttf",
+  bold: "@expo-google-fonts/jetbrains-mono/700Bold/JetBrainsMono_700Bold.ttf",
 } as const;
 
 const widgetsPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
@@ -371,21 +372,17 @@ const config: ExpoConfig = {
       "expo-font",
       {
         ios: {
-          fonts: [dmSansFonts.regular, dmSansFonts.medium, dmSansFonts.bold],
+          fonts: [jetBrainsMonoFonts.regular, jetBrainsMonoFonts.medium, jetBrainsMonoFonts.bold],
         },
         android: {
           fonts: [
             {
-              fontFamily: "DMSans-Regular",
-              fontDefinitions: [{ path: dmSansFonts.regular, weight: 400 }],
-            },
-            {
-              fontFamily: "DMSans-Medium",
-              fontDefinitions: [{ path: dmSansFonts.medium, weight: 500 }],
-            },
-            {
-              fontFamily: "DMSans-Bold",
-              fontDefinitions: [{ path: dmSansFonts.bold, weight: 700 }],
+              fontFamily: "JetBrains Mono",
+              fontDefinitions: [
+                { path: jetBrainsMonoFonts.regular, weight: 400 },
+                { path: jetBrainsMonoFonts.medium, weight: 500 },
+                { path: jetBrainsMonoFonts.bold, weight: 700 },
+              ],
             },
           ],
         },
@@ -506,6 +503,8 @@ const config: ExpoConfig = {
   ],
   extra: {
     appVariant: APP_VARIANT,
+    // nckrtl fork: a renamed build shows its name and the Conn mark in the app's brand lockups.
+    brandName: ownAppName || null,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,

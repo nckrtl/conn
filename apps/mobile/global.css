@@ -2,21 +2,12 @@
 @import "uniwind";
 @import "./generated-uniwind-themes.css";
 
-/* ─── Theme tokens ──────────────────────────────────────────────────── */
-@layer theme {
-  :root {
-    @variant android {
-      --font-mono: "monospace";
-    }
-  }
-}
-
 /* ─── Typography ────────────────────────────────────────────────────── */
 @theme {
-  /* Keep these native family names aligned with app.config.ts. */
-  --font-sans: "DMSans-Regular";
-  --font-medium: "DMSans-Medium";
-  --font-bold: "DMSans-Bold";
+  /* "System" is SF Pro on iOS and Roboto on Android; weight comes from font-weight.
+     Keep the mono family name aligned with app.config.ts and src/lib/fonts.ts. */
+  --font-sans: "System";
+  --font-mono: "JetBrains Mono";
 
   /* Keep this scale aligned with src/lib/typography.ts for native style props. */
   --text-3xs: 11px;
@@ -41,14 +32,13 @@
 
 /* ─── Custom utilities ──────────────────────────────────────────────── */
 @utility font-t3-medium {
-  font-family: var(--font-medium);
+  font-weight: 500;
 }
 
 @utility font-t3-bold {
-  font-family: var(--font-bold);
+  font-weight: 700;
 }
 
 @utility font-t3-extrabold {
-  font-family: var(--font-bold);
   font-weight: 800;
 }

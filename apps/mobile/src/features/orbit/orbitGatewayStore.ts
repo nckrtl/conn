@@ -1,6 +1,4 @@
 import {
-  createOrbitGatewayClient,
-  DEFAULT_ORBIT_GATEWAY_URL,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
   OrbitGatewayError,
   parseEnvironmentProvider,
@@ -23,11 +21,13 @@ import { AppState } from "react-native";
 import { environmentCatalog } from "../../connection/catalog";
 import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { orbitGatewayClient as client } from "./orbitGatewayClient";
+import { syncOrbitAppearance } from "./orbitProfileSync";
 
 /**
  * The phone's view of the Orbit Gateway: this device's Node and profile, the profile's workspaces,
- * and the registered T3 servers. The Gateway knows the phone by its WireGuard address, so the
- * calls carry no credentials. Workspaces are read-only here; the desktop edits them.
+ * and the registered T3 servers. Workspaces are read-only here; the desktop edits them. The
+ * appearance syncs both ways, see orbitProfileSync.
  *
  * It also applies the environment provider (see planEnvironmentProvider): in Orbit mode the
  * Gateway's servers are paired automatically and the environments added by hand are switched off.
@@ -46,18 +46,6 @@ export interface OrbitGatewayState {
   /** The workspace the thread list is scoped to on this device, or null for all projects. */
   readonly selectedWorkspaceId: string | null;
 }
-
-const client = createOrbitGatewayClient(async (request) => {
-  const response = await fetch(`${DEFAULT_ORBIT_GATEWAY_URL}/api/v1/conn${request.path}`, {
-    method: request.method,
-    headers: {
-      Accept: "application/json",
-      ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
-    },
-    ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-  });
-  return { status: response.status, body: await response.text() };
-});
 
 const PROVIDER_STORAGE_KEY = "t3code.environment-provider.v1";
 
@@ -178,6 +166,7 @@ export function refreshOrbitGateway(): Promise<void> {
       ]);
       const workspaces = node.profile ? (await client.settings(node.profile.id)).workspaces : [];
       set({ phase: "ready", node, profiles, environments, workspaces });
+      void syncOrbitAppearance(node);
       await reconcileEnvironments(environments);
     } catch (error) {
       set({ phase: "error", error: message(error) });
@@ -210,6 +199,16 @@ export async function chooseOrbitProfile(
   await refreshOrbitGateway();
 }
 
+/** Syncs the appearance with the profile now, as after a theme change on this phone. */
+export async function syncOrbitAppearanceNow(): Promise<void> {
+  if (state.provider !== "orbit") return;
+  try {
+    await syncOrbitAppearance(await client.me());
+  } catch {
+    // An unreachable Gateway syncs on a later run.
+  }
+}
+
 export function selectOrbitWorkspace(workspaceId: string | null): void {
   set({ selectedWorkspaceId: workspaceId });
 }
@@ -239,8 +238,13 @@ function subscribe(listener: () => void): () => void {
 }
 
 let started = false;
+/** How often an open app checks the profile for another device's appearance change. */
+const APPEARANCE_PROBE_MS = 30_000;
 
-/** The Gateway state. The first use loads it, and it reloads whenever the app comes to the front. */
+/**
+ * The Gateway state. The first use loads it, and it reloads whenever the app comes to the front.
+ * While the app is in front it also checks the profile's appearance every 30 seconds.
+ */
 export function useOrbitGateway(): OrbitGatewayState {
   useEffect(() => {
     if (started) return;
@@ -249,6 +253,9 @@ export function useOrbitGateway(): OrbitGatewayState {
     AppState.addEventListener("change", (next) => {
       if (next === "active") void refreshOrbitGateway();
     });
+    setInterval(() => {
+      if (AppState.currentState === "active" && !refreshing) void syncOrbitAppearanceNow();
+    }, APPEARANCE_PROBE_MS);
   }, []);
   return useSyncExternalStore(subscribe, () => state);
 }

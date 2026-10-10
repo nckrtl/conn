@@ -40,7 +40,20 @@ function overrideColors(
   return { ...stockColors(appearance), ...Object.fromEntries(overrides) } as ThemeColors;
 }
 
-export function toPublishedMobileTheme(theme: EnvironmentTheme): PublishedMobileTheme | null {
+/** A theme that carries its palette: one an environment publishes, or one from the Orbit profile. */
+export interface ColoredTheme {
+  readonly id: string;
+  readonly name: string;
+  readonly appearance: ThemeAppearance;
+  readonly colors?: Readonly<Record<string, string>> | undefined;
+  readonly variants?:
+    | Readonly<Partial<Record<string, Readonly<Record<string, string>>>>>
+    | undefined;
+}
+
+export function toPublishedMobileTheme(
+  theme: ColoredTheme | EnvironmentTheme,
+): PublishedMobileTheme | null {
   const colors: Partial<Record<ThemeAppearance, ThemeColors>> = {};
   const primary = overrideColors(theme.appearance, theme.colors);
   if (primary) colors[theme.appearance] = primary;

@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import type { ProfileSyncState } from "@t3tools/client-runtime/orbit-gateway";
 import type { ProviderInstanceId, SidebarProjectGroupingMode } from "@t3tools/contracts";
 import type { ComposerEnterBehavior } from "../lib/composerEnterBehavior";
 import { isMobileThemeId, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
@@ -43,6 +44,8 @@ export interface Preferences {
   /** Fresh keys reset both shelves to collapsed when users update. */
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
+  /** What this phone last agreed on with its Orbit profile, see features/orbit/orbitProfileSync. */
+  readonly orbitProfileSync?: ProfileSyncState;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -103,6 +106,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     modelFavorites?: Preferences["modelFavorites"];
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
+    orbitProfileSync?: ProfileSyncState;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -177,6 +181,19 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.threadListSnoozedShelfExpanded === "boolean") {
     preferences.threadListSnoozedShelfExpanded = parsed.threadListSnoozedShelfExpanded;
+  }
+  const sync = parsed.orbitProfileSync;
+  if (
+    typeof sync === "object" &&
+    sync !== null &&
+    typeof sync.profileId === "number" &&
+    typeof sync.profileVersion === "number" &&
+    typeof sync.sections === "object" &&
+    sync.sections !== null &&
+    typeof sync.ignored === "object" &&
+    sync.ignored !== null
+  ) {
+    preferences.orbitProfileSync = sync;
   }
   return preferences;
 }

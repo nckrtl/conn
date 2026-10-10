@@ -32,6 +32,12 @@ import {
   type PublishedMobileTheme,
 } from "../../../lib/publishedThemes";
 import { environmentServerConfigsAtom } from "../../../state/server";
+import {
+  profileMobileThemes,
+  syncedProfileAppearance,
+  withProfileThemes,
+} from "../../../lib/orbitAppearance";
+import { syncOrbitAppearanceNow } from "../../orbit/orbitGatewayStore";
 import type { MobileThemeVariables } from "../../../lib/mobileTheme";
 import {
   createMobileThemePairPatch,
@@ -80,6 +86,8 @@ interface AppearancePreferencesContextValue {
   readonly setCodeWordBreak: (value: boolean) => void;
 }
 
+const PROFILE_SYNC_DEBOUNCE_MS = 1_500;
+
 const AppearancePreferencesContext = createContext<AppearancePreferencesContextValue | null>(null);
 
 export function AppearancePreferencesProvider(props: { readonly children: ReactNode }) {
@@ -121,9 +129,14 @@ export function AppearancePreferencesProvider(props: { readonly children: ReactN
     };
   }, []);
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  const profileSyncState = storedPreferences?.orbitProfileSync;
+  const profileThemes = useMemo(
+    () => profileMobileThemes(syncedProfileAppearance(profileSyncState)),
+    [profileSyncState],
+  );
   const publishedThemes = useMemo(
-    () => collectPublishedMobileThemes(serverConfigs),
-    [serverConfigs],
+    () => withProfileThemes(collectPublishedMobileThemes(serverConfigs), profileThemes),
+    [serverConfigs, profileThemes],
   );
   const themeVariablesByAppearance = useMemo(() => {
     const resolve = (appearance: MobileThemeAppearance) => {
@@ -201,6 +214,16 @@ export function AppearancePreferencesProvider(props: { readonly children: ReactN
     },
     [savePreferences],
   );
+
+  // A theme or mode change goes to the Orbit profile; one the profile applied finds nothing to send.
+  const syncedThemeKey = `${themeIds.light}|${themeIds.dark}|${themeMode}`;
+  const lastThemeKeyRef = useRef(syncedThemeKey);
+  useEffect(() => {
+    if (lastThemeKeyRef.current === syncedThemeKey) return;
+    lastThemeKeyRef.current = syncedThemeKey;
+    const timer = setTimeout(() => void syncOrbitAppearanceNow(), PROFILE_SYNC_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [syncedThemeKey]);
 
   useLayoutEffect(() => {
     selectedThemeIdsRef.current = themeIds;

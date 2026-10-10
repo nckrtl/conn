@@ -503,6 +503,8 @@ const config: ExpoConfig = {
   ],
   extra: {
     appVariant: APP_VARIANT,
+    // nckrtl fork: a renamed build shows its name and the Conn mark in the app's brand lockups.
+    brandName: ownAppName || null,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,

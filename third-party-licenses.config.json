@@ -125,15 +125,10 @@
     },
     {
       "bundles": ["android", "assets", "mobile"],
-      "license": "Apache-2.0",
-      "name": "MesloLGS NF",
-      "sourceUrl": "https://github.com/romkatv/powerlevel10k-media",
-      "generatedNotices": [
-        {
-          "licenseId": "Apache-2.0",
-          "copyrights": ["Copyright 2009, 2010, 2013 André Berg"]
-        }
-      ]
+      "license": "OFL-1.1",
+      "name": "JetBrains Mono Nerd Font Mono",
+      "noticeFile": "apps/mobile/modules/t3-terminal/android/JetBrainsMonoNerdFont-OFL.txt",
+      "sourceUrl": "https://github.com/ryanoasis/nerd-fonts/releases/tag/v3.4.0"
     },
     {
       "bundles": ["mobile"],

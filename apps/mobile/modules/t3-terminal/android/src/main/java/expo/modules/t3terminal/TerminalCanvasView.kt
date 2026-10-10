@@ -23,7 +23,7 @@ import kotlin.math.min
 
 /**
  * Bundled terminal font with Nerd Font glyphs (powerline, file icons).
- * MesloLGS NF is the powerlevel10k-tuned Meslo Nerd Font patch.
+ * JetBrains Mono Nerd Font Mono matches the app mono font and keeps icons one cell wide.
  */
 internal object TerminalTypefaces {
   private var loaded = false
@@ -37,8 +37,8 @@ internal object TerminalTypefaces {
     if (loaded) return
     loaded = true
     try {
-      regular = Typeface.createFromAsset(context.assets, "fonts/MesloLGS-NF-Regular.ttf")
-      bold = Typeface.createFromAsset(context.assets, "fonts/MesloLGS-NF-Bold.ttf")
+      regular = Typeface.createFromAsset(context.assets, "fonts/JetBrainsMonoNerdFontMono-Regular.ttf")
+      bold = Typeface.createFromAsset(context.assets, "fonts/JetBrainsMonoNerdFontMono-Bold.ttf")
     } catch (error: RuntimeException) {
       Log.w("TerminalCanvasView", "bundled terminal font unavailable, using monospace", error)
     }

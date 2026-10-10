@@ -47,6 +47,7 @@ describe("buildGhosttyThemeConfig", () => {
   it("serializes theme colors into a ghostty config file", () => {
     const config = buildGhosttyThemeConfig(getMobileTerminalTheme("t3-code", "dark"));
 
+    expect(config).toContain("font-family = JetBrains Mono");
     expect(config).toContain("background = #0a0a0a");
     expect(config).toContain("foreground = #f5f5f5");
     expect(config).toContain("cursor-color = #b4cbff");

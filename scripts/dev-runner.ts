@@ -791,6 +791,11 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       }
     }
 
+    // Watchers can outlive a runner that was killed without a terminal signal.
+    // dev-electron.mjs checks this PID so an orphaned packer cannot open a
+    // second Electron on every rebuild.
+    env.T3CODE_DEV_RUNNER_PID = String(process.pid);
+
     const spawnCommand = yield* resolveSpawnCommand(
       "vp",
       [...MODE_ARGS[input.mode], ...input.runArgs],

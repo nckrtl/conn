@@ -52,6 +52,33 @@ const childTreeGracePeriodMs = 1_200;
 const remoteDebuggingPort = process.env.T3CODE_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
 const hostPlatform = NodeOS.platform();
+const devRunnerPid = Number.parseInt(process.env.T3CODE_DEV_RUNNER_PID ?? "", 10);
+
+// A dev runner killed without a terminal signal can leave `vp pack --watch`
+// running. That packer still launches this script after every build, which
+// opens a second Electron against the same state. Only a live runner may
+// launch; otherwise stop the leftover packer that started us.
+function isDevRunnerGone() {
+  if (!Number.isInteger(devRunnerPid) || devRunnerPid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(devRunnerPid, 0);
+    return false;
+  } catch (error) {
+    return error?.code === "ESRCH";
+  }
+}
+
+if (isDevRunnerGone()) {
+  console.warn(`[dev-electron] dev runner ${devRunnerPid} is gone; stopping its leftover packer.`);
+  if (process.ppid > 1) {
+    try {
+      process.kill(process.ppid, "SIGTERM");
+    } catch {}
+  }
+  process.exit(0);
+}
 
 NodeChildProcess.execFileSync(
   process.execPath,
@@ -101,6 +128,11 @@ function cleanupStaleDevApps() {
 
 function startApp() {
   if (shuttingDown || currentApp !== null) {
+    return;
+  }
+
+  if (isDevRunnerGone()) {
+    void shutdown(0);
     return;
   }
 

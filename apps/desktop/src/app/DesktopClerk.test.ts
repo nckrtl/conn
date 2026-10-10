@@ -29,7 +29,11 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
-const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
+const makeDesktopClerkLayer = (
+  isDevelopment = true,
+  events: string[] = [],
+  isPrimaryInstance = true,
+) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: "/tmp/t3-state",
     isDevelopment,
@@ -44,6 +48,10 @@ const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
       Effect.sync(() => {
         events.push(`setPath:${name}:${value}`);
       }),
+    requestSingleInstanceLock: Effect.sync(() => {
+      events.push("requestSingleInstanceLock");
+      return isPrimaryInstance;
+    }),
   } as unknown as ElectronApp.ElectronApp["Service"];
 
   return DesktopClerk.layer.pipe(
@@ -85,10 +93,13 @@ describe("DesktopClerk", () => {
         ],
       ]);
       assert.equal(cleanup.mock.calls.length, 1);
-      // The bridge acquires Electron's single-instance lock at creation, and
-      // the lock both lives in and creates the userData directory — so the
-      // real path must be set before the bridge exists.
-      assert.deepEqual(events, ["setPath:userData:/tmp/app-data/t3code-dev", "createClerkBridge"]);
+      // The single-instance lock both lives in and creates the userData
+      // directory, so the real path must be set before the lock is taken.
+      assert.deepEqual(events, [
+        "setPath:userData:/tmp/app-data/t3code-dev",
+        "requestSingleInstanceLock",
+        "createClerkBridge",
+      ]);
       storageMock.mockClear();
       createClerkBridgeMock.mockClear();
     });
@@ -172,7 +183,6 @@ describe("DesktopClerk", () => {
 
   it.effect("quits and interrupts startup in a secondary instance", () => {
     storageMock.mockReturnValue(storageAdapter);
-    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: false });
     const quit = vi.fn();
     const registeredEvents: string[] = [];
     const electronApp = {
@@ -191,8 +201,11 @@ describe("DesktopClerk", () => {
       assert.isTrue(Exit.hasInterrupts(exit));
       assert.equal(quit.mock.calls.length, 1);
       assert.deepEqual(registeredEvents, []);
+      // A secondary instance never builds the bridge, so it registers no IPC
+      // handlers or protocol listeners while it quits.
+      assert.equal(createClerkBridgeMock.mock.calls.length, 0);
     }).pipe(
-      Effect.provide(makeDesktopClerkLayer()),
+      Effect.provide(makeDesktopClerkLayer(true, [], false)),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
       Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
     );

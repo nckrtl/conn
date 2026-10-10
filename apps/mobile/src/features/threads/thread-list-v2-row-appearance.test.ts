@@ -8,7 +8,7 @@ import { getThreadListV2RowAppearance as androidAppearance } from "./thread-list
 describe.each([
   ["ios", iosAppearance],
   ["android", androidAppearance],
-] as const)("%s thread row colors", (_platform, appearanceFor) => {
+] as const)("%s thread row colors", (platform, appearanceFor) => {
   it.each(MOBILE_THEME_IDS)(
     "preserves active selection and uses neutral hover for %s",
     (themeId) => {
@@ -29,7 +29,10 @@ describe.each([
 
         const phone = appearanceFor(theme, false, false);
         expect(phone.swipeBackgroundColor).toBe(theme["--color-screen"]);
-        expect(phone.interactionClassName).toBe("bg-row-hover");
+        // nckrtl shell: iOS phone rows share the sidebar row surface model.
+        expect(phone.interactionClassName).toBe(
+          platform === "ios" ? "bg-thread-hover" : "bg-row-hover",
+        );
         expect(phone.foregroundClassName).toBe("text-foreground");
       }
     },

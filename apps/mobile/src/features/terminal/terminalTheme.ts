@@ -4,6 +4,7 @@ import {
   themeColorToNativeColor,
   type MobileThemeId,
 } from "../../lib/mobileTheme";
+import { isPublishedMobileThemeId } from "../../lib/publishedThemes";
 
 export type TerminalAppearanceScheme = "light" | "dark";
 
@@ -102,7 +103,9 @@ export function getMobileTerminalTheme(
   scheme: TerminalAppearanceScheme,
 ): TerminalTheme {
   const base = getPierreTerminalTheme(scheme);
-  const paletteId = themeId === "material-you" ? "t3-code" : themeId;
+  // Published themes arrive at runtime; the terminal keeps the stock palette for them.
+  const paletteId =
+    themeId === "material-you" || isPublishedMobileThemeId(themeId) ? "t3-code" : themeId;
   const palette = getMobileThemeColors(paletteId, scheme);
   const colors = getMobileThemeVariables(paletteId, scheme);
   const background = themeColorToNativeColor(palette.terminalBackground);

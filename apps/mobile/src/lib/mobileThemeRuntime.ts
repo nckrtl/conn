@@ -1,3 +1,4 @@
+import { isPublishedMobileThemeId } from "./publishedThemes";
 import { resolveTextScaleVariables } from "./appearancePreferences";
 import { BUILT_IN_THEME_IDS, type BuiltInThemeId } from "@t3tools/shared/themePalettes";
 import {
@@ -42,9 +43,13 @@ export function getMobileUniwindThemeName(
   themeId: MobileThemeId,
   appearance: MobileThemeAppearance,
 ): MobileUniwindThemeName {
-  return themeId === DEFAULT_MOBILE_THEME_ID || themeId === "material-you"
+  // Published themes have no registered Uniwind theme. They ride on the base
+  // appearance and replace every color through ScopedVariables.
+  return themeId === DEFAULT_MOBILE_THEME_ID ||
+    themeId === "material-you" ||
+    isPublishedMobileThemeId(themeId)
     ? appearance
-    : `${themeId}-${appearance}`;
+    : (`${themeId}-${appearance}` as MobileUniwindThemeName);
 }
 
 /**

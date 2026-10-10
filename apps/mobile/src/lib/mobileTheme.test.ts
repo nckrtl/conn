@@ -88,20 +88,16 @@ describe("mobile themes", () => {
         themeId === DEFAULT_MOBILE_THEME_ID
           ? readDefaultMobileThemeVariables(appearance)
           : getMobileThemeVariables(themeId, appearance);
-      expect(variables["--color-screen"]).toBe(themeColorToNativeColor(colors.canvas));
+      // nckrtl shell: panes sit on the theme's sidebar color, like the desktop fork.
+      expect(variables["--color-screen"]).toBe(themeColorToNativeColor(colors.sidebar));
       expect(variables["--color-thread-canvas"]).toBe(variables["--color-screen"]);
       expect(variables["--color-drawer"]).toBe(themeColorToNativeColor(colors.sidebar));
       expect(variables["--color-thread-hover"]).toBe(
         themeColorToNativeColor(colors.sidebarRowHover),
       );
-      expect(variables["--color-card"]).toBe(themeColorToNativeColor(colors.surface));
+      expect(variables["--color-card"]).toBe(themeColorToNativeColor(colors.sidebar));
       expect(variables["--color-composer-surface"]).toBe(
-        themeColorWithAlpha(
-          themeId === DEFAULT_MOBILE_THEME_ID
-            ? variables["--color-grouped-card"]
-            : themeColorToNativeColor(colors.surface),
-          appearance === "dark" ? 0.9 : 0.94,
-        ),
+        themeColorWithAlpha(variables["--color-grouped-card"], appearance === "dark" ? 0.9 : 0.94),
       );
       expect(variables["--color-thread-selected"]).toBe(
         themeColorToNativeColor(colors.sidebarRowActive),
@@ -182,10 +178,14 @@ describe("mobile themes", () => {
           runtime[platform === "android" ? "--color-header" : "--color-drawer"],
           runtime["--color-screen"],
         );
-        expect(relativeLuminance(sidebar)).toBeLessThan(
+        expect(relativeLuminance(sidebar)).toBeLessThanOrEqual(
           relativeLuminance(runtime["--color-thread-canvas"]),
         );
-        expect(contrastRatio(chrome, runtime["--color-screen"])).toBeGreaterThanOrEqual(1.06);
+        // The dark iOS sidebar shares the screen's pane color (desktop shell);
+        // tinted chrome elsewhere must still separate from it.
+        if (platform === "android" || appearance === "light") {
+          expect(contrastRatio(chrome, runtime["--color-screen"])).toBeGreaterThanOrEqual(1.06);
+        }
         const foregroundRoles =
           platform === "android"
             ? (["--color-header-foreground", "--color-foreground-muted"] as const)

@@ -10,12 +10,17 @@ import { AppText as Text } from "../../../../components/AppText";
 import {
   getMobileThemePreviewColors,
   MOBILE_THEME_OPTIONS,
+  themeColorToNativeColor,
   type MobileThemeAppearance,
   type MobileThemeId,
   type MobileThemeIds,
   type MobileThemeMode,
 } from "../../../../lib/mobileTheme";
 import { getMobileUniwindThemeName } from "../../../../lib/mobileThemeRuntime";
+import {
+  findPublishedThemeColors,
+  isPublishedMobileThemeId,
+} from "../../../../lib/publishedThemes";
 import { cn } from "../../../../lib/cn";
 import { useAppearancePreferences } from "../AppearancePreferencesProvider";
 
@@ -38,12 +43,21 @@ const PreviewOrb = memo(function PreviewOrb(props: {
   const idPrefix = useId().replaceAll(":", "");
   const accentGradientId = `${idPrefix}-accent-glow`;
   const actionGradientId = `${idPrefix}-action-glow`;
-  const { systemColorPalettes } = useAppearancePreferences();
+  const { publishedThemes, systemColorPalettes } = useAppearancePreferences();
   const palette = systemColorPalettes?.[props.appearance];
+  const published = isPublishedMobileThemeId(props.themeId)
+    ? findPublishedThemeColors(publishedThemes, props.themeId, props.appearance)
+    : null;
   const colors =
     props.themeId === "material-you" && palette
       ? { canvas: palette.surface, accent: palette.primary, messageAction: palette.tertiary }
-      : getMobileThemePreviewColors(props.themeId, props.appearance);
+      : published
+        ? {
+            canvas: themeColorToNativeColor(published.canvas),
+            accent: themeColorToNativeColor(published.accent),
+            messageAction: themeColorToNativeColor(published.messageAction),
+          }
+        : getMobileThemePreviewColors(props.themeId, props.appearance);
   const spec = THEME_PREVIEW_RENDER_SPECS[props.appearance];
   const accentRadius = Math.hypot(
     Math.max(spec.accent.center[0], 1 - spec.accent.center[0]),
@@ -114,6 +128,8 @@ const PreviewOrb = memo(function PreviewOrb(props: {
 });
 
 function ThemeCard(props: {
+  /** Appearances the theme defines. A dark-only published theme shows one choice. */
+  readonly appearances?: ReadonlyArray<MobileThemeAppearance>;
   readonly disabled: boolean;
   readonly darkSelected: boolean;
   readonly label: string;
@@ -165,8 +181,12 @@ function ThemeCard(props: {
         onPress={props.onSelectBoth}
       />
       <View className="flex-row items-center justify-center gap-2 py-1" pointerEvents="box-none">
-        {choice("light", props.lightSelected)}
-        {choice("dark", props.darkSelected)}
+        {(props.appearances ?? ["light", "dark"]).includes("light")
+          ? choice("light", props.lightSelected)
+          : null}
+        {(props.appearances ?? ["light", "dark"]).includes("dark")
+          ? choice("dark", props.darkSelected)
+          : null}
       </View>
       <Text
         className="min-w-0 flex-1 px-1 text-lg font-t3-medium"
@@ -292,6 +312,7 @@ export function ThemeAppearanceSection() {
     setThemeMode,
     themeIds,
     themeMode,
+    publishedThemes,
     systemColorsAvailable,
   } = useAppearancePreferences();
 
@@ -331,6 +352,30 @@ export function ThemeAppearanceSection() {
               themeId={theme.id}
             />
           ))}
+          {publishedThemes.map((theme) => {
+            const appearances = (["light", "dark"] as const).filter(
+              (appearance) => theme.colors[appearance] !== undefined,
+            );
+            return (
+              <ThemeCard
+                appearances={appearances}
+                disabled={!isReady}
+                key={theme.id}
+                label={theme.label}
+                darkSelected={theme.id === themeIds.dark}
+                lightSelected={theme.id === themeIds.light}
+                onSelect={(appearance) => setThemeIdForAppearance(appearance, theme.id)}
+                onSelectBoth={() =>
+                  appearances.length === 2
+                    ? setThemeIdForBothAppearances(theme.id)
+                    : appearances.forEach((appearance) =>
+                        setThemeIdForAppearance(appearance, theme.id),
+                      )
+                }
+                themeId={theme.id}
+              />
+            );
+          })}
         </View>
       </View>
     </View>

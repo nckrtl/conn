@@ -37,7 +37,7 @@ describe("mobile theme runtime variables", () => {
           "--color-header": themeColorWithAlpha(
             base[
               themeId === "t3-code" || themeId === "material-you"
-                ? "--color-row-hover"
+                ? "--color-grouped-card"
                 : "--color-drawer"
             ],
             1,
@@ -55,7 +55,7 @@ describe("mobile theme runtime variables", () => {
       for (const appearance of ["light", "dark"] as const) {
         const variables = getMobileThemeRuntimeVariables(themeId, appearance, "android");
         expect(variables["--color-header"]).toBe(
-          appearance === "light" ? "rgba(244, 244, 245, 1)" : "rgba(20, 20, 20, 1)",
+          appearance === "light" ? "rgba(233, 233, 233, 1)" : "rgba(20, 20, 20, 1)",
         );
         for (const pane of ["--color-screen", "--color-sheet-solid", "--color-drawer"] as const) {
           expect(variables["--color-header"]).not.toBe(themeColorWithAlpha(variables[pane], 1));
@@ -78,7 +78,8 @@ describe("mobile theme runtime variables", () => {
           expect(ios).toEqual(getMobileThemeVariables("t3-code", appearance));
           expect(ios["--color-drawer"]).toBe(android["--color-drawer"]);
           expect(ios["--color-drawer"]).toBe("#000000");
-          expect(ios["--color-thread-canvas"]).toBe("#0a0a0a");
+          // nckrtl shell: the chat canvas shares the sidebar pane color.
+          expect(ios["--color-thread-canvas"]).toBe("#000000");
         }
         expect(themeColorWithAlpha(ios["--color-thread-hover"], 1)).not.toBe(
           themeColorWithAlpha(ios["--color-drawer"], 1),

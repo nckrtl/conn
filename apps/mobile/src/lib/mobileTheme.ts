@@ -15,9 +15,21 @@ import {
   type ThemePreviewColors,
 } from "@t3tools/shared/themePreview";
 
+/**
+ * Themes a connected machine publishes (`<stateDir>/themes/<id>.json`), such as
+ * a custom desktop theme. Mobile stores them as `published:<id>` so they never
+ * collide with built-in ids. Lives here (not in publishedThemes.ts) because the
+ * Uniwind theme generator imports this file through plain Node ESM.
+ */
+export type PublishedMobileThemeId = `published:${string}`;
+
+export function isPublishedMobileThemeId(value: unknown): value is PublishedMobileThemeId {
+  return typeof value === "string" && value.startsWith("published:") && value.length > 10;
+}
+
 export const DEFAULT_MOBILE_THEME_ID = MOBILE_DEFAULT_THEME_ID;
 export const MOBILE_THEME_IDS = [...SHARED_MOBILE_THEME_IDS, "material-you"] as const;
-export type MobileThemeId = SharedMobileThemeId | "material-you";
+export type MobileThemeId = SharedMobileThemeId | "material-you" | PublishedMobileThemeId;
 export type MobileThemeAppearance = ThemeAppearance;
 export type MobileThemeMode = MobileThemeAppearance | "system";
 export type MobileThemeIds = Readonly<Record<MobileThemeAppearance, MobileThemeId>>;
@@ -36,10 +48,15 @@ export const MOBILE_THEME_OPTIONS: ReadonlyArray<{
 export type MobileThemeVariable = keyof ReturnType<typeof createMobileThemeVariables>;
 export type MobileThemeVariables = Readonly<Record<MobileThemeVariable, string>>;
 
+export function isMobileThemeId(value: unknown): value is MobileThemeId {
+  return (
+    (typeof value === "string" && (MOBILE_THEME_IDS as readonly string[]).includes(value)) ||
+    isPublishedMobileThemeId(value)
+  );
+}
+
 export function normalizeMobileThemeId(value: unknown): MobileThemeId {
-  return typeof value === "string" && (MOBILE_THEME_IDS as readonly string[]).includes(value)
-    ? (value as MobileThemeId)
-    : DEFAULT_MOBILE_THEME_ID;
+  return isMobileThemeId(value) ? value : DEFAULT_MOBILE_THEME_ID;
 }
 
 export function normalizeMobileThemeMode(value: unknown): MobileThemeMode {
@@ -242,16 +259,27 @@ export function createMobileThemeVariables(
 ) {
   const c = nativeColors(colors);
   const groupedCard = themeColorToNativeColor(groupedCardColor);
-  const textSurfaces = [c.canvas, c.surface, c.surfaceRaised, c.chrome, groupedCard];
+  // nckrtl shell: like the desktop fork, every pane sits on the theme's
+  // sidebar color (desktop `--shell-panel` / `--shell-card`), not the canvas.
+  const shellPanel = c.sidebar;
+  const textSurfaces = [
+    shellPanel,
+    c.sidebarRowHover,
+    c.canvas,
+    c.surface,
+    c.surfaceRaised,
+    c.chrome,
+    groupedCard,
+  ];
   return {
-    "--color-screen": c.canvas,
+    "--color-screen": shellPanel,
     "--color-sheet": withAlpha(c.chrome, 0.98),
     "--color-sheet-solid": c.chrome,
-    "--color-card": c.surface,
+    "--color-card": shellPanel,
     "--color-grouped-card": groupedCard,
     "--color-card-alt": c.surfaceRaised,
     "--color-card-translucent": withAlpha(c.surface, 0.8),
-    "--color-thread-canvas": c.canvas,
+    "--color-thread-canvas": shellPanel,
     "--color-thread-selected": c.sidebarRowActive,
     "--color-thread-selected-foreground": c.sidebarForeground,
     "--color-thread-selected-foreground-muted": readableTextColor(
@@ -260,7 +288,7 @@ export function createMobileThemeVariables(
     ),
     "--color-thread-hover": c.sidebarRowHover,
     "--color-row-hover": c.toolbarControlHover,
-    "--color-composer-panel": themeColorWithAlpha(c.canvas, appearance === "dark" ? 0.92 : 0.88),
+    "--color-composer-panel": themeColorWithAlpha(shellPanel, appearance === "dark" ? 0.92 : 0.88),
     "--color-composer-surface": themeColorWithAlpha(
       groupedCard,
       appearance === "dark" ? 0.9 : 0.94,
@@ -301,23 +329,23 @@ export function createMobileThemeVariables(
     "--color-danger-foreground": c.errorForeground,
     "--color-update": c.updateSurface,
     "--color-update-foreground": c.updateForeground,
-    "--color-input": c.surface,
+    "--color-input": c.sidebarRowHover,
     "--color-input-border": c.input,
     "--color-sidebar-search": c.sidebarControlSurface,
     "--color-placeholder": readableTextColor(c.placeholder, textSurfaces),
     "--color-icon": c.text,
     "--color-icon-muted": c.iconMuted,
     "--color-icon-subtle": c.secondaryLabel,
-    "--color-header": withAlpha(c.toolbar, 0.97),
+    "--color-header": withAlpha(shellPanel, 0.97),
     "--color-header-foreground": c.toolbarForeground,
     "--color-header-border": c.toolbarBorder,
     "--color-glass-surface": withAlpha(c.surfaceOverlay, 0.74),
     "--color-glass-fallback": themeColorWithAlpha(groupedCard, appearance === "dark" ? 0.9 : 0.94),
     "--color-glass-tint": withAlpha(c.surfaceOverlay, 0.22),
-    "--color-status-bar": c.canvas,
+    "--color-status-bar": shellPanel,
     "--color-md-body": c.text,
     "--color-md-strong": c.text,
-    "--color-md-link": readableTextColor(c.messageAction, c.canvas),
+    "--color-md-link": readableTextColor(c.messageAction, shellPanel),
     "--color-md-blockquote-border": c.border,
     "--color-md-blockquote-bg": c.muted,
     "--color-md-code-bg": c.codeBackground,
@@ -346,6 +374,16 @@ export function createMobileThemeVariables(
   };
 }
 
+/**
+ * Desktop `--shell-highlight` flattened over the pane: the text color at 8%
+ * over the sidebar (desktop light uses 6%; small phone cards need the extra step). Settings groups, composer and glass
+ * fallbacks sit on it, one step above the sidebar-colored screen.
+ */
+export function shellHighlightColor(colors: ThemeColors, appearance: MobileThemeAppearance) {
+  const pane = themeColorToNativeColor(colors.sidebar);
+  return flattenThemeColor(themeColorWithAlpha(themeColorToNativeColor(colors.text), 0.08), pane);
+}
+
 export const MOBILE_THEME_VARIABLE_NAMES = Object.keys(
   createMobileThemeVariables(T3_CHAT_THEME.colors, "light"),
 ) as ReadonlyArray<MobileThemeVariable>;
@@ -367,14 +405,7 @@ export function getMobileThemeVariables(
   overrides: Partial<MobileThemeVariables> | null = null,
 ): MobileThemeVariables {
   const colors = getMobileThemeColors(themeId, appearance);
-  // Mobile settings groups and fallback materials use tonal fills where desktop
-  // uses outlined cards. Regular cards retain their shared desktop surface.
-  const groupedCard =
-    themeId === DEFAULT_MOBILE_THEME_ID
-      ? appearance === "light"
-        ? colors.toolbarControlHover
-        : colors.sidebarRowActive
-      : colors.surface;
+  const groupedCard = shellHighlightColor(colors, appearance);
   const mobileColors =
     themeId === DEFAULT_MOBILE_THEME_ID
       ? {

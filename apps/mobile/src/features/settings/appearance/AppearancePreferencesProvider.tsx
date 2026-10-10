@@ -27,6 +27,11 @@ import type { Preferences } from "../../../persistence/mobile-preferences";
 import { isSystemColorsAvailable, readSystemColorPalettes } from "../../../lib/materialYouPalette";
 import { materialYouPaletteToMobileThemeVariables } from "../../../lib/materialYouTheme";
 import { getMobileThemeRuntimeVariables } from "../../../lib/mobileThemeVariables";
+import {
+  collectPublishedMobileThemes,
+  type PublishedMobileTheme,
+} from "../../../lib/publishedThemes";
+import { environmentServerConfigsAtom } from "../../../state/server";
 import type { MobileThemeVariables } from "../../../lib/mobileTheme";
 import {
   createMobileThemePairPatch,
@@ -54,6 +59,8 @@ interface AppearancePreferencesContextValue {
   readonly systemColorsAvailable: boolean;
   readonly systemColorsActive: boolean;
   readonly themeVariables: MobileThemeVariables;
+  /** Themes connected machines publish, such as a custom desktop theme. */
+  readonly publishedThemes: ReadonlyArray<PublishedMobileTheme>;
   readonly themeVariablesByAppearance: Readonly<
     Record<MobileThemeAppearance, MobileThemeVariables>
   >;
@@ -113,9 +120,19 @@ export function AppearancePreferencesProvider(props: { readonly children: ReactN
       focusSubscription.remove();
     };
   }, []);
+  const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  const publishedThemes = useMemo(
+    () => collectPublishedMobileThemes(serverConfigs),
+    [serverConfigs],
+  );
   const themeVariablesByAppearance = useMemo(() => {
     const resolve = (appearance: MobileThemeAppearance) => {
-      const base = getMobileThemeRuntimeVariables(themeIds[appearance], appearance, Platform.OS);
+      const base = getMobileThemeRuntimeVariables(
+        themeIds[appearance],
+        appearance,
+        Platform.OS,
+        publishedThemes,
+      );
       return themeIds[appearance] === "material-you" && systemColorPalettes
         ? materialYouPaletteToMobileThemeVariables(
             systemColorPalettes[appearance],
@@ -125,7 +142,7 @@ export function AppearancePreferencesProvider(props: { readonly children: ReactN
         : base;
     };
     return { light: resolve("light"), dark: resolve("dark") };
-  }, [themeIds, systemColorPalettes]);
+  }, [themeIds, systemColorPalettes, publishedThemes]);
   const themeVariables = themeVariablesByAppearance[themeAppearance];
   const activeThemeName = getMobileUniwindThemeName(themeId, themeAppearance);
   const { baseFontSize, codeFontSize, codeWordBreak, terminalFontSize } = preferences;
@@ -282,6 +299,7 @@ export function AppearancePreferencesProvider(props: { readonly children: ReactN
       systemColorsAvailable: isSystemColorsAvailable,
       systemColorsActive,
       themeVariables,
+      publishedThemes,
       themeVariablesByAppearance,
       systemColorPalettes,
       isReady,
@@ -301,6 +319,7 @@ export function AppearancePreferencesProvider(props: { readonly children: ReactN
       themeAppearance,
       systemColorsActive,
       themeVariables,
+      publishedThemes,
       themeVariablesByAppearance,
       systemColorPalettes,
       isReady,

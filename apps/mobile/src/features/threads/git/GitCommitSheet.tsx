@@ -106,7 +106,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
           <View className="gap-3 bg-card p-4 android:rounded-[20px] ios:rounded-[22px] ios:border ios:border-border">
             <View className="android:gap-1 ios:flex-row ios:items-center ios:justify-between ios:gap-3">
               <Text className="text-foreground-muted text-sm font-medium">Branch</Text>
-              <Text className="text-foreground text-base android:font-t3-medium ios:font-t3-bold">
+              <Text className="text-foreground text-base font-t3-medium">
                 {gitStatus.data?.refName ?? "(detached HEAD)"}
               </Text>
             </View>
@@ -120,9 +120,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
           <View className="gap-3 bg-card p-4 android:rounded-[20px] ios:rounded-[22px] ios:border ios:border-border">
             <View className="flex-row items-center justify-between gap-3">
               <View className="gap-1">
-                <Text className="text-foreground text-base android:font-t3-medium ios:font-t3-bold">
-                  Files
-                </Text>
+                <Text className="text-foreground text-base font-t3-medium">Files</Text>
                 <Text className="text-foreground-muted text-xs leading-normal">
                   {selectedFiles.length} selected · +{selectedInsertions} / -{selectedDeletions}
                 </Text>
@@ -228,7 +226,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
                         <View className="flex-1 gap-1">
                           <Text
                             selectable
-                            className={`text-sm font-t3-bold ${included ? "text-foreground" : "text-foreground-muted"}`}
+                            className={`text-sm font-t3-medium ${included ? "text-foreground" : "text-foreground-muted"}`}
                           >
                             {file.path}
                           </Text>
@@ -255,7 +253,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
           </View>
 
           <View className="android:gap-3 android:rounded-[20px] android:bg-card android:p-4 ios:gap-2">
-            <Text className="text-foreground android:text-base android:font-t3-medium ios:text-sm ios:font-t3-bold">
+            <Text className="text-foreground android:text-base ios:text-sm font-t3-medium">
               Commit message
             </Text>
             <TextInput

@@ -43,7 +43,7 @@ export function WorkspaceEmptyDetail(props: {
             tintColorClassName="accent-icon-subtle"
             type="hierarchical"
           />
-          <Text className="text-center text-xl font-t3-bold">Select a thread</Text>
+          <Text className="text-center text-xl font-t3-semibold">Select a thread</Text>
           <Text className="text-center text-base text-foreground-muted">
             {Platform.OS === "android"
               ? "Choose a thread from the sidebar or start a new thread."

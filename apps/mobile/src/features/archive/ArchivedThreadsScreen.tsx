@@ -238,7 +238,7 @@ function ArchivedThreadRow(props: {
           <View className="min-w-0 flex-1 gap-1">
             <View className="flex-row items-center gap-2">
               <Text
-                className="min-w-0 flex-1 text-base font-t3-bold leading-snug text-foreground"
+                className="min-w-0 flex-1 text-base font-t3-medium leading-snug text-foreground"
                 numberOfLines={1}
               >
                 {props.thread.title}
@@ -273,7 +273,7 @@ function ArchivedThreadRow(props: {
 function ArchiveError(props: { readonly message: string; readonly onRetry: () => void }) {
   return (
     <View className="rounded-[20px] border border-danger-border bg-danger p-4">
-      <Text className="text-base font-t3-bold text-danger-foreground">
+      <Text className="text-base font-t3-semibold text-danger-foreground">
         Could not load every archive
       </Text>
       <Text className="mt-1 text-sm text-foreground-muted">{props.message}</Text>

@@ -405,7 +405,7 @@ function ReviewFileNavigator({
               title="Changed files"
               titleColor={foregroundColor}
               titleFontSize={17}
-              titleFontWeight="700"
+              titleFontWeight="600"
               translucent
             />
           </Screen>
@@ -429,7 +429,7 @@ function ReviewFileNavigator({
       ) : (
         <View className="border-b border-border" style={{ paddingTop: headerInset }}>
           <View className="px-4 py-3">
-            <Text className="text-sm font-t3-bold text-foreground">Changed files</Text>
+            <Text className="text-sm font-t3-semibold text-foreground">Changed files</Text>
             <Text className="text-xs text-foreground-muted">
               {files.length} {files.length === 1 ? "file" : "files"}
             </Text>
@@ -688,7 +688,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
             Platform.OS === "android" ? "m-2 rounded-[20px]" : "border-b border-border",
           )}
         >
-          <Text className="text-sm font-t3-bold text-foreground">Review unavailable</Text>
+          <Text className="text-sm font-t3-semibold text-foreground">Review unavailable</Text>
           <Text className="text-xs leading-normal text-foreground-muted">{error}</Text>
         </View>,
       );
@@ -832,7 +832,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
                       : "border-b border-border bg-card px-4 py-5"
                   }
                 >
-                  <Text className="text-sm font-t3-bold text-foreground">No review diffs</Text>
+                  <Text className="text-sm font-t3-semibold text-foreground">No review diffs</Text>
                   <Text
                     className={cn(
                       "text-xs leading-normal text-foreground-muted",
@@ -860,7 +860,7 @@ export function ReviewSheet(props: ReviewSheetProps) {
                       : "border-b border-border bg-card px-4 py-5"
                   }
                 >
-                  <Text className="text-sm font-t3-bold text-foreground">No changes</Text>
+                  <Text className="text-sm font-t3-semibold text-foreground">No changes</Text>
                   <Text
                     className={cn(
                       "text-xs leading-normal text-foreground-muted",

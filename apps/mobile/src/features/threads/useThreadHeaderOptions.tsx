@@ -87,7 +87,7 @@ export function useThreadHeaderOptions(props: {
     headerTitleStyle: props.usesNativeHeaderGlass
       ? {
           fontSize: 17,
-          fontWeight: "800",
+          fontWeight: "600",
         }
       : undefined,
     title: props.title,

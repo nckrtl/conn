@@ -35,6 +35,10 @@
   font-weight: 500;
 }
 
+@utility font-t3-semibold {
+  font-weight: 600;
+}
+
 @utility font-t3-bold {
   font-weight: 700;
 }

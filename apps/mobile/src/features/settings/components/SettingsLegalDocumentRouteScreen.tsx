@@ -95,7 +95,7 @@ export function SettingsLegalDocumentRouteScreen({
           weight="regular"
         />
         <View className="items-center gap-2">
-          <Text className="text-center font-t3-bold text-lg text-foreground">
+          <Text className="text-center font-t3-semibold text-lg text-foreground">
             Couldn&apos;t load the {documentName.toLowerCase()}
           </Text>
           <Text selectable className="text-center text-sm leading-normal text-foreground-muted">

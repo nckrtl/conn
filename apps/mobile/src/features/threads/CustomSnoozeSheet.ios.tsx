@@ -241,7 +241,7 @@ function SnoozePopoverNavigation(props: {
                       : colors["--color-card"],
                   },
                   headerTintColor: colors["--color-foreground"],
-                  headerTitleStyle: { fontSize: 17, fontWeight: "700" },
+                  headerTitleStyle: { fontSize: 17, fontWeight: "600" },
                   headerTransparent: NATIVE_LIQUID_GLASS_SUPPORTED,
                   title: "Custom snooze",
                 }}

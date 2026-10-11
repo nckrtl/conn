@@ -1311,7 +1311,7 @@ function ThreadSettingsPickerNavigator(props: ThreadSettingsPickerPresentation) 
           },
           headerTransparent: NATIVE_LIQUID_GLASS_SUPPORTED,
           headerTintColor: foreground,
-          headerTitleStyle: { fontSize: 17, fontWeight: "700" },
+          headerTitleStyle: { fontSize: 17, fontWeight: "600" },
           scrollEdgeEffects: NATIVE_LIQUID_GLASS_SUPPORTED
             ? THREAD_SETTINGS_HEADER_SCROLL_EDGE_EFFECTS
             : undefined,

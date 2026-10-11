@@ -99,7 +99,7 @@ export function ConnectionEnvironmentRow(props: {
               tintColorClassName="accent-foreground-muted"
             />
             <Text
-              className="min-w-0 flex-shrink text-base font-t3-bold leading-snug text-foreground"
+              className="min-w-0 flex-shrink text-base font-t3-medium leading-snug text-foreground"
               numberOfLines={1}
             >
               {props.environment.environmentLabel}

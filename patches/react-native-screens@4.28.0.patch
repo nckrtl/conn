@@ -557,12 +557,12 @@ index a54cb63..da7e48e 100644
 +      BOOL hasLeadingButton = mailSearchToolbarConfig[@"leadingButtonId"] != nil;
 +      BOOL hasLeadingSlot = hasLeadingButton || (hasFilterButton && !filterInsideSearch);
 +      CGFloat embeddedFilterReserve = filterInsideSearch ? 40.0 : 0.0;
-+      // The pill's end caps are semicircles of radius toolbarHeight / 2, so a
-+      // glyph looks centered when its center sits about one radius from the
-+      // edge, nudged slightly inward. The magnifier sits 22pt from the left
++      // The pill's end caps are semicircles of radius toolbarHeight / 2, and
++      // each glyph sits at its cap's center, so the active filter circle is
++      // concentric with the right cap. The magnifier sits 22pt from the left
 +      // edge of a UISearchTextField (its built-in left padding plus half the
 +      // glyph), so the field's leading inset makes up the rest.
-+      CGFloat capGlyphCenterInset = toolbarHeight / 2.0 + 4.0;
++      CGFloat capGlyphCenterInset = toolbarHeight / 2.0;
 +      CGFloat embeddedFilterButtonSize = 36.0;
 +      CGFloat embeddedFilterTrailingInset = capGlyphCenterInset - embeddedFilterButtonSize / 2.0;
 +      CGFloat searchFieldLeadingInset = filterInsideSearch ? capGlyphCenterInset - 22.0 : 14.0;

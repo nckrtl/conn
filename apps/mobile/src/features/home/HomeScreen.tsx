@@ -223,6 +223,12 @@ function HomeTopContentSpacer() {
   return <View className="h-4" />;
 }
 
+// The glass iOS header is hidden when empty, so the list starts at the status
+// bar; this keeps the first row a short step below it.
+function HomeGlassTopContentSpacer() {
+  return <View className="h-2" />;
+}
+
 /* ─── Main screen ────────────────────────────────────────────────────── */
 
 export function HomeScreen(props: HomeScreenProps) {
@@ -959,7 +965,14 @@ export function HomeScreen(props: HomeScreenProps) {
     );
   }
 
-  const listHeader = Platform.OS === "ios" ? undefined : <HomeTopContentSpacer />;
+  const listHeader =
+    Platform.OS === "ios" ? (
+      NATIVE_LIQUID_GLASS_SUPPORTED ? (
+        <HomeGlassTopContentSpacer />
+      ) : undefined
+    ) : (
+      <HomeTopContentSpacer />
+    );
 
   // Project scoping lives in the header filter menu (no inline chip row on
   // mobile — the menu is the one filter surface).

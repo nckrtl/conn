@@ -209,7 +209,7 @@ index 8a41697..309ba2f 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/ios/RNSScreenStackHeaderConfig.mm b/ios/RNSScreenStackHeaderConfig.mm
-index a54cb63..2f52037 100644
+index a54cb63..cd2e26d 100644
 --- a/ios/RNSScreenStackHeaderConfig.mm
 +++ b/ios/RNSScreenStackHeaderConfig.mm
 @@ -24,11 +24,46 @@
@@ -277,8 +277,23 @@ index a54cb63..2f52037 100644
    _blurEffect = RNSBlurEffectStyleNone;
    _synchronousShadowStateUpdatesEnabled = YES;
  }
-@@ -507,6 +546,10 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -505,12 +544,31 @@ + (void)updateViewController:(UIViewController *)vc
  
+   [config applySemanticContentAttributeIfNeededToNavCtrl:navctr];
+ 
++  // The Mail-style bottom toolbar is a plain view on the screen, not part of
++  // the navigation bar. A screen that owns one keeps building it while its
++  // header is hidden, so hiding the (empty) bar does not remove the toolbar.
++  BOOL keepsMailSearchToolbarWhileHidden = NO;
++  if (shouldHide && config != nil) {
++    for (NSDictionary<NSString *, id> *toolbarConfig in config.headerToolbarItems) {
++      if (toolbarConfig[@"mailSearchToolbar"]) {
++        keepsMailSearchToolbarWhileHidden = YES;
++        break;
++      }
++    }
++  }
++
    if (shouldHide) {
      navitem.title = config.title;
 +    if (@available(iOS 26.0, *)) {
@@ -286,9 +301,18 @@ index a54cb63..2f52037 100644
 +      navitem.largeSubtitle = config.largeSubtitle;
 +    }
  
-     // Setting navigation bar visibility is split to mitigate iOS 26 bug with bar button items.
-     [navctr setNavigationBarHidden:YES animated:animated];
-@@ -523,11 +566,19 @@ + (void)updateViewController:(UIViewController *)vc
+-    // Setting navigation bar visibility is split to mitigate iOS 26 bug with bar button items.
+-    [navctr setNavigationBarHidden:YES animated:animated];
+-    return;
++    if (!keepsMailSearchToolbarWhileHidden) {
++      // Setting navigation bar visibility is split to mitigate iOS 26 bug with bar button items.
++      [navctr setNavigationBarHidden:YES animated:animated];
++      return;
++    }
+   }
+ 
+   navctr.navigationBar.overrideUserInterfaceStyle = config.userInterfaceStyle;
+@@ -523,11 +581,19 @@ + (void)updateViewController:(UIViewController *)vc
    }
    navitem.largeTitleDisplayMode =
        config.largeTitle ? UINavigationItemLargeTitleDisplayModeAlways : UINavigationItemLargeTitleDisplayModeNever;
@@ -308,7 +332,7 @@ index a54cb63..2f52037 100644
  
  // appearance does not apply to the tvOS so we need to use lagacy customization
  #if TARGET_OS_TV
-@@ -559,8 +610,6 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -559,8 +625,6 @@ + (void)updateViewController:(UIViewController *)vc
    navitem.leftItemsSupplementBackButton = config.backButtonInCustomView;
  #endif
    navitem.titleView = nil;
@@ -317,7 +341,7 @@ index a54cb63..2f52037 100644
  
  #if !TARGET_OS_TV
    // We want to set navitem.searchController to nil only if we are sure
-@@ -568,22 +617,18 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -568,22 +632,18 @@ + (void)updateViewController:(UIViewController *)vc
    bool searchBarPresent = false;
  #endif /* !TARGET_OS_TV */
  
@@ -344,7 +368,7 @@ index a54cb63..2f52037 100644
          break;
        }
        case RNSScreenStackHeaderSubviewTypeCenter:
-@@ -648,10 +693,531 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -648,14 +708,538 @@ + (void)updateViewController:(UIViewController *)vc
    // This assignment should be done after `navitem.titleView = ...` assignment (iOS 16.0 bug).
    // See: https://github.com/software-mansion/react-native-screens/issues/1570 (comments)
    navitem.title = config.title;
@@ -880,7 +904,15 @@ index a54cb63..2f52037 100644
  
    // Setting navigation bar visibility is split to mitigate iOS 26 bug with bar button items
    // (setting nav bar visibility should be done after `navitem.*BarButtonItems`).
-@@ -784,6 +1350,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+-  RCTAssert(shouldHide == NO, @"[RNScreens] RNSScreenStackHeaderConfig: expected shouldHide to be NO.");
++  if (shouldHide) {
++    [navctr setNavigationBarHidden:YES animated:animated];
++    return;
++  }
+   [navctr setNavigationBarHidden:NO animated:animated];
+ 
+   if (animated && vc.transitionCoordinator != nil &&
+@@ -784,6 +1368,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
  
  - (NSArray<UIBarButtonItem *> *)barButtonItemsFromConfigs:(NSArray<NSDictionary<NSString *, id> *> *)dicts
                                           withCurrentItems:(NSArray<UIBarButtonItem *> *)currentItems
@@ -889,7 +921,7 @@ index a54cb63..2f52037 100644
  {
    if (dicts.count == 0) {
      return currentItems;
-@@ -792,7 +1360,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -792,7 +1378,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    [items addObjectsFromArray:currentItems];
    for (NSUInteger i = 0; i < dicts.count; i++) {
      NSDictionary *dict = dicts[i];
@@ -1091,7 +1123,7 @@ index a54cb63..2f52037 100644
        RNSBarButtonItem *item = [[RNSBarButtonItem alloc] initWithConfig:dict
            action:^(NSString *buttonId) {
              auto eventEmitter = std::static_pointer_cast<const facebook::react::RNSScreenStackHeaderConfigEventEmitter>(
-@@ -814,19 +1575,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -814,19 +1593,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
            }
            imageLoader:_imageLoader];
        NSNumber *index = dict[@"index"];
@@ -1121,7 +1153,7 @@ index a54cb63..2f52037 100644
          [items insertObject:item atIndex:index.integerValue];
        } else {
          [items addObject:item];
-@@ -836,6 +1601,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -836,6 +1619,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    return items;
  }
  
@@ -1169,7 +1201,7 @@ index a54cb63..2f52037 100644
  RNS_IGNORE_SUPER_CALL_BEGIN
  - (void)insertReactSubview:(RNSScreenStackHeaderSubview *)subview atIndex:(NSInteger)atIndex
  {
-@@ -1025,6 +1831,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1025,6 +1849,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    }
  
    _title = RCTNSStringFromStringNilIfEmpty(newScreenProps.title);
@@ -1178,7 +1210,7 @@ index a54cb63..2f52037 100644
    if (newScreenProps.titleFontFamily != oldScreenProps.titleFontFamily) {
      _titleFontFamily = RCTNSStringFromStringNilIfEmpty(newScreenProps.titleFontFamily);
    }
-@@ -1050,6 +1858,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1050,6 +1876,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    _disableBackButtonMenu = newScreenProps.disableBackButtonMenu;
    _backButtonDisplayMode =
        [RNSConvert UINavigationItemBackButtonDisplayModeFromCppEquivalent:newScreenProps.backButtonDisplayMode];
@@ -1186,7 +1218,7 @@ index a54cb63..2f52037 100644
  
    if (newScreenProps.userInterfaceStyle != oldScreenProps.userInterfaceStyle) {
      _userInterfaceStyle = [RNSConvert UIUserInterfaceStyleFromCppEquivalent:newScreenProps.userInterfaceStyle];
-@@ -1096,6 +1905,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1096,6 +1923,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
      _headerRightBarButtonItems = array;
    }
  

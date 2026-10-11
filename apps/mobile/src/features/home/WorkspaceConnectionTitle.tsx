@@ -28,7 +28,7 @@ const FADE_IN_MS = 250;
  * workspace has been in a non-connected state for STATUS_SHOW_DELAY_MS,
  * then live-updating until the workspace reconnects (null again immediately).
  */
-function useDelayedConnectionStatus(): WorkspaceConnectionStatusPresentation | null {
+export function useDelayedConnectionStatus(): WorkspaceConnectionStatusPresentation | null {
   const { state } = useWorkspaceState();
   const presentation = workspaceConnectionStatusPresentation(state);
   const hasStatus = presentation !== null;

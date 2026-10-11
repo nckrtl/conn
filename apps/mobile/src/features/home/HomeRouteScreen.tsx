@@ -4,7 +4,12 @@ import { useNavigation } from "@react-navigation/native";
 import { useEffect, useMemo, useState } from "react";
 import { Platform, useWindowDimensions } from "react-native";
 
-import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
+import {
+  nativeHeaderScrollEdgeEffects,
+  NativeHeaderToolbar,
+  NativeStackScreenOptions,
+} from "../../native/StackHeader";
+import { NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED } from "../layout/native-mail-search-toolbar";
 import { useProjects, useThreadShells } from "../../state/entities";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useWorkspaceState } from "../../state/workspace";
@@ -21,7 +26,15 @@ import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
-import { getConnectionStatusOnlyHeaderOptions } from "./WorkspaceConnectionTitle";
+import {
+  getConnectionStatusOnlyHeaderOptions,
+  useDelayedConnectionStatus,
+} from "./WorkspaceConnectionTitle";
+
+const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
+// With the nav bar hidden nothing makes UIKit's automatic top edge effect
+// appear under the status bar, so ask for the soft fade explicitly.
+const HIDDEN_HEADER_SCROLL_EDGE_EFFECTS = { ...HEADER_SCROLL_EDGE_EFFECTS, top: "soft" } as const;
 
 /* ─── Route screen ───────────────────────────────────────────────────── */
 
@@ -35,6 +48,12 @@ export function HomeRouteScreen() {
   const navigation = useNavigation();
   const [searchQuery, setSearchQuery] = useState("");
   const handleSelectThread = useHomeThreadSelection();
+  // The glass iOS header holds nothing but the connection status (the toolbar
+  // lives in a view of its own), so hide the bar while there is no status to
+  // show. Its 44pt would otherwise push the first thread down.
+  const connectionStatus = useDelayedConnectionStatus();
+  const hidesEmptyHeader =
+    Platform.OS === "ios" && NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED && connectionStatus === null;
 
   useEffect(() => {
     void checkForAppUpdateOnLaunch();
@@ -163,7 +182,14 @@ export function HomeRouteScreen() {
                   params: { screen: "SettingsEnvironments" },
                 }),
             }),
-            headerShown: true,
+            headerShown: !hidesEmptyHeader,
+            ...(NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED && Platform.OS === "ios"
+              ? {
+                  scrollEdgeEffects: hidesEmptyHeader
+                    ? HIDDEN_HEADER_SCROLL_EDGE_EFFECTS
+                    : HEADER_SCROLL_EDGE_EFFECTS,
+                }
+              : {}),
           }}
         />
         <HomeHeader

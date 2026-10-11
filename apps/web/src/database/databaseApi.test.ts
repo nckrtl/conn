@@ -3,9 +3,12 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   browseTableSql,
   connectionFromEnv,
+  connectionFromVault,
+  connectionTarget,
   type DatabaseConnection,
   defaultConnection,
   parseDotEnv,
+  VAULT_CONNECTION_PREFIX,
 } from "./databaseApi";
 
 describe("database connections", () => {
@@ -49,5 +52,27 @@ describe("database connections", () => {
       'select * from "audit"."events" limit 100',
     );
     expect(browseTableSql("sqlite", "users")).toBe('select * from "users" limit 100');
+  });
+});
+
+describe("connectionFromVault", () => {
+  it("keeps the entry id and never carries a password", () => {
+    const connection = connectionFromVault({
+      id: "entry-1",
+      name: "ohdear",
+      driver: "pgsql",
+      host: "10.44.0.7",
+      port: 5432,
+      database: "ohdear",
+      username: "ohdear_main",
+      tls: "disabled",
+    });
+    expect(connection).toMatchObject({
+      id: `${VAULT_CONNECTION_PREFIX}entry-1`,
+      source: "vault",
+      vaultItemId: "entry-1",
+      password: "",
+    });
+    expect(connectionTarget(connection)).toBe("10.44.0.7:5432/ohdear");
   });
 });

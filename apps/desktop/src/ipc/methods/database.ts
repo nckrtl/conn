@@ -6,11 +6,13 @@ import postgres from "postgres";
 
 import * as DesktopIpc from "../DesktopIpc.ts";
 import { DATABASE_RUN_CHANNEL } from "../channels.ts";
+import { vaultCredential, type VaultTls } from "./vault.ts";
 
 // The Database panel's runner. The desktop main process connects directly (no T3 server
 // change), opens one connection per call and closes it again. Everything is read-only:
 // only reading statements may run, inside a read-only transaction that is rolled back
-// (SQLite opens the file read-only instead).
+// (SQLite opens the file read-only instead). A Vault connection carries only its entry id; its
+// credentials are fetched from Vault for each call and are never kept.
 
 const ROW_LIMIT = 500;
 const TIMEOUT_SECONDS = 30;
@@ -22,10 +24,13 @@ const Connection = Schema.Struct({
   database: Schema.String,
   username: Schema.String,
   password: Schema.String,
+  vaultItemId: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
 });
 
 const DatabaseRequest = Schema.Struct({
   connection: Connection,
+  /** Whether a locked Vault may ask for Touch ID. Only explicit actions set it. */
+  allowUnlock: Schema.optional(Schema.Boolean),
   operation: Schema.Literals(["tables", "describe", "query"]),
   table: Schema.optional(Schema.String),
   sql: Schema.optional(Schema.String.check(Schema.isMaxLength(200_000))),
@@ -53,6 +58,13 @@ const DatabaseResponse = Schema.Struct({
 });
 
 type Request = typeof DatabaseRequest.Type;
+/** A connection ready to open; `tls` comes only from a Vault entry. */
+type Resolved = Request["connection"] & { readonly tls?: VaultTls };
+type ResolvedRequest = Omit<Request, "connection"> & { readonly connection: Resolved };
+export type VaultResolver = (
+  itemID: string,
+  allowUnlock: boolean,
+) => Promise<Omit<Resolved, "vaultItemId">>;
 type Response = typeof DatabaseResponse.Type;
 type Column = typeof Column.Type;
 type CellValue = typeof Value.Type;
@@ -115,8 +127,28 @@ function text(value: unknown): string {
 
 // ─── MySQL / MariaDB ─────────────────────────────────────────────────────────
 
+/** TLS options for both drivers. `required` encrypts without checking the certificate. */
+function tlsOptions(tls: VaultTls | undefined) {
+  switch (tls) {
+    case "required":
+      return { rejectUnauthorized: false };
+    case "verify-ca":
+      return { rejectUnauthorized: true, checkServerIdentity: () => undefined };
+    case "verify-full":
+      return { rejectUnauthorized: true };
+    default:
+      return undefined;
+  }
+}
+
+/** The `ssl` option for a connection, or nothing when TLS is off. */
+function tlsSetting(tls: VaultTls | undefined) {
+  const ssl = tlsOptions(tls);
+  return ssl ? { ssl } : {};
+}
+
 async function withMysql<T>(
-  connection: Request["connection"],
+  connection: Resolved,
   run: (client: mysql.Connection) => Promise<T>,
 ): Promise<T> {
   const client = await mysql.createConnection({
@@ -130,6 +162,7 @@ async function withMysql<T>(
     supportBigNumbers: true,
     bigNumberStrings: true,
     multipleStatements: false,
+    ...tlsSetting(connection.tls),
   });
   try {
     await client.query("START TRANSACTION READ ONLY");
@@ -152,7 +185,7 @@ async function mysqlRows(client: mysql.Connection, sql: string, values: unknown[
   };
 }
 
-async function runMysql(request: Request): Promise<Partial<Response>> {
+async function runMysql(request: ResolvedRequest): Promise<Partial<Response>> {
   return withMysql(request.connection, async (client) => {
     if (request.operation === "tables") {
       const result = await mysqlRows(
@@ -184,7 +217,7 @@ async function runMysql(request: Request): Promise<Partial<Response>> {
 // ─── PostgreSQL ──────────────────────────────────────────────────────────────
 
 async function withPostgres<T>(
-  connection: Request["connection"],
+  connection: Resolved,
   run: (client: postgres.ReservedSql) => Promise<T>,
 ): Promise<T> {
   const sql = postgres({
@@ -198,6 +231,7 @@ async function withPostgres<T>(
     connect_timeout: 10,
     idle_timeout: 1,
     onnotice: () => undefined,
+    ...tlsSetting(connection.tls),
   });
   try {
     const client = await sql.reserve();
@@ -235,7 +269,7 @@ function postgresTable(name: string): [string, string] {
   return dot === -1 ? ["public", name] : [name.slice(0, dot), name.slice(dot + 1)];
 }
 
-async function runPostgres(request: Request): Promise<Partial<Response>> {
+async function runPostgres(request: ResolvedRequest): Promise<Partial<Response>> {
   return withPostgres(request.connection, async (client) => {
     if (request.operation === "tables") {
       const result = await postgresRows(
@@ -296,7 +330,7 @@ function sqliteRows(db: NodeSqlite.DatabaseSync, sql: string): Rows {
   return { columns, rows };
 }
 
-function runSqlite(request: Request): Partial<Response> {
+function runSqlite(request: ResolvedRequest): Partial<Response> {
   return withSqlite(request.connection, (db) => {
     if (request.operation === "tables") {
       return {
@@ -336,11 +370,20 @@ const EMPTY: Response = {
   durationMs: 0,
 };
 
-export async function runDatabase(request: Request): Promise<Response> {
+export async function runDatabase(
+  input: Request,
+  resolveVault: VaultResolver = vaultCredential,
+): Promise<Response> {
   const started = performance.now();
   const durationMs = () => Math.round((performance.now() - started) * 10) / 10;
   try {
-    if (request.operation === "query") assertReading(request.sql ?? "");
+    if (input.operation === "query") assertReading(input.sql ?? "");
+    const request: ResolvedRequest = input.connection.vaultItemId
+      ? {
+          ...input,
+          connection: await resolveVault(input.connection.vaultItemId, input.allowUnlock ?? false),
+        }
+      : input;
     const result =
       request.connection.driver === "mysql"
         ? await runMysql(request)

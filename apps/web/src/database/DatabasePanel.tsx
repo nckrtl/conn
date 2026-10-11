@@ -8,6 +8,8 @@ import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
 import {
   Menu,
+  MenuGroup,
+  MenuGroupLabel,
   MenuItem,
   MenuPopup,
   MenuRadioGroup,
@@ -38,6 +40,7 @@ import {
   runReadOnlyQuery,
 } from "./databaseApi";
 import { useDatabaseStore } from "./databaseStore";
+import { type VaultDatabases, useVaultDatabases } from "./useVaultDatabases";
 
 type ResultTab = "rows" | "structure";
 
@@ -322,21 +325,37 @@ function newConnection(from: DatabaseConnection | null): DatabaseConnection {
   };
 }
 
+function ConnectionItems({ connections }: { connections: readonly DatabaseConnection[] }) {
+  return connections.map((connection) => (
+    <MenuRadioItem key={connection.id} value={connection.id}>
+      <span className="truncate">{connection.name}</span>
+      <span className="ms-auto truncate ps-3 text-muted-foreground">
+        {connectionTarget(connection)}
+      </span>
+    </MenuRadioItem>
+  ));
+}
+
 function ConnectionMenu({
   connections,
+  vault,
   selected,
   onSelect,
+  onUnlockVault,
   onAdd,
   onEdit,
   onDelete,
 }: {
   connections: readonly DatabaseConnection[];
+  vault: VaultDatabases;
   selected: DatabaseConnection | null;
   onSelect: (id: string) => void;
+  onUnlockVault: () => void;
   onAdd: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const select = (id: unknown) => onSelect(String(id));
   return (
     <Menu>
       <MenuTrigger
@@ -352,21 +371,33 @@ function ConnectionMenu({
       <MenuPopup align="start" sideOffset={6}>
         {connections.length > 0 ? (
           <>
-            <MenuRadioGroup value={selected?.id ?? ""} onValueChange={(id) => onSelect(String(id))}>
-              {connections.map((connection) => (
-                <MenuRadioItem key={connection.id} value={connection.id}>
-                  <span className="truncate">{connection.name}</span>
-                  <span className="ms-auto truncate ps-3 text-muted-foreground">
-                    {connectionTarget(connection)}
-                  </span>
-                </MenuRadioItem>
-              ))}
+            <MenuRadioGroup value={selected?.id ?? ""} onValueChange={select}>
+              <ConnectionItems connections={connections} />
             </MenuRadioGroup>
             <MenuSeparator />
           </>
         ) : null}
+        {vault.available ? (
+          <>
+            <MenuGroup>
+              <MenuGroupLabel>Vault</MenuGroupLabel>
+              {vault.status === "locked" ? (
+                <MenuItem onClick={onUnlockVault}>Unlock Vault…</MenuItem>
+              ) : vault.status === "error" ? (
+                <MenuItem disabled>{vault.error ?? "Vault is unavailable."}</MenuItem>
+              ) : vault.status === "ok" && vault.connections.length === 0 ? (
+                <MenuItem disabled>No Database entries</MenuItem>
+              ) : (
+                <MenuRadioGroup value={selected?.id ?? ""} onValueChange={select}>
+                  <ConnectionItems connections={vault.connections} />
+                </MenuRadioGroup>
+              )}
+            </MenuGroup>
+            <MenuSeparator />
+          </>
+        ) : null}
         <MenuItem onClick={onAdd}>Add connection…</MenuItem>
-        {selected ? (
+        {selected && selected.source !== "vault" ? (
           <MenuItem onClick={onEdit}>
             {selected.source === "env" ? "Copy to a new connection…" : "Edit connection…"}
           </MenuItem>
@@ -404,8 +435,12 @@ export function DatabasePanel({
     (state) => state.byProjectKey[projectKey]?.connection ?? null,
   );
   const pending = useDatabaseStore((state) => state.pendingByThreadKey[threadKey] ?? null);
+  const vault = useVaultDatabases();
   const connections = envConnection ? [envConnection, ...saved] : saved;
-  const connection = defaultConnection(connections, remembered);
+  const connection = defaultConnection([...connections, ...vault.connections], remembered);
+  // Set by any user action. Until then, a locked Vault never asks for Touch ID.
+  const acted = useRef(false);
+  const options = () => ({ allowUnlock: acted.current });
   const key = connection ? connectionKey(connection) : null;
 
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -420,10 +455,10 @@ export function DatabasePanel({
 
   // Keys cover every connection field a call uses, so a load runs again exactly when they change.
   const tablesLoad = useKeyedLoad(key ? `${key}:${refreshNonce}` : null, () =>
-    connection ? listDatabaseTables(connection) : Promise.resolve([]),
+    connection ? listDatabaseTables(connection, options()) : Promise.resolve([]),
   );
   const columnsLoad = useKeyedLoad(key && table ? `${key}:${table}` : null, () =>
-    connection && table ? describeDatabaseTable(connection, table) : Promise.resolve([]),
+    connection && table ? describeDatabaseTable(connection, table, options()) : Promise.resolve([]),
   );
   const columns = columnsLoad.data;
 
@@ -440,6 +475,7 @@ export function DatabasePanel({
 
   const run = async (statement: string) => {
     if (!connection || !key || statement.trim() === "") return;
+    acted.current = true;
     const id = ++runId.current;
     setTab("rows");
     setQuery((previous) => ({
@@ -449,7 +485,7 @@ export function DatabasePanel({
       error: null,
     }));
     try {
-      const next = await runReadOnlyQuery(connection, statement);
+      const next = await runReadOnlyQuery(connection, statement, options());
       if (id === runId.current) setQuery({ key, running: false, result: next, error: null });
     } catch (error) {
       if (id === runId.current) {
@@ -500,8 +536,16 @@ export function DatabasePanel({
         <ToolbarGroup role="group" aria-label="Connection" className="min-w-0">
           <ConnectionMenu
             connections={connections}
+            vault={vault}
             selected={connection}
-            onSelect={(id) => store().setConnection(projectKey, id)}
+            onSelect={(id) => {
+              acted.current = true;
+              store().setConnection(projectKey, id);
+            }}
+            onUnlockVault={() => {
+              acted.current = true;
+              vault.reload(true);
+            }}
             onAdd={() => setEditing(newConnection(envConnection))}
             onEdit={() =>
               connection &&
@@ -521,7 +565,9 @@ export function DatabasePanel({
                   type="button"
                   aria-label="Refresh"
                   onClick={() => {
+                    acted.current = true;
                     envFile.refresh();
+                    vault.reload(false);
                     setRefreshNonce((value) => value + 1);
                   }}
                 />

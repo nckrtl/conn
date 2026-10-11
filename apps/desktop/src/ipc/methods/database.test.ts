@@ -76,4 +76,35 @@ describe("database panel runner", () => {
       ).rows,
     ).toEqual([{ n: 2 }]);
   });
+
+  it("fetches a Vault connection's credentials for each call", async () => {
+    const calls: Array<[string, boolean]> = [];
+    const resolve = async (itemID: string, allowUnlock: boolean) => {
+      calls.push([itemID, allowUnlock]);
+      return connection;
+    };
+    const vaultConnection = { ...connection, database: "", vaultItemId: "entry-1" };
+
+    const result = await runDatabase({ connection: vaultConnection, operation: "tables" }, resolve);
+    await runDatabase(
+      { connection: vaultConnection, allowUnlock: true, operation: "tables" },
+      resolve,
+    );
+
+    expect(result.tables).toEqual(["users"]);
+    expect(calls).toEqual([
+      ["entry-1", false],
+      ["entry-1", true],
+    ]);
+  });
+
+  it("reports a locked Vault as the call's error", async () => {
+    const result = await runDatabase(
+      { connection: { ...connection, vaultItemId: "entry-1" }, operation: "tables" },
+      async () => {
+        throw new Error("Vault is locked. Unlock Vault to use this connection.");
+      },
+    );
+    expect(result.error).toBe("Vault is locked. Unlock Vault to use this connection.");
+  });
 });

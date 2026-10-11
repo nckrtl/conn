@@ -221,6 +221,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   orbitGatewaySend: (request) =>
     ipcRenderer.invoke(IpcChannels.ORBIT_GATEWAY_SEND_CHANNEL, request),
   databaseRun: (request) => ipcRenderer.invoke(IpcChannels.DATABASE_RUN_CHANNEL, request),
+  vaultDatabases: (request) => ipcRenderer.invoke(IpcChannels.VAULT_DATABASES_CHANNEL, request),
   mcpConnect: (request) => ipcRenderer.invoke(IpcChannels.MCP_CONNECT_CHANNEL, request),
   mcpRequest: (request) => ipcRenderer.invoke(IpcChannels.MCP_REQUEST_CHANNEL, request),
   mcpDisconnect: (sessionId) => ipcRenderer.invoke(IpcChannels.MCP_DISCONNECT_CHANNEL, sessionId),

@@ -1,9 +1,11 @@
 // The Database panel's connections and calls. The desktop main process connects directly
-// (`databaseRun` IPC); connections come from the project's `.env` or are added by hand.
+// (`databaseRun` IPC); connections come from the project's `.env`, are added by hand, or are
+// Database entries in the Vault Mac app, whose credentials the desktop app fetches per call.
 import type {
   DesktopDatabaseColumn,
   DesktopDatabaseConnection,
   DesktopDatabaseResponse,
+  DesktopVaultDatabase,
 } from "@t3tools/contracts";
 import { APP_BASE_NAME } from "../branding";
 
@@ -14,8 +16,11 @@ export type DatabaseValue = string | number | boolean | null;
 export interface DatabaseConnection extends DesktopDatabaseConnection {
   readonly id: string;
   readonly name: string;
-  /** `env`: read from the project's `.env` on every open; `manual`: saved in the panel. */
-  readonly source: "env" | "manual";
+  /**
+   * `env`: read from the project's `.env` on every open; `manual`: saved in the panel;
+   * `vault`: a Vault entry, listed without its password and never saved.
+   */
+  readonly source: "env" | "manual" | "vault";
 }
 
 export interface DatabaseQueryResult {
@@ -101,6 +106,24 @@ export function connectionFromEnv(
   };
 }
 
+export const VAULT_CONNECTION_PREFIX = "vault:";
+
+/** A Vault Database entry as a panel connection. It has no password; the desktop app fetches it. */
+export function connectionFromVault(entry: DesktopVaultDatabase): DatabaseConnection {
+  return {
+    id: `${VAULT_CONNECTION_PREFIX}${entry.id}`,
+    name: entry.name,
+    source: "vault",
+    driver: entry.driver,
+    host: entry.host,
+    port: entry.port,
+    database: entry.database,
+    username: entry.username,
+    password: "",
+    vaultItemId: entry.id,
+  };
+}
+
 /** `host/database` for the menu; the file name for SQLite. */
 export function connectionTarget(connection: DesktopDatabaseConnection): string {
   if (connection.driver === "sqlite") {
@@ -124,15 +147,30 @@ export function defaultConnection(
 
 const UNREACHABLE = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|connect timeout|timed out/i;
 
+/** `allowUnlock`: the call follows a user action, so a locked Vault may ask for Touch ID. */
+export interface CallOptions {
+  readonly allowUnlock?: boolean;
+}
+
 async function call(
   connection: DesktopDatabaseConnection,
   request: { operation: "tables" | "describe" | "query"; table?: string; sql?: string },
+  options: CallOptions = {},
 ): Promise<DesktopDatabaseResponse> {
   const run = window.desktopBridge?.databaseRun;
   if (!run) throw new Error(`The Database panel needs the ${APP_BASE_NAME} desktop app.`);
-  const { host, port, driver, database, username, password } = connection;
+  const { host, port, driver, database, username, password, vaultItemId } = connection;
   const response = await run({
-    connection: { host, port, driver, database, username, password },
+    connection: {
+      host,
+      port,
+      driver,
+      database,
+      username,
+      password,
+      ...(vaultItemId ? { vaultItemId } : {}),
+    },
+    ...(options.allowUnlock ? { allowUnlock: true } : {}),
     ...request,
   });
   if (response.error) {
@@ -145,22 +183,27 @@ async function call(
   return response;
 }
 
-export async function listDatabaseTables(connection: DesktopDatabaseConnection): Promise<string[]> {
-  return [...(await call(connection, { operation: "tables" })).tables];
+export async function listDatabaseTables(
+  connection: DesktopDatabaseConnection,
+  options?: CallOptions,
+): Promise<string[]> {
+  return [...(await call(connection, { operation: "tables" }, options)).tables];
 }
 
 export async function describeDatabaseTable(
   connection: DesktopDatabaseConnection,
   table: string,
+  options?: CallOptions,
 ): Promise<DatabaseColumn[]> {
-  return [...(await call(connection, { operation: "describe", table })).columns];
+  return [...(await call(connection, { operation: "describe", table }, options)).columns];
 }
 
 export async function runReadOnlyQuery(
   connection: DesktopDatabaseConnection,
   sql: string,
+  options?: CallOptions,
 ): Promise<DatabaseQueryResult> {
-  const response = await call(connection, { operation: "query", sql });
+  const response = await call(connection, { operation: "query", sql }, options);
   return {
     columns: response.resultColumns,
     rows: response.rows,

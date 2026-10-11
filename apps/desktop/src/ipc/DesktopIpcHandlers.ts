@@ -6,6 +6,7 @@ import { installNotificationBadge } from "./methods/notificationBadge.ts";
 import { apiSend } from "./methods/apiRequest.ts";
 import { orbitGatewaySend } from "./methods/orbitGateway.ts";
 import { databaseRun } from "./methods/database.ts";
+import { vaultDatabases } from "./methods/vault.ts";
 import { mcpConnect, mcpDisconnect, mcpRequest } from "./methods/mcp.ts";
 import { getClientSettings, setClientSettings } from "./methods/clientSettings.ts";
 import { getLocalThemes, installLocalThemesWatcher } from "./methods/localThemes.ts";
@@ -152,6 +153,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(apiSend);
   yield* ipc.handle(orbitGatewaySend);
   yield* ipc.handle(databaseRun);
+  yield* ipc.handle(vaultDatabases);
   yield* ipc.handle(mcpConnect);
   yield* ipc.handle(mcpRequest);
   yield* ipc.handle(mcpDisconnect);

@@ -1194,10 +1194,14 @@ export interface DesktopDatabaseConnection {
   readonly database: string;
   readonly username: string;
   readonly password: string;
+  /** nckrtl fork: a Vault Database entry. The desktop app fetches its credentials per call. */
+  readonly vaultItemId?: string;
 }
 
 export interface DesktopDatabaseRequest {
   readonly connection: DesktopDatabaseConnection;
+  /** Whether a locked Vault may ask for Touch ID. Only explicit actions set it. */
+  readonly allowUnlock?: boolean;
   readonly operation: "tables" | "describe" | "query";
   readonly table?: string;
   readonly sql?: string;
@@ -1221,6 +1225,24 @@ export interface DesktopDatabaseResponse {
   readonly rowCount: number;
   readonly truncated: boolean;
   readonly durationMs: number;
+}
+
+/** nckrtl fork: a Database entry in the Vault Mac app. Listings never carry its password. */
+export interface DesktopVaultDatabase {
+  readonly id: string;
+  readonly name: string;
+  readonly driver: "mysql" | "pgsql";
+  readonly host: string;
+  readonly port: number;
+  readonly database: string;
+  readonly username: string;
+  readonly tls: "disabled" | "required" | "verify-ca" | "verify-full";
+}
+
+export interface DesktopVaultDatabasesResponse {
+  readonly status: "ok" | "locked" | "unavailable" | "error";
+  readonly databases: readonly DesktopVaultDatabase[];
+  readonly error: string | null;
 }
 
 /** An MCP server the MCP panel connects to: a local command, or a Streamable HTTP / SSE URL. */
@@ -1425,6 +1447,10 @@ export interface DesktopBridge {
    * connection. Optional: other desktop builds lack it.
    */
   databaseRun?: (request: DesktopDatabaseRequest) => Promise<DesktopDatabaseResponse>;
+  /** nckrtl fork: Database entries from the Vault Mac app. `allowUnlock` may prompt for Touch ID. */
+  vaultDatabases?: (request: {
+    readonly allowUnlock: boolean;
+  }) => Promise<DesktopVaultDatabasesResponse>;
   /**
    * nckrtl fork: the MCP panel's sessions, held by the main process (stdio servers run on this
    * machine; HTTP servers get the integrated browser's certificate trust). Optional: other

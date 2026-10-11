@@ -10,6 +10,7 @@ export const PROBE_REMOTE_EDITORS_CHANNEL = "desktop:probe-remote-editors";
 export const API_SEND_CHANNEL = "desktop:api-send";
 export const ORBIT_GATEWAY_SEND_CHANNEL = "desktop:orbit-gateway-send";
 export const DATABASE_RUN_CHANNEL = "desktop:database-run";
+export const VAULT_DATABASES_CHANNEL = "desktop:vault-databases";
 export const MCP_CONNECT_CHANNEL = "desktop:mcp-connect";
 export const MCP_REQUEST_CHANNEL = "desktop:mcp-request";
 export const MCP_DISCONNECT_CHANNEL = "desktop:mcp-disconnect";

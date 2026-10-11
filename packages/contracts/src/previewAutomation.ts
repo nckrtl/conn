@@ -74,6 +74,12 @@ export const PreviewAutomationStatus = Schema.Struct({
   url: Schema.NullOr(Schema.String),
   title: Schema.NullOr(Schema.String),
   loading: Schema.Boolean,
+  /**
+   * Identifies the document the tab shows. It changes on every document load
+   * (navigation, reload) and stays the same for hash and history.pushState
+   * changes. Absent from hosts that predate it.
+   */
+  documentId: Schema.optional(Schema.Int),
   /** Optional for compatibility with desktop hosts predating viewport sizing. */
   viewportSetting: Schema.optional(PreviewViewportSetting),
   /** Measured guest-page viewport in CSS pixels when a webview is ready. */

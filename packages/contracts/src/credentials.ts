@@ -139,6 +139,8 @@ export type DesktopCredentialFillStatus = typeof DesktopCredentialFillStatus.Typ
 
 export const DesktopCredentialFillResult = Schema.Struct({
   status: DesktopCredentialFillStatus,
+  /** The document the value went into, as in `PreviewAutomationStatus.documentId`. */
+  documentId: Schema.optional(Schema.Int),
 });
 export type DesktopCredentialFillResult = typeof DesktopCredentialFillResult.Type;
 

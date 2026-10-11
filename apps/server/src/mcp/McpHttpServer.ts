@@ -17,6 +17,7 @@ import { PreviewAutomationError } from "@t3tools/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
+import * as CredentialAutofill from "../credentials/CredentialAutofill.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -369,9 +370,13 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
   }).pipe(Effect.as(result));
 };
 
+const SCREENSHOT_WITHHELD_NOTICE =
+  "No screenshot: a password or code was filled into this page, so it is not shown as an image. The text above is redacted. Navigate to another page to see screenshots again.";
+
 const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot")(function* () {
   const server = yield* McpServer.McpServer;
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+  const autofill = yield* CredentialAutofill.CredentialAutofill;
   // The MCP tool runner only supplies the client, so hand the save path its services here.
   const saveServices = yield* Effect.context<
     ServerConfig.ServerConfig | FileSystem.FileSystem | Path.Path
@@ -406,6 +411,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
           Stream.run(Sink.last()),
           Effect.flatMap(Effect.fromOption),
           Effect.provideService(PreviewAutomationBroker.PreviewAutomationBroker, broker),
+          Effect.provideService(CredentialAutofill.CredentialAutofill, autofill),
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.flatMap(({ encodedResult }) =>
             Effect.gen(function* () {
@@ -419,9 +425,12 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 };
               };
               const { screenshot, ...page } = snapshot;
+              const imageWithheld = screenshot.data.length === 0;
               const png = new Uint8Array(Buffer.from(screenshot.data, "base64"));
               const screenshotPath =
-                payload?.save === true ? yield* saveScreenshot(snapshot.url, png) : undefined;
+                payload?.save === true && !imageWithheld
+                  ? yield* saveScreenshot(snapshot.url, png)
+                  : undefined;
               if (screenshotPath !== undefined && payload?.includeImage === false) {
                 // The agent only wants a file to show the user. The url keeps the site icon on the tool row.
                 const saved = {
@@ -467,9 +476,11 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                           text: `Snapshot text was bounded. Omitted: ${bounded.omitted.join("; ")}.`,
                         },
                       ]),
-                  ...(payload?.includeImage === false
-                    ? []
-                    : [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]),
+                  ...(imageWithheld
+                    ? [{ type: "text" as const, text: SCREENSHOT_WITHHELD_NOTICE }]
+                    : payload?.includeImage === false
+                      ? []
+                      : [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]),
                 ],
               });
             }),

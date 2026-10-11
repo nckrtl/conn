@@ -1202,6 +1202,32 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("changes the document id on a document load, not on in-page navigation", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const preview = makeFaviconWebContents();
+        fromId.mockReturnValue(preview.webContents);
+        yield* manager.createTab("tab_document_id");
+        yield* manager.registerWebview("tab_document_id", 42);
+
+        const first = (yield* manager.automationStatus("tab_document_id")).documentId;
+        expect(first).toEqual(expect.any(Number));
+
+        // A hash change or history.pushState keeps the document, and its filled input.
+        preview.setUrl("http://localhost:3200/#step-2");
+        preview.listeners.get("did-navigate-in-page")?.({} as never);
+        expect((yield* manager.automationStatus("tab_document_id")).documentId).toBe(first);
+
+        // A load, even of the same address, replaces it.
+        preview.listeners.get("did-navigate")?.({} as never);
+        const second = (yield* manager.automationStatus("tab_document_id")).documentId;
+        expect(second).not.toBe(first);
+        preview.listeners.get("did-navigate")?.({} as never);
+        expect((yield* manager.automationStatus("tab_document_id")).documentId).not.toBe(second);
+      }),
+    ),
+  );
+
   effectIt.effect("clears a published favicon after a confirmed cross-origin navigation", () =>
     withManager((manager) =>
       Effect.gen(function* () {

@@ -68,6 +68,8 @@ const itemList = toJson([
 
 interface Scenario {
   readonly tabUrl?: string | null;
+  /** The document id the desktop reports. Omitted: a host that predates ids. */
+  readonly documentId?: number;
   readonly approved?: boolean;
   /** Fields a sign-in prompt answers with. */
   readonly approvedFields?: ReadonlyArray<string>;
@@ -136,6 +138,13 @@ const makeHarness = (scenario: Scenario = {}) => {
         return TestLoginStore.summarizeTestLogin(login);
       }),
   });
+  /** What the tab shows now; a test changes it to navigate. */
+  const page = {
+    url: scenario.tabUrl === undefined ? "https://github.com/login" : scenario.tabUrl,
+    documentId: scenario.documentId,
+  };
+  const documentFields = () =>
+    page.documentId === undefined ? {} : { documentId: page.documentId };
   const broker = Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({
     invoke: <A>(request: PreviewAutomationBroker.PreviewAutomationInvokeInput) => {
       brokerCalls.push({
@@ -146,14 +155,14 @@ const makeHarness = (scenario: Scenario = {}) => {
       });
       switch (request.operation) {
         case "status": {
-          const url = scenario.tabUrl === undefined ? "https://github.com/login" : scenario.tabUrl;
           return Effect.succeed({
-            available: url !== null,
+            available: page.url !== null,
             visible: true,
             tabId: "tab-1",
-            url,
+            url: page.url,
             title: "Sign in",
             loading: false,
+            ...documentFields(),
           } as A);
         }
         case "credentialApproval":
@@ -179,7 +188,7 @@ const makeHarness = (scenario: Scenario = {}) => {
                   cause: null,
                 }),
               )
-            : Effect.succeed({ status: "filled" } as A);
+            : Effect.succeed({ status: "filled", ...documentFields() } as A);
         default:
           return Effect.die(`unexpected operation ${request.operation}`);
       }
@@ -208,7 +217,7 @@ const makeHarness = (scenario: Scenario = {}) => {
         );
     });
   const scope = invocation(["preview"]);
-  return { opCalls, brokerCalls, layer, call, scope, savedTestLogins };
+  return { opCalls, brokerCalls, layer, call, scope, savedTestLogins, page };
 };
 
 const secretReads = (opCalls: ReadonlyArray<ReadonlyArray<string>>) =>
@@ -422,6 +431,42 @@ describe("credentials MCP tools", () => {
       if (blocked._tag === "Failure") {
         expect(blocked.failure._tag).toBe("PreviewAutomationCredentialLockError");
       }
+    }).pipe(Effect.scoped, Effect.provide(harness.layer));
+  });
+
+  it.effect("keeps the script lock across hash and pushState changes of the same document", () => {
+    const harness = makeHarness({ documentId: 7 });
+    return Effect.gen(function* () {
+      const autofill = yield* CredentialAutofill.CredentialAutofill;
+      const locked = () => autofill.isScriptLocked(harness.scope, undefined);
+      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+      // history.pushState and a hash link change the URL, not the document.
+      harness.page.url = "https://github.com/login#step-2";
+      expect(yield* locked()).toBe(true);
+      harness.page.url = "https://github.com/session?x=1";
+      expect(yield* locked()).toBe(true);
+      const blocked = yield* autofill.guardScript(harness.scope, undefined).pipe(Effect.result);
+      expect(blocked._tag).toBe("Failure");
+      // A new document releases it, even at the same URL (a reload).
+      harness.page.documentId = 8;
+      harness.page.url = "https://github.com/login";
+      expect(yield* locked()).toBe(false);
+      yield* autofill.guardScript(harness.scope, undefined);
+      // And it stays released if the old document id comes back.
+      harness.page.documentId = 7;
+      expect(yield* locked()).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(harness.layer));
+  });
+
+  it.effect("without document ids, keeps the lock across a hash change only", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const autofill = yield* CredentialAutofill.CredentialAutofill;
+      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+      harness.page.url = "https://github.com/login#step-2";
+      expect(yield* autofill.isScriptLocked(harness.scope, undefined)).toBe(true);
+      harness.page.url = "https://github.com/session";
+      expect(yield* autofill.isScriptLocked(harness.scope, undefined)).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 

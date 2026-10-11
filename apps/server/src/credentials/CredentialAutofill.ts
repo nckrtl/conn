@@ -75,6 +75,26 @@ const result = (status: CredentialFillStatus, message = STATUS_MESSAGES[status])
   message,
 });
 
+/** The page a secret went into, as the tab reported it at fill time. */
+interface ScriptLock {
+  /** Absent when the desktop host predates document ids. */
+  readonly documentId: number | undefined;
+  readonly url: string;
+}
+
+const withoutHash = (url: string) => url.split("#", 1)[0];
+
+/**
+ * Whether the tab still shows the locked document. A document id says so
+ * exactly: it survives hash and pushState changes, and a reload gets a new one.
+ * Without ids, the URL minus its hash is the best guess, and a pushState
+ * change then releases the lock.
+ */
+const showsLockedDocument = (lock: ScriptLock, page: PreviewAutomationStatus) =>
+  lock.documentId !== undefined && page.documentId !== undefined
+    ? lock.documentId === page.documentId
+    : page.url !== null && withoutHash(page.url) === withoutHash(lock.url);
+
 interface SignInGrant {
   readonly fields: ReadonlySet<CredentialField>;
   readonly expiresAt: number;
@@ -104,10 +124,6 @@ export class CredentialAutofill extends Context.Service<
       scope: McpInvocationContext.McpInvocationScope,
       input: FillCredentialInput,
     ) => Effect.Effect<FillCredentialResult, PreviewAutomationError>;
-    /**
-     * Fails when agent JavaScript would run in a tab that still shows a page
-     * a password or code was filled into.
-     */
     /** Saved logins for the page the user is on, for the browser's key menu. */
     readonly listForSite: (
       input: ListSiteCredentialsInput,
@@ -123,6 +139,15 @@ export class CredentialAutofill extends Context.Service<
     readonly saveTestLogin: (
       input: SaveTestLoginInput,
     ) => Effect.Effect<TestLoginSummary, TestLoginStoreError>;
+    /**
+     * Whether the tab still shows the document a password or code was filled
+     * into. Releases the lock once the tab loads another document.
+     */
+    readonly isScriptLocked: (
+      scope: McpInvocationContext.McpInvocationScope,
+      tabId: PreviewTabId | undefined,
+    ) => Effect.Effect<boolean, PreviewAutomationError>;
+    /** Fails when agent JavaScript would run in a tab that `isScriptLocked`. */
     readonly guardScript: (
       scope: McpInvocationContext.McpInvocationScope,
       tabId: PreviewTabId | undefined,
@@ -136,8 +161,8 @@ const make = Effect.gen(function* () {
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const grants = yield* Ref.make<ReadonlyMap<string, SignInGrant>>(new Map());
-  /** Tab key → the page URL a secret was filled into. */
-  const locks = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
+  /** Tab key → the document a secret was filled into. */
+  const locks = yield* Ref.make<ReadonlyMap<string, ScriptLock>>(new Map());
 
   const settings = serverSettings.getSettings.pipe(
     Effect.map((current) => current.credentialAutofill),
@@ -334,11 +359,12 @@ const make = Effect.gen(function* () {
       updateCurrentTab: false,
       ...(step.clientId === undefined ? {} : { clientId: step.clientId }),
     });
-    const status = Option.getOrUndefined(decodeFillResult(filled))?.status ?? "insert_failed";
+    const outcome = Option.getOrUndefined(decodeFillResult(filled));
+    const status = outcome?.status ?? "insert_failed";
     if (status === "filled" && step.field !== "username" && step.blockScripts) {
-      const url = step.pageUrl;
+      const lock: ScriptLock = { documentId: outcome?.documentId, url: step.pageUrl };
       yield* Ref.update(locks, (current) =>
-        new Map(current).set(tabKey(step.scope, step.tabId), url),
+        new Map(current).set(tabKey(step.scope, step.tabId), lock),
       );
     }
     return result(status);
@@ -415,12 +441,14 @@ const make = Effect.gen(function* () {
     return { results };
   });
 
-  const guardScript: CredentialAutofill["Service"]["guardScript"] = Effect.fn(
-    "CredentialAutofill.guardScript",
-  )(function* (scope, tabId) {
+  /** The tab that still shows a filled document, or null. Drops locks of documents that are gone. */
+  const lockedTab = Effect.fn("CredentialAutofill.lockedTab")(function* (
+    scope: McpInvocationContext.McpInvocationScope,
+    tabId: PreviewTabId | undefined,
+  ) {
     const threadPrefix = `${scope.environmentId}\u0000${scope.threadId}\u0000`;
     const current = yield* Ref.get(locks);
-    if (![...current.keys()].some((key) => key.startsWith(threadPrefix))) return;
+    if (![...current.keys()].some((key) => key.startsWith(threadPrefix))) return null;
     const page = yield* broker.invoke<PreviewAutomationStatus>({
       scope,
       operation: "status",
@@ -428,21 +456,31 @@ const make = Effect.gen(function* () {
       updateCurrentTab: false,
       ...(tabId === undefined ? {} : { tabId }),
     });
-    if (!page.tabId) return;
+    if (!page.tabId) return null;
     const key = tabKey(scope, page.tabId);
-    const lockedUrl = current.get(key);
-    if (lockedUrl === undefined) return;
-    if (page.url === lockedUrl) {
-      return yield* new PreviewAutomationCredentialLockError({
-        threadId: scope.threadId,
-        tabId: page.tabId,
-      });
-    }
-    // The page moved on, so the filled input is gone.
+    const lock = current.get(key);
+    if (lock === undefined) return null;
+    if (showsLockedDocument(lock, page)) return page.tabId;
+    // A different document is loaded, so the filled input is gone.
     yield* Ref.update(locks, (latest) => {
       const next = new Map(latest);
       next.delete(key);
       return next;
+    });
+    return null;
+  });
+
+  const isScriptLocked: CredentialAutofill["Service"]["isScriptLocked"] = (scope, tabId) =>
+    lockedTab(scope, tabId).pipe(Effect.map((locked) => locked !== null));
+
+  const guardScript: CredentialAutofill["Service"]["guardScript"] = Effect.fn(
+    "CredentialAutofill.guardScript",
+  )(function* (scope, tabId) {
+    const locked = yield* lockedTab(scope, tabId);
+    if (locked === null) return;
+    return yield* new PreviewAutomationCredentialLockError({
+      threadId: scope.threadId,
+      tabId: locked,
     });
   });
 
@@ -453,6 +491,7 @@ const make = Effect.gen(function* () {
     listForSite,
     fillForSite,
     saveTestLogin: (input) => testLogins.save(input, "agent"),
+    isScriptLocked,
     guardScript,
   });
 });

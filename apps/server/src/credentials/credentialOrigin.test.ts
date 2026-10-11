@@ -80,6 +80,41 @@ describe("matchingOrigin with subdomains allowed", () => {
   });
 });
 
+describe("matchingOrigin with subdomains allowed and public suffixes", () => {
+  const allow = { allowSubdomains: true };
+
+  it("never treats a public suffix as a parent of unrelated sites", () => {
+    expect(matchingOrigin(["https://github.io"], "https://attacker.github.io/", allow)).toBeNull();
+    expect(matchingOrigin(["https://co.uk"], "https://attacker.co.uk/", allow)).toBeNull();
+    expect(
+      matchingOrigin(["https://vercel.app"], "https://attacker.vercel.app/", allow),
+    ).toBeNull();
+    expect(matchingOrigin(["https://com"], "https://attacker.com/", allow)).toBeNull();
+  });
+
+  it("still fills the exact host when the saved host is a public suffix", () => {
+    expect(matchingOrigin(["https://github.io"], "https://github.io/login", allow)).toBe(
+      "https://github.io",
+    );
+  });
+
+  it("allows subdomains of a registrable domain, including under a public suffix", () => {
+    expect(matchingOrigin(["https://example.co.uk"], "https://login.example.co.uk/", allow)).toBe(
+      "https://login.example.co.uk",
+    );
+    expect(matchingOrigin(["https://me.github.io"], "https://app.me.github.io/", allow)).toBe(
+      "https://app.me.github.io",
+    );
+    expect(matchingOrigin(["https://sso.example.com"], "https://a.sso.example.com/", allow)).toBe(
+      "https://a.sso.example.com",
+    );
+  });
+
+  it("does not use an IP address as a parent", () => {
+    expect(matchingOrigin(["http://10.0.0.1"], "http://a.10.0.0.1/", allow)).toBeNull();
+  });
+});
+
 describe("request host matching", () => {
   it("accepts a host or a full URL", () => {
     expect(requestedHost("github.com")).toBe("github.com");

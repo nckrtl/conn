@@ -558,6 +558,9 @@ importers:
       stream-json:
         specifier: 3.7.0
         version: 3.7.0
+      tldts:
+        specifier: ^7.4.2
+        version: 7.4.2
       yaml:
         specifier: ^2.9.1
         version: 2.9.1

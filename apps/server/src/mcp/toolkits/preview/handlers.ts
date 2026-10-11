@@ -188,6 +188,14 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
   return { ...recording, id: finalId, path: finalPath };
 });
 
+/**
+ * A page the agent filled a password or code into must not reach the agent as
+ * pixels: the page can show the value in any way (a toggled input type, a
+ * canvas, copied text), and no mask can be sure to cover them. The snapshot
+ * then carries an empty image, which the MCP layer leaves out.
+ */
+const WITHHELD_SCREENSHOT = { data: "", width: 0, height: 0 } as const;
+
 const handlers = {
   preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
   preview_open: (input) =>
@@ -198,11 +206,17 @@ const handlers = {
     invokeTargeted<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
   preview_set_appearance: (input) =>
     invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
-  preview_snapshot: (input) => {
-    // Output selection and saving are MCP-only; the browser still produces a complete snapshot.
-    const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
-    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
-  },
+  preview_snapshot: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+      const autofill = yield* CredentialAutofill.CredentialAutofill;
+      // Output selection and saving are MCP-only; the browser still produces a complete snapshot.
+      const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
+      const snapshot = yield* invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
+      // Asked after the capture, so a fill that lands during it is still caught.
+      if (!(yield* autofill.isScriptLocked(scope, input?.tabId))) return snapshot;
+      return { ...snapshot, screenshot: { ...snapshot.screenshot, ...WITHHELD_SCREENSHOT } };
+    }),
   preview_click: (input) => invokeTargeted<object>("click", input, input.timeoutMs),
   preview_type: (input) => invokeTargeted<object>("type", input, input.timeoutMs),
   preview_press: (input) => invokeTargeted<object>("press", input),

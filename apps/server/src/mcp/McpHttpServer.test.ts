@@ -45,11 +45,16 @@ const client = McpSchema.McpServerClient.of({
   },
   getClient: Effect.die("unused"),
 });
+/** Whether the tab shows a page a password or code was filled into. */
+const filledPage = { locked: false };
 const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
-  // No credential was filled, so the script guard always lets evaluate run.
+  // No credential is filled unless a test sets `filledPage.locked`.
   Layer.provideMerge(
-    Layer.mock(CredentialAutofill.CredentialAutofill)({ guardScript: () => Effect.void }),
+    Layer.mock(CredentialAutofill.CredentialAutofill)({
+      guardScript: () => Effect.void,
+      isScriptLocked: () => Effect.sync(() => filledPage.locked),
+    }),
   ),
   Layer.provideMerge(PreviewAutomationBroker.layer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
@@ -412,6 +417,51 @@ it.effect("saves the snapshot PNG on request and reports its path", () =>
       expect(others).toEqual([]);
       expect(only?.type === "text" ? decodeJsonText(only.text) : null).toEqual(saved);
     }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("withholds the screenshot while a filled password or code is on the page", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      yield* serveSnapshots("mcp-filled-client", snapshotResult);
+      filledPage.locked = true;
+      const savedBefore = yield* fileSystem
+        .readDirectory(config.browserArtifactsDir)
+        .pipe(Effect.orElseSucceed(() => []));
+
+      for (const args of [
+        {},
+        { save: true },
+        { includeImage: true },
+        { save: true, includeImage: false },
+      ]) {
+        const snapshot = yield* callSnapshot(args);
+        expect(snapshot.isError).toBe(false);
+        expect(snapshot.content.map(({ type }) => type)).not.toContain("image");
+        expect(snapshot.structuredContent).not.toHaveProperty("screenshotPath");
+        const notice = snapshot.content.at(-1);
+        expect(notice?.type === "text" ? notice.text : "").toContain("No screenshot");
+      }
+      // Nothing was written for a later read.
+      expect(
+        yield* fileSystem
+          .readDirectory(config.browserArtifactsDir)
+          .pipe(Effect.orElseSucceed(() => [])),
+      ).toEqual(savedBefore);
+
+      // The page changed, so images come back.
+      filledPage.locked = false;
+      const after = yield* callSnapshot({});
+      expect(after.content.map(({ type }) => type)).toContain("image");
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          filledPage.locked = false;
+        }),
+      ),
+    ),
   ).pipe(Effect.provide(TestLayer)),
 );
 

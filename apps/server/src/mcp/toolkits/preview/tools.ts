@@ -138,7 +138,8 @@ export const PreviewSnapshotTool = readonlyBrowserTool(
     }),
     success: PreviewAutomationSnapshot,
     failure: PreviewAutomationError,
-    dependencies,
+    // The credential service decides whether the screenshot may leave the server.
+    dependencies: [...dependencies, CredentialAutofill.CredentialAutofill],
   }).annotate(Tool.Title, "Inspect browser page"),
 );
 

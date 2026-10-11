@@ -695,6 +695,37 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     ReadonlyMap<number, BrowserControlSession>
   >(new Map());
   const diagnosticsRef = yield* Ref.make<ReadonlyMap<number, BrowserDiagnostics>>(new Map());
+  /**
+   * Per guest webContents: the id of the document it shows, and every secret
+   * T3 Code filled into it. The ids come from one counter, so a new document
+   * never reuses one. The secrets stay until the webContents detaches: the
+   * page decides what it keeps in the DOM, so redaction cannot rely on asking it,
+   * and the console and network buffers outlive the document.
+   */
+  const guestStates = new Map<
+    number,
+    { documentId: number; readonly filledSecrets: Set<string> }
+  >();
+  let documentSequence = 0;
+  const guestStateOf = (wc: Electron.WebContents) => {
+    const existing = guestStates.get(wc.id);
+    if (existing) return existing;
+    documentSequence += 1;
+    const created = { documentId: documentSequence, filledSecrets: new Set<string>() };
+    guestStates.set(wc.id, created);
+    return created;
+  };
+  /** Cap on remembered secrets per webContents; the oldest drop first. */
+  const MAX_REMEMBERED_SECRETS = 32;
+  const rememberFilledSecret = (wc: Electron.WebContents, value: string) => {
+    const { filledSecrets } = guestStateOf(wc);
+    filledSecrets.delete(value);
+    filledSecrets.add(value);
+    if (filledSecrets.size > MAX_REMEMBERED_SECRETS) {
+      const oldest = filledSecrets.values().next();
+      if (!oldest.done) filledSecrets.delete(oldest.value);
+    }
+  };
   const expectedAgentInputsRef = yield* Ref.make<
     ReadonlyMap<string, ReadonlyArray<ExpectedAgentInput>>
   >(new Map());
@@ -1652,18 +1683,29 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     );
 
   /**
-   * Values of masked inputs and inputs filled with a credential. Agent-visible
-   * results are redacted against them; a failure fails the read, so an
-   * unredacted result never goes out.
+   * Values of masked inputs and inputs filled with a credential, plus every
+   * secret this process filled into the tab, which the page cannot hide.
+   * Agent-visible results are redacted against them; a failure fails the read,
+   * so an unredacted result never goes out.
    */
   const collectSensitiveValues = (tabId: string, send: SendCommand) =>
-    evaluateWithDebugger<unknown>(tabId, send, SENSITIVE_INPUT_VALUES_EXPRESSION, true).pipe(
-      Effect.map((values) =>
-        Array.isArray(values)
+    Effect.gen(function* () {
+      const values = yield* evaluateWithDebugger<unknown>(
+        tabId,
+        send,
+        SENSITIVE_INPUT_VALUES_EXPRESSION,
+        true,
+      );
+      const webContentsId = (yield* SynchronizedRef.get(tabsRef)).get(tabId)?.webContentsId;
+      const filled =
+        webContentsId == null ? [] : [...(guestStates.get(webContentsId)?.filledSecrets ?? [])];
+      return [
+        ...(Array.isArray(values)
           ? values.filter((value): value is string => typeof value === "string")
-          : [],
-      ),
-    );
+          : []),
+        ...filled,
+      ];
+    });
 
   const automationLocator = (input: {
     readonly selector?: string | undefined;
@@ -1726,6 +1768,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         copy.delete(webContentsId);
       }),
     ]);
+    guestStates.delete(webContentsId);
     if (managed) {
       managed.cancelFaviconCapture();
       yield* Scope.close(managed.scope, Exit.void).pipe(Effect.ignore);
@@ -1846,7 +1889,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       if (Option.isSome(next)) yield* emitIfCurrent(tabId, next.value);
     });
     const sync = () => runFork(syncState(true));
-    const syncNavigation = () => runFork(syncState(false, true));
+    const syncNavigation = () => {
+      // `did-navigate` is main-frame document loads only; hash and pushState changes
+      // arrive as `did-navigate-in-page` and keep the document id.
+      const state = guestStateOf(wc);
+      documentSequence += 1;
+      state.documentId = documentSequence;
+      runFork(syncState(false, true));
+    };
     const syncInPageNavigation = () => runFork(syncState(false));
     const restoreRecordingCursor = () =>
       runFork(
@@ -3746,6 +3796,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           url: wc.getURL() || null,
           title: wc.getTitle() || null,
           loading: wc.isLoading(),
+          documentId: guestStateOf(wc).documentId,
         };
   });
 
@@ -4588,8 +4639,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     send: SendCommand,
     sendCleanup: SendCommand,
   ) {
-    const result = (status: DesktopCredentialFillStatus): DesktopCredentialFillResult => ({
+    const result = (
+      status: DesktopCredentialFillStatus,
+      documentId?: number,
+    ): DesktopCredentialFillResult => ({
       status,
+      ...(documentId === undefined ? {} : { documentId }),
     });
     if (originOf(wc.getURL()) !== input.expectedOrigin) return result("origin_mismatch");
     yield* send("Runtime.enable");
@@ -4627,12 +4682,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       }
       // The page may have navigated while the field was found.
       if (originOf(wc.getURL()) !== input.expectedOrigin) return result("origin_mismatch");
+      // The document the value goes into. If the page replaces it before the
+      // caller checks, the caller sees a different id and the lock is moot.
+      const { documentId } = guestStateOf(wc);
       yield* send("Input.insertText", { text: Redacted.value(input.value) });
+      // From here the page may hold the value, so redaction must know it.
+      if (input.field !== "username") rememberFilledSecret(wc, Redacted.value(input.value));
       const finished = yield* callOnField(objectId, CREDENTIAL_FINISH_FUNCTION, [
         input.field,
         Redacted.value(input.value),
       ]);
-      return result(finished === "filled" ? "filled" : "insert_failed");
+      return finished === "filled" ? result("filled", documentId) : result("insert_failed");
     }).pipe(
       Effect.ensuring(
         sendCleanup("Runtime.releaseObjectGroup", { objectGroup: CREDENTIAL_OBJECT_GROUP }).pipe(

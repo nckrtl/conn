@@ -291,6 +291,40 @@ describe("mobile themes", () => {
     expect(themeColorWithAlpha("rgba(18, 52, 86, 0.98)", 0)).toBe("rgba(18, 52, 86, 0)");
   });
 
+  it.each(["light", "dark"] as const)(
+    "keeps a white knob visible on the checked switch track of every %s theme",
+    (appearance) => {
+      for (const themeId of BUILT_IN_THEME_IDS) {
+        const variables = getMobileThemeVariables(themeId, appearance);
+        expect(
+          contrastRatio(variables["--color-switch-active-track"], "#ffffff"),
+          themeId,
+        ).toBeGreaterThanOrEqual(1.6);
+      }
+    },
+  );
+
+  it("darkens a near-white accent for the checked track but leaves colored accents alone", () => {
+    const mono = createMobileThemeVariables(
+      {
+        ...T3_CODE_DARK_THEME_COLORS,
+        messageAction: "#fafafa",
+        messageActionForeground: "#111111",
+      },
+      "dark",
+    );
+    expect(mono["--color-switch-active-track"]).not.toBe("#fafafa");
+    expect(contrastRatio(mono["--color-switch-active-track"], "#ffffff")).toBeGreaterThanOrEqual(
+      2.2,
+    );
+    expect(mono["--color-switch-active-thumb"]).toBe("#ffffff");
+    const colored = createMobileThemeVariables(
+      { ...T3_CODE_DARK_THEME_COLORS, messageAction: "#1b4ed8" },
+      "dark",
+    );
+    expect(colored["--color-switch-active-track"]).toBe("#1b4ed8");
+  });
+
   it("maps semantic palette roles onto every mobile color variable", () => {
     const variables = createMobileThemeVariables(T3_CHAT_THEME.colors, "light");
     expect(variables["--color-sheet-solid"]).toBe(variables["--color-screen"]);

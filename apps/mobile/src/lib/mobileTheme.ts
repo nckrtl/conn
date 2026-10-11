@@ -243,6 +243,62 @@ function readableTextColor(accent: string, surface: string | ReadonlyArray<strin
   return `#${readable.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
+/**
+ * The white knob must stay visible on a checked switch track. Only grey accents (mono) are
+ * adjusted; a colored accent already reads against the knob by hue, so it stays as the theme set it.
+ */
+const SWITCH_KNOB_MIN_CONTRAST = 2.2;
+const SWITCH_NEUTRAL_ACCENT_MAX_SPREAD = 24;
+const SWITCH_KNOB_COLOR = "#ffffff";
+
+/**
+ * The checked switch track and the knob that sits on it. A colored accent is the track as is. A grey
+ * accent too light for a white knob (mono's white accent in dark mode) is mixed toward the theme
+ * background (toward black in light mode) just far enough to clear the knob contrast bar, and the
+ * knob is then white on every platform.
+ */
+function switchOnColors(
+  accent: string,
+  accentForeground: string,
+  background: string,
+  appearance: MobileThemeAppearance,
+): { readonly track: string; readonly thumb: string } {
+  const white = rgbChannels(SWITCH_KNOB_COLOR)!;
+  const accentChannels = rgbChannels(accent);
+  const isNeutral =
+    accentChannels !== null &&
+    Math.max(...accentChannels) - Math.min(...accentChannels) <= SWITCH_NEUTRAL_ACCENT_MAX_SPREAD;
+  if (
+    !accentChannels ||
+    !isNeutral ||
+    contrastRatio(accentChannels, white) >= SWITCH_KNOB_MIN_CONTRAST
+  ) {
+    return { track: accent, thumb: accentForeground };
+  }
+  const target = (appearance === "dark" ? rgbChannels(background) : null) ?? [0, 0, 0];
+  let track: readonly [number, number, number] = target;
+  let lowerAmount = 0;
+  let upperAmount = 1;
+  for (let index = 0; index < 12; index += 1) {
+    const amount = (lowerAmount + upperAmount) / 2;
+    const candidate: readonly [number, number, number] = [
+      Math.round(accentChannels[0] + (target[0] - accentChannels[0]) * amount),
+      Math.round(accentChannels[1] + (target[1] - accentChannels[1]) * amount),
+      Math.round(accentChannels[2] + (target[2] - accentChannels[2]) * amount),
+    ];
+    if (contrastRatio(candidate, white) >= SWITCH_KNOB_MIN_CONTRAST) {
+      track = candidate;
+      upperAmount = amount;
+    } else {
+      lowerAmount = amount;
+    }
+  }
+  return {
+    track: `#${track.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`,
+    thumb: SWITCH_KNOB_COLOR,
+  };
+}
+
 export function themeColorWithAlpha(color: string, alpha: number): string {
   const channels = rgbChannels(color);
   if (channels) {
@@ -271,6 +327,12 @@ export function createMobileThemeVariables(
     c.chrome,
     groupedCard,
   ];
+  const switchOn = switchOnColors(
+    c.messageAction,
+    c.messageActionForeground,
+    shellPanel,
+    appearance,
+  );
   return {
     "--color-screen": shellPanel,
     // Sheets paint the same opaque pane as the home screen. The translucent
@@ -319,8 +381,8 @@ export function createMobileThemeVariables(
     "--color-secondary": c.secondary,
     "--color-secondary-foreground": c.secondaryForeground,
     "--color-secondary-border": c.border,
-    "--color-switch-active-track": c.messageAction,
-    "--color-switch-active-thumb": c.messageActionForeground,
+    "--color-switch-active-track": switchOn.track,
+    "--color-switch-active-thumb": switchOn.thumb,
     "--color-switch-inactive-track": c.secondary,
     "--color-switch-inactive-thumb": c.mutedForeground,
     "--color-warning": c.warningSurface,

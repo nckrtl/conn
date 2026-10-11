@@ -48,6 +48,7 @@ import {
 } from "../orbit/orbitGatewayStore";
 import { buildHomeListFilterMenu } from "../home/home-list-filter-menu";
 import { buildHomeProjectScopes } from "../home/homeThreadList";
+import { projectMachineLabel } from "../home/projectMachineLabel";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "../home/thread-swipe-actions";
 import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
 import { useThreadListActions } from "../home/useThreadListActions";
@@ -226,8 +227,17 @@ function ThreadNavigationSidebarPane(
       projectScopes.map((scope) => ({
         key: scope.key,
         label: scope.title,
+        // Same-named projects on different machines are only distinguishable
+        // while the list spans machines.
+        subtitle:
+          options.selectedEnvironmentId === null && Object.keys(savedConnectionsById).length > 1
+            ? (projectMachineLabel(
+                scope.projects,
+                (environmentId) => savedConnectionsById[environmentId]?.environmentLabel ?? null,
+              ) ?? undefined)
+            : undefined,
       })),
-    [projectScopes],
+    [options.selectedEnvironmentId, projectScopes, savedConnectionsById],
   );
   const projectTitleByProjectKey = useMemo(
     () =>
@@ -584,6 +594,7 @@ function ThreadNavigationSidebarPane(
                 ...projectFilterOptions.map((project) => ({
                   id: `project:${project.key}`,
                   title: project.label,
+                  subtitle: project.subtitle,
                   state: selectedProjectKey === project.key ? ("on" as const) : ("off" as const),
                 })),
               ],

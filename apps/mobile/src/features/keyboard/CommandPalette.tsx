@@ -309,7 +309,13 @@ export function CommandPalette(props: {
       project,
       title: project.title,
       detail: `New thread · ${savedConnectionsById[project.environmentId]?.environmentLabel ?? project.environmentId}`,
-      searchTerms: [project.workspaceRoot, "new thread", "project"],
+      // The machine is on the row, so typing its name finds the row.
+      searchTerms: [
+        project.workspaceRoot,
+        savedConnectionsById[project.environmentId]?.environmentLabel ?? "",
+        "new thread",
+        "project",
+      ],
       run: () =>
         navigation.navigate("NewTaskSheet", {
           screen: "NewTaskDraft",

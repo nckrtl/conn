@@ -14,6 +14,8 @@ export interface HomeListFilterMenuWorkspace {
 export interface HomeListFilterMenuProject {
   readonly key: string;
   readonly label: string;
+  /** The machine(s) the project sits on, set while the list spans several. */
+  readonly subtitle?: string;
 }
 
 type HomeListFilterMenuAction = {
@@ -110,6 +112,7 @@ export function buildHomeListFilterMenu(props: {
         ...props.projects.map((project) => ({
           type: "action" as const,
           title: project.label,
+          subtitle: project.subtitle,
           state: props.selectedProjectKey === project.key ? ("on" as const) : ("off" as const),
           onPress: () => props.onProjectChange(project.key),
         })),

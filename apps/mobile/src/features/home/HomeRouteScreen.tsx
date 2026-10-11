@@ -24,6 +24,7 @@ import { HomeHeader } from "./HomeHeader";
 import { useHomeListOptions } from "./home-list-options";
 import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
+import { projectMachineLabel } from "./projectMachineLabel";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
 import { getConnectionStatusOnlyHeaderOptions } from "./WorkspaceConnectionTitle";
@@ -103,8 +104,17 @@ export function HomeRouteScreen() {
       }).map((scope) => ({
         key: scope.key,
         label: scope.title,
+        // Same-named projects on different machines are only distinguishable
+        // while the list spans machines.
+        subtitle:
+          selectedEnvironmentId === null && Object.keys(savedConnectionsById).length > 1
+            ? (projectMachineLabel(
+                scope.projects,
+                (environmentId) => savedConnectionsById[environmentId]?.environmentLabel ?? null,
+              ) ?? undefined)
+            : undefined,
       })),
-    [listOptions.projectGroupingMode, projects, selectedEnvironmentId],
+    [listOptions.projectGroupingMode, projects, savedConnectionsById, selectedEnvironmentId],
   );
   useEffect(() => {
     if (

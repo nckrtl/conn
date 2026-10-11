@@ -3,6 +3,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import type { HomeProjectScope } from "../home/homeThreadList";
+import { projectMachineNames, type EnvironmentLabelLookup } from "../home/projectMachineLabel";
 
 type DraftProjectSelectionResolution =
   | { readonly kind: "preserve" }
@@ -19,9 +20,11 @@ export function getProjectScopeSelectionTarget(
   );
 }
 
+/** Matches project name, workspace path, and (when `machineLabelFor` is given) machine name. */
 export function filterProjectScopes(
   scopes: ReadonlyArray<HomeProjectScope>,
   searchText: string,
+  machineLabelFor?: EnvironmentLabelLookup,
 ): ReadonlyArray<HomeProjectScope> {
   const query = searchText.trim().toLowerCase();
   if (!query) return scopes;
@@ -32,7 +35,11 @@ export function filterProjectScopes(
         (project) =>
           project.title.toLowerCase().includes(query) ||
           project.workspaceRoot.toLowerCase().includes(query),
-      ),
+      ) ||
+      (machineLabelFor !== undefined &&
+        projectMachineNames(scope.projects, machineLabelFor).some((name) =>
+          name.toLowerCase().includes(query),
+        )),
   );
 }
 

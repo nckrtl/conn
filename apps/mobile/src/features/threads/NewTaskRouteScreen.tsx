@@ -7,12 +7,14 @@ import {
   type StaticScreenProps,
 } from "@react-navigation/native";
 import { SymbolView } from "../../components/AppSymbol";
+import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
+import { resolveEnvironmentMachineKind, type EnvironmentId } from "@t3tools/contracts";
 import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operations/projects";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { cn } from "../../lib/cn";
@@ -24,12 +26,16 @@ import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { useProjects, useServerConfigs, waitForProject } from "../../state/entities";
 import { projectEnvironment } from "../../state/projects";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
+import {
+  useRemoteConnectionStatus,
+  useSavedRemoteConnections,
+} from "../../state/use-remote-environment-registry";
 import type { WorkspaceState } from "../../state/workspaceModel";
 import { useWorkspaceState } from "../../state/workspace";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
 import { useNewTaskFlow } from "./new-task-flow-provider";
+import { joinMachineAndDetail, projectMachineLabel } from "../home/projectMachineLabel";
 import { filterProjectScopes, getProjectScopeSelectionTarget } from "./new-task-project-selection";
 
 type NewTaskRouteParams = {
@@ -89,6 +95,47 @@ function deriveProjectEmptyState(catalogState: WorkspaceState): {
     detail: "The connected environment did not report any projects.",
     loading: false,
   };
+}
+
+/**
+ * Second line of an iOS project row: the machine (with its glyph when the row
+ * sits on exactly one) in front of the path, so a long path truncates before
+ * the machine name does.
+ */
+function ProjectRowSubtitle(props: {
+  readonly machine: string | null;
+  readonly machineKind: ReturnType<typeof resolveEnvironmentMachineKind> | null;
+  readonly detail: string;
+}) {
+  return (
+    <View className="flex-row items-center gap-1">
+      {props.machine ? (
+        <>
+          {props.machineKind ? (
+            <EnvironmentMachineSymbol
+              kind={props.machineKind}
+              size={11}
+              tintColorClassName="accent-foreground-tertiary"
+            />
+          ) : null}
+          <Text
+            className="max-w-[45%] shrink-0 text-xs leading-snug text-foreground-muted"
+            numberOfLines={1}
+          >
+            {props.machine}
+          </Text>
+          <Text className="text-xs leading-snug text-foreground-tertiary">·</Text>
+        </>
+      ) : null}
+      <Text
+        className="min-w-0 flex-1 text-xs leading-snug text-foreground-muted"
+        ellipsizeMode="middle"
+        numberOfLines={1}
+      >
+        {props.detail}
+      </Text>
+    </View>
+  );
 }
 
 function NewTaskHeader(props: {
@@ -163,7 +210,16 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         isScratchProject(project, serverConfigs.get(project.environmentId)?.scratchWorkspaceRoot),
       ),
   );
-  const visibleScopes = filterProjectScopes(listScopes, searchText);
+  // Same rule as the thread list: name the machine only when there is more
+  // than one to tell apart.
+  const { savedConnectionsById } = useSavedRemoteConnections();
+  const showMachines = Object.keys(savedConnectionsById).length > 1;
+  const machineLabelFor = useCallback(
+    (environmentId: EnvironmentId) =>
+      showMachines ? (savedConnectionsById[environmentId]?.environmentLabel ?? null) : null,
+    [savedConnectionsById, showMachines],
+  );
+  const visibleScopes = filterProjectScopes(listScopes, searchText, machineLabelFor);
   const resumedDestinationKeyRef = useRef<string | null>(null);
   const reservedDestinationProject = incomingShare?.destination
     ? (projects.find(
@@ -436,7 +492,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                 No matching projects
               </Text>
               <Text className="text-center text-sm leading-normal text-foreground-muted">
-                Try a different project name or workspace path.
+                Try a different project name, workspace path, or machine.
               </Text>
             </View>
           ) : (
@@ -454,17 +510,25 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                   scope,
                   selectedEnvironmentId,
                 );
+                const rowDetail = hasMultipleProjects
+                  ? `${scope.projects.length} workspaces`
+                  : selectionTarget.workspaceRoot;
+                const machine = projectMachineLabel(scope.projects, machineLabelFor);
+                // The glyph only appears when every workspace in the row is on one machine.
+                const machineKind =
+                  machine !== null &&
+                  new Set(scope.projects.map((project) => project.environmentId)).size === 1
+                    ? resolveEnvironmentMachineKind(
+                        serverConfigs.get(selectionTarget.environmentId) ?? null,
+                      )
+                    : null;
                 if (Platform.OS === "android") {
                   return (
                     <MaterialListRow
                       className="bg-grouped-card"
                       key={scope.key}
                       title={scope.title}
-                      subtitle={
-                        hasMultipleProjects
-                          ? `${scope.projects.length} workspaces`
-                          : selectionTarget.workspaceRoot
-                      }
+                      subtitle={joinMachineAndDetail(machine, rowDetail)}
                       disabled={reservedDestinationProject !== null}
                       onPress={() => void selectProject(selectionTarget)}
                       leading={
@@ -487,7 +551,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                   >
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={scope.title}
+                      accessibilityLabel={machine ? `${scope.title}, ${machine}` : scope.title}
                       disabled={reservedDestinationProject !== null}
                       onPress={() => void selectProject(selectionTarget)}
                       className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
@@ -506,15 +570,11 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                         <Text className={cn("text-base leading-snug", "font-t3-medium")}>
                           {scope.title}
                         </Text>
-                        <Text
-                          className="text-xs leading-snug text-foreground-muted"
-                          ellipsizeMode="middle"
-                          numberOfLines={1}
-                        >
-                          {hasMultipleProjects
-                            ? `${scope.projects.length} workspaces`
-                            : selectionTarget.workspaceRoot}
-                        </Text>
+                        <ProjectRowSubtitle
+                          machine={machine}
+                          machineKind={machineKind}
+                          detail={rowDetail}
+                        />
                       </View>
                       <SymbolView
                         name="chevron.right"

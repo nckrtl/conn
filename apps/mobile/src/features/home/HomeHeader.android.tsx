@@ -72,7 +72,10 @@ export function HomeHeader(props: HomeHeaderProps) {
                 },
                 ...props.projects.map((project) => ({
                   id: `project:${project.key}`,
-                  title: project.label,
+                  // Android menus have no subtitle line.
+                  title: project.subtitle
+                    ? `${project.label} · ${project.subtitle}`
+                    : project.label,
                   state: checkedMenuState(props.selectedProjectKey === project.key),
                 })),
               ],

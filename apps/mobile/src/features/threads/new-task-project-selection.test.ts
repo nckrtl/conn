@@ -70,6 +70,24 @@ describe("getProjectScopeSelectionTarget", () => {
   });
 });
 
+describe("filterProjectScopes", () => {
+  const scopes = [
+    makeScope([makeProject("apps-mac", "mac", { workspaceRoot: "/Users/me/apps" })]),
+    makeScope([makeProject("apps-server", "server", { workspaceRoot: "/home/me/apps" })]),
+  ];
+  const labels: Record<string, string> = { mac: "Mac mini", server: "Hetzner" };
+  const labelFor = (environmentId: EnvironmentId) => labels[environmentId] ?? null;
+
+  it("matches the machine name when a lookup is given", () => {
+    expect(filterProjectScopes(scopes, "hetzner", labelFor)).toEqual([scopes[1]]);
+    expect(filterProjectScopes(scopes, "mac mini", labelFor)).toEqual([scopes[0]]);
+  });
+
+  it("ignores machine names without a lookup", () => {
+    expect(filterProjectScopes(scopes, "hetzner")).toEqual([]);
+  });
+});
+
 describe("resolveEnvironmentProjectMatch", () => {
   it("follows the same repository onto the target machine", () => {
     const selected = makeProject("t3code", "mac", { repositoryKey: "github.com/t3tools/t3code" });

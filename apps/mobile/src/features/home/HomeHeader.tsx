@@ -178,6 +178,7 @@ export function HomeHeader(props: HomeHeaderProps) {
                     key={project.key}
                     isOn={props.selectedProjectKey === project.key}
                     onPress={() => props.onProjectChange(project.key)}
+                    subtitle={project.subtitle}
                   >
                     <NativeHeaderToolbar.Label>{project.label}</NativeHeaderToolbar.Label>
                   </NativeHeaderToolbar.MenuAction>

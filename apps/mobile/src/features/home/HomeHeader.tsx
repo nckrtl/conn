@@ -66,9 +66,10 @@ export function HomeHeader(props: HomeHeaderProps) {
                     filterAccessibilityLabel: "Filter threads",
                     filterMenu,
                     filterButtonId: "home-filter",
-                    filterSystemImageName: hasCustomListOptions
-                      ? "line.3.horizontal.decrease.circle.fill"
-                      : "line.3.horizontal.decrease",
+                    // Same glyph in both states; the active state only adds a
+                    // filled circle behind it, so the icon never resizes.
+                    filterSystemImageName: "line.3.horizontal.decrease",
+                    filterActive: hasCustomListOptions,
                     composeButtonId: "home-new-task",
                     composeSystemImageName: "plus",
                     composeAccessibilityLabel: "New task",

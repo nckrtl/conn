@@ -209,7 +209,7 @@ index 8a41697..309ba2f 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/ios/RNSScreenStackHeaderConfig.mm b/ios/RNSScreenStackHeaderConfig.mm
-index a54cb63..3e16093 100644
+index a54cb63..da7e48e 100644
 --- a/ios/RNSScreenStackHeaderConfig.mm
 +++ b/ios/RNSScreenStackHeaderConfig.mm
 @@ -24,11 +24,46 @@
@@ -368,7 +368,7 @@ index a54cb63..3e16093 100644
          break;
        }
        case RNSScreenStackHeaderSubviewTypeCenter:
-@@ -648,14 +708,553 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -648,14 +708,570 @@ + (void)updateViewController:(UIViewController *)vc
    // This assignment should be done after `navitem.titleView = ...` assignment (iOS 16.0 bug).
    // See: https://github.com/software-mansion/react-native-screens/issues/1570 (comments)
    navitem.title = config.title;
@@ -740,7 +740,24 @@ index a54cb63..3e16093 100644
 +        embeddedConfiguration.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
 +        embeddedConfiguration.image = [UIImage
 +            systemImageNamed:mailSearchToolbarConfig[@"filterSystemImageName"] ?: @"line.3.horizontal.decrease"];
-+        embeddedConfiguration.baseForegroundColor = UIColor.labelColor;
++        // One fixed glyph size for both states, so the active state changes
++        // only colors: a filled circle behind the glyph with the glyph in the
++        // inverse color. The button frame is the same in both states, so the
++        // glyph never moves and the circle (the button's full size) grows
++        // around it.
++        embeddedConfiguration.preferredSymbolConfigurationForImage =
++            [UIImageSymbolConfiguration configurationWithPointSize:17.0
++                                                            weight:UIImageSymbolWeightRegular
++                                                             scale:UIImageSymbolScaleMedium];
++        if ([mailSearchToolbarConfig[@"filterActive"] boolValue]) {
++          UIBackgroundConfiguration *activeBackground = [UIBackgroundConfiguration clearConfiguration];
++          activeBackground.backgroundColor = UIColor.labelColor;
++          activeBackground.cornerRadius = embeddedFilterButtonSize / 2.0;
++          embeddedConfiguration.background = activeBackground;
++          embeddedConfiguration.baseForegroundColor = UIColor.systemBackgroundColor;
++        } else {
++          embeddedConfiguration.baseForegroundColor = UIColor.labelColor;
++        }
 +        UIButton *embeddedFilterButton = [UIButton buttonWithConfiguration:embeddedConfiguration primaryAction:nil];
 +        NSDictionary *filterMenuConfig = mailSearchToolbarConfig[@"filterMenu"];
 +        NSString *embeddedFilterButtonId = mailSearchToolbarConfig[@"filterButtonId"];
@@ -927,7 +944,7 @@ index a54cb63..3e16093 100644
    [navctr setNavigationBarHidden:NO animated:animated];
  
    if (animated && vc.transitionCoordinator != nil &&
-@@ -784,6 +1383,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -784,6 +1400,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
  
  - (NSArray<UIBarButtonItem *> *)barButtonItemsFromConfigs:(NSArray<NSDictionary<NSString *, id> *> *)dicts
                                           withCurrentItems:(NSArray<UIBarButtonItem *> *)currentItems
@@ -936,7 +953,7 @@ index a54cb63..3e16093 100644
  {
    if (dicts.count == 0) {
      return currentItems;
-@@ -792,7 +1393,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -792,7 +1410,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    [items addObjectsFromArray:currentItems];
    for (NSUInteger i = 0; i < dicts.count; i++) {
      NSDictionary *dict = dicts[i];
@@ -1138,7 +1155,7 @@ index a54cb63..3e16093 100644
        RNSBarButtonItem *item = [[RNSBarButtonItem alloc] initWithConfig:dict
            action:^(NSString *buttonId) {
              auto eventEmitter = std::static_pointer_cast<const facebook::react::RNSScreenStackHeaderConfigEventEmitter>(
-@@ -814,19 +1608,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -814,19 +1625,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
            }
            imageLoader:_imageLoader];
        NSNumber *index = dict[@"index"];
@@ -1168,7 +1185,7 @@ index a54cb63..3e16093 100644
          [items insertObject:item atIndex:index.integerValue];
        } else {
          [items addObject:item];
-@@ -836,6 +1634,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -836,6 +1651,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    return items;
  }
  
@@ -1216,7 +1233,7 @@ index a54cb63..3e16093 100644
  RNS_IGNORE_SUPER_CALL_BEGIN
  - (void)insertReactSubview:(RNSScreenStackHeaderSubview *)subview atIndex:(NSInteger)atIndex
  {
-@@ -1025,6 +1864,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1025,6 +1881,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    }
  
    _title = RCTNSStringFromStringNilIfEmpty(newScreenProps.title);
@@ -1225,7 +1242,7 @@ index a54cb63..3e16093 100644
    if (newScreenProps.titleFontFamily != oldScreenProps.titleFontFamily) {
      _titleFontFamily = RCTNSStringFromStringNilIfEmpty(newScreenProps.titleFontFamily);
    }
-@@ -1050,6 +1891,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1050,6 +1908,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    _disableBackButtonMenu = newScreenProps.disableBackButtonMenu;
    _backButtonDisplayMode =
        [RNSConvert UINavigationItemBackButtonDisplayModeFromCppEquivalent:newScreenProps.backButtonDisplayMode];
@@ -1233,7 +1250,7 @@ index a54cb63..3e16093 100644
  
    if (newScreenProps.userInterfaceStyle != oldScreenProps.userInterfaceStyle) {
      _userInterfaceStyle = [RNSConvert UIUserInterfaceStyleFromCppEquivalent:newScreenProps.userInterfaceStyle];
-@@ -1096,6 +1938,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1096,6 +1955,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
      _headerRightBarButtonItems = array;
    }
  
@@ -1772,7 +1789,7 @@ index 2cb1a79..d6ca5a4 100644
  }
  declare const _default: HostComponent<NativeProps>;
 diff --git a/lib/typescript/types.d.ts b/lib/typescript/types.d.ts
-index ff37881..a69dcdf 100644
+index ff37881..f6e9308 100644
 --- a/lib/typescript/types.d.ts
 +++ b/lib/typescript/types.d.ts
 @@ -19,6 +19,7 @@ export type SearchBarCommands = {
@@ -1872,7 +1889,7 @@ index ff37881..a69dcdf 100644
      /**
       * The tint color to apply to the item.
       *
-@@ -1201,8 +1256,45 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
+@@ -1201,8 +1256,46 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
  export interface HeaderBarButtonItemSpacing {
      type: 'spacing';
      spacing: number;
@@ -1899,6 +1916,7 @@ index ff37881..a69dcdf 100644
 +    leadingButtonId?: string | undefined;
 +    leadingSystemImageName?: string | undefined;
 +    onLeadingPress?: (() => void) | undefined;
++    filterActive?: boolean | undefined;
 +    filterAccessibilityLabel?: string | undefined;
 +    filterInsideSearch?: boolean | undefined;
 +    composeAccessibilityLabel?: string | undefined;
@@ -2200,7 +2218,7 @@ index 9a6af57..03aa2b2 100644
  }
  
 diff --git a/src/types.tsx b/src/types.tsx
-index 8594b73..395088d 100644
+index 8594b73..cab2227 100644
 --- a/src/types.tsx
 +++ b/src/types.tsx
 @@ -35,6 +35,7 @@ export type SearchBarCommands = {
@@ -2300,7 +2318,7 @@ index 8594b73..395088d 100644
    /**
     * The tint color to apply to the item.
     *
-@@ -1335,11 +1390,54 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
+@@ -1335,11 +1390,55 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
  export interface HeaderBarButtonItemSpacing {
    type: 'spacing';
    spacing: number;
@@ -2330,6 +2348,7 @@ index 8594b73..395088d 100644
 +  leadingButtonId?: string | undefined;
 +  leadingSystemImageName?: string | undefined;
 +  onLeadingPress?: (() => void) | undefined;
++  filterActive?: boolean | undefined;
 +  filterAccessibilityLabel?: string | undefined;
 +  filterInsideSearch?: boolean | undefined;
 +  composeAccessibilityLabel?: string | undefined;

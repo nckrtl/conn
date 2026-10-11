@@ -209,7 +209,7 @@ index 8a41697..309ba2f 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/ios/RNSScreenStackHeaderConfig.mm b/ios/RNSScreenStackHeaderConfig.mm
-index a54cb63..7634672 100644
+index a54cb63..3e16093 100644
 --- a/ios/RNSScreenStackHeaderConfig.mm
 +++ b/ios/RNSScreenStackHeaderConfig.mm
 @@ -24,11 +24,46 @@
@@ -368,7 +368,7 @@ index a54cb63..7634672 100644
          break;
        }
        case RNSScreenStackHeaderSubviewTypeCenter:
-@@ -648,14 +708,542 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -648,14 +708,553 @@ + (void)updateViewController:(UIViewController *)vc
    // This assignment should be done after `navitem.titleView = ...` assignment (iOS 16.0 bug).
    // See: https://github.com/software-mansion/react-native-screens/issues/1570 (comments)
    navitem.title = config.title;
@@ -557,6 +557,15 @@ index a54cb63..7634672 100644
 +      BOOL hasLeadingButton = mailSearchToolbarConfig[@"leadingButtonId"] != nil;
 +      BOOL hasLeadingSlot = hasLeadingButton || (hasFilterButton && !filterInsideSearch);
 +      CGFloat embeddedFilterReserve = filterInsideSearch ? 40.0 : 0.0;
++      // The pill's end caps are semicircles of radius toolbarHeight / 2, so a
++      // glyph looks centered when its center sits about one radius from the
++      // edge, nudged slightly inward. The magnifier sits 22pt from the left
++      // edge of a UISearchTextField (its built-in left padding plus half the
++      // glyph), so the field's leading inset makes up the rest.
++      CGFloat capGlyphCenterInset = toolbarHeight / 2.0 + 4.0;
++      CGFloat embeddedFilterButtonSize = 36.0;
++      CGFloat embeddedFilterTrailingInset = capGlyphCenterInset - embeddedFilterButtonSize / 2.0;
++      CGFloat searchFieldLeadingInset = filterInsideSearch ? capGlyphCenterInset - 22.0 : 14.0;
 +      CGFloat glassLeadingInset = hasLeadingSlot ? sideButtonReserve : 0.0;
 +      CGFloat glassTrailingInset = hasComposeButton ? -sideButtonReserve : 0.0;
 +      NSLayoutConstraint *glassLeadingConstraint =
@@ -662,7 +671,8 @@ index a54cb63..7634672 100644
 +        searchField.translatesAutoresizingMaskIntoConstraints = NO;
 +        [glassView.contentView addSubview:searchField];
 +        [NSLayoutConstraint activateConstraints:@[
-+          [searchField.leadingAnchor constraintEqualToAnchor:glassView.contentView.leadingAnchor constant:14.0],
++          [searchField.leadingAnchor constraintEqualToAnchor:glassView.contentView.leadingAnchor
++                                                    constant:searchFieldLeadingInset],
 +          [searchField.trailingAnchor constraintEqualToAnchor:glassView.contentView.trailingAnchor
 +                                                     constant:-(14.0 + embeddedFilterReserve)],
 +          [searchField.centerYAnchor constraintEqualToAnchor:glassView.contentView.centerYAnchor],
@@ -752,10 +762,11 @@ index a54cb63..7634672 100644
 +        // preview morphs the glass container, which drew it as a square.
 +        [toolbarHost addSubview:embeddedFilterButton];
 +        [NSLayoutConstraint activateConstraints:@[
-+          [embeddedFilterButton.trailingAnchor constraintEqualToAnchor:glassView.trailingAnchor constant:-4.0],
++          [embeddedFilterButton.trailingAnchor constraintEqualToAnchor:glassView.trailingAnchor
++                                                              constant:-embeddedFilterTrailingInset],
 +          [embeddedFilterButton.centerYAnchor constraintEqualToAnchor:glassView.centerYAnchor],
-+          [embeddedFilterButton.widthAnchor constraintEqualToConstant:36.0],
-+          [embeddedFilterButton.heightAnchor constraintEqualToConstant:36.0],
++          [embeddedFilterButton.widthAnchor constraintEqualToConstant:embeddedFilterButtonSize],
++          [embeddedFilterButton.heightAnchor constraintEqualToConstant:embeddedFilterButtonSize],
 +        ]];
 +      }
 +
@@ -916,7 +927,7 @@ index a54cb63..7634672 100644
    [navctr setNavigationBarHidden:NO animated:animated];
  
    if (animated && vc.transitionCoordinator != nil &&
-@@ -784,6 +1372,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -784,6 +1383,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
  
  - (NSArray<UIBarButtonItem *> *)barButtonItemsFromConfigs:(NSArray<NSDictionary<NSString *, id> *> *)dicts
                                           withCurrentItems:(NSArray<UIBarButtonItem *> *)currentItems
@@ -925,7 +936,7 @@ index a54cb63..7634672 100644
  {
    if (dicts.count == 0) {
      return currentItems;
-@@ -792,7 +1382,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -792,7 +1393,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    [items addObjectsFromArray:currentItems];
    for (NSUInteger i = 0; i < dicts.count; i++) {
      NSDictionary *dict = dicts[i];
@@ -1127,7 +1138,7 @@ index a54cb63..7634672 100644
        RNSBarButtonItem *item = [[RNSBarButtonItem alloc] initWithConfig:dict
            action:^(NSString *buttonId) {
              auto eventEmitter = std::static_pointer_cast<const facebook::react::RNSScreenStackHeaderConfigEventEmitter>(
-@@ -814,19 +1597,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -814,19 +1608,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
            }
            imageLoader:_imageLoader];
        NSNumber *index = dict[@"index"];
@@ -1157,7 +1168,7 @@ index a54cb63..7634672 100644
          [items insertObject:item atIndex:index.integerValue];
        } else {
          [items addObject:item];
-@@ -836,6 +1623,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -836,6 +1634,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    return items;
  }
  
@@ -1205,7 +1216,7 @@ index a54cb63..7634672 100644
  RNS_IGNORE_SUPER_CALL_BEGIN
  - (void)insertReactSubview:(RNSScreenStackHeaderSubview *)subview atIndex:(NSInteger)atIndex
  {
-@@ -1025,6 +1853,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1025,6 +1864,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    }
  
    _title = RCTNSStringFromStringNilIfEmpty(newScreenProps.title);
@@ -1214,7 +1225,7 @@ index a54cb63..7634672 100644
    if (newScreenProps.titleFontFamily != oldScreenProps.titleFontFamily) {
      _titleFontFamily = RCTNSStringFromStringNilIfEmpty(newScreenProps.titleFontFamily);
    }
-@@ -1050,6 +1880,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1050,6 +1891,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    _disableBackButtonMenu = newScreenProps.disableBackButtonMenu;
    _backButtonDisplayMode =
        [RNSConvert UINavigationItemBackButtonDisplayModeFromCppEquivalent:newScreenProps.backButtonDisplayMode];
@@ -1222,7 +1233,7 @@ index a54cb63..7634672 100644
  
    if (newScreenProps.userInterfaceStyle != oldScreenProps.userInterfaceStyle) {
      _userInterfaceStyle = [RNSConvert UIUserInterfaceStyleFromCppEquivalent:newScreenProps.userInterfaceStyle];
-@@ -1096,6 +1927,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1096,6 +1938,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
      _headerRightBarButtonItems = array;
    }
  

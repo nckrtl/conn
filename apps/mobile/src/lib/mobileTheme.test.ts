@@ -293,9 +293,8 @@ describe("mobile themes", () => {
 
   it("maps semantic palette roles onto every mobile color variable", () => {
     const variables = createMobileThemeVariables(T3_CHAT_THEME.colors, "light");
-    expect(variables["--color-sheet-solid"]).toBe(
-      themeColorToNativeColor(T3_CHAT_THEME.colors.chrome),
-    );
+    expect(variables["--color-sheet-solid"]).toBe(variables["--color-screen"]);
+    expect(variables["--color-sheet"]).toBe(variables["--color-screen"]);
     expect(variables["--color-warning"]).toBe(
       themeColorToNativeColor(T3_CHAT_THEME.colors.warningSurface),
     );

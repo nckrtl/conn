@@ -9,6 +9,7 @@ import {
   createMobileThemeVariables,
   getMobileThemeColors,
   getMobileThemeVariables,
+  themeColorToNativeColor,
   DEFAULT_MOBILE_THEME_ID,
   type MobileThemeAppearance,
 } from "../src/lib/mobileTheme.ts";
@@ -160,13 +161,12 @@ const variablesFor = (themeId: BuiltInThemeId, appearance: MobileThemeAppearance
 // profile pages must match it even when the rest of the app uses a named theme.
 const clerkColorsFor = (appearance: MobileThemeAppearance) => {
   // Native authentication uses plain cards, rather than tonal settings groups.
-  const variables = createMobileThemeVariables(
-    getMobileThemeColors(DEFAULT_MOBILE_THEME_ID, appearance),
-    appearance,
-  );
+  const themeColors = getMobileThemeColors(DEFAULT_MOBILE_THEME_ID, appearance);
+  const variables = createMobileThemeVariables(themeColors, appearance);
   return {
     primary: variables["--color-primary"],
-    background: variables["--color-sheet-solid"],
+    // Sheets now share the home pane color; Clerk keeps its chrome-colored page.
+    background: themeColorToNativeColor(themeColors.chrome),
     input: variables["--color-input"],
     danger: variables["--color-danger-foreground"],
     success: appearance === "dark" ? "#34d399" : "#059669",

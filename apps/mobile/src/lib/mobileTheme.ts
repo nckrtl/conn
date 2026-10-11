@@ -273,8 +273,10 @@ export function createMobileThemeVariables(
   ];
   return {
     "--color-screen": shellPanel,
-    "--color-sheet": withAlpha(c.chrome, 0.98),
-    "--color-sheet-solid": c.chrome,
+    // Sheets paint the same opaque pane as the home screen. The translucent
+    // chrome color rendered darker than the home background on dark themes.
+    "--color-sheet": shellPanel,
+    "--color-sheet-solid": shellPanel,
     "--color-card": shellPanel,
     "--color-grouped-card": groupedCard,
     "--color-card-alt": c.surfaceRaised,

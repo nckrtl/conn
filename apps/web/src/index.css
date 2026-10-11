@@ -2343,9 +2343,18 @@ html {
   --shell-highlight: color-mix(in srgb, var(--foreground) 6%, transparent);
   --shell-divider: color-mix(in oklab, var(--sidebar) 90%, var(--foreground));
   --shell-divider-header: color-mix(in oklab, var(--sidebar) 84%, var(--foreground));
-  /* Raised cards (settings groups) sit on the selected-row fill (--sidebar-row-active), so
-     their row dividers and secondary text step lighter to keep contrast on the lighter fill. */
+  /* Divider shared by the selected sidebar row's top edge and the toolbar flyout. */
   --shell-divider-raised: color-mix(in oklab, var(--sidebar) 80%, var(--foreground));
+  /* Settings cards (SettingsGroup) have their own fill. Light mode matches the selected-row
+     fill (--sidebar-row-active); dark mode sits a notch darker so the card does not glare on
+     the page. Dark mode derives the rest of the card from that fill (outer border, top edge and
+     row dividers, and the fill and border of the controls in its rows), so it moves as one
+     family. Light mode keeps the shared shell tokens. */
+  --shell-settings-card: var(--sidebar-row-active);
+  --shell-settings-card-border: var(--shell-divider-header);
+  --shell-settings-card-divider: var(--shell-divider-raised);
+  /* Re-rooted as --contrast-input on the card: controls paint bg-input/32 and border-input. */
+  --shell-settings-card-input: var(--contrast-input);
   --muted-foreground-raised: color-mix(in oklab, var(--muted-foreground) 80%, var(--foreground));
   /* Opaque tiles (empty-state icons) that sit on a raised card and read a step lighter. */
   --shell-tile: var(--card);
@@ -2404,6 +2413,24 @@ html {
   /* The header runs on the lighter frame, so its stretch of divider is lighter. */
   --shell-divider-header: color-mix(in oklab, var(--sidebar) 82%, var(--foreground));
   --shell-divider-raised: color-mix(in oklab, var(--sidebar) 78%, var(--foreground));
+  /* A notch darker than the selected-row fill (22% toward the sidebar). */
+  --shell-settings-card: color-mix(in oklab, var(--sidebar-row-active) 78%, var(--sidebar));
+  /* One hairline for the outer border, top edge and row dividers: the card fill, 10% toward
+     the foreground. */
+  --shell-settings-card-border: color-mix(
+    in oklab,
+    var(--shell-settings-card) 90%,
+    var(--foreground)
+  );
+  --shell-settings-card-divider: var(--shell-settings-card-border);
+  /* Controls: fill is this at 32% (hover 64%), border is this at full strength. Keeps the
+     appearance contrast boost that --contrast-input applies. */
+  --shell-settings-card-input: color-mix(
+    in srgb,
+    color-mix(in oklab, var(--shell-settings-card) 72%, var(--foreground)),
+    var(--foreground) var(--appearance-contrast-border-boost)
+  );
+  --muted-foreground-raised: color-mix(in oklab, var(--muted-foreground) 88%, var(--foreground));
   --shell-tile: color-mix(in oklab, var(--sidebar) 80%, var(--foreground));
   --shell-field: color-mix(in oklab, var(--sidebar) 92%, var(--foreground));
   --shell-control: color-mix(in oklab, var(--sidebar) 91%, var(--foreground));

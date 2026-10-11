@@ -1292,7 +1292,7 @@ function KeybindingsList(props: KeybindingsListProps) {
     return ids;
   }, [rows]);
   return (
-    <div className="[&>*+*]:border-t [&>*+*]:border-(--shell-divider-raised)!">
+    <div className="[&>*+*]:border-t [&>*+*]:border-(--shell-settings-card-divider)!">
       {isAddingBinding ? <NewKeybindingSettingsRow {...newProps} /> : null}
       {rows.map((row) => (
         <KeybindingSettingsRow

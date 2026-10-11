@@ -234,7 +234,7 @@ export function SettingsUnavailableGroup({
           <p>{message}</p>
         </div>
       </div>
-      <div className="border-t border-(--shell-divider-raised)! [&_h3]:opacity-64 [&_p]:opacity-64 [&>*+*]:border-t [&>*+*]:border-(--shell-divider-raised)!">
+      <div className="border-t border-(--shell-settings-card-divider)! [&_h3]:opacity-64 [&_p]:opacity-64 [&>*+*]:border-t [&>*+*]:border-(--shell-settings-card-divider)!">
         {children}
       </div>
     </div>
@@ -253,7 +253,8 @@ export function SettingsUnavailableGroup({
  * On wide rows with a description, the control slot spans the title line plus
  * the first description line and centers its children there, so a picker sits
  * between title and description. Without a description it starts at the title
- * line's top. Switches always start at the title line's top.
+ * line's top. Switches always sit on the title line, centered on its line box
+ * (`1lh` follows the interface line height setting).
  *
  * Control sizing across settings follows three tiers so rows share a baseline:
  * - `control` slot: `size="sm"` (Button, Select, Input, NumberField) or `icon-sm`.
@@ -442,7 +443,7 @@ export function SettingsRow({
       )}
     >
       <div className="flex flex-col gap-3 @min-[32rem]/settings-row:grid @min-[32rem]/settings-row:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] @min-[32rem]/settings-row:items-start @min-[32rem]/settings-row:gap-8">
-        <div className="min-w-0 flex-1 space-y-1">
+        <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex min-h-5 items-center gap-1.5">
             <h3 className="text-ui font-medium text-foreground">{title}</h3>
             {renderedInheritance ? (
@@ -455,9 +456,7 @@ export function SettingsRow({
             </span>
           </div>
           {description ? (
-            <p className="max-w-xl text-ui leading-normal text-muted-foreground/80">
-              {description}
-            </p>
+            <p className="max-w-xl text-ui leading-snug text-muted-foreground/80">{description}</p>
           ) : null}
           {renderedStatus ? (
             <div className="pt-0.5 text-ui text-muted-foreground">{renderedStatus}</div>
@@ -466,10 +465,10 @@ export function SettingsRow({
         {renderedControl ? (
           <div
             className={cn(
-              "flex w-full min-w-0 shrink-0 items-center gap-2 @min-[32rem]/settings-row:w-auto @min-[32rem]/settings-row:justify-end @min-[32rem]/settings-row:[&>[data-slot=switch]]:self-start [&_button]:text-ui [&_input]:text-ui",
+              "flex w-full min-w-0 shrink-0 items-center gap-2 @min-[32rem]/settings-row:w-auto @min-[32rem]/settings-row:justify-end @min-[32rem]/settings-row:[&>[data-slot=switch]]:self-start @min-[32rem]/settings-row:[&_[data-slot=switch]]:mt-[max(0px,calc((1lh_-_var(--thumb-size)_-_2px)/2))] [&_button]:text-ui [&_input]:text-ui",
               description
-                ? // Same height as the title line + gap + first description line (leading-normal).
-                  "@min-[32rem]/settings-row:min-h-[calc(--spacing(5)+--spacing(1)+var(--text-ui)*1.5)] @min-[32rem]/settings-row:items-center"
+                ? // Same height as the title line + gap + first description line (leading-snug).
+                  "@min-[32rem]/settings-row:min-h-[calc(var(--text-ui)*var(--text-ui--line-height)+--spacing(0.5)+var(--text-ui)*var(--leading-snug))] @min-[32rem]/settings-row:items-center"
                 : "@min-[32rem]/settings-row:min-h-5 @min-[32rem]/settings-row:items-start",
             )}
           >

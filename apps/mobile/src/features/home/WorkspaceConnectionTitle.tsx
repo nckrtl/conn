@@ -1,6 +1,6 @@
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ActivityIndicator, Animated, Platform, Pressable, View } from "react-native";
+import { ActivityIndicator, Animated, AppState, Platform, Pressable, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
@@ -28,20 +28,42 @@ const FADE_IN_MS = 250;
  * workspace has been in a non-connected state for STATUS_SHOW_DELAY_MS,
  * then live-updating until the workspace reconnects (null again immediately).
  */
-export function useDelayedConnectionStatus(): WorkspaceConnectionStatusPresentation | null {
+export function useDelayedConnectionStatus(
+  options: {
+    /**
+     * Keep the status hidden for this long after the app returns to the
+     * foreground, so the reconnect that every resume triggers does not flash
+     * it. Off by default.
+     */
+    readonly resumeGraceMs?: number;
+  } = {},
+): WorkspaceConnectionStatusPresentation | null {
   const { state } = useWorkspaceState();
   const presentation = workspaceConnectionStatusPresentation(state);
   const hasStatus = presentation !== null;
+  const resumeGraceMs = options.resumeGraceMs ?? 0;
   const [visible, setVisible] = useState(false);
+  const [resumedAt, setResumedAt] = useState(0);
 
   useEffect(() => {
-    if (!hasStatus) {
-      setVisible(false);
-      return;
-    }
-    const timer = setTimeout(() => setVisible(true), STATUS_SHOW_DELAY_MS);
+    if (resumeGraceMs <= 0) return;
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next !== "active") return;
+      setResumedAt(Date.now());
+    });
+    return () => subscription.remove();
+  }, [resumeGraceMs]);
+
+  useEffect(() => {
+    // A resume restarts the delay, so a status already showing is withdrawn
+    // and only returns if the connection is still down after the grace.
+    setVisible(false);
+    if (!hasStatus) return;
+    const sinceResume = Date.now() - resumedAt;
+    const delay = Math.max(STATUS_SHOW_DELAY_MS, resumeGraceMs - sinceResume);
+    const timer = setTimeout(() => setVisible(true), delay);
     return () => clearTimeout(timer);
-  }, [hasStatus]);
+  }, [hasStatus, resumedAt, resumeGraceMs]);
 
   return visible ? presentation : null;
 }
@@ -103,8 +125,11 @@ export function WorkspaceConnectionTitle(props: {
   readonly statusOffset?: number;
   /** Space available beside the native header actions. */
   readonly maxWidth?: number;
+  /** Presentation to show instead of this component's own debounced status. */
+  readonly status?: WorkspaceConnectionStatusPresentation | null;
 }) {
-  const status = useDelayedConnectionStatus();
+  const delayedStatus = useDelayedConnectionStatus();
+  const status = props.status !== undefined ? props.status : delayedStatus;
   const size = props.size ?? "navbar";
   const { scale } = useAndroidControlSizing();
 

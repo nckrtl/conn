@@ -227,18 +227,33 @@ function HomeTopContentSpacer() {
 }
 
 // The glass iOS Home has no nav bar, so the list starts at the status bar and
-// this keeps the first row a short step below it. It also hosts the connection
-// status: a row in the list content (not an inset), so it appears without
-// touching the scroll view's insets.
-function HomeGlassTopContent(props: { readonly onOpenEnvironments?: () => void }) {
-  const status = useDelayedConnectionStatus();
+// this keeps the first row a short step below it. It is a fixed spacer: the
+// list's top layout never depends on connection state.
+function HomeGlassTopSpacer() {
+  return <View className="h-2" />;
+}
+
+// After a resume the reconnect takes a moment; keep the status hidden for it.
+const CONNECTION_STATUS_RESUME_GRACE_MS = 2_000;
+
+// The connection status floats just under the status bar over the list, so its
+// appearance never moves a row. It may cover the first row briefly, and it
+// stays tappable (opens environment settings) while the rest passes touches.
+function HomeConnectionStatusOverlay(props: {
+  readonly top: number;
+  readonly onOpenEnvironments?: () => void;
+}) {
+  const status = useDelayedConnectionStatus({ resumeGraceMs: CONNECTION_STATUS_RESUME_GRACE_MS });
+  if (status === null) return null;
   return (
-    <View className="pt-2">
-      {status === null ? null : (
-        <View className="items-start px-4 pb-2 pt-1">
-          <WorkspaceConnectionTitle brand={null} onPress={props.onOpenEnvironments} />
-        </View>
-      )}
+    <View
+      className="absolute inset-x-0 items-center"
+      pointerEvents="box-none"
+      style={{ top: props.top }}
+    >
+      <View className="rounded-full border border-border-subtle bg-card px-3 py-1.5">
+        <WorkspaceConnectionTitle brand={null} onPress={props.onOpenEnvironments} status={status} />
+      </View>
     </View>
   );
 }
@@ -984,7 +999,7 @@ export function HomeScreen(props: HomeScreenProps) {
   const listHeader =
     Platform.OS === "ios" ? (
       NATIVE_LIQUID_GLASS_SUPPORTED ? (
-        <HomeGlassTopContent onOpenEnvironments={props.onOpenEnvironments} />
+        <HomeGlassTopSpacer />
       ) : undefined
     ) : (
       <HomeTopContentSpacer />
@@ -1103,6 +1118,12 @@ export function HomeScreen(props: HomeScreenProps) {
           />
         </SwipeableScrollGateProvider>
       </View>
+      {usesGlassTopInset ? (
+        <HomeConnectionStatusOverlay
+          top={insets.top + 4}
+          onOpenEnvironments={props.onOpenEnvironments}
+        />
+      ) : null}
     </View>
   );
 }

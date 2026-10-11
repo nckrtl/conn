@@ -29,6 +29,10 @@ import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSym
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { ProviderInstanceIcon } from "../../components/ProviderIcon";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
+import {
+  resolveThreadStatus,
+  type ThreadStatus,
+} from "@t3tools/client-runtime/state/thread-status";
 import { cn } from "../../lib/cn";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
@@ -41,9 +45,7 @@ import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozeGateExpiryMs,
-  resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
-  type ThreadListV2Status,
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
@@ -57,15 +59,17 @@ import { ThreadSearchMatchExcerpt } from "./thread-search-match";
 
 // Status hues follow the system-wide convention set by sidebar v1 and the
 // Live Activity/widgets (amber approval, indigo input, sky working) so a
-// thread reads the same color everywhere it surfaces.
-const STATUS_LABEL_BY_STATUS: Partial<
-  Record<ThreadListV2Status, { label: string; className: string }>
-> = {
-  approval: { label: "Approval", className: "text-warning-foreground" },
-  input: { label: "Input", className: "text-adaptive-indigo-600-300" },
-  working: { label: "Working", className: "text-adaptive-sky-600-400" },
-  failed: { label: "Failed", className: "text-danger-foreground" },
-};
+// thread reads the same color everywhere it surfaces. Monitoring is calm
+// background presence, so it keeps the row's full-strength foreground (see
+// the row); Done is the web sidebar's emerald and only shows on a ready row.
+const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadStatus, { label: string; className: string }>> =
+  {
+    approval: { label: "Approval", className: "text-warning-foreground" },
+    input: { label: "Input", className: "text-adaptive-indigo-600-300" },
+    working: { label: "Working", className: "text-adaptive-sky-600-400" },
+    failed: { label: "Failed", className: "text-danger-foreground" },
+  };
+const DONE_STATUS_LABEL = { label: "Done", className: "text-adaptive-emerald-700-300" };
 
 // Menus keep lifecycle and title regeneration together. Archive keeps its
 // own surface (thread screen / settings) rather than crowding v2 rows.
@@ -429,6 +433,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly variant: "card" | "slim";
   /** A message for this thread is waiting in the outbox. */
   readonly hasQueuedMessages?: boolean;
+  /** The latest turn finished after this device last opened the thread. */
+  readonly isUnread?: boolean;
   /** Snoozed-shelf row: shows its wake time and offers Wake. */
   readonly snoozed?: boolean;
   /** Pinned-block row: shows the pin glyph and offers Unpin. */
@@ -542,8 +548,17 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const selected = props.selected === true;
   const rowAppearance = getThreadListV2RowAppearance(theme, sidebarPane, selected);
 
-  const status = resolveThreadListV2Status(thread);
-  const statusLabel = STATUS_LABEL_BY_STATUS[status];
+  const status = resolveThreadStatus(thread);
+  const statusLabel =
+    status === "monitoring"
+      ? {
+          label: "Monitoring",
+          className: selected
+            ? selectedThreadRowColors.foregroundClassName
+            : rowAppearance.foregroundClassName,
+        }
+      : (STATUS_LABEL_BY_STATUS[status] ??
+        (status === "ready" && props.isUnread === true ? DONE_STATUS_LABEL : undefined));
   // The timestamp is precomputed on the list item (same stamps the settled
   // tail sorts by) so a minute tick only re-renders rows that draw it.
   const timeLabel = props.timeLabel;

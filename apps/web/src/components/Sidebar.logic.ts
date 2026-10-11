@@ -15,6 +15,11 @@ import {
   type ThreadSnoozeShell,
 } from "@t3tools/client-runtime/state/thread-settled";
 import {
+  hasUnseenCompletion,
+  resolveThreadStatus,
+  type ThreadStatus,
+} from "@t3tools/client-runtime/state/thread-status";
+import {
   getThreadSortTimestamp,
   sortThreads,
   toSortableTimestamp,
@@ -23,6 +28,8 @@ import {
 import type { SidebarThreadSummary, Thread } from "../types";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
+
+export { hasUnseenCompletion, resolveThreadStatus as resolveSidebarThreadStatus };
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -670,17 +677,6 @@ export function useThreadJumpHintVisibility(): {
   };
 }
 
-export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
-  if (!thread.latestTurn?.completedAt) return false;
-  const completedAt = Date.parse(thread.latestTurn.completedAt);
-  if (Number.isNaN(completedAt)) return false;
-  if (!thread.lastVisitedAt) return false;
-
-  const lastVisitedAt = Date.parse(thread.lastVisitedAt);
-  if (Number.isNaN(lastVisitedAt)) return true;
-  return completedAt > lastVisitedAt;
-}
-
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
   if (target === null) return true;
   return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
@@ -807,19 +803,9 @@ export function isContextMenuPointerDown(input: {
 }
 
 // ── Sidebar thread status model ─────────────────────────────────────
-// Five visual states, three colors: color is reserved for "act now"
-// (approval), "in motion" (working), and "broken" (failed). Ready is the
-// unlabeled resting state — the agent stopped and is waiting on the user,
-// whether it finished, asked a question, or proposed a plan.
-// Unread completion is tracked separately: it describes whether a ready
-// thread needs attention, not what the thread is currently doing.
-export type SidebarThreadStatus =
-  | "approval"
-  | "input"
-  | "working"
-  | "monitoring"
-  | "failed"
-  | "ready";
+// The states and their precedence live in client-runtime so the mobile thread
+// list reads the same. Web keeps its sidebar-prefixed names.
+export type SidebarThreadStatus = ThreadStatus;
 
 export function shouldRecedeSidebarThread(input: {
   status: SidebarThreadStatus;
@@ -836,42 +822,11 @@ export function shouldRecedeSidebarThread(input: {
   return false;
 }
 
-type SidebarThreadStatusInput = Pick<
-  SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
->;
-
-export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
-  if (thread.hasPendingApprovals) {
-    return "approval";
-  }
-  if (thread.hasPendingUserInput) {
-    return "input";
-  }
-  if (thread.session?.status === "running" || thread.session?.status === "starting") {
-    return "working";
-  }
-  // A failed session outranks lingering background liveness: the user must
-  // see the failure, not a stale Working (review finding).
-  if (thread.session?.status === "error") {
-    return "failed";
-  }
-  // Background work outlives the turn: fleets read as working; monitoring
-  // only when watch loops are the sole live work.
-  if (thread.backgroundLiveness === "working") {
-    return "working";
-  }
-  if (thread.backgroundLiveness === "monitoring") {
-    return "monitoring";
-  }
-  return "ready";
-}
-
 /** Working beta: threads busy with work that does not need the user fold into
     the Working shelf. Approvals, questions, plan prompts, and failures stay
     in the inbox. */
 export function isSidebarThreadWorking(thread: ThreadStatusInput): boolean {
-  const status = resolveSidebarThreadStatus(thread);
+  const status = resolveThreadStatus(thread);
   if (status !== "working" && status !== "monitoring") return false;
   // A plan prompt outranks lingering background work, as in the status pill.
   return resolveThreadStatusPill({ thread })?.label !== "Plan Ready";

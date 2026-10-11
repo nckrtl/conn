@@ -44,6 +44,10 @@ export interface Preferences {
   /** Fresh keys reset both shelves to collapsed when users update. */
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
+  /** Completion time of the latest turn this phone has seen, by thread key
+      (`environmentId:threadId`). Device-local, like web's threadLastVisitedAtById;
+      it drives the Done label in the thread list. */
+  readonly threadLastVisitedAt?: Readonly<Record<string, string>>;
   /** What this phone last agreed on with its Orbit profile, see features/orbit/orbitProfileSync. */
   readonly orbitProfileSync?: ProfileSyncState;
 }
@@ -106,6 +110,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     modelFavorites?: Preferences["modelFavorites"];
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
+    threadLastVisitedAt?: Record<string, string>;
     orbitProfileSync?: ProfileSyncState;
   } = {};
 
@@ -181,6 +186,15 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.threadListSnoozedShelfExpanded === "boolean") {
     preferences.threadListSnoozedShelfExpanded = parsed.threadListSnoozedShelfExpanded;
+  }
+  if (typeof parsed.threadLastVisitedAt === "object" && parsed.threadLastVisitedAt !== null) {
+    const visited: Record<string, string> = {};
+    for (const [threadKey, visitedAt] of Object.entries(parsed.threadLastVisitedAt)) {
+      if (typeof visitedAt === "string" && !Number.isNaN(Date.parse(visitedAt))) {
+        visited[threadKey] = visitedAt;
+      }
+    }
+    preferences.threadLastVisitedAt = visited;
   }
   const sync = parsed.orbitProfileSync;
   if (

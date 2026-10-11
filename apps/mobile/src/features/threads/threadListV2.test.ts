@@ -31,7 +31,6 @@ import {
   isThreadListV2ListItem,
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozeGateExpiryMs,
-  resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
   sortThreadsForListV2,
   threadListV2ListItemsAreEqual,
@@ -120,33 +119,6 @@ describe("resolveThreadListV2SnoozeMenuSelection", () => {
         new Date(selectedAt.getTime() + 60 * 60 * 1_000).toISOString(),
       );
     }
-  });
-});
-
-describe("resolveThreadListV2Status", () => {
-  it("prioritizes approval over a running session", () => {
-    const thread = makeThread({
-      id: ThreadId.make("t"),
-      title: "t",
-      hasPendingApprovals: true,
-      session: {
-        threadId: ThreadId.make("t"),
-        status: "running",
-        providerName: "Codex",
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        runtimeMode: "full-access",
-        activeTurnId: null,
-        lastError: null,
-        updatedAt: NOW,
-      },
-    });
-    expect(resolveThreadListV2Status(thread)).toBe("approval");
-  });
-
-  it("resolves ready for quiescent threads", () => {
-    expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
-      "ready",
-    );
   });
 });
 
@@ -1517,6 +1489,7 @@ function buildTickList(
   options?: {
     readonly snoozeEnvironmentIds?: ReadonlySet<EnvironmentId>;
     readonly queuedThreadKeys?: ReadonlySet<string>;
+    readonly unreadThreadKeys?: ReadonlySet<string>;
     readonly moveAvailability?: ReadonlyMap<string, ThreadMoveAvailability>;
     readonly shelfPreferencesLoading?: boolean;
   },
@@ -1542,6 +1515,7 @@ function buildTickList(
       ? { snoozeEnvironmentIds: options.snoozeEnvironmentIds }
       : {}),
     ...(options?.queuedThreadKeys ? { queuedThreadKeys: options.queuedThreadKeys } : {}),
+    ...(options?.unreadThreadKeys ? { unreadThreadKeys: options.unreadThreadKeys } : {}),
     ...(options?.moveAvailability ? { moveAvailability: options.moveAvailability } : {}),
     ...(options?.shelfPreferencesLoading !== undefined
       ? { shelfPreferencesLoading: options.shelfPreferencesLoading }
@@ -1937,6 +1911,31 @@ describe("buildThreadListV2ListItems row-state stamps", () => {
     expect(threadListV2ListItemsAreEqual(readyQueued, readyPlain)).toBe(false);
     // The neighbour row is untouched by the outbox change.
     expect(threadListV2ListItemsAreEqual(settledQueued, settledPlain)).toBe(true);
+  });
+
+  it("stamps unread completions onto card rows and swaps the time for the Done label", () => {
+    // A visit lives outside the thread shell, so the Done label has to ride on
+    // the item for the recycled cell to ever update it.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(BASE_MS);
+      const unread = buildTickList([readyThread, settledThread], BASE_MS, [], {
+        unreadThreadKeys: new Set([`${environmentId}:stamp-ready`]),
+        snoozeEnvironmentIds: allEnvironments,
+      });
+      const read = buildTickList([readyThread, settledThread], BASE_MS, [], {
+        snoozeEnvironmentIds: allEnvironments,
+      });
+      const readyUnread = itemsByThreadKey(unread).get(`v2-thread:${environmentId}:stamp-ready`)!;
+      const readyRead = itemsByThreadKey(read).get(`v2-thread:${environmentId}:stamp-ready`)!;
+      expect(readyUnread.type === "v2-thread" && readyUnread.isUnread).toBe(true);
+      expect(readyRead.type === "v2-thread" && readyRead.isUnread).toBe(false);
+      expect(readyUnread.type === "v2-thread" && readyUnread.timeLabel).toBe("");
+      expect(readyRead.type === "v2-thread" && readyRead.timeLabel).toBe("5m");
+      expect(threadListV2ListItemsAreEqual(readyUnread, readyRead)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("notices move-availability changes on card rows without a shell update", () => {

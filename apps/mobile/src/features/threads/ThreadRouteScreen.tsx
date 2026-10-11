@@ -48,6 +48,7 @@ import { vcsEnvironment } from "../../state/vcs";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingScreen } from "../../components/LoadingScreen";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { markThreadVisited } from "../../state/thread-visits";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { connectionTone } from "../connection/connectionTone";
 import {
@@ -336,6 +337,18 @@ function ThreadRouteContent(
   } = useThreadSelection();
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  // Reading a finished thread clears its Done label in the thread list. The
+  // visit is stamped at the turn's completion time, so a later completion still
+  // shows Done (same rule as web's ChatView).
+  const visitedEnvironmentId = selectedThread?.environmentId ?? null;
+  const visitedThreadId = selectedThread?.id ?? null;
+  const visitedCompletedAt = selectedThread?.latestTurn?.completedAt ?? null;
+  useEffect(() => {
+    if (visitedEnvironmentId === null || visitedThreadId === null || visitedCompletedAt === null) {
+      return;
+    }
+    markThreadVisited(scopedThreadKey(visitedEnvironmentId, visitedThreadId), visitedCompletedAt);
+  }, [visitedEnvironmentId, visitedThreadId, visitedCompletedAt]);
   // "Load earlier turns" header state for windowed (paginated) thread loads.
   const loadEarlierTurns = useMemo(() => {
     if (selectedThread === null || !threadHasOlderTurns(selectedThreadDetailState)) {

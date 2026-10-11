@@ -17,7 +17,6 @@ import {
   reduceSidebarProjectScopeMenuState,
   getFallbackThreadIdAfterDelete,
   getProjectSortTimestamp,
-  hasUnseenCompletion,
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
   isSidebarThreadWorking,
@@ -353,36 +352,6 @@ function makeLatestTurn(overrides?: {
       overrides?.completedAt !== undefined ? overrides.completedAt : "2026-03-09T10:05:00.000Z",
   };
 }
-
-describe("hasUnseenCompletion", () => {
-  it("returns true when a thread completed after its last visit", () => {
-    expect(
-      hasUnseenCompletion({
-        hasActionableProposedPlan: false,
-        hasPendingApprovals: false,
-        hasPendingUserInput: false,
-        interactionMode: "default",
-        latestTurn: makeLatestTurn(),
-        lastVisitedAt: "2026-03-09T10:04:00.000Z",
-        session: null,
-      }),
-    ).toBe(true);
-  });
-
-  it("treats a missing client visit marker as read", () => {
-    expect(
-      hasUnseenCompletion({
-        hasActionableProposedPlan: false,
-        hasPendingApprovals: false,
-        hasPendingUserInput: false,
-        interactionMode: "default",
-        latestTurn: makeLatestTurn(),
-        lastVisitedAt: undefined,
-        session: null,
-      }),
-    ).toBe(false);
-  });
-});
 
 describe("shouldRecedeSidebarThread", () => {
   it.each(["working", "monitoring"] as const)(
@@ -789,6 +758,13 @@ describe("resolveSidebarThreadStatus", () => {
   };
 
   const idle = { hasPendingApprovals: false, hasPendingUserInput: false };
+  // Built by a function so the persisted lastError is not an excess property:
+  // the resolver reads the status alone.
+  const sessionWith = (status: "error" | "stopped" | "ready", lastError: string) => ({
+    ...session,
+    status,
+    lastError,
+  });
 
   it("prioritizes approval over a running session", () => {
     expect(resolveSidebarThreadStatus({ ...idle, hasPendingApprovals: true, session })).toBe(
@@ -824,19 +800,19 @@ describe("resolveSidebarThreadStatus", () => {
     expect(
       resolveSidebarThreadStatus({
         ...idle,
-        session: { ...session, status: "error" as const, lastError: "boom" },
+        session: sessionWith("error", "boom"),
       }),
     ).toBe("failed");
     expect(
       resolveSidebarThreadStatus({
         ...idle,
-        session: { ...session, status: "stopped" as const, lastError: "persisted" },
+        session: sessionWith("stopped", "persisted"),
       }),
     ).toBe("ready");
     expect(
       resolveSidebarThreadStatus({
         ...idle,
-        session: { ...session, status: "ready" as const, lastError: "persisted" },
+        session: sessionWith("ready", "persisted"),
       }),
     ).toBe("ready");
   });

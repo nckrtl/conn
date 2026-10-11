@@ -8,6 +8,7 @@ import {
   snoozeWakeLabel,
 } from "@t3tools/client-runtime/state/thread-settled";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
+import { resolveThreadStatus } from "@t3tools/client-runtime/state/thread-status";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import {
@@ -33,13 +34,10 @@ export { snoozeWakeLabel };
 
 /**
  * Thread List v2 model, ported from the web sidebar v2
- * (apps/web/src/components/Sidebar.logic.ts + SidebarV2.tsx).
- *
- * Four visual states, three colors: color is reserved for "act now"
- * (approval), "in motion" (working), and "broken" (failed). Ready is the
- * unlabeled resting state.
+ * (apps/web/src/components/Sidebar.logic.ts + SidebarV2.tsx). Row status comes
+ * from `@t3tools/client-runtime/state/thread-status`, shared with the web
+ * sidebar.
  */
-export type ThreadListV2Status = "approval" | "input" | "working" | "failed" | "ready";
 export type ThreadListV2SwipeAction = "archive" | "settle" | "unsettle" | "snooze" | "unsnooze";
 
 export function resolveThreadListV2SnoozeMenuSelection(input: {
@@ -116,24 +114,6 @@ export function resolveThreadListV2SnoozeGateExpiryMs(
 // the iPad sidebar so both page identically.
 export const THREAD_LIST_V2_SETTLED_INITIAL_COUNT = 10;
 export const THREAD_LIST_V2_SETTLED_PAGE_COUNT = 25;
-
-export function resolveThreadListV2Status(
-  thread: Pick<EnvironmentThreadShell, "hasPendingApprovals" | "hasPendingUserInput" | "session">,
-): ThreadListV2Status {
-  if (thread.hasPendingApprovals) {
-    return "approval";
-  }
-  if (thread.hasPendingUserInput) {
-    return "input";
-  }
-  if (thread.session?.status === "running" || thread.session?.status === "starting") {
-    return "working";
-  }
-  if (thread.session?.status === "error") {
-    return "failed";
-  }
-  return "ready";
-}
 
 /** NaN-safe Date.parse for sort comparators: a malformed timestamp must not
     poison the whole ordering, so it sinks to the epoch instead. */
@@ -246,6 +226,11 @@ export interface ThreadListV2ThreadListItem {
       so an outbox write (which never touches the thread shell) reaches the
       row through recycled-list equality instead of leaving a stale icon. */
   readonly hasQueuedMessages: boolean;
+  /** The latest turn finished after this device last opened the thread (the
+      Done label). Carried on the item because the visit record lives outside
+      the thread shell, so a visit reaches the row through recycled-list
+      equality instead of leaving a stale label. */
+  readonly isUnread: boolean;
   /** Move up/down availability in the row's card section. Carried on the item
       for the same reason: a reorder in flight (or its commit) changes menu
       availability without changing any shell. */
@@ -329,6 +314,7 @@ export function threadListV2ListItemsAreEqual(
         previous.snoozePresetMinute === item.snoozePresetMinute &&
         previous.showTrailingDivider === item.showTrailingDivider &&
         previous.hasQueuedMessages === item.hasQueuedMessages &&
+        previous.isUnread === item.isUnread &&
         previous.canMoveUp === item.canMoveUp &&
         previous.canMoveDown === item.canMoveDown
       );
@@ -359,15 +345,16 @@ export function threadListV2ListItemsAreEqual(
 
 /** The timestamp a row renders when it shows no status label: the settle
     stamp on settled slim rows, otherwise the latest activity. Blank for
-    status-labelled cards and snoozed rows with a wake countdown — those
+    status-labelled (including Done) cards and snoozed rows with a wake countdown — those
     never draw a time, so their minute tick must not invalidate the cell. */
 function resolveThreadListV2ItemTimeLabel(
   item: ThreadListV2Item,
   showSnoozeWakeLabel: boolean,
+  isUnread: boolean,
 ): string {
   const { thread, variant, snoozed } = item;
   if (showSnoozeWakeLabel) return "";
-  if (variant === "card" && resolveThreadListV2Status(thread) !== "ready") return "";
+  if (variant === "card" && (isUnread || resolveThreadStatus(thread) !== "ready")) return "";
   const settledTimestamp =
     variant === "slim" && !snoozed ? resolveSettledThreadTimestamp(thread) : null;
   return relativeTime(
@@ -397,6 +384,9 @@ export function buildThreadListV2ListItems(input: {
   /** Thread keys (`environmentId:threadId`) with a message waiting in the
       outbox; stamped onto the matching rows as `hasQueuedMessages`. */
   readonly queuedThreadKeys?: ReadonlySet<string>;
+  /** Thread keys (`environmentId:threadId`) whose latest completion this
+      device has not seen; stamped onto the matching rows as `isUnread`. */
+  readonly unreadThreadKeys?: ReadonlySet<string>;
   /** Menu availability for Move up/down, keyed by `environmentId:threadId`
       (only consulted for card rows — slim menus omit the moves). Produced by
       `computeThreadMoveAvailability` in one pass per section; a recycled cell
@@ -428,16 +418,23 @@ export function buildThreadListV2ListItems(input: {
       item.variant === "card"
         ? input.moveAvailability?.get(`${item.thread.environmentId}:${item.thread.id}`)
         : undefined;
+    const isUnread =
+      input.unreadThreadKeys?.has(`${item.thread.environmentId}:${item.thread.id}`) === true;
     return {
       type: "v2-thread",
       key: `v2-thread:${item.thread.environmentId}:${item.thread.id}`,
       item,
       snoozeWakeLabelText,
-      timeLabel: resolveThreadListV2ItemTimeLabel(item, snoozeWakeLabelText !== undefined),
+      timeLabel: resolveThreadListV2ItemTimeLabel(
+        item,
+        snoozeWakeLabelText !== undefined,
+        isUnread,
+      ),
       snoozePresetMinute,
       showTrailingDivider: false,
       hasQueuedMessages:
         input.queuedThreadKeys?.has(`${item.thread.environmentId}:${item.thread.id}`) === true,
+      isUnread,
       canMoveUp: move?.canMoveUp === true,
       canMoveDown: move?.canMoveDown === true,
     };

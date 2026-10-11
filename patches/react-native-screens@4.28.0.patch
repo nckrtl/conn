@@ -499,7 +499,7 @@ index a54cb63..da7e48e 100644
 +      CGFloat sideButtonReserve = buttonSize + 8.0;
 +      CGFloat searchFieldHeight = 42.0;
 +      CGFloat toolbarBottomSpacing = 4.0;
-+      UIFont *searchFont = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle3];
++      UIFont *searchFont = mailSearchToolbarConfig[@"searchFontSize"] != nil ? [UIFont systemFontOfSize:[mailSearchToolbarConfig[@"searchFontSize"] doubleValue]] : [UIFont preferredFontForTextStyle:UIFontTextStyleTitle3];
 +      NSDictionary<NSAttributedStringKey, id> *placeholderAttributes = @{
 +        NSForegroundColorAttributeName : UIColor.secondaryLabelColor,
 +        NSFontAttributeName : searchFont,
@@ -638,7 +638,7 @@ index a54cb63..da7e48e 100644
 +        searchBar.searchTextField.alpha = 1.0;
 +        searchBar.searchTextField.backgroundColor = UIColor.clearColor;
 +        searchBar.searchTextField.font = searchFont;
-+        searchBar.searchTextField.adjustsFontForContentSizeCategory = YES;
++        searchBar.searchTextField.adjustsFontForContentSizeCategory = NO;
 +        searchBar.searchTextField.textColor = UIColor.labelColor;
 +        searchBar.searchTextField.tintColor = UIColor.labelColor;
 +        resolvedSearchTextField = searchBar.searchTextField;
@@ -664,7 +664,7 @@ index a54cb63..da7e48e 100644
 +        }
 +        searchField.borderStyle = UITextBorderStyleNone;
 +        searchField.font = searchFont;
-+        searchField.adjustsFontForContentSizeCategory = YES;
++        searchField.adjustsFontForContentSizeCategory = NO;
 +        searchField.textColor = UIColor.labelColor;
 +        searchField.tintColor = UIColor.labelColor;
 +        resolvedSearchTextField = searchField;

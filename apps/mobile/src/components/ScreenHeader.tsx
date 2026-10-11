@@ -5,7 +5,7 @@ import { ScreenHeaderButton } from "./ScreenHeaderButton";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../native/StackHeader";
 import { useAdaptiveWorkspaceLayout } from "../features/layout/AdaptiveWorkspaceLayout";
 import {
-  createNativeMailSearchToolbarItem,
+  useCreateNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../features/layout/native-mail-search-toolbar";
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
@@ -32,6 +32,7 @@ function mailMenuItems(items: ReadonlyArray<ScreenHeaderMenuItem>): MailMenu["it
 }
 
 export function ScreenHeader(props: ScreenHeaderProps) {
+  const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const headerId = useId();
   const { layout, panes, togglePrimarySidebar } = useAdaptiveWorkspaceLayout();
   const { themeVariables } = useAppearancePreferences();

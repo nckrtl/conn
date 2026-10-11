@@ -72,7 +72,7 @@ import {
   providerCatalogRefreshError,
 } from "./provider-catalog-refresh";
 import {
-  createNativeMailSearchToolbarItem,
+  useCreateNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
@@ -1039,6 +1039,7 @@ function useThreadSettingsPickerPresentation() {
 }
 
 function ThreadSettingsModelsScreen() {
+  const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const session = useThreadSettingsSession();
   const presentation = useThreadSettingsPickerPresentation();
   const navigation = useNavigation<NativeStackNavigationProp<ThreadSettingsPickerStackParams>>();

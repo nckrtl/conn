@@ -1,3 +1,4 @@
+import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import { PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES } from "@t3tools/client-runtime/text-paste";
 import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
 import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
@@ -13,7 +14,7 @@ import {
   type Ref,
 } from "react";
 import type { NativeSyntheticEvent, StyleProp, ViewProps, ViewStyle } from "react-native";
-import { StyleSheet } from "react-native";
+import { StyleSheet, useWindowDimensions } from "react-native";
 
 import {
   markdownFileIconSource,
@@ -27,7 +28,6 @@ import { resolveMarkdownFileIcon } from "@t3tools/mobile-markdown-text/links";
 import { useUniwindTheme } from "../lib/useUniwindTheme";
 import { createNativeComposerTheme } from "../lib/nativeComposerTheme";
 import { SANS_FONT_FAMILY } from "../lib/fonts";
-import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import {
   acknowledgeComposerNativeEvent,
   assumeComposerControlledState,
@@ -81,6 +81,7 @@ interface NativeComposerEditorProps extends ViewProps {
   readonly fontSize: number;
   readonly lineHeight: number;
   readonly contentInsetVertical: number;
+  readonly singleLineCentered: boolean;
   readonly editable: boolean;
   readonly readOnly: boolean;
   readonly enterBehavior: string;
@@ -132,6 +133,8 @@ export function ComposerEditor({
   contentInsetVertical = 0,
   ...props
 }: ComposerEditorProps) {
+  const bodyText = useScaledTextRole("body");
+  const { fontScale } = useWindowDimensions();
   const nativeRef = useRef<NativeComposerEditorRef>(null);
   const mostRecentEventCountRef = useRef(0);
   const [mostRecentEventCount, setMostRecentEventCount] = useState(0);
@@ -141,7 +144,6 @@ export function ComposerEditor({
   // recycled native view) is applied rather than skipped.
   const nativeEventSnapshotsRef = useRef<ComposerNativeEventSnapshot[]>([]);
   const confirmedTokensRef = useRef(collectComposerInlineTokens(props.value));
-  const bodyText = useScaledTextRole("body");
   const theme = useUniwindTheme();
 
   useImperativeHandle(
@@ -273,17 +275,10 @@ export function ComposerEditor({
           ? resolvedTextStyle.fontFamily
           : SANS_FONT_FAMILY
       }
-      fontSize={
-        typeof resolvedTextStyle.fontSize === "number"
-          ? resolvedTextStyle.fontSize
-          : bodyText.fontSize
-      }
-      lineHeight={
-        typeof resolvedTextStyle.lineHeight === "number"
-          ? resolvedTextStyle.lineHeight
-          : bodyText.lineHeight
-      }
+      fontSize={bodyText.fontSize * fontScale}
+      lineHeight={bodyText.lineHeight * fontScale}
       contentInsetVertical={contentInsetVertical}
+      singleLineCentered={props.singleLineCentered ?? false}
       editable={props.editable ?? true}
       readOnly={props.readOnly ?? false}
       enterBehavior={props.enterBehavior ?? DEFAULT_COMPOSER_ENTER_BEHAVIOR}

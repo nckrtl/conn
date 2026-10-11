@@ -83,6 +83,21 @@ export function useThreadHeaderOptions(props: {
 
   const options: AppNativeStackNavigationOptions = {
     headerShown: true,
+    // Transparent edge containers connect the feed to UIKit, as in Ofide Notes.
+    ...(props.usesNativeHeaderGlass
+      ? {
+          headerTransparent: true,
+          headerStyle: { backgroundColor: "transparent" },
+          headerShadowVisible: false,
+          headerBlurEffect: "none" as const,
+          scrollEdgeEffects: {
+            top: "soft" as const,
+            bottom: "soft" as const,
+            left: "hidden" as const,
+            right: "hidden" as const,
+          },
+        }
+      : {}),
     headerTitle: props.title,
     headerTitleStyle: props.usesNativeHeaderGlass
       ? {

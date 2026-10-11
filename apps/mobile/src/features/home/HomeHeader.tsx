@@ -4,7 +4,7 @@ import type { SearchBarCommands } from "react-native-screens";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import {
-  createNativeMailSearchToolbarItem,
+  useCreateNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
 import { selectOrbitWorkspace, useOrbitGateway } from "../orbit/orbitGatewayStore";
@@ -14,6 +14,7 @@ import type { HomeHeaderProps } from "./HomeHeader.types";
 export type { HomeHeaderEnvironment } from "./HomeHeader.types";
 
 export function HomeHeader(props: HomeHeaderProps) {
+  const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const searchBarRef = useRef<SearchBarCommands>(null);
   const iconColor = useUniwindTheme()["--color-icon"];
   // The list uses a fixed creation order and ignores sort/group options, so

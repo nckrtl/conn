@@ -424,9 +424,10 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     fileTint: "#737373"
   )
   private var fontFamily = "System"
-  private var fontSize: CGFloat = 14
-  private var lineHeight: CGFloat = 20
+  private var fontSize: CGFloat = 16
+  private var lineHeight: CGFloat = 23
   private var contentInsetVertical: CGFloat = 0
+  private var singleLineCentered = false
   private var shouldAutoFocus = false
   private var didAutoFocus = false
   private var isReadOnly = false
@@ -461,7 +462,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     textView.keyboardDismissMode = .interactive
     textView.alwaysBounceVertical = false
     textView.showsVerticalScrollIndicator = true
-    textView.adjustsFontForContentSizeCategory = true
+    textView.adjustsFontForContentSizeCategory = false
     textView.onPasteImages = { [weak self] urls in
       self?.onComposerPasteImages(["uris": urls])
     }
@@ -499,7 +500,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     addSubview(textView)
 
     placeholderLabel.numberOfLines = 0
-    placeholderLabel.adjustsFontForContentSizeCategory = true
+    placeholderLabel.adjustsFontForContentSizeCategory = false
     addSubview(placeholderLabel)
     applyTypography()
     applyTheme()
@@ -572,6 +573,14 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   public override func layoutSubviews() {
     super.layoutSubviews()
     textView.frame = bounds
+    // Center the resting line with the toolbar icons; expanded editors retain
+    // their caller's inset.
+    let verticalInset = singleLineCentered
+      ? max(0, (bounds.height - max(lineHeight, textView.font?.lineHeight ?? lineHeight)) / 2)
+      : contentInsetVertical
+    textView.textContainerInset = UIEdgeInsets(
+      top: verticalInset, left: 0, bottom: verticalInset, right: 0
+    )
     if chipsNeedMeasuredWidth, bounds.width > 0 {
       chipsNeedMeasuredWidth = false
       applyControlledDocument(force: true)
@@ -590,6 +599,14 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       height: max(lineHeight, placeholderLabel.font.lineHeight)
     )
     emitContentSizeIfNeeded()
+  }
+
+  public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+    super.traitCollectionDidChange(previousTraitCollection)
+    if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
+      applyTypography()
+      applyControlledDocument(force: true)
+    }
   }
 
   func setClipboardFragment(_ fragment: String) {
@@ -649,16 +666,21 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     applyControlledDocument(force: true)
   }
 
-  func setFontSize(_ fontSize: CGFloat) {
-    self.fontSize = fontSize
+  func setFontSize(_ size: CGFloat) {
+    fontSize = size
     applyTypography()
     applyControlledDocument(force: true)
   }
 
-  func setLineHeight(_ lineHeight: CGFloat) {
-    self.lineHeight = lineHeight
+  func setLineHeight(_ height: CGFloat) {
+    lineHeight = height
     applyTypography()
     applyControlledDocument(force: true)
+  }
+
+  func setSingleLineCentered(_ centered: Bool) {
+    singleLineCentered = centered
+    setNeedsLayout()
   }
 
   func setContentInsetVertical(_ contentInsetVertical: CGFloat) {

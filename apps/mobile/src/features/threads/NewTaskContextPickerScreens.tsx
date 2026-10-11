@@ -35,7 +35,7 @@ import { projectEnvironment } from "../../state/projects";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { vcsEnvironment } from "../../state/vcs";
 import {
-  createNativeMailSearchToolbarItem,
+  useCreateNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
@@ -304,6 +304,7 @@ export function NewTaskEnvironmentPickerRouteScreen() {
 }
 
 export function NewTaskBranchPickerRouteScreen() {
+  const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const flow = useNewTaskFlow();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();

@@ -1,4 +1,6 @@
+import { EdgeBlur } from "../../native/EdgeBlur";
 import { ChatGptUsageLimitNotice } from "./ChatGptUsageLimitNotice";
+import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useAtomValue } from "@effect/atom-react";
@@ -618,17 +620,24 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       className="px-[12px]"
       style={{
         paddingTop: isExpanded ? 8 : 6,
-        paddingBottom: (props.bottomInset ?? 0) + (isExpanded ? 8 : 6),
+        paddingBottom:
+          (props.bottomInset ?? 0) +
+          (Platform.OS === "ios" ? (isExpanded ? 4 : 2) : isExpanded ? 8 : 6),
         backgroundColor:
           Platform.OS === "android" ? themeColorWithAlpha(composerPanel, 1) : undefined,
       }}
     >
-      {/* The backdrop gradient lives on a plain View: Reanimated's Animated.View
-          silently drops experimental_backgroundImage on Android, which left this
-          strip fully transparent and the feed text legible through the composer. */}
+      {Platform.OS === "ios" && NATIVE_LIQUID_GLASS_SUPPORTED ? (
+        <EdgeBlur
+          edge="bottom"
+          pointerEvents="none"
+          style={{ position: "absolute", top: 0, bottom: 0, left: -12, right: -12 }}
+        />
+      ) : null}
+      {/* Earlier iOS keeps the color fade beneath the composer. */}
       <View
         className={
-          Platform.OS === "android"
+          Platform.OS === "android" || NATIVE_LIQUID_GLASS_SUPPORTED
             ? "hidden"
             : "absolute inset-0 bg-linear-to-b from-screen/0 via-screen/60 to-screen/90"
         }
@@ -690,8 +699,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   borderRadius: 26,
                   minHeight: 140,
                   overflow: "hidden" as const,
-                  paddingBottom: 6,
-                  paddingTop: 14,
+                  paddingBottom: Platform.OS === "ios" ? 2 : 6,
+                  paddingTop: Platform.OS === "ios" ? 16 : 14,
+                  paddingHorizontal: Platform.OS === "ios" ? 4 : 0,
                 }
               : {
                   // Keep the numeric radius close to the expanded card so the
@@ -699,6 +709,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   borderRadius: 27,
                   overflow: "hidden" as const,
                   paddingVertical: 2,
+                  paddingHorizontal: Platform.OS === "ios" ? 4 : 0,
                 }
           }
         >

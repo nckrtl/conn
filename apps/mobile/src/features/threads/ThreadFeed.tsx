@@ -1,3 +1,4 @@
+import { EdgeBlur } from "../../native/EdgeBlur";
 import {
   WorktreeWorkingHeader,
   WorktreeSetupCard,
@@ -2957,6 +2958,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             scrollEventThrottle={16}
             ListHeaderComponent={
               <>
+                {usesNativeAutomaticInsets ? (
+                  <EdgeBlur edge="content" pointerEvents="none" style={{ height: 0 }} />
+                ) : null}
                 {usesNativeAutomaticInsets ? null : <View style={{ height: topContentInset }} />}
                 {setupAnchorIndex < 0 && props.worktreeSetup ? (
                   <WorktreeSetupCard key={props.threadId} {...props.worktreeSetup} />

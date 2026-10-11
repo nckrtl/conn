@@ -1,3 +1,5 @@
+import { useWindowDimensions } from "react-native";
+import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import type { HeaderBarButtonMailSearchToolbarItem } from "react-native-screens";
 
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
@@ -27,13 +29,16 @@ type NativeMailSearchToolbarInput = Omit<
  * keep using platform-specific header/search primitives without depending on
  * this helper.
  */
-export function createNativeMailSearchToolbarItem(
-  input: NativeMailSearchToolbarInput,
-): HeaderBarButtonMailSearchToolbarItem {
-  return {
+export function useCreateNativeMailSearchToolbarItem() {
+  const { fontSize } = useScaledTextRole("body");
+  const { fontScale } = useWindowDimensions();
+  return (
+    input: NativeMailSearchToolbarInput,
+  ): HeaderBarButtonMailSearchToolbarItem & { searchFontSize: number } => ({
     placeholder: "Search",
+    searchFontSize: fontSize * fontScale,
     ...input,
     type: "mailSearchToolbar",
     useFallbackSearchField: true,
-  };
+  });
 }

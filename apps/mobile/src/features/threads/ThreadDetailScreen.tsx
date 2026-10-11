@@ -1,3 +1,5 @@
+import { useHeaderHeight } from "@react-navigation/elements";
+import { EdgeBlur } from "../../native/EdgeBlur";
 import type { WorktreeSetupCardProps } from "./worktree-setup-card";
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
@@ -848,6 +850,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     });
   }, [freeze, scrollMessageToEnd]);
 
+  const headerHeight = useHeaderHeight();
   const showScrollToEndButton = contentPresentationKind === "ready" && !endFollowEnabled;
   const { themeAppearance } = useAppearancePreferences();
   const isDarkMode = themeAppearance === "dark";
@@ -1112,6 +1115,13 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             </View>
           </Animated.View>
         </KeyboardStickyView>
+      ) : null}
+      {Platform.OS === "ios" && props.usesAutomaticContentInsets ? (
+        <EdgeBlur
+          edge="top"
+          pointerEvents="none"
+          style={{ position: "absolute", top: 0, left: 0, right: 0, height: headerHeight }}
+        />
       ) : null}
     </View>
   );

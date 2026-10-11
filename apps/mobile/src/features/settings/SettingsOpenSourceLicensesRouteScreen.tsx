@@ -17,7 +17,7 @@ import { AppText as Text, AppTextInput as TextInput } from "../../components/App
 import { SettingsScreen } from "./components/SettingsScreen";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import {
-  createNativeMailSearchToolbarItem,
+  useCreateNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
@@ -69,6 +69,7 @@ function LicenseRow(props: {
 }
 
 export function SettingsOpenSourceLicensesRouteScreen() {
+  const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [query, setQuery] = useState("");

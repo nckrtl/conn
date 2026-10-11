@@ -64,11 +64,14 @@ public class T3ComposerEditorModule: Module {
       Prop("fontFamily") { (view: T3ComposerEditorView, fontFamily: String) in
         view.setFontFamily(fontFamily)
       }
-      Prop("fontSize") { (view: T3ComposerEditorView, fontSize: Double) in
-        view.setFontSize(CGFloat(fontSize))
+      Prop("fontSize") { (view: T3ComposerEditorView, size: Double) in
+        view.setFontSize(CGFloat(size))
       }
-      Prop("lineHeight") { (view: T3ComposerEditorView, lineHeight: Double) in
-        view.setLineHeight(CGFloat(lineHeight))
+      Prop("lineHeight") { (view: T3ComposerEditorView, height: Double) in
+        view.setLineHeight(CGFloat(height))
+      }
+      Prop("singleLineCentered") { (view: T3ComposerEditorView, centered: Bool) in
+        view.setSingleLineCentered(centered)
       }
       Prop("contentInsetVertical") { (view: T3ComposerEditorView, contentInsetVertical: Double) in
         view.setContentInsetVertical(CGFloat(contentInsetVertical))
@@ -124,5 +127,104 @@ public class T3ComposerEditorModule: Module {
         view.setSelection(start: start, end: end)
       }
     }
+    View(T3EdgeBlurView.self) {
+      ViewName("EdgeBlur")
+      Prop("edge") { (view: T3EdgeBlurView, edge: String) in
+        view.edge = edge
+      }
+    }
+  }
+}
+
+// Ofide's Notes approach: associate transparent controls with the real scroll
+// view so UIKit produces the edge blur, without a material or color overlay.
+final class T3EdgeBlurView: ExpoView {
+  private static let scrollViews = NSMapTable<UIView, UIScrollView>.weakToWeakObjects()
+  private static let edges = NSHashTable<T3EdgeBlurView>.weakObjects()
+  private var edgeInteraction: AnyObject?
+  var edge = "top" { didSet { connect() } }
+
+  required init(appContext: AppContext? = nil) {
+    super.init(appContext: appContext)
+    isUserInteractionEnabled = false
+    Self.edges.add(self)
+    if #available(iOS 26, *) {
+      edgeInteraction = UIScrollEdgeElementContainerInteraction()
+    }
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    connect()
+  }
+
+  override func didMoveToSuperview() {
+    super.didMoveToSuperview()
+    connect()
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    connect()
+  }
+
+  private func screenRoot() -> UIView? {
+    var ancestor = superview
+    while let view = ancestor {
+      if NSStringFromClass(type(of: view)).contains("RNSScreenView") { return view }
+      ancestor = view.superview
+    }
+    return nil
+  }
+
+  private func connect() {
+    guard #available(iOS 26, *), let interaction = edgeInteraction as? UIScrollEdgeElementContainerInteraction else { return }
+    guard window != nil, let root = screenRoot() else {
+      interaction.view?.removeInteraction(interaction)
+      interaction.scrollView = nil
+      return
+    }
+    if edge == "content" {
+      var ancestor = superview
+      while let view = ancestor {
+        if let scroll = view as? UIScrollView, !(scroll is UITextView) {
+          Self.scrollViews.setObject(scroll, forKey: root)
+          for overlay in Self.edges.allObjects where overlay.edge != "content" && overlay.screenRoot() === root {
+            overlay.connect()
+          }
+          return
+        }
+        ancestor = view.superview
+      }
+      return
+    }
+    guard let scroll = Self.scrollViews.object(forKey: root) else { return }
+    let container: UIView?
+    if edge == "top" {
+      var responder: UIResponder? = root
+      var navigationBar: UINavigationBar?
+      while let current = responder {
+        if let controller = current as? UIViewController {
+          navigationBar = controller.navigationController?.navigationBar
+          if navigationBar != nil { break }
+        }
+        responder = current.next
+      }
+      container = navigationBar
+    } else {
+      // UIKit inspects descendants, so use the real composer control container,
+      // not this empty layout marker.
+      container = superview
+    }
+    if let container, interaction.view !== container {
+      interaction.view?.removeInteraction(interaction)
+      container.addInteraction(interaction)
+    }
+    interaction.edge = edge == "top" ? .top : .bottom
+    interaction.scrollView = scroll
+    scroll.topEdgeEffect.style = .soft
+    scroll.bottomEdgeEffect.style = .soft
+    scroll.topEdgeEffect.isHidden = false
+    scroll.bottomEdgeEffect.isHidden = false
   }
 }

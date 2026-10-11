@@ -37,6 +37,7 @@ import type { SavedRemoteConnection } from "../../lib/connection";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { selectedWorkspaceProjectRefs, useOrbitGateway } from "../orbit/orbitGatewayStore";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
+import { NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET } from "../layout/native-mail-search-toolbar";
 import { useThreadSearch } from "../../state/queries";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import { usePendingThreadOrder } from "../../state/thread-order";
@@ -236,11 +237,10 @@ function HomeGlassTopSpacer() {
 // After a resume the reconnect takes a moment; keep the status hidden for it.
 const CONNECTION_STATUS_RESUME_GRACE_MS = 2_000;
 
-// The connection status floats just under the status bar over the list, so its
-// appearance never moves a row. It may cover the first row briefly, and it
-// stays tappable (opens environment settings) while the rest passes touches.
+// Keep the status above the bottom search toolbar without moving list rows.
+// It stays tappable (opens environment settings) while the rest passes touches.
 function HomeConnectionStatusOverlay(props: {
-  readonly top: number;
+  readonly bottom: number;
   readonly onOpenEnvironments?: () => void;
 }) {
   const status = useDelayedConnectionStatus({ resumeGraceMs: CONNECTION_STATUS_RESUME_GRACE_MS });
@@ -249,7 +249,7 @@ function HomeConnectionStatusOverlay(props: {
     <View
       className="absolute inset-x-0 items-center"
       pointerEvents="box-none"
-      style={{ top: props.top }}
+      style={{ bottom: props.bottom }}
     >
       <View className="rounded-full border border-border-subtle bg-card px-3 py-1.5">
         <WorkspaceConnectionTitle brand={null} onPress={props.onOpenEnvironments} status={status} />
@@ -1120,7 +1120,7 @@ export function HomeScreen(props: HomeScreenProps) {
       </View>
       {usesGlassTopInset ? (
         <HomeConnectionStatusOverlay
-          top={insets.top + 4}
+          bottom={insets.bottom + NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET + 8}
           onOpenEnvironments={props.onOpenEnvironments}
         />
       ) : null}

@@ -2,7 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-import type { AppBrand } from "./appBrand.ts";
+import { UPSTREAM_APP_BRAND, appBrandDisplayName, type AppBrand } from "./appBrand.ts";
 
 /**
  * First launch after an app rename: the renamed app starts from a copy of the
@@ -89,7 +89,8 @@ export type UserDataCopyResult =
   | { readonly status: "failed"; readonly source: string; readonly cause: unknown };
 
 /**
- * Copies the old app's folder to the new one when the new one does not exist yet.
+ * Copies the old app's folder to the new one when the new one does not exist yet. The old
+ * folder is upstream's display-name folder when that exists, else its scheme folder.
  * The copy lands in a sibling folder first and is renamed into place, so a crash
  * never leaves a half-copied folder that looks complete. A failure leaves the
  * new folder absent, so the next launch tries again.
@@ -103,15 +104,20 @@ export function copyPreviousUserData(input: {
   const { brand, isDevelopment } = input;
   if (brand.previous === null) return { status: "not-needed" };
 
-  const source = NodePath.join(
-    input.appDataDirectory,
-    isDevelopment ? brand.previous.devUserDataDirName : brand.previous.userDataDirName,
-  );
   const target = NodePath.join(
     input.appDataDirectory,
     isDevelopment ? brand.devUserDataDirName : brand.userDataDirName,
   );
-  if (NodeFS.existsSync(target) || !NodeFS.existsSync(source)) return { status: "not-needed" };
+  if (NodeFS.existsSync(target)) return { status: "not-needed" };
+  // The display-name folder ("T3 Code (Alpha)") comes first: upstream's resolveUserDataPath
+  // prefers it whenever it exists, so it holds the live data. The scheme folder may be stale.
+  const source = [
+    appBrandDisplayName(UPSTREAM_APP_BRAND, isDevelopment ? "Dev" : "Alpha"),
+    isDevelopment ? brand.previous.devUserDataDirName : brand.previous.userDataDirName,
+  ]
+    .map((name) => NodePath.join(input.appDataDirectory, name))
+    .find((candidate) => NodeFS.existsSync(candidate));
+  if (source === undefined) return { status: "not-needed" };
 
   const staging = `${target}.migrating`;
   try {

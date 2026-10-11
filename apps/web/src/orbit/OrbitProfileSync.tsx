@@ -27,6 +27,7 @@ import {
 import { createSerialRunner } from "./serialRunner";
 import { trackNonUserThemeChanges } from "./themeOrigin";
 import {
+  parseWorkspaceProfileSyncState,
   syncWorkspaceProfile,
   type WorkspaceProfileSyncPorts,
   type WorkspaceProfileSyncState,
@@ -127,7 +128,7 @@ function toLocal(workspace: OrbitGatewayWorkspace): Workspace {
 function loadState(): WorkspaceProfileSyncState | null {
   try {
     const raw = window.localStorage.getItem(STATE_STORAGE_KEY);
-    return raw === null ? null : (JSON.parse(raw) as WorkspaceProfileSyncState);
+    return raw === null ? null : parseWorkspaceProfileSyncState(JSON.parse(raw));
   } catch {
     return null;
   }

@@ -11,6 +11,7 @@ import { ORBIT_GATEWAY_SEND_CHANNEL } from "../channels.ts";
 // network stack trusts the Orbit root CA from the keychain. Only paths below /api/v1/conn are sent.
 
 const TIMEOUT_MS = 15_000;
+const CONN_PREFIX = "/api/v1/conn";
 
 const OrbitGatewayRequest = Schema.Struct({
   method: Schema.Literals(["GET", "POST", "PUT", "PATCH"]),
@@ -24,23 +25,52 @@ const OrbitGatewayResponse = Schema.Struct({
   body: Schema.String,
 });
 
+/**
+ * Builds the Gateway URL for a Conn path, or returns null when the path would leave
+ * `/api/v1/conn`. The path is resolved by the URL parser first, so `..` segments (also written
+ * `%2e%2e`) cannot climb out of the prefix. They are rejected outright, as is an encoded slash.
+ */
+export function resolveConnUrl(path: string): URL | null {
+  const segments = path.split("/");
+  for (const segment of segments) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+    if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")) {
+      return null;
+    }
+  }
+  let url: URL;
+  try {
+    url = new URL(`${DEFAULT_ORBIT_GATEWAY_URL}${CONN_PREFIX}${path}`);
+  } catch {
+    return null;
+  }
+  const inside = url.pathname === CONN_PREFIX || url.pathname.startsWith(`${CONN_PREFIX}/`);
+  return inside && url.origin === new URL(DEFAULT_ORBIT_GATEWAY_URL).origin ? url : null;
+}
+
 async function send(
   request: typeof OrbitGatewayRequest.Type,
 ): Promise<typeof OrbitGatewayResponse.Type> {
+  const url = resolveConnUrl(request.path);
+  if (url === null) {
+    return { error: "That Gateway path is not allowed.", status: 0, body: "" };
+  }
   try {
-    const response = await Electron.net.fetch(
-      `${DEFAULT_ORBIT_GATEWAY_URL}/api/v1/conn${request.path}`,
-      {
-        method: request.method,
-        headers: {
-          Accept: "application/json",
-          ...(request.body === null ? {} : { "Content-Type": "application/json" }),
-        },
-        body: request.body,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-        bypassCustomProtocolHandlers: true,
+    const response = await Electron.net.fetch(url.toString(), {
+      method: request.method,
+      headers: {
+        Accept: "application/json",
+        ...(request.body === null ? {} : { "Content-Type": "application/json" }),
       },
-    );
+      body: request.body,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      bypassCustomProtocolHandlers: true,
+    });
     return { error: null, status: response.status, body: await response.text() };
   } catch (error) {
     return {

@@ -142,13 +142,17 @@ export async function reencryptLegacySecrets(input: {
     let raw: string;
     try {
       raw = NodeFS.readFileSync(filePath, "utf8");
-    } catch {
+    } catch (error) {
+      // A missing file has nothing to re-encrypt. A file that exists but cannot be read is a
+      // failure, so the next launch tries again.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") failed += 1;
       continue;
     }
     let document: unknown;
     try {
       document = JSON.parse(raw);
     } catch {
+      failed += 1;
       continue;
     }
 

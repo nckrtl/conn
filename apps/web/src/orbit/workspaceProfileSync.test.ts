@@ -6,6 +6,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  parseWorkspaceProfileSyncState,
   syncWorkspaceProfile,
   type WorkspaceProfileSyncPorts,
   type WorkspaceProfileSyncState,
@@ -157,5 +158,35 @@ describe("syncWorkspaceProfile", () => {
     expect(names(remote.profile.workspaces)).toEqual(["A on desktop", "B on phone"]);
     expect(names(memory.local)).toEqual(["A on desktop", "B on phone"]);
     expect(memory.state?.version).toBe(4);
+  });
+});
+
+describe("parseWorkspaceProfileSyncState", () => {
+  it("accepts a stored snapshot", () => {
+    const stored = JSON.parse(JSON.stringify({ profileId: 1, version: 2, base: [ws("a")] }));
+    expect(parseWorkspaceProfileSyncState(stored)).toEqual({
+      profileId: 1,
+      version: 2,
+      base: [ws("a")],
+    });
+    expect(parseWorkspaceProfileSyncState({ profileId: 1, version: 0, base: [] })).not.toBeNull();
+  });
+
+  it.each([
+    ["null", null],
+    ["a string", "state"],
+    ["a list", []],
+    ["a missing profile id", { version: 1, base: [] }],
+    ["a string version", { profileId: 1, version: "1", base: [] }],
+    ["a missing base", { profileId: 1, version: 1 }],
+    ["a base that is not a list", { profileId: 1, version: 1, base: {} }],
+    ["a base entry without an id", { profileId: 1, version: 1, base: [{ name: "a" }] }],
+    ["a base entry that is not an object", { profileId: 1, version: 1, base: ["a"] }],
+    [
+      "a base entry with bad project keys",
+      { profileId: 1, version: 1, base: [{ ...ws("a"), projectKeys: [1] }] },
+    ],
+  ])("treats %s as no snapshot", (_name, value) => {
+    expect(parseWorkspaceProfileSyncState(value)).toBeNull();
   });
 });

@@ -50,12 +50,45 @@ function upsert(history: readonly HistoryEntry[], row: ToolbarHistoryRow, now: n
   return next;
 }
 
+/** The newest requests a tab keeps. Each one can hold a full profiler payload. */
+export const MAX_HISTORY = 200;
+
+/**
+ * Keeps the newest `MAX_HISTORY` requests (always including the current one) and drops the
+ * payloads and selection of any request that is no longer in the history.
+ */
+function trim(tab: TabToolbar): TabToolbar {
+  let history = tab.history;
+  if (history.length > MAX_HISTORY) {
+    const kept = history.slice(-MAX_HISTORY);
+    const current =
+      tab.currentId === null || kept.some((entry) => entry.row.id === tab.currentId)
+        ? undefined
+        : history.find((entry) => entry.row.id === tab.currentId);
+    history = current ? [current, ...kept.slice(1)] : kept;
+  }
+  const ids = new Set(history.map((entry) => entry.row.id));
+  const stale = Object.keys(tab.details).some((id) => !ids.has(id));
+  const selectedId = tab.selectedId !== null && !ids.has(tab.selectedId) ? null : tab.selectedId;
+  if (history === tab.history && !stale && selectedId === tab.selectedId) return tab;
+  return {
+    ...tab,
+    history,
+    details: stale
+      ? Object.fromEntries(Object.entries(tab.details).filter(([id]) => ids.has(id)))
+      : tab.details,
+    selectedId,
+  };
+}
+
 function update(
   state: LaravelToolbarState,
   tabId: string,
   change: (tab: TabToolbar) => TabToolbar,
 ): Pick<LaravelToolbarState, "byTabId"> {
-  return { byTabId: { ...state.byTabId, [tabId]: change(state.byTabId[tabId] ?? EMPTY) } };
+  return {
+    byTabId: { ...state.byTabId, [tabId]: trim(change(state.byTabId[tabId] ?? EMPTY)) },
+  };
 }
 
 export const useLaravelToolbarStore = create<LaravelToolbarState>((set) => ({

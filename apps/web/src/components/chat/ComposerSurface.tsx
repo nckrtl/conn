@@ -22,7 +22,8 @@ function Shell({
         "before:pointer-events-none before:absolute before:inset-0 before:z-0 before:rounded-3xl before:bg-(--chat-composer-glass-surface)/(--glass-opacity) before:backdrop-blur-(--glass-blur) before:backdrop-saturate-(--glass-saturation)",
         "not-supports-[((backdrop-filter:blur(1px))_or_(-webkit-backdrop-filter:blur(1px)))]:before:bg-(--chat-composer-glass-surface)",
         // Dark: the raised shell surface, a step lighter than the chat card.
-        "dark:before:bg-(--shell-raised)",
+        // The fill is opaque, so a backdrop filter would only re-blur the timeline on every scroll.
+        "dark:before:bg-(--shell-raised) dark:before:backdrop-filter-none",
         // Dark: banners and the context strip show the raised surface through, a step darker.
         "dark:[--chat-composer-drawer-surface:color-mix(in_oklab,var(--shell-raised)_60%,transparent)]",
         "has-data-[composer-banner-surface=attached]:before:hidden",
@@ -133,7 +134,7 @@ function Main({ className, ...props }: ComponentProps<"div">) {
         "group-has-data-[composer-banner-surface=attached]/composer-surface:shadow-composer dark:group-has-data-[composer-banner-surface=attached]/composer-surface:shadow-none",
         "not-supports-[((backdrop-filter:blur(1px))_or_(-webkit-backdrop-filter:blur(1px)))]:group-has-data-[composer-banner-surface=attached]/composer-surface:bg-(--chat-composer-glass-surface)",
         // Dark: keep the raised shell surface the composer has without a banner.
-        "dark:group-has-data-[composer-banner-surface=attached]/composer-surface:bg-(--shell-raised)",
+        "dark:group-has-data-[composer-banner-surface=attached]/composer-surface:bg-(--shell-raised) dark:group-has-data-[composer-banner-surface=attached]/composer-surface:backdrop-filter-none",
         "group-has-data-[composer-banner-surface=attached]/composer-surface:**:data-[chat-composer-mobile-collapsed=true]:min-h-[calc(1rem+1px)]",
         className,
       )}

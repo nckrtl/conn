@@ -172,13 +172,37 @@ describe("reencryptLegacySecrets", () => {
     );
   });
 
-  it("ignores missing and unreadable state files", async () => {
-    NodeFS.writeFileSync(NodePath.join(stateDir, "saved-environments.json"), "not json");
+  it("treats missing state files as nothing to do", async () => {
     const result = await reencryptLegacySecrets({
       stateDir,
       ...newKey,
       legacyPasswords: async () => [],
     });
     expect(result).toEqual({ examined: 0, alreadyCurrent: 0, reencrypted: 0, failed: 0 });
+  });
+
+  it("counts a state file that is not valid JSON as failed, and still checks the others", async () => {
+    NodeFS.writeFileSync(NodePath.join(stateDir, "saved-environments.json"), "not json");
+    writeJson("connection-catalog.json", {
+      encryptedCatalog: b64(encryptChromiumV10('{"credentials":[]}', NEW_PASSWORD)),
+    });
+    const result = await reencryptLegacySecrets({
+      stateDir,
+      ...newKey,
+      legacyPasswords: async () => [],
+    });
+    expect(result.failed).toBe(1);
+    expect(result.alreadyCurrent).toBe(1);
+  });
+
+  it("counts a state file that exists but cannot be read as failed", async () => {
+    // A folder in place of the file makes the read fail with EISDIR, not ENOENT.
+    NodeFS.mkdirSync(NodePath.join(stateDir, "connection-catalog.json"));
+    const result = await reencryptLegacySecrets({
+      stateDir,
+      ...newKey,
+      legacyPasswords: async () => [],
+    });
+    expect(result).toEqual({ examined: 0, alreadyCurrent: 0, reencrypted: 0, failed: 1 });
   });
 });

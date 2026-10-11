@@ -24,6 +24,38 @@ export interface WorkspaceProfileSyncState {
   readonly base: readonly OrbitGatewayWorkspace[];
 }
 
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isGatewayWorkspace(value: unknown): value is OrbitGatewayWorkspace {
+  if (typeof value !== "object" || value === null) return false;
+  const workspace = value as Record<string, unknown>;
+  return (
+    typeof workspace.id === "string" &&
+    typeof workspace.name === "string" &&
+    typeof workspace.color === "string" &&
+    (workspace.icon === null || typeof workspace.icon === "string") &&
+    (workspace.image === undefined ||
+      workspace.image === null ||
+      typeof workspace.image === "string") &&
+    (workspace.projectRefs === undefined || isStringArray(workspace.projectRefs)) &&
+    (workspace.projectKeys === undefined || isStringArray(workspace.projectKeys))
+  );
+}
+
+/**
+ * Reads a stored sync snapshot. Anything of the wrong shape is null, so the next run is a first
+ * sync instead of a merge against a `base` this device never agreed on.
+ */
+export function parseWorkspaceProfileSyncState(value: unknown): WorkspaceProfileSyncState | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { profileId, version, base } = value as Record<string, unknown>;
+  if (typeof profileId !== "number" || typeof version !== "number") return null;
+  if (!Array.isArray(base) || !base.every(isGatewayWorkspace)) return null;
+  return { profileId, version, base };
+}
+
 export interface WorkspaceProfileSyncPorts {
   readonly client: OrbitGatewayClient;
   readonly readLocal: () => readonly OrbitGatewayWorkspace[];

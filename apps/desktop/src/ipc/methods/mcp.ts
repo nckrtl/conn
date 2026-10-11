@@ -106,9 +106,15 @@ interface Session {
   stderrTail: string;
 }
 
+// Keyed by `sessionKey`: the renderer's session id is only unique within one window, and a
+// window must never reach or replace another window's session.
 const sessions = new Map<string, Session>();
 const watchedSenders = new Set<number>();
 const sessionsBySender = new Map<number, Set<string>>();
+
+function sessionKey(senderId: number, sessionId: string): string {
+  return `${senderId}\u0000${sessionId}`;
+}
 
 function elapsedSince(started: number): number {
   return Math.round((performance.now() - started) * 10) / 10;
@@ -206,11 +212,12 @@ function makeTransport(server: Server): Transport {
     : new StreamableHTTPClientTransport(url, options);
 }
 
-function closeSession(sessionId: string): Promise<void> {
-  const session = sessions.get(sessionId);
+function closeSession(senderId: number, sessionId: string): Promise<void> {
+  const key = sessionKey(senderId, sessionId);
+  const session = sessions.get(key);
   if (!session) return Promise.resolve();
   session.retired = true;
-  sessions.delete(sessionId);
+  sessions.delete(key);
   return session.client.close().catch(() => undefined);
 }
 
@@ -224,7 +231,7 @@ function watchSender(senderId: number, sessionId: string): void {
   watchedSenders.add(senderId);
   // A closed or reloaded window cannot see its sessions again; stop their servers.
   const closeOwned = () => {
-    for (const id of sessionsBySender.get(senderId) ?? []) void closeSession(id);
+    for (const id of sessionsBySender.get(senderId) ?? []) void closeSession(senderId, id);
     sessionsBySender.delete(senderId);
   };
   contents.once("destroyed", () => {
@@ -259,7 +266,8 @@ async function connect(
   senderId: number,
 ): Promise<typeof ConnectResponse.Type> {
   const started = performance.now();
-  await closeSession(request.sessionId);
+  const key = sessionKey(senderId, request.sessionId);
+  await closeSession(senderId, request.sessionId);
   let session: Session | null = null;
   try {
     const inner = makeTransport(request.server);
@@ -283,10 +291,10 @@ async function connect(
     client.onclose = () => {
       if (current.retired) return;
       current.retired = true;
-      sessions.delete(request.sessionId);
+      sessions.delete(key);
       push(senderId, { sessionId: request.sessionId, kind: "closed" });
     };
-    sessions.set(request.sessionId, session);
+    sessions.set(key, session);
     watchSender(senderId, request.sessionId);
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -302,7 +310,7 @@ async function connect(
     return { error: null, info: serverInfo(client), durationMs: elapsedSince(started) };
   } catch (error) {
     const stderr = session?.stderrTail.trim() ?? "";
-    await closeSession(request.sessionId);
+    await closeSession(senderId, request.sessionId);
     let message = errorMessage(error);
     if (request.server.transport === "stdio" && /\bENOENT\b/.test(message)) {
       message = `${request.server.command} was not found on this machine's PATH.`;
@@ -362,9 +370,12 @@ async function call(client: Client, method: typeof Method.Type, params: unknown)
   }
 }
 
-async function request(input: typeof McpRequest.Type): Promise<typeof McpResponse.Type> {
+async function request(
+  input: typeof McpRequest.Type,
+  senderId: number,
+): Promise<typeof McpResponse.Type> {
   const started = performance.now();
-  const session = sessions.get(input.sessionId);
+  const session = sessions.get(sessionKey(senderId, input.sessionId));
   if (!session) {
     return { error: "The server is not connected.", result: null, durationMs: 0 };
   }
@@ -390,8 +401,9 @@ export const mcpRequest = DesktopIpc.makeIpcMethod({
   channel: MCP_REQUEST_CHANNEL,
   payload: McpRequest,
   result: McpResponse,
-  handler: Effect.fn("desktop.ipc.mcp.request")(function* (input) {
-    return yield* Effect.promise(() => request(input));
+  handler: Effect.fn("desktop.ipc.mcp.request")(function* (input, event) {
+    const senderId = event?.sender.id ?? -1;
+    return yield* Effect.promise(() => request(input, senderId));
   }),
 });
 
@@ -399,7 +411,8 @@ export const mcpDisconnect = DesktopIpc.makeIpcMethod({
   channel: MCP_DISCONNECT_CHANNEL,
   payload: Schema.String,
   result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.mcp.disconnect")(function* (sessionId) {
-    yield* Effect.promise(() => closeSession(sessionId));
+  handler: Effect.fn("desktop.ipc.mcp.disconnect")(function* (sessionId, event) {
+    const senderId = event?.sender.id ?? -1;
+    yield* Effect.promise(() => closeSession(senderId, sessionId));
   }),
 });

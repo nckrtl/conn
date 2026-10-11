@@ -106,6 +106,46 @@ describe("copyPreviousUserData", () => {
     expect(NodeFS.existsSync(NodePath.join(appData, "conn"))).toBe(false);
   });
 
+  it("prefers the display-name folder upstream uses over a stale scheme folder", () => {
+    write(NodePath.join(appData, "t3code/Preferences"), "stale");
+    const alpha = NodePath.join(appData, "T3 Code (Alpha)");
+    write(NodePath.join(alpha, "Preferences"), "live");
+
+    const result = copyPreviousUserData({
+      appDataDirectory: appData,
+      brand,
+      isDevelopment: false,
+      now,
+    });
+
+    expect(result).toEqual({
+      status: "copied",
+      source: alpha,
+      target: NodePath.join(appData, "conn"),
+    });
+    expect(NodeFS.readFileSync(NodePath.join(appData, "conn/Preferences"), "utf8")).toBe("live");
+  });
+
+  it("copies the dev display-name folder, and does not take the packaged one for dev", () => {
+    write(NodePath.join(appData, "T3 Code (Alpha)/Preferences"), "alpha");
+    expect(
+      copyPreviousUserData({ appDataDirectory: appData, brand, isDevelopment: true, now }),
+    ).toEqual({ status: "not-needed" });
+
+    write(NodePath.join(appData, "T3 Code (Dev)/Preferences"), "dev");
+    copyPreviousUserData({ appDataDirectory: appData, brand, isDevelopment: true, now });
+
+    expect(NodeFS.readFileSync(NodePath.join(appData, "conn-dev/Preferences"), "utf8")).toBe("dev");
+    expect(NodeFS.existsSync(NodePath.join(appData, "conn"))).toBe(false);
+  });
+
+  it("falls back to the scheme folder when no display-name folder exists", () => {
+    const source = seedOldFolder("t3code");
+    expect(
+      copyPreviousUserData({ appDataDirectory: appData, brand, isDevelopment: false, now }),
+    ).toEqual({ status: "copied", source, target: NodePath.join(appData, "conn") });
+  });
+
   it("copies once: an existing new folder is never touched", () => {
     seedOldFolder("t3code-dev");
     write(NodePath.join(appData, "conn-dev/Preferences"), "already here");

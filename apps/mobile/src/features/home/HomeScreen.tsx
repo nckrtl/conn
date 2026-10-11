@@ -71,6 +71,7 @@ import {
 import { createSwipeRowActivation } from "./swipe-row-activation";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "./thread-swipe-actions";
 import { useMaterialFabScroll } from "./MaterialFabScrollContext";
+import { useDelayedConnectionStatus, WorkspaceConnectionTitle } from "./WorkspaceConnectionTitle";
 
 /* ─── Types ──────────────────────────────────────────────────────────── */
 
@@ -93,6 +94,8 @@ interface HomeScreenProps {
   readonly onProjectChange: (projectKey: string | null) => void;
   readonly onAddConnection: () => void;
   readonly onOpenSettings: () => void;
+  /** Opens environment settings from the connection status row (glass iOS). */
+  readonly onOpenEnvironments?: () => void;
   readonly onStartNewTask: () => void;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
   readonly onArchiveThread: (thread: EnvironmentThreadShell) => void;
@@ -223,10 +226,21 @@ function HomeTopContentSpacer() {
   return <View className="h-4" />;
 }
 
-// The glass iOS header is hidden when empty, so the list starts at the status
-// bar; this keeps the first row a short step below it.
-function HomeGlassTopContentSpacer() {
-  return <View className="h-2" />;
+// The glass iOS Home has no nav bar, so the list starts at the status bar and
+// this keeps the first row a short step below it. It also hosts the connection
+// status: a row in the list content (not an inset), so it appears without
+// touching the scroll view's insets.
+function HomeGlassTopContent(props: { readonly onOpenEnvironments?: () => void }) {
+  const status = useDelayedConnectionStatus();
+  return (
+    <View className="pt-2">
+      {status === null ? null : (
+        <View className="items-start px-4 pb-2 pt-1">
+          <WorkspaceConnectionTitle brand={null} onPress={props.onOpenEnvironments} />
+        </View>
+      )}
+    </View>
+  );
 }
 
 /* ─── Main screen ────────────────────────────────────────────────────── */
@@ -237,6 +251,8 @@ export function HomeScreen(props: HomeScreenProps) {
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
   const insets = useSafeAreaInsets();
   const { fabClearance } = useAndroidControlSizing();
+  // The glass iOS Home never shows a nav bar, so its list insets are explicit.
+  const usesGlassTopInset = Platform.OS === "ios" && NATIVE_LIQUID_GLASS_SUPPORTED;
   const iosBottomToolbarClearance =
     Platform.OS === "ios" && !NATIVE_LIQUID_GLASS_SUPPORTED
       ? PRE_LIQUID_GLASS_BOTTOM_TOOLBAR_HEIGHT
@@ -968,7 +984,7 @@ export function HomeScreen(props: HomeScreenProps) {
   const listHeader =
     Platform.OS === "ios" ? (
       NATIVE_LIQUID_GLASS_SUPPORTED ? (
-        <HomeGlassTopContentSpacer />
+        <HomeGlassTopContent onOpenEnvironments={props.onOpenEnvironments} />
       ) : undefined
     ) : (
       <HomeTopContentSpacer />
@@ -1059,17 +1075,29 @@ export function HomeScreen(props: HomeScreenProps) {
             }
             ListEmptyComponent={v2ListEmpty}
             style={{ flex: 1 }}
-            automaticallyAdjustsScrollIndicatorInsets={Platform.OS === "ios"}
-            contentInsetAdjustmentBehavior={Platform.OS === "ios" ? "automatic" : "never"}
+            automaticallyAdjustsScrollIndicatorInsets={Platform.OS === "ios" && !usesGlassTopInset}
+            contentInsetAdjustmentBehavior={
+              Platform.OS === "ios" && !usesGlassTopInset ? "automatic" : "never"
+            }
+            scrollIndicatorInsets={
+              usesGlassTopInset ? { top: insets.top, bottom: insets.bottom } : undefined
+            }
             showsVerticalScrollIndicator={false}
             keyboardDismissMode="on-drag"
             keyboardShouldPersistTaps="handled"
             {...scrollGateHandlers}
             scrollEventThrottle={16}
             contentContainerStyle={{
+              // Explicit insets on the glass path: UIKit's automatic
+              // adjustment lags nav bar changes, so the safe area is applied
+              // here instead (top above the list, bottom as automatic did).
+              paddingTop: usesGlassTopInset ? insets.top : undefined,
               paddingBottom:
                 Platform.OS === "ios"
-                  ? Math.max(insets.bottom, 24) + 96 + iosBottomToolbarClearance
+                  ? Math.max(insets.bottom, 24) +
+                    96 +
+                    iosBottomToolbarClearance +
+                    (usesGlassTopInset ? insets.bottom : 0)
                   : Math.max(insets.bottom, 16) + (Platform.OS === "android" ? fabClearance : 88),
             }}
           />

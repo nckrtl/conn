@@ -615,7 +615,16 @@ const RootStackConfig = createNativeStackNavigator({
         ...GLASS_HEADER_OPTIONS,
         contentStyle: { backgroundColor: "transparent" },
         headerBackVisible: false,
-        // No brand lockup on Home; HomeRouteScreen adds the connection status.
+        // No brand lockup on Home. On the glass iOS path the nav bar is never
+        // shown (the bottom toolbar is its own view and the connection status
+        // lives in the list), so the first frame already has no bar and the
+        // list's top inset never changes.
+        ...(Platform.OS === "ios" && NATIVE_LIQUID_GLASS_SUPPORTED
+          ? {
+              headerShown: false,
+              scrollEdgeEffects: { ...HEADER_SCROLL_EDGE_EFFECTS, top: "soft" as const },
+            }
+          : {}),
         headerTitle: "",
         title: "",
       },

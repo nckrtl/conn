@@ -26,15 +26,15 @@ import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
-import {
-  getConnectionStatusOnlyHeaderOptions,
-  useDelayedConnectionStatus,
-} from "./WorkspaceConnectionTitle";
+import { getConnectionStatusOnlyHeaderOptions } from "./WorkspaceConnectionTitle";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 // With the nav bar hidden nothing makes UIKit's automatic top edge effect
 // appear under the status bar, so ask for the soft fade explicitly.
 const HIDDEN_HEADER_SCROLL_EDGE_EFFECTS = { ...HEADER_SCROLL_EDGE_EFFECTS, top: "soft" } as const;
+// The glass iOS Home never shows its nav bar (see Stack.tsx); the bottom
+// toolbar is its own view and the connection status renders inside the list.
+const HOME_HIDES_HEADER = Platform.OS === "ios" && NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED;
 
 /* ─── Route screen ───────────────────────────────────────────────────── */
 
@@ -48,12 +48,6 @@ export function HomeRouteScreen() {
   const navigation = useNavigation();
   const [searchQuery, setSearchQuery] = useState("");
   const handleSelectThread = useHomeThreadSelection();
-  // The glass iOS header holds nothing but the connection status (the toolbar
-  // lives in a view of its own), so hide the bar while there is no status to
-  // show. Its 44pt would otherwise push the first thread down.
-  const connectionStatus = useDelayedConnectionStatus();
-  const hidesEmptyHeader =
-    Platform.OS === "ios" && NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED && connectionStatus === null;
 
   useEffect(() => {
     void checkForAppUpdateOnLaunch();
@@ -130,7 +124,14 @@ export function HomeRouteScreen() {
           options={
             Platform.OS === "android"
               ? { headerShown: false }
-              : { title: "", headerTitle: "", unstable_headerLeftItems: () => [] }
+              : {
+                  // The glass Home route hides its bar; this pane needs it for
+                  // the new-task button.
+                  headerShown: true,
+                  title: "",
+                  headerTitle: "",
+                  unstable_headerLeftItems: () => [],
+                }
           }
         />
         {Platform.OS === "ios" ? (
@@ -169,28 +170,31 @@ export function HomeRouteScreen() {
     >
       <>
         {/* Restore the header after leaving split view; screen options are
-            shallow-merged. The title slot has no brand; it only shows the
-            connection status while an environment reconnects. */}
+            shallow-merged. The glass iOS header stays hidden. Elsewhere the
+            title slot has no brand and only shows the connection status while
+            an environment reconnects. */}
         <NativeStackScreenOptions
           optionsVersion={windowWidth}
-          options={{
-            ...getConnectionStatusOnlyHeaderOptions({
-              headerWidth: windowWidth,
-              onOpenEnvironments: () =>
-                navigation.navigate("SettingsSheet", {
-                  screen: "SettingsContent",
-                  params: { screen: "SettingsEnvironments" },
-                }),
-            }),
-            headerShown: !hidesEmptyHeader,
-            ...(NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED && Platform.OS === "ios"
+          options={
+            HOME_HIDES_HEADER
               ? {
-                  scrollEdgeEffects: hidesEmptyHeader
-                    ? HIDDEN_HEADER_SCROLL_EDGE_EFFECTS
-                    : HEADER_SCROLL_EDGE_EFFECTS,
+                  headerShown: false,
+                  headerTitle: "",
+                  scrollEdgeEffects: HIDDEN_HEADER_SCROLL_EDGE_EFFECTS,
+                  title: "",
                 }
-              : {}),
-          }}
+              : {
+                  ...getConnectionStatusOnlyHeaderOptions({
+                    headerWidth: windowWidth,
+                    onOpenEnvironments: () =>
+                      navigation.navigate("SettingsSheet", {
+                        screen: "SettingsContent",
+                        params: { screen: "SettingsEnvironments" },
+                      }),
+                  }),
+                  headerShown: true,
+                }
+          }
         />
         <HomeHeader
           environments={environments}
@@ -239,6 +243,12 @@ export function HomeRouteScreen() {
           onRegenerateThreadTitle={regenerateThreadTitle}
           onEnvironmentChange={setSelectedEnvironmentId}
           onProjectChange={setSelectedProjectKey}
+          onOpenEnvironments={() =>
+            navigation.navigate("SettingsSheet", {
+              screen: "SettingsContent",
+              params: { screen: "SettingsEnvironments" },
+            })
+          }
           onOpenSettings={() =>
             navigation.navigate("SettingsSheet", {
               screen: "SettingsContent",

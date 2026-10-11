@@ -12,13 +12,17 @@ type EditorTab = "headers" | "body";
 const fieldClass =
   "min-w-0 flex-1 bg-transparent py-2 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/70";
 
-function HeaderRows({
+/** Name/value rows that can be switched off; `noun` names a row ("header", "variable"). */
+export function HeaderRows({
   headers,
   onChange,
+  noun = "header",
 }: {
   headers: readonly ApiHeaderRow[];
   onChange: (headers: readonly ApiHeaderRow[]) => void;
+  noun?: string;
 }) {
+  const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const update = (id: string, patch: Partial<ApiHeaderRow>) =>
     onChange(headers.map((row) => (row.id === id ? { ...row, ...patch } : row)));
   return (
@@ -31,13 +35,13 @@ function HeaderRows({
           <Checkbox
             checked={row.enabled}
             onCheckedChange={(checked) => update(row.id, { enabled: checked === true })}
-            aria-label={row.enabled ? "Disable header" : "Enable header"}
+            aria-label={row.enabled ? `Disable ${noun}` : `Enable ${noun}`}
           />
           <input
             value={row.name}
             onChange={(event) => update(row.id, { name: event.target.value })}
-            placeholder="Header"
-            aria-label="Header name"
+            placeholder={Noun}
+            aria-label={`${Noun} name`}
             className={fieldClass}
             data-disabled={!row.enabled || undefined}
           />
@@ -45,7 +49,7 @@ function HeaderRows({
             value={row.value}
             onChange={(event) => update(row.id, { value: event.target.value })}
             placeholder="Value"
-            aria-label="Header value"
+            aria-label={`${Noun} value`}
             className={fieldClass}
           />
           <span className="opacity-0 group-hover:opacity-100 has-focus-visible:opacity-100">
@@ -53,7 +57,7 @@ function HeaderRows({
               variant="ghost"
               size="icon-xs"
               type="button"
-              aria-label="Remove header"
+              aria-label={`Remove ${noun}`}
               onClick={() => onChange(headers.filter((candidate) => candidate.id !== row.id))}
             >
               <X />
@@ -71,7 +75,7 @@ function HeaderRows({
           }
         >
           <Plus />
-          Add header
+          Add {noun}
         </Button>
       </div>
     </div>

@@ -47,7 +47,7 @@ import type { RightPanelSurface } from "~/rightPanelStore";
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "~/localApi";
 import { Button } from "~/components/ui/button";
-import { AndroidIcon, AppleIcon } from "~/components/Icons";
+import { AndroidIcon, AppleIcon, McpIcon } from "~/components/Icons";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { Kbd } from "~/components/ui/kbd";
 import {
@@ -132,6 +132,9 @@ interface RightPanelTabsProps {
   /** nckrtl fork: the Database panel; absent where it is not offered. */
   onAddDatabase?: (() => void) | undefined;
   databaseAvailable?: boolean | undefined;
+  /** nckrtl fork: the MCP panel; absent where it is not offered. */
+  onAddMcp?: (() => void) | undefined;
+  mcpAvailable?: boolean | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -173,6 +176,7 @@ const SURFACE_DISABLED_REASONS = {
   device: "Devices are only available from a thread.",
   api: `API requests are only available in the ${APP_BASE_NAME} desktop app, from a project thread.`,
   database: `The Database panel is only available in the ${APP_BASE_NAME} desktop app, from a project thread.`,
+  mcp: `The MCP panel is only available in the ${APP_BASE_NAME} desktop app, from a project thread.`,
 } as const;
 
 /** Overlays that must win over the launcher's letter shortcuts. */
@@ -199,6 +203,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   device: "Available from a thread.",
   api: "Available in the desktop app.",
   database: "Available in the desktop app.",
+  mcp: "Available in the desktop app.",
 } as const;
 
 type TabContextMenuAction =
@@ -345,6 +350,9 @@ function RightPanelEmptyState(props: {
   /** nckrtl fork: the Database panel; absent where it is not offered. */
   onAddDatabase?: (() => void) | undefined;
   databaseAvailable?: boolean | undefined;
+  /** nckrtl fork: the MCP panel; absent where it is not offered. */
+  onAddMcp?: (() => void) | undefined;
+  mcpAvailable?: boolean | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -386,6 +394,16 @@ function RightPanelEmptyState(props: {
       available: props.databaseAvailable === true,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.database,
       onClick: props.onAddDatabase ?? (() => undefined),
+      badgeCount: 0,
+    },
+    {
+      label: "MCP",
+      description: "Connect to an MCP server and test its tools, resources and prompts.",
+      icon: McpIcon,
+      shortcut: "I",
+      available: props.mcpAvailable === true,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.mcp,
+      onClick: props.onAddMcp ?? (() => undefined),
       badgeCount: 0,
     },
     {
@@ -673,6 +691,8 @@ function surfaceTitle(
       return "API";
     case "database":
       return "Database";
+    case "mcp":
+      return "MCP";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "preview": {
@@ -762,6 +782,8 @@ function SurfaceIcon({
       return <Webhook className="size-4 shrink-0" />;
     case "database":
       return <Database className="size-4 shrink-0" />;
+    case "mcp":
+      return <McpIcon className="size-4 shrink-0" />;
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-4 shrink-0" />
@@ -939,6 +961,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.databaseAvailable === true,
       disabledReason: SURFACE_DISABLED_REASONS.database,
       onClick: props.onAddDatabase ?? (() => undefined),
+    },
+    {
+      label: "MCP",
+      icon: McpIcon,
+      shortcut: "I",
+      available: props.mcpAvailable === true,
+      disabledReason: SURFACE_DISABLED_REASONS.mcp,
+      onClick: props.onAddMcp ?? (() => undefined),
     },
     {
       label: "Terminal",
@@ -1497,6 +1527,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             apiAvailable={props.apiAvailable}
             onAddDatabase={props.onAddDatabase}
             databaseAvailable={props.databaseAvailable}
+            onAddMcp={props.onAddMcp}
+            mcpAvailable={props.mcpAvailable}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}

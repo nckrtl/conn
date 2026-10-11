@@ -221,6 +221,19 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   orbitGatewaySend: (request) =>
     ipcRenderer.invoke(IpcChannels.ORBIT_GATEWAY_SEND_CHANNEL, request),
   databaseRun: (request) => ipcRenderer.invoke(IpcChannels.DATABASE_RUN_CHANNEL, request),
+  mcpConnect: (request) => ipcRenderer.invoke(IpcChannels.MCP_CONNECT_CHANNEL, request),
+  mcpRequest: (request) => ipcRenderer.invoke(IpcChannels.MCP_REQUEST_CHANNEL, request),
+  mcpDisconnect: (sessionId) => ipcRenderer.invoke(IpcChannels.MCP_DISCONNECT_CHANNEL, sessionId),
+  onMcpEvent: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, event: unknown) => {
+      if (typeof event !== "object" || event === null || !("sessionId" in event)) return;
+      listener(event as Parameters<typeof listener>[0]);
+    };
+    ipcRenderer.on(IpcChannels.MCP_EVENT_CHANNEL, wrappedListener);
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.MCP_EVENT_CHANNEL, wrappedListener);
+    };
+  },
   pasteAsText: () => ipcRenderer.invoke(IpcChannels.PASTE_AS_TEXT_CHANNEL, undefined),
   openWorkspaceWindow: (workspace) =>
     ipcRenderer.invoke(IpcChannels.OPEN_WORKSPACE_WINDOW_CHANNEL, workspace),

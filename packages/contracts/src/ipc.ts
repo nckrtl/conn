@@ -1223,6 +1223,83 @@ export interface DesktopDatabaseResponse {
   readonly durationMs: number;
 }
 
+/** An MCP server the MCP panel connects to: a local command, or a Streamable HTTP / SSE URL. */
+export type DesktopMcpServer =
+  | {
+      readonly transport: "stdio";
+      readonly command: string;
+      readonly args: readonly string[];
+      /** Added to the desktop app's environment. */
+      readonly env: Readonly<Record<string, string>>;
+      /** The folder the command runs in, on this machine; null for the home folder. */
+      readonly cwd: string | null;
+    }
+  | {
+      readonly transport: "http" | "sse";
+      readonly url: string;
+      readonly headers: readonly DesktopApiHeader[];
+    };
+
+export interface DesktopMcpConnectRequest {
+  /** Chosen by the panel; a second connect with the same id replaces the first session. */
+  readonly sessionId: string;
+  readonly server: DesktopMcpServer;
+}
+
+export interface DesktopMcpServerInfo {
+  readonly name: string;
+  readonly title: string | null;
+  readonly version: string;
+  readonly protocolVersion: string | null;
+  readonly instructions: string | null;
+  readonly capabilities: {
+    readonly tools: boolean;
+    readonly resources: boolean;
+    readonly prompts: boolean;
+    readonly logging: boolean;
+  };
+}
+
+export interface DesktopMcpConnectResponse {
+  readonly error: string | null;
+  readonly info: DesktopMcpServerInfo | null;
+  readonly durationMs: number;
+}
+
+export type DesktopMcpMethod =
+  | "ping"
+  | "tools/list"
+  | "tools/call"
+  | "resources/list"
+  | "resources/templates/list"
+  | "resources/read"
+  | "prompts/list"
+  | "prompts/get";
+
+export interface DesktopMcpRequest {
+  readonly sessionId: string;
+  readonly method: DesktopMcpMethod;
+  /** The JSON-RPC params. List methods return every page as one result. */
+  readonly params: unknown;
+}
+
+export interface DesktopMcpResponse {
+  readonly error: string | null;
+  /** The JSON-RPC result, as the server sent it. */
+  readonly result: unknown;
+  readonly durationMs: number;
+}
+
+/** Traffic of one MCP session, pushed by the main process for the panel's log. */
+export interface DesktopMcpEvent {
+  readonly sessionId: string;
+  readonly at: number;
+  /** `send`/`receive`: a JSON-RPC message; `stderr`: server output; `closed`: the session ended. */
+  readonly kind: "send" | "receive" | "stderr" | "closed";
+  readonly message?: unknown;
+  readonly text?: string;
+}
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** Absolute path of a dropped or picked file; absent on desktop builds predating it. */
@@ -1348,6 +1425,15 @@ export interface DesktopBridge {
    * connection. Optional: other desktop builds lack it.
    */
   databaseRun?: (request: DesktopDatabaseRequest) => Promise<DesktopDatabaseResponse>;
+  /**
+   * nckrtl fork: the MCP panel's sessions, held by the main process (stdio servers run on this
+   * machine; HTTP servers get the integrated browser's certificate trust). Optional: other
+   * desktop builds lack them.
+   */
+  mcpConnect?: (request: DesktopMcpConnectRequest) => Promise<DesktopMcpConnectResponse>;
+  mcpRequest?: (request: DesktopMcpRequest) => Promise<DesktopMcpResponse>;
+  mcpDisconnect?: (sessionId: string) => Promise<void>;
+  onMcpEvent?: (listener: (event: DesktopMcpEvent) => void) => () => void;
   /** Present when the desktop shell can perform an ordered plain-text paste. */
   pasteAsText?: () => Promise<void>;
   /** Opens an extra desktop window showing a workspace (id or name; null = all projects). */

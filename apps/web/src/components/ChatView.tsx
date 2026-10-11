@@ -221,6 +221,7 @@ import { RightPanelTabs } from "./RightPanelTabs";
 import { AgentsPanel } from "./AgentsPanel";
 import { ApiPanel } from "../api/ApiPanel";
 import { DatabasePanel } from "../database/DatabasePanel";
+import { McpPanel } from "../mcp/McpPanel";
 import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
 import { ThreadPullRequestsPanel } from "./pullRequest/ThreadPullRequestsPanel";
 import { useDeviceState } from "~/state/device";
@@ -4597,6 +4598,16 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject || !databaseAvailable) return;
     useRightPanelStore.getState().open(activeThreadRef, "database");
   }, [activeProject, activeThreadRef, databaseAvailable]);
+  // nckrtl fork: the MCP panel holds its sessions in the desktop shell.
+  const mcpAvailable =
+    activeThreadRef !== null &&
+    activeProject !== null &&
+    typeof window !== "undefined" &&
+    window.desktopBridge?.mcpConnect !== undefined;
+  const addMcpSurface = useCallback(() => {
+    if (!activeThreadRef || !activeProject || !mcpAvailable) return;
+    useRightPanelStore.getState().open(activeThreadRef, "mcp");
+  }, [activeProject, activeThreadRef, mcpAvailable]);
   const supportsThreadPullRequests =
     serverConfig?.environment.capabilities.threadPullRequests === true;
   const visiblePullRequests = visibleThreadPullRequests(
@@ -9762,6 +9773,13 @@ export default function ChatView(props: ChatViewProps) {
         environmentId={activeProject.environmentId}
         cwd={activeProject.workspaceRoot}
       />
+    ) : renderedRightPanelSurface?.kind === "mcp" && activeProject && activeProjectKey ? (
+      <McpPanel
+        projectKey={activeProjectKey}
+        environmentId={activeProject.environmentId}
+        cwd={activeProject.workspaceRoot}
+        baseUrl={apiBaseUrl}
+      />
     ) : renderedRightPanelSurface?.kind === "agents" ? (
       <AgentsPanel
         model={agentPanelModel}
@@ -10452,6 +10470,8 @@ export default function ChatView(props: ChatViewProps) {
             apiAvailable={apiAvailable}
             onAddDatabase={addDatabaseSurface}
             databaseAvailable={databaseAvailable}
+            onAddMcp={addMcpSurface}
+            mcpAvailable={mcpAvailable}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
             diffAvailable={isServerThread && isGitRepo}
@@ -10514,6 +10534,8 @@ export default function ChatView(props: ChatViewProps) {
             apiAvailable={apiAvailable}
             onAddDatabase={addDatabaseSurface}
             databaseAvailable={databaseAvailable}
+            onAddMcp={addMcpSurface}
+            mcpAvailable={mcpAvailable}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
             diffAvailable={isServerThread && isGitRepo}

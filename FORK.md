@@ -1,18 +1,20 @@
 # nckrtl fork of T3 Code
 
 This is Nick's fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code)
-at [nckrtl/t3code](https://github.com/nckrtl/t3code). Read this file before you
+at [nckrtl/conn](https://github.com/nckrtl/conn), shipped as Conn. Read this file before you
 merge upstream, build, or change shared UI. Upstream's `AGENTS.md` still
 applies to everything else.
 
 ## Branch and build
 
-- `nckrtl` is the only long-lived branch. It holds every customization. New
-  work lands on `nckrtl` directly. The old `rooms-patches-*` branches are
-  history; do not build from them or commit to them.
+- `main` is the only long-lived branch. It holds every customization. New
+  work lands on `main` directly. Until 2026-10-11 this line was the `nckrtl`
+  branch of `nckrtl/t3code`; the old `nckrtl` and `rooms-patches-*` branches
+  are history, and `upstream-mirror` is the old upstream copy. Do not build
+  from them or commit to them. `wip/*` branches hold unreviewed saved work.
 - Upstream is taken in by merging a stable tag (`vX.Y.Z`) into a sync branch
-  off `nckrtl`, then merging that back after a good build. Never force-push
-  `nckrtl`.
+  off `main`, then merging that back after a good build. Never force-push
+  `main`.
 - Only the Mac desktop app is custom. Servers run official upstream T3.
 - Build, sign and install: [.agents/skills/nckrtl-shell-design/references/build.md](.agents/skills/nckrtl-shell-design/references/build.md).
   Builds ship no update feed (`publish: null` in
@@ -61,11 +63,11 @@ applies to everything else.
    touched (`vp test run src/laravelToolbar`, `src/annotations`, the
    workspace logic tests, `apps/desktop` `src/window`).
 4. Build, sign, install and smoke as described in `build.md`. Merge the sync
-   branch into `nckrtl` only after a good build and smoke. Before that merge,
-   tag the current `nckrtl` tip as `nckrtl-pre-<tag>` and push the tag.
+   branch into `main` only after a good build and smoke. Before that merge,
+   tag the current `main` tip as `conn-pre-<tag>` and push the tag.
 
-Rollback is cheap: `nckrtl` changes only after a good build and smoke,
-`nckrtl-pre-<tag>` marks the previous tip, and the install keeps a backup of
+Rollback is cheap: `main` changes only after a good build and smoke,
+`conn-pre-<tag>` marks the previous tip, and the install keeps a backup of
 the previous app. If an automatic merge damaged fork work, reset to the tag and
 redo the sync by hand.
 

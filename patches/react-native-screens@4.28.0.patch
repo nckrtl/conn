@@ -209,7 +209,7 @@ index 8a41697..309ba2f 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/ios/RNSScreenStackHeaderConfig.mm b/ios/RNSScreenStackHeaderConfig.mm
-index a54cb63..4ff30b3 100644
+index a54cb63..2f52037 100644
 --- a/ios/RNSScreenStackHeaderConfig.mm
 +++ b/ios/RNSScreenStackHeaderConfig.mm
 @@ -24,11 +24,46 @@
@@ -344,7 +344,7 @@ index a54cb63..4ff30b3 100644
          break;
        }
        case RNSScreenStackHeaderSubviewTypeCenter:
-@@ -648,10 +693,479 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -648,10 +693,531 @@ + (void)updateViewController:(UIViewController *)vc
    // This assignment should be done after `navitem.titleView = ...` assignment (iOS 16.0 bug).
    // See: https://github.com/software-mansion/react-native-screens/issues/1570 (comments)
    navitem.title = config.title;
@@ -525,7 +525,13 @@ index a54cb63..4ff30b3 100644
 +          mailSearchToolbarConfig[@"filterButtonId"] != nil || mailSearchToolbarConfig[@"filterMenu"] != nil;
 +      BOOL hasComposeButton =
 +          mailSearchToolbarConfig[@"composeButtonId"] != nil || mailSearchToolbarConfig[@"composeMenu"] != nil;
-+      CGFloat glassLeadingInset = hasFilterButton ? sideButtonReserve : 0.0;
++      // `filterInsideSearch` moves the filter control into the search pill's
++      // trailing edge and frees the leading slot for `leadingButtonId`.
++      BOOL filterInsideSearch = [mailSearchToolbarConfig[@"filterInsideSearch"] boolValue] && hasFilterButton;
++      BOOL hasLeadingButton = mailSearchToolbarConfig[@"leadingButtonId"] != nil;
++      BOOL hasLeadingSlot = hasLeadingButton || (hasFilterButton && !filterInsideSearch);
++      CGFloat embeddedFilterReserve = filterInsideSearch ? 40.0 : 0.0;
++      CGFloat glassLeadingInset = hasLeadingSlot ? sideButtonReserve : 0.0;
 +      CGFloat glassTrailingInset = hasComposeButton ? -sideButtonReserve : 0.0;
 +      NSLayoutConstraint *glassLeadingConstraint =
 +          [glassView.leadingAnchor constraintEqualToAnchor:toolbarHost.leadingAnchor constant:glassLeadingInset];
@@ -609,7 +615,8 @@ index a54cb63..4ff30b3 100644
 +        [glassView.contentView addSubview:searchBar];
 +        [NSLayoutConstraint activateConstraints:@[
 +          [searchBar.leadingAnchor constraintEqualToAnchor:glassView.contentView.leadingAnchor constant:8.0],
-+          [searchBar.trailingAnchor constraintEqualToAnchor:glassView.contentView.trailingAnchor constant:-8.0],
++          [searchBar.trailingAnchor constraintEqualToAnchor:glassView.contentView.trailingAnchor
++                                                   constant:-(8.0 + embeddedFilterReserve)],
 +          [searchBar.centerYAnchor constraintEqualToAnchor:glassView.contentView.centerYAnchor],
 +          [searchBar.heightAnchor constraintEqualToConstant:searchFieldHeight],
 +        ]];
@@ -630,7 +637,8 @@ index a54cb63..4ff30b3 100644
 +        [glassView.contentView addSubview:searchField];
 +        [NSLayoutConstraint activateConstraints:@[
 +          [searchField.leadingAnchor constraintEqualToAnchor:glassView.contentView.leadingAnchor constant:14.0],
-+          [searchField.trailingAnchor constraintEqualToAnchor:glassView.contentView.trailingAnchor constant:-14.0],
++          [searchField.trailingAnchor constraintEqualToAnchor:glassView.contentView.trailingAnchor
++                                                     constant:-(14.0 + embeddedFilterReserve)],
 +          [searchField.centerYAnchor constraintEqualToAnchor:glassView.contentView.centerYAnchor],
 +          [searchField.heightAnchor constraintEqualToConstant:searchFieldHeight],
 +        ]];
@@ -664,12 +672,21 @@ index a54cb63..4ff30b3 100644
 +            forControlEvents:UIControlEventEditingChanged];
 +      }
 +
++      // The leading glass button: a plain action (`leadingButtonId`) or, without
++      // `filterInsideSearch`, the filter button.
 +      UIButton *filterButton = nil;
-+      if (hasFilterButton) {
-+        filterButton = makeGlassButton(
-+            mailSearchToolbarConfig[@"filterSystemImageName"] ?: @"line.3.horizontal.decrease",
-+            mailSearchToolbarConfig[@"filterButtonId"],
-+            mailSearchToolbarConfig[@"filterMenu"]);
++      if (hasLeadingSlot) {
++        filterButton = hasLeadingButton
++            ? makeGlassButton(
++                  mailSearchToolbarConfig[@"leadingSystemImageName"] ?: @"circle",
++                  mailSearchToolbarConfig[@"leadingButtonId"],
++                  nil)
++            : makeGlassButton(
++                  mailSearchToolbarConfig[@"filterSystemImageName"] ?: @"line.3.horizontal.decrease",
++                  mailSearchToolbarConfig[@"filterButtonId"],
++                  mailSearchToolbarConfig[@"filterMenu"]);
++        filterButton.accessibilityLabel = hasLeadingButton ? mailSearchToolbarConfig[@"leadingAccessibilityLabel"]
++                                                           : mailSearchToolbarConfig[@"filterAccessibilityLabel"];
 +        filterButton.translatesAutoresizingMaskIntoConstraints = NO;
 +        [toolbarHost addSubview:filterButton];
 +        [NSLayoutConstraint activateConstraints:@[
@@ -680,12 +697,47 @@ index a54cb63..4ff30b3 100644
 +        ]];
 +      }
 +
++      // The filter control embedded in the search pill: a plain (glass-less)
++      // button on the trailing edge, so search and filter read as one element.
++      if (filterInsideSearch) {
++        UIButtonConfiguration *embeddedConfiguration = [UIButtonConfiguration plainButtonConfiguration];
++        embeddedConfiguration.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
++        embeddedConfiguration.image = [UIImage
++            systemImageNamed:mailSearchToolbarConfig[@"filterSystemImageName"] ?: @"line.3.horizontal.decrease"];
++        embeddedConfiguration.baseForegroundColor = UIColor.labelColor;
++        UIButton *embeddedFilterButton = [UIButton buttonWithConfiguration:embeddedConfiguration primaryAction:nil];
++        NSDictionary *filterMenuConfig = mailSearchToolbarConfig[@"filterMenu"];
++        NSString *embeddedFilterButtonId = mailSearchToolbarConfig[@"filterButtonId"];
++        if (filterMenuConfig != nil) {
++          embeddedFilterButton.menu = [RNSBarButtonItem initUIMenuWithDict:filterMenuConfig
++                                                                menuAction:emitMenuPress
++                                                               imageLoader:config->_imageLoader];
++          embeddedFilterButton.showsMenuAsPrimaryAction = YES;
++        } else if (embeddedFilterButtonId != nil) {
++          [embeddedFilterButton addAction:[UIAction actionWithHandler:^(__kindof UIAction *_Nonnull action) {
++                                  emitButtonPress(embeddedFilterButtonId);
++                                }]
++                         forControlEvents:UIControlEventTouchUpInside];
++        }
++        embeddedFilterButton.accessibilityLabel = mailSearchToolbarConfig[@"filterAccessibilityLabel"];
++        embeddedFilterButton.translatesAutoresizingMaskIntoConstraints = NO;
++        [glassView.contentView addSubview:embeddedFilterButton];
++        [NSLayoutConstraint activateConstraints:@[
++          [embeddedFilterButton.trailingAnchor constraintEqualToAnchor:glassView.contentView.trailingAnchor
++                                                              constant:-4.0],
++          [embeddedFilterButton.centerYAnchor constraintEqualToAnchor:glassView.contentView.centerYAnchor],
++          [embeddedFilterButton.widthAnchor constraintEqualToConstant:36.0],
++          [embeddedFilterButton.heightAnchor constraintEqualToConstant:36.0],
++        ]];
++      }
++
 +      UIButton *composeButton = nil;
 +      if (hasComposeButton) {
 +        composeButton = makeGlassButton(
 +            mailSearchToolbarConfig[@"composeSystemImageName"] ?: @"square.and.pencil",
 +            mailSearchToolbarConfig[@"composeButtonId"],
 +            mailSearchToolbarConfig[@"composeMenu"]);
++        composeButton.accessibilityLabel = mailSearchToolbarConfig[@"composeAccessibilityLabel"];
 +        composeButton.translatesAutoresizingMaskIntoConstraints = NO;
 +        [toolbarHost addSubview:composeButton];
 +        [NSLayoutConstraint activateConstraints:@[
@@ -828,7 +880,7 @@ index a54cb63..4ff30b3 100644
  
    // Setting navigation bar visibility is split to mitigate iOS 26 bug with bar button items
    // (setting nav bar visibility should be done after `navitem.*BarButtonItems`).
-@@ -784,6 +1298,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -784,6 +1350,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
  
  - (NSArray<UIBarButtonItem *> *)barButtonItemsFromConfigs:(NSArray<NSDictionary<NSString *, id> *> *)dicts
                                           withCurrentItems:(NSArray<UIBarButtonItem *> *)currentItems
@@ -837,7 +889,7 @@ index a54cb63..4ff30b3 100644
  {
    if (dicts.count == 0) {
      return currentItems;
-@@ -792,7 +1308,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -792,7 +1360,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    [items addObjectsFromArray:currentItems];
    for (NSUInteger i = 0; i < dicts.count; i++) {
      NSDictionary *dict = dicts[i];
@@ -1039,7 +1091,7 @@ index a54cb63..4ff30b3 100644
        RNSBarButtonItem *item = [[RNSBarButtonItem alloc] initWithConfig:dict
            action:^(NSString *buttonId) {
              auto eventEmitter = std::static_pointer_cast<const facebook::react::RNSScreenStackHeaderConfigEventEmitter>(
-@@ -814,19 +1523,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -814,19 +1575,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
            }
            imageLoader:_imageLoader];
        NSNumber *index = dict[@"index"];
@@ -1069,7 +1121,7 @@ index a54cb63..4ff30b3 100644
          [items insertObject:item atIndex:index.integerValue];
        } else {
          [items addObject:item];
-@@ -836,6 +1549,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -836,6 +1601,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    return items;
  }
  
@@ -1117,7 +1169,7 @@ index a54cb63..4ff30b3 100644
  RNS_IGNORE_SUPER_CALL_BEGIN
  - (void)insertReactSubview:(RNSScreenStackHeaderSubview *)subview atIndex:(NSInteger)atIndex
  {
-@@ -1025,6 +1779,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1025,6 +1831,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    }
  
    _title = RCTNSStringFromStringNilIfEmpty(newScreenProps.title);
@@ -1126,7 +1178,7 @@ index a54cb63..4ff30b3 100644
    if (newScreenProps.titleFontFamily != oldScreenProps.titleFontFamily) {
      _titleFontFamily = RCTNSStringFromStringNilIfEmpty(newScreenProps.titleFontFamily);
    }
-@@ -1050,6 +1806,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1050,6 +1858,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    _disableBackButtonMenu = newScreenProps.disableBackButtonMenu;
    _backButtonDisplayMode =
        [RNSConvert UINavigationItemBackButtonDisplayModeFromCppEquivalent:newScreenProps.backButtonDisplayMode];
@@ -1134,7 +1186,7 @@ index a54cb63..4ff30b3 100644
  
    if (newScreenProps.userInterfaceStyle != oldScreenProps.userInterfaceStyle) {
      _userInterfaceStyle = [RNSConvert UIUserInterfaceStyleFromCppEquivalent:newScreenProps.userInterfaceStyle];
-@@ -1096,6 +1853,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1096,6 +1905,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
      _headerRightBarButtonItems = array;
    }
  
@@ -1253,10 +1305,10 @@ index add33c4..489afa5 100644
  
  // Needed because of this: https://github.com/facebook/react-native/pull/37274
 diff --git a/lib/commonjs/components/ScreenStackHeaderConfig.js b/lib/commonjs/components/ScreenStackHeaderConfig.js
-index 6e68cd1..9e09485 100644
+index 6e68cd1..1d7c283 100644
 --- a/lib/commonjs/components/ScreenStackHeaderConfig.js
 +++ b/lib/commonjs/components/ScreenStackHeaderConfig.js
-@@ -31,17 +31,42 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
+@@ -31,17 +31,46 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
    } = (0, _EdgeInsetApplicationContext.useEdgeInsetApplication)(!props.hidden, props.disableTopInsetApplication ?? false, props.disableLeftInsetApplication ?? false, props.disableRightInsetApplication ?? false, props.disableBottomInsetApplication ?? false);
    const {
      headerLeftBarButtonItems,
@@ -1286,6 +1338,10 @@ index 6e68cd1..9e09485 100644
 +      if (!item || item.type !== 'mailSearchToolbar') {
 +        continue;
 +      }
++      if (item.leadingButtonId === buttonId) {
++        item.onLeadingPress?.();
++        return;
++      }
 +      if (item.filterButtonId === buttonId) {
 +        item.onFilterPress?.();
 +        return;
@@ -1302,7 +1358,7 @@ index 6e68cd1..9e09485 100644
      }
    } : undefined;
  
-@@ -64,7 +89,7 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
+@@ -64,7 +93,7 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
      };
  
      // Check each bar-button item with a menu
@@ -1311,7 +1367,7 @@ index 6e68cd1..9e09485 100644
      for (const item of allItems) {
        if (item && item.type === 'menu' && item.menu) {
          const action = findInMenu(item.menu, event.nativeEvent.menuId);
-@@ -72,6 +97,15 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
+@@ -72,6 +101,15 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
            action.onPress();
            return;
          }
@@ -1327,7 +1383,7 @@ index 6e68cd1..9e09485 100644
        }
      }
    } : undefined;
-@@ -79,6 +113,8 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
+@@ -79,6 +117,8 @@ const ScreenStackHeaderConfig = exports.ScreenStackHeaderConfig = /*#__PURE__*/_
      userInterfaceStyle: props.experimental_userInterfaceStyle,
      headerLeftBarButtonItems: preparedHeaderLeftBarButtonItems,
      headerRightBarButtonItems: preparedHeaderRightBarButtonItems,
@@ -1425,10 +1481,10 @@ index 589b6cc..b584624 100644
  //# sourceMappingURL=prepareHeaderBarButtonItems.js.map
 \ No newline at end of file
 diff --git a/lib/module/components/ScreenStackHeaderConfig.js b/lib/module/components/ScreenStackHeaderConfig.js
-index 242898c..7cebaa3 100644
+index 242898c..36b3323 100644
 --- a/lib/module/components/ScreenStackHeaderConfig.js
 +++ b/lib/module/components/ScreenStackHeaderConfig.js
-@@ -27,17 +27,42 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
+@@ -27,17 +27,46 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
    } = useEdgeInsetApplication(!props.hidden, props.disableTopInsetApplication ?? false, props.disableLeftInsetApplication ?? false, props.disableRightInsetApplication ?? false, props.disableBottomInsetApplication ?? false);
    const {
      headerLeftBarButtonItems,
@@ -1458,6 +1514,10 @@ index 242898c..7cebaa3 100644
 +      if (!item || item.type !== 'mailSearchToolbar') {
 +        continue;
 +      }
++      if (item.leadingButtonId === buttonId) {
++        item.onLeadingPress?.();
++        return;
++      }
 +      if (item.filterButtonId === buttonId) {
 +        item.onFilterPress?.();
 +        return;
@@ -1474,7 +1534,7 @@ index 242898c..7cebaa3 100644
      }
    } : undefined;
  
-@@ -60,7 +85,7 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
+@@ -60,7 +89,7 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
      };
  
      // Check each bar-button item with a menu
@@ -1483,7 +1543,7 @@ index 242898c..7cebaa3 100644
      for (const item of allItems) {
        if (item && item.type === 'menu' && item.menu) {
          const action = findInMenu(item.menu, event.nativeEvent.menuId);
-@@ -68,6 +93,15 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
+@@ -68,6 +97,15 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
            action.onPress();
            return;
          }
@@ -1499,7 +1559,7 @@ index 242898c..7cebaa3 100644
        }
      }
    } : undefined;
-@@ -75,6 +109,8 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
+@@ -75,6 +113,8 @@ export const ScreenStackHeaderConfig = /*#__PURE__*/React.forwardRef((props, ref
      userInterfaceStyle: props.experimental_userInterfaceStyle,
      headerLeftBarButtonItems: preparedHeaderLeftBarButtonItems,
      headerRightBarButtonItems: preparedHeaderRightBarButtonItems,
@@ -1665,7 +1725,7 @@ index 2cb1a79..d6ca5a4 100644
  }
  declare const _default: HostComponent<NativeProps>;
 diff --git a/lib/typescript/types.d.ts b/lib/typescript/types.d.ts
-index ff37881..b487303 100644
+index ff37881..a69dcdf 100644
 --- a/lib/typescript/types.d.ts
 +++ b/lib/typescript/types.d.ts
 @@ -19,6 +19,7 @@ export type SearchBarCommands = {
@@ -1765,7 +1825,7 @@ index ff37881..b487303 100644
      /**
       * The tint color to apply to the item.
       *
-@@ -1201,8 +1256,38 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
+@@ -1201,8 +1256,45 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
  export interface HeaderBarButtonItemSpacing {
      type: 'spacing';
      spacing: number;
@@ -1788,6 +1848,13 @@ index ff37881..b487303 100644
 +    composeButtonId?: string | undefined;
 +    composeMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
 +    composeSystemImageName?: string | undefined;
++    leadingAccessibilityLabel?: string | undefined;
++    leadingButtonId?: string | undefined;
++    leadingSystemImageName?: string | undefined;
++    onLeadingPress?: (() => void) | undefined;
++    filterAccessibilityLabel?: string | undefined;
++    filterInsideSearch?: boolean | undefined;
++    composeAccessibilityLabel?: string | undefined;
 +    filterButtonId?: string | undefined;
 +    filterMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
 +    filterSystemImageName?: string | undefined;
@@ -1806,7 +1873,7 @@ index ff37881..b487303 100644
   * Custom Screen Transition
   */
 diff --git a/src/components/ScreenStackHeaderConfig.tsx b/src/components/ScreenStackHeaderConfig.tsx
-index 509d6cd..761e49b 100644
+index 509d6cd..5f02d69 100644
 --- a/src/components/ScreenStackHeaderConfig.tsx
 +++ b/src/components/ScreenStackHeaderConfig.tsx
 @@ -54,7 +54,12 @@ export const ScreenStackHeaderConfig = React.forwardRef<
@@ -1864,7 +1931,7 @@ index 509d6cd..761e49b 100644
          );
          if (
            pressedItem &&
-@@ -87,6 +106,32 @@ export const ScreenStackHeaderConfig = React.forwardRef<
+@@ -87,6 +106,36 @@ export const ScreenStackHeaderConfig = React.forwardRef<
            pressedItem.onPress
          ) {
            pressedItem.onPress();
@@ -1873,6 +1940,10 @@ index 509d6cd..761e49b 100644
 +        for (const item of allItems) {
 +          if (!item || item.type !== 'mailSearchToolbar') {
 +            continue;
++          }
++          if (item.leadingButtonId === buttonId) {
++            item.onLeadingPress?.();
++            return;
 +          }
 +          if (item.filterButtonId === buttonId) {
 +            item.onFilterPress?.();
@@ -1897,7 +1968,7 @@ index 509d6cd..761e49b 100644
          }
        }
      : undefined;
-@@ -117,6 +162,8 @@ export const ScreenStackHeaderConfig = React.forwardRef<
+@@ -117,6 +166,8 @@ export const ScreenStackHeaderConfig = React.forwardRef<
          const allItems = [
            ...(preparedHeaderLeftBarButtonItems ?? []),
            ...(preparedHeaderRightBarButtonItems ?? []),
@@ -1906,7 +1977,7 @@ index 509d6cd..761e49b 100644
          ];
          for (const item of allItems) {
            if (item && item.type === 'menu' && item.menu) {
-@@ -125,6 +172,17 @@ export const ScreenStackHeaderConfig = React.forwardRef<
+@@ -125,6 +176,17 @@ export const ScreenStackHeaderConfig = React.forwardRef<
                action.onPress();
                return;
              }
@@ -1924,7 +1995,7 @@ index 509d6cd..761e49b 100644
            }
          }
        }
-@@ -136,6 +194,8 @@ export const ScreenStackHeaderConfig = React.forwardRef<
+@@ -136,6 +198,8 @@ export const ScreenStackHeaderConfig = React.forwardRef<
        userInterfaceStyle={props.experimental_userInterfaceStyle}
        headerLeftBarButtonItems={preparedHeaderLeftBarButtonItems}
        headerRightBarButtonItems={preparedHeaderRightBarButtonItems}
@@ -2082,7 +2153,7 @@ index 9a6af57..03aa2b2 100644
  }
  
 diff --git a/src/types.tsx b/src/types.tsx
-index 8594b73..20c6e88 100644
+index 8594b73..395088d 100644
 --- a/src/types.tsx
 +++ b/src/types.tsx
 @@ -35,6 +35,7 @@ export type SearchBarCommands = {
@@ -2182,7 +2253,7 @@ index 8594b73..20c6e88 100644
    /**
     * The tint color to apply to the item.
     *
-@@ -1335,11 +1390,47 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
+@@ -1335,11 +1390,54 @@ export interface HeaderBarButtonItemWithMenu extends SharedHeaderBarButtonItem {
  export interface HeaderBarButtonItemSpacing {
    type: 'spacing';
    spacing: number;
@@ -2208,6 +2279,13 @@ index 8594b73..20c6e88 100644
 +  composeButtonId?: string | undefined;
 +  composeMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
 +  composeSystemImageName?: string | undefined;
++  leadingAccessibilityLabel?: string | undefined;
++  leadingButtonId?: string | undefined;
++  leadingSystemImageName?: string | undefined;
++  onLeadingPress?: (() => void) | undefined;
++  filterAccessibilityLabel?: string | undefined;
++  filterInsideSearch?: boolean | undefined;
++  composeAccessibilityLabel?: string | undefined;
 +  filterButtonId?: string | undefined;
 +  filterMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
 +  filterSystemImageName?: string | undefined;

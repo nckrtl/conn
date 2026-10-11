@@ -22,7 +22,6 @@ import {
 import { useResolveClassNames } from "uniwind";
 
 import { AppText as Text } from "./components/AppText";
-import { getCompactBrandHeaderOptions } from "./components/CompactBrandTitle";
 import {
   RenderErrorBoundary,
   RenderFailureView,
@@ -616,7 +615,9 @@ const RootStackConfig = createNativeStackNavigator({
         ...GLASS_HEADER_OPTIONS,
         contentStyle: { backgroundColor: "transparent" },
         headerBackVisible: false,
-        ...getCompactBrandHeaderOptions(),
+        // No brand lockup on Home; HomeRouteScreen adds the connection status.
+        headerTitle: "",
+        title: "",
       },
     }),
     Thread: createNativeStackScreen({

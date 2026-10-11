@@ -159,6 +159,34 @@ export function WorkspaceConnectionTitle(props: {
 }
 
 /**
+ * Home header without the brand lockup: the title slot is empty while
+ * connected and only shows the connection status while an environment is
+ * unavailable. The header itself stays mounted because the native bottom
+ * toolbar is attached to it.
+ */
+export function getConnectionStatusOnlyHeaderOptions(opts: {
+  readonly headerWidth: number;
+  readonly onOpenEnvironments: () => void;
+}): NativeStackNavigationOptions {
+  // No trailing header actions remain, so only bar margins and title spacing
+  // limit the status label.
+  const maxWidth = Math.max(0, opts.headerWidth - 64);
+
+  return {
+    headerTitle: () => (
+      <WorkspaceConnectionTitle
+        brand={null}
+        maxWidth={maxWidth}
+        onPress={opts.onOpenEnvironments}
+        statusOffset={brandTitleOffset()}
+      />
+    ),
+    title: "",
+    unstable_headerLeftItems: undefined,
+  };
+}
+
+/**
  * getCompactBrandHeaderOptions with the brand slot upgraded to the
  * connection-status swap. Screens with an environment-settings callback apply
  * this over the static brand options at mount.

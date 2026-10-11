@@ -21,7 +21,7 @@ import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
-import { getConnectionAwareBrandHeaderOptions } from "./WorkspaceConnectionTitle";
+import { getConnectionStatusOnlyHeaderOptions } from "./WorkspaceConnectionTitle";
 
 /* ─── Route screen ───────────────────────────────────────────────────── */
 
@@ -150,12 +150,12 @@ export function HomeRouteScreen() {
     >
       <>
         {/* Restore the header after leaving split view; screen options are
-            shallow-merged. The brand slot also doubles as the connection
-            status surface while an environment reconnects. */}
+            shallow-merged. The title slot has no brand; it only shows the
+            connection status while an environment reconnects. */}
         <NativeStackScreenOptions
           optionsVersion={windowWidth}
           options={{
-            ...getConnectionAwareBrandHeaderOptions({
+            ...getConnectionStatusOnlyHeaderOptions({
               headerWidth: windowWidth,
               onOpenEnvironments: () =>
                 navigation.navigate("SettingsSheet", {

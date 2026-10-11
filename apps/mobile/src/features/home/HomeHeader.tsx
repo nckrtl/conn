@@ -3,7 +3,6 @@ import { useCallback, useRef } from "react";
 import type { SearchBarCommands } from "react-native-screens";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
-import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
 import {
   createNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
@@ -49,29 +48,30 @@ export function HomeHeader(props: HomeHeaderProps) {
           // Static header config (glass, title, fonts) lives in Stack.tsx
           // (GLASS_HEADER_OPTIONS). Only dynamic values are set here.
           headerTintColor: iconColor,
-          unstable_headerRightItems: () => [
-            withNativeGlassHeaderItem({
-              accessibilityLabel: "Open settings",
-              icon: { name: "ellipsis", type: "sfSymbol" } as const,
-              identifier: "home-settings",
-              label: "",
-              onPress: props.onOpenSettings,
-              type: "button",
-            }),
-          ],
+          // Settings now lives in the bottom bar; the header carries no items.
+          unstable_headerRightItems: () => [],
           // The keys below are set per-branch (not `undefined`) so a later
           // reapply cannot clobber options owned by NativeHeaderToolbar.
           ...(NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED
             ? {
+                // Bottom bar, left to right: settings, search with the filter
+                // embedded on its trailing edge, then create.
                 unstable_headerToolbarItems: () => [
                   createNativeMailSearchToolbarItem({
-                    composeButtonId: "home-new-task",
-                    composeSystemImageName: "square.and.pencil",
+                    leadingButtonId: "home-settings",
+                    leadingSystemImageName: "ellipsis",
+                    leadingAccessibilityLabel: "Open settings",
+                    onLeadingPress: props.onOpenSettings,
+                    filterInsideSearch: true,
+                    filterAccessibilityLabel: "Filter threads",
                     filterMenu,
                     filterButtonId: "home-filter",
                     filterSystemImageName: hasCustomListOptions
                       ? "line.3.horizontal.decrease.circle.fill"
                       : "line.3.horizontal.decrease",
+                    composeButtonId: "home-new-task",
+                    composeSystemImageName: "plus",
+                    composeAccessibilityLabel: "New task",
                     onComposePress: props.onStartNewTask,
                     onSearchTextChange: props.onSearchQueryChange,
                     placeholder: "Search",
@@ -101,6 +101,15 @@ export function HomeHeader(props: HomeHeaderProps) {
 
       {NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED ? null : (
         <NativeHeaderToolbar placement="bottom">
+          <NativeHeaderToolbar.Button
+            accessibilityLabel="Open settings"
+            icon="ellipsis"
+            onPress={props.onOpenSettings}
+            separateBackground
+          />
+          <NativeHeaderToolbar.Spacer flexible />
+          {/* The pull-down search lives in the nav bar here, so the filter
+              cannot sit inside it; it stays beside the create button. */}
           <NativeHeaderToolbar.Menu
             accessibilityLabel="Filter threads"
             icon={
@@ -175,10 +184,9 @@ export function HomeHeader(props: HomeHeaderProps) {
               </NativeHeaderToolbar.Menu>
             ) : null}
           </NativeHeaderToolbar.Menu>
-          <NativeHeaderToolbar.Spacer flexible />
           <NativeHeaderToolbar.Button
             accessibilityLabel="New task"
-            icon="square.and.pencil"
+            icon="plus"
             onPress={props.onStartNewTask}
             separateBackground
           />

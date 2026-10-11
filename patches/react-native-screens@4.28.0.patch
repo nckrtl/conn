@@ -209,7 +209,7 @@ index 8a41697..309ba2f 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/ios/RNSScreenStackHeaderConfig.mm b/ios/RNSScreenStackHeaderConfig.mm
-index a54cb63..cd2e26d 100644
+index a54cb63..7634672 100644
 --- a/ios/RNSScreenStackHeaderConfig.mm
 +++ b/ios/RNSScreenStackHeaderConfig.mm
 @@ -24,11 +24,46 @@
@@ -368,7 +368,7 @@ index a54cb63..cd2e26d 100644
          break;
        }
        case RNSScreenStackHeaderSubviewTypeCenter:
-@@ -648,14 +708,538 @@ + (void)updateViewController:(UIViewController *)vc
+@@ -648,14 +708,542 @@ + (void)updateViewController:(UIViewController *)vc
    // This assignment should be done after `navitem.titleView = ...` assignment (iOS 16.0 bug).
    // See: https://github.com/software-mansion/react-native-screens/issues/1570 (comments)
    navitem.title = config.title;
@@ -495,7 +495,6 @@ index a54cb63..cd2e26d 100644
 +      }
 +
 +      CGFloat toolbarHeight = 48.0;
-+      CGFloat toolbarRadius = toolbarHeight / 2.0;
 +      CGFloat buttonSize = toolbarHeight;
 +      CGFloat sideButtonReserve = buttonSize + 8.0;
 +      CGFloat searchFieldHeight = 42.0;
@@ -542,7 +541,10 @@ index a54cb63..cd2e26d 100644
 +      glassEffect.interactive = YES;
 +      UIVisualEffectView *glassView = [[UIVisualEffectView alloc] initWithEffect:glassEffect];
 +      glassView.clipsToBounds = YES;
-+      glassView.layer.cornerRadius = toolbarRadius;
++      // The glass shape follows `cornerConfiguration`, not `layer.cornerRadius`.
++      // A capsule needs no bounds, so it stays round through the transient
++      // layouts a menu presentation causes.
++      glassView.cornerConfiguration = [UICornerConfiguration capsuleConfiguration];
 +      glassView.translatesAutoresizingMaskIntoConstraints = NO;
 +      [toolbarHost addSubview:glassView];
 +      BOOL hasFilterButton =
@@ -745,11 +747,13 @@ index a54cb63..cd2e26d 100644
 +        }
 +        embeddedFilterButton.accessibilityLabel = mailSearchToolbarConfig[@"filterAccessibilityLabel"];
 +        embeddedFilterButton.translatesAutoresizingMaskIntoConstraints = NO;
-+        [glassView.contentView addSubview:embeddedFilterButton];
++        // A sibling above the glass view, not a subview of it: inside the
++        // interactive glass, touches highlight the pill and the menu's source
++        // preview morphs the glass container, which drew it as a square.
++        [toolbarHost addSubview:embeddedFilterButton];
 +        [NSLayoutConstraint activateConstraints:@[
-+          [embeddedFilterButton.trailingAnchor constraintEqualToAnchor:glassView.contentView.trailingAnchor
-+                                                              constant:-4.0],
-+          [embeddedFilterButton.centerYAnchor constraintEqualToAnchor:glassView.contentView.centerYAnchor],
++          [embeddedFilterButton.trailingAnchor constraintEqualToAnchor:glassView.trailingAnchor constant:-4.0],
++          [embeddedFilterButton.centerYAnchor constraintEqualToAnchor:glassView.centerYAnchor],
 +          [embeddedFilterButton.widthAnchor constraintEqualToConstant:36.0],
 +          [embeddedFilterButton.heightAnchor constraintEqualToConstant:36.0],
 +        ]];
@@ -912,7 +916,7 @@ index a54cb63..cd2e26d 100644
    [navctr setNavigationBarHidden:NO animated:animated];
  
    if (animated && vc.transitionCoordinator != nil &&
-@@ -784,6 +1368,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -784,6 +1372,8 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
  
  - (NSArray<UIBarButtonItem *> *)barButtonItemsFromConfigs:(NSArray<NSDictionary<NSString *, id> *> *)dicts
                                           withCurrentItems:(NSArray<UIBarButtonItem *> *)currentItems
@@ -921,7 +925,7 @@ index a54cb63..cd2e26d 100644
  {
    if (dicts.count == 0) {
      return currentItems;
-@@ -792,7 +1378,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -792,7 +1382,200 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    [items addObjectsFromArray:currentItems];
    for (NSUInteger i = 0; i < dicts.count; i++) {
      NSDictionary *dict = dicts[i];
@@ -1123,7 +1127,7 @@ index a54cb63..cd2e26d 100644
        RNSBarButtonItem *item = [[RNSBarButtonItem alloc] initWithConfig:dict
            action:^(NSString *buttonId) {
              auto eventEmitter = std::static_pointer_cast<const facebook::react::RNSScreenStackHeaderConfigEventEmitter>(
-@@ -814,19 +1593,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -814,19 +1597,23 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
            }
            imageLoader:_imageLoader];
        NSNumber *index = dict[@"index"];
@@ -1153,7 +1157,7 @@ index a54cb63..cd2e26d 100644
          [items insertObject:item atIndex:index.integerValue];
        } else {
          [items addObject:item];
-@@ -836,6 +1619,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
+@@ -836,6 +1623,47 @@ - (void)applySemanticContentAttributeIfNeededToNavCtrl:(UINavigationController *
    return items;
  }
  
@@ -1201,7 +1205,7 @@ index a54cb63..cd2e26d 100644
  RNS_IGNORE_SUPER_CALL_BEGIN
  - (void)insertReactSubview:(RNSScreenStackHeaderSubview *)subview atIndex:(NSInteger)atIndex
  {
-@@ -1025,6 +1849,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1025,6 +1853,8 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    }
  
    _title = RCTNSStringFromStringNilIfEmpty(newScreenProps.title);
@@ -1210,7 +1214,7 @@ index a54cb63..cd2e26d 100644
    if (newScreenProps.titleFontFamily != oldScreenProps.titleFontFamily) {
      _titleFontFamily = RCTNSStringFromStringNilIfEmpty(newScreenProps.titleFontFamily);
    }
-@@ -1050,6 +1876,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1050,6 +1880,7 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
    _disableBackButtonMenu = newScreenProps.disableBackButtonMenu;
    _backButtonDisplayMode =
        [RNSConvert UINavigationItemBackButtonDisplayModeFromCppEquivalent:newScreenProps.backButtonDisplayMode];
@@ -1218,7 +1222,7 @@ index a54cb63..cd2e26d 100644
  
    if (newScreenProps.userInterfaceStyle != oldScreenProps.userInterfaceStyle) {
      _userInterfaceStyle = [RNSConvert UIUserInterfaceStyleFromCppEquivalent:newScreenProps.userInterfaceStyle];
-@@ -1096,6 +1923,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
+@@ -1096,6 +1927,30 @@ - (void)updateProps:(react::Props::Shared const &)props oldProps:(react::Props::
      _headerRightBarButtonItems = array;
    }
  

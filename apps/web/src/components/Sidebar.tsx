@@ -2006,7 +2006,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               {thread.branch ? (
                 <>
                   <ThreadWorktreeIndicator thread={thread} />
-                  <span className="flex min-w-0 flex-1 text-muted-foreground/40">
+                  {/* Rows with background work already fade to opacity-70, so the branch
+                      drops its own dimming there to stay readable. */}
+                  <span
+                    className={cn(
+                      "flex min-w-0 flex-1",
+                      shouldRecede && (status === "working" || status === "monitoring")
+                        ? "text-muted-foreground"
+                        : "text-muted-foreground/70",
+                    )}
+                  >
                     <MiddleTruncate value={thread.branch} showTitle={false} />
                   </span>
                 </>

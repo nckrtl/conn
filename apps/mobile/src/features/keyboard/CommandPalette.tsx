@@ -21,6 +21,7 @@ import { GlassSurface } from "../../components/GlassSurface";
 import { RowPressable } from "../../components/RowPressable";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
+import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { cn } from "../../lib/cn";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { T3KeyboardCommands } from "../../native/T3KeyboardCommands";
@@ -97,11 +98,24 @@ function PaletteRow(props: {
       style={{ height: ROW_HEIGHT }}
     >
       <View className="w-7 items-center">
-        <SymbolView
-          name={itemIcon(props.item)}
-          size={20}
-          tintColorClassName={props.selected ? "accent-thread-selected-foreground" : "accent-icon"}
-        />
+        {props.item.project ? (
+          <ProjectFavicon
+            environmentId={props.item.project.environmentId}
+            faviconPath={props.item.project.faviconPath}
+            projectIcon={props.item.project.projectIcon}
+            projectTitle={props.item.project.title}
+            size={20}
+            workspaceRoot={props.item.project.workspaceRoot}
+          />
+        ) : (
+          <SymbolView
+            name={itemIcon(props.item)}
+            size={20}
+            tintColorClassName={
+              props.selected ? "accent-thread-selected-foreground" : "accent-icon"
+            }
+          />
+        )}
       </View>
       <View className="flex-1">
         <Text numberOfLines={1} className={cn("text-base", foregroundClassName)}>
@@ -292,6 +306,7 @@ export function CommandPalette(props: {
     const projectItems: CommandPaletteItem[] = projects.map((project) => ({
       key: `project:${scopedProjectKey(project.environmentId, project.id)}`,
       kind: "project",
+      project,
       title: project.title,
       detail: `New thread · ${savedConnectionsById[project.environmentId]?.environmentLabel ?? project.environmentId}`,
       searchTerms: [project.workspaceRoot, "new thread", "project"],

@@ -27,6 +27,10 @@
       "types": "./src/projectFavicon.ts",
       "import": "./src/projectFavicon.ts"
     },
+    "./projectIdentity": {
+      "types": "./src/projectIdentity.ts",
+      "import": "./src/projectIdentity.ts"
+    },
     "./credentialFill": {
       "types": "./src/credentialFill.ts",
       "import": "./src/credentialFill.ts"

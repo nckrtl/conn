@@ -1,8 +1,17 @@
 import type { ProjectIconColor, ProjectIconOverride } from "@t3tools/contracts";
+import { deriveProjectIdentity } from "@t3tools/shared/projectIdentity";
+
+import { themeColorWithAlpha } from "./mobileTheme";
+
+export type ProjectMonogramGlyph = {
+  readonly kind: "monogram";
+  readonly text: string;
+  readonly color: ProjectIconColor;
+};
 
 export type ProjectIconGlyph =
   | { readonly kind: "emoji"; readonly emoji: string }
-  | { readonly kind: "monogram"; readonly text: string; readonly color: ProjectIconColor };
+  | ProjectMonogramGlyph;
 
 /**
  * Visible glyph count for sizing monogram text. Hermes has no Intl.Segmenter, so combining
@@ -12,29 +21,11 @@ export function countGlyphs(text: string): number {
   return Array.from(text.replace(/\p{M}/gu, "")).length;
 }
 
-/** Mirrors the automatic monogram web derives from a project name when it has no favicon. */
-export function projectMonogram(projectName: string): string {
-  const words =
-    projectName
-      .normalize("NFKC")
-      .trim()
-      .match(/[\p{L}\p{N}]+/gu) ?? [];
-  const firstWord = words[0];
-  if (!firstWord) return "PR";
-
-  const glyphs = Array.from(firstWord);
-  const first = glyphs[0] ?? "P";
-  const second =
-    glyphs.slice(1).find((glyph) => /\p{N}/u.test(glyph)) ??
-    (words.length > 1 ? Array.from(words.at(-1) ?? "")[0] : glyphs.at(-1)) ??
-    first;
-  return Array.from(`${first}${second}`.toUpperCase()).slice(0, 2).join("");
-}
-
 /**
- * Picks what mobile draws for an assigned project icon. Mobile does not bundle
- * the Lucide set, so a Lucide override keeps its color and falls back to the
- * project's monogram instead of the folder glyph.
+ * Picks what mobile draws for an assigned project icon, with the same precedence as the
+ * web `ProjectFavicon`. Mobile does not bundle the Lucide set (icons are imported one by
+ * one), so a Lucide override keeps its color and shows the title monogram instead.
+ * Returns null when the project has no override.
  */
 export function resolveProjectIconGlyph(
   projectIcon: ProjectIconOverride | null | undefined,
@@ -46,36 +37,54 @@ export function resolveProjectIconGlyph(
     case "monogram":
       return { kind: "monogram", text: projectIcon.text, color: projectIcon.color };
     case "lucide":
-      return { kind: "monogram", text: projectMonogram(projectTitle), color: projectIcon.color };
+      return {
+        kind: "monogram",
+        text: deriveProjectIdentity(projectTitle).monogram,
+        color: projectIcon.color,
+      };
     case undefined:
       return null;
   }
 }
 
-const PROJECT_ICON_COLOR_CLASSES: Record<
+/**
+ * The generated monogram shown when a project has no override and no favicon. Null only for
+ * a blank title, which keeps the folder, matching web.
+ */
+export function resolveProjectFallbackGlyph(projectTitle: string): ProjectMonogramGlyph | null {
+  if (projectTitle.trim().length === 0) return null;
+  const identity = deriveProjectIdentity(projectTitle);
+  return { kind: "monogram", text: identity.monogram, color: identity.color };
+}
+
+// Tailwind 600 on light themes and 400 on dark themes, the shades web uses for
+// `text-<color>-600 dark:text-<color>-400`.
+const PROJECT_ICON_COLORS: Record<
   ProjectIconColor,
-  { readonly text: string; readonly background: string }
+  { readonly light: string; readonly dark: string }
 > = {
-  gray: { text: "text-gray-500", background: "bg-gray-500/15" },
-  red: { text: "text-red-500", background: "bg-red-500/15" },
-  orange: { text: "text-orange-500", background: "bg-orange-500/15" },
-  amber: { text: "text-amber-500", background: "bg-amber-500/15" },
-  yellow: { text: "text-yellow-500", background: "bg-yellow-500/15" },
-  lime: { text: "text-lime-500", background: "bg-lime-500/15" },
-  green: { text: "text-green-500", background: "bg-green-500/15" },
-  emerald: { text: "text-emerald-500", background: "bg-emerald-500/15" },
-  teal: { text: "text-teal-500", background: "bg-teal-500/15" },
-  cyan: { text: "text-cyan-500", background: "bg-cyan-500/15" },
-  sky: { text: "text-sky-500", background: "bg-sky-500/15" },
-  blue: { text: "text-blue-500", background: "bg-blue-500/15" },
-  indigo: { text: "text-indigo-500", background: "bg-indigo-500/15" },
-  violet: { text: "text-violet-500", background: "bg-violet-500/15" },
-  purple: { text: "text-purple-500", background: "bg-purple-500/15" },
-  fuchsia: { text: "text-fuchsia-500", background: "bg-fuchsia-500/15" },
-  pink: { text: "text-pink-500", background: "bg-pink-500/15" },
-  rose: { text: "text-rose-500", background: "bg-rose-500/15" },
+  gray: { light: "#4b5563", dark: "#9ca3af" },
+  red: { light: "#dc2626", dark: "#f87171" },
+  orange: { light: "#ea580c", dark: "#fb923c" },
+  amber: { light: "#d97706", dark: "#fbbf24" },
+  yellow: { light: "#ca8a04", dark: "#facc15" },
+  lime: { light: "#65a30d", dark: "#a3e635" },
+  green: { light: "#16a34a", dark: "#4ade80" },
+  emerald: { light: "#059669", dark: "#34d399" },
+  teal: { light: "#0d9488", dark: "#2dd4bf" },
+  cyan: { light: "#0891b2", dark: "#22d3ee" },
+  sky: { light: "#0284c7", dark: "#38bdf8" },
+  blue: { light: "#2563eb", dark: "#60a5fa" },
+  indigo: { light: "#4f46e5", dark: "#818cf8" },
+  violet: { light: "#7c3aed", dark: "#a78bfa" },
+  purple: { light: "#9333ea", dark: "#c084fc" },
+  fuchsia: { light: "#c026d3", dark: "#e879f9" },
+  pink: { light: "#db2777", dark: "#f472b6" },
+  rose: { light: "#e11d48", dark: "#fb7185" },
 };
 
-export function projectIconColorClassNames(color: ProjectIconColor) {
-  return PROJECT_ICON_COLOR_CLASSES[color];
+/** Text color and the 14% tint web mixes behind it, for the current appearance. */
+export function projectIconColors(color: ProjectIconColor, appearance: "light" | "dark") {
+  const text = PROJECT_ICON_COLORS[color][appearance];
+  return { text, background: themeColorWithAlpha(text, 0.14) };
 }

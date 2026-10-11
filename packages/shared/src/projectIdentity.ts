@@ -1,5 +1,4 @@
-import { PROJECT_ICON_COLORS } from "./projectIconColors";
-import type { ProjectIconColor } from "@t3tools/contracts";
+import { ProjectIconColor } from "@t3tools/contracts";
 
 /** Visual identity tokens for a generated project badge. */
 export interface ProjectIdentity {
@@ -25,13 +24,16 @@ function projectMonogram(projectName: string): string {
   return Array.from(`${first}${second}`.toUpperCase()).slice(0, 2).join("");
 }
 
+// The contract order is the hash palette: reordering it recolors every
+// automatic project icon on every client.
 function projectColor(projectName: string): ProjectIconColor {
+  const palette = ProjectIconColor.literals;
   const seed = normalizeProjectName(projectName).toLocaleLowerCase("en-US") || "project";
   let index = 0;
   for (const glyph of seed) {
-    index = (index * 31 + (glyph.codePointAt(0) ?? 0)) % PROJECT_ICON_COLORS.length;
+    index = (index * 31 + (glyph.codePointAt(0) ?? 0)) % palette.length;
   }
-  return PROJECT_ICON_COLORS[index]?.value ?? "blue";
+  return palette[index] ?? "blue";
 }
 
 /** Derives the stable monogram and generated colors used when a project has no icon. */

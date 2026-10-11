@@ -3,7 +3,7 @@ import { AppText } from "./AppText";
 import { Image } from "expo-image";
 import { useLayoutEffect, useMemo, useState } from "react";
 import { View } from "react-native";
-import type { EnvironmentId, ProjectIconOverride } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectIconColor, ProjectIconOverride } from "@t3tools/contracts";
 import {
   getProjectFaviconCacheKey,
   getProjectFaviconResourceKey,
@@ -12,9 +12,11 @@ import {
 import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/unstable/reactivity";
 import { projectFaviconUrlAtom } from "../state/assets";
+import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 import {
   countGlyphs,
-  projectIconColorClassNames,
+  projectIconColors,
+  resolveProjectFallbackGlyph,
   resolveProjectIconGlyph,
   type ProjectIconGlyph,
 } from "../lib/projectIcon";
@@ -30,6 +32,9 @@ import {
 const EMPTY_FAVICON_URL = Atom.make<string | null>(null);
 
 /* ─── Component ──────────────────────────────────────────────────────── */
+// Same precedence as web: icon override, then the project's favicon, then a monogram of
+// the title (a folder only for a blank title). Pass the project record's own title, not a
+// display label, so the generated monogram and color match every other surface.
 export function ProjectFavicon(props: {
   readonly environmentId: EnvironmentId;
   readonly open?: boolean;
@@ -96,14 +101,24 @@ function ProjectIconGlyphView(props: { readonly glyph: ProjectIconGlyph; readonl
     );
   }
 
-  const colors = projectIconColorClassNames(glyph.color);
+  return <ProjectMonogramView text={glyph.text} color={glyph.color} size={size} />;
+}
+
+function ProjectMonogramView(props: {
+  readonly text: string;
+  readonly color: ProjectIconColor;
+  readonly size: number;
+}) {
+  const { size } = props;
+  const { themeAppearance } = useAppearancePreferences();
+  const colors = projectIconColors(props.color, themeAppearance);
   return (
     <View
-      className={colors.background}
       style={{
         width: size,
         height: size,
         borderRadius: size * 0.25,
+        backgroundColor: colors.background,
         alignItems: "center",
         justifyContent: "center",
       }}
@@ -111,16 +126,17 @@ function ProjectIconGlyphView(props: { readonly glyph: ProjectIconGlyph; readonl
       <AppText
         allowFontScaling={false}
         numberOfLines={1}
-        className={`font-mono ${colors.text}`}
+        className="font-mono"
         style={{
+          color: colors.text,
           fontWeight: "700",
-          fontSize: size * (countGlyphs(glyph.text) === 1 ? 0.6 : 0.515625),
+          fontSize: size * (countGlyphs(props.text) === 1 ? 0.6 : 0.515625),
           lineHeight: size,
           textAlign: "center",
           includeFontPadding: false,
         }}
       >
-        {glyph.text}
+        {props.text}
       </AppText>
     </View>
   );
@@ -152,6 +168,7 @@ function ProjectFaviconImage(props: {
       : "loading",
   );
 
+  const fallbackGlyph = resolveProjectFallbackGlyph(props.projectTitle);
   const requestIsActive = faviconRequest !== null && activeFaviconRequest === faviconRequest;
   const showImage = requestIsActive && status === "loaded";
 
@@ -164,8 +181,15 @@ function ProjectFaviconImage(props: {
         justifyContent: "center",
       }}
     >
-      {/* Folder icon fallback (matches web's FolderIcon) */}
-      {!showImage ? (
+      {/* Title monogram while loading or when the favicon fails, like web; folder only for a blank title. */}
+      {!showImage && fallbackGlyph !== null ? (
+        <ProjectMonogramView
+          text={fallbackGlyph.text}
+          color={fallbackGlyph.color}
+          size={props.size}
+        />
+      ) : null}
+      {!showImage && fallbackGlyph === null ? (
         <SymbolView
           name={{ ios: "folder.fill", android: props.open ? "folder_open" : "folder" }}
           size={props.size}

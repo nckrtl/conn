@@ -236,7 +236,10 @@ async function withPostgres<T>(
   try {
     const client = await sql.reserve();
     try {
-      await client.unsafe(`set statement_timeout = ${TIMEOUT_SECONDS * 1000}`);
+      // The session is read-only too, so a `commit` cannot turn writes back on.
+      await client.unsafe(
+        `set statement_timeout = ${TIMEOUT_SECONDS * 1000}; set default_transaction_read_only = on`,
+      );
       await client.unsafe("begin read only");
       try {
         return await run(client);
@@ -251,12 +254,23 @@ async function withPostgres<T>(
   }
 }
 
+/**
+ * `simple: false` sends the SQL through the extended protocol, where PostgreSQL accepts one
+ * statement only. The default for a query without parameters is the simple protocol, which
+ * runs `select 1; commit; delete ...` as three statements. `postgres` reads this option at
+ * runtime (`unsafe` in postgres/src/index.js) but does not declare it in its types.
+ */
+const POSTGRES_SINGLE_STATEMENT = {
+  prepare: false,
+  simple: false,
+} as postgres.UnsafeQueryOptions;
+
 async function postgresRows(
   client: postgres.ReservedSql,
   sql: string,
   values: postgres.ParameterOrJSON<never>[] = [],
 ): Promise<Rows> {
-  const result = await client.unsafe(sql, values);
+  const result = await client.unsafe(sql, values, POSTGRES_SINGLE_STATEMENT);
   return {
     columns: (result.columns ?? []).map((column) => column.name),
     rows: [...result] as Record<string, unknown>[],

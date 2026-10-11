@@ -9,7 +9,7 @@ import type { DatabaseConnection } from "./databaseApi";
 
 // The Database panel's saved connections, picked connection and SQL per project (persisted
 // in this app's local storage, passwords included), and queries handed over from the
-// Laravel Toolbar (per thread, until the panel runs them).
+// Laravel Toolbar (per thread, until the panel shows them in the editor).
 
 export interface DatabaseProjectState {
   readonly connection: string | null;
@@ -113,7 +113,10 @@ export const useDatabaseStore = create<DatabaseState>()(
   ),
 );
 
-/** Opens the thread's Database panel and runs `sql` there (from the Laravel Toolbar). */
+/**
+ * Opens the thread's Database panel with `sql` in the editor (from the Laravel Toolbar). It
+ * never runs: the SQL comes from a web page, so the user reads it and presses Run.
+ */
 export function openDatabaseQuery(threadRef: ScopedThreadRef, sql: string): void {
   useDatabaseStore.getState().setPending(scopedThreadKey(threadRef), sql);
   useRightPanelStore.getState().open(threadRef, "database");

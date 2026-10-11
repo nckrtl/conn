@@ -3,7 +3,34 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
-import { afterAll, describe, expect, it } from "vite-plus/test";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+const driver = vi.hoisted(() => ({
+  postgresStatements: [] as Array<{ sql: string; args: unknown; options: unknown }>,
+  mysqlOptions: [] as unknown[],
+}));
+
+// The network drivers are replaced, so these tests can check how user SQL reaches them.
+vi.mock("postgres", () => ({
+  default: () => {
+    const client = {
+      unsafe: async (sql: string, args?: unknown, options?: unknown) => {
+        driver.postgresStatements.push({ sql, args, options });
+        return Object.assign([], { columns: [] });
+      },
+      release: () => undefined,
+    };
+    return { reserve: async () => client, end: async () => undefined };
+  },
+}));
+vi.mock("mysql2/promise", () => ({
+  default: {
+    createConnection: async (options: unknown) => {
+      driver.mysqlOptions.push(options);
+      return { query: async () => [[], []], end: async () => undefined, destroy: () => undefined };
+    },
+  },
+}));
 
 import { runDatabase } from "./database.ts";
 
@@ -77,6 +104,23 @@ describe("database panel runner", () => {
     ).toEqual([{ n: 2 }]);
   });
 
+  it("runs only the first statement of stacked SQLite statements", async () => {
+    await runDatabase({
+      connection,
+      operation: "query",
+      sql: "select 1; delete from users",
+    });
+    expect(
+      (
+        await runDatabase({
+          connection,
+          operation: "query",
+          sql: "select count(*) as n from users",
+        })
+      ).rows,
+    ).toEqual([{ n: 2 }]);
+  });
+
   it("fetches a Vault connection's credentials for each call", async () => {
     const calls: Array<[string, boolean]> = [];
     const resolve = async (itemID: string, allowUnlock: boolean) => {
@@ -106,5 +150,59 @@ describe("database panel runner", () => {
       },
     );
     expect(result.error).toBe("Vault is locked. Unlock Vault to use this connection.");
+  });
+
+  describe("network drivers", () => {
+    const remote = { ...connection, host: "db.test", database: "app" };
+
+    beforeEach(() => {
+      driver.postgresStatements.length = 0;
+      driver.mysqlOptions.length = 0;
+    });
+
+    it("keeps the PostgreSQL session read-only before it runs user SQL", async () => {
+      const sql = "select 1; commit; delete from users";
+      const result = await runDatabase({
+        connection: { ...remote, driver: "pgsql" },
+        operation: "query",
+        sql,
+      });
+      expect(result.error).toBeNull();
+
+      const statements = driver.postgresStatements.map((statement) => statement.sql);
+      const readOnly = statements.findIndex((statement) =>
+        statement.includes("default_transaction_read_only = on"),
+      );
+      const begin = statements.indexOf("begin read only");
+      expect(readOnly).toBeGreaterThanOrEqual(0);
+      expect(readOnly).toBeLessThan(begin);
+      expect(begin).toBeLessThan(statements.indexOf(sql));
+    });
+
+    it("sends PostgreSQL user SQL through the extended protocol", async () => {
+      await runDatabase({
+        connection: { ...remote, driver: "pgsql" },
+        operation: "query",
+        sql: "select 1; commit; delete from users",
+      });
+      const user = driver.postgresStatements.find((statement) =>
+        statement.sql.startsWith("select 1"),
+      );
+      expect(user?.options).toMatchObject({ simple: false });
+      // Catalog queries use the same single-statement path.
+      await runDatabase({ connection: { ...remote, driver: "pgsql" }, operation: "tables" });
+      for (const statement of driver.postgresStatements.filter((entry) => entry.options)) {
+        expect(statement.options).toMatchObject({ simple: false });
+      }
+    });
+
+    it("does not allow stacked statements on MySQL", async () => {
+      await runDatabase({
+        connection: { ...remote, driver: "mysql" },
+        operation: "query",
+        sql: "select 1",
+      });
+      expect(driver.mysqlOptions).toEqual([expect.objectContaining({ multipleStatements: false })]);
+    });
   });
 });

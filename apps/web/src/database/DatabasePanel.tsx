@@ -1,7 +1,17 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { ChevronDown, CircleAlert, Database, KeyRound, Play, Plus, Search } from "lucide-react";
-import { type FormEvent, useEffect, useEffectEvent, useRef, useState } from "react";
+import {
+  type FormEvent,
+  memo,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { useProjectFileQuery } from "~/components/files/projectFilesQueryState";
 import { Button } from "~/components/ui/button";
@@ -72,7 +82,9 @@ function Cell({ value }: { value: DatabaseValue | undefined }) {
   return <>{String(value)}</>;
 }
 
-function RowsGrid({ result }: { result: DatabaseQueryResult }) {
+// Memoized: `result` keeps its identity while the user types in the SQL box, so a keystroke
+// does not rebuild the (up to 500 row) grid.
+const RowsGrid = memo(function RowsGrid({ result }: { result: DatabaseQueryResult }) {
   if (result.columns.length === 0) {
     return (
       <p className="px-4 py-3 text-muted-foreground text-ui">The query returned no columns.</p>
@@ -110,7 +122,34 @@ function RowsGrid({ result }: { result: DatabaseQueryResult }) {
       </tbody>
     </table>
   );
-}
+});
+
+/** The filtered table buttons. Memoized so SQL keystrokes do not re-render the list. */
+const TableList = memo(function TableList({
+  names,
+  selected,
+  onOpen,
+}: {
+  names: readonly string[];
+  selected: string | null;
+  onOpen: (name: string) => void;
+}) {
+  return names.map((name) => (
+    <button
+      key={name}
+      type="button"
+      onClick={() => onOpen(name)}
+      className={cn(
+        "flex h-7 w-full cursor-pointer items-center rounded-(--control-radius) px-2.5 text-left text-ui outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        name === selected
+          ? "bg-(--shell-highlight) text-foreground"
+          : "text-muted-foreground hover:bg-foreground/4 hover:text-foreground",
+      )}
+    >
+      <span className="truncate">{name}</span>
+    </button>
+  ));
+});
 
 function StructureList({ columns }: { columns: readonly DatabaseColumn[] }) {
   return (
@@ -494,16 +533,13 @@ export function DatabasePanel({
     }
   };
 
-  // A query handed over from the Laravel Toolbar runs once a connection is known.
-  const runPending = useEffectEvent((sqlToRun: string) => {
-    if (connectionId) useDatabaseStore.getState().setSql(projectKey, connectionId, sqlToRun);
-    void run(sqlToRun);
-  });
+  // A query handed over from the Laravel Toolbar goes into the editor once a connection is
+  // known. It does not run: the SQL comes from a web page, so the user reads it and runs it.
   useEffect(() => {
     if (!pending || !connectionId) return;
     useDatabaseStore.getState().clearPending(threadKey, pending.nonce);
-    runPending(pending.sql);
-  }, [connectionId, pending, threadKey]);
+    useDatabaseStore.getState().setSql(projectKey, connectionId, pending.sql);
+  }, [connectionId, pending, projectKey, threadKey]);
 
   const openTable = (name: string) => {
     if (!connection || !key) return;
@@ -514,9 +550,16 @@ export function DatabasePanel({
   };
 
   const tables = tablesLoad.data;
-  const visibleTables = (tables ?? []).filter((name) =>
-    name.toLowerCase().includes(filter.trim().toLowerCase()),
-  );
+  const visibleTables = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    return (tables ?? []).filter((name) => name.toLowerCase().includes(needle));
+  }, [tables, filter]);
+  // A stable identity for TableList; it always calls the latest `openTable`.
+  const openTableRef = useRef(openTable);
+  useLayoutEffect(() => {
+    openTableRef.current = openTable;
+  });
+  const onOpenTable = useCallback((name: string) => openTableRef.current(name), []);
   const store = useDatabaseStore.getState;
 
   return (
@@ -632,21 +675,7 @@ export function DatabasePanel({
               {tables && visibleTables.length === 0 ? (
                 <p className="px-2.5 py-2 text-muted-foreground text-ui">No tables</p>
               ) : null}
-              {visibleTables.map((name) => (
-                <button
-                  key={name}
-                  type="button"
-                  onClick={() => openTable(name)}
-                  className={cn(
-                    "flex h-7 w-full cursor-pointer items-center rounded-(--control-radius) px-2.5 text-left text-ui outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    name === table
-                      ? "bg-(--shell-highlight) text-foreground"
-                      : "text-muted-foreground hover:bg-foreground/4 hover:text-foreground",
-                  )}
-                >
-                  <span className="truncate">{name}</span>
-                </button>
-              ))}
+              <TableList names={visibleTables} selected={table} onOpen={onOpenTable} />
             </div>
           </div>
           <div className="flex min-w-0 flex-1 flex-col">

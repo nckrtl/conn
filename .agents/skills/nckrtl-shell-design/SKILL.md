@@ -1,11 +1,11 @@
 ---
 name: nckrtl-shell-design
-description: The nckrtl fork's shell design system for T3 Code (ChatGPT-desktop structure, active-theme palette, shell tokens). Use for UI polish on the `nckrtl` branch, when you style a new or changed web component, after you merge upstream T3 Code into `nckrtl`, and when you review upstream components for consistency with the fork's look.
+description: The nckrtl fork's shell design system for T3 Code (ChatGPT-desktop structure, active-theme palette, shell tokens). Use for UI polish in Conn (the fork's `main` branch), when you style a new or changed web component, after you merge upstream T3 Code into the fork, and when you review upstream components for consistency with the fork's look.
 ---
 
 # nckrtl shell design
 
-The `nckrtl` branch restyles T3 Code's web shell. The structure follows the
+Conn, the fork's `main` branch, restyles T3 Code's web shell. The structure follows the
 ChatGPT desktop app. The colors come from the active theme. This skill records
 the user's feedback so you can apply the same style and keep it alive across
 upstream merges.
@@ -21,10 +21,10 @@ build and install the fork's desktop app is in
 
 ## When to use
 
-- A UI polish pass on `nckrtl`, from annotations or chat feedback.
-- New or changed web UI on `nckrtl`, including fork-only panels (annotator,
+- A UI polish pass in Conn, from annotations or chat feedback.
+- New or changed web UI in Conn, including fork-only panels (annotator,
   Laravel toolbar, Orbit, device).
-- After a merge of upstream T3 Code into `nckrtl`. Run the sync procedure below.
+- After a merge of upstream T3 Code into Conn's `main`. Run the sync procedure below.
 - A review of new upstream components for consistency with the fork.
 
 ## Principles

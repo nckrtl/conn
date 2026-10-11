@@ -13,7 +13,7 @@ export function ThemedSwitch(props: ThemedSwitchProps) {
   return (
     <Switch
       {...props}
-      thumbColor="#ffffff"
+      thumbColorClassName="accent-switch-active-thumb"
       ios_backgroundColorClassName="accent-switch-inactive-track"
       trackColorOffClassName="accent-switch-inactive-track"
       trackColorOnClassName="accent-switch-active-track"

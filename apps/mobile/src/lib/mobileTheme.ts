@@ -243,60 +243,56 @@ function readableTextColor(accent: string, surface: string | ReadonlyArray<strin
   return `#${readable.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
-/**
- * The white knob must stay visible on a checked switch track. Only grey accents (mono) are
- * adjusted; a colored accent already reads against the knob by hue, so it stays as the theme set it.
- */
-const SWITCH_KNOB_MIN_CONTRAST = 2.2;
-const SWITCH_NEUTRAL_ACCENT_MAX_SPREAD = 24;
-const SWITCH_KNOB_COLOR = "#ffffff";
+function srgbToLinear(channel: number): number {
+  const value = channel / 255;
+  return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function srgbToOklab(
+  channels: readonly [number, number, number],
+): readonly [number, number, number] {
+  const red = srgbToLinear(channels[0]);
+  const green = srgbToLinear(channels[1]);
+  const blue = srgbToLinear(channels[2]);
+  const l = Math.cbrt(0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue);
+  const m = Math.cbrt(0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue);
+  const s = Math.cbrt(0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+
+function oklabToHex(lab: readonly [number, number, number]): string {
+  const l = (lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2]) ** 3;
+  const m = (lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2]) ** 3;
+  const s = (lab[0] - 0.0894841775 * lab[1] - 1.291485548 * lab[2]) ** 3;
+  return `#${[
+    linearToSrgb(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+    linearToSrgb(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+    linearToSrgb(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+  ]
+    .map((channel) => channel.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
 
 /**
- * The checked switch track and the knob that sits on it. A colored accent is the track as is. A grey
- * accent too light for a white knob (mono's white accent in dark mode) is mixed toward the theme
- * background (toward black in light mode) just far enough to clear the knob contrast bar, and the
- * knob is then white on every platform.
+ * CSS `color-mix(in oklab, first <percent>%, second)` for opaque hex colors. Desktop builds its
+ * checked switch track this way (`--switch-on`), so mobile mixes in the same space.
  */
-function switchOnColors(
-  accent: string,
-  accentForeground: string,
-  background: string,
-  appearance: MobileThemeAppearance,
-): { readonly track: string; readonly thumb: string } {
-  const white = rgbChannels(SWITCH_KNOB_COLOR)!;
-  const accentChannels = rgbChannels(accent);
-  const isNeutral =
-    accentChannels !== null &&
-    Math.max(...accentChannels) - Math.min(...accentChannels) <= SWITCH_NEUTRAL_ACCENT_MAX_SPREAD;
-  if (
-    !accentChannels ||
-    !isNeutral ||
-    contrastRatio(accentChannels, white) >= SWITCH_KNOB_MIN_CONTRAST
-  ) {
-    return { track: accent, thumb: accentForeground };
-  }
-  const target = (appearance === "dark" ? rgbChannels(background) : null) ?? [0, 0, 0];
-  let track: readonly [number, number, number] = target;
-  let lowerAmount = 0;
-  let upperAmount = 1;
-  for (let index = 0; index < 12; index += 1) {
-    const amount = (lowerAmount + upperAmount) / 2;
-    const candidate: readonly [number, number, number] = [
-      Math.round(accentChannels[0] + (target[0] - accentChannels[0]) * amount),
-      Math.round(accentChannels[1] + (target[1] - accentChannels[1]) * amount),
-      Math.round(accentChannels[2] + (target[2] - accentChannels[2]) * amount),
-    ];
-    if (contrastRatio(candidate, white) >= SWITCH_KNOB_MIN_CONTRAST) {
-      track = candidate;
-      upperAmount = amount;
-    } else {
-      lowerAmount = amount;
-    }
-  }
-  return {
-    track: `#${track.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`,
-    thumb: SWITCH_KNOB_COLOR,
-  };
+export function mixOklab(first: string, second: string, firstPercent: number): string {
+  const firstChannels = rgbChannels(first);
+  const secondChannels = rgbChannels(second);
+  if (!firstChannels || !secondChannels) return first;
+  const weight = firstPercent / 100;
+  const a = srgbToOklab(firstChannels);
+  const b = srgbToOklab(secondChannels);
+  return oklabToHex([
+    a[0] * weight + b[0] * (1 - weight),
+    a[1] * weight + b[1] * (1 - weight),
+    a[2] * weight + b[2] * (1 - weight),
+  ]);
 }
 
 export function themeColorWithAlpha(color: string, alpha: number): string {
@@ -327,12 +323,16 @@ export function createMobileThemeVariables(
     c.chrome,
     groupedCard,
   ];
-  const switchOn = switchOnColors(
-    c.messageAction,
-    c.messageActionForeground,
-    shellPanel,
-    appearance,
+  // Switches follow desktop's `Switch`: the knob is `--background` (the canvas role) in both states,
+  // the checked track is `color-mix(in oklab, --primary 70%, --foreground)` (messageAction and text
+  // roles), and the unchecked track is `--input`, flattened over the grouped row it sits on.
+  const switchOnTrack = mixOklab(
+    flattenThemeColor(c.messageAction, shellPanel),
+    flattenThemeColor(c.text, shellPanel),
+    70,
   );
+  const switchKnob = flattenThemeColor(c.canvas, shellPanel);
+  const switchOffTrack = flattenThemeColor(c.input, groupedCard);
   return {
     "--color-screen": shellPanel,
     // Sheets paint the same opaque pane as the home screen. The translucent
@@ -381,10 +381,10 @@ export function createMobileThemeVariables(
     "--color-secondary": c.secondary,
     "--color-secondary-foreground": c.secondaryForeground,
     "--color-secondary-border": c.border,
-    "--color-switch-active-track": switchOn.track,
-    "--color-switch-active-thumb": switchOn.thumb,
-    "--color-switch-inactive-track": c.secondary,
-    "--color-switch-inactive-thumb": c.mutedForeground,
+    "--color-switch-active-track": switchOnTrack,
+    "--color-switch-active-thumb": switchKnob,
+    "--color-switch-inactive-track": switchOffTrack,
+    "--color-switch-inactive-thumb": switchKnob,
     "--color-warning": c.warningSurface,
     "--color-warning-border": withAlpha(c.warning, 0.32),
     "--color-warning-foreground": c.warningForeground,

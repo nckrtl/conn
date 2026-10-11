@@ -19,6 +19,7 @@ import {
   flattenThemeColor,
   getMobileThemePreviewColors,
   getMobileThemeVariables,
+  mixOklab,
   normalizeMobileThemeId,
   normalizeMobileThemeMode,
   resolveMobileThemeIds,
@@ -291,38 +292,36 @@ describe("mobile themes", () => {
     expect(themeColorWithAlpha("rgba(18, 52, 86, 0.98)", 0)).toBe("rgba(18, 52, 86, 0)");
   });
 
-  it.each(["light", "dark"] as const)(
-    "keeps a white knob visible on the checked switch track of every %s theme",
-    (appearance) => {
-      for (const themeId of BUILT_IN_THEME_IDS) {
-        const variables = getMobileThemeVariables(themeId, appearance);
-        expect(
-          contrastRatio(variables["--color-switch-active-track"], "#ffffff"),
-          themeId,
-        ).toBeGreaterThanOrEqual(1.6);
-      }
-    },
-  );
+  it("mixes the checked switch track in oklab like desktop's --switch-on", () => {
+    expect(mixOklab("#ffffff", "#000000", 70)).toBe("#9e9e9e");
+    expect(mixOklab("#1b4ed8", "#1b4ed8", 70)).toBe("#1b4ed8");
+    expect(mixOklab("#ff0000", "#0000ff", 100)).toBe("#ff0000");
+  });
 
-  it("darkens a near-white accent for the checked track but leaves colored accents alone", () => {
+  it("builds switches like desktop: canvas knob, primary/foreground track, input off track", () => {
     const mono = createMobileThemeVariables(
       {
         ...T3_CODE_DARK_THEME_COLORS,
+        canvas: "#0a0a0a",
+        text: "#f5f5f5",
         messageAction: "#fafafa",
-        messageActionForeground: "#111111",
+        input: "#ffffff2e",
       },
       "dark",
     );
-    expect(mono["--color-switch-active-track"]).not.toBe("#fafafa");
-    expect(contrastRatio(mono["--color-switch-active-track"], "#ffffff")).toBeGreaterThanOrEqual(
-      2.2,
-    );
-    expect(mono["--color-switch-active-thumb"]).toBe("#ffffff");
+    expect(mono["--color-switch-active-track"]).toBe(mixOklab("#fafafa", "#f5f5f5", 70));
+    expect(mono["--color-switch-active-thumb"]).toBe("#0a0a0a");
+    expect(mono["--color-switch-inactive-thumb"]).toBe("#0a0a0a");
+    expect(mono["--color-switch-inactive-track"]).toMatch(/^#[\da-f]{6}$/);
+
     const colored = createMobileThemeVariables(
-      { ...T3_CODE_DARK_THEME_COLORS, messageAction: "#1b4ed8" },
-      "dark",
+      { ...T3_CODE_LIGHT_THEME_COLORS, messageAction: "#1b4ed8", text: "#27272a" },
+      "light",
     );
-    expect(colored["--color-switch-active-track"]).toBe("#1b4ed8");
+    expect(colored["--color-switch-active-track"]).toBe(mixOklab("#1b4ed8", "#27272a", 70));
+    expect(colored["--color-switch-active-thumb"]).toBe(
+      themeColorToNativeColor(T3_CODE_LIGHT_THEME_COLORS.canvas),
+    );
   });
 
   it("maps semantic palette roles onto every mobile color variable", () => {

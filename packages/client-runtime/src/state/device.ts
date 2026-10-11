@@ -68,6 +68,14 @@ export function createDeviceEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    // Not the device-command lane: `ensure` waits on the CLI, and Home, rotate,
+    // close, and power must not queue behind that.
+    annotator: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:device:annotator",
+      tag: WS_METHODS.deviceAnnotator,
+      scheduler: createAtomCommandScheduler(),
+      concurrency,
+    }),
   };
 }
 

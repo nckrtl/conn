@@ -20,6 +20,11 @@ export interface AnnotatorRecord {
   readonly summary?: string;
   readonly question?: boolean;
   readonly source?: string;
+  /** Normalized rect stored by device annotations. The store keeps extra fields. */
+  readonly x?: number;
+  readonly y?: number;
+  readonly width?: number;
+  readonly height?: number;
 }
 
 /** The state a person sees on a pin and in the queue. */

@@ -14,6 +14,9 @@ import { DeviceAndroidFoldControls } from "./DeviceAndroidFoldControls";
 import type { DuoControlState } from "@t3tools/client-runtime/device/duo-control";
 import { DevicePhoneViewport } from "./DevicePhoneViewport";
 import { DeviceLoadingView } from "./DeviceLoadingView";
+import type { AnnotatorRecord } from "~/annotations/annotatorQueue";
+import { DeviceAnnotationOverlay } from "./DeviceAnnotationOverlay";
+import { deviceAnnotationRect } from "./deviceAnnotations";
 import { type DeviceAxElement, fetchDeviceAxTree } from "./deviceHubApi";
 import {
   createDeviceStreamClient,
@@ -63,6 +66,11 @@ export function DeviceStreamView(props: {
   readonly renderControls?: (view: DeviceViewControls) => ReactNode;
   /** Draw accessibility element frames over the screen. */
   readonly axOverlay?: boolean;
+  /** Click elements to comment instead of tapping the device. Flat screen only. */
+  readonly annotating?: boolean;
+  readonly annotations?: ReadonlyArray<AnnotatorRecord>;
+  readonly annotationsUrl?: string | null;
+  readonly onToggleAnnotating?: () => void;
   readonly onHandle?: (handle: DeviceStreamHandle | null) => void;
   readonly onScreen?: (screen: DeviceScreenSize | null) => void;
 }) {
@@ -195,6 +203,11 @@ export function DeviceStreamView(props: {
     status === "connecting" &&
     inputState.connected &&
     screen !== null;
+  // Pins are drawn in the flat frame. 3D maps pointers onto the model, so the
+  // flat screen stays up while any pin can be drawn, including after the mode ends.
+  const pinsHoldFlat = (props.annotations ?? []).some(
+    (annotation) => deviceAnnotationRect(annotation) !== null,
+  );
   const showPhone =
     props.allowPhoneView &&
     (status === "streaming" || retainingAndroidFrame) &&
@@ -203,6 +216,8 @@ export function DeviceStreamView(props: {
     !phoneUnavailable &&
     !mjpegUrl &&
     !props.axOverlay &&
+    !props.annotating &&
+    !pinsHoldFlat &&
     (!isDuo || screen?.supportsHingeAngle === true);
   useEffect(() => {
     if (!retainingAndroidFrame || !showPhone) return;
@@ -271,11 +286,12 @@ export function DeviceStreamView(props: {
         ...(rotation ? { transform: `rotate(${rotation}deg)` } : {}),
       };
 
-  // The accessibility tree is polled while the overlay is on; each poll is
-  // one JSON fetch, so there is nothing to repaint between polls.
+  // The accessibility tree is polled while a frame overlay or annotation mode is
+  // on; each poll is one JSON fetch, so there is nothing to repaint between polls.
+  const axPolling = props.axOverlay || props.annotating;
   const [axElements, setAxElements] = useState<ReadonlyArray<DeviceAxElement>>([]);
   useEffect(() => {
-    if (!props.axOverlay || !access || !props.visible) return;
+    if (!axPolling || !access || !props.visible) return;
     const target = { access, platform: props.platform, deviceId: props.deviceId };
     let controller: AbortController | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -297,9 +313,23 @@ export function DeviceStreamView(props: {
       if (timer) clearTimeout(timer);
       setAxElements([]);
     };
-  }, [access, props.axOverlay, props.deviceId, props.platform, props.visible]);
+  }, [access, axPolling, props.deviceId, props.platform, props.visible]);
 
   const pointerActive = useRef(false);
+  const pointerCapture = useRef<{ id: number; target: HTMLElement } | null>(null);
+  const pointerPoint = useRef({ x: 0, y: 0 });
+  // Annotation mode ignores pointerup, so a press that is still down would stick.
+  useEffect(() => {
+    if (!props.annotating || !pointerActive.current) return;
+    const point = pointerPoint.current;
+    const capture = pointerCapture.current;
+    pointerActive.current = false;
+    pointerCapture.current = null;
+    clientRef.current?.sendTouch("end", point.x, point.y);
+    if (capture !== null && capture.target.hasPointerCapture(capture.id)) {
+      capture.target.releasePointerCapture(capture.id);
+    }
+  }, [props.annotating]);
   const normalizedPoint = (event: React.PointerEvent<HTMLElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = (event.clientX - rect.left) / rect.width;
@@ -314,9 +344,11 @@ export function DeviceStreamView(props: {
         ? "3D is unavailable on this browser"
         : mjpegUrl
           ? "3D requires the H.264 stream"
-          : props.axOverlay
-            ? "Turn off accessibility frames to use 3D"
-            : null;
+          : props.annotating || pinsHoldFlat
+            ? "Annotation uses the flat screen"
+            : props.axOverlay
+              ? "Turn off accessibility frames to use 3D"
+              : null;
 
   const keyboardSource = deviceKeyboard(props.platform, props.deviceName ?? "");
   const resetView = useCallback(() => {
@@ -398,6 +430,17 @@ export function DeviceStreamView(props: {
         aria-label={`${props.platform === "ios" ? "iOS Simulator" : "Android Emulator"} screen`}
         onKeyDown={(event) => {
           if (event.target !== event.currentTarget) return;
+          if (
+            props.onToggleAnnotating &&
+            event.shiftKey &&
+            (event.metaKey || event.ctrlKey) &&
+            !event.altKey &&
+            event.key.toLowerCase() === "a"
+          ) {
+            event.preventDefault();
+            props.onToggleAnnotating();
+            return;
+          }
           if (event.metaKey && !["r", "R"].includes(event.key)) return;
           event.preventDefault();
           clientRef.current?.sendKey(event.nativeEvent, "down");
@@ -411,28 +454,36 @@ export function DeviceStreamView(props: {
           className={cn("relative select-none", showPhone && "invisible pointer-events-none")}
           style={{ width: frame.width, height: frame.height }}
           onPointerDown={(event) => {
+            if (props.annotating) return;
             event.currentTarget.setPointerCapture(event.pointerId);
+            pointerCapture.current = { id: event.pointerId, target: event.currentTarget };
             (event.currentTarget.parentElement as HTMLElement | null)?.focus();
             pointerActive.current = true;
-            const { x, y } = normalizedPoint(event);
-            clientRef.current?.sendTouch("begin", x, y);
+            const point = normalizedPoint(event);
+            pointerPoint.current = point;
+            clientRef.current?.sendTouch("begin", point.x, point.y);
           }}
           onPointerMove={(event) => {
-            if (!pointerActive.current) return;
-            const { x, y } = normalizedPoint(event);
-            clientRef.current?.sendTouch("move", x, y);
+            if (props.annotating || !pointerActive.current) return;
+            const point = normalizedPoint(event);
+            pointerPoint.current = point;
+            clientRef.current?.sendTouch("move", point.x, point.y);
           }}
           onPointerUp={(event) => {
-            if (!pointerActive.current) return;
+            if (props.annotating || !pointerActive.current) return;
             pointerActive.current = false;
-            const { x, y } = normalizedPoint(event);
-            clientRef.current?.sendTouch("end", x, y);
+            pointerCapture.current = null;
+            const point = normalizedPoint(event);
+            pointerPoint.current = point;
+            clientRef.current?.sendTouch("end", point.x, point.y);
           }}
           onPointerCancel={(event) => {
-            if (!pointerActive.current) return;
+            if (props.annotating || !pointerActive.current) return;
             pointerActive.current = false;
-            const { x, y } = normalizedPoint(event);
-            clientRef.current?.sendTouch("end", x, y);
+            pointerCapture.current = null;
+            const point = normalizedPoint(event);
+            pointerPoint.current = point;
+            clientRef.current?.sendTouch("end", point.x, point.y);
           }}
         >
           <canvas
@@ -450,7 +501,7 @@ export function DeviceStreamView(props: {
               style={mediaStyle}
             />
           ) : null}
-          {axElements.length > 0 ? (
+          {props.axOverlay && axElements.length > 0 ? (
             <div className="pointer-events-none absolute inset-0" aria-hidden>
               {axElements.map((element) => (
                 <div
@@ -472,6 +523,14 @@ export function DeviceStreamView(props: {
               ))}
             </div>
           ) : null}
+          <DeviceAnnotationOverlay
+            active={!!props.annotating}
+            elements={axElements}
+            annotations={props.annotations ?? []}
+            annotationsUrl={props.annotationsUrl ?? null}
+            hostId={props.hostId}
+            deviceId={props.deviceId}
+          />
         </div>
         {showPhone && isDuo && model ? (
           <DeviceDuoViewport

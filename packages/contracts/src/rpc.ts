@@ -206,6 +206,7 @@ import {
 } from "./preview.ts";
 import {
   DeviceActionInput,
+  DeviceAnnotatorResult,
   DeviceCloseInput,
   DeviceConfigureInput,
   DeviceDetail,
@@ -372,6 +373,7 @@ export const WS_METHODS = {
   deviceShutdown: "device.shutdown",
   deviceDetail: "device.detail",
   deviceAction: "device.action",
+  deviceAnnotator: "device.annotator",
 
   // Server meta
   serverProbe: "server.probe",
@@ -1301,6 +1303,12 @@ const WsDeviceActionRpc = Rpc.make(WS_METHODS.deviceAction, {
   error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
 });
 
+const WsDeviceAnnotatorRpc = Rpc.make(WS_METHODS.deviceAnnotator, {
+  payload: DeviceDetailInput,
+  success: DeviceAnnotatorResult,
+  error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeDeviceStateRpc = Rpc.make(WS_METHODS.subscribeDeviceState, {
   payload: Schema.Struct({}),
   success: DeviceServiceState,
@@ -1562,6 +1570,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsDeviceShutdownRpc,
   WsDeviceDetailRpc,
   WsDeviceActionRpc,
+  WsDeviceAnnotatorRpc,
   WsSubscribeDeviceStateRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,

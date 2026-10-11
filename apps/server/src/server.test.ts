@@ -108,6 +108,7 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
+import * as DeviceAnnotator from "./device/DeviceAnnotator.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
 import {
@@ -849,6 +850,10 @@ const buildAppUnderTest = (options?: {
             state: Effect.succeed(EMPTY_DEVICE_STATE),
             currentReadiness: () => Effect.succeed(null),
             sessionsForThread: () => Effect.succeed([]),
+          }),
+          Layer.mock(DeviceAnnotator.DeviceAnnotator)({
+            ensure: () => Effect.succeed({ annotationsUrl: null, error: null }),
+            syncSessions: () => Effect.void,
           }),
         ),
       ),

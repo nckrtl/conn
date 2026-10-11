@@ -1,10 +1,20 @@
-import type { DeviceSummary, EnvironmentId } from "@t3tools/contracts";
-import { useEffect, useRef, useState } from "react";
+import type { DeviceSummary, EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   captureDeviceScreenshot,
   DeviceScreenshotError,
 } from "@t3tools/client-runtime/device/screenshot";
-import { refreshDeviceHubAccess, useDeviceHubAccess } from "~/state/device";
+import { deviceEnvironment, refreshDeviceHubAccess, useDeviceHubAccess } from "~/state/device";
+import { formatEnvironmentQueryError } from "~/state/query";
+import { useAtomCommand } from "~/state/use-atom-command";
+import {
+  useAnnotationWatchStore,
+  useConfirmedDeviceWatchUrl,
+} from "~/annotations/annotationWatchStore";
+import { useAnnotatorQueue } from "~/annotations/useAnnotatorQueue";
+import { DeviceAnnotationControl } from "./DeviceAnnotationControl";
+import { annotationsForPathname, deviceAnnotationPathname } from "./deviceAnnotations";
 import { DeviceControlsRail } from "./DeviceControlsRail";
 import { DeviceStreamView, type DeviceStreamHandle } from "./DeviceStreamView";
 import { DeviceToolsPanel } from "./DeviceToolsPanel";
@@ -12,6 +22,7 @@ import { useDeviceControls } from "./useDeviceControls";
 
 /** Keyed by environment and device; the screen, quick controls and drawer share the same session. */
 export function DeviceWorkspace(props: {
+  threadRef: ScopedThreadRef;
   environmentId: EnvironmentId;
   device: DeviceSummary;
   hostLabel: string;
@@ -24,12 +35,103 @@ export function DeviceWorkspace(props: {
   const [handle, setHandle] = useState<DeviceStreamHandle | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [axOverlay, setAxOverlay] = useState(false);
+  const [annotating, setAnnotating] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [annotator, setAnnotator] = useState<{ url: string | null; error: string | null }>({
+    url: null,
+    error: null,
+  });
+  const startingRef = useRef(false);
   const [screenshotPending, setScreenshotPending] = useState(false);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   const captureRef = useRef<AbortController | null>(null);
   const downloadRef = useRef<string | null>(null);
   const access = useDeviceHubAccess(props.environmentId, props.device.hostId);
   const controls = useDeviceControls({ ...props, access });
+  const ensureAnnotator = useAtomCommand(deviceEnvironment.annotator, { reportFailure: false });
+  const threadKey = scopedThreadKey(props.threadRef);
+  const noteDeviceAnnotatorUrl = useAnnotationWatchStore((state) => state.noteDeviceAnnotatorUrl);
+  const confirmedUrl = useConfirmedDeviceWatchUrl(threadKey);
+  const savedDeviceWatchUrl = useAnnotationWatchStore((state) => {
+    const entry = state.watchingByThreadKey[threadKey];
+    if (
+      entry?.device?.hostId !== props.device.hostId ||
+      entry.device.deviceId !== props.device.id
+    ) {
+      return null;
+    }
+    return entry.annotationsUrl;
+  });
+  const pathname = deviceAnnotationPathname(props.device.hostId, props.device.id);
+  const annotatorEndpoint = useMemo(
+    () =>
+      annotator.url === null
+        ? null
+        : { annotationsUrl: annotator.url, injectUrl: "", origin: pathname },
+    [annotator.url, pathname],
+  );
+  const queue = useAnnotatorQueue(annotatorEndpoint);
+  const annotations = useMemo(
+    () => (queue.annotations === null ? null : annotationsForPathname(queue.annotations, pathname)),
+    [pathname, queue.annotations],
+  );
+  // Confirm a saved watch only when this panel already has that URL.
+  // A different saved URL stays for the coordinator. Noting the cache would drop it.
+  useEffect(() => {
+    if (annotator.url === null || savedDeviceWatchUrl !== annotator.url) return;
+    if (confirmedUrl === annotator.url) return;
+    noteDeviceAnnotatorUrl(
+      threadKey,
+      { hostId: props.device.hostId, deviceId: props.device.id },
+      annotator.url,
+    );
+  }, [
+    annotator.url,
+    confirmedUrl,
+    noteDeviceAnnotatorUrl,
+    props.device.hostId,
+    props.device.id,
+    savedDeviceWatchUrl,
+    threadKey,
+  ]);
+  const toggleAnnotating = () => {
+    if (annotating) {
+      setAnnotating(false);
+      return;
+    }
+    // `start` is idempotent. A cached URL can belong to a process that has exited.
+    if (startingRef.current) return;
+    startingRef.current = true;
+    setStarting(true);
+    setAnnotator((current) => ({ url: current.url, error: null }));
+    void ensureAnnotator({
+      environmentId: props.environmentId,
+      input: { hostId: props.device.hostId, deviceId: props.device.id },
+    }).then((result) => {
+      startingRef.current = false;
+      setStarting(false);
+      if (result._tag !== "Success") {
+        setAnnotator({ url: null, error: formatEnvironmentQueryError(result.cause) });
+        return;
+      }
+      const url = result.value.error ? null : result.value.annotationsUrl;
+      if (!url) {
+        setAnnotator({
+          url: null,
+          error: result.value.error ?? "The annotation server did not start.",
+        });
+        return;
+      }
+      setAnnotator({ url, error: null });
+      setAnnotating(true);
+      // This URL just came back from device.annotator. A match confirms; a different saved URL is dropped.
+      noteDeviceAnnotatorUrl(
+        threadKey,
+        { hostId: props.device.hostId, deviceId: props.device.id },
+        url,
+      );
+    });
+  };
   useEffect(() => {
     if (!access || !props.visible) captureRef.current?.abort();
     return () => {
@@ -94,6 +196,10 @@ export function DeviceWorkspace(props: {
             hostId={props.device.hostId}
             visible={props.visible}
             axOverlay={axOverlay}
+            annotating={annotating}
+            annotations={annotations ?? []}
+            annotationsUrl={annotator.url}
+            onToggleAnnotating={toggleAnnotating}
             allowPhoneView
             onHandle={setHandle}
             renderControls={(view) => (
@@ -104,6 +210,20 @@ export function DeviceWorkspace(props: {
                 controls={controls}
                 screenshotPending={screenshotPending}
                 onScreenshot={() => void saveScreenshot()}
+                annotation={
+                  <DeviceAnnotationControl
+                    threadRef={props.threadRef}
+                    hostId={props.device.hostId}
+                    deviceId={props.device.id}
+                    annotating={annotating}
+                    onToggle={toggleAnnotating}
+                    annotationsUrl={annotator.url}
+                    annotations={annotations}
+                    error={annotator.error}
+                    starting={starting}
+                    unreachable={queue.unreachable}
+                  />
+                }
                 toolsOpen={toolsOpen}
                 onTools={() => setToolsOpen(!toolsOpen)}
                 onFloat={props.onFloat}

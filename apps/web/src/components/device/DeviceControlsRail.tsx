@@ -42,6 +42,7 @@ export function DeviceControlsRail(props: {
   controls: DeviceControls;
   screenshotPending: boolean;
   onScreenshot: () => void;
+  annotation?: ReactNode;
   toolsOpen: boolean;
   onTools: () => void;
   onFloat: () => void;
@@ -195,6 +196,7 @@ export function DeviceControlsRail(props: {
         >
           <Camera />
         </RailButton>
+        {props.annotation}
         <Menu>
           <MenuTrigger
             render={

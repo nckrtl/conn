@@ -15,7 +15,8 @@ export function useAnnotationWatchBanner(threadKey: string | null): ComposerBann
       watch === null ? null : { annotationsUrl: watch.annotationsUrl, injectUrl: "", origin: "" },
     [watch],
   );
-  const annotations = useAnnotatorQueue(endpoint);
+  const queue = useAnnotatorQueue(endpoint);
+  const annotations = queue.annotations;
   return useMemo(() => {
     if (threadKey === null || watch === null) return null;
     const counts = countAnnotations(annotations ?? []);
@@ -37,13 +38,16 @@ export function useAnnotationWatchBanner(threadKey: string | null): ComposerBann
         />
       ),
       title: "Watching annotations",
-      description:
-        annotations === null ? "Annotator unreachable" : parts.join(" · ") || "Queue empty",
+      description: queue.unreachable
+        ? "Annotator unreachable"
+        : annotations === null
+          ? "Loading annotations"
+          : parts.join(" · ") || "Queue empty",
       actions: (
         <Button size="xs" variant="ghost" onClick={() => setWatching(threadKey, null)}>
           Stop
         </Button>
       ),
     };
-  }, [annotations, setWatching, threadKey, watch]);
+  }, [annotations, queue.unreachable, setWatching, threadKey, watch]);
 }

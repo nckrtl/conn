@@ -201,6 +201,7 @@ export function DevicePanel(props: {
         {activeDevice && activeSession ? (
           <DeviceWorkspace
             key={`${environmentId}\u0000${deviceKey(activeDevice)}`}
+            threadRef={props.threadRef}
             environmentId={environmentId}
             device={activeDevice}
             hostLabel={

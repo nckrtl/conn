@@ -360,6 +360,13 @@ export type DeviceActionType = DeviceActionInput["type"];
 export const DeviceDetailInput = Schema.Struct(DeviceTarget);
 export type DeviceDetailInput = typeof DeviceDetailInput.Type;
 
+/** One annotator process for a device. `error` is set when it could not start. */
+export const DeviceAnnotatorResult = Schema.Struct({
+  annotationsUrl: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+});
+export type DeviceAnnotatorResult = typeof DeviceAnnotatorResult.Type;
+
 export class DeviceHostUnavailableError extends Schema.TaggedError<DeviceHostUnavailableError>()(
   "DeviceHostUnavailableError",
   {

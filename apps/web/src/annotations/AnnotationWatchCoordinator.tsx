@@ -1,6 +1,7 @@
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
-import { useEffect, useEffectEvent, useMemo } from "react";
+import { DeviceHostId, DeviceId } from "@t3tools/contracts";
+import { useEffect, useEffectEvent, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import {
@@ -9,10 +10,22 @@ import {
 } from "../components/ChatView.logic";
 import { useQueuedMessageStore, useQueuedMessages } from "../queuedMessageStore";
 import { derivePhase } from "../session-logic";
+import { deviceEnvironment } from "../state/device";
 import { useThread, useThreadStatus } from "../state/entities";
 import { useEnvironment } from "../state/environments";
+import { useEnvironmentQuery } from "../state/query";
+import { useAtomCommand } from "../state/use-atom-command";
 import { waitingIdsToSend } from "./annotatorQueue";
-import { useAnnotationWatchStore } from "./annotationWatchStore";
+import {
+  useAnnotationWatch,
+  useAnnotationWatchStore,
+  useConfirmedDeviceWatchUrl,
+} from "./annotationWatchStore";
+import {
+  type DeviceWatchConfirmFlight,
+  deviceWatchConfirmKey,
+  startDeviceWatchConfirm,
+} from "./deviceWatchConfirm";
 import { sendAnnotationPrompt } from "./sendAnnotationPrompt";
 import { useAnnotatorQueue } from "./useAnnotatorQueue";
 
@@ -31,10 +44,131 @@ export function AnnotationWatchCoordinator() {
 }
 
 function ThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
-  const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
-  const annotationsUrl = useAnnotationWatchStore(
-    (state) => state.watchingByThreadKey[threadKey]?.annotationsUrl ?? null,
+  const deviceId = useAnnotationWatchStore(
+    (state) => state.watchingByThreadKey[threadKey]?.device?.deviceId,
   );
+  if (deviceId !== undefined) return <DeviceThreadAnnotationWatch threadKey={threadKey} />;
+  return <PageThreadAnnotationWatch threadKey={threadKey} />;
+}
+
+function PageThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
+  const annotationsUrl = useAnnotationWatch(threadKey)?.annotationsUrl ?? null;
+  return <AnnotationWatchSender threadKey={threadKey} annotationsUrl={annotationsUrl} />;
+}
+
+function DeviceThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
+  const entry = useAnnotationWatchStore((state) => state.watchingByThreadKey[threadKey] ?? null);
+  const confirmed = useConfirmedDeviceWatchUrl(threadKey);
+  const annotationsUrl =
+    entry?.device !== undefined && confirmed === entry.annotationsUrl ? entry.annotationsUrl : null;
+  const setWatching = useAnnotationWatchStore((state) => state.setWatching);
+  const noteDeviceAnnotatorUrl = useAnnotationWatchStore((state) => state.noteDeviceAnnotatorUrl);
+  const ensureAnnotator = useAtomCommand(deviceEnvironment.annotator, { reportFailure: false });
+  const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
+  const sessions = useEnvironmentQuery(
+    threadRef === null
+      ? null
+      : deviceEnvironment.state({ environmentId: threadRef.environmentId, input: {} }),
+  );
+  const flight = useRef<DeviceWatchConfirmFlight>({ key: null, token: 0 });
+  const stopConfirm = useRef<(() => void) | null>(null);
+  const activeKey = useRef<string | null>(null);
+  const savedUrl = entry?.annotationsUrl ?? null;
+  const hostId = entry?.device?.hostId ?? null;
+  const deviceId = entry?.device?.deviceId ?? null;
+  const deviceLive =
+    hostId !== null &&
+    deviceId !== null &&
+    sessions.isSuccess &&
+    (sessions.data?.sessions ?? []).some(
+      (session) => session.hostId === hostId && session.deviceId === deviceId,
+    );
+  useEffect(() => {
+    if (hostId === null || deviceId === null || threadRef === null || !sessions.isSuccess) return;
+    // No open session for this device, so Watch has nothing left to poll.
+    if (!deviceLive) setWatching(threadKey, null);
+  }, [deviceId, deviceLive, hostId, sessions.isSuccess, setWatching, threadKey, threadRef]);
+  // A failed confirm retries after a short gap. The device may not publish
+  // another snapshot, including one that arrived while the call was in flight.
+  useEffect(() => {
+    if (
+      !deviceLive ||
+      hostId === null ||
+      deviceId === null ||
+      savedUrl === null ||
+      threadRef === null
+    ) {
+      stopConfirm.current?.();
+      stopConfirm.current = null;
+      activeKey.current = null;
+      return;
+    }
+    if (confirmed === savedUrl) {
+      stopConfirm.current?.();
+      stopConfirm.current = null;
+      activeKey.current = null;
+      return;
+    }
+    const device = { hostId, deviceId };
+    const key = deviceWatchConfirmKey(device, savedUrl);
+    if (activeKey.current === key) return;
+    stopConfirm.current?.();
+    const environmentId = threadRef.environmentId;
+    activeKey.current = key;
+    stopConfirm.current = startDeviceWatchConfirm({
+      device,
+      annotationsUrl: savedUrl,
+      flight: flight.current,
+      confirm: () =>
+        ensureAnnotator({
+          environmentId,
+          input: {
+            hostId: DeviceHostId.make(hostId),
+            deviceId: DeviceId.make(deviceId),
+          },
+        }).then((result) =>
+          result._tag === "Success"
+            ? result.value.error
+              ? null
+              : result.value.annotationsUrl
+            : null,
+        ),
+      readEntry: () => useAnnotationWatchStore.getState().watchingByThreadKey[threadKey],
+      note: (url) => noteDeviceAnnotatorUrl(threadKey, device, url),
+      schedule: (delayMs, run) => {
+        const timer = setTimeout(run, delayMs);
+        return () => clearTimeout(timer);
+      },
+    });
+  }, [
+    confirmed,
+    deviceId,
+    deviceLive,
+    ensureAnnotator,
+    hostId,
+    noteDeviceAnnotatorUrl,
+    savedUrl,
+    threadKey,
+    threadRef,
+  ]);
+  useEffect(() => {
+    return () => {
+      stopConfirm.current?.();
+      stopConfirm.current = null;
+      activeKey.current = null;
+    };
+  }, []);
+  return <AnnotationWatchSender threadKey={threadKey} annotationsUrl={annotationsUrl} />;
+}
+
+function AnnotationWatchSender({
+  threadKey,
+  annotationsUrl,
+}: {
+  threadKey: string;
+  annotationsUrl: string | null;
+}) {
+  const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
   const lastSentIds = useAnnotationWatchStore(
     (state) => state.lastSentIdsByThreadKey[threadKey] ?? EMPTY_IDS,
   );
@@ -42,7 +176,7 @@ function ThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
     () => (annotationsUrl === null ? null : { annotationsUrl, injectUrl: "", origin: "" }),
     [annotationsUrl],
   );
-  const annotations = useAnnotatorQueue(endpoint);
+  const annotations = useAnnotatorQueue(endpoint).annotations;
   const threadIdle = useThreadIdle(threadKey);
 
   const toSend = waitingIdsToSend({

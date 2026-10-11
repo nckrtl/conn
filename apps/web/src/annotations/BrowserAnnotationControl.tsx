@@ -75,7 +75,7 @@ export function BrowserAnnotationControl({
     () => (pageUrl === null ? null : annotatorEndpointForPage(pageUrl)),
     [pageUrl],
   );
-  const annotations = useAnnotatorQueue(endpoint);
+  const annotations = useAnnotatorQueue(endpoint).annotations;
   const available = annotations !== null;
   const threadKey = scopedThreadKey(threadRef);
   const watch = useAnnotationWatch(threadKey);

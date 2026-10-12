@@ -1,6 +1,6 @@
 diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator.mm
---- a/ios/header/RNSHeaderCoordinator.mm	2026-10-12 18:04:03
-+++ b/ios/header/RNSHeaderCoordinator.mm	2026-10-12 18:04:03
+--- a/ios/header/RNSHeaderCoordinator.mm	1985-10-26 09:15:00
++++ b/ios/header/RNSHeaderCoordinator.mm	2026-10-12 22:33:06
 @@ -4,6 +4,7 @@
  #import "RNSConversions-Stack.h"
  #import "RNSDefines.h"
@@ -119,7 +119,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
    [self applyItemsWithTitleView:titleView
                     subtitleView:subtitleView
                largeSubtitleView:largeSubtitleView
-@@ -174,6 +248,12 @@
+@@ -182,6 +256,12 @@
  
    // Items belong to each screen. Only the visible screen may change the shared toolbar.
    [navController setToolbarHidden:_screenController.toolbarItems.count == 0 animated:animated];
@@ -132,7 +132,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
  }
  
  - (void)updateBackButtonMenuEnabled
-@@ -239,6 +319,10 @@
+@@ -247,6 +327,10 @@
      }
      case RNSHeaderItemPlacementToolbar: {
  #if !TARGET_OS_TV
@@ -143,7 +143,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
        UIBarButtonItem *newBarButtonItem = [self buildBarButtonItemForItem:targetItem];
        NSUInteger index = oldBarButtonItem == nil ? NSNotFound : [_toolbarBarButtonItems indexOfObject:oldBarButtonItem];
        if (index != NSNotFound) {
-@@ -416,6 +500,15 @@
+@@ -424,6 +508,15 @@
      return;
    }
  
@@ -159,7 +159,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
    UIBarButtonItem *barButtonItem = _barButtonItemsByItemId[itemId];
    if (barButtonItem == nil) {
      return;
-@@ -548,10 +641,16 @@
+@@ -595,10 +688,16 @@
  {
    UINavigationItem *navItem = controller.navigationItem;
    UISearchController *searchController = searchBar.controller;
@@ -176,7 +176,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
    }
  
    navItem.hidesSearchBarWhenScrolling = searchBar == nil || searchBar.hideWhenScrolling;
-@@ -569,6 +668,10 @@
+@@ -616,6 +715,10 @@
           searchBar.allowToolbarIntegration);
    }
  #endif // RNS_IPHONE_OS_VERSION_AVAILABLE(26_0)
@@ -187,7 +187,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
  }
  #endif // !TARGET_OS_TV
  
-@@ -731,4 +834,123 @@
+@@ -859,4 +962,123 @@
    return barButtonItem;
  }
  
@@ -312,10 +312,10 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
  @end
 +
 diff -ruN a/ios/header/RNSHeaderItemComponentView.mm b/ios/header/RNSHeaderItemComponentView.mm
---- a/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 18:04:03
-+++ b/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 18:04:03
-@@ -79,6 +79,11 @@
-   return std::static_pointer_cast<const react::RNSHeaderItemIOSProps>(_props)->searchBarPlacement;
+--- a/ios/header/RNSHeaderItemComponentView.mm	1985-10-26 09:15:00
++++ b/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 22:33:16
+@@ -88,6 +88,11 @@
+   _menuRepresentation = menuRepresentationProp;
  }
  
 +- (BOOL)searchFieldAccessory
@@ -326,18 +326,18 @@ diff -ruN a/ios/header/RNSHeaderItemComponentView.mm b/ios/header/RNSHeaderItemC
  - (void)emitOnPress
  {
    [_headerItemEventEmitter emitOnPress];
-@@ -198,6 +203,7 @@
+@@ -235,6 +240,7 @@
    const auto &oldItemProps = *std::static_pointer_cast<const react::RNSHeaderItemIOSProps>(_props);
  
    BOOL needsUpdate = oldItemProps.searchBarPlacement != newItemProps.searchBarPlacement ||
 +      oldItemProps.searchFieldAccessory != newItemProps.searchFieldAccessory ||
-       oldItemProps.axisBehavior != newItemProps.axisBehavior;
+       oldItemProps.axisBehavior != newItemProps.axisBehavior || oldItemProps.variant != newItemProps.variant ||
+       oldItemProps.tintColor != newItemProps.tintColor;
    BOOL menuDidChange = NO;
- 
 diff -ruN a/ios/header/RNSHeaderItemDataProviding.h b/ios/header/RNSHeaderItemDataProviding.h
---- a/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 18:04:03
-+++ b/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 18:04:03
-@@ -22,6 +22,8 @@
+--- a/ios/header/RNSHeaderItemDataProviding.h	1985-10-26 09:15:00
++++ b/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 22:33:06
+@@ -27,6 +27,8 @@
  @property (nonatomic, readonly) BOOL respondsToOnPress;
  @property (nonatomic, readonly) BOOL hidesSharedBackground;
  @property (nonatomic, readonly) BOOL searchBarPlacement;
@@ -347,8 +347,8 @@ diff -ruN a/ios/header/RNSHeaderItemDataProviding.h b/ios/header/RNSHeaderItemDa
  @property (nonatomic, readonly) RNSHeaderItemVisibilityPriority visibilityPriority;
  
 diff -ruN a/ios/legacy/RNSSearchBar.h b/ios/legacy/RNSSearchBar.h
---- a/ios/legacy/RNSSearchBar.h	2026-10-12 18:04:03
-+++ b/ios/legacy/RNSSearchBar.h	2026-10-12 18:04:03
+--- a/ios/legacy/RNSSearchBar.h	1985-10-26 09:15:00
++++ b/ios/legacy/RNSSearchBar.h	2026-10-12 22:33:06
 @@ -32,6 +32,8 @@
  @property (nonatomic) BOOL hideWhenScrolling;
  @property (nonatomic) RNSSearchBarPlacement placement;
@@ -359,8 +359,8 @@ diff -ruN a/ios/legacy/RNSSearchBar.h b/ios/legacy/RNSSearchBar.h
  @property (nonatomic, retain) UISearchController *controller;
  
 diff -ruN a/ios/legacy/RNSSearchBar.mm b/ios/legacy/RNSSearchBar.mm
---- a/ios/legacy/RNSSearchBar.mm	2026-10-12 18:04:03
-+++ b/ios/legacy/RNSSearchBar.mm	2026-10-12 18:04:03
+--- a/ios/legacy/RNSSearchBar.mm	1985-10-26 09:15:00
++++ b/ios/legacy/RNSSearchBar.mm	2026-10-12 22:33:06
 @@ -17,6 +17,8 @@
  @implementation RNSSearchBar {
    UISearchController *_controller;
@@ -435,10 +435,10 @@ diff -ruN a/ios/legacy/RNSSearchBar.mm b/ios/legacy/RNSSearchBar.mm
    [super updateProps:props oldProps:oldProps];
  
 diff -ruN a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts
---- a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 18:04:03
-+++ b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 18:04:03
-@@ -204,6 +204,8 @@
- export interface StackHeaderInlineItemIOS extends StackHeaderBaseItemIOS, SupportsMenuIOS, SupportsIdentifierIOS, SupportsAxisBehaviorIOS, SupportsSharedBackgroundIOS, SupportsVisibilityPriorityIOS {
+--- a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	1985-10-26 09:15:00
++++ b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 22:33:06
+@@ -231,6 +231,8 @@
+     tintColor?: ColorValue | undefined;
      /** Uses UIKit's search placement item on iOS 26 and later. */
      searchBarPlacement?: boolean | undefined;
 +    /** Conn: toolbar menu item shown as a button inside the toolbar search field (iOS 26 and later). */
@@ -447,9 +447,9 @@ diff -ruN a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d
       * @summary Marks this object as a header item definition.
       *
 diff -ruN a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts
---- a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 18:04:03
-+++ b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 18:04:03
-@@ -11,6 +11,8 @@
+--- a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	1985-10-26 09:15:00
++++ b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 22:33:06
+@@ -12,6 +12,8 @@
      hidesSharedBackground?: boolean | undefined;
      /** Uses UIKit's search placement item on iOS 26 and later. */
      searchBarPlacement?: boolean | undefined;
@@ -457,21 +457,21 @@ diff -ruN a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types
 +    searchFieldAccessory?: boolean | undefined;
      axisBehavior?: StackHeaderItemAxisBehaviorIOS | undefined;
      visibilityPriority?: StackHeaderItemVisibilityPriorityIOS | undefined;
-     title?: string | undefined;
+     variant?: 'plain' | 'done' | 'prominent' | undefined;
 diff -ruN a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts
---- a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 18:04:03
-+++ b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 18:04:03
-@@ -43,6 +43,7 @@
+--- a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	1985-10-26 09:15:00
++++ b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 22:33:06
+@@ -44,6 +44,7 @@
      identifier?: string | undefined;
      hidesSharedBackground?: CT.WithDefault<boolean, false>;
      searchBarPlacement?: CT.WithDefault<boolean, false>;
 +    searchFieldAccessory?: CT.WithDefault<boolean, false>;
      axisBehavior?: CT.WithDefault<'automatic' | 'horizontalOnly' | 'verticalPreferred', 'automatic'>;
      visibilityPriority?: CT.WithDefault<StackHeaderItemVisibilityPriorityIOS, 'standard'>;
-     title?: string | undefined;
+     variant?: CT.WithDefault<'plain' | 'done' | 'prominent', 'plain'>;
 diff -ruN a/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts b/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts
---- a/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts	2026-10-12 18:04:03
-+++ b/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts	2026-10-12 18:04:03
+--- a/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts	1985-10-26 09:15:00
++++ b/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts	2026-10-12 22:33:06
 @@ -26,6 +26,7 @@
      barTintColor?: ColorValue | undefined;
      tintColor?: ColorValue | undefined;
@@ -481,8 +481,8 @@ diff -ruN a/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts b/lib/typ
      disableBackButtonOverride?: boolean | undefined;
      inputType?: string | undefined;
 diff -ruN a/lib/typescript/legacy/types.d.ts b/lib/typescript/legacy/types.d.ts
---- a/lib/typescript/legacy/types.d.ts	2026-10-12 18:04:03
-+++ b/lib/typescript/legacy/types.d.ts	2026-10-12 18:04:03
+--- a/lib/typescript/legacy/types.d.ts	1985-10-26 09:15:00
++++ b/lib/typescript/legacy/types.d.ts	2026-10-12 22:33:06
 @@ -1026,6 +1026,12 @@
       */
      textColor?: ColorValue | undefined;
@@ -506,10 +506,10 @@ diff -ruN a/lib/typescript/legacy/types.d.ts b/lib/typescript/legacy/types.d.ts
      filterSystemImageName?: string | undefined;
      onComposePress?: (() => void) | undefined;
 diff -ruN a/src/components/stack/header/StackHeaderConfig.ios.types.ts b/src/components/stack/header/StackHeaderConfig.ios.types.ts
---- a/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 18:04:03
-+++ b/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 18:04:03
-@@ -224,6 +224,8 @@
-     SupportsVisibilityPriorityIOS {
+--- a/src/components/stack/header/StackHeaderConfig.ios.types.ts	1985-10-26 09:15:00
++++ b/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 22:33:06
+@@ -252,6 +252,8 @@
+   tintColor?: ColorValue | undefined;
    /** Uses UIKit's search placement item on iOS 26 and later. */
    searchBarPlacement?: boolean | undefined;
 +  /** Conn: toolbar menu item shown as a button inside the toolbar search field (iOS 26 and later). */
@@ -518,9 +518,9 @@ diff -ruN a/src/components/stack/header/StackHeaderConfig.ios.types.ts b/src/com
     * @summary Marks this object as a header item definition.
     *
 diff -ruN a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts
---- a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 18:04:03
-+++ b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 18:04:03
-@@ -19,6 +19,8 @@
+--- a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	1985-10-26 09:15:00
++++ b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 22:33:06
+@@ -20,6 +20,8 @@
    hidesSharedBackground?: boolean | undefined;
    /** Uses UIKit's search placement item on iOS 26 and later. */
    searchBarPlacement?: boolean | undefined;
@@ -528,11 +528,11 @@ diff -ruN a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts b/src/c
 +  searchFieldAccessory?: boolean | undefined;
    axisBehavior?: StackHeaderItemAxisBehaviorIOS | undefined;
    visibilityPriority?: StackHeaderItemVisibilityPriorityIOS | undefined;
-   title?: string | undefined;
+   variant?: 'plain' | 'done' | 'prominent' | undefined;
 diff -ruN a/src/fabric/header/HeaderItemIOSNativeComponent.ts b/src/fabric/header/HeaderItemIOSNativeComponent.ts
---- a/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 18:04:03
-+++ b/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 18:04:03
-@@ -76,6 +76,7 @@
+--- a/src/fabric/header/HeaderItemIOSNativeComponent.ts	1985-10-26 09:15:00
++++ b/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 22:33:06
+@@ -79,6 +79,7 @@
    identifier?: string | undefined;
    hidesSharedBackground?: CT.WithDefault<boolean, false>;
    searchBarPlacement?: CT.WithDefault<boolean, false>;
@@ -541,8 +541,8 @@ diff -ruN a/src/fabric/header/HeaderItemIOSNativeComponent.ts b/src/fabric/heade
      'automatic' | 'horizontalOnly' | 'verticalPreferred',
      'automatic'
 diff -ruN a/src/fabric/legacy/SearchBarNativeComponent.ts b/src/fabric/legacy/SearchBarNativeComponent.ts
---- a/src/fabric/legacy/SearchBarNativeComponent.ts	2026-10-12 18:04:03
-+++ b/src/fabric/legacy/SearchBarNativeComponent.ts	2026-10-12 18:04:03
+--- a/src/fabric/legacy/SearchBarNativeComponent.ts	1985-10-26 09:15:00
++++ b/src/fabric/legacy/SearchBarNativeComponent.ts	2026-10-12 22:33:06
 @@ -60,6 +60,8 @@
    barTintColor?: ColorValue | undefined;
    tintColor?: ColorValue | undefined;
@@ -553,8 +553,8 @@ diff -ruN a/src/fabric/legacy/SearchBarNativeComponent.ts b/src/fabric/legacy/Se
    // Android only
    autoFocus?: CT.WithDefault<boolean, false>;
 diff -ruN a/src/legacy/types.ts b/src/legacy/types.ts
---- a/src/legacy/types.ts	2026-10-12 18:04:03
-+++ b/src/legacy/types.ts	2026-10-12 18:04:03
+--- a/src/legacy/types.ts	1985-10-26 09:15:00
++++ b/src/legacy/types.ts	2026-10-12 22:33:06
 @@ -1143,6 +1143,12 @@
     */
    textColor?: ColorValue | undefined;

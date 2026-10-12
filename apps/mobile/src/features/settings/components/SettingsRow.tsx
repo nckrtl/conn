@@ -1,18 +1,17 @@
-import { MaterialListRow } from "../../../components/MaterialListRow";
 import { useNavigation } from "@react-navigation/native";
 import type { ComponentProps, ReactNode } from "react";
-import { Platform, Pressable, View } from "react-native";
+import { Platform, View } from "react-native";
+import { useResolveClassNames } from "uniwind";
 
 import { SymbolView } from "../../../components/AppSymbol";
-import { AppText as Text } from "../../../components/AppText";
+import { ListRow } from "../../../components/ListRow";
+import { ListRowLayout } from "../../../components/ListRowLayout";
+import { RowPressable } from "../../../components/RowPressable";
 import type { SettingsLegalDocumentTarget, SettingsSheetTarget } from "./settings-sheet-targets";
-import { cn } from "../../../lib/cn";
-
-type SymbolName = ComponentProps<typeof SymbolView>["name"];
 
 export function SettingsRow(props: {
   readonly disabled?: boolean;
-  readonly icon: SymbolName;
+  readonly icon: ComponentProps<typeof ListRow>["icon"];
   /** Drawn in place of `icon`, for a mark that is not a symbol. */
   readonly leading?: ReactNode;
   readonly label: string;
@@ -23,123 +22,92 @@ export function SettingsRow(props: {
   readonly onPress?: () => void;
 }) {
   const navigation = useNavigation();
-  if (Platform.OS === "android") {
+  const valueBelow =
+    props.valuePosition === "below" ||
+    (props.valuePosition === undefined && Platform.OS === "android");
+  const onPress = () => {
+    if (props.target) {
+      navigation.navigate("SettingsSheet", {
+        screen: "SettingsContent",
+        params: { screen: props.target },
+      });
+    } else if (props.fullScreenTarget) {
+      navigation.navigate(props.fullScreenTarget);
+    } else {
+      props.onPress?.();
+    }
+  };
+  if (props.leading !== undefined && props.leading !== null) {
     return (
-      <MaterialListRow
-        className="bg-grouped-card"
-        title={props.label}
-        subtitle={props.valuePosition === "trailing" ? undefined : props.value}
-        accessibilityLabel={[props.label, props.value].filter(Boolean).join(", ")}
-        trailing={
-          props.valuePosition === "trailing" && props.value ? (
-            <View className="flex-row items-center gap-3">
-              <Text className="text-sm text-foreground-muted">{props.value}</Text>
-              <SymbolView name="chevron.right" size={16} tintColorClassName="accent-chevron" />
-            </View>
-          ) : undefined
-        }
+      <LeadingSettingsRow
+        leading={props.leading}
+        label={props.label}
+        description={valueBelow ? props.value : undefined}
+        detail={valueBelow ? undefined : props.value}
         disabled={props.disabled}
-        leading={
-          props.leading ?? (
-            <SymbolView
-              name={props.icon}
-              size={24}
-              tintColorClassName="accent-icon"
-              type="monochrome"
-              weight="regular"
-            />
-          )
-        }
-        onPress={() => {
-          if (props.target)
-            navigation.navigate("SettingsSheet", {
-              screen: "SettingsContent",
-              params: { screen: props.target },
-            });
-          else if (props.fullScreenTarget) navigation.navigate(props.fullScreenTarget);
-          else props.onPress?.();
-        }}
+        onPress={onPress}
       />
     );
   }
-  const content = (
-    <View className={cn("flex-row items-center gap-4 p-4", props.disabled && "opacity-[0.45]")}>
-      {props.leading ?? (
-        <SymbolView
-          name={props.icon}
-          size={22}
-          tintColorClassName="accent-icon"
-          type="monochrome"
-          weight="regular"
-        />
-      )}
-      <>
-        <Text className="shrink-0 text-lg text-foreground" numberOfLines={1}>
-          {props.label}
-        </Text>
-        <View className="min-w-0 flex-1 items-end">
-          {props.value ? (
-            <Text
-              className="max-w-[180px] text-right text-base text-foreground-muted"
-              ellipsizeMode="middle"
-              numberOfLines={1}
-            >
-              {props.value}
-            </Text>
-          ) : null}
-        </View>
-      </>
-      <SymbolView
-        name="chevron.right"
-        size={16}
-        tintColorClassName="accent-chevron"
-        type="monochrome"
-        weight="semibold"
-      />
-    </View>
-  );
-
-  const target = props.target;
-  if (target) {
-    return (
-      <Pressable
-        accessibilityLabel={props.label}
-        accessibilityRole="button"
-        disabled={props.disabled}
-        onPress={() =>
-          navigation.navigate("SettingsSheet", {
-            screen: "SettingsContent",
-            params: { screen: target },
-          })
-        }
-      >
-        {content}
-      </Pressable>
-    );
-  }
-
-  const fullScreenTarget = props.fullScreenTarget;
-  if (fullScreenTarget) {
-    return (
-      <Pressable
-        accessibilityLabel={props.label}
-        accessibilityRole="button"
-        disabled={props.disabled}
-        onPress={() => navigation.navigate(fullScreenTarget)}
-      >
-        {content}
-      </Pressable>
-    );
-  }
-
   return (
-    <Pressable
-      accessibilityLabel={props.label}
+    <ListRow
+      icon={props.icon}
+      label={props.label}
+      description={valueBelow ? props.value : undefined}
+      detail={valueBelow ? undefined : props.value}
+      disabled={props.disabled}
+      onPress={onPress}
+    />
+  );
+}
+
+/**
+ * ListRow with a custom leading mark (Conn: the Orbit ring) in the icon slot.
+ * The mark takes the icon's 24pt box; ListRowLayout keeps the rest of the row.
+ */
+function LeadingSettingsRow(props: {
+  readonly leading: ReactNode;
+  readonly label: string;
+  readonly description?: string;
+  readonly detail?: string;
+  readonly disabled?: boolean;
+  readonly onPress: () => void;
+}) {
+  const rippleStyle = useResolveClassNames("bg-subtle-strong");
+  return (
+    <RowPressable
       accessibilityRole="button"
+      accessibilityLabel={[props.label, props.description, props.detail].filter(Boolean).join(", ")}
+      accessibilityState={{ disabled: Boolean(props.disabled) }}
       disabled={props.disabled}
       onPress={props.onPress}
+      android_ripple={{ color: rippleStyle.backgroundColor }}
+      unstable_pressDelay={Platform.OS === "android" ? 50 : undefined}
+      className="bg-grouped-card"
     >
-      {content}
-    </Pressable>
+      <View className="flex-row items-center pl-4">
+        <View className={props.disabled ? "size-6 opacity-45" : "size-6"}>
+          <View className="flex-1 items-center justify-center">{props.leading}</View>
+        </View>
+        {/* ListRowLayout pads 16pt where its icon gap is 12pt. */}
+        <View className="-ml-1 min-w-0 flex-1">
+          <ListRowLayout
+            label={props.label}
+            description={props.description}
+            detail={props.detail}
+            disabled={props.disabled}
+            accessory={
+              <SymbolView
+                name="chevron.right"
+                size={16}
+                tintColorClassName="accent-chevron"
+                type="monochrome"
+                weight="semibold"
+              />
+            }
+          />
+        </View>
+      </View>
+    </RowPressable>
   );
 }

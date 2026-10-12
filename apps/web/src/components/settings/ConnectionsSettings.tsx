@@ -4101,7 +4101,7 @@ export function ConnectionsSettings() {
   }
 
   return (
-    <SettingsPageContainer width="wide">
+    <SettingsPageContainer>
       <EnvironmentProviderSection />
       {primarySettings}
       <SettingsSection

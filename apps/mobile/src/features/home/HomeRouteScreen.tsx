@@ -7,13 +7,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Platform, useWindowDimensions } from "react-native";
 
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { resolveScratchProjectScopeKey } from "@t3tools/client-runtime/state/project-grouping";
 
-import {
-  nativeHeaderScrollEdgeEffects,
-  NativeHeaderToolbar,
-  NativeStackScreenOptions,
-} from "../../native/StackHeader";
-import { NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED } from "../layout/native-mail-search-toolbar";
+import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import { useProjects } from "../../state/entities";
 import { environmentThreadShells } from "../../state/threads";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
@@ -35,14 +31,7 @@ import { projectMachineLabel } from "./projectMachineLabel";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
 import { getConnectionStatusOnlyHeaderOptions } from "./WorkspaceConnectionTitle";
-
-const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
-// With the nav bar hidden nothing makes UIKit's automatic top edge effect
-// appear under the status bar, so ask for the soft fade explicitly.
-const HIDDEN_HEADER_SCROLL_EDGE_EFFECTS = { ...HEADER_SCROLL_EDGE_EFFECTS, top: "soft" } as const;
-// The glass iOS Home hides its nav bar outside the native sidebar column (see
-// Stack.tsx); the connection status renders inside the list.
-const HOME_HIDES_HEADER = Platform.OS === "ios" && NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED;
+import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 
 /* ─── Route screen ───────────────────────────────────────────────────── */
 
@@ -51,7 +40,8 @@ export function HomeRouteScreen() {
   const nativePrimaryColumn = use(NativePrimaryColumnContext);
   const columnMetrics = useNativeColumnLayoutMetrics();
   const headerWidth = nativePrimaryColumn ? (columnMetrics?.width ?? windowWidth) : windowWidth;
-  const { layout, panes } = useAdaptiveWorkspaceLayout();
+  const { layout, panes, primarySidebarSearchQuery, setPrimarySidebarSearchQuery } =
+    useAdaptiveWorkspaceLayout();
   const projects = useProjects();
   // Streaming turns rewrite thread shells many times a second. While a Thread
   // covers Home, rebuilding this list is invisible work.
@@ -63,7 +53,17 @@ export function HomeRouteScreen() {
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const navigation = useNavigation();
-  const [searchQuery, setSearchQuery] = useState("");
+  const workspace = useWorkspaceTabs();
+  const [localSearchQuery, setLocalSearchQuery] = useState("");
+  const searchQuery =
+    Platform.OS === "android"
+      ? primarySidebarSearchQuery
+      : (workspace?.state.tabs.threads.query ?? localSearchQuery);
+  const setSearchQuery = (query: string) => {
+    if (Platform.OS === "android") setPrimarySidebarSearchQuery(query);
+    else if (workspace) workspace.dispatch({ type: "query", query, tab: "threads" });
+    else setLocalSearchQuery(query);
+  };
   const handleSelectThread = useHomeThreadSelection();
   const handleNewThreadOnBranch = useCallback(
     (thread: EnvironmentThreadShell) => {
@@ -121,10 +121,22 @@ export function HomeRouteScreen() {
     () => new Set(environments.map((environment) => environment.environmentId)),
     [environments],
   );
-  const { options: listOptions, setSelectedEnvironmentId } =
-    useHomeListOptions(availableEnvironmentIds);
+  const {
+    options: listOptions,
+    setSelectedEnvironmentId,
+    setSelectedProjectKey,
+  } = useHomeListOptions(availableEnvironmentIds);
   const selectedEnvironmentId = listOptions.selectedEnvironmentId;
-  const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
+  const projectScopeKey = listOptions.selectedProjectKey;
+  const resolvedProjectKey = resolveScratchProjectScopeKey(projectScopeKey, projects, {
+    sidebarProjectGroupingMode: listOptions.projectGroupingMode,
+    sidebarProjectGroupingOverrides: {},
+  });
+  useEffect(() => {
+    if (resolvedProjectKey !== projectScopeKey) {
+      setSelectedProjectKey(resolvedProjectKey);
+    }
+  }, [projectScopeKey, resolvedProjectKey, setSelectedProjectKey]);
   const projectFilterOptions = useMemo(
     () =>
       buildHomeProjectScopes({
@@ -146,14 +158,12 @@ export function HomeRouteScreen() {
       })),
     [listOptions.projectGroupingMode, projects, savedConnectionsById, selectedEnvironmentId],
   );
-  useEffect(() => {
-    if (
-      selectedProjectKey !== null &&
-      !projectFilterOptions.some((project) => project.key === selectedProjectKey)
-    ) {
-      setSelectedProjectKey(null);
-    }
-  }, [projectFilterOptions, selectedProjectKey]);
+  // A saved project stays selected while its environment is offline or filtered out.
+  const selectedProjectKey = projectFilterOptions.some(
+    (project) => project.key === resolvedProjectKey,
+  )
+    ? resolvedProjectKey
+    : null;
 
   // In split layouts the persistent sidebar IS the thread list — Home becomes
   // an empty detail pane so selecting a thread never transitions layouts.
@@ -165,12 +175,16 @@ export function HomeRouteScreen() {
             Platform.OS === "android"
               ? { headerShown: false }
               : {
-                  // The glass Home route hides its bar; this pane needs it for
-                  // the new-task button.
+                  // Stack.tsx may hide Home's bar; this pane needs it for the
+                  // new-task button.
                   headerShown: true,
                   title: "",
                   headerTitle: "",
                   unstable_headerLeftItems: () => [],
+                  // Options survive layout changes; search and settings now belong to the sidebar.
+                  headerSearchBarOptions: undefined,
+                  unstable_headerRightItems: () => [],
+                  unstable_headerToolbarItems: () => [],
                 }
           }
         />
@@ -206,41 +220,36 @@ export function HomeRouteScreen() {
 
   return (
     <AndroidHomeFabLayout
+      disabled={workspace !== null && Platform.OS !== "android"}
       onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
     >
       <>
         {/* Restore the header after leaving split view; screen options are
-            shallow-merged. The glass iOS header stays hidden. Elsewhere the
-            title slot has no brand and only shows the connection status while
-            an environment reconnects. */}
-        <NativeStackScreenOptions
-          optionsVersion={headerWidth}
-          options={
-            HOME_HIDES_HEADER && !nativePrimaryColumn
-              ? {
-                  headerShown: false,
-                  headerTitle: "",
-                  scrollEdgeEffects: HIDDEN_HEADER_SCROLL_EDGE_EFFECTS,
-                  title: "",
-                }
-              : {
-                  ...getConnectionStatusOnlyHeaderOptions({
-                    // The iPad sidebar keeps filter and settings beside the title.
-                    headerWidth:
-                      nativePrimaryColumn && Platform.OS === "ios" && Platform.isPad
-                        ? headerWidth - 44 * 2
-                        : headerWidth,
-                    onOpenEnvironments: () =>
-                      navigation.navigate("SettingsSheet", {
-                        screen: "SettingsContent",
-                        params: { screen: "SettingsEnvironments" },
-                      }),
+            shallow-merged. On iOS the workspace root owns the header. Elsewhere
+            the title slot has no brand and only shows the connection status
+            while an environment reconnects. */}
+        {workspace !== null && Platform.OS === "ios" ? null : (
+          <NativeStackScreenOptions
+            optionsVersion={headerWidth}
+            options={{
+              ...getConnectionStatusOnlyHeaderOptions({
+                // The iPad sidebar keeps filter and settings beside the title.
+                headerWidth:
+                  nativePrimaryColumn && Platform.OS === "ios" && Platform.isPad
+                    ? headerWidth - 44 * 2
+                    : headerWidth,
+                onOpenEnvironments: () =>
+                  navigation.navigate("SettingsSheet", {
+                    screen: "SettingsContent",
+                    params: { screen: "SettingsEnvironments" },
                   }),
-                  headerShown: true,
-                }
-          }
-        />
+              }),
+              headerShown: Platform.OS !== "android",
+            }}
+          />
+        )}
         <HomeHeader
+          usesWorkspaceToolbar={workspace !== null}
           environments={environments}
           projects={projectFilterOptions}
           searchQuery={searchQuery}

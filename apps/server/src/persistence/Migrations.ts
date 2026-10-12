@@ -74,7 +74,10 @@ import Migration0057 from "./Migrations/057_ScheduledTaskWebhooks.ts";
 import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
-import Migration0061 from "./Migrations/061_PeerLinks.ts";
+import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
+// Conn: upstream's preview shipped PeerLinks at 61, which upstream main gives to
+// PullRequestReviewGuides. See reconcileConnPeerLinksMigration.
+import Migration0062 from "./Migrations/062_PeerLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -149,7 +152,8 @@ export const migrationEntries = [
   [58, "WebhookRelayDeliveries", Migration0058],
   [59, "McpAppModelContext", Migration0059],
   [60, "ThreadSnapshotWindowIndexes", Migration0060],
-  [61, "PeerLinks", Migration0061],
+  [61, "PullRequestReviewGuides", Migration0061],
+  [62, "PeerLinks", Migration0062],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -162,6 +166,39 @@ const makeMigrationLoader = (throughId?: number) =>
         .map(([id, name, migration]) => [`${id}_${name}`, migration]),
     ),
   );
+
+/**
+ * Conn builds from upstream's preview recorded PeerLinks at 61. Upstream main
+ * gives 61 to PullRequestReviewGuides, which the migrator would skip on those
+ * databases. Run that migration, record it at 61, and move PeerLinks to 62.
+ * Both migrations only create their table if it is missing.
+ */
+const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigration")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const tables = yield* sql`
+          SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+        `;
+      if (tables.length === 0) return [];
+      const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+          SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 61
+        `;
+      const legacy = history.find((row) => row.migration_id === 61 && row.name === "PeerLinks");
+      if (!legacy) return [];
+      if (history.some((row) => row !== legacy)) {
+        return yield* new Migrator.MigrationError({
+          kind: "BadState",
+          message: "Cannot move PeerLinks to 62 with unexpected later migrations.",
+        });
+      }
+      yield* Migration0061;
+      yield* sql`UPDATE effect_sql_migrations SET migration_id = 62 WHERE migration_id = 61 AND name = 'PeerLinks'`;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (61, 'PullRequestReviewGuides')`;
+      return [[61, "PullRequestReviewGuides"] as const];
+    }),
+  );
+});
 
 /**
  * Migrator run function - no schema dumping needed
@@ -190,8 +227,13 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     toMigrationInclusive === undefined || toMigrationInclusive >= 55
       ? yield* reconcileV2PreviewMigration()
       : [];
+  const connMigrations =
+    toMigrationInclusive === undefined || toMigrationInclusive >= 62
+      ? yield* reconcileConnPeerLinksMigration()
+      : [];
   const executedMigrations = [
     ...previewMigrations,
+    ...connMigrations,
     ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
   ];
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);

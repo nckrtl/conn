@@ -48,7 +48,7 @@ export function TimelineSystemDivider(props: {
                 type="button"
                 aria-label={props.actionLabel}
                 onClick={props.onAction}
-                className="flex min-w-0 items-center gap-1.5 rounded-full border border-(--shell-divider)! px-2.5 py-1 transition-colors hover:bg-(--shell-highlight)"
+                className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-(--shell-divider)! px-2.5 py-1 transition-colors hover:bg-(--shell-highlight) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
               />
             }
           >

@@ -9,6 +9,7 @@ import { migrationManifest, runMigrations } from "./Migrations.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
+import PeerLinks from "./Migrations/062_PeerLinks.ts";
 
 // The V2 schema is unchanged from the published September 15–16 previews.
 const seedPreview = Effect.gen(function* () {
@@ -41,7 +42,8 @@ describe("V2 preview upgrade", () => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "PeerLinks"],
+        [61, "PullRequestReviewGuides"],
+        [62, "PeerLinks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -125,7 +127,8 @@ describe("V2 preview upgrade", () => {
         [58, "WebhookRelayDeliveries"],
         [59, "McpAppModelContext"],
         [60, "ThreadSnapshotWindowIndexes"],
-        [61, "PeerLinks"],
+        [61, "PullRequestReviewGuides"],
+        [62, "PeerLinks"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -141,6 +144,40 @@ describe("V2 preview upgrade", () => {
         yield* sql`SELECT * FROM effect_sql_migrations ORDER BY migration_id`,
         history,
       );
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+});
+
+// Conn shipped upstream's preview with PeerLinks at 61; upstream main gives 61
+// to PullRequestReviewGuides and Conn keeps PeerLinks at 62.
+describe("Conn PeerLinks preview upgrade", () => {
+  it.effect("moves PeerLinks to 62 and runs the review guides migration it skipped", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 60 });
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord({ "61_PeerLinks": PeerLinks }),
+      });
+      yield* sql`
+        INSERT INTO peer_environment_links
+          (environment_id, secret_name, label, urls_json, access, linked_at, expires_at)
+        VALUES ('peer', 'peer-secret', 'Peer', '[]', 'read-only', '2026-10-10', '2026-11-10')
+      `;
+
+      assert.deepStrictEqual(yield* runMigrations(), [[61, "PullRequestReviewGuides"]]);
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+        SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
+      `;
+      assert.deepStrictEqual(
+        history.map((row) => [row.migration_id, row.name] as const),
+        migrationManifest,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM sqlite_master WHERE name = 'pull_request_review_guides'`,
+        [{ name: "pull_request_review_guides" }],
+      );
+      assert.strictEqual((yield* sql`SELECT * FROM peer_environment_links`).length, 1);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });

@@ -111,6 +111,7 @@ describe("Orbit names", () => {
   });
 
   it("derives the route slug from T3's generated branch", () => {
+    expect(orbitRouteSlugForBranch("t3/login-redirect")).toBe("login-redirect");
     expect(orbitRouteSlugForBranch("t3code/login-redirect")).toBe("login-redirect");
     expect(orbitRouteSlugForBranch("t3code/Fix_Login Redirect!")).toBe("fix-login-redirect");
     expect(orbitRouteSlugForBranch(`t3code/${"a".repeat(80)}`)).toHaveLength(63);

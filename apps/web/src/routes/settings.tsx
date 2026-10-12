@@ -114,7 +114,11 @@ function SettingsContentLayout() {
   const location = useLocation();
   const navigateToMainApp = useNavigateToMainApp();
   useEscapeToGoBack(navigateToMainApp);
-  const { search } = useSettingsScope();
+  const { search, environment } = useSettingsScope();
+  const contentScopeKey =
+    location.pathname === "/settings/diagnostics" || location.pathname === "/settings/providers"
+      ? environment?.environmentId
+      : JSON.stringify(search);
   const [restoreSignal, setRestoreSignal] = useState(0);
 
   return (
@@ -138,7 +142,7 @@ function SettingsContentLayout() {
         </WorkspacePageHeader>
 
         <div
-          key={`${JSON.stringify(search)}:${restoreSignal}`}
+          key={`${contentScopeKey}:${restoreSignal}`}
           // Same card as the chat: shell fill, --shell-inset gap, right corners match the nav panel's left corners.
           className="relative z-0 mr-(--shell-inset) mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tr-lg rounded-br-(--shell-corner) bg-(--shell-card) [--background:var(--shell-card)]"
         >

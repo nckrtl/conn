@@ -25,18 +25,24 @@ export function brandTitleOffset(): number {
 export function CompactBrandTitle(
   props: {
     readonly allowFontScaling?: boolean;
+    readonly accessibilityLabel?: string;
   } = {},
 ) {
   const stageLabel = resolveMobileStageLabel(Constants.expoConfig?.extra?.appVariant);
   // A renamed build (the nckrtl fork ships as Conn) shows its own mark and name.
   const brandName: string | null = Constants.expoConfig?.extra?.brandName ?? null;
+  // Callers label the screen as "T3 Code, <tab>"; a renamed build reads its own name.
+  const accessibilityLabel = props.accessibilityLabel ?? "T3 Code, Threads";
+  const brandedAccessibilityLabel = brandName
+    ? accessibilityLabel.replace(/^T3 Code\b/, brandName)
+    : accessibilityLabel;
   const titleOffset = brandTitleOffset();
   const { scale } = useAndroidControlSizing();
 
   return (
     <View
       aria-level={1}
-      accessibilityLabel={`${brandName ?? "T3 Code"}, Threads`}
+      accessibilityLabel={brandedAccessibilityLabel}
       accessible
       role="heading"
       className="flex-row items-center gap-1.5"

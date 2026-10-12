@@ -7,6 +7,15 @@ export const THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME = "px-3 py-2.5";
 export const THREAD_LIST_V2_ROW_DIVIDERS = false;
 /** Phone rows inset from the screen edge so their rounded surface reads. */
 export const THREAD_LIST_V2_ROW_INSET = 8;
+export const THREAD_LIST_V2_SIDEBAR_ROW_STYLE = {
+  borderRadius: 12,
+  paddingHorizontal: 12,
+  paddingVertical: 10,
+} satisfies ViewStyle;
+export const THREAD_LIST_V2_SIDEBAR_ROW_CONTAINER_STYLE = {
+  borderRadius: 12,
+  overflow: "hidden",
+} satisfies ViewStyle;
 
 export const selectedThreadRowColors = {
   foregroundClassName: "text-thread-selected-foreground",
@@ -28,13 +37,12 @@ export function getThreadListV2RowAppearance(
   const paneColor = theme[sidebarPane ? "--color-drawer" : "--color-screen"];
   const style: ViewStyle = {
     backgroundColor: selected ? selectedBackgroundColor : paneColor,
-    borderRadius: 12,
+    borderRadius: THREAD_LIST_V2_SIDEBAR_ROW_STYLE.borderRadius,
   };
   const swipeContainerStyle: ViewStyle = sidebarPane
-    ? { borderRadius: 12, overflow: "hidden" }
+    ? THREAD_LIST_V2_SIDEBAR_ROW_CONTAINER_STYLE
     : {
-        borderRadius: 12,
-        overflow: "hidden",
+        ...THREAD_LIST_V2_SIDEBAR_ROW_CONTAINER_STYLE,
         marginHorizontal: THREAD_LIST_V2_ROW_INSET,
       };
 
@@ -56,7 +64,7 @@ export function getThreadListV2RowAppearance(
       ? "accent-drawer-foreground-muted"
       : "accent-foreground-tertiary",
     style,
-    cardStyle: { ...style, paddingHorizontal: 12, paddingVertical: 10 },
+    cardStyle: { ...style, ...THREAD_LIST_V2_SIDEBAR_ROW_STYLE },
     swipeContainerStyle,
     swipeBackgroundColor: paneColor,
     // Provider badges blend into the surface beneath them.

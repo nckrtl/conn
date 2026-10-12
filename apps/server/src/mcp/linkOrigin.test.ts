@@ -19,6 +19,7 @@ import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -27,6 +28,7 @@ import { makeSubagentChildThread } from "@t3tools/provider-core/server/subagentP
 import * as ThreadForkService from "../orchestration-v2/ThreadForkService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -67,7 +69,11 @@ const layerOrchestrator = Layer.mergeAll(
     { databaseLayer: layerDatabase, runEffectWorker: false },
   ),
 );
-const layerOrchestration = ThreadManagement.layer.pipe(Layer.provideMerge(layerOrchestrator));
+const layerOrchestration = ThreadManagement.layer.pipe(
+  Layer.provideMerge(layerOrchestrator),
+  Layer.provideMerge(ServerSettings.layerTest()),
+  Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+);
 
 /** Launches dispatch the real thread.create, and nothing more: no workspace, no run. */
 const layerLaunches = Layer.effect(

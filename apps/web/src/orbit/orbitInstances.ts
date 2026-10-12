@@ -201,12 +201,11 @@ export function orbitInstanceNameForBranch(temporaryBranch: string): string {
   return temporaryBranch.replace("/", "-");
 }
 
-/** `t3code/login-redirect` → `login-redirect`, as a DNS label; null while temporary. */
+/** `t3/login-redirect` (or legacy `t3code/…`) → `login-redirect`, as a DNS label; null while temporary. */
 export function orbitRouteSlugForBranch(branch: string): string | null {
   if (isTemporaryWorktreeBranch(branch)) return null;
-  const name = branch.startsWith(`${WORKTREE_BRANCH_PREFIX}/`)
-    ? branch.slice(WORKTREE_BRANCH_PREFIX.length + 1)
-    : branch;
+  const prefix = [`${WORKTREE_BRANCH_PREFIX}/`, "t3code/"].find((p) => branch.startsWith(p));
+  const name = prefix ? branch.slice(prefix.length) : branch;
   const slug = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")

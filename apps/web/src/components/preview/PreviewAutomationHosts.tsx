@@ -21,6 +21,7 @@ import {
   type PreviewRenderedViewportSize,
   type PreviewViewportSetting,
   type ScopedThreadRef,
+  type VaultFillRequest,
 } from "@t3tools/contracts";
 import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
@@ -796,6 +797,17 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               approved: answer.approved,
               ...(answer.fields ? { fields: answer.fields } : {}),
             };
+          }
+          case "vaultCredentialFill": {
+            const input = request.input as Omit<VaultFillRequest, "tabId">;
+            const ready = await requireReadyTab();
+            if (!window.desktopBridge?.vaultFill) return { status: "insert_failed" };
+            const filled = await window.desktopBridge.vaultFill({
+              ...input,
+              tabId: ready.runtimeTabId,
+            });
+            if (filled.status === "origin_mismatch") toastSiteChanged(input.expectedOrigin);
+            return filled;
           }
           case "credentialFill": {
             const input = request.input as DesktopPreviewAutomationFillCredentialInput["input"];

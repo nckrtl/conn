@@ -628,9 +628,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Password manager",
     to: "/settings/passwords",
     scope: "environment-defaults",
-    searchTerms: [
-      "1password op cli bitwarden credentials logins sign in autofill connection status",
-    ],
+    searchTerms: ["vault vaultwarden credentials logins sign in autofill connection status"],
   },
   {
     id: "test-logins",
@@ -638,20 +636,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/passwords",
     scope: "environment-defaults",
     searchTerms: ["test users seed accounts development login passwords one-time code agents"],
-  },
-  {
-    id: "credential-sign-in-approval",
-    title: "One approval per sign-in",
-    to: "/settings/passwords",
-    scope: "environment-defaults",
-    searchTerms: ["password autofill prompt approve username one-time code otp group minute"],
-  },
-  {
-    id: "credential-approval-timeout",
-    title: "Deny unanswered prompts after",
-    to: "/settings/passwords",
-    scope: "environment-defaults",
-    searchTerms: ["password autofill prompt timeout seconds auto deny"],
   },
   {
     id: "credential-block-scripts",

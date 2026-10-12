@@ -218,7 +218,8 @@ export function PreviewChromeRow({
               }
             />
           </Tooltip>
-          {credentialAction && !inputFocused ? (
+          {/* Keep the login menu and its selection mounted when address-bar focus changes. */}
+          {credentialAction ? (
             <InputGroupAddon align="inline-end">{credentialAction}</InputGroupAddon>
           ) : null}
           {onOpenInBrowser && !inputFocused ? (

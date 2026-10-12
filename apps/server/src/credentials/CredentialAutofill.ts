@@ -1,12 +1,10 @@
 import {
-  CredentialApprovalDecision,
   DEFAULT_SERVER_SETTINGS,
   DesktopCredentialFillResult,
+  VaultFillResult,
   PreviewAutomationCredentialLockError,
-  type CredentialApprovalRequest,
   type CredentialField,
   type CredentialFillStatus,
-  type CredentialProviderStatus,
   type FillCredentialInput,
   type FillSiteCredentialInput,
   type FillSiteCredentialResult,
@@ -36,7 +34,6 @@ import * as Schema from "effect/Schema";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import * as CredentialProvider from "./CredentialProvider.ts";
 import * as TestLoginStore from "./TestLoginStore.ts";
 import { parseTotpSetup, totpCode } from "./totp.ts";
 import {
@@ -46,14 +43,8 @@ import {
   savedUrlsMatchHost,
 } from "./credentialOrigin.ts";
 
-/** The desktop denies at its own deadline first, so the broker never times out a live host. */
-const APPROVAL_BROKER_MARGIN_MS = 15_000;
-/** How long one sign-in approval covers the login's other fields. */
-const SIGN_IN_GRANT_SECONDS = 60;
-const SIGN_IN_FIELDS: ReadonlyArray<CredentialField> = ["username", "password", "otp"];
-
-const decodeDecision = Schema.decodeUnknownOption(CredentialApprovalDecision);
 const decodeFillResult = Schema.decodeUnknownOption(DesktopCredentialFillResult);
+const decodeVaultFillResult = Schema.decodeUnknownOption(VaultFillResult);
 
 const STATUS_MESSAGES: Record<CredentialFillStatus, string> = {
   filled: "Filled. The value is not shown to you.",
@@ -95,29 +86,19 @@ const showsLockedDocument = (lock: ScriptLock, page: PreviewAutomationStatus) =>
     ? lock.documentId === page.documentId
     : page.url !== null && withoutHash(page.url) === withoutHash(lock.url);
 
-interface SignInGrant {
-  readonly fields: ReadonlySet<CredentialField>;
-  readonly expiresAt: number;
-}
-
 const tabKey = (scope: McpInvocationContext.McpInvocationScope, tabId: PreviewTabId) =>
   `${scope.environmentId}\u0000${scope.threadId}\u0000${tabId}`;
 
 export class CredentialAutofill extends Context.Service<
   CredentialAutofill,
   {
-    /** Whether the password manager is reachable, for Settings. */
-    readonly status: Effect.Effect<CredentialProviderStatus>;
     /** Saved logins for a site, as metadata only. */
     readonly request: (
       input: RequestCredentialsInput,
-    ) => Effect.Effect<
-      RequestCredentialsResult,
-      CredentialProvider.CredentialProviderUnavailableError
-    >;
+    ) => Effect.Effect<RequestCredentialsResult, TestLoginStoreError>;
     /**
-     * Checks the tab's origin against the item, asks the user (or uses a
-     * live sign-in approval), then has the desktop insert the value. Returns
+     * Checks the tab's origin against a saved test login, then has the
+     * desktop insert the value. Returns
      * a status only, never the value.
      */
     readonly fill: (
@@ -155,12 +136,18 @@ export class CredentialAutofill extends Context.Service<
   }
 >()("t3/credentials/CredentialAutofill") {}
 
+interface TestCredential {
+  readonly id: string;
+  readonly title: string;
+  readonly urls: readonly string[];
+  readonly username: string;
+  readonly source: "test";
+}
+
 const make = Effect.gen(function* () {
-  const provider = yield* CredentialProvider.CredentialProvider;
   const testLogins = yield* TestLoginStore.TestLoginStore;
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  const grants = yield* Ref.make<ReadonlyMap<string, SignInGrant>>(new Map());
   /** Tab key → the document a secret was filled into. */
   const locks = yield* Ref.make<ReadonlyMap<string, ScriptLock>>(new Map());
 
@@ -171,27 +158,15 @@ const make = Effect.gen(function* () {
 
   const testLoginsAsCredentials = testLogins.list.pipe(
     Effect.map((stored) =>
-      stored.map((login): CredentialProvider.CredentialLogin => ({
+      stored.map((login): TestCredential => ({
         id: login.id,
         title: login.label || login.username,
-        vaultId: "",
         urls: [login.url],
         username: login.username,
         source: "test",
       })),
     ),
-    // A broken test store must not take 1Password down with it.
-    Effect.orElseSucceed((): ReadonlyArray<CredentialProvider.CredentialLogin> => []),
   );
-
-  /** Test logins first, then 1Password's. A 1Password failure leaves test logins usable. */
-  const allLogins = Effect.gen(function* () {
-    const test = yield* testLoginsAsCredentials;
-    const onePassword = yield* provider.listLogins.pipe(Effect.result);
-    return onePassword._tag === "Failure"
-      ? { logins: test, onePasswordError: onePassword.failure }
-      : { logins: [...test, ...onePassword.success], onePasswordError: null };
-  });
 
   const readTestSecret = (id: string, field: CredentialField) =>
     testLogins.list.pipe(
@@ -210,30 +185,19 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const readSecret = (
-    login: CredentialProvider.CredentialLogin,
-    field: CredentialField,
-  ): Effect.Effect<
-    Option.Option<Redacted.Redacted<string>>,
-    CredentialProvider.CredentialProviderUnavailableError | TestLoginStoreError
-  > =>
-    login.source === "test" ? readTestSecret(login.id, field) : provider.readSecret(login, field);
-
   const request: CredentialAutofill["Service"]["request"] = Effect.fn("CredentialAutofill.request")(
     function* (input) {
       const host = requestedHost(input.domain);
       if (!host) return { items: [] };
-      const { logins, onePasswordError } = yield* allLogins;
+      const logins = yield* testLoginsAsCredentials;
       const matches = logins.filter((login) => savedUrlsMatchHost(login.urls, host));
-      if (matches.length === 0 && onePasswordError) return yield* onePasswordError;
       return {
         items: matches.map((login) => ({
           id: login.id,
           title: login.title,
           urls: login.urls,
           source: login.source,
-          // Agents may see test usernames; 1Password's stay with the user.
-          ...(login.source === "test" && login.username ? { username: login.username } : {}),
+          username: login.username,
         })),
       };
     },
@@ -242,16 +206,11 @@ const make = Effect.gen(function* () {
   const fill: CredentialAutofill["Service"]["fill"] = Effect.fn("CredentialAutofill.fill")(
     function* (scope, input) {
       const options = yield* settings;
-      const { logins, onePasswordError } = yield* allLogins;
+      const loaded = yield* testLoginsAsCredentials.pipe(Effect.result);
+      if (loaded._tag === "Failure") return result("provider_unavailable", loaded.failure.message);
+      const logins = loaded.success;
       const login = logins.find((candidate) => candidate.id === input.itemId);
-      if (!login) {
-        return onePasswordError
-          ? result("provider_unavailable", onePasswordError.message)
-          : result("item_not_found");
-      }
-      // Test logins are for sites you develop: no prompt and no script lock.
-      const isTest = login.source === "test";
-
+      if (!login) return result("item_not_found");
       const page = yield* broker.invoke<PreviewAutomationStatus>({
         scope,
         operation: "status",
@@ -274,58 +233,13 @@ const make = Effect.gen(function* () {
       }
       const fieldExpression = credentialFieldExpression(input.field, input.selector);
 
-      // A sign-in approval is bound to this agent session, tab, login and origin.
-      const grantKey = `${tabKey(scope, tabId)}\u0000${scope.providerSessionId}\u0000${login.id}\u0000${origin}`;
-      const now = yield* Clock.currentTimeMillis;
-      const grant = (yield* Ref.get(grants)).get(grantKey);
-      const granted =
-        isTest || (grant !== undefined && grant.expiresAt > now && grant.fields.has(input.field));
-      if (!granted) {
-        const approvalRequest: CredentialApprovalRequest = {
-          itemTitle: login.title,
-          providerLabel: provider.label,
-          origin,
-          field: input.field,
-          timeoutSeconds: options.approvalTimeoutSeconds,
-          fieldExpression,
-          ...(options.oneApprovalPerSignIn
-            ? { signInFields: SIGN_IN_FIELDS, signInSeconds: SIGN_IN_GRANT_SECONDS }
-            : {}),
-        };
-        const answer = yield* broker.invoke<unknown>({
-          scope,
-          operation: "credentialApproval",
-          input: approvalRequest,
-          tabId,
-          timeoutMs: options.approvalTimeoutSeconds * 1000 + APPROVAL_BROKER_MARGIN_MS,
-          updateCurrentTab: false,
-        });
-        const decision = Option.getOrUndefined(decodeDecision(answer));
-        const allowed = options.oneApprovalPerSignIn
-          ? (decision?.fields ?? []).filter((field) => SIGN_IN_FIELDS.includes(field))
-          : [input.field];
-        if (decision?.approved !== true || !allowed.includes(input.field)) {
-          return result("denied");
-        }
-        if (options.oneApprovalPerSignIn) {
-          const expiresAt = (yield* Clock.currentTimeMillis) + SIGN_IN_GRANT_SECONDS * 1000;
-          yield* Ref.update(grants, (current) => {
-            const next = new Map([...current].filter(([, entry]) => entry.expiresAt > now));
-            next.set(grantKey, { fields: new Set(allowed), expiresAt });
-            return next;
-          });
-        }
-      }
-
       return yield* readAndFill({
         scope,
         login,
         field: input.field,
         tabId,
         origin,
-        pageUrl: page.url,
         fieldExpression,
-        blockScripts: options.blockScriptsAfterFill && !isTest,
       });
     },
   );
@@ -333,16 +247,14 @@ const make = Effect.gen(function* () {
   /** Reads one value and has the desktop insert it. Never returns the value. */
   const readAndFill = Effect.fn("CredentialAutofill.readAndFill")(function* (step: {
     readonly scope: McpInvocationContext.McpInvocationScope;
-    readonly login: CredentialProvider.CredentialLogin;
+    readonly login: TestCredential;
     readonly field: CredentialField;
     readonly tabId: PreviewTabId;
     readonly origin: string;
-    readonly pageUrl: string;
     readonly fieldExpression: string;
-    readonly blockScripts: boolean;
     readonly clientId?: string;
   }) {
-    const secret = yield* readSecret(step.login, step.field).pipe(Effect.result);
+    const secret = yield* readTestSecret(step.login.id, step.field).pipe(Effect.result);
     if (secret._tag === "Failure") return result("provider_unavailable", secret.failure.message);
     if (Option.isNone(secret.success)) return result("no_value");
 
@@ -361,12 +273,6 @@ const make = Effect.gen(function* () {
     });
     const outcome = Option.getOrUndefined(decodeFillResult(filled));
     const status = outcome?.status ?? "insert_failed";
-    if (status === "filled" && step.field !== "username" && step.blockScripts) {
-      const lock: ScriptLock = { documentId: outcome?.documentId, url: step.pageUrl };
-      yield* Ref.update(locks, (current) =>
-        new Map(current).set(tabKey(step.scope, step.tabId), lock),
-      );
-    }
     return result(status);
   });
 
@@ -374,7 +280,10 @@ const make = Effect.gen(function* () {
     "CredentialAutofill.listForSite",
   )(function* (input) {
     const options = yield* settings;
-    const { logins, onePasswordError } = yield* allLogins;
+    const loaded = yield* testLoginsAsCredentials.pipe(Effect.result);
+    if (loaded._tag === "Failure")
+      return { origin: null, items: [], unavailable: loaded.failure.message };
+    const logins = loaded.success;
     const matches = logins.flatMap((login) => {
       const origin = matchingOrigin(login.urls, input.url, {
         allowSubdomains: options.allowSubdomains,
@@ -389,7 +298,7 @@ const make = Effect.gen(function* () {
         username: login.username,
         source: login.source,
       })),
-      unavailable: onePasswordError?.message ?? null,
+      unavailable: null,
     };
   });
 
@@ -408,9 +317,48 @@ const make = Effect.gen(function* () {
     const every = (status: CredentialFillStatus) => ({
       results: input.fields.map((field) => ({ field, status })),
     });
-    const { logins, onePasswordError } = yield* allLogins;
+    if (input.source === "vault") {
+      const page = yield* broker.invoke<PreviewAutomationStatus>({
+        scope,
+        operation: "status",
+        input: {},
+        tabId: input.tabId,
+        clientId: input.hostClientId,
+      });
+      if (!page.available || !page.url) return every("tab_unavailable");
+      const origin = input.expectedOrigin
+        ? matchingOrigin([input.expectedOrigin], page.url, { allowSubdomains: false })
+        : null;
+      if (!origin) return every("origin_mismatch");
+      const results: Array<{ field: CredentialField; status: CredentialFillStatus }> = [];
+      for (const field of input.fields) {
+        // Vault rechecks the item's saved URLs; the desktop rechecks the actual tab before inserting.
+        const filled = yield* broker.invoke<unknown>({
+          scope,
+          operation: "vaultCredentialFill",
+          input: { itemId: input.itemId, field, expectedOrigin: origin },
+          tabId: input.tabId,
+          clientId: input.hostClientId,
+          updateCurrentTab: false,
+          timeoutMs: 135_000,
+        });
+        const outcome = Option.getOrUndefined(decodeVaultFillResult(filled));
+        const status = outcome?.status ?? "insert_failed";
+        if (status === "filled" && field !== "username" && options.blockScriptsAfterFill) {
+          const lock: ScriptLock = { documentId: outcome?.documentId, url: page.url };
+          yield* Ref.update(locks, (current) =>
+            new Map(current).set(tabKey(scope, input.tabId), lock),
+          );
+        }
+        results.push({ field, status });
+      }
+      return { results };
+    }
+    const loaded = yield* testLoginsAsCredentials.pipe(Effect.result);
+    if (loaded._tag === "Failure") return every("provider_unavailable");
+    const logins = loaded.success;
     const login = logins.find((candidate) => candidate.id === input.itemId);
-    if (!login) return every(onePasswordError ? "provider_unavailable" : "item_not_found");
+    if (!login) return every("item_not_found");
     const page = yield* broker.invoke<PreviewAutomationStatus>({
       scope,
       operation: "status",
@@ -431,9 +379,7 @@ const make = Effect.gen(function* () {
         field,
         tabId: input.tabId,
         origin,
-        pageUrl: page.url,
         fieldExpression: credentialFieldExpression(field),
-        blockScripts: options.blockScriptsAfterFill && login.source !== "test",
         clientId: input.hostClientId,
       });
       results.push({ field, status: filled.status });
@@ -485,7 +431,6 @@ const make = Effect.gen(function* () {
   });
 
   return CredentialAutofill.of({
-    status: provider.status,
     request,
     fill,
     listForSite,

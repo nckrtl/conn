@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import { TestClock } from "effect/testing";
@@ -4104,6 +4105,47 @@ describe("PreviewManager", () => {
           artifactPath,
           cause: writeCause,
         });
+      }),
+    ),
+  );
+
+  effectIt.effect("fills credentials without sending text to the host's focused composer", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let composer = "Draft to preserve";
+        let fieldValue = "old value";
+        const guest = makeTestPreviewWebContents(async () => ({
+          toJPEG: () => Buffer.alloc(0),
+          getSize: () => ({ width: 1, height: 1 }),
+        }));
+        guest.isDevToolsOpened = () => false;
+        const sendCommand = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+          if (method === "Input.insertText") composer += String(params?.text);
+          if (method === "Runtime.evaluate")
+            return { result: { subtype: "node", objectId: "password-field" } };
+          if (method === "Runtime.callFunctionOn") {
+            expect(params?.objectId).toBe("password-field");
+            const args = params?.arguments as { value: string }[];
+            if (args.length === 1) return { result: { value: "ready" } };
+            fieldValue = args[1]!.value;
+            expect(args[2]!.value).toBe("https://example.com");
+            return { result: { value: "filled" } };
+          }
+          return undefined;
+        });
+        guest.debugger.sendCommand = sendCommand;
+        fromId.mockReturnValue(guest);
+        yield* manager.createTab("tab_credential");
+        yield* manager.registerWebview("tab_credential", 42);
+        const result = yield* manager.automationFillCredential("tab_credential", {
+          expectedOrigin: "https://example.com",
+          field: "password",
+          fieldExpression: 'document.querySelector("input[type=password]")',
+          value: Redacted.make("test-secret"),
+        });
+        expect(result.status).toBe("filled");
+        expect(fieldValue).toBe("test-secret");
+        expect(composer).toBe("Draft to preserve");
       }),
     ),
   );

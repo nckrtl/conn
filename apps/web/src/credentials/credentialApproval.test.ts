@@ -12,7 +12,7 @@ import {
 
 const request = {
   itemTitle: "GitHub",
-  providerLabel: "1Password",
+  providerLabel: "Vault",
   origin: "https://github.com",
   field: "password" as const,
 };

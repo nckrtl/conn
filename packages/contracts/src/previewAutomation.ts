@@ -47,6 +47,8 @@ export const PREVIEW_AUTOMATION_OPERATIONS = [
   "credentialApproval",
   /** Fills an approved credential value; returns DesktopCredentialFillResult. */
   "credentialFill",
+  /** Fills a selected personal Vault field entirely on the desktop. */
+  "vaultCredentialFill",
 ] as const;
 
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_OPERATIONS);

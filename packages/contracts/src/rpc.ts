@@ -223,7 +223,6 @@ import {
   DeviceShutdownInput,
 } from "./device.ts";
 import {
-  CredentialProviderStatus,
   FillSiteCredentialInput,
   FillSiteCredentialResult,
   ListSiteCredentialsInput,
@@ -384,7 +383,6 @@ export const WS_METHODS = {
   previewAutomationConnect: "previewAutomation.connect",
   previewAutomationRespond: "previewAutomation.respond",
   previewAutomationFocusHost: "previewAutomation.focusHost",
-  credentialsStatus: "credentials.status",
   credentialsListForSite: "credentials.listForSite",
   credentialsFillForSite: "credentials.fillForSite",
   testLoginsList: "testLogins.list",
@@ -1293,12 +1291,6 @@ const WsPreviewAutomationFocusHostRpc = Rpc.make(WS_METHODS.previewAutomationFoc
   error: EnvironmentAuthorizationError,
 });
 
-const WsCredentialsStatusRpc = Rpc.make(WS_METHODS.credentialsStatus, {
-  payload: Schema.Struct({}),
-  success: CredentialProviderStatus,
-  error: EnvironmentAuthorizationError,
-});
-
 const WsCredentialsListForSiteRpc = Rpc.make(WS_METHODS.credentialsListForSite, {
   payload: ListSiteCredentialsInput,
   success: ListSiteCredentialsResult,
@@ -1662,7 +1654,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewAutomationConnectRpc,
   WsPreviewAutomationRespondRpc,
   WsPreviewAutomationFocusHostRpc,
-  WsCredentialsStatusRpc,
   WsCredentialsListForSiteRpc,
   WsCredentialsFillForSiteRpc,
   WsTestLoginsListRpc,

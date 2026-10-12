@@ -109,30 +109,31 @@ export const CREDENTIAL_PREPARE_FUNCTION = `function (field) {
 }`;
 
 /**
- * Runs with `this` bound to the input after CDP inserted the value. A hidden
- * guest can drop CDP text input, so an empty input falls back to an in-page
- * insert, which also fires the input events React listens to. Returns a fill
- * status and never the value.
+ * Writes only to the bound input. CDP Input.insertText can reach the host's
+ * focused composer when a webview is inactive, so credentials must never use
+ * keyboard routing. The native setter also supports controlled React inputs.
  */
-export const CREDENTIAL_FINISH_FUNCTION = `function (field, value) {
+export const CREDENTIAL_INSERT_FUNCTION = `function (field, value, expectedOrigin) {
   const element = this;
-  if (element.value.length === 0) {
-    element.focus();
-    if (!element.ownerDocument.execCommand("insertText", false, value)) {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-      if (setter) setter.call(element, value);
-      else element.value = value;
-      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
-    }
+  if (location.origin !== expectedOrigin) return "origin_mismatch";
+  const textTypes = new Set(${JSON.stringify(TEXT_INPUT_TYPES)});
+  if (!(element instanceof HTMLInputElement) || !element.isConnected ||
+      element.ownerDocument !== document || element.disabled || element.readOnly ||
+      (field === "password" ? element.type !== "password" : !textTypes.has(element.type))) {
+    return "not_editable";
   }
-  if (element.value.length === 0) return "insert_failed";
-  element.dispatchEvent(new Event("change", { bubbles: true }));
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (!setter) return "insert_failed";
+  setter.call(element, value);
+  if (element.value !== value) return "insert_failed";
   if (field !== "username") {
     Object.defineProperty(element, Symbol.for(${JSON.stringify(FILLED_MARK)}), {
       value: true,
       configurable: true,
     });
   }
+  element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
   return "filled";
 }`;
 

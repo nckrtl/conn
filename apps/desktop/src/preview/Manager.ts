@@ -39,7 +39,7 @@ import type {
   PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
 import {
-  CREDENTIAL_FINISH_FUNCTION,
+  CREDENTIAL_INSERT_FUNCTION,
   CREDENTIAL_PREPARE_FUNCTION,
   SENSITIVE_INPUT_VALUES_EXPRESSION,
   redactSensitiveValues,
@@ -4685,14 +4685,16 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       // The document the value goes into. If the page replaces it before the
       // caller checks, the caller sees a different id and the lock is moot.
       const { documentId } = guestStateOf(wc);
-      yield* send("Input.insertText", { text: Redacted.value(input.value) });
-      // From here the page may hold the value, so redaction must know it.
+      // Bind the write to the resolved field; keyboard input can reach the
+      // host composer when Electron has not activated the guest webview.
       if (input.field !== "username") rememberFilledSecret(wc, Redacted.value(input.value));
-      const finished = yield* callOnField(objectId, CREDENTIAL_FINISH_FUNCTION, [
+      const finished = yield* callOnField(objectId, CREDENTIAL_INSERT_FUNCTION, [
         input.field,
         Redacted.value(input.value),
+        input.expectedOrigin,
       ]);
-      return finished === "filled" ? result("filled", documentId) : result("insert_failed");
+      if (finished === "filled") return result("filled", documentId);
+      return result(finished === "origin_mismatch" ? "origin_mismatch" : "insert_failed");
     }).pipe(
       Effect.ensuring(
         sendCleanup("Runtime.releaseObjectGroup", { objectGroup: CREDENTIAL_OBJECT_GROUP }).pipe(

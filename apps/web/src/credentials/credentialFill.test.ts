@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import {
-  CREDENTIAL_FINISH_FUNCTION,
+  CREDENTIAL_INSERT_FUNCTION,
   CREDENTIAL_PREPARE_FUNCTION,
   SENSITIVE_INPUT_VALUES_EXPRESSION,
   credentialFieldExpression,
@@ -18,8 +18,6 @@ const find = (field: "username" | "password" | "otp", selector?: string) =>
 
 describe("credential page scripts", () => {
   beforeEach(() => {
-    // jsdom has no execCommand; Chromium's can refuse too, which takes the same fallback.
-    document.execCommand = () => false;
     // jsdom has no layout; give every element a box so it counts as visible.
     vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
       x: 0,
@@ -82,20 +80,22 @@ describe("credential page scripts", () => {
     input.addEventListener("input", () => events.push("input"));
     input.addEventListener("change", () => events.push("change"));
     expect(callOn(input, CREDENTIAL_PREPARE_FUNCTION, "password")).toBe("ready");
-    // CDP Input.insertText replaces the selection; jsdom has no CDP, so emulate a dropped insert.
-    input.value = "";
-    expect(callOn(input, CREDENTIAL_FINISH_FUNCTION, "password", "s3cret")).toBe("filled");
+    expect(callOn(input, CREDENTIAL_INSERT_FUNCTION, "password", "s3cret", location.origin)).toBe(
+      "filled",
+    );
     expect(input.value).toBe("s3cret");
     expect(events).toEqual(["input", "change"]);
     expect(evaluate(SENSITIVE_INPUT_VALUES_EXPRESSION)).toEqual(["s3cret"]);
   });
 
-  it("does not insert twice when CDP already inserted the value", () => {
+  it("fills a username without marking it as a secret", () => {
     document.body.innerHTML = `<input type="text" id="user">`;
     const input = document.getElementById("user") as HTMLInputElement;
     expect(callOn(input, CREDENTIAL_PREPARE_FUNCTION, "username")).toBe("ready");
     input.value = "nick";
-    expect(callOn(input, CREDENTIAL_FINISH_FUNCTION, "username", "nick")).toBe("filled");
+    expect(callOn(input, CREDENTIAL_INSERT_FUNCTION, "username", "nick", location.origin)).toBe(
+      "filled",
+    );
     expect(input.value).toBe("nick");
     // Usernames are not secret and are not marked for redaction.
     expect(evaluate(SENSITIVE_INPUT_VALUES_EXPRESSION)).toEqual([]);
@@ -115,7 +115,7 @@ describe("credential page scripts", () => {
     document.body.innerHTML = `<input type="password" id="p"><input type="text" id="t" value="visible">`;
     const input = document.getElementById("p") as HTMLInputElement;
     callOn(input, CREDENTIAL_PREPARE_FUNCTION, "password");
-    callOn(input, CREDENTIAL_FINISH_FUNCTION, "password", "s3cret");
+    callOn(input, CREDENTIAL_INSERT_FUNCTION, "password", "s3cret", location.origin);
     input.type = "text";
     expect(evaluate(SENSITIVE_INPUT_VALUES_EXPRESSION)).toEqual(["s3cret"]);
   });

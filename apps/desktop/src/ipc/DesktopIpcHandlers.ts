@@ -1,3 +1,5 @@
+import { vaultwardenSetup } from "./methods/vaultwarden.ts";
+import { vaultLogins, vaultFill } from "./methods/vaultLogins.ts";
 import * as Effect from "effect/Effect";
 
 import { receiveProviderAuthCallback, cancelProviderAuthCallback } from "./methods/providerAuth.ts";
@@ -154,6 +156,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(orbitGatewaySend);
   yield* ipc.handle(databaseRun);
   yield* ipc.handle(vaultDatabases);
+  yield* ipc.handle(vaultwardenSetup);
+  yield* ipc.handle(vaultLogins);
+  yield* ipc.handle(vaultFill);
   yield* ipc.handle(mcpConnect);
   yield* ipc.handle(mcpRequest);
   yield* ipc.handle(mcpDisconnect);

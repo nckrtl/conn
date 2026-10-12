@@ -3814,10 +3814,6 @@ const makeWsRpcLayer = (
             previewAutomationBroker.respond(input),
             { "rpc.aggregate": "preview-automation" },
           ),
-        [WS_METHODS.credentialsStatus]: (_input) =>
-          observeRpcEffect(WS_METHODS.credentialsStatus, credentialAutofill.status, {
-            "rpc.aggregate": "credentials",
-          }),
         [WS_METHODS.credentialsListForSite]: (input) =>
           observeRpcEffect(
             WS_METHODS.credentialsListForSite,

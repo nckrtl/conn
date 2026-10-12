@@ -72,6 +72,9 @@ function InputGroupAddon({
       data-slot="input-group-addon"
       onMouseDown={(e) => {
         const target = e.target as HTMLElement;
+        // React portals bubble through this addon, but their menu/dialog controls
+        // must not focus the input and unmount the surface before its click runs.
+        if (!e.currentTarget.contains(target)) return;
         const isInteractive = target.closest(
           "button, a, input, select, textarea, [role='button'], [role='combobox'], [role='listbox'], [data-slot='select-trigger']",
         );

@@ -7,15 +7,15 @@ import { PreviewTabId } from "./preview.ts";
  * Password-manager autofill for the collaborative browser.
  *
  * Agents only ever see item metadata (id, title, saved URLs) and fill
- * statuses. Secret values travel from the password manager CLI to the
+ * statuses. Test-login values travel from the server store to the
  * desktop's CDP session inside trusted app code and never appear in these
- * agent-facing schemas.
+ * agent-facing schemas. Personal Vault logins stay on the desktop.
  */
 
 export const CredentialField = Schema.Literals(["username", "password", "otp"]);
 export type CredentialField = typeof CredentialField.Type;
 
-/** 1Password item ids are 26 lowercase alphanumerics; Bitwarden ids are UUIDs. */
+/** Login ids, including the legacy id format accepted by older clients. */
 export const CredentialItemId = Schema.String.check(
   Schema.isPattern(
     /^(?:[a-z0-9]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/,
@@ -27,7 +27,7 @@ export type CredentialItemId = typeof CredentialItemId.Type;
  * Where a saved login lives. `test` logins are T3 Code's own store for test
  * users of sites you develop: they fill without a prompt and agents may save them.
  */
-export const CredentialSource = Schema.Literals(["1password", "test"]);
+export const CredentialSource = Schema.Literals(["test", "vault"]);
 export type CredentialSource = typeof CredentialSource.Type;
 
 export const CredentialItemSummary = Schema.Struct({
@@ -35,7 +35,7 @@ export const CredentialItemSummary = Schema.Struct({
   title: Schema.String,
   urls: Schema.Array(Schema.String),
   source: Schema.optional(CredentialSource),
-  /** Only for test logins; 1Password usernames are not shown to agents. */
+  /** Only test logins are exposed to agents. */
   username: Schema.optional(Schema.String),
 });
 export type CredentialItemSummary = typeof CredentialItemSummary.Type;
@@ -144,15 +144,6 @@ export const DesktopCredentialFillResult = Schema.Struct({
 });
 export type DesktopCredentialFillResult = typeof DesktopCredentialFillResult.Type;
 
-/** Whether the server can reach the password manager. Never touches a vault. */
-export const CredentialProviderStatus = Schema.Struct({
-  provider: Schema.Literal("1password"),
-  label: Schema.String,
-  state: Schema.Literals(["ready", "not_installed", "no_account", "unavailable"]),
-  version: Schema.NullOr(Schema.String),
-});
-export type CredentialProviderStatus = typeof CredentialProviderStatus.Type;
-
 export const CREDENTIAL_APPROVAL_TIMEOUT_SECONDS = [30, 90, 180] as const;
 
 export const CredentialAutofillSettings = Schema.Struct({
@@ -164,7 +155,7 @@ export const CredentialAutofillSettings = Schema.Struct({
   ),
   /** After a password or code fill, refuse agent JavaScript in that tab until it navigates. */
   blockScriptsAfterFill: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  /** A login saved for example.com also fills its subdomains. */
+  /** A test login saved for example.com also fills its subdomains. */
   allowSubdomains: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type CredentialAutofillSettings = typeof CredentialAutofillSettings.Type;
@@ -180,7 +171,7 @@ export const CredentialAutofillSettingsPatch = Schema.Struct({
 export const SiteCredentialOption = Schema.Struct({
   id: CredentialItemId,
   title: Schema.String,
-  /** The username hint 1Password lists. Never sent to agents. */
+  /** The username hint shown in the login picker. */
   username: Schema.NullOr(Schema.String),
   source: CredentialSource,
 });
@@ -195,7 +186,7 @@ export const ListSiteCredentialsResult = Schema.Struct({
   /** The tab origin the logins match, or null when nothing matches. */
   origin: Schema.NullOr(Schema.String),
   items: Schema.Array(SiteCredentialOption),
-  /** Set when the password manager could not be asked. */
+  /** Set when the test-login store could not be read. */
   unavailable: Schema.NullOr(Schema.String),
 });
 export type ListSiteCredentialsResult = typeof ListSiteCredentialsResult.Type;
@@ -206,6 +197,10 @@ export type ListSiteCredentialsResult = typeof ListSiteCredentialsResult.Type;
  * whose own browser sent it.
  */
 export const FillSiteCredentialInput = Schema.Struct({
+  /** Distinguishes Vault UUIDs from test-login UUIDs. Older callers omit this. */
+  source: Schema.optional(CredentialSource),
+  /** Origin at which the user selected a local Vault suggestion. */
+  expectedOrigin: Schema.optional(Schema.String),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   tabId: PreviewTabId,

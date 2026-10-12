@@ -1,3 +1,10 @@
+import type { VaultwardenSetupRequest, VaultwardenSetupResponse } from "./vaultwarden.ts";
+import type {
+  VaultLoginsRequest,
+  VaultLoginsResponse,
+  VaultFillRequest,
+  VaultFillResult,
+} from "./vaultLogins.ts";
 import * as Schema from "effect/Schema";
 
 import {
@@ -1447,6 +1454,10 @@ export interface DesktopBridge {
    * connection. Optional: other desktop builds lack it.
    */
   databaseRun?: (request: DesktopDatabaseRequest) => Promise<DesktopDatabaseResponse>;
+  /** Dedicated Vaultwarden account setup. Secrets are write-only and held by the OS credential store. */
+  vaultwardenSetup?: (request: VaultwardenSetupRequest) => Promise<VaultwardenSetupResponse>;
+  vaultLogins?: (request: VaultLoginsRequest) => Promise<VaultLoginsResponse>;
+  vaultFill?: (request: VaultFillRequest) => Promise<VaultFillResult>;
   /** nckrtl fork: Database entries from the Vault Mac app. `allowUnlock` may prompt for Touch ID. */
   vaultDatabases?: (request: {
     readonly allowUnlock: boolean;

@@ -51,6 +51,18 @@ interface Reply {
   readonly message?: string;
   readonly databases?: readonly Wire[];
   readonly database?: Wire;
+  readonly suggestions?: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly username: string;
+  }[];
+  readonly itemID?: string;
+  readonly credential?: {
+    readonly mode: string;
+    readonly username?: string;
+    readonly password?: string;
+    readonly code?: string;
+  };
 }
 
 export class VaultError extends Error {
@@ -70,9 +82,15 @@ function frame(payload: object): Buffer {
 }
 
 /** Sends one request through the relay and returns Vault's final reply. */
-export function vaultRequest(
-  mode: "list-database" | "database-credential",
-  options: { readonly itemID?: string; readonly allowUnlock: boolean },
+export function vaultBridgeRequest(
+  request: {
+    readonly kind: "database" | "login";
+    readonly mode: string;
+    readonly itemID?: string;
+    readonly url?: string;
+    readonly field?: string;
+    readonly allowUnlock: boolean;
+  },
   binary: string = VAULT_BINARY,
 ): Promise<Reply> {
   // The binary exists only where Vault is installed, which is only ever a Mac.
@@ -140,13 +158,18 @@ export function vaultRequest(
       frame({
         version: 1,
         id,
-        kind: "database",
-        mode,
-        ...(options.itemID ? { itemID: options.itemID } : {}),
-        allowUnlock: options.allowUnlock,
+        ...request,
       }),
     );
   });
+}
+
+export function vaultRequest(
+  mode: "list-database" | "database-credential",
+  options: { readonly itemID?: string; readonly allowUnlock: boolean },
+  binary?: string,
+) {
+  return vaultBridgeRequest({ kind: "database", mode, ...options }, binary);
 }
 
 function toDatabase(wire: Wire): VaultDatabase | null {

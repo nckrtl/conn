@@ -6,6 +6,7 @@ import {
   PreviewAutomationExecutionError,
   ProviderInstanceId,
   ThreadId,
+  TestLoginStoreError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -13,17 +14,14 @@ import * as Schema from "effect/Schema";
 import { McpSchema, McpServer } from "effect/unstable/ai";
 
 import * as CredentialAutofill from "../credentials/CredentialAutofill.ts";
-import * as CredentialProvider from "../credentials/CredentialProvider.ts";
-import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TestLoginStore from "../credentials/TestLoginStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
-const SECRET = "s3cret-Value!42";
-const ITEM_ID = "abcdefghijklmnopqrstuvwxyz";
-const VAULT_ID = "vaultvaultvaultvaultvault1";
+const SECRET = "test-password";
+const ITEM_ID = "11111111-2222-4333-8444-555555555555";
 
 const invocation = (capabilities: ReadonlyArray<McpInvocationContext.McpCapability>) => ({
   environmentId: EnvironmentId.make("environment-credentials-test"),
@@ -49,35 +47,14 @@ const client = McpSchema.McpServerClient.of({
 
 const toJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-const itemList = toJson([
-  {
-    id: ITEM_ID,
-    title: "GitHub",
-    category: "LOGIN",
-    vault: { id: VAULT_ID, name: "Private" },
-    additional_information: "nick@example.com",
-    urls: [{ label: "website", primary: true, href: "https://github.com/login" }],
-  },
-  {
-    id: "zyxwvutsrqponmlkjihgfedcba",
-    title: "GitLab",
-    vault: { id: VAULT_ID, name: "Private" },
-    urls: [{ href: "https://gitlab.com" }],
-  },
-]);
-
 interface Scenario {
   readonly tabUrl?: string | null;
   /** The document id the desktop reports. Omitted: a host that predates ids. */
   readonly documentId?: number;
-  readonly approved?: boolean;
-  /** Fields a sign-in prompt answers with. */
-  readonly approvedFields?: ReadonlyArray<string>;
   readonly fillFails?: boolean;
+  readonly storeFails?: boolean;
   readonly settings?: Partial<CredentialAutofillSettings>;
   readonly testLogins?: ReadonlyArray<TestLoginStore.StoredTestLogin>;
-  /** 1Password's CLI fails, as when it is locked or missing. */
-  readonly onePasswordDown?: boolean;
 }
 
 const TEST_LOGIN_ID = "11111111-2222-4333-8444-555555555555";
@@ -96,33 +73,19 @@ const testLogin = (
 });
 
 const makeHarness = (scenario: Scenario = {}) => {
-  const opCalls: Array<ReadonlyArray<string>> = [];
   const brokerCalls: Array<{
     operation: string;
     input: unknown;
     tabId?: string;
     clientId?: string;
   }> = [];
-  const output = (stdout: string): ProcessRunner.ProcessRunOutput => ({
-    stdout,
-    stderr: "",
-    code: 0 as ProcessRunner.ProcessRunOutput["code"],
-    timedOut: false,
-    stdoutTruncated: false,
-    stderrTruncated: false,
-    stdoutInvalidUtf8: false,
-    stderrInvalidUtf8: false,
-  });
-  const runner = Layer.mock(ProcessRunner.ProcessRunner)({
-    run: (input) => {
-      opCalls.push(input.args);
-      if (scenario.onePasswordDown) return Effect.succeed({ ...output(""), code: 1 as never });
-      return Effect.succeed(output(input.args[0] === "read" ? SECRET : itemList));
-    },
-  });
-  const savedTestLogins: Array<TestLoginStore.StoredTestLogin> = [...(scenario.testLogins ?? [])];
+  const savedTestLogins: Array<TestLoginStore.StoredTestLogin> = [
+    ...(scenario.testLogins ?? [testLogin()]),
+  ];
   const testLoginStore = Layer.mock(TestLoginStore.TestLoginStore)({
-    list: Effect.sync(() => [...savedTestLogins]),
+    list: scenario.storeFails
+      ? Effect.fail(new TestLoginStoreError({}))
+      : Effect.sync(() => [...savedTestLogins]),
     save: (input, createdBy) =>
       Effect.sync(() => {
         const login = testLogin({
@@ -165,11 +128,7 @@ const makeHarness = (scenario: Scenario = {}) => {
             ...documentFields(),
           } as A);
         }
-        case "credentialApproval":
-          return Effect.succeed({
-            approved: scenario.approved ?? true,
-            ...(scenario.approvedFields ? { fields: scenario.approvedFields } : {}),
-          } as A);
+        case "vaultCredentialFill":
         case "credentialFill":
           return scenario.fillFails
             ? Effect.fail(
@@ -197,8 +156,6 @@ const makeHarness = (scenario: Scenario = {}) => {
   const layer = McpHttpServer.CredentialsToolkitRegistrationLive.pipe(
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(CredentialAutofill.layer),
-    Layer.provide(CredentialProvider.layerOnePassword),
-    Layer.provide(runner),
     Layer.provide(broker),
     Layer.provide(ServerSettings.layerTest({ credentialAutofill: scenario.settings ?? {} })),
     Layer.provide(testLoginStore),
@@ -217,11 +174,23 @@ const makeHarness = (scenario: Scenario = {}) => {
         );
     });
   const scope = invocation(["preview"]);
-  return { opCalls, brokerCalls, layer, call, scope, savedTestLogins, page };
+  return { brokerCalls, layer, call, scope, savedTestLogins, page };
 };
 
-const secretReads = (opCalls: ReadonlyArray<ReadonlyArray<string>>) =>
-  opCalls.filter((args) => args[0] === "read" || args.includes("--otp"));
+const fillVault = (harness: ReturnType<typeof makeHarness>, field: "username" | "password") =>
+  Effect.gen(function* () {
+    const autofill = yield* CredentialAutofill.CredentialAutofill;
+    return yield* autofill.fillForSite({
+      environmentId: harness.scope.environmentId,
+      threadId: harness.scope.threadId,
+      tabId: PreviewTabId.make("tab-1"),
+      hostClientId: "desktop-host-1",
+      itemId: ITEM_ID,
+      source: "vault",
+      expectedOrigin: "https://github.com",
+      fields: [field],
+    });
+  });
 
 describe("credentials MCP tools", () => {
   it.effect("lists matching logins as metadata without revealing fields", () => {
@@ -237,67 +206,15 @@ describe("credentials MCP tools", () => {
       expect(result.isError).toBe(false);
       expect(result.structuredContent).toEqual({
         items: [
-          { id: ITEM_ID, title: "GitHub", urls: ["https://github.com/login"], source: "1password" },
+          {
+            id: ITEM_ID,
+            title: "admin",
+            urls: ["https://github.com/login"],
+            source: "test",
+            username: "admin@myapp.test",
+          },
         ],
       });
-      // The username hint 1Password lists is not passed on.
-      expect(toJson(result)).not.toContain("nick@example.com");
-      expect(harness.opCalls).toEqual([
-        ["item", "list", "--categories", "Login", "--format", "json"],
-      ]);
-      expect(harness.opCalls.flat()).not.toContain("--reveal");
-    }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
-
-  it.effect("fills after approval and returns only a status", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const result = yield* harness.call("fill_credential", {
-        itemId: ITEM_ID,
-        field: "password",
-      });
-      expect(result.isError).toBe(false);
-      expect(result.structuredContent).toMatchObject({ status: "filled" });
-      expect(toJson(result)).not.toContain(SECRET);
-
-      expect(harness.brokerCalls.map((entry) => entry.operation)).toEqual([
-        "status",
-        "credentialApproval",
-        "credentialFill",
-      ]);
-      const [, approval, fill] = harness.brokerCalls;
-      // The prompt names the item and origin, and holds no secret.
-      expect(approval!.input).toMatchObject({
-        itemTitle: "GitHub",
-        providerLabel: "1Password",
-        origin: "https://github.com",
-        field: "password",
-        timeoutSeconds: 90,
-      });
-      expect(toJson(approval!.input)).not.toContain(SECRET);
-      expect(approval!.tabId).toBe("tab-1");
-      // The secret only travels in the fill request, pinned to the checked tab and origin.
-      expect(fill!.tabId).toBe("tab-1");
-      expect(fill!.input).toMatchObject({
-        field: "password",
-        expectedOrigin: "https://github.com",
-        value: SECRET,
-      });
-      expect(harness.opCalls).toContainEqual([
-        "read",
-        "--no-newline",
-        `op://${VAULT_ID}/${ITEM_ID}/password`,
-      ]);
-    }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
-
-  it.effect("reads no secret when the user denies", () => {
-    const harness = makeHarness({ approved: false });
-    return Effect.gen(function* () {
-      const result = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
-      expect(result.structuredContent).toMatchObject({ status: "denied" });
-      expect(secretReads(harness.opCalls)).toEqual([]);
-      expect(harness.brokerCalls.map((entry) => entry.operation)).not.toContain("credentialFill");
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
@@ -307,7 +224,6 @@ describe("credentials MCP tools", () => {
       const result = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
       expect(result.structuredContent).toMatchObject({ status: "origin_mismatch" });
       expect(harness.brokerCalls.map((entry) => entry.operation)).toEqual(["status"]);
-      expect(secretReads(harness.opCalls)).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
@@ -316,23 +232,6 @@ describe("credentials MCP tools", () => {
     return Effect.gen(function* () {
       const result = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "username" });
       expect(result.structuredContent).toMatchObject({ status: "tab_unavailable" });
-      expect(secretReads(harness.opCalls)).toEqual([]);
-    }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
-
-  it.effect("reads one-time codes through --otp", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const result = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "otp" });
-      expect(result.structuredContent).toMatchObject({ status: "filled" });
-      expect(harness.opCalls).toContainEqual([
-        "item",
-        "get",
-        ITEM_ID,
-        "--vault",
-        VAULT_ID,
-        "--otp",
-      ]);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
@@ -349,7 +248,7 @@ describe("credentials MCP tools", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const unknown = yield* harness.call("fill_credential", {
-        itemId: "zzzzzzzzzzzzzzzzzzzzzzzzzz",
+        itemId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         field: "password",
       });
       expect(unknown.structuredContent).toMatchObject({ status: "item_not_found" });
@@ -359,44 +258,6 @@ describe("credentials MCP tools", () => {
         [] as never,
       );
       expect(denied.isError).toBe(true);
-      expect(secretReads(harness.opCalls)).toEqual([]);
-    }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
-
-  it.effect("one sign-in approval covers the login's other fields", () => {
-    const harness = makeHarness({
-      settings: { oneApprovalPerSignIn: true },
-      approvedFields: ["username", "password"],
-    });
-    return Effect.gen(function* () {
-      const first = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "username" });
-      expect(first.structuredContent).toMatchObject({ status: "filled" });
-      const approvals = () =>
-        harness.brokerCalls.filter((entry) => entry.operation === "credentialApproval");
-      expect(approvals()[0]!.input).toMatchObject({
-        field: "username",
-        signInFields: ["username", "password", "otp"],
-        timeoutSeconds: 90,
-      });
-      const second = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
-      expect(second.structuredContent).toMatchObject({ status: "filled" });
-      expect(approvals()).toHaveLength(1);
-      // The user left the code unticked, so it asks again.
-      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "otp" });
-      expect(approvals()).toHaveLength(2);
-    }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
-
-  it.effect("asks on every fill when sign-in approvals are off", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "username" });
-      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "username" });
-      const approvals = harness.brokerCalls.filter(
-        (entry) => entry.operation === "credentialApproval",
-      );
-      expect(approvals).toHaveLength(2);
-      expect(approvals[0]!.input).not.toHaveProperty("signInFields");
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
@@ -425,7 +286,7 @@ describe("credentials MCP tools", () => {
       // Nothing filled yet: scripts run without even asking the tab.
       yield* autofill.guardScript(harness.scope, undefined);
       expect(harness.brokerCalls).toEqual([]);
-      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+      yield* fillVault(harness, "password");
       const blocked = yield* autofill.guardScript(harness.scope, undefined).pipe(Effect.result);
       expect(blocked._tag).toBe("Failure");
       if (blocked._tag === "Failure") {
@@ -439,7 +300,7 @@ describe("credentials MCP tools", () => {
     return Effect.gen(function* () {
       const autofill = yield* CredentialAutofill.CredentialAutofill;
       const locked = () => autofill.isScriptLocked(harness.scope, undefined);
-      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+      yield* fillVault(harness, "password");
       // history.pushState and a hash link change the URL, not the document.
       harness.page.url = "https://github.com/login#step-2";
       expect(yield* locked()).toBe(true);
@@ -462,7 +323,7 @@ describe("credentials MCP tools", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const autofill = yield* CredentialAutofill.CredentialAutofill;
-      yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+      yield* fillVault(harness, "password");
       harness.page.url = "https://github.com/login#step-2";
       expect(yield* autofill.isScriptLocked(harness.scope, undefined)).toBe(true);
       harness.page.url = "https://github.com/session";
@@ -476,12 +337,12 @@ describe("credentials MCP tools", () => {
     return Effect.gen(function* () {
       yield* Effect.gen(function* () {
         const autofill = yield* CredentialAutofill.CredentialAutofill;
-        yield* username.call("fill_credential", { itemId: ITEM_ID, field: "username" });
+        yield* fillVault(username, "username");
         yield* autofill.guardScript(username.scope, undefined);
       }).pipe(Effect.provide(username.layer));
       yield* Effect.gen(function* () {
         const autofill = yield* CredentialAutofill.CredentialAutofill;
-        yield* off.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+        yield* fillVault(off, "password");
         yield* autofill.guardScript(off.scope, undefined);
       }).pipe(Effect.provide(off.layer));
     }).pipe(Effect.scoped);
@@ -494,9 +355,7 @@ describe("credentials MCP tools", () => {
       const site = yield* autofill.listForSite({ url: "https://github.com/login?return_to=/" });
       expect(site).toEqual({
         origin: "https://github.com",
-        items: [
-          { id: ITEM_ID, title: "GitHub", username: "nick@example.com", source: "1password" },
-        ],
+        items: [{ id: ITEM_ID, title: "admin", username: "admin@myapp.test", source: "test" }],
         unavailable: null,
       });
       const other = yield* autofill.listForSite({ url: "https://example.org/" });
@@ -526,11 +385,11 @@ describe("credentials MCP tools", () => {
         "credentialFill",
       ]);
       expect(harness.brokerCalls.every((entry) => entry.clientId === "desktop-host-1")).toBe(true);
-      // The password fill locks agent scripts in that tab, as an agent fill would.
+      // Test credentials leave agent scripts available for development.
       const blocked = yield* autofill
         .guardScript(harness.scope, PreviewTabId.make("tab-1"))
         .pipe(Effect.result);
-      expect(blocked._tag).toBe("Failure");
+      expect(blocked._tag).toBe("Success");
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
@@ -547,22 +406,81 @@ describe("credentials MCP tools", () => {
         fields: ["password"],
       });
       expect(filled.results).toEqual([{ field: "password", status: "origin_mismatch" }]);
-      expect(secretReads(harness.opCalls)).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
+
+  it.effect(
+    "fills Vault locally through the selected desktop even when the test store is unavailable",
+    () => {
+      const harness = makeHarness({ storeFails: true, documentId: 42 });
+      return Effect.gen(function* () {
+        const autofill = yield* CredentialAutofill.CredentialAutofill;
+        const filled = yield* autofill.fillForSite({
+          environmentId: harness.scope.environmentId,
+          threadId: harness.scope.threadId,
+          tabId: PreviewTabId.make("tab-1"),
+          hostClientId: "desktop-host-1",
+          itemId: TEST_LOGIN_ID,
+          source: "vault",
+          expectedOrigin: "https://github.com",
+          fields: ["username", "password"],
+        });
+        expect(filled.results).toEqual([
+          { field: "username", status: "filled" },
+          { field: "password", status: "filled" },
+        ]);
+        expect(harness.brokerCalls.map((call) => call.operation)).toEqual([
+          "status",
+          "vaultCredentialFill",
+          "vaultCredentialFill",
+        ]);
+        expect(harness.brokerCalls.every((call) => call.clientId === "desktop-host-1")).toBe(true);
+        expect(harness.brokerCalls[1]?.input).toEqual({
+          itemId: TEST_LOGIN_ID,
+          field: "username",
+          expectedOrigin: "https://github.com",
+        });
+        expect(yield* autofill.isScriptLocked(harness.scope, PreviewTabId.make("tab-1"))).toBe(
+          true,
+        );
+        harness.page.documentId = 43;
+        expect(yield* autofill.isScriptLocked(harness.scope, PreviewTabId.make("tab-1"))).toBe(
+          false,
+        );
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "does not request a Vault field after the tab moves away from the selected site",
+    () => {
+      const harness = makeHarness({ tabUrl: "https://gitlab.com" });
+      return Effect.gen(function* () {
+        const autofill = yield* CredentialAutofill.CredentialAutofill;
+        const filled = yield* autofill.fillForSite({
+          environmentId: harness.scope.environmentId,
+          threadId: harness.scope.threadId,
+          tabId: PreviewTabId.make("tab-1"),
+          hostClientId: "desktop-host-1",
+          itemId: TEST_LOGIN_ID,
+          source: "vault",
+          expectedOrigin: "https://github.com",
+          fields: ["password"],
+        });
+        expect(filled.results).toEqual([{ field: "password", status: "origin_mismatch" }]);
+        expect(harness.brokerCalls.map((call) => call.operation)).toEqual(["status"]);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("fills a test login without a prompt or script lock", () => {
     const harness = makeHarness({ testLogins: [testLogin()] });
     return Effect.gen(function* () {
       const found = yield* harness.call("request_credentials", { domain: "github.com" });
       expect(found.structuredContent).toMatchObject({
-        items: [
-          { id: TEST_LOGIN_ID, source: "test", username: "admin@myapp.test" },
-          { id: ITEM_ID, source: "1password" },
-        ],
+        items: [{ id: TEST_LOGIN_ID, source: "test", username: "admin@myapp.test" }],
       });
-      // 1Password usernames stay with the user.
-      expect(toJson(found)).not.toContain("nick@example.com");
+      expect(toJson(found)).not.toContain(SECRET);
 
       const filled = yield* harness.call("fill_credential", {
         itemId: TEST_LOGIN_ID,
@@ -574,7 +492,6 @@ describe("credentials MCP tools", () => {
         "credentialFill",
       ]);
       expect(harness.brokerCalls[1]!.input).toMatchObject({ value: "test-password" });
-      expect(secretReads(harness.opCalls)).toEqual([]);
       const autofill = yield* CredentialAutofill.CredentialAutofill;
       yield* autofill.guardScript(harness.scope, undefined);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
@@ -596,7 +513,7 @@ describe("credentials MCP tools", () => {
   });
 
   it.effect("lets agents save the test users they create", () => {
-    const harness = makeHarness();
+    const harness = makeHarness({ testLogins: [] });
     return Effect.gen(function* () {
       const saved = yield* harness.call("save_test_login", {
         url: "http://myapp.test/login",
@@ -611,15 +528,29 @@ describe("credentials MCP tools", () => {
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
-  it.effect("keeps test logins usable while 1Password is down", () => {
-    const harness = makeHarness({ testLogins: [testLogin()], onePasswordDown: true });
+  it.effect("reports test store failures without offering stale logins", () => {
+    const harness = makeHarness({ storeFails: true });
     return Effect.gen(function* () {
       const autofill = yield* CredentialAutofill.CredentialAutofill;
       const site = yield* autofill.listForSite({ url: "https://github.com/login" });
-      expect(site.items).toEqual([
-        { id: TEST_LOGIN_ID, title: "admin", username: "admin@myapp.test", source: "test" },
-      ]);
+      expect(site.items).toEqual([]);
       expect(site.unavailable).not.toBeNull();
+      const found = yield* harness.call("request_credentials", { domain: "github.com" });
+      expect(found.isError).toBe(true);
+      const filled = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+      expect(filled.structuredContent).toMatchObject({ status: "provider_unavailable" });
+      expect(harness.brokerCalls).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(harness.layer));
+  });
+
+  it.effect("does not expose personal Vault entries through agent tools", () => {
+    const harness = makeHarness({ testLogins: [] });
+    return Effect.gen(function* () {
+      const found = yield* harness.call("request_credentials", { domain: "github.com" });
+      expect(found.structuredContent).toEqual({ items: [] });
+      const filled = yield* harness.call("fill_credential", { itemId: ITEM_ID, field: "password" });
+      expect(filled.structuredContent).toMatchObject({ status: "item_not_found" });
+      expect(harness.brokerCalls).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 });

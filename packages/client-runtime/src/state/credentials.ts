@@ -8,11 +8,6 @@ export function createCredentialsEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   return {
-    /** Whether the environment's password manager CLI is installed and set up. */
-    status: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:credentials:status",
-      tag: WS_METHODS.credentialsStatus,
-    }),
     /** Saved logins for one page origin, for the browser's key menu. */
     listForSite: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:credentials:list-for-site",

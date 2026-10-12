@@ -30,7 +30,7 @@ interface TestLoginDialogProps {
 
 /**
  * Adds or edits a test login in T3 Code's own store. Test logins are for
- * test users of sites you develop; real accounts belong in 1Password.
+ * test users of sites you develop; real accounts belong in Vault.
  */
 export function TestLoginDialog(props: TestLoginDialogProps) {
   return (
@@ -102,7 +102,7 @@ function TestLoginForm(props: TestLoginDialogProps) {
         <DialogTitle>{login ? "Edit test login" : "Save a test login"}</DialogTitle>
         <DialogDescription>
           For test users of sites you develop. Agents can sign in with it without a prompt, so keep
-          real accounts in 1Password.
+          real accounts in Vault.
         </DialogDescription>
       </DialogHeader>
       <DialogPanel>

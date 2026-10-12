@@ -766,8 +766,9 @@ export function PreviewView({
               threadRef={threadRef}
               tabId={tabId}
               runtimeTabId={runtimeTabId}
-              pageUrl={navUrl}
-              loading={loading}
+              pageUrl={url || null}
+              loading={loading || navStatus._tag !== "Success"}
+              visible={visible && !isUnreachable}
             />
           ) : null
         }

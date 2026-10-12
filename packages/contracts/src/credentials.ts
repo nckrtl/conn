@@ -139,8 +139,6 @@ export type DesktopCredentialFillStatus = typeof DesktopCredentialFillStatus.Typ
 
 export const DesktopCredentialFillResult = Schema.Struct({
   status: DesktopCredentialFillStatus,
-  /** The document the value went into, as in `PreviewAutomationStatus.documentId`. */
-  documentId: Schema.optional(Schema.Int),
 });
 export type DesktopCredentialFillResult = typeof DesktopCredentialFillResult.Type;
 
@@ -192,19 +190,16 @@ export const ListSiteCredentialsResult = Schema.Struct({
 export type ListSiteCredentialsResult = typeof ListSiteCredentialsResult.Type;
 
 /**
- * The user picked a login in the browser's key menu. Runs without a prompt,
- * so it only goes to the desktop host named by `hostClientId`, the window
- * whose own browser sent it.
+ * The user picked a test login in the browser's key menu. Runs without a
+ * prompt. The environment's browser fills its own tab; Vault logins never
+ * come here, the desktop fills them itself.
  */
 export const FillSiteCredentialInput = Schema.Struct({
-  /** Distinguishes Vault UUIDs from test-login UUIDs. Older callers omit this. */
+  /** Distinguishes Vault UUIDs from test-login UUIDs. The server refuses Vault items. */
   source: Schema.optional(CredentialSource),
-  /** Origin at which the user selected a local Vault suggestion. */
-  expectedOrigin: Schema.optional(Schema.String),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   tabId: PreviewTabId,
-  hostClientId: Schema.String.check(Schema.isNonEmpty()).check(Schema.isMaxLength(128)),
   itemId: CredentialItemId,
   fields: Schema.Array(CredentialField).check(Schema.isMinLength(1)).check(Schema.isMaxLength(3)),
 });

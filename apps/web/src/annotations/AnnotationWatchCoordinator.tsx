@@ -1,15 +1,9 @@
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { useEffect, useEffectEvent, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
-import {
-  hasServerAcknowledgedLocalDispatch,
-  latestTurnStartFailureId,
-} from "../components/ChatView.logic";
-import { useQueuedMessageStore, useQueuedMessages } from "../queuedMessageStore";
-import { derivePhase } from "../session-logic";
-import { useThread, useThreadStatus } from "../state/entities";
+import { useThreadShell } from "../state/entities";
 import { useEnvironment } from "../state/environments";
 import { waitingIdsToSend } from "./annotatorQueue";
 import { useAnnotationWatchStore } from "./annotationWatchStore";
@@ -18,8 +12,8 @@ import { useAnnotatorQueue } from "./useAnnotatorQueue";
 
 /**
  * Watch mode: prompts each watched thread when it is idle and annotations it has not
- * been told about are waiting. Mounted once, in the main window, next to the queued
- * message sender that does the actual send.
+ * been told about are waiting. Mounted once, in the main window. The server queues the
+ * message, so idle only has to mean "nothing is running, queued or waiting on the user".
  */
 export function AnnotationWatchCoordinator() {
   const threadKeys = useAnnotationWatchStore(
@@ -65,39 +59,13 @@ function ThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
 
 const EMPTY_IDS: string[] = [];
 
-/** The same "can take a message now" rules the queued message sender uses, plus an empty queue. */
+/** The thread is connected and has no run, queued message or pending request. */
 function useThreadIdle(threadKey: string): boolean {
   const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
-  const thread = useThread(threadRef);
-  const threadStatus = useThreadStatus(threadRef);
+  const shell = useThreadShell(threadRef);
   const environment = useEnvironment(threadRef?.environmentId ?? null);
-  const queue = useQueuedMessages(threadKey);
-  const pendingRequests = useMemo(
-    () => derivePendingRequests(thread?.activities ?? []),
-    [thread?.activities],
-  );
-  const phase = derivePhase(thread?.session ?? null);
-  const lastDispatch = useQueuedMessageStore(
-    (state) => state.lastDispatchByThreadKey[threadKey]?.thread ?? null,
-  );
-  if (threadRef === null || thread === null || threadStatus !== "live") return false;
+  if (threadRef === null || shell === null) return false;
   if (environment !== null && environment.connection.phase !== "connected") return false;
-  if (queue.length > 0) return false;
-  if (phase === "running" || phase === "connecting") return false;
-  if (pendingRequests.approvals.length > 0 || pendingRequests.userInputs.length > 0) return false;
-  const latestUserMessageId = thread.messages.findLast((m) => m.role === "user")?.id ?? null;
-  return (
-    lastDispatch === null ||
-    hasServerAcknowledgedLocalDispatch({
-      localDispatch: lastDispatch,
-      phase,
-      latestTurn: thread.latestTurn ?? null,
-      latestUserMessageId,
-      session: thread.session ?? null,
-      hasPendingApproval: false,
-      hasPendingUserInput: false,
-      latestTurnStartFailureId: latestTurnStartFailureId(thread, latestUserMessageId),
-      threadError: null,
-    })
-  );
+  if (threadRuntimeIsActive(shell.runtime)) return false;
+  return !shell.hasPendingApprovals && !shell.hasPendingUserInput;
 }

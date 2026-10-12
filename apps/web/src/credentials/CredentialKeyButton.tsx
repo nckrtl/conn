@@ -1,5 +1,6 @@
 import type {
   CredentialField,
+  CredentialFillStatus,
   PreviewTabId,
   ScopedThreadRef,
   SiteCredentialOption,
@@ -21,7 +22,6 @@ import {
 } from "~/components/ui/menu";
 import { toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
-import { readPreviewAutomationClientId } from "~/components/preview/previewAutomationClientId";
 import { credentialsEnvironment } from "~/state/credentials";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -53,6 +53,27 @@ const FILL_FAILURES: Record<string, string> = {
   item_not_found: "The password manager no longer offers this login for this site.",
   denied: "Vault was not unlocked. Unlock it and try again.",
 };
+
+/**
+ * Fills a Vault login on this desktop, one field at a time. Vault reads the
+ * value and the desktop inserts it into the tab; neither the renderer nor the
+ * environment sees it. Null when this desktop build cannot fill from Vault.
+ */
+async function fillFromVault(
+  runtimeTabId: string,
+  itemId: string,
+  expectedOrigin: string,
+  fields: ReadonlyArray<CredentialField>,
+): Promise<ReadonlyArray<{ field: CredentialField; status: CredentialFillStatus }> | null> {
+  const vaultFill = window.desktopBridge?.vaultFill;
+  if (!vaultFill) return null;
+  const results: Array<{ field: CredentialField; status: CredentialFillStatus }> = [];
+  for (const field of fields) {
+    const filled = await vaultFill({ tabId: runtimeTabId, itemId, field, expectedOrigin });
+    results.push({ field, status: filled.status });
+  }
+  return results;
+}
 
 /** The fields one click fills, from what the page shows. */
 function fieldsToFill(page: CredentialPageFields): ReadonlyArray<CredentialField> {
@@ -134,30 +155,29 @@ export function CredentialKeyButton(props: {
       automatic = false,
     ) => {
       const { id: itemId, title } = item;
-      const hostClientId = readPreviewAutomationClientId(environmentId);
-      if (!origin || !hostClientId || requestedFields.length === 0 || fillingRef.current) return;
+      if (!origin || requestedFields.length === 0 || fillingRef.current) return;
       fillingRef.current = true;
       setFilling(true);
       try {
-        const result = await fill({
-          environmentId,
-          input: {
-            environmentId,
-            threadId,
-            tabId,
-            hostClientId,
-            itemId,
-            source: item.source,
-            expectedOrigin: origin,
-            fields: [...requestedFields],
-          },
-        });
-        if (result._tag === "Failure") {
+        const results = await (item.source === "vault"
+          ? fillFromVault(runtimeTabId, itemId, origin, requestedFields)
+          : fill({
+              environmentId,
+              input: {
+                environmentId,
+                threadId,
+                tabId,
+                itemId,
+                source: item.source,
+                fields: [...requestedFields],
+              },
+            }).then((result) => (result._tag === "Failure" ? null : result.value.results)));
+        if (results === null) {
           setContinuation(null);
           toastManager.add({ type: "error", title: `Could not fill “${title}”` });
           return;
         }
-        const failed = result.value.results.find(
+        const failed = results.find(
           (entry) =>
             entry.status !== "filled" &&
             // A transitioning form can disappear between detection and fill.
@@ -183,7 +203,7 @@ export function CredentialKeyButton(props: {
           currentContext.current.origin === origin &&
           currentContext.current.runtimeTabId === runtimeTabId
         ) {
-          const completed = result.value.results
+          const completed = results
             .filter((entry) => entry.status === "filled")
             .map((entry) => entry.field);
           setContinuation((current) => {

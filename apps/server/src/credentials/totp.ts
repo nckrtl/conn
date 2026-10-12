@@ -1,3 +1,4 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac.
 import * as NodeCrypto from "node:crypto";
 
 /** A one-time code setup: from a base32 secret or an otpauth:// URI. */

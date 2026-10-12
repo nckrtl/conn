@@ -1,11 +1,6 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import {
-  DEFAULT_RUNTIME_MODE,
-  EnvironmentId,
-  ProjectId,
-  ProviderInstanceId,
-  ThreadId,
-} from "@t3tools/contracts";
+import type { ThreadRunSummary, ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -13,7 +8,7 @@ import {
   workspaceAttention,
   workspaceThreads,
 } from "./workspaceActivity.logic";
-import type { ThreadSession } from "./types";
+import type { SidebarThreadSummary } from "./types";
 
 const local = EnvironmentId.make("local");
 const beast = EnvironmentId.make("beast");
@@ -28,9 +23,9 @@ function thread(environmentId = local, id = "t1") {
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     interactionMode: "default" as const,
-    latestTurn: null,
-    session: null,
-    backgroundLiveness: null,
+    latestRun: null as ThreadRunSummary | null,
+    runtime: null as ThreadRuntimeSummary | null,
+    pendingBackgroundTasks: [] as SidebarThreadSummary["pendingBackgroundTasks"],
   };
 }
 const ref = (environmentId = local, id = "t1") => scopeThreadRef(environmentId, ThreadId.make(id));
@@ -68,21 +63,19 @@ describe("workspace thread navigation", () => {
 });
 
 describe("workspace attention", () => {
-  const session = (status: ThreadSession["status"]): ThreadSession => ({
-    threadId: ThreadId.make("t1"),
+  const runtime = (status: ThreadRuntimeSummary["status"]): ThreadRuntimeSummary => ({
     status,
-    providerName: "Codex",
+    activeRunId: null,
     providerInstanceId: ProviderInstanceId.make("codex"),
-    runtimeMode: DEFAULT_RUNTIME_MODE,
-    activeTurnId: null,
+    providerName: "Codex",
     lastError: null,
     updatedAt: "2026-09-30T11:00:00Z",
   });
   const completed = {
     ...thread(),
-    latestTurn: {
-      turnId: "turn-1" as never,
-      state: "completed" as const,
+    latestRun: {
+      runId: "run-1" as never,
+      status: "completed" as const,
       assistantMessageId: null,
       requestedAt: "2026-09-30T10:00:00Z",
       startedAt: "2026-09-30T10:00:00Z",
@@ -108,33 +101,52 @@ describe("workspace attention", () => {
     });
     expect(workspaceAttention([completed], {})).toEqual({ unread: 0, approval: 0, input: 0 });
   });
-  it("waits for the turn and session to finish before reporting done", () => {
+  it("waits for the run and runtime to finish before reporting done", () => {
     const running = {
       ...completed,
-      latestTurn: { ...completed.latestTurn, state: "running" as const },
+      latestRun: { ...completed.latestRun, status: "running" as const },
     };
     expect(workspaceAttention([running], visited()).unread).toBe(0);
-    for (const status of ["running", "starting"] as const) {
+    for (const status of ["running", "starting", "idle"] as const) {
       expect(
-        workspaceAttention([{ ...completed, session: session(status) }], visited()).unread,
+        workspaceAttention([{ ...completed, runtime: runtime(status) }], visited()).unread,
       ).toBe(0);
     }
     expect(
-      workspaceAttention([{ ...completed, session: session("ready") }], visited()).unread,
+      workspaceAttention([{ ...completed, runtime: runtime("completed") }], visited()).unread,
     ).toBe(1);
-    for (const state of ["error", "interrupted"] as const) {
+    for (const status of ["failed", "interrupted"] as const) {
       expect(
         workspaceAttention(
-          [{ ...completed, latestTurn: { ...completed.latestTurn, state } }],
+          [{ ...completed, latestRun: { ...completed.latestRun, status } }],
           visited(),
         ).unread,
       ).toBe(0);
     }
   });
   it("suppresses done while background work continues", () => {
-    for (const backgroundLiveness of ["working", "monitoring"] as const) {
-      expect(workspaceAttention([{ ...completed, backgroundLiveness }], visited()).unread).toBe(0);
+    for (const kind of ["subagent", "monitor"] as const) {
+      expect(
+        workspaceAttention(
+          [{ ...completed, pendingBackgroundTasks: [{ taskId: "bg-1", kind }] }],
+          visited(),
+        ).unread,
+      ).toBe(0);
     }
+    expect(
+      workspaceAttention(
+        [{ ...completed, pendingBackgroundTasks: [{ taskId: "bg-1", kind: "command" }] }],
+        visited(),
+      ).unread,
+    ).toBe(1);
+  });
+  it("prefers the server's visited watermark over this device's", () => {
+    expect(
+      workspaceAttention(
+        [{ ...completed, lastVisitedAt: "2026-09-30T12:00:00Z" }],
+        visited(local, "t1", "2026-09-30T10:00:00Z"),
+      ).unread,
+    ).toBe(0);
   });
   it("reports requests separately from unread completions", () => {
     expect(workspaceAttention([{ ...completed, hasPendingApprovals: true }], visited())).toEqual({

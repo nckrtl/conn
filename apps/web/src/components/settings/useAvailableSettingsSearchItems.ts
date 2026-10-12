@@ -1,13 +1,15 @@
 import { useMemo } from "react";
-import { AuthAccessWriteScope } from "@t3tools/contracts";
+import { AuthEnvironmentMaintainScope } from "@t3tools/contracts";
 
+import { usePrimaryCloudLinkState } from "~/cloud/primaryCloudLinkState";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { isElectron } from "~/env";
 import { isLocalEnvironmentDisabled } from "~/localEnvironment";
 import { desktopWslStateAtom } from "~/state/desktopWslState";
-import { useEnvironments } from "~/state/environments";
+import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
+import { usePeerLinkHosts } from "~/state/peerLinks";
 import { useEnvironmentQuery } from "~/state/query";
-import { usePrimarySessionState } from "~/environments/primary";
+import { useEnvironmentScope } from "~/state/session";
 import { isWslSettingsRowVisible } from "./ConnectionsSettings.logic";
 import { isProviderSettingsEnvironmentAvailable } from "./ProviderSettingsPanel.logic";
 import type { SettingsScopeSearch } from "./settingsScope";
@@ -18,17 +20,18 @@ import {
 
 export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch = {}) {
   const { environments } = useEnvironments();
-  const primarySessionState = usePrimarySessionState();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const localEnvironmentDisabled = isLocalEnvironmentDisabled();
+  const canMaintain = useEnvironmentScope(primaryEnvironmentId, AuthEnvironmentMaintainScope);
+  const canManageLocalBackend = !localEnvironmentDisabled && canMaintain;
   const desktopWsl = useEnvironmentQuery(
-    isElectron && !localEnvironmentDisabled ? desktopWslStateAtom : null,
+    isElectron && canManageLocalBackend ? desktopWslStateAtom : null,
   );
-  const canManageLocalBackend =
-    !localEnvironmentDisabled &&
-    (isElectron ||
-      ((primarySessionState.data?.authenticated &&
-        primarySessionState.data.scopes?.includes(AuthAccessWriteScope)) ??
-        false));
+  const hasPeerLinkHost = usePeerLinkHosts().length > 0;
+  const cloudLinkState = usePrimaryCloudLinkState().data;
+  // Same fallback as the Connections row: older servers imply a tunnel from `linked`.
+  const managedTunnelActive =
+    cloudLinkState?.managedTunnelActive ?? cloudLinkState?.linked ?? false;
 
   return useMemo(
     () =>
@@ -59,8 +62,12 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
         }),
         hasThreadAutoSettlement:
           getThreadAutoSettlementSearchAvailability(environments).eligibleEnvironmentIds.length > 0,
+        managedTunnelActive,
+        hasPeerLinkHost,
       }),
     [
+      managedTunnelActive,
+      hasPeerLinkHost,
       canManageLocalBackend,
       desktopWsl.data,
       desktopWsl.error,

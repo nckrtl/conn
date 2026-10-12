@@ -8,7 +8,7 @@ import {
   type ProfileSyncChannel,
   type ProfileSyncState,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 
 import {
   mobileAppearancePatch,

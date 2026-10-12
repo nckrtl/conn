@@ -1,4 +1,4 @@
-import { type TurnId } from "@t3tools/contracts";
+import { type RunId } from "@t3tools/contracts";
 import { type MouseEvent, memo, useCallback, useMemo, useState } from "react";
 import { type TurnDiffFileChange } from "../../types";
 import {
@@ -6,18 +6,15 @@ import {
   summarizeTurnDiffStats,
   type TurnDiffTreeNode,
 } from "../../lib/turnDiffTree";
-import {
-  ChevronsDownUpIcon,
-  ChevronsUpDownIcon,
-  ChevronRightIcon,
-  FileDiffIcon,
-} from "lucide-react";
+import { ChevronRightIcon, FileDiffIcon } from "lucide-react";
+import { ChevronsDownUp, ChevronsUpDown } from "lucide";
 import { cn } from "~/lib/utils";
 import { DiffStatLabel, diffStatColumnsStyle, hasNonZeroStat } from "./DiffStatLabel";
 import { PierreEntryIcon } from "./PierreEntryIcon";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
+import { MorphIcon } from "~/components/MorphIcon";
 
 const EMPTY_DIRECTORY_OVERRIDES: Record<string, boolean> = {};
 
@@ -25,16 +22,16 @@ const EMPTY_DIRECTORY_OVERRIDES: Record<string, boolean> = {};
 export type ChangedFileContextMenuHandler = (filePath: string, event: MouseEvent) => void;
 
 export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
-  turnId: TurnId;
+  runId: RunId;
   files: ReadonlyArray<TurnDiffFileChange>;
   allDirectoriesExpanded: boolean;
   resolvedTheme: "light" | "dark";
   onToggleAllDirectories: () => void;
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onFileContextMenu?: ChangedFileContextMenuHandler | undefined;
 }) {
   const {
-    turnId,
+    runId,
     files,
     allDirectoriesExpanded,
     resolvedTheme,
@@ -85,11 +82,10 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
                   />
                 }
               >
-                {allDirectoriesExpanded ? (
-                  <ChevronsDownUpIcon className="size-3" />
-                ) : (
-                  <ChevronsUpDownIcon className="size-3" />
-                )}
+                <MorphIcon
+                  className="size-3"
+                  icon={allDirectoriesExpanded ? ChevronsDownUp : ChevronsUpDown}
+                />
               </TooltipTrigger>
               <TooltipPopup side="top">
                 {allDirectoriesExpanded ? "Collapse all folders" : "Expand all folders"}
@@ -104,7 +100,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
                   size="xs"
                   variant="ghost-muted"
                   aria-label="Open diff"
-                  onClick={() => onOpenTurnDiff(turnId, files[0]?.path)}
+                  onClick={() => onOpenTurnDiff(runId, files[0]?.path)}
                 />
               }
             >
@@ -116,8 +112,8 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
         </div>
       </div>
       <ChangedFilesTree
-        key={`${turnId}:${allDirectoriesExpanded}`}
-        turnId={turnId}
+        key={`${runId}:${allDirectoriesExpanded}`}
+        runId={runId}
         files={files}
         allDirectoriesExpanded={allDirectoriesExpanded}
         resolvedTheme={resolvedTheme}
@@ -129,21 +125,15 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
 });
 
 export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
-  turnId: TurnId;
+  runId: RunId;
   files: ReadonlyArray<TurnDiffFileChange>;
   allDirectoriesExpanded: boolean;
   resolvedTheme: "light" | "dark";
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onFileContextMenu?: ChangedFileContextMenuHandler | undefined;
 }) {
-  const {
-    files,
-    allDirectoriesExpanded,
-    onOpenTurnDiff,
-    resolvedTheme,
-    turnId,
-    onFileContextMenu,
-  } = props;
+  const { files, allDirectoriesExpanded, onOpenTurnDiff, resolvedTheme, runId, onFileContextMenu } =
+    props;
   const treeNodes = useMemo(() => buildTurnDiffTree(files), [files]);
   const directoryPathsKey = useMemo(
     () => collectDirectoryPaths(treeNodes).join("\u0000"),
@@ -189,7 +179,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
             type="button"
             data-scroll-anchor-ignore
             aria-expanded={isExpanded}
-            className="group flex w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+            className="group flex w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
             style={{ paddingLeft: `${leftPadding}px` }}
             onClick={() => toggleDirectory(node.path)}
           >
@@ -229,9 +219,9 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
       <button
         key={`file:${node.path}`}
         type="button"
-        className="group flex w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+        className="group flex w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
         style={{ paddingLeft: `${leftPadding}px` }}
-        onClick={() => onOpenTurnDiff(turnId, node.path)}
+        onClick={() => onOpenTurnDiff(runId, node.path)}
         onContextMenu={
           onFileContextMenu
             ? (event) => {

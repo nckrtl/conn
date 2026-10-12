@@ -11,10 +11,10 @@ import type {
   PreviewSessionSnapshot,
   ProjectId,
   PullRequestState,
+  ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import {
-  Bot,
   Smartphone,
   Webhook,
   Database,
@@ -26,9 +26,8 @@ import {
   Globe2,
   Plus,
   TerminalSquare,
-  Volume2,
-  VolumeOff,
 } from "lucide-react";
+import { Volume2, VolumeOff } from "lucide";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -36,6 +35,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -45,8 +45,10 @@ import { isElectron } from "~/env";
 import type { DesktopPreviewOverlay } from "~/previewStateStore";
 import type { RightPanelSurface } from "~/rightPanelStore";
 import { cn } from "~/lib/utils";
+import { resolveShortcutCommand, type ShortcutMatchContext } from "~/keybindings";
 import { readLocalApi } from "~/localApi";
 import { Button } from "~/components/ui/button";
+import { MorphIcon } from "~/components/MorphIcon";
 import { AndroidIcon, AppleIcon, McpIcon } from "~/components/Icons";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { Kbd } from "~/components/ui/kbd";
@@ -66,6 +68,7 @@ import { PanelTabCloseButton } from "~/components/ui/panel-tab-close-button";
 import { faviconUrlForOrigin } from "~/lib/favicon";
 import { useTheme } from "~/hooks/useTheme";
 import { useDeviceState } from "~/state/device";
+import type { PreviewPanelInlineSize } from "~/hooks/usePreviewPanelInlineSize";
 import {
   newestPullRequestSummary,
   pullRequestEnvironment,
@@ -81,15 +84,19 @@ import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { APP_BASE_NAME } from "../branding";
+import { observeResize } from "~/lib/observeResize";
 
 interface RightPanelTabsProps {
   mode: PreviewPanelMode;
   maximized?: boolean;
   open?: boolean;
+  keybindings: ResolvedKeybindingsConfig;
+  getShortcutContext: () => ShortcutMatchContext;
   /** Forwarded to PreviewPanelShell so this surface persists its own width. */
   widthStorageKey?: string;
   /** Forwarded to PreviewPanelShell as the initial width before a user resize. */
   defaultWidth?: number;
+  inlineSize?: PreviewPanelInlineSize;
   layoutControls?: ReactNode;
   surfaces: readonly RightPanelSurface[];
   /** Fallback environment for surfaces that do not carry their own. */
@@ -124,7 +131,6 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
-  onAddAgents: () => void;
   onAddDevice: () => void;
   /** nckrtl fork: the API request panel; absent where it is not offered. */
   onAddApi?: (() => void) | undefined;
@@ -141,11 +147,8 @@ interface RightPanelTabsProps {
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
-  agentsAvailable: boolean;
   deviceAvailable: boolean;
   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
-  /** Running + waiting subagents; badges the Agents card in the empty state. */
-  liveAgentCount: number;
   children: ReactNode;
 }
 
@@ -172,7 +175,6 @@ const SURFACE_DISABLED_REASONS = {
   diff: "Diff is only available for server threads in Git repositories.",
   pullRequest: "This thread's branch has no pull request yet.",
   pullRequests: "No linked pull requests are available for this thread.",
-  agents: "Agents are only available from a thread.",
   device: "Devices are only available from a thread.",
   api: `API requests are only available in the ${APP_BASE_NAME} desktop app, from a project thread.`,
   database: `The Database panel is only available in the ${APP_BASE_NAME} desktop app, from a project thread.`,
@@ -199,7 +201,6 @@ const SURFACE_UNAVAILABLE_HINTS = {
   diff: "Available for Git repositories.",
   pullRequest: "No pull request on this branch yet.",
   pullRequests: "No linked pull requests available.",
-  agents: "Available from a thread.",
   device: "Available from a thread.",
   api: "Available in the desktop app.",
   database: "Available in the desktop app.",
@@ -342,7 +343,6 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
-  onAddAgents: () => void;
   onAddDevice: () => void;
   /** nckrtl fork: the API request panel; absent where it is not offered. */
   onAddApi?: (() => void) | undefined;
@@ -359,9 +359,7 @@ function RightPanelEmptyState(props: {
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
-  agentsAvailable: boolean;
   deviceAvailable: boolean;
-  liveAgentCount: number;
 }) {
   // -1 means no highlight: it only appears on hover or arrow use.
   const [highlight, setHighlight] = useState(-1);
@@ -374,7 +372,6 @@ function RightPanelEmptyState(props: {
       available: props.browserAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.browser,
       onClick: props.onAddBrowser,
-      badgeCount: 0,
     },
     {
       label: "API",
@@ -413,7 +410,6 @@ function RightPanelEmptyState(props: {
       available: props.terminalAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.terminal,
       onClick: props.onAddTerminal,
-      badgeCount: 0,
     },
     {
       label: "Files",
@@ -422,7 +418,6 @@ function RightPanelEmptyState(props: {
       available: props.filesAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.files,
       onClick: props.onAddFiles,
-      badgeCount: 0,
     },
     {
       label: "Diff",
@@ -431,7 +426,6 @@ function RightPanelEmptyState(props: {
       available: props.diffAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.diff,
       onClick: props.onAddDiff,
-      badgeCount: 0,
     },
     {
       label: "Pull request",
@@ -440,7 +434,6 @@ function RightPanelEmptyState(props: {
       available: props.pullRequestAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.pullRequest,
       onClick: props.onAddPullRequest,
-      badgeCount: 0,
     },
     {
       label: "Linked pull requests",
@@ -449,16 +442,6 @@ function RightPanelEmptyState(props: {
       available: props.pullRequestsAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.pullRequests,
       onClick: props.onAddPullRequests,
-      badgeCount: 0,
-    },
-    {
-      label: "Agents",
-      icon: Bot,
-      shortcut: "A",
-      available: props.agentsAvailable,
-      disabledReason: SURFACE_UNAVAILABLE_HINTS.agents,
-      onClick: props.onAddAgents,
-      badgeCount: props.liveAgentCount,
     },
     {
       label: "Device",
@@ -468,7 +451,6 @@ function RightPanelEmptyState(props: {
       available: props.deviceAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
       onClick: props.onAddDevice,
-      badgeCount: 0,
     },
   ] as const;
 
@@ -491,7 +473,8 @@ function RightPanelEmptyState(props: {
       const action = surfaceShortcutActionForKey(shortcutActionsRef.current, event);
       if (!action) return;
       if (document.querySelector(LAUNCHER_SHORTCUT_BLOCKING_LAYERS)) return;
-      const target = event.target;
+      // The composed path starts at the real target, which may sit inside a shadow root.
+      const target = event.composedPath()[0] ?? event.target;
       if (target instanceof Element && surfaceShortcutTargetsTypingContext(target)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -542,14 +525,6 @@ function RightPanelEmptyState(props: {
     return (
       <span className="relative inline-flex shrink-0">
         <Icon className={iconClassName} />
-        {action.badgeCount > 0 ? (
-          <span
-            aria-hidden
-            className="absolute -top-1.5 -right-2 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-info px-1 text-3xs font-semibold tabular-nums text-white"
-          >
-            {action.badgeCount}
-          </span>
-        ) : null}
       </span>
     );
   };
@@ -562,7 +537,7 @@ function RightPanelEmptyState(props: {
       aria-label="Open a surface"
       data-surface-launcher-keys={availableActions.map((action) => action.shortcut).join("")}
       className={cn(
-        "flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 outline-none",
+        "scrollbar-gutter-both flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 outline-none",
         // The panel topbar sits above this container; matching bottom padding
         // keeps the list centered against the full panel, not the leftover.
         "pb-(--workspace-topbar-height)",
@@ -685,8 +660,6 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "pull-requests":
       return "Pull requests";
-    case "agents":
-      return "Agents";
     case "api":
       return "API";
     case "database":
@@ -776,8 +749,6 @@ function SurfaceIcon({
       );
     case "pull-requests":
       return <PullRequestGlyph.link className="size-4 shrink-0" />;
-    case "agents":
-      return <Bot className="size-4 shrink-0" />;
     case "api":
       return <Webhook className="size-4 shrink-0" />;
     case "database":
@@ -898,6 +869,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   const browserProfiles = useBrowserDefaults().profiles;
   const { resolvedTheme } = useTheme();
   const tabListRef = useRef<HTMLDivElement>(null);
+  const addSurfaceTriggerRef = useRef<HTMLButtonElement>(null);
   const [renamingDevice, setRenamingDevice] = useState<string | null>(null);
   const [addSurfaceMenuOpen, setAddSurfaceMenuOpen] = useState(false);
   const [tabScrollState, setTabScrollState] = useState({
@@ -905,6 +877,30 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
     canScrollLeft: false,
     canScrollRight: false,
   });
+
+  if (props.open === false && addSurfaceMenuOpen) setAddSurfaceMenuOpen(false);
+
+  const onNewSurfaceKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (event.defaultPrevented || event.isComposing) return;
+    if (
+      resolveShortcutCommand(event, props.keybindings, {
+        context: { ...props.getShortcutContext(), rightPanelOpen: true },
+      }) !== "rightPanel.new"
+    )
+      return;
+    if (!addSurfaceMenuOpen && document.querySelector(LAUNCHER_SHORTCUT_BLOCKING_LAYERS)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) {
+      addSurfaceTriggerRef.current?.focus();
+      setAddSurfaceMenuOpen(true);
+    }
+  });
+  useEffect(() => {
+    if (props.open === false) return;
+    document.addEventListener("keydown", onNewSurfaceKeyDown, true);
+    return () => document.removeEventListener("keydown", onNewSurfaceKeyDown, true);
+  }, [props.open]);
 
   const updateTabScrollState = useCallback(() => {
     const viewport = tabScrollViewport(tabListRef.current);
@@ -1009,14 +1005,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.pullRequestsAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.pullRequests,
       onClick: props.onAddPullRequests,
-    },
-    {
-      label: "Agents",
-      icon: Bot,
-      shortcut: "A",
-      available: props.agentsAvailable,
-      disabledReason: SURFACE_DISABLED_REASONS.agents,
-      onClick: props.onAddAgents,
     },
     {
       label: "Device",
@@ -1157,14 +1145,15 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
     if (!viewport) return;
 
     const content = viewport.firstElementChild;
-    const resizeObserver = new ResizeObserver(updateTabScrollState);
-    resizeObserver.observe(viewport);
-    if (content) resizeObserver.observe(content);
+    const stopObserving = observeResize(
+      content ? [viewport, content] : viewport,
+      updateTabScrollState,
+    );
     viewport.addEventListener("scroll", updateTabScrollState, { passive: true });
     updateTabScrollState();
 
     return () => {
-      resizeObserver.disconnect();
+      stopObserving();
       viewport.removeEventListener("scroll", updateTabScrollState);
     };
   }, [updateTabScrollState]);
@@ -1199,6 +1188,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       {...(props.widthStorageKey !== undefined ? { widthStorageKey: props.widthStorageKey } : {})}
       {...(props.defaultWidth !== undefined ? { defaultWidth: props.defaultWidth } : {})}
       splitHeader={props.mode === "inline"}
+      {...(props.inlineSize ? { inlineSize: props.inlineSize } : {})}
     >
       <div
         className={cn(
@@ -1291,11 +1281,10 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                                 .catch(() => undefined);
                             }}
                           >
-                            {audio === "muted" ? (
-                              <VolumeOff className="size-4" />
-                            ) : (
-                              <Volume2 className="size-4" />
-                            )}
+                            <MorphIcon
+                              className="size-4"
+                              icon={audio === "muted" ? VolumeOff : Volume2}
+                            />
                           </button>
                         }
                       />
@@ -1305,7 +1294,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                   {renamingDevice === surface.id ? (
                     <input
                       aria-label="Device tab name"
-                      className="w-24 min-w-0 rounded-sm bg-background px-1 outline-none ring-1 ring-ring"
+                      className="w-24 min-w-0 rounded-sm bg-background px-1 outline-none ring-1 ring-inset ring-ring"
                       defaultValue={title}
                       ref={(element) => {
                         element?.focus();
@@ -1357,9 +1346,10 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                 </div>
               );
             })}
-            {props.surfaces.length > 0 ? (
+            {props.open !== false ? (
               <Menu open={addSurfaceMenuOpen} onOpenChange={setAddSurfaceMenuOpen}>
                 <MenuTrigger
+                  ref={addSurfaceTriggerRef}
                   render={
                     <Button
                       aria-label="Add panel surface"
@@ -1521,7 +1511,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
-            onAddAgents={props.onAddAgents}
             onAddDevice={props.onAddDevice}
             onAddApi={props.onAddApi}
             apiAvailable={props.apiAvailable}
@@ -1535,9 +1524,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             filesAvailable={props.filesAvailable}
             pullRequestAvailable={props.pullRequestAvailable}
             pullRequestsAvailable={props.pullRequestsAvailable}
-            agentsAvailable={props.agentsAvailable}
             deviceAvailable={props.deviceAvailable}
-            liveAgentCount={props.liveAgentCount}
           />
         ) : (
           props.children

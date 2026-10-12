@@ -7,6 +7,7 @@ import { EMPTY_PAGE_FIELDS } from "./credentialPageFields";
 const mocks = vi.hoisted(() => ({
   fields: { username: true, password: false, otp: false, any: true, empty: ["username"] },
   fill: vi.fn(),
+  serverFill: vi.fn(),
   list: vi.fn(),
   refresh: vi.fn(),
   toast: vi.fn(),
@@ -32,10 +33,7 @@ vi.mock("./useVaultLogins", () => ({
 }));
 vi.mock("~/state/credentials", () => ({ credentialsEnvironment: { listForSite: () => null } }));
 vi.mock("~/state/query", () => ({ useEnvironmentQuery: () => ({ data: { items: [] } }) }));
-vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => mocks.fill }));
-vi.mock("~/components/preview/previewAutomationClientId", () => ({
-  readPreviewAutomationClientId: () => "client",
-}));
+vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => mocks.serverFill }));
 vi.mock("./credentialSubmit", () => ({ submitCredentialStep: mocks.submit }));
 vi.mock("./TestLoginDialog", () => ({ TestLoginDialog: () => null }));
 vi.mock("./CredentialInlineSuggestions", () => ({ CredentialInlineSuggestions: () => null }));
@@ -82,13 +80,14 @@ const render = async (pageUrl: string | null, loading: boolean) => {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal("window", { setTimeout, clearTimeout, desktopBridge: { vaultLogins: mocks.list } });
+  vi.stubGlobal("window", {
+    setTimeout,
+    clearTimeout,
+    desktopBridge: { vaultLogins: mocks.list, vaultFill: mocks.fill },
+  });
   vi.stubGlobal("document", { visibilityState: "visible" });
   mocks.fields = { username: true, password: false, otp: false, any: true, empty: ["username"] };
-  mocks.fill.mockImplementation(async ({ input }) => ({
-    _tag: "Success",
-    value: { results: input.fields.map((field: string) => ({ field, status: "filled" })) },
-  }));
+  mocks.fill.mockResolvedValue({ status: "filled" });
   mocks.submit.mockResolvedValue("submitted");
   mocks.list.mockResolvedValue({ status: "ok", items: [item] });
 });
@@ -107,6 +106,14 @@ it("keeps the selected Vault login through loading before filling password and O
     .find((n) => !n.props.disabled && n.props.onClick);
   await act(async () => choice!.props.onClick());
   expect(mocks.fill).toHaveBeenCalledTimes(1);
+  // Vault fills on this desktop; the environment is never asked.
+  expect(mocks.fill).toHaveBeenLastCalledWith({
+    tabId: "runtime-tab",
+    itemId: item.id,
+    field: "username",
+    expectedOrigin: "https://id.example.com",
+  });
+  expect(mocks.serverFill).not.toHaveBeenCalled();
   mocks.fields = { ...EMPTY_PAGE_FIELDS, empty: [] };
   await render(null, true);
   await act(() => vi.advanceTimersByTimeAsync(500));
@@ -115,13 +122,13 @@ it("keeps the selected Vault login through loading before filling password and O
   await render("https://id.example.com/password", false);
   await act(() => vi.advanceTimersByTimeAsync(750));
   expect(mocks.fill).toHaveBeenCalledTimes(2);
-  expect(mocks.fill.mock.calls[1]![0].input.fields).toEqual(["password"]);
+  expect(mocks.fill.mock.calls[1]![0].field).toBe("password");
   await render(null, true);
   mocks.fields = { ...EMPTY_PAGE_FIELDS, any: true, otp: true, empty: ["otp"] };
   await render("https://id.example.com/code", false);
   await act(() => vi.advanceTimersByTimeAsync(750));
   expect(mocks.fill).toHaveBeenCalledTimes(3);
-  expect(mocks.fill.mock.calls[2]![0].input.fields).toEqual(["otp"]);
+  expect(mocks.fill.mock.calls[2]![0].field).toBe("otp");
 });
 
 it("does not fill when navigation lands on another origin", async () => {
@@ -164,10 +171,7 @@ it("lets a slow Vault lookup finish through parent updates and uses the full ste
 
 it("does not label Vault's missing OTP response as a definite site mismatch", async () => {
   mocks.fields = { ...EMPTY_PAGE_FIELDS, any: true, otp: true, empty: ["otp"] };
-  mocks.fill.mockResolvedValue({
-    _tag: "Success",
-    value: { results: [{ field: "otp", status: "item_not_found" }] },
-  });
+  mocks.fill.mockResolvedValue({ status: "item_not_found" });
   await render(base.pageUrl, false);
   const choice = renderer!.root
     .findAllByType("menuitem")
@@ -193,10 +197,7 @@ it("polls for a delayed password, retries a disappearing field, and submits fill
   await act(() => vi.advanceTimersByTimeAsync(2250));
   expect(mocks.fill).toHaveBeenCalledTimes(1);
   mocks.fields = { ...EMPTY_PAGE_FIELDS, any: true, password: true, empty: ["password"] };
-  mocks.fill.mockResolvedValueOnce({
-    _tag: "Success",
-    value: { results: [{ field: "password", status: "field_not_found" }] },
-  });
+  mocks.fill.mockResolvedValueOnce({ status: "field_not_found" });
   await act(() => vi.advanceTimersByTimeAsync(750));
   expect(mocks.fill).toHaveBeenCalledTimes(2);
   expect(mocks.submit).toHaveBeenCalledTimes(1);
@@ -206,7 +207,7 @@ it("polls for a delayed password, retries a disappearing field, and submits fill
   expect(mocks.submit.mock.calls.map((call) => call[1])).toEqual(["username", "password"]);
   mocks.fields = { ...EMPTY_PAGE_FIELDS, any: true, otp: true, empty: ["otp"] };
   await act(() => vi.advanceTimersByTimeAsync(750));
-  expect(mocks.fill.mock.calls[3]![0].input.fields).toEqual(["otp"]);
+  expect(mocks.fill.mock.calls[3]![0].field).toBe("otp");
   await act(() => vi.advanceTimersByTimeAsync(1500));
   expect(mocks.submit.mock.calls.map((call) => call[1])).toEqual(["username", "password", "otp"]);
   expect(mocks.toast).not.toHaveBeenCalled();

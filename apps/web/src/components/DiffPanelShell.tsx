@@ -13,7 +13,7 @@ function getDiffPanelHeaderRowClassName(mode: DiffPanelMode) {
     "flex items-center justify-between gap-2",
     mode === "embedded" ? "px-2" : "px-4",
     shouldUseDragRegion
-      ? "drag-region h-[var(--workspace-topbar-height)] border-b border-border wco:h-[env(titlebar-area-height)] wco:pr-(--workspace-native-controls-inset)"
+      ? "drag-region h-[var(--workspace-topbar-height)] border-b border-border wco:pr-(--workspace-native-controls-inset)"
       : "flex h-10 min-h-10 shrink-0 items-center border-b border-border/60 bg-background in-data-[preview-panel-mode=inline]:h-auto in-data-[preview-panel-mode=inline]:min-h-0 in-data-[preview-panel-mode=inline]:py-toolbar in-data-[preview-panel-mode=inline]:ps-2 in-data-[preview-panel-mode=inline]:pe-toolbar in-data-[preview-panel-mode=inline]:border-b-transparent",
   );
 }

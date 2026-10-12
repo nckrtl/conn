@@ -1,16 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import {
-  HostProcessEnvironment,
-  HostProcessPlatform,
-  HostProcessUserId,
-} from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ServerConfig from "./config.ts";
 import * as ProcessRunner from "./processRunner.ts";
@@ -63,10 +59,10 @@ const makeWith = (host: Host, stop: Effect.Effect<void> = Effect.void) => {
   return makeServerRestart({ stop }).pipe(
     Effect.provide(configLayer(host.mode ?? "web")),
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
-    Effect.provideService(HostProcessPlatform, host.platform ?? "darwin"),
-    Effect.provideService(HostProcessUserId, 501),
+    Effect.provideService(HostProcess.Platform, host.platform ?? "darwin"),
+    Effect.provideService(HostProcess.UserId, 501),
     Effect.provideService(
-      HostProcessEnvironment,
+      HostProcess.Environment,
       host.xpcServiceName === undefined ? {} : { XPC_SERVICE_NAME: host.xpcServiceName },
     ),
     Effect.map((service) => ({ service, commands })),

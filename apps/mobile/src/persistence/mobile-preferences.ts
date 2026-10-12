@@ -8,6 +8,7 @@ import * as Semaphore from "effect/Semaphore";
 import type { ProfileSyncState } from "@t3tools/client-runtime/orbit-gateway";
 import type { ProviderInstanceId, SidebarProjectGroupingMode } from "@t3tools/contracts";
 import type { ComposerEnterBehavior } from "../lib/composerEnterBehavior";
+import type { FollowUpBehavior } from "../lib/followUpBehavior";
 import { isMobileThemeId, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
 import * as MobileDatabase from "./mobile-database";
 import * as MobileSecureStorage from "./mobile-secure-storage";
@@ -31,11 +32,18 @@ export interface Preferences {
   readonly collapsedProjectGroups?: readonly string[];
   /** What the Return key does in the composer on a hardware keyboard. iOS only. */
   readonly composerEnterBehavior?: ComposerEnterBehavior;
+  /**
+   * Device-local mirror of the web `followUpBehavior` client setting: whether a
+   * message sent during a running turn queues behind it or steers it.
+   */
+  readonly followUpBehavior?: FollowUpBehavior;
   /** @deprecated Kept temporarily so older OTA bundles retain the selected mode. */
   readonly projectGroupingEnabled?: boolean;
   readonly projectGroupingMode?: SidebarProjectGroupingMode;
   /** Device-local counterpart of desktop's `planModeEnabled` legacy flag. */
   readonly planModeEnabled?: boolean;
+  /** Device-local counterpart of web's `sidebarWorkingShelfEnabled` beta. */
+  readonly workingShelfEnabled?: boolean;
   /** Model favorites belong to this device, like the web client setting. */
   readonly modelFavorites?: ReadonlyArray<{
     readonly provider: ProviderInstanceId;
@@ -44,10 +52,7 @@ export interface Preferences {
   /** Fresh keys reset both shelves to collapsed when users update. */
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
-  /** Completion time of the latest turn this phone has seen, by thread key
-      (`environmentId:threadId`). Device-local, like web's threadLastVisitedAtById;
-      it drives the Done label in the thread list. */
-  readonly threadLastVisitedAt?: Readonly<Record<string, string>>;
+  readonly threadListWorkingShelfExpanded?: boolean;
   /** What this phone last agreed on with its Orbit profile, see features/orbit/orbitProfileSync. */
   readonly orbitProfileSync?: ProfileSyncState;
 }
@@ -104,13 +109,15 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
     collapsedProjectGroups?: readonly string[];
     composerEnterBehavior?: ComposerEnterBehavior;
+    followUpBehavior?: FollowUpBehavior;
     projectGroupingEnabled?: boolean;
     projectGroupingMode?: SidebarProjectGroupingMode;
     planModeEnabled?: boolean;
+    workingShelfEnabled?: boolean;
     modelFavorites?: Preferences["modelFavorites"];
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
-    threadLastVisitedAt?: Record<string, string>;
+    threadListWorkingShelfExpanded?: boolean;
     orbitProfileSync?: ProfileSyncState;
   } = {};
 
@@ -157,6 +164,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   if (parsed.composerEnterBehavior === "send" || parsed.composerEnterBehavior === "newline") {
     preferences.composerEnterBehavior = parsed.composerEnterBehavior;
   }
+  if (parsed.followUpBehavior === "queue" || parsed.followUpBehavior === "steer") {
+    preferences.followUpBehavior = parsed.followUpBehavior;
+  }
   if (typeof parsed.projectGroupingEnabled === "boolean") {
     preferences.projectGroupingEnabled = parsed.projectGroupingEnabled;
   }
@@ -169,6 +179,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.planModeEnabled === "boolean") {
     preferences.planModeEnabled = parsed.planModeEnabled;
+  }
+  if (typeof parsed.workingShelfEnabled === "boolean") {
+    preferences.workingShelfEnabled = parsed.workingShelfEnabled;
   }
   if (Array.isArray(parsed.modelFavorites)) {
     preferences.modelFavorites = parsed.modelFavorites.filter(
@@ -187,14 +200,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   if (typeof parsed.threadListSnoozedShelfExpanded === "boolean") {
     preferences.threadListSnoozedShelfExpanded = parsed.threadListSnoozedShelfExpanded;
   }
-  if (typeof parsed.threadLastVisitedAt === "object" && parsed.threadLastVisitedAt !== null) {
-    const visited: Record<string, string> = {};
-    for (const [threadKey, visitedAt] of Object.entries(parsed.threadLastVisitedAt)) {
-      if (typeof visitedAt === "string" && !Number.isNaN(Date.parse(visitedAt))) {
-        visited[threadKey] = visitedAt;
-      }
-    }
-    preferences.threadLastVisitedAt = visited;
+  if (typeof parsed.threadListWorkingShelfExpanded === "boolean") {
+    preferences.threadListWorkingShelfExpanded = parsed.threadListWorkingShelfExpanded;
   }
   const sync = parsed.orbitProfileSync;
   if (

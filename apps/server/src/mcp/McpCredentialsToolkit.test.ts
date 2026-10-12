@@ -11,23 +11,30 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { McpSchema, McpServer } from "effect/unstable/ai";
+import { McpSchema, McpServer } from "effect/ai";
 
 import * as CredentialAutofill from "../credentials/CredentialAutofill.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TestLoginStore from "../credentials/TestLoginStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const SECRET = "test-password";
 const ITEM_ID = "11111111-2222-4333-8444-555555555555";
 
-const invocation = (capabilities: ReadonlyArray<McpInvocationContext.McpCapability>) => ({
+const invocation = (
+  capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
+): McpInvocationContext.McpThreadInvocationScope => ({
   environmentId: EnvironmentId.make("environment-credentials-test"),
-  threadId: ThreadId.make("thread-credentials-test"),
-  providerSessionId: "provider-session-credentials-test",
-  providerInstanceId: ProviderInstanceId.make("codex"),
+  requestNamespace: "provider-session-credentials-test",
+  thread: {
+    threadId: ThreadId.make("thread-credentials-test"),
+    providerSessionId: "provider-session-credentials-test",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  client: undefined,
   capabilities: new Set(capabilities),
   issuedAt: 1,
 });
@@ -49,8 +56,6 @@ const toJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 interface Scenario {
   readonly tabUrl?: string | null;
-  /** The document id the desktop reports. Omitted: a host that predates ids. */
-  readonly documentId?: number;
   readonly fillFails?: boolean;
   readonly storeFails?: boolean;
   readonly settings?: Partial<CredentialAutofillSettings>;
@@ -77,7 +82,6 @@ const makeHarness = (scenario: Scenario = {}) => {
     operation: string;
     input: unknown;
     tabId?: string;
-    clientId?: string;
   }> = [];
   const savedTestLogins: Array<TestLoginStore.StoredTestLogin> = [
     ...(scenario.testLogins ?? [testLogin()]),
@@ -101,20 +105,17 @@ const makeHarness = (scenario: Scenario = {}) => {
         return TestLoginStore.summarizeTestLogin(login);
       }),
   });
-  /** What the tab shows now; a test changes it to navigate. */
+  /** What the tab shows now; `locked` is the page's mark of a filled Vault secret. */
   const page = {
     url: scenario.tabUrl === undefined ? "https://github.com/login" : scenario.tabUrl,
-    documentId: scenario.documentId,
+    locked: false,
   };
-  const documentFields = () =>
-    page.documentId === undefined ? {} : { documentId: page.documentId };
   const broker = Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({
     invoke: <A>(request: PreviewAutomationBroker.PreviewAutomationInvokeInput) => {
       brokerCalls.push({
         operation: request.operation,
         input: request.input,
         ...(request.tabId === undefined ? {} : { tabId: request.tabId }),
-        ...(request.clientId === undefined ? {} : { clientId: request.clientId }),
       });
       switch (request.operation) {
         case "status": {
@@ -125,19 +126,19 @@ const makeHarness = (scenario: Scenario = {}) => {
             url: page.url,
             title: "Sign in",
             loading: false,
-            ...documentFields(),
           } as A);
         }
-        case "vaultCredentialFill":
+        case "credentialLock":
+          return Effect.succeed({ tabId: "tab-1", locked: page.locked } as A);
         case "credentialFill":
           return scenario.fillFails
             ? Effect.fail(
                 new PreviewAutomationExecutionError({
                   operation: "credentialFill",
                   environmentId: request.scope.environmentId,
-                  threadId: request.scope.threadId,
-                  providerSessionId: request.scope.providerSessionId,
-                  providerInstanceId: request.scope.providerInstanceId,
+                  threadId: request.scope.thread.threadId,
+                  providerSessionId: request.scope.thread.providerSessionId,
+                  providerInstanceId: request.scope.thread.providerInstanceId,
                   clientId: "client",
                   connectionId: "connection",
                   requestId: "preview-1",
@@ -147,14 +148,15 @@ const makeHarness = (scenario: Scenario = {}) => {
                   cause: null,
                 }),
               )
-            : Effect.succeed({ status: "filled", ...documentFields() } as A);
+            : Effect.succeed({ status: "filled" } as A);
         default:
           return Effect.die(`unexpected operation ${request.operation}`);
       }
     },
   });
-  const layer = McpHttpServer.CredentialsToolkitRegistrationLive.pipe(
+  const layer = McpHttpServer.layerCredentialsToolkit.pipe(
     Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
     Layer.provideMerge(CredentialAutofill.layer),
     Layer.provide(broker),
     Layer.provide(ServerSettings.layerTest({ credentialAutofill: scenario.settings ?? {} })),
@@ -177,18 +179,23 @@ const makeHarness = (scenario: Scenario = {}) => {
   return { brokerCalls, layer, call, scope, savedTestLogins, page };
 };
 
-const fillVault = (harness: ReturnType<typeof makeHarness>, field: "username" | "password") =>
+const fillForUser = (
+  harness: ReturnType<typeof makeHarness>,
+  input: {
+    readonly itemId: string;
+    readonly fields: ReadonlyArray<"username" | "password" | "otp">;
+  },
+  source?: "test" | "vault",
+) =>
   Effect.gen(function* () {
     const autofill = yield* CredentialAutofill.CredentialAutofill;
     return yield* autofill.fillForSite({
       environmentId: harness.scope.environmentId,
-      threadId: harness.scope.threadId,
+      threadId: harness.scope.thread.threadId,
       tabId: PreviewTabId.make("tab-1"),
-      hostClientId: "desktop-host-1",
-      itemId: ITEM_ID,
-      source: "vault",
-      expectedOrigin: "https://github.com",
-      fields: [field],
+      itemId: input.itemId,
+      fields: [...input.fields],
+      ...(source === undefined ? {} : { source }),
     });
   });
 
@@ -279,73 +286,38 @@ describe("credentials MCP tools", () => {
     }).pipe(Effect.scoped);
   });
 
-  it.effect("blocks agent scripts in the tab until its page changes", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const autofill = yield* CredentialAutofill.CredentialAutofill;
-      // Nothing filled yet: scripts run without even asking the tab.
-      yield* autofill.guardScript(harness.scope, undefined);
-      expect(harness.brokerCalls).toEqual([]);
-      yield* fillVault(harness, "password");
-      const blocked = yield* autofill.guardScript(harness.scope, undefined).pipe(Effect.result);
-      expect(blocked._tag).toBe("Failure");
-      if (blocked._tag === "Failure") {
-        expect(blocked.failure._tag).toBe("PreviewAutomationCredentialLockError");
-      }
-    }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
+  it.effect(
+    "blocks agent scripts and screenshots while the page holds a filled Vault secret",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const autofill = yield* CredentialAutofill.CredentialAutofill;
+        yield* autofill.guardScript(harness.scope, undefined);
+        expect(yield* autofill.isScriptLocked(harness.scope, undefined)).toBe(false);
+        // The desktop marked the document when it filled the Vault password.
+        harness.page.locked = true;
+        expect(yield* autofill.isScriptLocked(harness.scope, undefined)).toBe(true);
+        const blocked = yield* autofill.guardScript(harness.scope, undefined).pipe(Effect.result);
+        expect(blocked._tag).toBe("Failure");
+        if (blocked._tag === "Failure") {
+          expect(blocked.failure._tag).toBe("PreviewAutomationCredentialLockError");
+        }
+        // A new document starts without the mark.
+        harness.page.locked = false;
+        yield* autofill.guardScript(harness.scope, undefined);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
 
-  it.effect("keeps the script lock across hash and pushState changes of the same document", () => {
-    const harness = makeHarness({ documentId: 7 });
+  it.effect("does not ask the tab when script blocking is off", () => {
+    const harness = makeHarness({ settings: { blockScriptsAfterFill: false } });
     return Effect.gen(function* () {
       const autofill = yield* CredentialAutofill.CredentialAutofill;
-      const locked = () => autofill.isScriptLocked(harness.scope, undefined);
-      yield* fillVault(harness, "password");
-      // history.pushState and a hash link change the URL, not the document.
-      harness.page.url = "https://github.com/login#step-2";
-      expect(yield* locked()).toBe(true);
-      harness.page.url = "https://github.com/session?x=1";
-      expect(yield* locked()).toBe(true);
-      const blocked = yield* autofill.guardScript(harness.scope, undefined).pipe(Effect.result);
-      expect(blocked._tag).toBe("Failure");
-      // A new document releases it, even at the same URL (a reload).
-      harness.page.documentId = 8;
-      harness.page.url = "https://github.com/login";
-      expect(yield* locked()).toBe(false);
+      harness.page.locked = true;
       yield* autofill.guardScript(harness.scope, undefined);
-      // And it stays released if the old document id comes back.
-      harness.page.documentId = 7;
-      expect(yield* locked()).toBe(false);
-    }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
-
-  it.effect("without document ids, keeps the lock across a hash change only", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const autofill = yield* CredentialAutofill.CredentialAutofill;
-      yield* fillVault(harness, "password");
-      harness.page.url = "https://github.com/login#step-2";
-      expect(yield* autofill.isScriptLocked(harness.scope, undefined)).toBe(true);
-      harness.page.url = "https://github.com/session";
       expect(yield* autofill.isScriptLocked(harness.scope, undefined)).toBe(false);
+      expect(harness.brokerCalls).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
-  });
-
-  it.effect("does not block scripts after a username fill or with the setting off", () => {
-    const username = makeHarness();
-    const off = makeHarness({ settings: { blockScriptsAfterFill: false } });
-    return Effect.gen(function* () {
-      yield* Effect.gen(function* () {
-        const autofill = yield* CredentialAutofill.CredentialAutofill;
-        yield* fillVault(username, "username");
-        yield* autofill.guardScript(username.scope, undefined);
-      }).pipe(Effect.provide(username.layer));
-      yield* Effect.gen(function* () {
-        const autofill = yield* CredentialAutofill.CredentialAutofill;
-        yield* fillVault(off, "password");
-        yield* autofill.guardScript(off.scope, undefined);
-      }).pipe(Effect.provide(off.layer));
-    }).pipe(Effect.scoped);
   });
 
   it.effect("lists the site's logins with username hints for the user's key menu", () => {
@@ -363,15 +335,10 @@ describe("credentials MCP tools", () => {
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
-  it.effect("fills a login the user picked without a prompt, only through their host", () => {
+  it.effect("fills a test login the user picked without a prompt", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
-      const autofill = yield* CredentialAutofill.CredentialAutofill;
-      const filled = yield* autofill.fillForSite({
-        environmentId: harness.scope.environmentId,
-        threadId: harness.scope.threadId,
-        tabId: PreviewTabId.make("tab-1"),
-        hostClientId: "desktop-host-1",
+      const filled = yield* fillForUser(harness, {
         itemId: ITEM_ID,
         fields: ["username", "password"],
       });
@@ -384,94 +351,33 @@ describe("credentials MCP tools", () => {
         "credentialFill",
         "credentialFill",
       ]);
-      expect(harness.brokerCalls.every((entry) => entry.clientId === "desktop-host-1")).toBe(true);
-      // Test credentials leave agent scripts available for development.
-      const blocked = yield* autofill
-        .guardScript(harness.scope, PreviewTabId.make("tab-1"))
-        .pipe(Effect.result);
-      expect(blocked._tag).toBe("Success");
+      // It runs as the user's own pick, not as an agent action.
+      expect(harness.brokerCalls[1]?.input).toMatchObject({ initiator: "user", field: "username" });
+      expect(harness.brokerCalls.every((entry) => entry.tabId === "tab-1")).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
   it.effect("refuses a user fill on another site without reading a secret", () => {
     const harness = makeHarness({ tabUrl: "https://gitlab.com/users/sign_in" });
     return Effect.gen(function* () {
-      const autofill = yield* CredentialAutofill.CredentialAutofill;
-      const filled = yield* autofill.fillForSite({
-        environmentId: harness.scope.environmentId,
-        threadId: harness.scope.threadId,
-        tabId: PreviewTabId.make("tab-1"),
-        hostClientId: "desktop-host-1",
-        itemId: ITEM_ID,
-        fields: ["password"],
-      });
+      const filled = yield* fillForUser(harness, { itemId: ITEM_ID, fields: ["password"] });
       expect(filled.results).toEqual([{ field: "password", status: "origin_mismatch" }]);
+      expect(harness.brokerCalls.map((entry) => entry.operation)).toEqual(["status"]);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));
   });
 
-  it.effect(
-    "fills Vault locally through the selected desktop even when the test store is unavailable",
-    () => {
-      const harness = makeHarness({ storeFails: true, documentId: 42 });
-      return Effect.gen(function* () {
-        const autofill = yield* CredentialAutofill.CredentialAutofill;
-        const filled = yield* autofill.fillForSite({
-          environmentId: harness.scope.environmentId,
-          threadId: harness.scope.threadId,
-          tabId: PreviewTabId.make("tab-1"),
-          hostClientId: "desktop-host-1",
-          itemId: TEST_LOGIN_ID,
-          source: "vault",
-          expectedOrigin: "https://github.com",
-          fields: ["username", "password"],
-        });
-        expect(filled.results).toEqual([
-          { field: "username", status: "filled" },
-          { field: "password", status: "filled" },
-        ]);
-        expect(harness.brokerCalls.map((call) => call.operation)).toEqual([
-          "status",
-          "vaultCredentialFill",
-          "vaultCredentialFill",
-        ]);
-        expect(harness.brokerCalls.every((call) => call.clientId === "desktop-host-1")).toBe(true);
-        expect(harness.brokerCalls[1]?.input).toEqual({
-          itemId: TEST_LOGIN_ID,
-          field: "username",
-          expectedOrigin: "https://github.com",
-        });
-        expect(yield* autofill.isScriptLocked(harness.scope, PreviewTabId.make("tab-1"))).toBe(
-          true,
-        );
-        harness.page.documentId = 43;
-        expect(yield* autofill.isScriptLocked(harness.scope, PreviewTabId.make("tab-1"))).toBe(
-          false,
-        );
-      }).pipe(Effect.scoped, Effect.provide(harness.layer));
-    },
-  );
-
-  it.effect(
-    "does not request a Vault field after the tab moves away from the selected site",
-    () => {
-      const harness = makeHarness({ tabUrl: "https://gitlab.com" });
-      return Effect.gen(function* () {
-        const autofill = yield* CredentialAutofill.CredentialAutofill;
-        const filled = yield* autofill.fillForSite({
-          environmentId: harness.scope.environmentId,
-          threadId: harness.scope.threadId,
-          tabId: PreviewTabId.make("tab-1"),
-          hostClientId: "desktop-host-1",
-          itemId: TEST_LOGIN_ID,
-          source: "vault",
-          expectedOrigin: "https://github.com",
-          fields: ["password"],
-        });
-        expect(filled.results).toEqual([{ field: "password", status: "origin_mismatch" }]);
-        expect(harness.brokerCalls.map((call) => call.operation)).toEqual(["status"]);
-      }).pipe(Effect.scoped, Effect.provide(harness.layer));
-    },
-  );
+  it.effect("never fills a Vault login: the desktop does that itself", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const filled = yield* fillForUser(
+        harness,
+        { itemId: TEST_LOGIN_ID, fields: ["password"] },
+        "vault",
+      );
+      expect(filled.results).toEqual([{ field: "password", status: "provider_unavailable" }]);
+      expect(harness.brokerCalls).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(harness.layer));
+  });
 
   it.effect("fills a test login without a prompt or script lock", () => {
     const harness = makeHarness({ testLogins: [testLogin()] });
@@ -491,7 +397,10 @@ describe("credentials MCP tools", () => {
         "status",
         "credentialFill",
       ]);
-      expect(harness.brokerCalls[1]!.input).toMatchObject({ value: "test-password" });
+      expect(harness.brokerCalls[1]!.input).toMatchObject({
+        initiator: "agent",
+        value: "test-password",
+      });
       const autofill = yield* CredentialAutofill.CredentialAutofill;
       yield* autofill.guardScript(harness.scope, undefined);
     }).pipe(Effect.scoped, Effect.provide(harness.layer));

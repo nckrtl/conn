@@ -1,7 +1,13 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 
-import { hasUnseenCompletion, resolveSidebarThreadStatus } from "./components/Sidebar.logic";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+
+import {
+  hasUnseenCompletion,
+  resolveSidebarThreadStatus,
+  resolveThreadLastVisitedAt,
+} from "./components/Sidebar.logic";
 import type { SidebarThreadSummary } from "./types";
 
 type WorkspaceThread = Pick<
@@ -15,9 +21,10 @@ type WorkspaceThread = Pick<
   | "hasPendingUserInput"
   | "hasActionableProposedPlan"
   | "interactionMode"
-  | "latestTurn"
-  | "session"
-  | "backgroundLiveness"
+  | "latestRun"
+  | "runtime"
+  | "pendingBackgroundTasks"
+  | "lastVisitedAt"
 >;
 
 export function workspaceThreads<T extends WorkspaceThread>(
@@ -68,13 +75,17 @@ export function workspaceAttention(
     const status = resolveSidebarThreadStatus(thread);
     if (status === "approval") approval++;
     else if (status === "input") input++;
-    const lastVisitedAt = visited[scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))];
-    // A mid-turn checkpoint can set completedAt while the agent is still working.
+    const lastVisitedAt = resolveThreadLastVisitedAt(
+      thread.lastVisitedAt,
+      visited[scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))],
+    );
+    // A mid-run checkpoint can set completedAt while the agent is still working.
     if (
       status === "ready" &&
       thread.settledOverride !== "settled" &&
-      thread.latestTurn?.state === "completed" &&
-      hasUnseenCompletion({ ...thread, ...(lastVisitedAt === undefined ? {} : { lastVisitedAt }) })
+      thread.latestRun?.status === "completed" &&
+      !backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks) &&
+      hasUnseenCompletion({ ...thread, lastVisitedAt })
     )
       unread++;
   }

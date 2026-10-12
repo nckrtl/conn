@@ -19,8 +19,10 @@ import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import * as PreviewPasskeys from "../preview/Passkeys.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import * as DesktopLegacyLocalStorage from "./DesktopLegacyLocalStorage.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopLinuxUrlHandler from "./DesktopLinuxUrlHandler.ts";
 import * as DesktopObservability from "./DesktopObservability.ts";
@@ -34,6 +36,8 @@ import * as DesktopRemoteUpdates from "../updates/DesktopRemoteUpdates.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
+import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const MAX_TCP_PORT = 65_535;
@@ -181,6 +185,10 @@ const bootstrap = Effect.gen(function* () {
   });
   yield* installDesktopIpcHandlers();
   yield* logBootstrapInfo("bootstrap ipc handlers registered");
+  // Before any window: the preload merges these items before the app reads storage.
+  yield* (yield* DesktopLegacyLocalStorage.DesktopLegacyLocalStorage).load(
+    yield* (yield* DesktopAppIdentity.DesktopAppIdentity).resolveUserDataPath,
+  );
 
   yield* snapShot.initialize;
 
@@ -272,13 +280,16 @@ const startup = Effect.gen(function* () {
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
   const updates = yield* DesktopUpdates.DesktopUpdates;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const previewPasskeys = yield* PreviewPasskeys.PreviewPasskeys;
 
   yield* shellEnvironment.installIntoProcess;
   const hasCommandLinePasswordStore =
     preReadyElectronOptions.linuxPasswordStoreCommandLine !== null;
   const linuxElectronOptions =
     environment.platform === "linux" && !hasCommandLinePasswordStore
-      ? DesktopPreReadyPlatform.resolveEarlyLinuxElectronOptionsFromProcess()
+      ? DesktopPreReadyPlatform.resolveEarlyLinuxElectronOptionsFromProcess(
+          yield* HostProcess.HomeDirectory,
+        )
       : preReadyElectronOptions.linux;
   if (linuxElectronOptions !== null && !hasCommandLinePasswordStore) {
     if (
@@ -327,6 +338,7 @@ const startup = Effect.gen(function* () {
   yield* appIdentity.configure;
   // A renamed app brings the old app's localStorage and saved secrets along, before any window opens.
   yield* migrateRenamedApp;
+  yield* previewPasskeys.configure;
   yield* applicationMenu.configure;
   yield* updates.configure;
   yield* DesktopRemoteUpdates.listen;
@@ -341,6 +353,7 @@ const scopedProgram = Effect.scoped(
     yield* Effect.annotateCurrentSpan({ scope: "desktop", runId });
 
     const shutdown = yield* DesktopShutdown.DesktopShutdown;
+    const rendererHistory = yield* DesktopRendererHistory.DesktopRendererHistory;
 
     yield* Effect.addFinalizer(() =>
       // Stop every backend in the pool, not just the primary. The
@@ -348,7 +361,10 @@ const scopedProgram = Effect.scoped(
       // cascade, so leaving the WSL instance for its parent scope
       // finalizer means it gets hard-killed by the OS instead of
       // receiving SIGTERM + grace.
-      stopAllPoolInstances().pipe(Effect.ensuring(shutdown.markComplete)),
+      stopAllPoolInstances().pipe(
+        Effect.ensuring(rendererHistory.shutdown),
+        Effect.ensuring(shutdown.markComplete),
+      ),
     );
 
     yield* startup;

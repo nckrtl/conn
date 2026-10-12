@@ -37,6 +37,5 @@ export type VaultFillRequest = typeof VaultFillRequest.Type;
 
 export const VaultFillResult = Schema.Struct({
   status: CredentialFillStatus,
-  documentId: Schema.optional(Schema.Int),
 });
 export type VaultFillResult = typeof VaultFillResult.Type;

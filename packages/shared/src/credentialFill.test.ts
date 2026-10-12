@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   CREDENTIAL_INSERT_FUNCTION,
+  CREDENTIAL_LOCK_EXPRESSION,
   REDACTED_VALUE,
+  redactCdpMessage,
   redactSensitiveValues,
 } from "./credentialFill.ts";
 
@@ -61,6 +63,89 @@ describe("credential field insertion", () => {
     expect(run('insert.call(field, "password", "secret", "https://example.com")')).toBe(status);
     expect(run("field.value")).toBe("old value");
     expect(run("field.events.length")).toBe(0);
+  });
+});
+
+describe("credential document lock", () => {
+  const fixture = () => {
+    const context = NodeVM.createContext({});
+    NodeVM.runInContext(
+      `
+      var window = globalThis;
+      var document = {};
+      var location = { origin: "https://example.com" };
+      class Event { constructor(type) { this.type = type; } }
+      class InputEvent extends Event {}
+      class HTMLInputElement {
+        constructor() {
+          this.type = "password"; this.isConnected = true;
+          this.ownerDocument = document; this.storedValue = "old value";
+        }
+        get value() { return this.storedValue; }
+        set value(value) { this.storedValue = value; }
+        dispatchEvent() {}
+      }
+      var field = new HTMLInputElement();
+      var insert = (${CREDENTIAL_INSERT_FUNCTION});
+    `,
+      context,
+    );
+    return (expression: string): unknown => NodeVM.runInContext(expression, context);
+  };
+
+  it("marks the document for a locked fill, and the page cannot clear it", () => {
+    const run = fixture();
+    expect(run(CREDENTIAL_LOCK_EXPRESSION)).toBe(false);
+    expect(run('insert.call(field, "password", "secret", "https://example.com", true)')).toBe(
+      "filled",
+    );
+    run("delete window.__t3codeCredentialLocked; window.__t3codeCredentialLocked = false;");
+    expect(run(CREDENTIAL_LOCK_EXPRESSION)).toBe(true);
+  });
+
+  it("leaves the document unmarked for an unlocked fill or a username", () => {
+    const run = fixture();
+    run('insert.call(field, "password", "secret", "https://example.com", false)');
+    run('field.type = "email"');
+    run('insert.call(field, "username", "me@example.com", "https://example.com", true)');
+    expect(run(CREDENTIAL_LOCK_EXPRESSION)).toBe(false);
+  });
+
+  it("inserts nothing when the page blocks the mark", () => {
+    const run = fixture();
+    run(
+      'Object.defineProperty(window, "__t3codeCredentialLocked", { get: () => false, configurable: false })',
+    );
+    expect(run('insert.call(field, "password", "secret", "https://example.com", true)')).toBe(
+      "insert_failed",
+    );
+    expect(run("field.value")).toBe("old value");
+  });
+});
+
+describe("redactCdpMessage", () => {
+  it("redacts a secret from a CDP event and keeps the message valid JSON", () => {
+    const message = JSON.stringify({
+      method: "Runtime.consoleAPICalled",
+      params: { args: [{ type: "string", value: `typed ${SECRET}` }] },
+    });
+    const redacted = redactCdpMessage(message, [SECRET]);
+    expect(redacted).not.toContain("hunter2");
+    expect(JSON.parse(redacted)).toEqual({
+      method: "Runtime.consoleAPICalled",
+      params: { args: [{ type: "string", value: `typed ${REDACTED_VALUE}` }] },
+    });
+  });
+
+  it("returns messages without a secret unchanged", () => {
+    const message = '{"id":1,"result":{"value":"nothing to hide"}}';
+    expect(redactCdpMessage(message, [SECRET])).toBe(message);
+  });
+
+  it("leaves base64 payloads intact", () => {
+    const data = "abcd".repeat(400);
+    const message = JSON.stringify({ id: 2, result: { data } });
+    expect(JSON.parse(redactCdpMessage(message, ["abcd"])).result.data).toBe(data);
   });
 });
 

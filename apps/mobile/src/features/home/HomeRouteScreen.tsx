@@ -1,8 +1,12 @@
+import { use } from "react";
+import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 import { useNavigation } from "@react-navigation/native";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Platform, useWindowDimensions } from "react-native";
+
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 
 import {
   nativeHeaderScrollEdgeEffects,
@@ -10,11 +14,13 @@ import {
   NativeStackScreenOptions,
 } from "../../native/StackHeader";
 import { NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED } from "../layout/native-mail-search-toolbar";
-import { useProjects, useThreadShells } from "../../state/entities";
+import { useProjects } from "../../state/entities";
+import { environmentThreadShells } from "../../state/threads";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
+import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
 import { WorkspaceEmptyDetail } from "../layout/WorkspaceEmptyDetail";
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { checkForAppUpdateOnLaunch, startAppUpdateForegroundRecheck } from "../updates/app-updates";
@@ -22,6 +28,7 @@ import { AndroidHomeFabLayout } from "./AndroidHomeFab";
 import { HomeScreen } from "./HomeScreen";
 import { HomeHeader } from "./HomeHeader";
 import { useHomeListOptions } from "./home-list-options";
+import { useAtomValueWhileVisible, useHomeRouteVisible } from "./home-route-visibility";
 import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
 import { projectMachineLabel } from "./projectMachineLabel";
@@ -33,22 +40,45 @@ const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Pl
 // With the nav bar hidden nothing makes UIKit's automatic top edge effect
 // appear under the status bar, so ask for the soft fade explicitly.
 const HIDDEN_HEADER_SCROLL_EDGE_EFFECTS = { ...HEADER_SCROLL_EDGE_EFFECTS, top: "soft" } as const;
-// The glass iOS Home never shows its nav bar (see Stack.tsx); the bottom
-// toolbar is its own view and the connection status renders inside the list.
+// The glass iOS Home hides its nav bar outside the native sidebar column (see
+// Stack.tsx); the connection status renders inside the list.
 const HOME_HIDES_HEADER = Platform.OS === "ios" && NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED;
 
 /* ─── Route screen ───────────────────────────────────────────────────── */
 
 export function HomeRouteScreen() {
   const { width: windowWidth } = useWindowDimensions();
+  const nativePrimaryColumn = use(NativePrimaryColumnContext);
+  const columnMetrics = useNativeColumnLayoutMetrics();
+  const headerWidth = nativePrimaryColumn ? (columnMetrics?.width ?? windowWidth) : windowWidth;
   const { layout, panes } = useAdaptiveWorkspaceLayout();
   const projects = useProjects();
-  const threads = useThreadShells();
+  // Streaming turns rewrite thread shells many times a second. While a Thread
+  // covers Home, rebuilding this list is invisible work.
+  const visible = useHomeRouteVisible();
+  const threads = useAtomValueWhileVisible(
+    environmentThreadShells.navigationThreadShellsAtom,
+    visible,
+  );
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const navigation = useNavigation();
   const [searchQuery, setSearchQuery] = useState("");
   const handleSelectThread = useHomeThreadSelection();
+  const handleNewThreadOnBranch = useCallback(
+    (thread: EnvironmentThreadShell) => {
+      navigation.navigate("NewTaskSheet", {
+        screen: "NewTaskDraft",
+        params: {
+          environmentId: String(thread.environmentId),
+          projectId: String(thread.projectId),
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+        },
+      });
+    },
+    [navigation],
+  );
 
   useEffect(() => {
     void checkForAppUpdateOnLaunch();
@@ -127,7 +157,7 @@ export function HomeRouteScreen() {
 
   // In split layouts the persistent sidebar IS the thread list — Home becomes
   // an empty detail pane so selecting a thread never transitions layouts.
-  if (layout.usesSplitView) {
+  if (layout.usesSplitView && !nativePrimaryColumn) {
     return (
       <>
         <NativeStackScreenOptions
@@ -184,9 +214,9 @@ export function HomeRouteScreen() {
             title slot has no brand and only shows the connection status while
             an environment reconnects. */}
         <NativeStackScreenOptions
-          optionsVersion={windowWidth}
+          optionsVersion={headerWidth}
           options={
-            HOME_HIDES_HEADER
+            HOME_HIDES_HEADER && !nativePrimaryColumn
               ? {
                   headerShown: false,
                   headerTitle: "",
@@ -195,7 +225,11 @@ export function HomeRouteScreen() {
                 }
               : {
                   ...getConnectionStatusOnlyHeaderOptions({
-                    headerWidth: windowWidth,
+                    // The iPad sidebar keeps filter and settings beside the title.
+                    headerWidth:
+                      nativePrimaryColumn && Platform.OS === "ios" && Platform.isPad
+                        ? headerWidth - 44 * 2
+                        : headerWidth,
                     onOpenEnvironments: () =>
                       navigation.navigate("SettingsSheet", {
                         screen: "SettingsContent",
@@ -269,17 +303,7 @@ export function HomeRouteScreen() {
           onSelectThread={handleSelectThread}
           onSelectPendingTask={openPendingTask}
           onDeletePendingTask={confirmDeletePendingTask}
-          onNewThreadOnBranch={(thread) => {
-            navigation.navigate("NewTaskSheet", {
-              screen: "NewTaskDraft",
-              params: {
-                environmentId: String(thread.environmentId),
-                projectId: String(thread.projectId),
-                branch: thread.branch,
-                worktreePath: thread.worktreePath,
-              },
-            });
-          }}
+          onNewThreadOnBranch={handleNewThreadOnBranch}
           onNewThreadInProject={(project) => {
             navigation.navigate("NewTaskSheet", {
               screen: "NewTaskDraft",

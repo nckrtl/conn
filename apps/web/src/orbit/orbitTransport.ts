@@ -2,7 +2,7 @@ import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { terminalOutputText } from "@t3tools/client-runtime/state/terminal";
 import * as Option from "effect/Option";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 
 import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";

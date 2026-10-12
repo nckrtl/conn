@@ -13,7 +13,7 @@ function Shell({
       data-slot="composer-shell"
       data-with-context={contextStrip || undefined}
       className={cn(
-        "@container/composer-surface group/composer-surface relative isolate mx-auto w-full max-w-(--chat-max-width)",
+        "@container/composer-surface group/composer-surface relative isolate mx-auto w-full max-w-(--chat-content-max-width)",
         "[--chat-composer-drawer-inset:1.375rem] [--chat-composer-glass-surface:var(--card)] [--chat-composer-outline:rgb(0_0_0/8%)]",
         "dark:[--chat-composer-glass-surface:var(--surface-raised)] dark:[--chat-composer-outline:color-mix(in_srgb,var(--color-white)_5%,transparent)]",
         "[html[data-theme-id]_&]:[--chat-composer-glass-surface:var(--app-theme-surface-raised)] [html[data-theme-id]_&]:[--chat-composer-outline:var(--app-theme-toolbar-border)]",
@@ -26,7 +26,7 @@ function Shell({
         "dark:before:bg-(--shell-raised) dark:before:backdrop-filter-none",
         // Dark: banners and the context strip show the raised surface through, a step darker.
         "dark:[--chat-composer-drawer-surface:color-mix(in_oklab,var(--shell-raised)_60%,transparent)]",
-        "has-data-[composer-banner-surface=attached]:before:hidden",
+        "has-data-[composer-banner-surface=attached]:before:hidden data-model-strip-transition:before:hidden",
         contextStrip && [
           "[--chat-composer-context-extension:2.25rem] sm:[--chat-composer-context-extension:2rem]",
           // Keep one continuous backdrop around the fixed-pixel corners and rem-sized strip inset.
@@ -126,7 +126,10 @@ function Main({ className, ...props }: ComponentProps<"div">) {
     <div
       data-chat-composer-main-surface="true"
       className={cn(
-        "group relative z-10 rounded-3xl p-px transition-colors duration-200",
+        "group relative z-10 rounded-3xl p-px",
+        // The host also wraps shoulder tabs, so its backdrop would extend above the input.
+        "group-data-model-strip-transition/composer-surface:bg-(--chat-composer-glass-surface)/(--glass-opacity) group-data-model-strip-transition/composer-surface:backdrop-blur-(--glass-blur) group-data-model-strip-transition/composer-surface:backdrop-saturate-(--glass-saturation)",
+        "dark:group-data-model-strip-transition/composer-surface:bg-(--shell-raised) dark:group-data-model-strip-transition/composer-surface:backdrop-filter-none",
         outlineClasses,
         contextSeamClasses,
         "after:z-20 after:hidden group-has-data-[composer-banner-surface=attached]/composer-surface:after:block",
@@ -148,7 +151,7 @@ function ContextStrip({ className, ...props }: ComponentProps<"div">) {
     <div
       data-slot="composer-context-strip"
       className={cn(
-        "group/composer-context relative isolate mx-auto -mt-4 flex w-[calc(100%-2*var(--chat-composer-drawer-inset))] items-center gap-2 overflow-x-clip overflow-y-visible ps-1 pe-2 pt-5 pb-1",
+        "group/composer-context relative isolate mx-auto -mt-4 flex w-[calc(100%-2*var(--chat-composer-drawer-inset))] items-center gap-2 overflow-x-clip overflow-y-visible px-2 pt-5 pb-1",
         "before:absolute before:inset-0 before:-z-1 before:rounded-b-2xl before:border before:border-(--chat-composer-outline) before:mask-b-from-transparent before:mask-b-from-4 before:mask-b-to-black before:mask-b-to-4 before:shadow-composer",
         // Dark: the Shell backdrop stops above the strip, so the strip blurs the page itself.
         "dark:before:border-white/7 dark:before:bg-(--chat-composer-drawer-surface) dark:before:backdrop-blur-(--glass-blur) dark:before:backdrop-saturate-(--glass-saturation) dark:before:shadow-composer-dark",

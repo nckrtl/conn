@@ -3,6 +3,7 @@ import { Image } from "expo-image";
 import { View } from "react-native";
 
 import { AppText as Text } from "./AppText";
+import { T3_CODE_BRAND_MARK_SOURCE } from "./brandAssets";
 
 const appVariant = Constants.expoConfig?.extra?.appVariant;
 // A renamed build (the nckrtl fork ships as Conn) shows its own icon and name.
@@ -11,11 +12,7 @@ const BRAND_MARK_SOURCE = brandName
   ? appVariant === "development"
     ? require("../../../../assets/conn/dev/conn-dev-ios-1024.png")
     : require("../../../../assets/conn/prod/conn-prod-ios-1024.png")
-  : appVariant === "development"
-    ? require("../../../../assets/dev/blueprint-ios-1024.png")
-    : appVariant === "preview"
-      ? require("../../../../assets/nightly/nightly-ios-1024.png")
-      : require("../../../../assets/prod/black-ios-1024.png");
+  : T3_CODE_BRAND_MARK_SOURCE;
 const DEFAULT_STAGE_LABEL =
   appVariant === "development" ? "Dev" : appVariant === "preview" ? "Preview" : "Alpha";
 

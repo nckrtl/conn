@@ -1,9 +1,5 @@
 import { ServerRestartError, type ServerRestartResult } from "@t3tools/contracts";
-import {
-  HostProcessEnvironment,
-  HostProcessPlatform,
-  HostProcessUserId,
-} from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -60,9 +56,9 @@ export const make = Effect.fn("serverRestart.make")(function* (options?: {
 }) {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const runner = yield* ProcessRunner.ProcessRunner;
-  const platform = yield* HostProcessPlatform;
-  const environment = yield* HostProcessEnvironment;
-  const uid = yield* HostProcessUserId;
+  const platform = yield* HostProcess.Platform;
+  const environment = yield* HostProcess.Environment;
+  const uid = yield* HostProcess.UserId;
   const launcher = yield* resolveServiceLauncherMode().pipe(
     Effect.orElseSucceed(() => ({ managed: false })),
   );

@@ -130,9 +130,14 @@ async function reconcileEnvironments(
   for (const environmentId of plan.pair) {
     try {
       const pairing = await client.pair(environmentId);
-      const result = await runAtomCommand(appAtomRegistry, connectPairingUrl, pairing.pairingUrl, {
-        reportFailure: false,
-      });
+      const result = await runAtomCommand(
+        appAtomRegistry,
+        connectPairingUrl,
+        { pairingUrl: pairing.pairingUrl },
+        {
+          reportFailure: false,
+        },
+      );
       if (result._tag === "Success") next = recordPaired(next, environmentId);
     } catch {
       // An unreachable server pairs on a later refresh.

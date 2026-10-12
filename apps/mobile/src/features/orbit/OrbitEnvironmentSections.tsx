@@ -7,7 +7,7 @@ import { AppText as Text } from "../../components/AppText";
 import { ControlPillMenu } from "../../components/ControlPillMenu";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
-import { ConnectionSheetButton } from "../connection/ConnectionSheetButton";
+import { ConnectionSheetButton } from "./OrbitSheetButton";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import {
   chooseOrbitProfile,

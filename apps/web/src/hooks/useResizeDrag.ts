@@ -5,7 +5,8 @@ interface ResizeSession {
   edge: "left" | "right" | "top" | "bottom";
   resize: (width: number) => number;
   finish: (width: number, moved: boolean) => void;
-  cleanup?: () => void;
+  /** Runs on every end; `committed` is false when the drag was abandoned without `finish`. */
+  cleanup?: (committed: boolean) => void;
 }
 
 function position(event: PointerEvent<HTMLElement>, edge: ResizeSession["edge"]) {
@@ -54,7 +55,7 @@ export function useResizeDrag<T extends HTMLElement>(
       }
       document.body.style.removeProperty("cursor");
       document.body.style.removeProperty("user-select");
-      active.session.cleanup?.();
+      active.session.cleanup?.(commit);
       if (commit) active.session.finish(active.width, active.moved);
     },
     [flush],
@@ -86,6 +87,8 @@ export function useResizeDrag<T extends HTMLElement>(
   };
 
   return {
+    /** Re-applies the pointer position to an active drag, e.g. after its bounds change. */
+    refresh: flush,
     onPointerDown(event: PointerEvent<T>) {
       if (event.button !== 0 || drag.current) return;
       const session = start(event);
@@ -93,7 +96,7 @@ export function useResizeDrag<T extends HTMLElement>(
       try {
         event.currentTarget.setPointerCapture(event.pointerId);
       } catch {
-        session.cleanup?.();
+        session.cleanup?.(false);
         return;
       }
       event.preventDefault();

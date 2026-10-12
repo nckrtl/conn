@@ -1,13 +1,19 @@
 /**
- * Page-side pieces of password-manager autofill, shared by the server (which
- * builds the field finder) and the desktop main process (which runs them over
- * CDP and redacts agent-visible results).
+ * Page-side pieces of password-manager autofill, shared by the server's
+ * browser (test logins, agent-visible results) and the desktop main process
+ * (Vault logins, and redaction of what its tabs send the server).
  */
 
 export type CredentialFillField = "username" | "password" | "otp";
 
 /** Element property that marks an input T3 Code filled with a secret. */
 const FILLED_MARK = "t3code.credentialFilled";
+
+/**
+ * Window property that marks a document a Vault secret went into. It cannot
+ * be removed, and the next document starts without it.
+ */
+const LOCKED_DOCUMENT_MARK = "__t3codeCredentialLocked";
 
 /** Input types a username or one-time code may be typed into. */
 const TEXT_INPUT_TYPES = ["text", "email", "tel", "number", "search", "url", ""];
@@ -112,8 +118,10 @@ export const CREDENTIAL_PREPARE_FUNCTION = `function (field) {
  * Writes only to the bound input. CDP Input.insertText can reach the host's
  * focused composer when a webview is inactive, so credentials must never use
  * keyboard routing. The native setter also supports controlled React inputs.
+ * With `lockDocument`, a password or code first marks the document for
+ * `CREDENTIAL_LOCK_EXPRESSION`; no value goes in unless the mark holds.
  */
-export const CREDENTIAL_INSERT_FUNCTION = `function (field, value, expectedOrigin) {
+export const CREDENTIAL_INSERT_FUNCTION = `function (field, value, expectedOrigin, lockDocument) {
   const element = this;
   if (location.origin !== expectedOrigin) return "origin_mismatch";
   const textTypes = new Set(${JSON.stringify(TEXT_INPUT_TYPES)});
@@ -121,6 +129,15 @@ export const CREDENTIAL_INSERT_FUNCTION = `function (field, value, expectedOrigi
       element.ownerDocument !== document || element.disabled || element.readOnly ||
       (field === "password" ? element.type !== "password" : !textTypes.has(element.type))) {
     return "not_editable";
+  }
+  if (lockDocument === true && field !== "username") {
+    const mark = ${JSON.stringify(LOCKED_DOCUMENT_MARK)};
+    try {
+      Object.defineProperty(window, mark, { value: true, writable: false, configurable: false });
+    } catch {
+      return "insert_failed";
+    }
+    if (window[mark] !== true) return "insert_failed";
   }
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
   if (!setter) return "insert_failed";
@@ -168,6 +185,9 @@ export const SENSITIVE_INPUT_VALUES_EXPRESSION = `(() => {
   return Array.from(values);
 })()`;
 
+/** Whether the page's document holds a Vault password or code (see `CREDENTIAL_INSERT_FUNCTION`). */
+export const CREDENTIAL_LOCK_EXPRESSION = `window[${JSON.stringify(LOCKED_DOCUMENT_MARK)}] === true`;
+
 export const REDACTED_VALUE = "[redacted]";
 
 /** Values shorter than this are only redacted when a string equals them exactly. */
@@ -186,9 +206,14 @@ const variantsOf = (secret: string): ReadonlyArray<string> => {
 
 /**
  * Replaces every occurrence of a secret (raw, URI-encoded or JSON-escaped)
- * in strings and object keys of a JSON-like value. Other values pass through.
+ * in strings and object keys of a JSON-like value. Other values, and strings
+ * `keep` accepts, pass through.
  */
-export function redactSensitiveValues<T>(value: T, secrets: ReadonlyArray<string>): T {
+export function redactSensitiveValues<T>(
+  value: T,
+  secrets: ReadonlyArray<string>,
+  keep: (text: string) => boolean = () => false,
+): T {
   const exact = new Set<string>();
   const substrings: string[] = [];
   for (const secret of secrets) {
@@ -209,7 +234,7 @@ export function redactSensitiveValues<T>(value: T, secrets: ReadonlyArray<string
     return result;
   };
   const visit = (current: unknown, depth: number): unknown => {
-    if (typeof current === "string") return redactString(current);
+    if (typeof current === "string") return keep(current) ? current : redactString(current);
     if (depth > 64 || current === null || typeof current !== "object") return current;
     if (Array.isArray(current)) return current.map((entry) => visit(entry, depth + 1));
     const prototype = Object.getPrototypeOf(current);
@@ -219,4 +244,26 @@ export function redactSensitiveValues<T>(value: T, secrets: ReadonlyArray<string
     );
   };
   return visit(value, 0) as T;
+}
+
+/** A long run of base64 is an image or file payload, where a short secret matches by chance. */
+const isBinaryPayload = (text: string) => /^[A-Za-z0-9+/=]{1024,}$/.test(text);
+
+/**
+ * Redacts secrets from one CDP JSON message, leaving base64 payloads intact.
+ * A message with no secret in it, or that is not JSON, comes back unchanged.
+ */
+export function redactCdpMessage(message: string, secrets: ReadonlyArray<string>): string {
+  const present = secrets.filter(
+    (secret) =>
+      secret.length > 0 && variantsOf(secret).some((variant) => message.includes(variant)),
+  );
+  if (present.length === 0) return message;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    return message;
+  }
+  return JSON.stringify(redactSensitiveValues(parsed, present, isBinaryPayload));
 }

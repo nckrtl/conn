@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - The profile sync runs on plain promises, outside an Effect runtime.
 import { describe, expect, it } from "vite-plus/test";
 
 import {

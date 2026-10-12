@@ -306,8 +306,8 @@ function SidebarUpdateControl({ variant }: { variant: "footer" | "rail" }) {
       aria-disabled={isInteractionDisabled || undefined}
       className={cn(
         inRail
-          ? "flex size-9.5 shrink-0 items-center justify-center rounded-md outline-hidden ring-ring transition-colors focus-visible:ring-2"
-          : "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors focus-visible:ring-2",
+          ? "flex size-9.5 shrink-0 items-center justify-center rounded-md outline-hidden ring-ring transition-colors focus-visible:ring-2 focus-visible:ring-inset"
+          : "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors focus-visible:ring-2 focus-visible:ring-inset",
         isInteractionDisabled ? "cursor-not-allowed" : "cursor-pointer",
         showUpdateIconState
           ? cn(

@@ -27,8 +27,16 @@ function relay(name: string, reply: string): string {
     path,
     `#!${process.execPath}
 const fs = require("node:fs");
-const input = fs.readFileSync(0);
-const request = JSON.parse(input.subarray(4, 4 + input.readUInt32LE(0)).toString());
+let input = Buffer.alloc(0);
+process.stdin.on("data", (chunk) => {
+  input = Buffer.concat([input, chunk]);
+  if (input.length < 4 || input.length < 4 + input.readUInt32LE(0)) return;
+  const request = JSON.parse(input.subarray(4, 4 + input.readUInt32LE(0)).toString());
+  setTimeout(() => answer(request), 50);
+});
+// Like Vault's relay: a caller that closes stdin before the reply gets none.
+process.stdin.on("end", () => process.exit(1));
+function answer(request) {
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), request }) + "\\n");
 const send = (value) => {
   const body = Buffer.from(JSON.stringify(value));
@@ -37,6 +45,7 @@ const send = (value) => {
   process.stdout.write(Buffer.concat([header, body]));
 };
 ${reply}
+}
 `,
   );
   NodeFS.chmodSync(path, 0o755);

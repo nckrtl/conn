@@ -103,7 +103,8 @@ export function vaultRequest(
           signal === "SIGTERM"
             ? new VaultError("error", "Vault did not answer in time.")
             : new VaultError(
-                "unavailable",
+                // Vault is installed, so the menu shows this instead of hiding its Vault section.
+                "error",
                 "Vault refused the request. Update Vault, and use the signed Conn app.",
               ),
         ),
@@ -133,7 +134,9 @@ export function vaultRequest(
       }
     });
     child.stdin.on("error", () => undefined);
-    child.stdin.end(
+    // Keep stdin open until the reply: the relay reads EOF as the caller hanging up and closes
+    // its Vault connection before Vault answers. `settle` ends the relay once a reply arrives.
+    child.stdin.write(
       frame({
         version: 1,
         id,

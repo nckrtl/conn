@@ -951,13 +951,6 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     @apply flex h-10 min-h-10 shrink-0 items-center border-b border-border/60 bg-background;
   }
 
-  [data-preview-panel-mode="inline"] [data-right-panel-surface-content] [data-surface-subheader] {
-    height: calc(var(--spacing) * 7);
-    min-height: calc(var(--spacing) * 7);
-    margin-bottom: calc(var(--spacing) * 3);
-    border-bottom-color: transparent;
-  }
-
   .chat-content-lane {
     margin-inline: auto;
     width: 100%;
@@ -2419,7 +2412,7 @@ html {
      outer bottom corners stay concentric with it across the inset and border. */
   --window-radius: 16px;
   /* Gap between the inset cards and the window edge. */
-  --shell-inset: 2px;
+  --shell-inset: 4px;
   --shell-corner: calc(var(--window-radius) - var(--shell-inset) - 1px);
   --shell-blur: 40px;
   --shell-saturate: 1.6;

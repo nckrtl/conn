@@ -61,7 +61,7 @@ function JsonTokens({ text }: { readonly text: string }) {
 }
 
 const monoClassName =
-  "font-mono text-(length:--font-size-code,var(--text-2xs)) leading-relaxed whitespace-pre-wrap break-words select-text";
+  "font-mono text-(length:--font-size-code,var(--text-2xs)) leading-(--line-height-code,1.625) whitespace-pre-wrap break-words select-text";
 
 function StructuredValue({
   value,
@@ -229,9 +229,9 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
     sourceItemId: props.projectedItem.sourceItemId,
   });
   return (
-    <div className="space-y-2 text-xs" data-v2-item-inspector={item.type}>
+    <div className="space-y-2 text-ui" data-v2-item-inspector={item.type}>
       {item.type === "reasoning" && item.text ? (
-        <div className="rounded-md border border-border/45 bg-muted/15 p-2 italic text-muted-foreground">
+        <div className="rounded-md border border-(--shell-divider)! bg-(--shell-highlight) p-2 italic text-muted-foreground">
           <ChatMarkdown
             text={item.text}
             cwd={props.cwd}

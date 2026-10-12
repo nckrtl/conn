@@ -97,7 +97,7 @@ function ProviderCustomColorPicker(props: {
           onCommit={props.onCommit}
         />
         {normalized ? (
-          <div className="border-t border-border/60 p-1">
+          <div className="border-t border-(--glass-divider)! p-1">
             <PopoverClose
               render={
                 <Button

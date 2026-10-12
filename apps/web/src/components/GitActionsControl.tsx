@@ -455,7 +455,7 @@ function GitActionProgressButtonContent({
       {!isPanel ? (
         <GitActionElapsedTime
           startedAtMs={progress.startedAtMs}
-          className="row-start-1 text-2xs font-normal tabular-nums text-muted-foreground"
+          className="row-start-1 text-xs font-normal tabular-nums text-muted-foreground"
         />
       ) : null}
       <div
@@ -469,7 +469,7 @@ function GitActionProgressButtonContent({
           <Tooltip>
             <TooltipTrigger
               render={
-                <p className="truncate pt-0.5 text-left text-2xs font-normal text-muted-foreground" />
+                <p className="truncate pt-0.5 text-left text-ui font-normal text-muted-foreground" />
               }
             >
               {progress.output}
@@ -505,7 +505,7 @@ function GitActionSuccessButtonContent({ success }: { success: InlineGitActionSu
           <Tooltip>
             <TooltipTrigger
               render={
-                <p className="truncate pt-0.5 text-left text-2xs font-normal text-muted-foreground" />
+                <p className="truncate pt-0.5 text-left text-ui font-normal text-muted-foreground" />
               }
             >
               {success.description}
@@ -1829,7 +1829,7 @@ export default function GitActionsControl({
           className={cn(
             "shrink-0",
             isPanel && THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS,
-            isPanel && gitActionProgress && "bg-black/[0.035] dark:bg-white/[0.055]",
+            isPanel && gitActionProgress && "bg-(--shell-highlight)",
           )}
         >
           {gitActionProgress ? (
@@ -1916,7 +1916,7 @@ export default function GitActionsControl({
             // the output row expands below.
             <GitActionElapsedTime
               startedAtMs={gitActionProgress.startedAtMs}
-              className="flex h-8 shrink-0 items-center self-start pe-2.5 text-2xs font-normal tabular-nums text-muted-foreground"
+              className="flex h-8 shrink-0 items-center self-start pe-2.5 text-ui font-normal tabular-nums text-muted-foreground"
             />
           ) : (
             <>
@@ -1973,7 +1973,7 @@ export default function GitActionsControl({
         >
           <FileDiffIcon className={THREAD_DETAILS_PANEL_ICON_CLASS} aria-hidden />
           <span className="flex-1 text-left">Changes</span>
-          <span className="flex items-center gap-1 font-mono text-2xs tabular-nums">
+          <span className="flex items-center gap-1 text-ui tabular-nums">
             <span className="text-success">+{changesTotals?.insertions ?? 0}</span>
             <span className="text-destructive">-{changesTotals?.deletions ?? 0}</span>
           </span>

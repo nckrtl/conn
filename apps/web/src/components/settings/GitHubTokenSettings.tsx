@@ -67,10 +67,10 @@ export function GitHubTokenSettings({
     >
       {/* Locked while saving: a successful save clears the draft, which would drop edits made mid-request. */}
       <fieldset disabled={saving} className="contents">
-        <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+        <p className="max-w-2xl text-ui leading-relaxed text-muted-foreground">
           A token saved here is used before{" "}
-          <code className="rounded bg-muted px-1 py-px text-2xs">GH_TOKEN</code> and the{" "}
-          <code className="rounded bg-muted px-1 py-px text-2xs">gh</code> login, so GitHub works
+          <code className="rounded bg-muted px-1 py-px text-ui">GH_TOKEN</code> and the{" "}
+          <code className="rounded bg-muted px-1 py-px text-ui">gh</code> login, so GitHub works
           without the GitHub CLI. Give it read and write access to pull requests and contents.{" "}
           <InlineButton
             render={
@@ -111,7 +111,7 @@ export function GitHubTokenSettings({
           </div>
         </div>
         <div className="flex items-center justify-between gap-3">
-          <p className="text-xs text-muted-foreground">
+          <p className="text-ui text-muted-foreground">
             {savedHosts.length === 0
               ? "No token saved; the server uses GH_TOKEN or the gh login."
               : `Saved for ${savedHosts.join(", ")}.`}

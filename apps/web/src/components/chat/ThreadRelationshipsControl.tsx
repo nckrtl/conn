@@ -112,7 +112,7 @@ export function ThreadLineageRowList(props: {
         <button
           type="button"
           onClick={props.onShowMore}
-          className={`flex h-8 w-full cursor-pointer items-center rounded-lg ${THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS} text-sm font-medium text-muted-foreground/70 hover:bg-black/[0.055] hover:text-foreground/80 dark:hover:bg-white/[0.075]`}
+          className={`flex h-8 w-full cursor-pointer items-center rounded-lg ${THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS} text-sm font-medium text-muted-foreground/70 hover:bg-(--shell-highlight) hover:text-foreground/80`}
         >
           <PlusIcon aria-hidden className="size-4 shrink-0" />
           Show {Math.min(props.hiddenCount, THREAD_LINEAGE_PAGE_COUNT)} more
@@ -254,7 +254,7 @@ function RemoteSubagentRow(props: {
             </span>
           </span>
           <span
-            className={`shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
+            className={`shrink-0 text-ui ${failed ? "text-destructive" : "text-muted-foreground"}`}
           >
             on {remoteChild.label} · {threadRelationshipStatusLabel(status)}
           </span>
@@ -531,13 +531,13 @@ export function ThreadRelationshipsPanel(props: {
                       carries status, so an agent with a known time shows only that. */}
                   {agent && !failed && deriveSubagentElapsedMs(agent, 0) !== null ? (
                     <span
-                      className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${trailingVisibilityClass}`}
+                      className={`shrink-0 text-ui font-normal tabular-nums text-muted-foreground ${trailingVisibilityClass}`}
                     >
                       <AgentElapsed agent={agent} compact />
                     </span>
                   ) : !isMergeTarget ? (
                     <span
-                      className={`shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"} ${trailingVisibilityClass}`}
+                      className={`shrink-0 text-ui ${failed ? "text-destructive" : "text-muted-foreground"} ${trailingVisibilityClass}`}
                     >
                       {threadRelationshipStatusLabel(status)}
                     </span>
@@ -601,7 +601,7 @@ export function ThreadRelationshipsPanel(props: {
                               : "Merge this conversation back into its source"}
                         </TooltipPopup>
                       </Tooltip>
-                      <span className="shrink-0 border border-transparent ps-1 pe-2.5 text-2xs font-medium text-muted-foreground">
+                      <span className="shrink-0 border border-transparent ps-1 pe-2.5 text-ui font-medium text-muted-foreground">
                         {threadRelationshipStatusLabel(status)}
                       </span>
                     </div>

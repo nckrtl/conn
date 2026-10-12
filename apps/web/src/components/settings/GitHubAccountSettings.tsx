@@ -25,9 +25,9 @@ function RedactedLogin(props: {
   readonly label?: string;
 }) {
   return props.revealed ? (
-    <span className="min-w-0 truncate font-mono text-2xs">{props.account}</span>
+    <span className="min-w-0 truncate text-ui">{props.account}</span>
   ) : (
-    <span className="min-w-0 truncate font-mono text-2xs">
+    <span className="min-w-0 truncate text-ui">
       <span className="select-none blur-xs" aria-hidden>
         {redactedPlaceholder(props.account)}
       </span>
@@ -75,8 +75,8 @@ export function GitHubAccountSettings({
 
   if (groups.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">
-        Sign in with <code className="rounded bg-muted px-1 py-px text-2xs">gh auth login</code> on
+      <p className="text-ui text-muted-foreground">
+        Sign in with <code className="rounded bg-muted px-1 py-px text-ui">gh auth login</code> on
         the server host, then rescan to choose accounts here.
       </p>
     );
@@ -85,8 +85,8 @@ export function GitHubAccountSettings({
   return (
     <div className="grid gap-4">
       <div className="flex items-center justify-between gap-3">
-        <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-          Choose which <code className="rounded bg-muted px-1 py-px text-2xs">gh</code> login each
+        <p className="max-w-2xl text-ui leading-relaxed text-muted-foreground">
+          Choose which <code className="rounded bg-muted px-1 py-px text-ui">gh</code> login each
           GitHub host uses, or turn a host off.
         </p>
         <Button
@@ -109,9 +109,9 @@ export function GitHubAccountSettings({
           <div key={group.host} className="grid gap-2">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0 space-y-0.5">
-                <span className="text-xs font-medium text-foreground">{group.host}</span>
+                <span className="text-ui font-medium text-foreground">{group.host}</span>
                 {group.selectable.length === 1 && group.selectable[0] !== undefined ? (
-                  <p className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+                  <p className="flex min-w-0 items-center gap-1 text-ui text-muted-foreground">
                     <span>Signed in as</span>
                     <RedactedLogin revealed={revealed} account={group.selectable[0]} />
                   </p>
@@ -126,7 +126,7 @@ export function GitHubAccountSettings({
             </div>
             {group.selectable.length > 1 ? (
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs text-muted-foreground">Account</span>
+                <span className="text-ui text-muted-foreground">Account</span>
                 <div className="w-64 max-w-full">
                   <Select
                     value={pinned}
@@ -188,7 +188,7 @@ export function GitHubAccountSettings({
             ) : null}
             {stalePin ? (
               <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-warning">
+                <p className="text-ui text-warning">
                   The chosen login is no longer signed in, so the active gh login is used.
                 </p>
                 <Button
@@ -204,14 +204,14 @@ export function GitHubAccountSettings({
             {group.broken.map((entry) => (
               <p
                 key={entry.account}
-                className="flex min-w-0 flex-wrap items-center gap-1 text-xs text-muted-foreground/70"
+                className="flex min-w-0 flex-wrap items-center gap-1 text-ui text-muted-foreground/70"
               >
                 <RedactedLogin revealed={revealed} account={entry.account} />
                 <span>can't be used: {entry.error ?? "gh reports this login as invalid."}</span>
               </p>
             ))}
             {group.environmentVariable ? (
-              <p className="text-xs text-warning">
+              <p className="text-ui text-warning">
                 {group.environmentVariable} is set on the server, so it overrides the account chosen
                 here until it is unset.
               </p>

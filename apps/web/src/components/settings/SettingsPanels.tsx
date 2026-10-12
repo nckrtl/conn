@@ -928,7 +928,7 @@ function BackgroundActivityAdvancedDialog({
         <DialogPanel>
           <fieldset
             disabled={!canWriteSettings}
-            className="min-w-0 overflow-hidden rounded-xl border bg-card text-card-foreground"
+            className="min-w-0 overflow-hidden rounded-lg border border-(--shell-divider-header)! bg-(--shell-highlight) text-foreground [&_div]:border-(--shell-divider-header)!"
           >
             <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0 space-y-1">

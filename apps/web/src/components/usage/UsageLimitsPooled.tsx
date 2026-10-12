@@ -181,13 +181,13 @@ function SegmentPopover({
           />
         ) : null}
       </div>
-      <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5">
+      <div className="flex flex-col gap-1 border-t border-(--glass-divider)! pt-2.5">
         {account.plan ? <Row label="Plan">{account.plan}</Row> : null}
         {where ? (
           <Row label={account.environments.length > 0 ? "Signed in" : "Via"}>{where}</Row>
         ) : null}
       </div>
-      <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5">
+      <div className="flex flex-col gap-1 border-t border-(--glass-divider)! pt-2.5">
         <Row label="Left">{remaining}%</Row>
         {window.resetsAt ? (
           <Row label="Resets">
@@ -200,7 +200,7 @@ function SegmentPopover({
         ) : null}
       </div>
       {credits && redeem ? (
-        <div className="border-t border-border/60 pt-2.5 text-muted-foreground">
+        <div className="border-t border-(--glass-divider)! pt-2.5 text-muted-foreground">
           <span className="flex items-center gap-3">
             <span className="tabular-nums">{resetCreditsSummary(credits, now, true)}</span>
             <Button

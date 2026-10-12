@@ -106,7 +106,7 @@ function PendingSecretRequestForm(props: {
   return (
     <form
       data-v2-item-type={item.type}
-      className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/60 bg-card p-4"
+      className="flex min-w-0 flex-col gap-3 rounded-xl border border-(--shell-divider)! bg-(--shell-tile) p-4"
       onSubmit={onSubmit}
       autoComplete="off"
       // A click anywhere on the card targets its field, so a paste that
@@ -152,14 +152,14 @@ function PendingSecretRequestForm(props: {
         </Button>
       </div>
       {error !== null ? (
-        <p id={errorId} role="alert" className="text-xs text-destructive">
+        <p id={errorId} role="alert" className="text-ui text-destructive">
           {error}
         </p>
       ) : null}
       <div className="flex min-w-0 items-center justify-between gap-2">
         <p
           id={privacyId}
-          className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+          className="flex min-w-0 items-center gap-1.5 text-ui text-muted-foreground"
         >
           <ShieldCheckIcon className="size-3.5 shrink-0" aria-hidden />
           {SECRET_REQUEST_PRIVACY_NOTE}

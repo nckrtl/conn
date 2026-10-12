@@ -136,12 +136,12 @@ function LinkedEnvironmentRow({
               }
               pingClassName={null}
             />
-            <h3 className="text-sm font-medium text-foreground">{link.label}</h3>
+            <h3 className="text-ui font-medium text-foreground">{link.label}</h3>
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-ui text-muted-foreground">
             {accessConfig[link.access].label} · {status}
           </p>
-          <p className="truncate text-xs text-muted-foreground/80">{link.urls.join(", ")}</p>
+          <p className="truncate text-ui text-muted-foreground/80">{link.urls.join(", ")}</p>
         </div>
         {canUnlink ? (
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">

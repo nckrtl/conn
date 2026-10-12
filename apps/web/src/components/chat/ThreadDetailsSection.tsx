@@ -23,7 +23,7 @@ export function ThreadDetailsSection({
       {...props}
       aria-labelledby={showHeading ? headingId : undefined}
       aria-label={showHeading ? undefined : title}
-      className={cn("px-2 pt-2 pb-2.5", separated && "border-t border-border/65")}
+      className={cn("px-2 pt-2 pb-2.5", separated && "border-t border-(--glass-divider)!")}
     >
       <div
         className={cn(
@@ -33,7 +33,7 @@ export function ThreadDetailsSection({
       >
         <h3
           id={headingId}
-          className="min-w-0 truncate text-2xs font-medium text-muted-foreground select-none"
+          className="min-w-0 truncate text-ui font-medium text-muted-foreground select-none"
         >
           {title}
         </h3>

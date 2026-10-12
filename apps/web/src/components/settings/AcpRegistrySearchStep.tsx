@@ -214,7 +214,7 @@ export function AcpRegistrySearchStep({
         results.length === 0 ? (
           <div className="flex min-h-28 flex-col items-center justify-center rounded-2xl border border-dashed px-4 text-center">
             <p className="text-sm font-medium">No compatible agents found</p>
-            <p className="mt-1 text-xs text-muted-foreground">Try a broader search.</p>
+            <p className="mt-1 text-ui text-muted-foreground">Try a broader search.</p>
           </div>
         ) : (
           <ScrollArea scrollFade className="max-h-64">
@@ -243,7 +243,7 @@ export function AcpRegistrySearchStep({
                             </h4>
                           </div>
                           {agent.description ? (
-                            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                            <p className="mt-0.5 truncate text-ui text-muted-foreground">
                               {agent.description}
                             </p>
                           ) : null}

@@ -439,7 +439,7 @@ export function UsagePriceOverrides({
                               {errors.has(row.id) &&
                               (row.model.trim() !== "" ||
                                 Object.values(row.values).some((value) => value !== "")) ? (
-                                <p role="alert" className="mt-1 text-xs text-destructive">
+                                <p role="alert" className="mt-1 text-ui text-destructive">
                                   {errors.get(row.id)}
                                 </p>
                               ) : null}

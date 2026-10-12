@@ -60,7 +60,7 @@ build and install the fork's desktop app is in
 ### Shell and window
 
 - Window corner is `--window-radius` (16px). Inset cards sit `--shell-inset`
-  (2px) from the window edge.
+  (4px) from the window edge.
 - Corners are concentric: inner radius = outer radius - inset. Outer bottom
   corners of cards use `rounded-br-(--shell-corner)`. Rail tiles use
   `rounded-tile` inside the 10px rail button. Hover shapes must follow the

@@ -2137,7 +2137,7 @@ function ContextCompactionTimelineRow({
       aria-label={row.label}
       className="mx-auto flex w-full max-w-(--chat-content-max-width) items-center gap-3 py-1 text-muted-foreground text-xs"
     >
-      <span className="h-px flex-1 bg-border/70" />
+      <span className="h-px flex-1 bg-(--shell-divider)" />
       <span
         ref={row.active ? observeVisibleAnimation : undefined}
         className="relative shrink-0 overflow-hidden"
@@ -2155,7 +2155,7 @@ function ContextCompactionTimelineRow({
           </ActivityShimmerOverlay>
         ) : null}
       </span>
-      <span className="h-px flex-1 bg-border/70" />
+      <span className="h-px flex-1 bg-(--shell-divider)" />
     </div>
   );
 }
@@ -2748,14 +2748,14 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
       data-scroll-anchor-ignore
       data-superseded-attempt-id={row.attemptId}
       onClick={() => ctx.onToggleAttemptFold(row.attemptId)}
-      className="flex w-full cursor-pointer select-none items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-2.5 py-2 text-left transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+      className="flex w-full cursor-pointer select-none items-center gap-2 rounded-md border border-(--shell-divider)! px-2.5 py-2 text-left transition-colors hover:bg-(--shell-highlight) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
     >
       <MorphIcon
         className="size-3.5 shrink-0 text-muted-foreground"
         icon={row.expanded ? ChevronDown : ChevronRight}
       />
-      <span className="text-xs font-medium text-foreground/80">{row.label}</span>
-      <span className="text-2xs text-muted-foreground">Partial output retained</span>
+      <span className="text-ui font-medium text-foreground/80">{row.label}</span>
+      <span className="text-ui text-muted-foreground">Partial output retained</span>
     </button>
   );
 }
@@ -3147,7 +3147,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
         data-v2-item-visibility={visibility}
         data-v2-event-disclosure="true"
       >
-        <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs [&::-webkit-details-marker]:hidden">
+        <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-ui [&::-webkit-details-marker]:hidden">
           <Icon
             className={cn(
               "size-3.5 shrink-0",
@@ -3181,9 +3181,9 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
           ) : null}
           <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground/60 transition-transform group-open:rotate-180" />
         </summary>
-        <div className="border-t border-border/45 px-3 py-2 ps-8">
+        <div className="border-t border-(--shell-divider)! px-3 py-2 ps-8">
           {presentation.detail ? (
-            <div className="text-xs leading-relaxed text-muted-foreground">
+            <div className="text-ui leading-relaxed text-muted-foreground">
               <ChatMarkdown
                 text={presentation.detail}
                 cwd={ctx.markdownCwd}
@@ -3221,7 +3221,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
         presentation.tone === "warning" && "border-warning/25 bg-warning/5",
         presentation.tone === "danger" && "border-destructive/25 bg-destructive/5",
         presentation.tone === "success" && "border-success/20 bg-success/5",
-        presentation.tone === "muted" && "border-border/60 bg-card/30",
+        presentation.tone === "muted" && "border-(--shell-divider)! bg-(--shell-highlight)",
       )}
       data-v2-item-type={item.type}
       data-v2-item-visibility={visibility}
@@ -3238,7 +3238,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
         />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-xs font-medium text-foreground/90">{presentation.label}</span>
+            <span className="text-ui font-medium text-foreground/90">{presentation.label}</span>
             {item.status !== "completed" ? (
               <span
                 className={cn(
@@ -3258,7 +3258,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
             ) : null}
           </div>
           {presentation.detail ? (
-            <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            <div className="mt-1 text-ui leading-relaxed text-muted-foreground">
               <ChatMarkdown
                 text={presentation.detail}
                 cwd={ctx.markdownCwd}
@@ -3396,7 +3396,7 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
             ) : null}
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block text-xs font-semibold">{label}</span>
+            <span className="block text-ui font-semibold">{label}</span>
             <span
               className={cn(
                 "block truncate text-3xs text-muted-foreground",
@@ -3420,7 +3420,7 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
         {/* Virtualized rows must settle before disclosure scroll anchoring resumes. */}
         <CollapsiblePanel animate={false}>
           {expanded ? (
-            <div className="mt-1 mb-1 rounded-lg border border-border/60 bg-card/30 p-1">
+            <div className="mt-1 mb-1 rounded-lg border border-(--shell-divider)! bg-(--shell-highlight) p-1">
               {members.map((item) => (
                 <V2LifecycleRow
                   environmentId={ctx.activeThreadEnvironmentId}

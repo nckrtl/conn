@@ -338,7 +338,7 @@ export function ProviderAuthenticationSection({
             <div className="py-2">
               <Suspense
                 fallback={
-                  <p className="text-xs text-muted-foreground">Loading sign-in terminal…</p>
+                  <p className="text-ui text-muted-foreground">Loading sign-in terminal…</p>
                 }
               >
                 <ProviderAuthTerminal
@@ -464,7 +464,7 @@ export function ProviderAuthenticationSection({
             </form>
           ) : null}
           {error || query.error ? (
-            <p role="alert" className="py-2 text-xs text-destructive">
+            <p role="alert" className="py-2 text-ui text-destructive">
               {error ?? query.error}
             </p>
           ) : null}

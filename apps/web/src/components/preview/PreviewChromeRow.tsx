@@ -123,7 +123,7 @@ export function PreviewChromeRow({
     <div className="relative">
       <form
         onSubmit={submit}
-        className="flex h-10 min-h-10 shrink-0 items-center gap-2 border-b border-(--shell-divider)! bg-background px-2 in-data-[preview-panel-mode=inline]:h-auto in-data-[preview-panel-mode=inline]:min-h-0 in-data-[preview-panel-mode=inline]:py-toolbar"
+        className="flex h-10 min-h-10 shrink-0 items-center gap-2 border-b border-(--shell-divider)! bg-background px-2 in-data-[preview-panel-mode=inline]:h-auto in-data-[preview-panel-mode=inline]:min-h-0 in-data-[preview-panel-mode=inline]:mb-3 in-data-[preview-panel-mode=inline]:py-toolbar"
         data-surface-subheader
       >
         <ToolbarGroup role="group" aria-label="Navigation">

@@ -55,7 +55,7 @@ export function UsageShareBar({
           </Tooltip>
         ))}
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-ui">
         {visible.map((segment) => (
           <span key={segment.label} className="flex items-center gap-1.5">
             <span

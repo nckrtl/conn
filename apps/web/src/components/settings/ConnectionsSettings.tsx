@@ -1710,7 +1710,7 @@ function SavedBackendListRow({
           {permissionsOpen && (
             <div
               id={`remote-permissions-${environmentId}`}
-              className="mt-2 border-t border-border/50"
+              className="mt-2 border-t border-(--shell-divider-header)!"
             >
               <SessionPermissions
                 environmentId={environmentId}
@@ -3009,8 +3009,8 @@ export function ConnectionsSettings() {
   const renderRemoteModeBody = () => (
     <div className="space-y-4">
       {relayRouteOffer !== null ? (
-        <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-          <p className="text-xs text-muted-foreground">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-(--shell-divider-header)! px-3 py-2">
+          <p className="text-ui text-muted-foreground">
             This machine is on your T3 Connect account. Use it as a fallback route.
           </p>
           <Button
@@ -3747,7 +3747,7 @@ export function ConnectionsSettings() {
             ) : null}
             {primaryEnvironment ? (
               <details className="group px-3 sm:px-4">
-                <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md text-ui font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
                   Permissions
                   <ChevronRightIcon
                     aria-hidden
@@ -3797,7 +3797,7 @@ export function ConnectionsSettings() {
                 {canReadAccess ? (
                   renderAuthorizedClients("current")
                 ) : (
-                  <p className="px-4 py-3 text-xs text-muted-foreground">
+                  <p className="px-4 py-3 text-ui text-muted-foreground">
                     This connection can create access links but cannot view authorized clients.
                   </p>
                 )}

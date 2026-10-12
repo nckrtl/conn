@@ -672,7 +672,7 @@ export function UsagePage() {
                                 </span>
                                 <span
                                   className={cn(
-                                    "shrink-0 whitespace-nowrap text-2xs text-muted-foreground tabular-nums",
+                                    "shrink-0 whitespace-nowrap text-ui text-muted-foreground tabular-nums",
                                     figureClass(providerLoading),
                                     awaitingData && "invisible",
                                   )}
@@ -697,7 +697,7 @@ export function UsagePage() {
                           {/* Kept while awaiting data so the row does not grow when it lands. */}
                           <span
                             className={cn(
-                              "text-xs text-muted-foreground",
+                              "text-ui text-muted-foreground",
                               figureClass(providerLoading),
                               awaitingData && "invisible",
                             )}
@@ -823,7 +823,7 @@ export function UsagePage() {
                   {breakdown === "model" ? (
                     <table className="w-full text-sm">
                       <thead>
-                        <tr className="border-b border-border text-right text-xs text-muted-foreground">
+                        <tr className="border-b border-(--shell-divider)! text-right text-ui text-muted-foreground">
                           <th className="py-2 pr-3 text-left font-normal">#</th>
                           <th className="w-full py-2 text-left font-normal">Model</th>
                           <th className="py-2 pl-6 font-normal">Cost</th>
@@ -850,9 +850,9 @@ export function UsagePage() {
                             return (
                               <tr
                                 key={key}
-                                className="relative border-b border-border/50 text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-muted/50 has-focus-visible:bg-muted/50"
+                                className="relative border-b border-(--shell-divider)! text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-foreground/4 has-focus-visible:bg-foreground/4"
                               >
-                                <td className="py-2.5 pr-3 text-left text-xs">{index + 1}</td>
+                                <td className="py-2.5 pr-3 text-left text-ui">{index + 1}</td>
                                 <td className="py-2.5 text-left whitespace-normal">
                                   {/* The button's overlay makes the whole row open the model.
                                       Focus shows as the row's hover fill, not a ring. */}
@@ -912,7 +912,7 @@ export function UsagePage() {
                         <col style={{ width: timeValueColumnWidth }} />
                       </colgroup>
                       <thead>
-                        <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                        <tr className="border-b border-(--shell-divider)! text-left text-ui text-muted-foreground">
                           <th className="py-2 font-normal">{shownHourly ? "Hour" : "Day"}</th>
                           {activeProviders.map((provider) => (
                             <th key={provider} className="py-2 text-right font-normal">
@@ -937,7 +937,7 @@ export function UsagePage() {
                           breakdownPeriods.map((period) => (
                             <tr
                               key={"hourStart" in period ? period.hourStart : period.day}
-                              className="border-b border-border/50 transition-colors hover:bg-muted/50"
+                              className="border-b border-(--shell-divider)! transition-colors hover:bg-foreground/4"
                             >
                               <td className="py-2 text-foreground">
                                 {"hourStart" in period
@@ -1181,7 +1181,7 @@ function Metric({
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-ui text-muted-foreground">{label}</span>
       <span
         className={cn("text-base font-medium text-foreground tabular-nums", figureClass(loading))}
       >
@@ -1217,7 +1217,7 @@ function UsageCoverageNotice({
   }
 
   return (
-    <div className="flex flex-col gap-1 border-t border-border px-2 py-2 text-xs text-muted-foreground">
+    <div className="flex flex-col gap-1 border-t border-(--glass-divider)! px-2 py-2 text-ui text-muted-foreground">
       {failed.map((environment) => (
         <span key={environment.label}>
           {environment.label}: {environment.error}
@@ -1339,7 +1339,7 @@ function UsageEnvironmentFilter({
                 {showUsageStatus ? (
                   <span
                     className={cn(
-                      "shrink-0 text-xs text-muted-foreground",
+                      "shrink-0 text-ui text-muted-foreground",
                       environment.error !== null && "text-destructive",
                     )}
                   >
@@ -1351,10 +1351,10 @@ function UsageEnvironmentFilter({
           );
         })}
         {environments.length === 0 ? (
-          <p className="px-2 py-2 text-xs text-muted-foreground">No environments connected.</p>
+          <p className="px-2 py-2 text-ui text-muted-foreground">No environments connected.</p>
         ) : null}
         {showUsageStatus && isPartial ? (
-          <p className="px-2 py-2 text-xs text-muted-foreground">
+          <p className="px-2 py-2 text-ui text-muted-foreground">
             Totals are partial while selected environments scan.
           </p>
         ) : null}
@@ -1504,7 +1504,7 @@ function MetricSkeletons({ labels }: { readonly labels: readonly string[] }) {
     <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
       {labels.map((label) => (
         <div key={label} className="flex flex-col gap-0.5">
-          <span className="text-xs text-muted-foreground">{label}</span>
+          <span className="text-ui text-muted-foreground">{label}</span>
           <Skeleton className="h-6 w-16" />
         </div>
       ))}

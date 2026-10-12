@@ -35,11 +35,11 @@ export function TimelineSystemDivider(props: {
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center gap-2 py-2 text-2xs text-muted-foreground",
+        "flex min-w-0 items-center gap-2 py-2 text-xs text-muted-foreground",
         props.tone === "danger" && "text-destructive",
       )}
     >
-      <span aria-hidden="true" className="h-px flex-1 bg-border/70" />
+      <span aria-hidden="true" className="h-px flex-1 bg-(--shell-divider)" />
       {props.onAction ? (
         <Tooltip>
           <TooltipTrigger
@@ -48,7 +48,7 @@ export function TimelineSystemDivider(props: {
                 type="button"
                 aria-label={props.actionLabel}
                 onClick={props.onAction}
-                className="flex min-w-0 items-center gap-1.5 rounded-full border border-border/70 bg-background px-2.5 py-1 transition-colors hover:bg-muted"
+                className="flex min-w-0 items-center gap-1.5 rounded-full border border-(--shell-divider)! px-2.5 py-1 transition-colors hover:bg-(--shell-highlight)"
               />
             }
           >
@@ -61,7 +61,7 @@ export function TimelineSystemDivider(props: {
           {content}
         </span>
       )}
-      <span aria-hidden="true" className="h-px flex-1 bg-border/70" />
+      <span aria-hidden="true" className="h-px flex-1 bg-(--shell-divider)" />
     </div>
   );
 }

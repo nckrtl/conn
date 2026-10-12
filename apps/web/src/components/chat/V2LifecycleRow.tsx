@@ -81,7 +81,7 @@ export function V2LifecycleRow(props: {
   if (item.type === "run_interrupt_request") {
     return (
       <div className="flex justify-end px-1 py-1" data-v2-item-type={item.type}>
-        <div className="flex max-w-[80%] items-center gap-2 text-xs text-destructive">
+        <div className="flex max-w-[80%] items-center gap-2 text-ui text-destructive">
           <span aria-hidden="true" className="font-mono">
             ■
           </span>
@@ -90,7 +90,7 @@ export function V2LifecycleRow(props: {
             ·
           </span>
           <span className="font-medium">{item.message}</span>
-          <span className="text-3xs text-muted-foreground">
+          <span className="text-xs text-muted-foreground">
             {formatShortTimestamp(props.createdAt, props.timestampFormat)}
           </span>
         </div>
@@ -177,9 +177,9 @@ export function V2LifecycleRow(props: {
       return (
         <div
           data-v2-item-type={item.type}
-          className="flex min-w-0 items-center gap-3 rounded-lg border border-border/60 p-3"
+          className="flex min-w-0 items-center gap-3 rounded-xl border border-(--shell-divider)! bg-(--shell-tile) p-3"
         >
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/60">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-(--shell-highlight)">
             <MessageSquareIcon className="size-4 text-secondary-label" aria-hidden />
           </span>
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
@@ -309,7 +309,7 @@ export function SubagentAvatar({
     <span
       aria-hidden
       className={cn(
-        "relative inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border/70 bg-muted ring-2 ring-background",
+        "relative inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-(--shell-divider-header)! bg-(--shell-tile) ring-2 ring-background",
         className,
       )}
     >
@@ -470,7 +470,7 @@ function SubagentTimelineLink(props: {
       />
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2">
-          <span className="min-w-0 truncate text-xs font-medium text-foreground">
+          <span className="min-w-0 truncate text-ui font-medium text-foreground">
             {props.title}
           </span>
           {remote !== undefined ? (
@@ -489,7 +489,7 @@ function SubagentTimelineLink(props: {
         </span>
         <span
           className={cn(
-            "block text-2xs leading-relaxed",
+            "block text-xs leading-relaxed",
             failed ? "text-destructive" : "text-muted-foreground",
           )}
         >

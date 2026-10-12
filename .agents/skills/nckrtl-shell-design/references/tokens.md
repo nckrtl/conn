@@ -14,7 +14,7 @@ values before you change a token.
 | Token                              | Value                               | Use                                                                                              |
 | ---------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `--window-radius`                  | 16px                                | macOS 26 window corner, measured on a real window. The web mock window uses it.                  |
-| `--shell-inset`                    | 2px                                 | Gap between an inset card and the window edge.                                                   |
+| `--shell-inset`                    | 4px                                 | Gap between an inset card and the window edge.                                                   |
 | `--shell-corner`                   | `window-radius - shell-inset - 1px` | Outer bottom corners of inset cards, so they stay concentric with the window.                    |
 | `--shell-header-height`            | 44px                                | Glass header over chat, right panel and Settings. Two-tone dividers switch color at this height. |
 | `--shell-blur`, `--shell-saturate` | 40px, 1.6                           | Backdrop blur for the frame and floating surfaces.                                               |

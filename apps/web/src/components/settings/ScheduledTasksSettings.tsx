@@ -154,9 +154,7 @@ function Field({
     <div className="space-y-1.5">
       <Label className="flex items-baseline justify-between" htmlFor={htmlFor}>
         <span>{label}</span>
-        {hint ? (
-          <span className="font-normal text-2xs text-muted-foreground/80">{hint}</span>
-        ) : null}
+        {hint ? <span className="font-normal text-ui text-muted-foreground/80">{hint}</span> : null}
       </Label>
       {children}
     </div>
@@ -662,7 +660,7 @@ function DeliveryBlock({ title, children }: { title: string; children: ReactNode
   return (
     <div className="space-y-1">
       <Label>{title}</Label>
-      <pre className="max-h-64 overflow-auto rounded-md bg-muted p-2 text-xs whitespace-pre-wrap break-all">
+      <pre className="max-h-64 overflow-auto rounded-lg bg-(--shell-highlight) p-2 text-ui whitespace-pre-wrap break-all">
         {children}
       </pre>
     </div>
@@ -742,7 +740,7 @@ function WebhookEndpointField({
           Rotate
         </Button>
       </div>
-      {note !== null ? <p className="text-xs text-muted-foreground">{note}</p> : null}
+      {note !== null ? <p className="text-ui text-muted-foreground">{note}</p> : null}
       {endpoint.url !== null ? <WebhookDeliveryMode environmentId={environmentId} /> : null}
     </div>
   );
@@ -757,7 +755,7 @@ function WebhookDeliveryMode({ environmentId }: { readonly environmentId: Enviro
   const cloudLink = usePrimaryCloudLinkState();
   if (cloudLink.target?.environmentId !== environmentId || cloudLink.data === null) return null;
   return (
-    <p className="text-xs text-muted-foreground">
+    <p className="text-ui text-muted-foreground">
       {cloudLink.data.holdWebhooksWhileOffline
         ? "Held for up to 24 hours while this environment is offline. "
         : "Forwarded live. Requests fail while this environment is offline. "}
@@ -1018,7 +1016,7 @@ function ScheduledTaskEditorDialog({
               </p>
             ) : null}
             {editingTaskMissing ? (
-              <p className="text-xs text-destructive" role="status">
+              <p className="text-ui text-destructive" role="status">
                 This scheduled task no longer exists.
               </p>
             ) : null}
@@ -1171,7 +1169,7 @@ function ScheduledTaskEditorDialog({
               {draft.scheduleMode === "webhook" ? (
                 <div className="space-y-4">
                   <WebhookEndpointField environmentId={environmentId} task={liveTask} />
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-ui text-muted-foreground">
                     {
                       "Each request runs the prompt. Use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} or {{request}} in the prompt; only what it names reaches the agent."
                     }
@@ -1294,7 +1292,7 @@ function ScheduledTaskEditorDialog({
                         setDraft((current) => ({ ...current, timeOfDay: event.target.value }))
                       }
                     />
-                    <span className="text-xs text-muted-foreground">on</span>
+                    <span className="text-ui text-muted-foreground">on</span>
                   </div>
                   <ToggleGroup
                     multiple
@@ -1332,7 +1330,7 @@ function ScheduledTaskEditorDialog({
                       setDraft((current) => ({ ...current, intervalMinutes: event.target.value }))
                     }
                   />
-                  <span className="text-xs text-muted-foreground">minutes</span>
+                  <span className="text-ui text-muted-foreground">minutes</span>
                 </div>
               )}
             </div>

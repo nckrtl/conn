@@ -115,7 +115,7 @@ function PendingLinkRequest(props: {
   return (
     <div
       data-v2-item-type={item.type}
-      className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/60 bg-card p-4"
+      className="flex min-w-0 flex-col gap-3 rounded-xl border border-(--shell-divider)! bg-(--shell-tile) p-4"
     >
       <div className="flex min-w-0 flex-col gap-1">
         <p className="text-sm font-medium text-foreground">
@@ -125,11 +125,11 @@ function PendingLinkRequest(props: {
         </p>
         {item.reason.trim() ? <p className="text-sm text-muted-foreground">{item.reason}</p> : null}
         {item.label !== undefined && item.url !== undefined ? (
-          <p className="truncate text-xs text-muted-foreground/80">{item.url}</p>
+          <p className="truncate text-ui text-muted-foreground/80">{item.url}</p>
         ) : null}
       </div>
       {error !== null ? (
-        <p role="alert" className="text-xs text-destructive">
+        <p role="alert" className="text-ui text-destructive">
           {error}
         </p>
       ) : null}
@@ -149,7 +149,7 @@ function PendingLinkRequest(props: {
           </Button>
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-ui text-muted-foreground">
           Only a session that manages access here can answer this.
         </p>
       )}
@@ -368,7 +368,7 @@ function LinkRequestDialog(props: {
                 ) : null}
                 {asksAddress ? (
                   <label className="block space-y-1.5">
-                    <span className="block text-xs font-medium text-foreground">Address</span>
+                    <span className="block text-ui font-medium text-foreground">Address</span>
                     <Input
                       value={address}
                       onChange={(event) => setAddress(event.target.value)}
@@ -378,7 +378,7 @@ function LinkRequestDialog(props: {
                       spellCheck={false}
                     />
                     {target.kind === "machine" ? (
-                      <span className="block text-xs text-muted-foreground">
+                      <span className="block text-ui text-muted-foreground">
                         This app has no address for {target.label} that another machine can reach.
                         Enter its https or Tailscale address.
                       </span>
@@ -386,7 +386,7 @@ function LinkRequestDialog(props: {
                   </label>
                 ) : null}
                 {useExisting ? (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-ui text-muted-foreground">
                     This environment is already linked to {targetName}. The agent can use that link
                     as it is; change its access in Settings → Connections.
                   </p>
@@ -395,11 +395,11 @@ function LinkRequestDialog(props: {
             ) : (
               <>
                 {item.url !== undefined && !pickMachine ? (
-                  <p className="truncate text-xs text-muted-foreground">{item.url}</p>
+                  <p className="truncate text-ui text-muted-foreground">{item.url}</p>
                 ) : null}
                 {canMint ? null : (
                   <label className="block space-y-1.5">
-                    <span className="block text-xs font-medium text-foreground">Pairing code</span>
+                    <span className="block text-ui font-medium text-foreground">Pairing code</span>
                     <Input
                       value={pairingCode}
                       onChange={(event) => setPairingCode(event.target.value)}
@@ -409,7 +409,7 @@ function LinkRequestDialog(props: {
                       nativeInput
                       spellCheck={false}
                     />
-                    <span className="block text-xs text-muted-foreground">
+                    <span className="block text-ui text-muted-foreground">
                       Create a link on {targetName}: Settings → Connections → Create link, then
                       paste its code here.
                     </span>
@@ -419,7 +419,7 @@ function LinkRequestDialog(props: {
               </>
             )}
             {error !== null ? (
-              <p role="alert" className="text-xs text-destructive">
+              <p role="alert" className="text-ui text-destructive">
                 {error}
               </p>
             ) : null}
@@ -471,7 +471,7 @@ function MachinePicker(props: {
   const labelId = useId();
   return (
     <div className="space-y-2">
-      <span id={labelId} className="block text-xs font-medium">
+      <span id={labelId} className="block text-ui font-medium">
         Machine
       </span>
       <RadioGroup

@@ -291,7 +291,7 @@ function ConnectAgentHeading({
 }) {
   return (
     <>
-      <p className="text-3xs font-semibold tracking-widest text-primary uppercase">Agent sign-in</p>
+      <p className="text-ui font-medium text-primary">Agent sign-in</p>
       <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h1>
       <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{description}</p>
     </>
@@ -314,7 +314,7 @@ function AccessOption({
         "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
         selected
           ? "border-primary bg-background ring-2 ring-inset ring-primary/25 dark:border-transparent dark:bg-primary/10 dark:ring-1 dark:ring-primary/30"
-          : "border-border bg-background hover:bg-muted/50 dark:border-transparent dark:bg-white/[0.035] dark:hover:bg-accent",
+          : "border-border bg-background hover:bg-(--shell-highlight) dark:border-transparent dark:bg-(--shell-field) dark:hover:bg-(--shell-highlight)",
       )}
     >
       <Icon

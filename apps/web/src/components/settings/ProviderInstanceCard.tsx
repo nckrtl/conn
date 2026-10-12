@@ -835,7 +835,7 @@ export function ProviderInstanceCard({
             </p>
             <p
               className={cn(
-                "text-xs leading-snug",
+                "text-ui leading-snug",
                 versionAdvisory.emphasis === "strong" ? "text-warning" : "text-muted-foreground",
               )}
             >
@@ -863,7 +863,7 @@ export function ProviderInstanceCard({
             <p
               aria-live="polite"
               className={cn(
-                "text-xs leading-snug [overflow-wrap:anywhere]",
+                "text-ui leading-snug [overflow-wrap:anywhere]",
                 updateProblem ? "text-warning" : "text-muted-foreground",
               )}
             >
@@ -871,15 +871,15 @@ export function ProviderInstanceCard({
             </p>
           ) : null}
           {onRunVersionAction && updateCommand ? (
-            <div className="flex items-center gap-2 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
-              <span aria-hidden className="h-px flex-1 bg-border" />
+            <div className="flex items-center gap-2 text-ui text-muted-foreground">
+              <span aria-hidden className="h-px flex-1 bg-(--glass-divider)" />
               or, update manually using
-              <span aria-hidden className="h-px flex-1 bg-border" />
+              <span aria-hidden className="h-px flex-1 bg-(--glass-divider)" />
             </div>
           ) : null}
           {updateCommand ? (
-            <div className="flex min-w-0 items-center gap-1 rounded-md border border-border/70 bg-muted/40 py-0.5 pr-0.5 pl-2">
-              <code className="min-w-0 flex-1 truncate font-mono text-2xs text-foreground">
+            <div className="flex min-w-0 items-center gap-1 rounded-lg border border-(--glass-divider)! bg-(--shell-highlight) py-0.5 pr-0.5 pl-2">
+              <code className="min-w-0 flex-1 truncate font-mono text-ui text-foreground">
                 {updateCommand}
               </code>
               <Tooltip>
@@ -1043,9 +1043,9 @@ export function ProviderInstanceCard({
                 </div>
               </ProviderStatusDiagnostic>
               {urlAuthAction && onAcceptUrlAuth ? (
-                <div className="grid max-w-xl gap-1.5 pt-1 text-xs">
+                <div className="grid max-w-xl gap-1.5 pt-1 text-ui">
                   <p>{urlAuthAction.message}</p>
-                  <code className="break-all text-2xs">{urlAuthAction.url}</code>
+                  <code className="break-all text-ui">{urlAuthAction.url}</code>
                   <Button
                     render={
                       <a

@@ -13,7 +13,7 @@ export function SessionPermissions({
 }) {
   const session = useEnvironmentSessionState(environmentId);
   return connected && !session.hasError && !session.isPending && session.data?.authenticated ? (
-    <div className="space-y-3 py-3 text-xs">
+    <div className="space-y-3 py-3 text-ui">
       <p className="text-muted-foreground">
         {routeContext
           ? "These permissions apply to your active route. Other routes may have different permissions."
@@ -31,7 +31,7 @@ export function SessionPermissions({
       </ul>
     </div>
   ) : (
-    <p className="py-3 text-xs text-muted-foreground">
+    <p className="py-3 text-ui text-muted-foreground">
       Permissions not checked. Connect to this environment to view this session’s permissions.
     </p>
   );

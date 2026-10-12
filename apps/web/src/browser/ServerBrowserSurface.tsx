@@ -36,6 +36,7 @@ import {
 
 import { AgentCursorMark } from "~/components/preview/AgentBrowserCursor";
 import { CommandBlock } from "~/components/CommandBlock";
+import { ToolbarGroup } from "~/components/ToolbarGroup";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { toastManager } from "~/components/ui/toast";
@@ -742,24 +743,26 @@ export function ServerBrowserSurface(props: {
     >
       <div
         className={cn(
-          "visible relative z-20 flex shrink-0 items-center justify-between gap-2 border-border bg-background px-2 py-1",
+          "visible relative z-20 flex shrink-0 items-center justify-between gap-2 border-(--shell-divider)! bg-background py-toolbar ps-3 pe-toolbar-end",
           controlPosition === "bottom" ? "order-last border-t" : "border-b",
         )}
       >
-        <span role="status" className="text-xs text-muted-foreground">
+        <span role="status" className="text-ui text-muted-foreground">
           {previewStreamControlLabel(control)}
         </span>
         {control?.canOperate ? (
-          <Button
-            variant="outline"
-            size="xs"
-            disabled={control.controller === "another-viewer"}
-            onClick={() =>
-              send({ type: control.controller === "you" ? "releaseControl" : "takeControl" })
-            }
-          >
-            {control.controller === "you" ? "Release control" : "Take control"}
-          </Button>
+          <ToolbarGroup className="shrink-0">
+            <Button
+              variant="ghost"
+              size="xs"
+              disabled={control.controller === "another-viewer"}
+              onClick={() =>
+                send({ type: control.controller === "you" ? "releaseControl" : "takeControl" })
+              }
+            >
+              {control.controller === "you" ? "Release control" : "Take control"}
+            </Button>
+          </ToolbarGroup>
         ) : null}
       </div>
       <div className="relative min-h-0 flex-1">
@@ -882,7 +885,7 @@ export function ServerBrowserSurface(props: {
                 </div>
               </>
             ) : (
-              <p className="text-xs text-muted-foreground">Take control to respond.</p>
+              <p className="text-ui text-muted-foreground">Take control to respond.</p>
             )}
           </div>
         ) : null}
@@ -901,7 +904,7 @@ export function ServerBrowserSurface(props: {
       {visible && accessDenied ? (
         // The page can be invisible beneath an empty or unreachable state; reconnect must remain reachable.
         <div className="visible absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-background p-3 text-center">
-          <p role="alert" className="text-xs text-muted-foreground">
+          <p role="alert" className="text-ui text-muted-foreground">
             Browser connection was refused.
           </p>
           <Button

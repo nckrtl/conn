@@ -123,7 +123,7 @@ function SettingsContentLayout() {
         {/* Transparent glass header over the shell, like the chat header; the content below is an inset card. */}
         <WorkspacePageHeader
           electron={isElectron}
-          className="relative z-10 h-[44px] min-h-[44px] shrink-0 bg-transparent! [--control-radius:9999px]"
+          className="relative z-10 h-[44px]! min-h-[44px]! max-h-[44px]! shrink-0 bg-transparent! [--control-radius:9999px]"
         >
           <div className="flex w-full items-center gap-3">
             <SettingsBreadcrumb pathname={location.pathname} />

@@ -89,7 +89,7 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
         </Button>
       ) : null}
       {error ? (
-        <p role="alert" className="basis-full text-xs text-destructive">
+        <p role="alert" className="basis-full text-ui text-destructive">
           {error}
         </p>
       ) : null}

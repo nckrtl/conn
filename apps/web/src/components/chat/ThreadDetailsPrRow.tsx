@@ -247,11 +247,11 @@ export function ThreadDetailsPrRow({
         className="max-w-80 text-left whitespace-normal"
       >
         <div className="flex min-w-0 max-w-80 flex-col gap-2 px-1 py-2">
-          <div className="flex min-w-0 items-baseline gap-1.5 text-xs leading-none">
+          <div className="flex min-w-0 items-baseline gap-1.5 text-ui leading-none">
             <span className="min-w-0 truncate font-medium text-foreground">{detail.title}</span>
             <span className="shrink-0 text-muted-foreground">#{detail.number}</span>
           </div>
-          <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
+          <div className="grid gap-1.5 pl-0.5 text-ui text-muted-foreground">
             <div className="flex min-w-0 items-center gap-2">
               <statePresentation.Icon
                 aria-hidden
@@ -414,7 +414,7 @@ export function ThreadDetailsPrRow({
         // and the block keeps space below, so stacked pull requests read as separate pairs.
         <div className="pb-2">
           {openRow(detail.title, "row")}
-          <div className="-mt-1 flex h-6 min-w-0 items-center gap-0.5 ps-9 pe-1 text-xs text-muted-foreground">
+          <div className="-mt-1 flex h-6 min-w-0 items-center gap-0.5 ps-9 pe-1 text-ui text-muted-foreground">
             <span className="me-1 shrink-0 tabular-nums">#{number}</span>
             {showChecks && checksRollup !== null ? (
               <PullRequestChecksPopover

@@ -103,7 +103,7 @@ export function EnvironmentRoutesList({
   };
 
   return (
-    <div className="mt-2 border-t border-border/50 py-2">
+    <div className="mt-2 border-t border-(--shell-settings-card-divider)! py-2">
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -170,11 +170,11 @@ function SortableRouteRow({
       style={{ transform: CSS.Translate.toString(transform), transition }}
       className={cn(
         "flex items-center gap-2 py-2",
-        isDragging && "relative z-10 rounded-md bg-background shadow-md",
+        isDragging && "relative z-10 rounded-lg bg-(--shell-settings-card) shadow-md",
       )}
     >
       <div className="min-w-0 flex-1">
-        <p className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+        <p className="flex items-center gap-1.5 text-ui font-medium text-foreground">
           {label}
           {inUse ? (
             <span className="rounded-sm bg-success/12 px-1 text-2xs font-normal text-success-foreground">
@@ -183,7 +183,7 @@ function SortableRouteRow({
           ) : null}
         </p>
         {address !== null ? (
-          <p className="truncate text-2xs text-muted-foreground">
+          <p className="truncate text-ui text-muted-foreground">
             {address}
             {isLearned(route) ? " · found automatically" : ""}
           </p>

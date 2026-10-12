@@ -15,6 +15,8 @@ import { buildHomeListFilterMenu } from "./home-list-filter-menu";
 import { createSidebarHeaderItems } from "../threads/sidebar-native-header-items";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
+import { WorkspacePhoneBar } from "../workspace/WorkspacePhoneBar";
+import { useWorkspacePhoneBar } from "../workspace/useWorkspacePhoneBar";
 
 export type { HomeHeaderEnvironment } from "./HomeHeader.types";
 
@@ -71,8 +73,12 @@ export function HomeHeader(props: HomeHeaderProps) {
     onWorkspaceChange: selectOrbitWorkspace,
   });
 
+  // Conn: on iPhone the thread filters sit inside the bottom bar's search field.
+  const connPhoneBar = useWorkspacePhoneBar();
   if (props.usesWorkspaceToolbar) {
-    return null;
+    return connPhoneBar ? (
+      <WorkspacePhoneBar filterMenu={filterMenu} filterActive={hasCustomListOptions} />
+    ) : null;
   }
 
   return (

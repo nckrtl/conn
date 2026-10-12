@@ -83,6 +83,7 @@ import { useMaterialFabScroll } from "./MaterialFabScrollContext";
 import { useDelayedConnectionStatus, WorkspaceConnectionTitle } from "./WorkspaceConnectionTitle";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { ThreadListFilters } from "./ThreadListFilters";
+import { useWorkspacePhoneBar } from "../workspace/useWorkspacePhoneBar";
 
 /* ─── Types ──────────────────────────────────────────────────────────── */
 
@@ -309,6 +310,7 @@ function renderHomeScrollView(props: ScrollViewProps) {
 export function HomeScreen(props: HomeScreenProps) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const workspace = useWorkspaceTabs();
+  const connPhoneBar = useWorkspacePhoneBar();
   const [initialScrollOffset] = useState(() => workspace?.getScrollOffset("threads") ?? 0);
   const primaryColumn = use(NativePrimaryColumnContext);
   const contentBackground = primaryColumn ? "bg-drawer" : "bg-screen";
@@ -1038,7 +1040,8 @@ export function HomeScreen(props: HomeScreenProps) {
   const v2ListHeader = (
     <>
       {listHeader}
-      {Platform.OS === "ios" && workspace ? (
+      {/* Conn: the iPhone bottom bar carries these filters inside its search field. */}
+      {Platform.OS === "ios" && workspace && !connPhoneBar ? (
         <ThreadListFilters
           environments={props.environments}
           projects={projectScopes.map((scope) => ({ key: scope.key, label: scope.title }))}

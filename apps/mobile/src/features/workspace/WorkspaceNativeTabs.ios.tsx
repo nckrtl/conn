@@ -12,6 +12,7 @@ import { WorkspaceTabsContext, useWorkspaceTabs } from "./WorkspaceTabsContext";
 import type { WorkspaceTab } from "./workspace-tabs-state";
 import { NativeWorkspaceTabActivityContext } from "../../native/v5-workspace-context";
 import { useSystemWorkspaceTabBar } from "./useSystemWorkspaceTabBar";
+import { useWorkspacePhoneBar } from "./useWorkspacePhoneBar";
 
 // Tabler's git-pull-request geometry, rasterized at 1x/2x/3x for UIKit template images.
 const PULL_REQUEST_ICON = require("../../../assets/icons/pull-request.png");
@@ -62,6 +63,8 @@ export function WorkspaceNativeTabs(props: {
     Platform.OS === "ios" && !Platform.isPad && (metrics?.verticalBarEdge ?? "none") === "none";
   const [provenance, setProvenance] = useState(0);
   const systemTabBar = useSystemWorkspaceTabBar();
+  // Conn: iPhones switch tabs from WorkspacePhoneBar in the bottom toolbar.
+  const connPhoneBar = useWorkspacePhoneBar();
   const selectedTab = workspace.state.selectedTab;
   const request = useMemo(
     () => ({ selectedScreenKey: selectedTab, baseProvenance: provenance }),
@@ -71,7 +74,7 @@ export function WorkspaceNativeTabs(props: {
     <View style={{ flex: 1 }}>
       <Tabs.Host
         navStateRequest={request}
-        tabBarHidden={props.hidden || !systemTabBar}
+        tabBarHidden={props.hidden || !systemTabBar || connPhoneBar}
         ios={{ tabBarControllerMode: "tabBar", tabBarMinimizeBehavior: "never" }}
         onTabSelectionPrevented={({
           nativeEvent,
@@ -114,7 +117,7 @@ export function WorkspaceNativeTabs(props: {
             </RetainedWorkspaceTab>
           </Tabs.Screen>
         ))}
-        {phoneBar ? (
+        {phoneBar && !connPhoneBar ? (
           <Tabs.Screen
             key={COMPOSE_TAB}
             screenKey={COMPOSE_TAB}

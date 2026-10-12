@@ -26,6 +26,7 @@ import { WorkspaceToolbar } from "./WorkspaceToolbar";
 import { WORKSPACE_DOCK, workspaceToolbarHeight } from "./workspace-tabs-state";
 import { WorkspaceSidebarTabs } from "./WorkspaceSidebarTabs";
 import { useSidebarWorkspaceTabs, useSystemWorkspaceTabBar } from "./useSystemWorkspaceTabBar";
+import { useWorkspacePhoneBar } from "./useWorkspacePhoneBar";
 
 const TAB_TITLES = {
   threads: "Threads",
@@ -60,6 +61,7 @@ function WorkspaceRootContent() {
   const nativeMetrics = useNativeLayoutMetrics();
   const systemTabBar = useSystemWorkspaceTabBar();
   const sidebarTabs = useSidebarWorkspaceTabs();
+  const connPhoneBar = useWorkspacePhoneBar();
   const sidebarNavigation =
     primaryColumn !== null &&
     (layout.usesSplitView ||
@@ -142,10 +144,13 @@ function WorkspaceRootContent() {
         <SafeAreaInsetsContext value={sidebarTabs ? { ...insets, top: 0 } : insets}>
           {state.selectedTab === "threads" ? <HomeRouteScreen /> : <PullRequestsScreen />}
         </SafeAreaInsetsContext>
-        <WorkspaceToolbar
-          sidebar={sidebarNavigation}
-          onNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
-        />
+        {/* Conn: on iPhone, each list renders WorkspacePhoneBar instead. */}
+        {connPhoneBar ? null : (
+          <WorkspaceToolbar
+            sidebar={sidebarNavigation}
+            onNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+          />
+        )}
       </View>
     </WorkspaceTabsContext>
   );

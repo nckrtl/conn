@@ -38,6 +38,8 @@ import {
 import { useDebouncedValue } from "../../state/queries";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { useAndroidWorkspaceSelection } from "../workspace/useAndroidWorkspaceSelection";
+import { WorkspacePhoneBar } from "../workspace/WorkspacePhoneBar";
+import { useWorkspacePhoneBar } from "../workspace/useWorkspacePhoneBar";
 
 function PullRequestScrollView(props: ScrollViewProps) {
   const insets = useSafeAreaInsets();
@@ -62,6 +64,7 @@ export function PullRequestsScreen(
   const navigation = useNavigation();
   const primaryColumn = use(NativePrimaryColumnContext);
   const workspace = useWorkspaceTabs()!;
+  const connPhoneBar = useWorkspacePhoneBar();
   const { environments } = useWorkspaceState();
   const configs = useAtomValue(environmentServerConfigsAtom);
   const insets = useSafeAreaInsets();
@@ -207,6 +210,7 @@ export function PullRequestsScreen(
 
   return (
     <View className={sidebar ? "flex-1 bg-drawer" : "flex-1 bg-screen"}>
+      {connPhoneBar && !props.sidebar ? <WorkspacePhoneBar /> : null}
       <LegendList
         ref={listRef}
         data={entries}

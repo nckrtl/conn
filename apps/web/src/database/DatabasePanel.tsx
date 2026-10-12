@@ -50,6 +50,7 @@ import {
   runReadOnlyQuery,
 } from "./databaseApi";
 import { useDatabaseStore } from "./databaseStore";
+import vaultIcon from "./vault-icon.png";
 import { type VaultDatabases, useVaultDatabases } from "./useVaultDatabases";
 
 type ResultTab = "rows" | "structure";
@@ -364,9 +365,15 @@ function newConnection(from: DatabaseConnection | null): DatabaseConnection {
   };
 }
 
+/** The Vault app icon, in front of connections that come from Vault. */
+function VaultIcon() {
+  return <img src={vaultIcon} alt="" aria-hidden className="size-4 shrink-0" />;
+}
+
 function ConnectionItems({ connections }: { connections: readonly DatabaseConnection[] }) {
   return connections.map((connection) => (
     <MenuRadioItem key={connection.id} value={connection.id}>
+      {connection.source === "vault" ? <VaultIcon /> : null}
       <span className="truncate">{connection.name}</span>
       <span className="ms-auto truncate ps-3 text-muted-foreground">
         {connectionTarget(connection)}
@@ -400,7 +407,7 @@ function ConnectionMenu({
       <MenuTrigger
         render={<Button variant="ghost" size="xs" type="button" aria-label="Database connection" />}
       >
-        <Database />
+        {selected?.source === "vault" ? <VaultIcon /> : <Database />}
         <span className="truncate">{selected?.name ?? "Choose a connection"}</span>
         {selected ? (
           <span className="truncate text-muted-foreground">{connectionTarget(selected)}</span>

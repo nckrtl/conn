@@ -316,6 +316,10 @@ function useStreamingHaptics(threadId: ThreadId, feed: ReadonlyArray<ThreadFeedE
   }, [threadId, feed]);
 }
 
+// Conn: extra room between the last message and the resting composer, so the
+// last paragraph does not sit tight against the prompt box.
+const FEED_COMPOSER_REST_GAP = 8;
+
 const USER_INPUT_TOGGLE_TIMING = {
   duration: USER_INPUT_TOGGLE_DURATION_MS,
   easing: Easing.out(Easing.cubic),
@@ -535,15 +539,22 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     return null;
   })();
   const showWorkingControl = floatingStatus !== null;
+  // Conn: a connection check (connecting or reconnecting) floats over the feed
+  // instead of reserving room for the pill. Reserving it pushed the messages up
+  // while the check ran and let them slide back down once it finished.
+  const connectionCheckOnly =
+    (props.connectionStateLabel === "connecting" ||
+      props.connectionStateLabel === "reconnecting") &&
+    floatingStatus?.kind === "connection";
   // Connection and working status occupy the same space. Keep the feed inset
-  // stable when reconnecting hands off to syncing and then to a running turn.
+  // stable when an outage hands off to syncing and then to a running turn.
   const showFloatingStatus =
-    showWorkingControl ||
+    (showWorkingControl && !connectionCheckOnly) ||
     queuedCount > 0 ||
     agentsSegment !== null ||
     devicePreviews.length > 0 ||
     browserTabs.tabs.length > 0 ||
-    props.connectionStateLabel !== "connected" ||
+    (props.connectionStateLabel !== "connected" && !connectionCheckOnly) ||
     props.queuedMessages.length > 0 ||
     props.selectedThreadFeed.some(
       (entry) => "acknowledged" in entry && entry.acknowledged === true,
@@ -674,8 +685,8 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const { contentInsetEndAdjustment, onComposerLayout } = useKeyboardChatComposerInset(
     listRef,
     composerOverlayRef,
-    Math.max(0, estimatedOverlayHeight - nativeInsetOvercount),
-    -nativeInsetOvercount,
+    Math.max(0, estimatedOverlayHeight + FEED_COMPOSER_REST_GAP - nativeInsetOvercount),
+    FEED_COMPOSER_REST_GAP - nativeInsetOvercount,
     Platform.OS === "ios" ? COMPOSER_TRANSITION_DURATION_MS : 0,
   );
   // The expanded questionnaire is an absolute overlay on iOS, so it never

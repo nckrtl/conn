@@ -439,7 +439,8 @@ function NativeList(props: {
               : props.depth % 3 === 2
                 ? "▪︎"
                 : "•";
-        const markerWidth = ordered ? 28 : taskMarker ? 20 : 18;
+        // Conn: about half the upstream gap between the marker and the item text.
+        const markerWidth = ordered ? 28 : taskMarker ? 18 : 12;
         const markerOffset = taskMarker ? 3 : ordered ? 0 : 2;
         return (
           <View
@@ -450,7 +451,7 @@ function NativeList(props: {
               style={{
                 width: markerWidth,
                 height: props.textStyle.lineHeight,
-                marginRight: 6,
+                marginRight: 3,
                 alignItems: ordered ? "flex-end" : "center",
                 justifyContent: "flex-start",
               }}

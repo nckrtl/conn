@@ -778,8 +778,9 @@ function appendList(
         : ordered
           ? `${"\u2007".repeat(Math.max(0, markerWidth - Array.from(marker).length))}${marker}`
           : marker;
+    // Conn: about half the upstream gap between the marker and the item text.
     const markerColumnWidth =
-      child.type === "task_list_item" ? 28 : ordered ? 10 + markerWidth * 8 : 24;
+      child.type === "task_list_item" ? 21 : ordered ? 4 + markerWidth * 8 : 15;
     appendListItem(runs, child, alignedMarker, depth, markerColumnWidth);
   }
   return runs;

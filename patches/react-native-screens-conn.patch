@@ -1,6 +1,6 @@
 diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator.mm
---- a/ios/header/RNSHeaderCoordinator.mm	2026-10-12 17:24:19
-+++ b/ios/header/RNSHeaderCoordinator.mm	2026-10-12 17:24:20
+--- a/ios/header/RNSHeaderCoordinator.mm	2026-10-12 18:04:03
++++ b/ios/header/RNSHeaderCoordinator.mm	2026-10-12 18:04:03
 @@ -4,6 +4,7 @@
  #import "RNSConversions-Stack.h"
  #import "RNSDefines.h"
@@ -9,19 +9,84 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
  #import "RNSHeaderItemDataProviding.h"
  #import "RNSHeaderItemSpacerDataProviding.h"
  #import "RNSHeaderMenuCoordinator.h"
-@@ -29,6 +30,11 @@
+@@ -13,6 +14,60 @@
+ #import "RNSStackNavigationBarCoordinator.h"
+ #import "RNSStackNavigationController.h"
+ 
++#if !TARGET_OS_TV
++// Conn: menu button inside the toolbar search field. Its own icon is the menu's
++// source, so the menu opens over the search field instead of morphing it.
++@interface RNSSearchFieldAccessoryButton : UIButton
++@end
++
++@implementation RNSSearchFieldAccessoryButton
++
++- (UITargetedPreview *)rns_iconPreview
++{
++  UIPreviewParameters *parameters = [UIPreviewParameters new];
++  parameters.backgroundColor = UIColor.clearColor;
++  parameters.visiblePath = [UIBezierPath bezierPathWithOvalInRect:self.bounds];
++  return [[UITargetedPreview alloc] initWithView:self parameters:parameters];
++}
++
++- (UITargetedPreview *)contextMenuInteraction:(UIContextMenuInteraction *)interaction
++                                 configuration:(UIContextMenuConfiguration *)configuration
++         highlightPreviewForItemWithIdentifier:(id<NSCopying>)identifier
++{
++  return [self rns_iconPreview];
++}
++
++- (UITargetedPreview *)contextMenuInteraction:(UIContextMenuInteraction *)interaction
++                                 configuration:(UIContextMenuConfiguration *)configuration
++           dismissalPreviewForItemWithIdentifier:(id<NSCopying>)identifier
++{
++  return [self rns_iconPreview];
++}
++
++@end
++#endif // !TARGET_OS_TV
++
++#if !TARGET_OS_TV
++// Conn: with toolbar integration (iOS 26+), UIKit shows its own search text
++// field in the toolbar, not the search controller's field. Find the visible one.
++static UISearchTextField *_Nullable RNSVisibleSearchTextField(UIView *_Nullable root)
++{
++  if (root == nil) {
++    return nil;
++  }
++  NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
++  while (queue.count > 0) {
++    UIView *view = queue.firstObject;
++    [queue removeObjectAtIndex:0];
++    if ([view isKindOfClass:UISearchTextField.class] && view.window != nil && !view.hidden) {
++      return (UISearchTextField *)view;
++    }
++    [queue addObjectsFromArray:view.subviews];
++  }
++  return nil;
++}
++#endif // !TARGET_OS_TV
++
+ @implementation RNSHeaderCoordinator {
+   __weak UIViewController *_Nullable _screenController;
+ 
+@@ -29,6 +84,15 @@
    NSMutableArray<UIBarButtonItem *> *_Nonnull _trailingBarButtonItems;
    NSMutableArray<UIBarButtonItem *> *_Nonnull _toolbarBarButtonItems;
    NSMutableDictionary<NSString *, UIBarButtonItem *> *_Nonnull _barButtonItemsByItemId;
 +
 +#if !TARGET_OS_TV
 +  // Conn: the menu button this coordinator put inside the toolbar search field.
-+  __weak UIButton *_Nullable _searchFieldAccessoryButton;
++  // Strong: the button may wait a few run loop turns for the toolbar's field.
++  UIButton *_Nullable _searchFieldAccessoryButton;
++  NSString *_Nullable _searchFieldAccessoryItemId;
++  // Conn: the search bar applied last, for its font size.
++  __weak RNSSearchBar *_Nullable _appliedSearchBar;
 +#endif // !TARGET_OS_TV
  }
  
  - (instancetype)initWithScreenController:(UIViewController *)controller
-@@ -81,6 +87,9 @@
+@@ -81,6 +145,9 @@
    UIView *titleView = nil;
    UIView *subtitleView = nil;
    UIView *largeSubtitleView = nil;
@@ -31,7 +96,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
  
    for (UIView *child in _configDataProvider.children) {
      if ([child conformsToProtocol:@protocol(RNSHeaderItemDataProviding)]) {
-@@ -95,7 +104,11 @@
+@@ -95,7 +162,11 @@
            break;
          case RNSHeaderItemPlacementToolbar:
  #if !TARGET_OS_TV
@@ -44,7 +109,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
  #endif // !TARGET_OS_TV
            break;
          case RNSHeaderItemPlacementTitle:
-@@ -137,6 +150,9 @@
+@@ -137,6 +208,9 @@
    }
  
    [self applyConfigPropertiesForController:controller];
@@ -54,7 +119,20 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
    [self applyItemsWithTitleView:titleView
                     subtitleView:subtitleView
                largeSubtitleView:largeSubtitleView
-@@ -239,6 +255,10 @@
+@@ -174,6 +248,12 @@
+ 
+   // Items belong to each screen. Only the visible screen may change the shared toolbar.
+   [navController setToolbarHidden:_screenController.toolbarItems.count == 0 animated:animated];
++#if !TARGET_OS_TV
++  // Conn: UIKit rebuilds the toolbar's search field when the screen reappears.
++  if (_searchFieldAccessoryButton != nil) {
++    [self installSearchFieldAccessoryButton:_searchFieldAccessoryButton attempt:0];
++  }
++#endif // !TARGET_OS_TV
+ }
+ 
+ - (void)updateBackButtonMenuEnabled
+@@ -239,6 +319,10 @@
      }
      case RNSHeaderItemPlacementToolbar: {
  #if !TARGET_OS_TV
@@ -65,7 +143,7 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
        UIBarButtonItem *newBarButtonItem = [self buildBarButtonItemForItem:targetItem];
        NSUInteger index = oldBarButtonItem == nil ? NSNotFound : [_toolbarBarButtonItems indexOfObject:oldBarButtonItem];
        if (index != NSNotFound) {
-@@ -416,6 +436,15 @@
+@@ -416,6 +500,15 @@
      return;
    }
  
@@ -81,7 +159,35 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
    UIBarButtonItem *barButtonItem = _barButtonItemsByItemId[itemId];
    if (barButtonItem == nil) {
      return;
-@@ -731,4 +760,66 @@
+@@ -548,10 +641,16 @@
+ {
+   UINavigationItem *navItem = controller.navigationItem;
+   UISearchController *searchController = searchBar.controller;
++  _appliedSearchBar = searchBar;
+   if (navItem.searchController != searchController) {
+     // Dismiss the old presentation before releasing or replacing its controller.
+     navItem.searchController.active = NO;
+     navItem.searchController = searchController;
++    // Conn: the new search field has no accessory yet.
++    NSString *accessoryItemId = _searchFieldAccessoryItemId;
++    if (accessoryItemId != nil) {
++      [self applySearchFieldAccessoryForItem:[self findItemWithId:accessoryItemId]];
++    }
+   }
+ 
+   navItem.hidesSearchBarWhenScrolling = searchBar == nil || searchBar.hideWhenScrolling;
+@@ -569,6 +668,10 @@
+          searchBar.allowToolbarIntegration);
+   }
+ #endif // RNS_IPHONE_OS_VERSION_AVAILABLE(26_0)
++  // Conn: refresh the toolbar search field (font size, filter button).
++  if (_searchFieldAccessoryButton != nil) {
++    [self installSearchFieldAccessoryButton:_searchFieldAccessoryButton attempt:0];
++  }
+ }
+ #endif // !TARGET_OS_TV
+ 
+@@ -731,4 +834,123 @@
    return barButtonItem;
  }
  
@@ -90,21 +196,24 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
 +// toolbar search field, like Mail's filter. Passing nil removes the button.
 +- (void)applySearchFieldAccessoryForItem:(nullable id<RNSHeaderItemDataProviding>)item
 +{
-+  UISearchTextField *field = [self requireScreenController].navigationItem.searchController.searchBar.searchTextField;
 +  UIButton *installed = _searchFieldAccessoryButton;
-+  if (installed != nil && installed.superview != nil && field.rightView != installed) {
-+    // The search controller changed; drop the button from the old field.
-+    [installed removeFromSuperview];
-+  }
-+  if (item == nil || field == nil) {
-+    if (installed != nil && field.rightView == installed) {
-+      field.rightView = nil;
++  if (item == nil) {
++    if (installed != nil) {
++      UITextField *owner = (UITextField *)installed.superview;
++      if ([owner isKindOfClass:UITextField.class] && owner.rightView == installed) {
++        owner.rightView = nil;
++      }
++      [installed removeFromSuperview];
 +    }
 +    _searchFieldAccessoryButton = nil;
++    _searchFieldAccessoryItemId = nil;
 +    return;
 +  }
++  // Remember the item even before a search field exists: the search bar often
++  // mounts after the header items, and applySearchBar installs it then.
++  _searchFieldAccessoryItemId = item.itemId;
 +
-+  UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
++  UIButton *button = [RNSSearchFieldAccessoryButton buttonWithType:UIButtonTypeSystem];
 +  button.tintColor = UIColor.secondaryLabelColor;
 +  button.accessibilityLabel = item.title;
 +  button.accessibilityIdentifier = item.identifier;
@@ -139,18 +248,72 @@ diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator
 +  frame.size.width = MAX(frame.size.width, 30.0);
 +  button.frame = frame;
 +
-+  field.rightView = button;
-+  // While typing, the field's clear button takes the trailing edge.
-+  field.rightViewMode = UITextFieldViewModeUnlessEditing;
++  if (installed != nil && installed != button) {
++    UITextField *owner = (UITextField *)installed.superview;
++    if ([owner isKindOfClass:UITextField.class] && owner.rightView == installed) {
++      owner.rightView = nil;
++    }
++    [installed removeFromSuperview];
++  }
 +  _searchFieldAccessoryButton = button;
++  [self installSearchFieldAccessoryButton:button attempt:0];
++}
++
++// The toolbar's search field appears after UIKit lays out the toolbar, and
++// UIKit may replace it later, so look for it on the next run loop turns.
++- (void)installSearchFieldAccessoryButton:(UIButton *)button attempt:(NSInteger)attempt
++{
++  if (_searchFieldAccessoryButton != button) {
++    return;
++  }
++  UIViewController *controller = [self requireScreenController];
++  UINavigationController *navController = controller.navigationController;
++  UISearchTextField *field = RNSVisibleSearchTextField(navController.toolbar);
++  if (field == nil) {
++    field = RNSVisibleSearchTextField(navController.view);
++  }
++  if (field == nil) {
++    UISearchTextField *controllerField = controller.navigationItem.searchController.searchBar.searchTextField;
++    field = controllerField.window != nil ? controllerField : nil;
++  }
++  if (field != nil) {
++    // UIKit resets the fields' font when it moves the search bar into the
++    // toolbar, so apply the app's size (appearance settings) here, after that.
++    CGFloat fontSize = _appliedSearchBar.fontSize;
++    if (fontSize > 0) {
++      UIFont *font = [UIFont systemFontOfSize:fontSize];
++      UISearchTextField *controllerField = controller.navigationItem.searchController.searchBar.searchTextField;
++      for (UISearchTextField *target in controllerField != nil ? @[ field, controllerField ] : @[ field ]) {
++        target.adjustsFontForContentSizeCategory = NO;
++        if (![target.font isEqual:font]) {
++          target.font = font;
++        }
++      }
++    }
++    if (field.rightView != button) {
++      field.rightView = button;
++    }
++    // Always visible, also while typing (the clear button sits before it).
++    field.rightViewMode = UITextFieldViewModeAlways;
++  }
++  if (field == nil && attempt < 40) {
++    __weak auto weakSelf = self;
++    __weak UIButton *weakButton = button;
++    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
++      UIButton *strongButton = weakButton;
++      if (strongButton != nil) {
++        [weakSelf installSearchFieldAccessoryButton:strongButton attempt:attempt + 1];
++      }
++    });
++  }
 +}
 +#endif // !TARGET_OS_TV
 +
  @end
 +
 diff -ruN a/ios/header/RNSHeaderItemComponentView.mm b/ios/header/RNSHeaderItemComponentView.mm
---- a/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 17:24:19
-+++ b/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 17:24:20
+--- a/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 18:04:03
++++ b/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 18:04:03
 @@ -79,6 +79,11 @@
    return std::static_pointer_cast<const react::RNSHeaderItemIOSProps>(_props)->searchBarPlacement;
  }
@@ -172,8 +335,8 @@ diff -ruN a/ios/header/RNSHeaderItemComponentView.mm b/ios/header/RNSHeaderItemC
    BOOL menuDidChange = NO;
  
 diff -ruN a/ios/header/RNSHeaderItemDataProviding.h b/ios/header/RNSHeaderItemDataProviding.h
---- a/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 17:24:19
-+++ b/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 17:24:20
+--- a/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 18:04:03
++++ b/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 18:04:03
 @@ -22,6 +22,8 @@
  @property (nonatomic, readonly) BOOL respondsToOnPress;
  @property (nonatomic, readonly) BOOL hidesSharedBackground;
@@ -183,9 +346,97 @@ diff -ruN a/ios/header/RNSHeaderItemDataProviding.h b/ios/header/RNSHeaderItemDa
  @property (nonatomic, readonly) RNSHeaderItemAxisBehavior axisBehavior;
  @property (nonatomic, readonly) RNSHeaderItemVisibilityPriority visibilityPriority;
  
+diff -ruN a/ios/legacy/RNSSearchBar.h b/ios/legacy/RNSSearchBar.h
+--- a/ios/legacy/RNSSearchBar.h	2026-10-12 18:04:03
++++ b/ios/legacy/RNSSearchBar.h	2026-10-12 18:04:03
+@@ -32,6 +32,8 @@
+ @property (nonatomic) BOOL hideWhenScrolling;
+ @property (nonatomic) RNSSearchBarPlacement placement;
+ @property (nonatomic) BOOL allowToolbarIntegration;
++// Conn: search field point size from JS (system font); 0 keeps the system size.
++@property (nonatomic, readonly) CGFloat fontSize;
+ 
+ @property (nonatomic, retain) UISearchController *controller;
+ 
+diff -ruN a/ios/legacy/RNSSearchBar.mm b/ios/legacy/RNSSearchBar.mm
+--- a/ios/legacy/RNSSearchBar.mm	2026-10-12 18:04:03
++++ b/ios/legacy/RNSSearchBar.mm	2026-10-12 18:04:03
+@@ -17,6 +17,8 @@
+ @implementation RNSSearchBar {
+   UISearchController *_controller;
+   UIColor *_textColor;
++  // Conn: search field point size; 0 keeps the system size.
++  CGFloat _fontSize;
+ 
+   // We use those booleans to log a warning if user attempts to restore
+   // default behavior after setting explicit value for the prop.
+@@ -174,6 +176,33 @@
+ #endif
+ }
+ 
++// Conn: matches the search field text to the app's body size (appearance settings).
++- (void)setFontSize:(CGFloat)fontSize
++{
++#if !TARGET_OS_TV
++  _fontSize = fontSize;
++  [self applyFontSize];
++#endif
++}
++
++- (CGFloat)fontSize
++{
++  return _fontSize;
++}
++
++- (void)applyFontSize
++{
++#if !TARGET_OS_TV
++  if (_fontSize > 0) {
++    UISearchTextField *field = _controller.searchBar.searchTextField;
++    // The size from JS already includes Dynamic Type (like the composer), so
++    // stop UIKit from swapping in its own body font on trait changes.
++    field.adjustsFontForContentSizeCategory = NO;
++    field.font = [UIFont systemFontOfSize:_fontSize];
++  }
++#endif
++}
++
+ - (void)setCancelButtonText:(NSString *)text
+ {
+   [_controller.searchBar setValue:text forKey:@"cancelButtonText"];
+@@ -256,6 +285,7 @@
+   if (_textColor != nil) {
+     [_controller.searchBar.searchTextField setTextColor:_textColor];
+   }
++  [self applyFontSize];
+ #endif
+ 
+   [self showCancelButton];
+@@ -375,6 +405,10 @@
+     [self setTextColor:RCTUIColorFromSharedColor(newScreenProps.textColor)];
+   }
+ 
++  if (oldScreenProps.fontSize != newScreenProps.fontSize) {
++    [self setFontSize:newScreenProps.fontSize];
++  }
++
+   if (oldScreenProps.placement != newScreenProps.placement) {
+     self.placement = [RNSConvert RNSScreenSearchBarPlacementFromCppEquivalent:newScreenProps.placement];
+   }
+@@ -385,7 +419,9 @@
+ 
+   BOOL navigationItemDidChange = oldScreenProps.hideWhenScrolling != newScreenProps.hideWhenScrolling ||
+       oldScreenProps.placement != newScreenProps.placement ||
+-      oldScreenProps.allowToolbarIntegration != newScreenProps.allowToolbarIntegration;
++      oldScreenProps.allowToolbarIntegration != newScreenProps.allowToolbarIntegration ||
++      // Conn: the header copies the size to the toolbar's search field.
++      oldScreenProps.fontSize != newScreenProps.fontSize;
+ 
+   [super updateProps:props oldProps:oldProps];
+ 
 diff -ruN a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts
---- a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 17:24:19
-+++ b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 17:24:20
+--- a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 18:04:03
++++ b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 18:04:03
 @@ -204,6 +204,8 @@
  export interface StackHeaderInlineItemIOS extends StackHeaderBaseItemIOS, SupportsMenuIOS, SupportsIdentifierIOS, SupportsAxisBehaviorIOS, SupportsSharedBackgroundIOS, SupportsVisibilityPriorityIOS {
      /** Uses UIKit's search placement item on iOS 26 and later. */
@@ -196,8 +447,8 @@ diff -ruN a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d
       * @summary Marks this object as a header item definition.
       *
 diff -ruN a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts
---- a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 17:24:19
-+++ b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 17:24:20
+--- a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 18:04:03
++++ b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 18:04:03
 @@ -11,6 +11,8 @@
      hidesSharedBackground?: boolean | undefined;
      /** Uses UIKit's search placement item on iOS 26 and later. */
@@ -208,8 +459,8 @@ diff -ruN a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types
      visibilityPriority?: StackHeaderItemVisibilityPriorityIOS | undefined;
      title?: string | undefined;
 diff -ruN a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts
---- a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 17:24:19
-+++ b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 17:24:20
+--- a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 18:04:03
++++ b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 18:04:03
 @@ -43,6 +43,7 @@
      identifier?: string | undefined;
      hidesSharedBackground?: CT.WithDefault<boolean, false>;
@@ -218,10 +469,34 @@ diff -ruN a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts b/lib
      axisBehavior?: CT.WithDefault<'automatic' | 'horizontalOnly' | 'verticalPreferred', 'automatic'>;
      visibilityPriority?: CT.WithDefault<StackHeaderItemVisibilityPriorityIOS, 'standard'>;
      title?: string | undefined;
+diff -ruN a/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts b/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts
+--- a/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts	2026-10-12 18:04:03
++++ b/lib/typescript/fabric/legacy/SearchBarNativeComponent.d.ts	2026-10-12 18:04:03
+@@ -26,6 +26,7 @@
+     barTintColor?: ColorValue | undefined;
+     tintColor?: ColorValue | undefined;
+     textColor?: ColorValue | undefined;
++    fontSize?: CT.WithDefault<CT.Float, 0>;
+     autoFocus?: CT.WithDefault<boolean, false>;
+     disableBackButtonOverride?: boolean | undefined;
+     inputType?: string | undefined;
 diff -ruN a/lib/typescript/legacy/types.d.ts b/lib/typescript/legacy/types.d.ts
---- a/lib/typescript/legacy/types.d.ts	2026-10-12 17:24:19
-+++ b/lib/typescript/legacy/types.d.ts	2026-10-12 17:24:20
-@@ -1285,6 +1285,8 @@
+--- a/lib/typescript/legacy/types.d.ts	2026-10-12 18:04:03
++++ b/lib/typescript/legacy/types.d.ts	2026-10-12 18:04:03
+@@ -1026,6 +1026,12 @@
+      */
+     textColor?: ColorValue | undefined;
+     /**
++     * Conn: point size of the search field text (system font). Unset keeps the system size.
++     *
++     * @platform ios
++     */
++    fontSize?: number | undefined;
++    /**
+      * The search hint text color
+      *
+      * @plaform android
+@@ -1285,6 +1291,8 @@
      composeMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
      composeSystemImageName?: string | undefined;
      filterButtonId?: string | undefined;
@@ -231,8 +506,8 @@ diff -ruN a/lib/typescript/legacy/types.d.ts b/lib/typescript/legacy/types.d.ts
      filterSystemImageName?: string | undefined;
      onComposePress?: (() => void) | undefined;
 diff -ruN a/src/components/stack/header/StackHeaderConfig.ios.types.ts b/src/components/stack/header/StackHeaderConfig.ios.types.ts
---- a/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 17:24:20
-+++ b/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 17:24:20
+--- a/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 18:04:03
++++ b/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 18:04:03
 @@ -224,6 +224,8 @@
      SupportsVisibilityPriorityIOS {
    /** Uses UIKit's search placement item on iOS 26 and later. */
@@ -243,8 +518,8 @@ diff -ruN a/src/components/stack/header/StackHeaderConfig.ios.types.ts b/src/com
     * @summary Marks this object as a header item definition.
     *
 diff -ruN a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts
---- a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 17:24:20
-+++ b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 17:24:20
+--- a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 18:04:03
++++ b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 18:04:03
 @@ -19,6 +19,8 @@
    hidesSharedBackground?: boolean | undefined;
    /** Uses UIKit's search placement item on iOS 26 and later. */
@@ -255,8 +530,8 @@ diff -ruN a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts b/src/c
    visibilityPriority?: StackHeaderItemVisibilityPriorityIOS | undefined;
    title?: string | undefined;
 diff -ruN a/src/fabric/header/HeaderItemIOSNativeComponent.ts b/src/fabric/header/HeaderItemIOSNativeComponent.ts
---- a/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 17:24:20
-+++ b/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 17:24:20
+--- a/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 18:04:03
++++ b/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 18:04:03
 @@ -76,6 +76,7 @@
    identifier?: string | undefined;
    hidesSharedBackground?: CT.WithDefault<boolean, false>;
@@ -265,10 +540,35 @@ diff -ruN a/src/fabric/header/HeaderItemIOSNativeComponent.ts b/src/fabric/heade
    axisBehavior?: CT.WithDefault<
      'automatic' | 'horizontalOnly' | 'verticalPreferred',
      'automatic'
+diff -ruN a/src/fabric/legacy/SearchBarNativeComponent.ts b/src/fabric/legacy/SearchBarNativeComponent.ts
+--- a/src/fabric/legacy/SearchBarNativeComponent.ts	2026-10-12 18:04:03
++++ b/src/fabric/legacy/SearchBarNativeComponent.ts	2026-10-12 18:04:03
+@@ -60,6 +60,8 @@
+   barTintColor?: ColorValue | undefined;
+   tintColor?: ColorValue | undefined;
+   textColor?: ColorValue | undefined;
++  // Conn: point size of the search field text; 0 keeps the system size.
++  fontSize?: CT.WithDefault<CT.Float, 0>;
+ 
+   // Android only
+   autoFocus?: CT.WithDefault<boolean, false>;
 diff -ruN a/src/legacy/types.ts b/src/legacy/types.ts
---- a/src/legacy/types.ts	2026-10-12 17:24:19
-+++ b/src/legacy/types.ts	2026-10-12 17:24:20
-@@ -1420,6 +1420,8 @@
+--- a/src/legacy/types.ts	2026-10-12 18:04:03
++++ b/src/legacy/types.ts	2026-10-12 18:04:03
+@@ -1143,6 +1143,12 @@
+    */
+   textColor?: ColorValue | undefined;
+   /**
++   * Conn: point size of the search field text (system font). Unset keeps the system size.
++   *
++   * @platform ios
++   */
++  fontSize?: number | undefined;
++  /**
+    * The search hint text color
+    *
+    * @plaform android
+@@ -1420,6 +1426,8 @@
    composeMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
    composeSystemImageName?: string | undefined;
    filterButtonId?: string | undefined;

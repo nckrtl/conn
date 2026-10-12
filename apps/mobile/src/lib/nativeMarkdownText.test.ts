@@ -622,7 +622,7 @@ describe("nativeMarkdownDocumentRuns", () => {
       role: "list-marker",
       depth: 1,
       firstLineHeadIndent: 0,
-      headIndent: 24,
+      headIndent: 15,
       paragraphSpacing: 2,
     });
   });
@@ -688,7 +688,7 @@ describe("nativeMarkdownDocumentRuns", () => {
         role: "list-marker",
         depth: 1,
         firstLineHeadIndent: 0,
-        headIndent: 24,
+        headIndent: 15,
         paragraphSpacing: 2,
       },
       { text: "Finding:", bold: true, role: "body", depth: 1 },

@@ -4,7 +4,8 @@ import type {
   NativeStackNavigationOptions,
 } from "@react-navigation/native-stack";
 import { isValidElement, useRef } from "react";
-import { Platform, StyleSheet } from "react-native";
+import { Platform, StyleSheet, useWindowDimensions } from "react-native";
+import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import { useMobileNavigationTheme } from "../lib/useMobileNavigationTheme";
 import { useNativeLayoutMetrics } from "../native/native-layout-metrics";
 import {
@@ -141,6 +142,10 @@ export function V5StackHeader(props: {
   const theme = useMobileNavigationTheme();
   const nativeMetrics = useNativeLayoutMetrics();
   const searchRef = useRef<SearchBarCommands>(null);
+  // Conn: search fields use the composer's text size, which follows the
+  // appearance settings and Dynamic Type like the composer's TextInput.
+  const bodyText = useScaledTextRole("body");
+  const { fontScale } = useWindowDimensions();
   const itemProps = { tintColor: options.headerTintColor, canGoBack: props.canGoBack };
   const leading = convertItems(options.unstable_headerLeftItems?.(itemProps) ?? [], "leading");
   const trailing = convertItems(
@@ -253,6 +258,7 @@ export function V5StackHeader(props: {
               ref={searchOptions?.ref ?? searchRef}
               hideNavigationBar={false}
               hideWhenScrolling={false}
+              fontSize={bodyText.fontSize * fontScale}
               allowToolbarIntegration={searchOptions?.allowToolbarIntegration ?? true}
               placement={bottomSearch ? "integrated" : (searchOptions?.placement ?? "automatic")}
               placeholder={mailSearch?.placeholder ?? searchOptions?.placeholder ?? "Search"}

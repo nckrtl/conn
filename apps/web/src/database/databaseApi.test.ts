@@ -9,6 +9,7 @@ import {
   defaultConnection,
   parseDotEnv,
   VAULT_CONNECTION_PREFIX,
+  vaultGroups,
 } from "./databaseApi";
 
 describe("database connections", () => {
@@ -66,6 +67,10 @@ describe("connectionFromVault", () => {
       database: "ohdear",
       username: "ohdear_main",
       tls: "disabled",
+      sshHost: null,
+      sshPort: null,
+      sshUser: null,
+      organization: "Orbit",
     });
     expect(connection).toMatchObject({
       id: `${VAULT_CONNECTION_PREFIX}entry-1`,
@@ -74,5 +79,37 @@ describe("connectionFromVault", () => {
       password: "",
     });
     expect(connectionTarget(connection)).toBe("10.44.0.7:5432/ohdear");
+  });
+});
+
+describe("vaultGroups", () => {
+  const entry = (id: string, organization: string | null, sshHost: string | null = null) =>
+    connectionFromVault({
+      id,
+      name: id,
+      driver: "mysql",
+      host: "127.0.0.1",
+      port: 3306,
+      database: "app",
+      username: "app",
+      tls: "disabled",
+      sshHost,
+      sshPort: null,
+      sshUser: null,
+      organization,
+    });
+
+  it("puts the personal vault first, then organizations by name", () => {
+    const groups = vaultGroups([
+      entry("a", "Orbit"),
+      entry("b", null, "sfmain1"),
+      entry("c", "Acme"),
+    ]);
+    expect(groups.map((group) => [group.label, group.connections.map((c) => c.id)])).toEqual([
+      ["Personal", ["vault:b"]],
+      ["Acme", ["vault:c"]],
+      ["Orbit", ["vault:a"]],
+    ]);
+    expect(connectionTarget(groups[0]!.connections[0]!)).toBe("app via sfmain1");
   });
 });

@@ -11,6 +11,15 @@ const driver = vi.hoisted(() => ({
   mysqlStatements: [] as string[],
   /** The next MySQL query fails with this error code, as when the server drops the connection. */
   mysqlFailNext: null as string | null,
+  tunnels: [] as Array<{ target: unknown; closed: boolean }>,
+}));
+
+vi.mock("./sshTunnel.ts", () => ({
+  openSshTunnel: async (target: unknown) => {
+    const tunnel = { target, closed: false };
+    driver.tunnels.push(tunnel);
+    return { localPort: 40_000, close: () => (tunnel.closed = true) };
+  },
 }));
 
 // The network drivers are replaced, so these tests can check how user SQL reaches them.
@@ -167,6 +176,55 @@ describe("database panel runner", () => {
       driver.mysqlOptions.length = 0;
       driver.mysqlStatements.length = 0;
       driver.mysqlFailNext = null;
+      driver.tunnels.length = 0;
+    });
+
+    it("connects to an SSH entry through a tunnel and closes both together", async () => {
+      const resolve = async () => ({
+        ...remote,
+        driver: "mysql" as const,
+        host: "127.0.0.1",
+        port: 3306,
+        sshHost: "sfmain1",
+        sshPort: null,
+        sshUser: "forge",
+        sshAgent: "/tmp/vault-agent.sock",
+      });
+      const result = await runDatabase(
+        {
+          connection: { ...remote, driver: "mysql", vaultItemId: "entry-ssh" },
+          operation: "tables",
+        },
+        resolve,
+      );
+
+      expect(result.error).toBeNull();
+      expect(driver.tunnels[0]?.target).toEqual({
+        host: "sfmain1",
+        port: null,
+        user: "forge",
+        agent: "/tmp/vault-agent.sock",
+        remoteHost: "127.0.0.1",
+        remotePort: 3306,
+      });
+      expect(driver.mysqlOptions).toEqual([
+        expect.objectContaining({ host: "127.0.0.1", port: 40_000 }),
+      ]);
+
+      await closeDatabaseSessions();
+      expect(driver.tunnels[0]?.closed).toBe(true);
+    });
+
+    it("asks to turn on Vault's SSH agent when an SSH entry has none", async () => {
+      const result = await runDatabase(
+        {
+          connection: { ...remote, driver: "mysql", vaultItemId: "entry-ssh-off" },
+          operation: "tables",
+        },
+        async () => ({ ...remote, driver: "mysql" as const, sshHost: "sfmain1", sshAgent: null }),
+      );
+      expect(result.error).toMatch(/Use Vault for SSH/);
+      expect(driver.tunnels).toHaveLength(0);
     });
 
     it("keeps one MySQL connection open and sets it read-only once", async () => {
@@ -217,6 +275,27 @@ describe("database panel runner", () => {
       expect(result.error).toBeNull();
       expect(driver.mysqlOptions).toHaveLength(2);
       expect(driver.mysqlStatements).toContain("select 3");
+    });
+
+    it("asks Vault again on reconnect and after a first call fails", async () => {
+      const passwords = ["old", "new", "newer"];
+      const resolve = async () => ({
+        ...remote,
+        driver: "mysql" as const,
+        password: passwords.shift()!,
+      });
+      const entry = { ...remote, driver: "mysql" as const, vaultItemId: "entry-refresh" };
+
+      // The login is accepted, but the first query fails: the connection is not kept.
+      driver.mysqlFailNext = "ER_BAD_DB_ERROR";
+      await runDatabase({ connection: entry, operation: "tables" }, resolve);
+      await runDatabase({ connection: entry, operation: "tables" }, resolve);
+      // Refresh closes the working connection and reads the entry again.
+      await runDatabase({ connection: entry, operation: "tables", reconnect: true }, resolve);
+
+      expect(
+        driver.mysqlOptions.map((options) => (options as { password: string }).password),
+      ).toEqual(["old", "new", "newer"]);
     });
 
     it("keeps the connection after a query error", async () => {

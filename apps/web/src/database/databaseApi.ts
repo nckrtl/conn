@@ -21,6 +21,10 @@ export interface DatabaseConnection extends DesktopDatabaseConnection {
    * `vault`: a Vault entry, listed without its password and never saved.
    */
   readonly source: "env" | "manual" | "vault";
+  /** Vault entries: the SSH host the database is reached through, or null. */
+  readonly sshHost?: string | null;
+  /** Vault entries: the organization's name, or null for the personal vault. */
+  readonly organization?: string | null;
 }
 
 export interface DatabaseQueryResult {
@@ -121,14 +125,33 @@ export function connectionFromVault(entry: DesktopVaultDatabase): DatabaseConnec
     username: entry.username,
     password: "",
     vaultItemId: entry.id,
+    sshHost: entry.sshHost,
+    organization: entry.organization,
   };
 }
 
+/** Vault connections by where they live: the personal vault first, then each organization. */
+export function vaultGroups(
+  connections: readonly DatabaseConnection[],
+): Array<{ readonly label: string; readonly connections: DatabaseConnection[] }> {
+  const groups = new Map<string, DatabaseConnection[]>();
+  for (const connection of connections) {
+    const label = connection.organization ?? "Personal";
+    groups.set(label, [...(groups.get(label) ?? []), connection]);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === "Personal" ? -1 : b === "Personal" ? 1 : a.localeCompare(b)))
+    .map(([label, entries]) => ({ label, connections: entries }));
+}
+
 /** `host/database` for the menu; the file name for SQLite. */
-export function connectionTarget(connection: DesktopDatabaseConnection): string {
+export function connectionTarget(
+  connection: DesktopDatabaseConnection & { readonly sshHost?: string | null },
+): string {
   if (connection.driver === "sqlite") {
     return connection.database.split(/[\\/]/).pop() || connection.database;
   }
+  if (connection.sshHost) return `${connection.database} via ${connection.sshHost}`;
   return `${connection.host}${connection.port ? `:${connection.port}` : ""}/${connection.database}`;
 }
 
@@ -150,6 +173,8 @@ const UNREACHABLE = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|connect timeo
 /** `allowUnlock`: the call follows a user action, so a locked Vault may ask for Touch ID. */
 export interface CallOptions {
   readonly allowUnlock?: boolean;
+  /** Close the open connection first, so changed credentials are read again. */
+  readonly reconnect?: boolean;
 }
 
 async function call(
@@ -171,6 +196,7 @@ async function call(
       ...(vaultItemId ? { vaultItemId } : {}),
     },
     ...(options.allowUnlock ? { allowUnlock: true } : {}),
+    ...(options.reconnect ? { reconnect: true } : {}),
     ...request,
   });
   if (response.error) {

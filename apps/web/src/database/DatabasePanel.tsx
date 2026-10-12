@@ -43,6 +43,7 @@ import {
   type DatabaseDriver,
   type DatabaseQueryResult,
   type DatabaseValue,
+  vaultGroups,
   defaultConnection,
   describeDatabaseTable,
   DRIVER_LABELS,
@@ -376,9 +377,12 @@ function ConnectionItems({ connections }: { connections: readonly DatabaseConnec
     <MenuRadioItem key={connection.id} value={connection.id}>
       {connection.source === "vault" ? <VaultIcon /> : null}
       <span className="truncate">{connection.name}</span>
-      <span className="ms-auto truncate ps-3 text-muted-foreground">
-        {connectionTarget(connection)}
-      </span>
+      {/* A Vault entry is known by its name; its address can be long and adds nothing. */}
+      {connection.source === "vault" ? null : (
+        <span className="ms-auto truncate ps-3 text-muted-foreground">
+          {connectionTarget(connection)}
+        </span>
+      )}
     </MenuRadioItem>
   ));
 }
@@ -406,12 +410,22 @@ function ConnectionMenu({
   return (
     <Menu>
       <MenuTrigger
-        render={<Button variant="ghost" size="xs" type="button" aria-label="Database connection" />}
+        render={
+          <Button
+            variant="ghost"
+            size="xs"
+            type="button"
+            aria-label="Database connection"
+            className="min-w-0 max-w-full"
+          />
+        }
       >
         {selected?.source === "vault" ? <VaultIcon /> : <Database />}
-        <span className="truncate">{selected?.name ?? "Choose a connection"}</span>
-        {selected ? (
-          <span className="truncate text-muted-foreground">{connectionTarget(selected)}</span>
+        <span className="min-w-0 truncate">{selected?.name ?? "Choose a connection"}</span>
+        {selected && selected.source !== "vault" ? (
+          <span className="min-w-0 truncate text-muted-foreground">
+            {connectionTarget(selected)}
+          </span>
         ) : null}
         <ChevronDown />
       </MenuTrigger>
@@ -434,12 +448,22 @@ function ConnectionMenu({
                 <MenuItem disabled>{vault.error ?? "Vault is unavailable."}</MenuItem>
               ) : vault.status === "ok" && vault.connections.length === 0 ? (
                 <MenuItem disabled>No Database entries</MenuItem>
-              ) : (
+              ) : vault.status === "ok" ? null : (
                 <MenuRadioGroup value={selected?.id ?? ""} onValueChange={select}>
                   <ConnectionItems connections={vault.connections} />
                 </MenuRadioGroup>
               )}
             </MenuGroup>
+            {vault.status === "ok"
+              ? vaultGroups(vault.connections).map((group) => (
+                  <MenuGroup key={group.label}>
+                    <MenuGroupLabel inset>{group.label}</MenuGroupLabel>
+                    <MenuRadioGroup value={selected?.id ?? ""} onValueChange={select}>
+                      <ConnectionItems connections={group.connections} />
+                    </MenuRadioGroup>
+                  </MenuGroup>
+                ))
+              : null}
             <MenuSeparator />
           </>
         ) : null}
@@ -487,7 +511,13 @@ export function DatabasePanel({
   const connection = defaultConnection([...connections, ...vault.connections], remembered);
   // Set by any user action. Until then, a locked Vault never asks for Touch ID.
   const acted = useRef(false);
-  const options = () => ({ allowUnlock: acted.current });
+  // Set by Refresh: the next call opens a new connection, so a changed Vault entry is used.
+  const reconnect = useRef(false);
+  const options = () => {
+    const fresh = reconnect.current;
+    reconnect.current = false;
+    return { allowUnlock: acted.current, reconnect: fresh };
+  };
   const key = connection ? connectionKey(connection) : null;
 
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -617,6 +647,7 @@ export function DatabasePanel({
                   aria-label="Refresh"
                   onClick={() => {
                     acted.current = true;
+                    reconnect.current = true;
                     envFile.refresh();
                     vault.reload(false);
                     setRefreshNonce((value) => value + 1);
@@ -658,94 +689,112 @@ export function DatabasePanel({
           </Button>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1">
-          <div className="shell-divider-r flex w-52 shrink-0 flex-col">
-            <div className="shrink-0 p-2">
-              <InputGroup variant="soft" className="h-8">
-                <InputGroupAddon>
-                  <Search aria-hidden />
-                </InputGroupAddon>
-                <InputGroupInput
-                  value={filter}
-                  onChange={(event) => setFilter(event.target.value)}
-                  placeholder="Tables"
-                  aria-label="Filter tables"
-                />
-              </InputGroup>
+        <>
+          {tablesLoad.error ? (
+            // The connection itself failed (login, SSH, network): its own message above the panels,
+            // inset like the panels' own content.
+            <div className="shrink-0 border-b border-(--shell-divider)! p-2">
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-lg bg-warning/10 px-3 py-2 text-ui text-warning"
+              >
+                <CircleAlert className="mt-0.5 size-4 shrink-0" />
+                <span className="min-w-0 break-words">{tablesLoad.error}</span>
+              </div>
             </div>
-            <div className="scrollbar-inset min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
-              {tablesLoad.error ? <Notice>{tablesLoad.error}</Notice> : null}
-              {tablesLoad.loading ? (
-                <div className="flex justify-center py-3 text-muted-foreground">
-                  <Spinner className="size-4" />
-                </div>
-              ) : null}
-              {tables && visibleTables.length === 0 ? (
-                <p className="px-2.5 py-2 text-muted-foreground text-ui">No tables</p>
-              ) : null}
-              <TableList names={visibleTables} selected={table} onOpen={onOpenTable} />
+          ) : null}
+          <div className="flex min-h-0 flex-1">
+            <div className="shell-divider-r flex w-52 shrink-0 flex-col">
+              <div className="shrink-0 p-2">
+                <InputGroup variant="soft" className="h-8">
+                  <InputGroupAddon>
+                    <Search aria-hidden />
+                  </InputGroupAddon>
+                  <InputGroupInput
+                    value={filter}
+                    onChange={(event) => setFilter(event.target.value)}
+                    placeholder="Tables"
+                    aria-label="Filter tables"
+                  />
+                </InputGroup>
+              </div>
+              <div className="scrollbar-inset min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
+                {tablesLoad.loading ? (
+                  <div className="flex justify-center py-3 text-muted-foreground">
+                    <Spinner className="size-4" />
+                  </div>
+                ) : null}
+                {tables && visibleTables.length === 0 ? (
+                  <p className="px-2.5 py-2 text-muted-foreground text-ui">No tables</p>
+                ) : null}
+                <TableList names={visibleTables} selected={table} onOpen={onOpenTable} />
+              </div>
             </div>
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col">
-            <SqlEditor value={sql} onChange={setSql} placeholder="select * from users limit 100" />
-            <ApiTabs
-              className="h-11"
-              value={tab}
-              onChange={setTab}
-              tabs={[
-                { id: "rows", label: "Rows", count: result?.rowCount },
-                { id: "structure", label: "Structure", count: columns?.length },
-              ]}
-              trailing={
-                <>
-                  {result ? (
-                    <span className="text-muted-foreground text-ui tabular-nums">
-                      {result.truncated ? "First 500 rows · " : ""}
-                      {Math.round(result.durationMs)} ms
-                    </span>
-                  ) : null}
-                  <ToolbarGroup>
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      type="button"
-                      onClick={() => void run(sql)}
-                      disabled={running || sql.trim() === ""}
-                    >
-                      {running ? <Spinner className="size-3.5" /> : <Play />}
-                      Run
-                    </Button>
-                  </ToolbarGroup>
-                </>
-              }
-            />
-            <div className="scrollbar-inset min-h-0 flex-1 overflow-auto">
-              {tab === "rows" ? (
-                current?.error ? (
-                  <Notice>{current.error}</Notice>
-                ) : result ? (
-                  <RowsGrid result={result} />
-                ) : (
+            <div className="flex min-w-0 flex-1 flex-col">
+              <SqlEditor
+                value={sql}
+                onChange={setSql}
+                placeholder="select * from users limit 100"
+              />
+              <ApiTabs
+                className="h-11"
+                value={tab}
+                onChange={setTab}
+                tabs={[
+                  { id: "rows", label: "Rows", count: result?.rowCount },
+                  { id: "structure", label: "Structure", count: columns?.length },
+                ]}
+                trailing={
+                  <>
+                    {result ? (
+                      <span className="text-muted-foreground text-ui tabular-nums">
+                        {result.truncated ? "First 500 rows · " : ""}
+                        {Math.round(result.durationMs)} ms
+                      </span>
+                    ) : null}
+                    <ToolbarGroup>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        type="button"
+                        onClick={() => void run(sql)}
+                        disabled={running || sql.trim() === ""}
+                      >
+                        {running ? <Spinner className="size-3.5" /> : <Play />}
+                        Run
+                      </Button>
+                    </ToolbarGroup>
+                  </>
+                }
+              />
+              <div className="scrollbar-inset min-h-0 flex-1 overflow-auto">
+                {tab === "rows" ? (
+                  current?.error ? (
+                    <Notice>{current.error}</Notice>
+                  ) : result ? (
+                    <RowsGrid result={result} />
+                  ) : (
+                    <p className="px-4 py-3 text-muted-foreground text-ui">
+                      {running ? "Running…" : "Pick a table, or write a query and press ⌘↵."}
+                    </p>
+                  )
+                ) : !table ? (
                   <p className="px-4 py-3 text-muted-foreground text-ui">
-                    {running ? "Running…" : "Pick a table, or write a query and press ⌘↵."}
+                    Pick a table to see its columns.
                   </p>
-                )
-              ) : !table ? (
-                <p className="px-4 py-3 text-muted-foreground text-ui">
-                  Pick a table to see its columns.
-                </p>
-              ) : columnsLoad.error ? (
-                <Notice>{columnsLoad.error}</Notice>
-              ) : columns ? (
-                <StructureList columns={columns} />
-              ) : (
-                <div className="flex justify-center py-3 text-muted-foreground">
-                  <Spinner className="size-4" />
-                </div>
-              )}
+                ) : columnsLoad.error ? (
+                  <Notice>{columnsLoad.error}</Notice>
+                ) : columns ? (
+                  <StructureList columns={columns} />
+                ) : (
+                  <div className="flex justify-center py-3 text-muted-foreground">
+                    <Spinner className="size-4" />
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        </>
       )}
     </div>
   );

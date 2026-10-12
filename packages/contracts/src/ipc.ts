@@ -1209,6 +1209,8 @@ export interface DesktopDatabaseRequest {
   readonly connection: DesktopDatabaseConnection;
   /** Whether a locked Vault may ask for Touch ID. Only explicit actions set it. */
   readonly allowUnlock?: boolean;
+  /** nckrtl fork: close an open connection first, so a changed Vault entry is read again. */
+  readonly reconnect?: boolean;
   readonly operation: "tables" | "describe" | "query";
   readonly table?: string;
   readonly sql?: string;
@@ -1244,6 +1246,12 @@ export interface DesktopVaultDatabase {
   readonly database: string;
   readonly username: string;
   readonly tls: "disabled" | "required" | "verify-ca" | "verify-full";
+  /** Set when the database is reached through SSH; `host` and `port` are then as the server sees them. */
+  readonly sshHost: string | null;
+  readonly sshPort: number | null;
+  readonly sshUser: string | null;
+  /** The organization's name, or null for the personal vault. */
+  readonly organization: string | null;
 }
 
 export interface DesktopVaultDatabasesResponse {

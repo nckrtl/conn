@@ -30,6 +30,12 @@ const VaultDatabase = Schema.Struct({
   database: Schema.String,
   username: Schema.String,
   tls: VaultTls,
+  /** Set when the database is reached through SSH; `host` and `port` are then as the server sees them. */
+  sshHost: Schema.NullOr(Schema.String),
+  sshPort: Schema.NullOr(Schema.Int),
+  sshUser: Schema.NullOr(Schema.String),
+  /** The organization's name, or null for the personal vault. */
+  organization: Schema.NullOr(Schema.String),
 });
 export type VaultDatabase = typeof VaultDatabase.Type;
 
@@ -43,6 +49,10 @@ interface Wire {
   readonly username: string;
   readonly tls: string;
   readonly password?: string;
+  readonly sshHost?: string;
+  readonly sshPort?: number;
+  readonly sshUser?: string;
+  readonly organization?: string;
 }
 
 interface Reply {
@@ -51,6 +61,8 @@ interface Reply {
   readonly message?: string;
   readonly databases?: readonly Wire[];
   readonly database?: Wire;
+  /** Vault's SSH agent socket, sent with entries that connect over SSH. */
+  readonly sshAgent?: string;
   readonly suggestions?: readonly {
     readonly id: string;
     readonly name: string;
@@ -185,6 +197,10 @@ function toDatabase(wire: Wire): VaultDatabase | null {
     database: wire.database,
     username: wire.username,
     tls,
+    sshHost: wire.sshHost ?? null,
+    sshPort: wire.sshPort ?? null,
+    sshUser: wire.sshUser ?? null,
+    organization: wire.organization ?? null,
   };
 }
 
@@ -209,11 +225,11 @@ export async function vaultCredential(
   itemID: string,
   allowUnlock: boolean,
   binary?: string,
-): Promise<VaultDatabase & { readonly password: string }> {
+): Promise<VaultDatabase & { readonly password: string; readonly sshAgent: string | null }> {
   const reply = await vaultRequest("database-credential", { itemID, allowUnlock }, binary);
   const database = reply.status === "ok" && reply.database ? toDatabase(reply.database) : null;
   if (!database || typeof reply.database?.password !== "string") throw failure(reply);
-  return { ...database, password: reply.database.password };
+  return { ...database, password: reply.database.password, sshAgent: reply.sshAgent ?? null };
 }
 
 const VaultDatabasesRequest = Schema.Struct({ allowUnlock: Schema.Boolean });

@@ -7,6 +7,7 @@ import postgres from "postgres";
 
 import * as DesktopIpc from "../DesktopIpc.ts";
 import { DATABASE_RUN_CHANNEL } from "../channels.ts";
+import { openSshTunnel, type SshTunnel } from "./sshTunnel.ts";
 import { vaultCredential, type VaultTls } from "./vault.ts";
 
 // The Database panel's runner. The desktop main process connects directly (no T3 server
@@ -36,6 +37,8 @@ const DatabaseRequest = Schema.Struct({
   connection: Connection,
   /** Whether a locked Vault may ask for Touch ID. Only explicit actions set it. */
   allowUnlock: Schema.optional(Schema.Boolean),
+  /** Close an open connection first, so a changed Vault entry or `.env` is read again. */
+  reconnect: Schema.optional(Schema.Boolean),
   operation: Schema.Literals(["tables", "describe", "query"]),
   table: Schema.optional(Schema.String),
   sql: Schema.optional(Schema.String.check(Schema.isMaxLength(200_000))),
@@ -63,8 +66,17 @@ const DatabaseResponse = Schema.Struct({
 });
 
 type Request = typeof DatabaseRequest.Type;
-/** A connection ready to open; `tls` comes only from a Vault entry. */
-type Resolved = Request["connection"] & { readonly tls?: VaultTls };
+/**
+ * A connection ready to open. `tls` and the SSH fields come only from a Vault entry; with an SSH
+ * host, `host` and `port` are the database as the SSH server reaches it.
+ */
+type Resolved = Request["connection"] & {
+  readonly tls?: VaultTls;
+  readonly sshHost?: string | null;
+  readonly sshPort?: number | null;
+  readonly sshUser?: string | null;
+  readonly sshAgent?: string | null;
+};
 export type VaultResolver = (
   itemID: string,
   allowUnlock: boolean,
@@ -390,6 +402,47 @@ function runSqlite(request: Request): Partial<Response> {
 
 // ─── Open connections ────────────────────────────────────────────────────────
 
+/** Opens the driver connection, through an SSH tunnel when the entry names an SSH host. */
+async function openSession(
+  resolved: Resolved,
+): Promise<Session<mysql.Connection> | Session<postgres.ReservedSql>> {
+  let tunnel: SshTunnel | null = null;
+  let target = resolved;
+  if (resolved.sshHost) {
+    if (!resolved.sshAgent) {
+      throw new Error(
+        "This connection uses SSH. Turn on Settings › SSH agent › Use Vault for SSH in Vault.",
+      );
+    }
+    const defaultPort = resolved.driver === "pgsql" ? 5432 : 3306;
+    tunnel = await openSshTunnel({
+      host: resolved.sshHost,
+      port: resolved.sshPort ?? null,
+      user: resolved.sshUser ?? null,
+      agent: resolved.sshAgent,
+      remoteHost: resolved.host || "127.0.0.1",
+      remotePort: resolved.port ?? defaultPort,
+    });
+    target = { ...resolved, host: "127.0.0.1", port: tunnel.localPort };
+  }
+  try {
+    const session =
+      target.driver === "mysql" ? await openMysql(target) : await openPostgres(target);
+    if (!tunnel) return session;
+    const opened = tunnel;
+    return {
+      ...session,
+      close: async () => {
+        await session.close();
+        opened.close();
+      },
+    } as Session<mysql.Connection> | Session<postgres.ReservedSql>;
+  } catch (error) {
+    tunnel?.close();
+    throw error;
+  }
+}
+
 interface Session<Client> {
   readonly client: Client;
   readonly driver: "mysql" | "pgsql";
@@ -401,6 +454,8 @@ interface OpenSession {
   /** Calls on one connection run one after another. */
   queue: Promise<unknown>;
   idle: ReturnType<typeof setTimeout> | undefined;
+  /** Whether a call has succeeded. Until then an error closes it: the login may be accepted while the entry is wrong. */
+  proven: boolean;
 }
 
 const sessions = new Map<string, OpenSession>();
@@ -449,6 +504,8 @@ async function withSession(
   resolveVault: VaultResolver,
 ): Promise<Partial<Response>> {
   const key = sessionKey(request.connection);
+  const stale = sessions.get(key);
+  if (request.reconnect && stale) closeSession(key, stale);
   for (let attempt = 0; ; attempt++) {
     let open = sessions.get(key);
     if (!open) {
@@ -457,9 +514,9 @@ async function withSession(
         const resolved: Resolved = connection.vaultItemId
           ? await resolveVault(connection.vaultItemId, request.allowUnlock ?? false)
           : connection;
-        return resolved.driver === "mysql" ? openMysql(resolved) : openPostgres(resolved);
+        return openSession(resolved);
       })();
-      open = { session: opening, queue: Promise.resolve(), idle: undefined };
+      open = { session: opening, queue: Promise.resolve(), idle: undefined, proven: false };
       const entry = open;
       sessions.set(key, entry);
       opening.catch(() => {
@@ -476,8 +533,11 @@ async function withSession(
     });
     entry.queue = call.catch(() => undefined);
     try {
-      return await call;
+      const result = await call;
+      entry.proven = true;
+      return result;
     } catch (error) {
+      if (!entry.proven) closeSession(key, entry);
       if (!lostConnection(error)) throw error;
       closeSession(key, entry);
       // The server or network dropped the connection: open a new one, once.

@@ -6,7 +6,9 @@ export function ApiTabs<T extends string>({
   tabs,
   onChange,
   trailing,
+  className,
 }: {
+  className?: string;
   value: T;
   tabs: ReadonlyArray<{
     readonly id: T;
@@ -17,7 +19,12 @@ export function ApiTabs<T extends string>({
   trailing?: React.ReactNode;
 }) {
   return (
-    <div className="flex h-9 shrink-0 items-stretch gap-4 border-b border-(--shell-divider)! ps-4 pe-toolbar-end">
+    <div
+      className={cn(
+        "flex h-9 shrink-0 items-stretch gap-4 border-b border-(--shell-divider)! ps-4 pe-toolbar-end",
+        className,
+      )}
+    >
       {tabs.map((tab) => (
         <button
           key={tab.id}

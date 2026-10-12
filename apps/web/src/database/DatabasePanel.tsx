@@ -50,6 +50,7 @@ import {
   runReadOnlyQuery,
 } from "./databaseApi";
 import { useDatabaseStore } from "./databaseStore";
+import { SqlEditor } from "./SqlEditor";
 import vaultIcon from "./vault-icon.png";
 import { type VaultDatabases, useVaultDatabases } from "./useVaultDatabases";
 
@@ -686,16 +687,9 @@ export function DatabasePanel({
             </div>
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
-            <textarea
-              value={sql}
-              onChange={(event) => setSql(event.target.value)}
-              placeholder="select * from users limit 100"
-              aria-label="SQL query"
-              spellCheck={false}
-              rows={5}
-              className="block max-h-[40%] min-h-24 w-full shrink-0 resize-y border-b border-(--shell-divider)! bg-transparent px-4 py-3 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/70"
-            />
+            <SqlEditor value={sql} onChange={setSql} placeholder="select * from users limit 100" />
             <ApiTabs
+              className="h-11"
               value={tab}
               onChange={setTab}
               tabs={[
@@ -725,7 +719,7 @@ export function DatabasePanel({
                 </>
               }
             />
-            <div className="scrollbar-gutter-both scrollbar-inset min-h-0 flex-1 overflow-auto">
+            <div className="scrollbar-inset min-h-0 flex-1 overflow-auto">
               {tab === "rows" ? (
                 current?.error ? (
                   <Notice>{current.error}</Notice>

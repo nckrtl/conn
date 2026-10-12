@@ -1,6 +1,6 @@
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { use, useCallback, useEffect, useRef } from "react";
-import { Keyboard, Pressable, Text, View } from "react-native";
+import { Keyboard, Pressable, Text, View, useWindowDimensions } from "react-native";
 import type { SearchBarCommands } from "react-native-screens";
 
 import { SymbolView } from "../../components/AppSymbol";
@@ -13,9 +13,20 @@ import { useCreateNativeMailSearchToolbarItem } from "../layout/native-mail-sear
 import { useWorkspaceTabs } from "./WorkspaceTabsContext";
 import type { WorkspaceTab } from "./workspace-tabs-state";
 
-const SWITCHER_ITEM_WIDTH = 64;
 const SWITCHER_HEIGHT = 48;
 const SWITCHER_PADDING = 3;
+// The group takes the width the toolbar leaves beside its two 48pt buttons.
+const TOOLBAR_MARGIN = 20;
+const TOOLBAR_BUTTON = 48;
+const TOOLBAR_GAP = 12;
+const SWITCHER_MAX_WIDTH = 360;
+
+function switcherWidth(windowWidth: number) {
+  return Math.min(
+    SWITCHER_MAX_WIDTH,
+    windowWidth - TOOLBAR_MARGIN * 2 - TOOLBAR_BUTTON * 2 - TOOLBAR_GAP * 2,
+  );
+}
 
 const SWITCHER_ITEMS = [
   { key: "threads", label: "Threads", accessibilityLabel: "Threads", icon: "text.bubble" },
@@ -30,16 +41,18 @@ const SWITCHER_ITEMS = [
 
 /** Threads, Pulls and Search share one glass group in the toolbar. */
 function WorkspacePhoneSwitcher(props: {
+  readonly width: number;
   readonly selectedTab: WorkspaceTab;
   readonly onSelect: (tab: WorkspaceTab) => void;
   readonly onSearch: () => void;
 }) {
+  const itemWidth = (props.width - SWITCHER_PADDING * 2) / SWITCHER_ITEMS.length;
   return (
     <View
       accessibilityRole="tablist"
       style={{
         flexDirection: "row",
-        width: SWITCHER_ITEMS.length * SWITCHER_ITEM_WIDTH + SWITCHER_PADDING * 2,
+        width: props.width,
         height: SWITCHER_HEIGHT,
         padding: SWITCHER_PADDING,
       }}
@@ -58,7 +71,7 @@ function WorkspacePhoneSwitcher(props: {
             }}
             className={selected ? "bg-subtle-strong" : undefined}
             style={{
-              width: SWITCHER_ITEM_WIDTH,
+              width: itemWidth,
               borderRadius: (SWITCHER_HEIGHT - SWITCHER_PADDING * 2) / 2,
               alignItems: "center",
               justifyContent: "center",
@@ -67,14 +80,14 @@ function WorkspacePhoneSwitcher(props: {
           >
             <SymbolView
               name={item.icon}
-              size={19}
+              size={21}
               tintColorClassName={selected ? "accent-focus" : "accent-icon"}
             />
             <Text
               className={
                 selected
-                  ? "text-3xs font-t3-medium text-foreground"
-                  : "text-3xs font-t3-medium text-foreground-muted"
+                  ? "text-2xs font-t3-medium text-foreground"
+                  : "text-2xs font-t3-medium text-foreground-muted"
               }
               numberOfLines={1}
             >
@@ -99,6 +112,7 @@ export function WorkspacePhoneBar(props: {
   const workspace = useWorkspaceTabs()!;
   const navigation = useNavigation();
   const createSearchItem = useCreateNativeMailSearchToolbarItem();
+  const { width: windowWidth } = useWindowDimensions();
   const tabActive = use(NativeWorkspaceTabActivityContext)?.active ?? true;
   const searchRef = useRef<SearchBarCommands>(null);
   const { isTabActive } = workspace;
@@ -157,7 +171,13 @@ export function WorkspacePhoneBar(props: {
 
   return (
     <NativeStackScreenOptions
-      optionsVersion={[selectedTab, tab.searchMode, props.filterMenu?.items, props.filterActive]}
+      optionsVersion={[
+        selectedTab,
+        tab.searchMode,
+        windowWidth,
+        props.filterMenu?.items,
+        props.filterActive,
+      ]}
       options={{
         unstable_headerRightItems: () => [],
         headerSearchBarOptions: searching
@@ -202,6 +222,7 @@ export function WorkspacePhoneBar(props: {
                   type: "custom",
                   element: (
                     <WorkspacePhoneSwitcher
+                      width={switcherWidth(windowWidth)}
                       selectedTab={selectedTab}
                       onSelect={(next) => {
                         Keyboard.dismiss();

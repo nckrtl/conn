@@ -46,7 +46,7 @@ export function withDevRendererAllowedOrigin(environment) {
     T3CODE_DEV_ALLOWED_ORIGINS: [...new Set([...existing, origin])].join(","),
   };
 }
-const LAUNCHER_VERSION = 20;
+const LAUNCHER_VERSION = 21;
 const developmentMacIconPngPath = NodePath.join(repoRoot, brand.icons.dev.macPng);
 const productionMacIconPngPath = NodePath.join(repoRoot, brand.icons.prod.macPng);
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher script has no Effect runtime.
@@ -121,8 +121,59 @@ export function resolveMacCodeSignArguments(appBundlePath) {
   return ["--force", "--deep", "--sign", "-", "--timestamp=none", appBundlePath];
 }
 
+/**
+ * nckrtl fork: the identifier the development runtime's Electron binary is signed under. Vault's
+ * Conn relay trusts it from the fork's Apple team, so the dev build can read Vault Database entries.
+ */
+export const DEV_RUNTIME_IDENTIFIER = "com.nckrtl.conn.dev";
+
+/**
+ * The Developer ID of the fork's team in a `security find-identity` listing, or null.
+ * `CONN_DEV_SIGNING_IDENTITY` overrides it; `-` keeps the runtime ad-hoc.
+ */
+export function pickDevSigningIdentity(listing, teamId, override) {
+  if (override) return override === "-" ? null : override;
+  if (!teamId) return null;
+  for (const match of listing.matchAll(/^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"/gm)) {
+    if (match[2].startsWith("Developer ID Application:") && match[2].endsWith(`(${teamId})`)) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function devSigningIdentity() {
+  const listing = NodeChildProcess.spawnSync(
+    "security",
+    ["find-identity", "-v", "-p", "codesigning"],
+    {
+      encoding: "utf8",
+    },
+  ).stdout;
+  return pickDevSigningIdentity(
+    listing ?? "",
+    resolveForkBrand(process.env).appleTeamId,
+    process.env.CONN_DEV_SIGNING_IDENTITY,
+  );
+}
+
 function signMacLauncherBundle(appBundlePath) {
   runChecked("codesign", resolveMacCodeSignArguments(appBundlePath));
+  const identity = isDevelopment ? devSigningIdentity() : null;
+  if (!identity) return;
+  // Sign Electron under a fixed identifier, then reseal the bundle around it. Only a runtime
+  // rebuild gets here; restarts reuse the runtime and load the app's code from the checkout.
+  const electronBinaryPath = NodePath.join(appBundlePath, "Contents", "MacOS", "Electron");
+  runChecked("codesign", [
+    "--force",
+    "--sign",
+    identity,
+    "--identifier",
+    DEV_RUNTIME_IDENTIFIER,
+    "--timestamp=none",
+    electronBinaryPath,
+  ]);
+  runChecked("codesign", ["--force", "--sign", "-", "--timestamp=none", appBundlePath]);
 }
 
 function shellSingleQuote(value) {

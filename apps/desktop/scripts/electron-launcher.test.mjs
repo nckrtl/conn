@@ -10,6 +10,7 @@ import {
   makeDevelopmentLauncherScript,
   resolveElectronBinaryPath,
   resolveMacBundleInfoPlistStrings,
+  pickDevSigningIdentity,
   resolveMacCodeSignArguments,
   resolveMacLauncherIconPaths,
   resolveMacLauncherPaths,
@@ -157,5 +158,20 @@ describe("electron development launcher", () => {
       /assets[\\/]conn[\\/]prod[\\/]conn-prod-macos-1024\.png$/,
     );
     assert.equal(production.generatedIconPath, "/runtime/icon-prod.icns");
+  });
+
+  it("picks the fork team's Developer ID for the dev runtime", () => {
+    const listing = [
+      '  1) F30924F6D74A3891902C54047FD20F59B6BE07BD "Drift Local Development"',
+      '  2) D544EF64013E6D26144153665506839674354703 "Apple Development: Nick Retel (G9Y9TT23QF)"',
+      '  3) 2D638C37AAC81EAFE4771EE998EB8E2FD60EB0CC "Developer ID Application: Nick Retel (9SVJ4SYB9B)"',
+    ].join("\n");
+    assert.equal(
+      pickDevSigningIdentity(listing, "9SVJ4SYB9B", undefined),
+      "2D638C37AAC81EAFE4771EE998EB8E2FD60EB0CC",
+    );
+    assert.equal(pickDevSigningIdentity(listing, "OTHERTEAM1", undefined), null);
+    assert.equal(pickDevSigningIdentity(listing, "9SVJ4SYB9B", "-"), null);
+    assert.equal(pickDevSigningIdentity(listing, undefined, "My Identity"), "My Identity");
   });
 });

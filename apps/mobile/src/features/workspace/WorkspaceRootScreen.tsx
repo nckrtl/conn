@@ -13,6 +13,8 @@ import {
   useNativeLayoutMetrics,
 } from "../../native/native-layout-metrics";
 import { HomeRouteScreen } from "../home/HomeRouteScreen";
+import { HomeConnectionStatusOverlay } from "../home/HomeScreen";
+import { NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET } from "../layout/native-mail-search-toolbar";
 import { dispatchHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { WorkspaceConnectionTitle } from "../home/WorkspaceConnectionTitle";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
@@ -109,7 +111,8 @@ function WorkspaceRootContent() {
             optionsVersion={[state.selectedTab, state.selectionRevision, width, sidebarNavigation]}
             options={{
               title: TAB_TITLES[state.selectedTab],
-              headerShown: true,
+              // Conn: iPhones keep the space; the bottom bar shows the selected tab.
+              headerShown: !connPhoneBar,
               unstable_headerLeftItems: () => [],
               headerTitle: renderHeaderTitle,
             }}
@@ -144,6 +147,17 @@ function WorkspaceRootContent() {
         <SafeAreaInsetsContext value={sidebarTabs ? { ...insets, top: 0 } : insets}>
           {state.selectedTab === "threads" ? <HomeRouteScreen /> : <PullRequestsScreen />}
         </SafeAreaInsetsContext>
+        {connPhoneBar ? (
+          <HomeConnectionStatusOverlay
+            bottom={insets.bottom + NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET + 8}
+            onOpenEnvironments={() =>
+              navigation.navigate("SettingsSheet", {
+                screen: "SettingsContent",
+                params: { screen: "SettingsEnvironments" },
+              })
+            }
+          />
+        ) : null}
         {/* Conn: on iPhone, each list renders WorkspacePhoneBar instead. */}
         {connPhoneBar ? null : (
           <WorkspaceToolbar

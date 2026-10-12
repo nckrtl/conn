@@ -249,7 +249,7 @@ const CONNECTION_STATUS_RESUME_GRACE_MS = 2_000;
 
 // Keep the status above the bottom search toolbar without moving list rows.
 // It stays tappable (opens environment settings) while the rest passes touches.
-function HomeConnectionStatusOverlay(props: {
+export function HomeConnectionStatusOverlay(props: {
   readonly bottom: number;
   readonly onOpenEnvironments?: () => void;
 }) {
@@ -330,7 +330,10 @@ export function HomeScreen(props: HomeScreenProps) {
   // The glass iOS Home hides its nav bar outside the native sidebar column. The
   // workspace root shows its own bar with the connection status in the title.
   const homeHidesHeader =
-    Platform.OS === "ios" && NATIVE_LIQUID_GLASS_SUPPORTED && !primaryColumn && workspace === null;
+    Platform.OS === "ios" &&
+    NATIVE_LIQUID_GLASS_SUPPORTED &&
+    !primaryColumn &&
+    (workspace === null || connPhoneBar);
   const screenMetrics = useNativeLayoutMetrics();
   const contentSideInsets = usesNativeWorkspaceColumns
     ? (columnMetrics ?? screenMetrics)?.safeArea
@@ -1165,7 +1168,8 @@ export function HomeScreen(props: HomeScreenProps) {
           </GestureDetector>
         </SwipeableScrollGateProvider>
       </View>
-      {homeHidesHeader ? (
+      {/* Conn: the workspace root shows the status for both iPhone tabs. */}
+      {homeHidesHeader && !connPhoneBar ? (
         <HomeConnectionStatusOverlay
           bottom={insets.bottom + NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET + 8}
           onOpenEnvironments={props.onOpenEnvironments}

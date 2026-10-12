@@ -114,7 +114,8 @@ export function HomeHeader(props: HomeHeaderProps) {
                     autoCapitalize: "none" as const,
                     onCancelButtonPress: () => props.onSearchQueryChange(""),
                   },
-                  // Bottom bar, left to right: settings, filter, search, then create.
+                  // Bottom bar, left to right: settings, search with the filter
+                  // inside its trailing edge, then create.
                   unstable_headerToolbarItems: () => [
                     withNativeGlassHeaderItem({
                       accessibilityLabel: "Open settings",
@@ -128,6 +129,8 @@ export function HomeHeader(props: HomeHeaderProps) {
                     createNativeMailSearchToolbarItem({
                       composeButtonId: "home-new-task",
                       composeSystemImageName: "plus",
+                      // Conn: the filter sits inside the search field, not beside settings.
+                      filterInsideSearch: true,
                       filterMenu,
                       filterButtonId: "home-filter",
                       filterSystemImageName: hasCustomListOptions

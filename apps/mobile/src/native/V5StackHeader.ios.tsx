@@ -162,11 +162,16 @@ export function V5StackHeader(props: {
     return convertItems([item], `toolbar:${index}`);
   });
   if (mailSearch) {
+    const filterInSearchField = bottomSearch && mailSearch.filterInsideSearch === true;
     if (mailSearch.filterMenu)
       bottom.push({
         type: "item",
         id: mailSearch.filterButtonId ?? "filter",
         axisBehavior: bottomSearch ? "horizontalOnly" : undefined,
+        // Conn: the filter sits inside the bottom search field, like Mail. Native
+        // code reads the title only as the button's accessibility label there.
+        searchFieldAccessory: filterInSearchField,
+        ...(filterInSearchField ? { title: "Filter" } : {}),
         icon: {
           type: "sfSymbol",
           name: mailSearch.filterSystemImageName ?? "line.3.horizontal.decrease",

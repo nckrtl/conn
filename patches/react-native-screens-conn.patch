@@ -1,0 +1,279 @@
+diff -ruN a/ios/header/RNSHeaderCoordinator.mm b/ios/header/RNSHeaderCoordinator.mm
+--- a/ios/header/RNSHeaderCoordinator.mm	2026-10-12 17:24:19
++++ b/ios/header/RNSHeaderCoordinator.mm	2026-10-12 17:24:20
+@@ -4,6 +4,7 @@
+ #import "RNSConversions-Stack.h"
+ #import "RNSDefines.h"
+ #import "RNSHeaderContentFactory.h"
++#import "RNSHeaderIconResolver.h"
+ #import "RNSHeaderItemDataProviding.h"
+ #import "RNSHeaderItemSpacerDataProviding.h"
+ #import "RNSHeaderMenuCoordinator.h"
+@@ -29,6 +30,11 @@
+   NSMutableArray<UIBarButtonItem *> *_Nonnull _trailingBarButtonItems;
+   NSMutableArray<UIBarButtonItem *> *_Nonnull _toolbarBarButtonItems;
+   NSMutableDictionary<NSString *, UIBarButtonItem *> *_Nonnull _barButtonItemsByItemId;
++
++#if !TARGET_OS_TV
++  // Conn: the menu button this coordinator put inside the toolbar search field.
++  __weak UIButton *_Nullable _searchFieldAccessoryButton;
++#endif // !TARGET_OS_TV
+ }
+ 
+ - (instancetype)initWithScreenController:(UIViewController *)controller
+@@ -81,6 +87,9 @@
+   UIView *titleView = nil;
+   UIView *subtitleView = nil;
+   UIView *largeSubtitleView = nil;
++#if !TARGET_OS_TV
++  id<RNSHeaderItemDataProviding> searchFieldAccessoryItem = nil;
++#endif // !TARGET_OS_TV
+ 
+   for (UIView *child in _configDataProvider.children) {
+     if ([child conformsToProtocol:@protocol(RNSHeaderItemDataProviding)]) {
+@@ -95,7 +104,11 @@
+           break;
+         case RNSHeaderItemPlacementToolbar:
+ #if !TARGET_OS_TV
+-          [_toolbarBarButtonItems addObject:[self buildBarButtonItemForItem:item]];
++          if (item.searchFieldAccessory) {
++            searchFieldAccessoryItem = item;
++          } else {
++            [_toolbarBarButtonItems addObject:[self buildBarButtonItemForItem:item]];
++          }
+ #endif // !TARGET_OS_TV
+           break;
+         case RNSHeaderItemPlacementTitle:
+@@ -137,6 +150,9 @@
+   }
+ 
+   [self applyConfigPropertiesForController:controller];
++#if !TARGET_OS_TV
++  [self applySearchFieldAccessoryForItem:searchFieldAccessoryItem];
++#endif // !TARGET_OS_TV
+   [self applyItemsWithTitleView:titleView
+                    subtitleView:subtitleView
+               largeSubtitleView:largeSubtitleView
+@@ -239,6 +255,10 @@
+     }
+     case RNSHeaderItemPlacementToolbar: {
+ #if !TARGET_OS_TV
++      if (targetItem.searchFieldAccessory) {
++        [self applySearchFieldAccessoryForItem:targetItem];
++        break;
++      }
+       UIBarButtonItem *newBarButtonItem = [self buildBarButtonItemForItem:targetItem];
+       NSUInteger index = oldBarButtonItem == nil ? NSNotFound : [_toolbarBarButtonItems indexOfObject:oldBarButtonItem];
+       if (index != NSNotFound) {
+@@ -416,6 +436,15 @@
+     return;
+   }
+ 
++#if !TARGET_OS_TV
++  // Conn: the search field accessory has no bar button item; rebuild its button.
++  id<RNSHeaderItemDataProviding> accessoryItem = [self findItemWithId:itemId];
++  if (accessoryItem.searchFieldAccessory && accessoryItem.placement == RNSHeaderItemPlacementToolbar) {
++    [self applySearchFieldAccessoryForItem:accessoryItem];
++    return;
++  }
++#endif // !TARGET_OS_TV
++
+   UIBarButtonItem *barButtonItem = _barButtonItemsByItemId[itemId];
+   if (barButtonItem == nil) {
+     return;
+@@ -731,4 +760,66 @@
+   return barButtonItem;
+ }
+ 
++#if !TARGET_OS_TV
++// Conn: shows a toolbar menu item as a button on the trailing edge of the
++// toolbar search field, like Mail's filter. Passing nil removes the button.
++- (void)applySearchFieldAccessoryForItem:(nullable id<RNSHeaderItemDataProviding>)item
++{
++  UISearchTextField *field = [self requireScreenController].navigationItem.searchController.searchBar.searchTextField;
++  UIButton *installed = _searchFieldAccessoryButton;
++  if (installed != nil && installed.superview != nil && field.rightView != installed) {
++    // The search controller changed; drop the button from the old field.
++    [installed removeFromSuperview];
++  }
++  if (item == nil || field == nil) {
++    if (installed != nil && field.rightView == installed) {
++      field.rightView = nil;
++    }
++    _searchFieldAccessoryButton = nil;
++    return;
++  }
++
++  UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
++  button.tintColor = UIColor.secondaryLabelColor;
++  button.accessibilityLabel = item.title;
++  button.accessibilityIdentifier = item.identifier;
++  UIImageSymbolConfiguration *symbolConfiguration =
++      [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleBody scale:UIImageSymbolScaleMedium];
++  [button setPreferredSymbolConfiguration:symbolConfiguration forImageInState:UIControlStateNormal];
++  if (item.icon != nil) {
++    __weak UIButton *weakButton = button;
++    UIImage *syncImage = [RNSHeaderIconResolver resolveIcon:item.icon
++                                            withImageLoader:_imageLoader
++                                       asyncCompletionBlock:^(UIImage *_Nullable image) {
++                                         [weakButton setImage:image forState:UIControlStateNormal];
++                                       }];
++    [button setImage:syncImage ? syncImage : [RNSHeaderIconResolver placeholderImageForIcon:item.icon]
++            forState:UIControlStateNormal];
++  }
++  if (item.menu != nil && item.itemId != nil) {
++    RNSHeaderMenuToggleStateTracker *tracker = [_trackerRegistry trackerForItemId:item.itemId];
++    __weak auto weakSelf = self;
++    NSString *capturedItemId = item.itemId;
++    button.menu = [RNSHeaderMenuCoordinator buildUIMenuFromData:item.menu
++                                       withHeaderEventsDelegate:_eventsDelegate
++                                                   stateTracker:tracker
++                                                withImageLoader:_imageLoader
++                                        menuInvalidatedCallback:^{
++                                          [weakSelf reapplyMenuForItemWithId:capturedItemId];
++                                        }];
++    button.showsMenuAsPrimaryAction = YES;
++  }
++  [button sizeToFit];
++  CGRect frame = button.frame;
++  frame.size.width = MAX(frame.size.width, 30.0);
++  button.frame = frame;
++
++  field.rightView = button;
++  // While typing, the field's clear button takes the trailing edge.
++  field.rightViewMode = UITextFieldViewModeUnlessEditing;
++  _searchFieldAccessoryButton = button;
++}
++#endif // !TARGET_OS_TV
++
+ @end
++
+diff -ruN a/ios/header/RNSHeaderItemComponentView.mm b/ios/header/RNSHeaderItemComponentView.mm
+--- a/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 17:24:19
++++ b/ios/header/RNSHeaderItemComponentView.mm	2026-10-12 17:24:20
+@@ -79,6 +79,11 @@
+   return std::static_pointer_cast<const react::RNSHeaderItemIOSProps>(_props)->searchBarPlacement;
+ }
+ 
++- (BOOL)searchFieldAccessory
++{
++  return std::static_pointer_cast<const react::RNSHeaderItemIOSProps>(_props)->searchFieldAccessory;
++}
++
+ - (void)emitOnPress
+ {
+   [_headerItemEventEmitter emitOnPress];
+@@ -198,6 +203,7 @@
+   const auto &oldItemProps = *std::static_pointer_cast<const react::RNSHeaderItemIOSProps>(_props);
+ 
+   BOOL needsUpdate = oldItemProps.searchBarPlacement != newItemProps.searchBarPlacement ||
++      oldItemProps.searchFieldAccessory != newItemProps.searchFieldAccessory ||
+       oldItemProps.axisBehavior != newItemProps.axisBehavior;
+   BOOL menuDidChange = NO;
+ 
+diff -ruN a/ios/header/RNSHeaderItemDataProviding.h b/ios/header/RNSHeaderItemDataProviding.h
+--- a/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 17:24:19
++++ b/ios/header/RNSHeaderItemDataProviding.h	2026-10-12 17:24:20
+@@ -22,6 +22,8 @@
+ @property (nonatomic, readonly) BOOL respondsToOnPress;
+ @property (nonatomic, readonly) BOOL hidesSharedBackground;
+ @property (nonatomic, readonly) BOOL searchBarPlacement;
++// Conn: a toolbar menu item shown inside the toolbar search field instead of as its own button.
++@property (nonatomic, readonly) BOOL searchFieldAccessory;
+ @property (nonatomic, readonly) RNSHeaderItemAxisBehavior axisBehavior;
+ @property (nonatomic, readonly) RNSHeaderItemVisibilityPriority visibilityPriority;
+ 
+diff -ruN a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts
+--- a/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 17:24:19
++++ b/lib/typescript/components/stack/header/StackHeaderConfig.ios.types.d.ts	2026-10-12 17:24:20
+@@ -204,6 +204,8 @@
+ export interface StackHeaderInlineItemIOS extends StackHeaderBaseItemIOS, SupportsMenuIOS, SupportsIdentifierIOS, SupportsAxisBehaviorIOS, SupportsSharedBackgroundIOS, SupportsVisibilityPriorityIOS {
+     /** Uses UIKit's search placement item on iOS 26 and later. */
+     searchBarPlacement?: boolean | undefined;
++    /** Conn: toolbar menu item shown as a button inside the toolbar search field (iOS 26 and later). */
++    searchFieldAccessory?: boolean | undefined;
+     /**
+      * @summary Marks this object as a header item definition.
+      *
+diff -ruN a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts
+--- a/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 17:24:19
++++ b/lib/typescript/components/stack/header/ios/StackHeaderItem.ios.types.d.ts	2026-10-12 17:24:20
+@@ -11,6 +11,8 @@
+     hidesSharedBackground?: boolean | undefined;
+     /** Uses UIKit's search placement item on iOS 26 and later. */
+     searchBarPlacement?: boolean | undefined;
++    /** Toolbar menu item shown as a button inside the toolbar search field (iOS 26 and later). */
++    searchFieldAccessory?: boolean | undefined;
+     axisBehavior?: StackHeaderItemAxisBehaviorIOS | undefined;
+     visibilityPriority?: StackHeaderItemVisibilityPriorityIOS | undefined;
+     title?: string | undefined;
+diff -ruN a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts
+--- a/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 17:24:19
++++ b/lib/typescript/fabric/header/HeaderItemIOSNativeComponent.d.ts	2026-10-12 17:24:20
+@@ -43,6 +43,7 @@
+     identifier?: string | undefined;
+     hidesSharedBackground?: CT.WithDefault<boolean, false>;
+     searchBarPlacement?: CT.WithDefault<boolean, false>;
++    searchFieldAccessory?: CT.WithDefault<boolean, false>;
+     axisBehavior?: CT.WithDefault<'automatic' | 'horizontalOnly' | 'verticalPreferred', 'automatic'>;
+     visibilityPriority?: CT.WithDefault<StackHeaderItemVisibilityPriorityIOS, 'standard'>;
+     title?: string | undefined;
+diff -ruN a/lib/typescript/legacy/types.d.ts b/lib/typescript/legacy/types.d.ts
+--- a/lib/typescript/legacy/types.d.ts	2026-10-12 17:24:19
++++ b/lib/typescript/legacy/types.d.ts	2026-10-12 17:24:20
+@@ -1285,6 +1285,8 @@
+     composeMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
+     composeSystemImageName?: string | undefined;
+     filterButtonId?: string | undefined;
++    /** Puts the filter menu button inside the search field's trailing edge instead of beside it. */
++    filterInsideSearch?: boolean | undefined;
+     filterMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
+     filterSystemImageName?: string | undefined;
+     onComposePress?: (() => void) | undefined;
+diff -ruN a/src/components/stack/header/StackHeaderConfig.ios.types.ts b/src/components/stack/header/StackHeaderConfig.ios.types.ts
+--- a/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 17:24:20
++++ b/src/components/stack/header/StackHeaderConfig.ios.types.ts	2026-10-12 17:24:20
+@@ -224,6 +224,8 @@
+     SupportsVisibilityPriorityIOS {
+   /** Uses UIKit's search placement item on iOS 26 and later. */
+   searchBarPlacement?: boolean | undefined;
++  /** Conn: toolbar menu item shown as a button inside the toolbar search field (iOS 26 and later). */
++  searchFieldAccessory?: boolean | undefined;
+   /**
+    * @summary Marks this object as a header item definition.
+    *
+diff -ruN a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts
+--- a/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 17:24:20
++++ b/src/components/stack/header/ios/StackHeaderItem.ios.types.ts	2026-10-12 17:24:20
+@@ -19,6 +19,8 @@
+   hidesSharedBackground?: boolean | undefined;
+   /** Uses UIKit's search placement item on iOS 26 and later. */
+   searchBarPlacement?: boolean | undefined;
++  /** Toolbar menu item shown as a button inside the toolbar search field (iOS 26 and later). */
++  searchFieldAccessory?: boolean | undefined;
+   axisBehavior?: StackHeaderItemAxisBehaviorIOS | undefined;
+   visibilityPriority?: StackHeaderItemVisibilityPriorityIOS | undefined;
+   title?: string | undefined;
+diff -ruN a/src/fabric/header/HeaderItemIOSNativeComponent.ts b/src/fabric/header/HeaderItemIOSNativeComponent.ts
+--- a/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 17:24:20
++++ b/src/fabric/header/HeaderItemIOSNativeComponent.ts	2026-10-12 17:24:20
+@@ -76,6 +76,7 @@
+   identifier?: string | undefined;
+   hidesSharedBackground?: CT.WithDefault<boolean, false>;
+   searchBarPlacement?: CT.WithDefault<boolean, false>;
++  searchFieldAccessory?: CT.WithDefault<boolean, false>;
+   axisBehavior?: CT.WithDefault<
+     'automatic' | 'horizontalOnly' | 'verticalPreferred',
+     'automatic'
+diff -ruN a/src/legacy/types.ts b/src/legacy/types.ts
+--- a/src/legacy/types.ts	2026-10-12 17:24:19
++++ b/src/legacy/types.ts	2026-10-12 17:24:20
+@@ -1420,6 +1420,8 @@
+   composeMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
+   composeSystemImageName?: string | undefined;
+   filterButtonId?: string | undefined;
++  /** Puts the filter menu button inside the search field's trailing edge instead of beside it. */
++  filterInsideSearch?: boolean | undefined;
+   filterMenu?: HeaderBarButtonItemWithMenu['menu'] | undefined;
+   filterSystemImageName?: string | undefined;
+   onComposePress?: (() => void) | undefined;

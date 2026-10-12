@@ -8,6 +8,9 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const driver = vi.hoisted(() => ({
   postgresStatements: [] as Array<{ sql: string; args: unknown; options: unknown }>,
   mysqlOptions: [] as unknown[],
+  mysqlStatements: [] as string[],
+  /** The next MySQL query fails with this error code, as when the server drops the connection. */
+  mysqlFailNext: null as string | null,
 }));
 
 // The network drivers are replaced, so these tests can check how user SQL reaches them.
@@ -27,12 +30,27 @@ vi.mock("mysql2/promise", () => ({
   default: {
     createConnection: async (options: unknown) => {
       driver.mysqlOptions.push(options);
-      return { query: async () => [[], []], end: async () => undefined, destroy: () => undefined };
+      return {
+        query: async (query: string | { sql: string }) => {
+          const sql = typeof query === "string" ? query : query.sql;
+          if (driver.mysqlFailNext && !sql.startsWith("SET SESSION")) {
+            const code = driver.mysqlFailNext;
+            driver.mysqlFailNext = null;
+            throw Object.assign(new Error("Connection lost: The server closed the connection."), {
+              code,
+            });
+          }
+          driver.mysqlStatements.push(sql);
+          return [[], []];
+        },
+        end: async () => undefined,
+        destroy: () => undefined,
+      };
     },
   },
 }));
 
-import { runDatabase } from "./database.ts";
+import { closeDatabaseSessions, runDatabase } from "./database.ts";
 
 const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-database-panel-"));
 const file = NodePath.join(dir, "app.sqlite");
@@ -121,30 +139,18 @@ describe("database panel runner", () => {
     ).toEqual([{ n: 2 }]);
   });
 
-  it("fetches a Vault connection's credentials for each call", async () => {
-    const calls: Array<[string, boolean]> = [];
-    const resolve = async (itemID: string, allowUnlock: boolean) => {
-      calls.push([itemID, allowUnlock]);
-      return connection;
-    };
-    const vaultConnection = { ...connection, database: "", vaultItemId: "entry-1" };
-
-    const result = await runDatabase({ connection: vaultConnection, operation: "tables" }, resolve);
-    await runDatabase(
-      { connection: vaultConnection, allowUnlock: true, operation: "tables" },
-      resolve,
-    );
-
-    expect(result.tables).toEqual(["users"]);
-    expect(calls).toEqual([
-      ["entry-1", false],
-      ["entry-1", true],
-    ]);
-  });
-
   it("reports a locked Vault as the call's error", async () => {
+    await closeDatabaseSessions();
     const result = await runDatabase(
-      { connection: { ...connection, vaultItemId: "entry-1" }, operation: "tables" },
+      {
+        connection: {
+          ...connection,
+          driver: "mysql",
+          host: "db.test",
+          vaultItemId: "entry-locked",
+        },
+        operation: "tables",
+      },
       async () => {
         throw new Error("Vault is locked. Unlock Vault to use this connection.");
       },
@@ -155,9 +161,73 @@ describe("database panel runner", () => {
   describe("network drivers", () => {
     const remote = { ...connection, host: "db.test", database: "app" };
 
-    beforeEach(() => {
+    beforeEach(async () => {
+      await closeDatabaseSessions();
       driver.postgresStatements.length = 0;
       driver.mysqlOptions.length = 0;
+      driver.mysqlStatements.length = 0;
+      driver.mysqlFailNext = null;
+    });
+
+    it("keeps one MySQL connection open and sets it read-only once", async () => {
+      const mysqlConnection = { ...remote, driver: "mysql" as const };
+      await runDatabase({ connection: mysqlConnection, operation: "tables" });
+      await runDatabase({ connection: mysqlConnection, operation: "query", sql: "select 1" });
+      await runDatabase({ connection: mysqlConnection, operation: "query", sql: "select 2" });
+
+      expect(driver.mysqlOptions).toHaveLength(1);
+      expect(driver.mysqlStatements[0]).toBe("SET SESSION TRANSACTION READ ONLY");
+      expect(driver.mysqlStatements.filter((sql) => sql.startsWith("SET SESSION"))).toHaveLength(1);
+      expect(driver.mysqlStatements).toContain("select 2");
+      expect(driver.mysqlStatements).not.toContain("START TRANSACTION READ ONLY");
+    });
+
+    it("asks Vault once per connection, not per call", async () => {
+      const calls: Array<[string, boolean]> = [];
+      const resolve = async (itemID: string, allowUnlock: boolean) => {
+        calls.push([itemID, allowUnlock]);
+        return { ...remote, driver: "mysql" as const, password: "secret" };
+      };
+      const vaultConnection = { ...remote, driver: "mysql" as const, vaultItemId: "entry-1" };
+
+      await runDatabase(
+        { connection: vaultConnection, allowUnlock: true, operation: "tables" },
+        resolve,
+      );
+      await runDatabase(
+        { connection: vaultConnection, operation: "query", sql: "select 1" },
+        resolve,
+      );
+
+      expect(calls).toEqual([["entry-1", true]]);
+      expect(driver.mysqlOptions).toEqual([expect.objectContaining({ password: "secret" })]);
+    });
+
+    it("opens a new connection once when the server dropped the old one", async () => {
+      const mysqlConnection = { ...remote, driver: "mysql" as const };
+      await runDatabase({ connection: mysqlConnection, operation: "tables" });
+      driver.mysqlFailNext = "PROTOCOL_CONNECTION_LOST";
+
+      const result = await runDatabase({
+        connection: mysqlConnection,
+        operation: "query",
+        sql: "select 3",
+      });
+
+      expect(result.error).toBeNull();
+      expect(driver.mysqlOptions).toHaveLength(2);
+      expect(driver.mysqlStatements).toContain("select 3");
+    });
+
+    it("keeps the connection after a query error", async () => {
+      const mysqlConnection = { ...remote, driver: "mysql" as const };
+      await runDatabase({ connection: mysqlConnection, operation: "tables" });
+      driver.mysqlFailNext = "ER_PARSE_ERROR";
+
+      await runDatabase({ connection: mysqlConnection, operation: "query", sql: "select oops" });
+      await runDatabase({ connection: mysqlConnection, operation: "query", sql: "select 4" });
+
+      expect(driver.mysqlOptions).toHaveLength(1);
     });
 
     it("keeps the PostgreSQL session read-only before it runs user SQL", async () => {

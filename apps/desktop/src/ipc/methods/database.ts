@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off -- The idle timer of an open database connection runs outside any Effect fiber.
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import mysql from "mysql2/promise";
@@ -9,13 +10,17 @@ import { DATABASE_RUN_CHANNEL } from "../channels.ts";
 import { vaultCredential, type VaultTls } from "./vault.ts";
 
 // The Database panel's runner. The desktop main process connects directly (no T3 server
-// change), opens one connection per call and closes it again. Everything is read-only:
-// only reading statements may run, inside a read-only transaction that is rolled back
-// (SQLite opens the file read-only instead). A Vault connection carries only its entry id; its
-// credentials are fetched from Vault for each call and are never kept.
+// change) and keeps one open connection per database, so a query costs one round trip instead
+// of a new login each time. A connection closes after IDLE_MS without use. Everything is
+// read-only: only reading statements may run. MySQL sessions are set read-only once; PostgreSQL
+// runs each call in a pipelined read-only transaction that is rolled back, which also undoes any
+// session setting a query changes. SQLite opens the file read-only. A Vault connection carries
+// only its entry id; Vault is asked for its credentials when the connection opens, and they live
+// only as long as that connection.
 
 const ROW_LIMIT = 500;
 const TIMEOUT_SECONDS = 30;
+const IDLE_MS = 5 * 60_000;
 
 const Connection = Schema.Struct({
   driver: Schema.Literals(["mysql", "pgsql", "sqlite"]),
@@ -60,7 +65,6 @@ const DatabaseResponse = Schema.Struct({
 type Request = typeof DatabaseRequest.Type;
 /** A connection ready to open; `tls` comes only from a Vault entry. */
 type Resolved = Request["connection"] & { readonly tls?: VaultTls };
-type ResolvedRequest = Omit<Request, "connection"> & { readonly connection: Resolved };
 export type VaultResolver = (
   itemID: string,
   allowUnlock: boolean,
@@ -147,10 +151,7 @@ function tlsSetting(tls: VaultTls | undefined) {
   return ssl ? { ssl } : {};
 }
 
-async function withMysql<T>(
-  connection: Resolved,
-  run: (client: mysql.Connection) => Promise<T>,
-): Promise<T> {
+async function openMysql(connection: Resolved): Promise<Session<mysql.Connection>> {
   const client = await mysql.createConnection({
     host: connection.host || "127.0.0.1",
     port: connection.port ?? 3306,
@@ -164,16 +165,13 @@ async function withMysql<T>(
     multipleStatements: false,
     ...tlsSetting(connection.tls),
   });
-  try {
-    await client.query("START TRANSACTION READ ONLY");
-    try {
-      return await run(client);
-    } finally {
-      await client.query("ROLLBACK").catch(() => undefined);
-    }
-  } finally {
-    await client.end().catch(() => client.destroy());
-  }
+  // Every later statement runs read-only. `set` is not a reading statement, so a query cannot undo it.
+  await client.query("SET SESSION TRANSACTION READ ONLY");
+  return {
+    client,
+    driver: "mysql",
+    close: () => client.end().catch(() => client.destroy()),
+  };
 }
 
 async function mysqlRows(client: mysql.Connection, sql: string, values: unknown[] = []) {
@@ -185,8 +183,8 @@ async function mysqlRows(client: mysql.Connection, sql: string, values: unknown[
   };
 }
 
-async function runMysql(request: ResolvedRequest): Promise<Partial<Response>> {
-  return withMysql(request.connection, async (client) => {
+async function runMysql(client: mysql.Connection, request: Request): Promise<Partial<Response>> {
+  {
     if (request.operation === "tables") {
       const result = await mysqlRows(
         client,
@@ -211,15 +209,12 @@ async function runMysql(request: ResolvedRequest): Promise<Partial<Response>> {
       };
     }
     return limitRows(await mysqlRows(client, request.sql ?? ""));
-  });
+  }
 }
 
 // ─── PostgreSQL ──────────────────────────────────────────────────────────────
 
-async function withPostgres<T>(
-  connection: Resolved,
-  run: (client: postgres.ReservedSql) => Promise<T>,
-): Promise<T> {
+async function openPostgres(connection: Resolved): Promise<Session<postgres.ReservedSql>> {
   const sql = postgres({
     host: connection.host || "127.0.0.1",
     port: connection.port ?? 5432,
@@ -229,28 +224,47 @@ async function withPostgres<T>(
     max: 1,
     prepare: false,
     connect_timeout: 10,
-    idle_timeout: 1,
+    idle_timeout: 0,
     onnotice: () => undefined,
     ...tlsSetting(connection.tls),
   });
   try {
     const client = await sql.reserve();
-    try {
-      // The session is read-only too, so a `commit` cannot turn writes back on.
-      await client.unsafe(
-        `set statement_timeout = ${TIMEOUT_SECONDS * 1000}; set default_transaction_read_only = on`,
-      );
-      await client.unsafe("begin read only");
-      try {
-        return await run(client);
-      } finally {
-        await client.unsafe("rollback").catch(() => undefined);
-      }
-    } finally {
-      client.release();
-    }
-  } finally {
+    await client.unsafe(
+      `set statement_timeout = ${TIMEOUT_SECONDS * 1000}; set default_transaction_read_only = on`,
+    );
+    return {
+      client,
+      driver: "pgsql",
+      close: async () => {
+        client.release();
+        await sql.end({ timeout: 1 }).catch(() => undefined);
+      },
+    };
+  } catch (error) {
     await sql.end({ timeout: 1 }).catch(() => undefined);
+    throw error;
+  }
+}
+
+/**
+ * Runs `run` inside `begin read only` … `rollback`. The three are pipelined on the connection,
+ * so the transaction adds no round trip, and the rollback undoes any setting the query changed.
+ */
+async function postgresReadOnly<T>(
+  client: postgres.ReservedSql,
+  run: () => Promise<T>,
+): Promise<T> {
+  const begin = client.unsafe("begin read only");
+  const result = run();
+  const rollback = client.unsafe("rollback");
+  // If `begin` fails, its error is the one to report; the query's own failure is then expected.
+  result.catch(() => undefined);
+  await begin;
+  try {
+    return await result;
+  } finally {
+    await rollback.catch(() => undefined);
   }
 }
 
@@ -283,8 +297,11 @@ function postgresTable(name: string): [string, string] {
   return dot === -1 ? ["public", name] : [name.slice(0, dot), name.slice(dot + 1)];
 }
 
-async function runPostgres(request: ResolvedRequest): Promise<Partial<Response>> {
-  return withPostgres(request.connection, async (client) => {
+async function runPostgres(
+  client: postgres.ReservedSql,
+  request: Request,
+): Promise<Partial<Response>> {
+  return postgresReadOnly(client, async () => {
     if (request.operation === "tables") {
       const result = await postgresRows(
         client,
@@ -344,7 +361,7 @@ function sqliteRows(db: NodeSqlite.DatabaseSync, sql: string): Rows {
   return { columns, rows };
 }
 
-function runSqlite(request: ResolvedRequest): Partial<Response> {
+function runSqlite(request: Request): Partial<Response> {
   return withSqlite(request.connection, (db) => {
     if (request.operation === "tables") {
       return {
@@ -371,6 +388,104 @@ function runSqlite(request: ResolvedRequest): Partial<Response> {
   });
 }
 
+// ─── Open connections ────────────────────────────────────────────────────────
+
+interface Session<Client> {
+  readonly client: Client;
+  readonly driver: "mysql" | "pgsql";
+  readonly close: () => Promise<unknown>;
+}
+
+interface OpenSession {
+  readonly session: Promise<Session<mysql.Connection> | Session<postgres.ReservedSql>>;
+  /** Calls on one connection run one after another. */
+  queue: Promise<unknown>;
+  idle: ReturnType<typeof setTimeout> | undefined;
+}
+
+const sessions = new Map<string, OpenSession>();
+
+/** A Vault entry by its id, so a rotated password reuses the open connection; others by everything. */
+function sessionKey(connection: Request["connection"]): string {
+  if (connection.vaultItemId) return `vault:${connection.vaultItemId}`;
+  const { driver, host, port, database, username, password } = connection;
+  return JSON.stringify([driver, host, port, database, username, password]);
+}
+
+function closeSession(key: string, open: OpenSession): void {
+  if (sessions.get(key) !== open) return;
+  sessions.delete(key);
+  if (open.idle) clearTimeout(open.idle);
+  void open.session.then((session) => session.close()).catch(() => undefined);
+}
+
+function touch(key: string, open: OpenSession): void {
+  if (open.idle) clearTimeout(open.idle);
+  open.idle = setTimeout(() => closeSession(key, open), IDLE_MS);
+  open.idle.unref?.();
+}
+
+/** Closes every open connection, for tests and app shutdown. */
+export async function closeDatabaseSessions(): Promise<void> {
+  const open = [...sessions.entries()];
+  for (const [key, entry] of open) closeSession(key, entry);
+  await Promise.all(
+    open.map(([, entry]) => entry.session.then((s) => s.close()).catch(() => undefined)),
+  );
+}
+
+const LOST_CONNECTION =
+  /PROTOCOL_CONNECTION_LOST|ECONNRESET|EPIPE|ETIMEDOUT|Connection lost|connection.*(closed|ended|terminated)|CONNECTION_(CLOSED|ENDED|DESTROYED)|Can't add new command when connection is in closed state/i;
+
+function lostConnection(error: unknown): boolean {
+  const code =
+    typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+  const message = error instanceof Error ? error.message : String(error);
+  return code ? LOST_CONNECTION.test(code) : LOST_CONNECTION.test(message);
+}
+
+async function withSession(
+  request: Request,
+  resolveVault: VaultResolver,
+): Promise<Partial<Response>> {
+  const key = sessionKey(request.connection);
+  for (let attempt = 0; ; attempt++) {
+    let open = sessions.get(key);
+    if (!open) {
+      const connection = request.connection;
+      const opening = (async () => {
+        const resolved: Resolved = connection.vaultItemId
+          ? await resolveVault(connection.vaultItemId, request.allowUnlock ?? false)
+          : connection;
+        return resolved.driver === "mysql" ? openMysql(resolved) : openPostgres(resolved);
+      })();
+      open = { session: opening, queue: Promise.resolve(), idle: undefined };
+      const entry = open;
+      sessions.set(key, entry);
+      opening.catch(() => {
+        if (sessions.get(key) === entry) sessions.delete(key);
+      });
+    }
+    const entry = open;
+    touch(key, entry);
+    const call = entry.queue.then(async () => {
+      const session = await entry.session;
+      return session.driver === "mysql"
+        ? runMysql(session.client as mysql.Connection, request)
+        : runPostgres(session.client as postgres.ReservedSql, request);
+    });
+    entry.queue = call.catch(() => undefined);
+    try {
+      return await call;
+    } catch (error) {
+      if (!lostConnection(error)) throw error;
+      closeSession(key, entry);
+      // The server or network dropped the connection: open a new one, once.
+      if (attempt > 0) throw error;
+    }
+  }
+}
+
 // ─── Entry ───────────────────────────────────────────────────────────────────
 
 const EMPTY: Response = {
@@ -392,18 +507,10 @@ export async function runDatabase(
   const durationMs = () => Math.round((performance.now() - started) * 10) / 10;
   try {
     if (input.operation === "query") assertReading(input.sql ?? "");
-    const request: ResolvedRequest = input.connection.vaultItemId
-      ? {
-          ...input,
-          connection: await resolveVault(input.connection.vaultItemId, input.allowUnlock ?? false),
-        }
-      : input;
     const result =
-      request.connection.driver === "mysql"
-        ? await runMysql(request)
-        : request.connection.driver === "pgsql"
-          ? await runPostgres(request)
-          : runSqlite(request);
+      input.connection.driver === "sqlite"
+        ? runSqlite(input)
+        : await withSession(input, resolveVault);
     return { ...EMPTY, ...result, durationMs: durationMs() };
   } catch (error) {
     return {

@@ -13,10 +13,12 @@ public final class ConnSymbolsAppDelegateSubscriber: ExpoAppDelegateSubscriber {
 }
 
 /// Returns Conn's Phosphor custom symbols (ConnSymbols.xcassets, built by
-/// scripts/build-conn-symbols.ts) for the SF Symbol names in `connSymbolNames`.
-/// Swapping `UIImage`'s `systemImageNamed` methods covers every caller at once:
-/// expo-symbols views, native toolbar and tab bar items, and menus. Custom symbols
-/// keep symbol sizing, weight scale and tint. Other names stay SF Symbols.
+/// scripts/build-conn-symbols.ts) for `conn.<sf name>` names, where `<sf name>` is in
+/// `connSymbolNames`. `AppSymbol.ios.tsx` asks for those names inside a
+/// `ConnSymbolScope` (the thread feed); plain SF Symbol names, and so native
+/// toolbars, tab bars and menus, are untouched. Swapping `UIImage`'s
+/// `systemImageNamed` methods lets expo-symbols load them; custom symbols keep symbol
+/// sizing, weight scale and tint.
 enum ConnSymbols {
   private final class BundleMarker {}
 
@@ -42,14 +44,22 @@ enum ConnSymbols {
     )
   }
 
+  private static let prefix = "conn."
+
+  private static func assetName(_ name: String) -> String? {
+    guard name.hasPrefix(prefix) else { return nil }
+    let asset = String(name.dropFirst(prefix.count))
+    return connSymbolNames.contains(asset) ? asset : nil
+  }
+
   static func image(named name: String, configuration: UIImage.Configuration?) -> UIImage? {
-    guard connSymbolNames.contains(name), let bundle else { return nil }
-    return UIImage(named: name, in: bundle, with: configuration)
+    guard let asset = assetName(name), let bundle else { return nil }
+    return UIImage(named: asset, in: bundle, with: configuration)
   }
 
   static func image(named name: String, traitCollection: UITraitCollection?) -> UIImage? {
-    guard connSymbolNames.contains(name), let bundle else { return nil }
-    return UIImage(named: name, in: bundle, compatibleWith: traitCollection)
+    guard let asset = assetName(name), let bundle else { return nil }
+    return UIImage(named: asset, in: bundle, compatibleWith: traitCollection)
   }
 
   private static func swap(_ original: String, _ replacement: String) {

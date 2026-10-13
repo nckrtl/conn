@@ -4,8 +4,8 @@
  * keep their imports. To change an icon, edit its line. A Lucide name upstream
  * starts using fails the typecheck until it gets a line here.
  *
- * Icons are Phosphor's solid (fill) weight. Line glyphs whose solid form adds a
- * box behind them, such as Check, X and Plus, use the bold weight instead.
+ * Icons are Phosphor's solid (fill) weight. Carets, and line glyphs whose solid
+ * form adds a box behind them (Check, X, Plus), use the bold weight instead.
  * Project and workspace icons stay Lucide: they import `lucide-react-original`.
  */
 import { AlarmIcon as PhAlarm } from "@phosphor-icons/react/dist/csr/Alarm";
@@ -303,11 +303,11 @@ export const CheckIcon = connIcon(PhCheck, "check", "bold"),
   Check = CheckIcon;
 export const CheckCircle2Icon = connIcon(PhCheckCircle, "check-circle-2"),
   CheckCircle2 = CheckCircle2Icon;
-export const ChevronDownIcon = connIcon(PhCaretDown, "chevron-down"),
+export const ChevronDownIcon = connIcon(PhCaretDown, "chevron-down", "bold"),
   ChevronDown = ChevronDownIcon;
-export const ChevronLeftIcon = connIcon(PhCaretLeft, "chevron-left"),
+export const ChevronLeftIcon = connIcon(PhCaretLeft, "chevron-left", "bold"),
   ChevronLeft = ChevronLeftIcon;
-export const ChevronRightIcon = connIcon(PhCaretRight, "chevron-right"),
+export const ChevronRightIcon = connIcon(PhCaretRight, "chevron-right", "bold"),
   ChevronRight = ChevronRightIcon;
 export const ChevronsDownUpIcon = connIcon(PhArrowsInLineVertical, "chevrons-down-up"),
   ChevronsDownUp = ChevronsDownUpIcon;
@@ -316,9 +316,9 @@ export const ChevronsLeftRightEllipsisIcon = connIcon(
     "chevrons-left-right-ellipsis",
   ),
   ChevronsLeftRightEllipsis = ChevronsLeftRightEllipsisIcon;
-export const ChevronsUpDownIcon = connIcon(PhCaretUpDown, "chevrons-up-down"),
+export const ChevronsUpDownIcon = connIcon(PhCaretUpDown, "chevrons-up-down", "bold"),
   ChevronsUpDown = ChevronsUpDownIcon;
-export const ChevronUpIcon = connIcon(PhCaretUp, "chevron-up"),
+export const ChevronUpIcon = connIcon(PhCaretUp, "chevron-up", "bold"),
   ChevronUp = ChevronUpIcon;
 export const CircleIcon = connIcon(PhCircle, "circle", "bold"),
   Circle = CircleIcon;

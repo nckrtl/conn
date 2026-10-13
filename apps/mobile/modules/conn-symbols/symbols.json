@@ -50,15 +50,30 @@
   "checkmark.circle": "CheckCircle",
   "checkmark.circle.fill": "CheckCircle",
   "checkmark.shield": "ShieldCheck",
-  "chevron.backward": "CaretLeft",
-  "chevron.down": "CaretDown",
-  "chevron.left": "CaretLeft",
+  "chevron.backward": {
+    "icon": "CaretLeft",
+    "weight": "bold"
+  },
+  "chevron.down": {
+    "icon": "CaretDown",
+    "weight": "bold"
+  },
+  "chevron.left": {
+    "icon": "CaretLeft",
+    "weight": "bold"
+  },
   "chevron.left.forwardslash.chevron.right": {
     "icon": "Code",
     "weight": "bold"
   },
-  "chevron.right": "CaretRight",
-  "chevron.up": "CaretUp",
+  "chevron.right": {
+    "icon": "CaretRight",
+    "weight": "bold"
+  },
+  "chevron.up": {
+    "icon": "CaretUp",
+    "weight": "bold"
+  },
   "circle": {
     "icon": "Circle",
     "weight": "bold"

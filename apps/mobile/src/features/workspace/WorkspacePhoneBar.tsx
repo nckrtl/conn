@@ -14,9 +14,11 @@ import { useWorkspaceTabs } from "./WorkspaceTabsContext";
 import type { WorkspaceTab } from "./workspace-tabs-state";
 
 const SWITCHER_HEIGHT = 48;
-// The selected pill sits this far inside the glass, with concentric corners.
+// The selected pill sits this far inside the glass, with concentric corners. The
+// toolbar already pads custom views by about this much at the sides, so the group
+// only pads top and bottom.
 const SWITCHER_PADDING = 4;
-const SWITCHER_ITEM_WIDTH = 72;
+const SWITCHER_ITEM_WIDTH = 64;
 // The toolbar keeps this much room for its two 48pt buttons, gaps and margins.
 const TOOLBAR_RESERVED = 20 * 2 + 48 * 2 + 12 * 2;
 
@@ -32,10 +34,7 @@ const SWITCHER_ITEMS = [
 ] as const;
 
 function switcherWidth(windowWidth: number) {
-  return Math.min(
-    SWITCHER_ITEM_WIDTH * SWITCHER_ITEMS.length + SWITCHER_PADDING * 2,
-    windowWidth - TOOLBAR_RESERVED,
-  );
+  return Math.min(SWITCHER_ITEM_WIDTH * SWITCHER_ITEMS.length, windowWidth - TOOLBAR_RESERVED);
 }
 
 /** Threads, Pulls and Search share one glass group in the toolbar. */
@@ -45,7 +44,7 @@ function WorkspacePhoneSwitcher(props: {
   readonly onSelect: (tab: WorkspaceTab) => void;
   readonly onSearch: () => void;
 }) {
-  const itemWidth = (props.width - SWITCHER_PADDING * 2) / SWITCHER_ITEMS.length;
+  const itemWidth = props.width / SWITCHER_ITEMS.length;
   return (
     <View
       accessibilityRole="tablist"
@@ -53,7 +52,7 @@ function WorkspacePhoneSwitcher(props: {
         flexDirection: "row",
         width: props.width,
         height: SWITCHER_HEIGHT,
-        padding: SWITCHER_PADDING,
+        paddingVertical: SWITCHER_PADDING,
       }}
     >
       {SWITCHER_ITEMS.map((item) => {

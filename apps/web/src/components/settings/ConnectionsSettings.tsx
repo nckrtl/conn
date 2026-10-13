@@ -4090,12 +4090,31 @@ export function ConnectionsSettings() {
     </>
   );
 
+  // Sections both providers share: each environment's linked environments, load
+  // balancing and GitHub routing.
+  const sharedEnvironmentSettings = (
+    <>
+      {peerLinkHosts.map((environment, index) => (
+        <LinkedEnvironmentsSettings
+          key={environment.environmentId}
+          environmentId={environment.environmentId}
+          environmentLabel={peerLinkHosts.length > 1 ? environment.label : null}
+          isSearchTarget={index === 0}
+        />
+      ))}
+      <LoadBalancingSettings environments={loadBalancingEnvironments} />
+      <GitHubRoutingSettings environments={loadBalancingEnvironments} />
+    </>
+  );
+
   if (environmentProvider === "orbit") {
     return (
       <SettingsPageContainer width="wide">
         <EnvironmentProviderSection />
         {primarySettings}
         <OrbitEnvironmentSections />
+        {/* Conn: Orbit mode keeps upstream's per-environment sections. */}
+        {sharedEnvironmentSettings}
       </SettingsPageContainer>
     );
   }
@@ -4208,16 +4227,7 @@ export function ConnectionsSettings() {
           }}
         />
       ) : null}
-      {peerLinkHosts.map((environment, index) => (
-        <LinkedEnvironmentsSettings
-          key={environment.environmentId}
-          environmentId={environment.environmentId}
-          environmentLabel={peerLinkHosts.length > 1 ? environment.label : null}
-          isSearchTarget={index === 0}
-        />
-      ))}
-      <LoadBalancingSettings environments={loadBalancingEnvironments} />
-      <GitHubRoutingSettings environments={loadBalancingEnvironments} />
+      {sharedEnvironmentSettings}
     </SettingsPageContainer>
   );
 }

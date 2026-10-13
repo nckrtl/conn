@@ -46,7 +46,8 @@ function enrichedStyle(
     fontSize: style.fontSize,
     lineHeight: style.lineHeight,
     marginTop: 0,
-    marginBottom: 8,
+    // Conn: 12pt between blocks (upstream 8) so replies breathe.
+    marginBottom: 12,
   };
   const heading = (level: number) => {
     const fontSize = style.headingFontSizes?.[level - 1] ?? style.fontSize * (1.6 - level * 0.1);
@@ -56,7 +57,8 @@ function enrichedStyle(
       fontWeight: "600",
       fontSize,
       lineHeight: fontSize * 1.35,
-      marginTop: 8,
+      // Conn: 12pt above a heading (upstream 8), on top of the block above's 12pt.
+      marginTop: 12,
     };
   };
   return {
@@ -118,8 +120,15 @@ function enrichedStyle(
       borderWidth: 2,
       gapWidth: 12,
     },
-    // nckrtl fork: the marker sits 8pt from the item text, as in the old renderer.
-    list: { ...body, bulletColor: style.mutedColor, markerColor: style.mutedColor, gapWidth: 8 },
+    // Conn: markers start at the list's edge and sit 8pt from the item text (the
+    // marker column comes from patches/react-native-enriched-markdown-conn.patch).
+    list: {
+      ...body,
+      bulletColor: style.mutedColor,
+      markerColor: style.mutedColor,
+      gapWidth: 8,
+      itemSpacing: 6,
+    },
     thematicBreak: { color: style.dividerColor, height: 1, marginTop: 8, marginBottom: 8 },
     table: {
       ...body,

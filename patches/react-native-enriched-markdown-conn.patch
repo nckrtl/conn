@@ -1,0 +1,87 @@
+diff --git a/ios/renderer/ListItemRenderer.m b/ios/renderer/ListItemRenderer.m
+index ed80dfa..8e00314 100644
+--- a/ios/renderer/ListItemRenderer.m
++++ b/ios/renderer/ListItemRenderer.m
+@@ -83,9 +83,9 @@ - (void)renderNodeContent:(MarkdownASTNode *)node
+ 
+   // currentDepth - 1 handles the horizontal offset for nested lists
+   const NSInteger nestingLevel = currentDepth - 1;
+-  const CGFloat baseMarkerWidth = isTask                                  ? [_config effectiveListMarginLeftForTask]
+-                                  : (context.listType == ListTypeOrdered) ? [_config effectiveListMarginLeftForNumber]
+-                                                                          : [_config effectiveListMarginLeftForBullet];
++  // Conn: bullets and numbers use their list's own marker width (see ListRenderer).
++  const CGFloat baseMarkerWidth = isTask ? [_config effectiveListMarginLeftForTask]
++                                         : MAX([_config listStyleMarkerMinWidth], context.listMarkerWidth);
+ 
+   const CGFloat blockquoteIndent =
+       blockquoteIndentForDepth(context.blockquoteDepth, [_config blockquoteBorderWidth] + [_config blockquoteGapWidth]);
+diff --git a/ios/renderer/ListRenderer.m b/ios/renderer/ListRenderer.m
+index 47283dc..917b50b 100644
+--- a/ios/renderer/ListRenderer.m
++++ b/ios/renderer/ListRenderer.m
+@@ -90,6 +90,16 @@ - (void)renderNodeContent:(MarkdownASTNode *)node
+   // ListItemRenderer pre-increments, so the counter starts one below the
+   // first rendered number.
+   context.listItemNumber = startNumber - 1;
++  // Conn: size the marker column to this list's widest number, so "1." starts at the
++  // list's edge like a bullet does, instead of right-aligning in a "99." column.
++  if (_isOrdered) {
++    NSInteger lastNumber = startNumber + MAX((NSInteger)1, (NSInteger)node.children.count) - 1;
++    UIFont *markerFont = [_config listMarkerFont] ?: _config.listStyleFont;
++    NSString *widest = [NSString stringWithFormat:@"%ld.", (long)lastNumber];
++    context.listMarkerWidth = [widest sizeWithAttributes:@{NSFontAttributeName : markerFont}].width;
++  } else {
++    context.listMarkerWidth = [_config listStyleBulletSize];
++  }
+ 
+   [context setBlockStyle:_isOrdered ? BlockTypeOrderedList : BlockTypeUnorderedList
+                     font:_config.listStyleFont
+diff --git a/ios/renderer/RenderContext.h b/ios/renderer/RenderContext.h
+index ad4a643..bd36799 100644
+--- a/ios/renderer/RenderContext.h
++++ b/ios/renderer/RenderContext.h
+@@ -52,6 +52,8 @@ typedef NS_ENUM(NSInteger, ListType) { ListTypeUnordered, ListTypeOrdered };
+ @property (nonatomic, assign) NSInteger listDepth;
+ @property (nonatomic, assign) ListType listType;
+ @property (nonatomic, assign) NSInteger listItemNumber;
++/// Conn: width of the current list's marker column (its widest number, or the bullet).
++@property (nonatomic, assign) CGFloat listMarkerWidth;
+ @property (nonatomic, assign) CGFloat accumulatedIndent;
+ @property (nonatomic, assign) BOOL allowFontScaling;
+ @property (nonatomic, assign) CGFloat maxFontSizeMultiplier;
+diff --git a/ios/renderer/RenderContext.m b/ios/renderer/RenderContext.m
+index b226867..4077c42 100644
+--- a/ios/renderer/RenderContext.m
++++ b/ios/renderer/RenderContext.m
+@@ -24,6 +24,7 @@ @implementation BlockStyle
+       @"listDepth",
+       @"listType",
+       @"listItemNumber",
++      @"listMarkerWidth",
+       @"accumulatedIndent",
+     ];
+   });
+@@ -313,6 +314,7 @@ - (void)reset
+   _listDepth = 0;
+   _listType = ListTypeUnordered;
+   _listItemNumber = 0;
++  _listMarkerWidth = 0;
+   _accumulatedIndent = 0;
+   _taskItemCount = 0;
+ 
+diff --git a/ios/utils/ListMarkerDrawer.m b/ios/utils/ListMarkerDrawer.m
+index 0bf008f..c896d58 100644
+--- a/ios/utils/ListMarkerDrawer.m
++++ b/ios/utils/ListMarkerDrawer.m
+@@ -107,7 +107,10 @@ - (void)drawMarkersForGlyphRange:(NSRange)glyphsToShow
+                                                    centerY:baselineY - (font.capHeight / 2.0)
+                                                    checked:marker.isChecked];
+                                    } else if (marker.listType == ListTypeUnordered) {
+-                                     [self drawBulletAtX:markerX
++                                     // Conn: the bullet ends where a number would end, so
++                                     // both keep the same gap to the item text.
++                                     const CGFloat half = [_config listStyleBulletSize] / 2.0;
++                                     [self drawBulletAtX:isRTL ? markerX + half : markerX - half
+                                                  centerY:baselineY - (font.xHeight + font.capHeight) / 4.0
+                                                    depth:marker.depth];
+                                    } else {

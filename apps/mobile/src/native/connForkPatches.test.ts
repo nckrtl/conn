@@ -5,13 +5,13 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 // Conn fork guard: an upstream merge must not silently drop the fork's
-// react-native-screens patch or the screens that rely on it. See FORK.md,
+// vendored-package patches or the screens that rely on them. See FORK.md,
 // "Vendored dependency patches".
 const mobileRoot = NodePath.join(import.meta.dirname, "../..");
 const read = (path: string) => NodeFS.readFileSync(NodePath.join(mobileRoot, path), "utf8");
 
 describe("Conn react-native-screens patch", () => {
-  it("installs the patched tarball built by scripts/build-conn-react-native-screens.ts", () => {
+  it("installs the patched tarball built by scripts/build-conn-vendored-tarball.ts", () => {
     const manifest = JSON.parse(read("package.json")) as {
       dependencies: Record<string, string>;
     };
@@ -38,5 +38,28 @@ describe("Conn react-native-screens patch", () => {
   it("keeps the home filter inside the bottom search field", () => {
     expect(read("src/features/home/HomeHeader.tsx")).toContain("filterInsideSearch: true");
     expect(read("src/native/V5StackHeader.ios.tsx")).toContain("searchFieldAccessory:");
+  });
+});
+
+describe("Conn react-native-enriched-markdown patch", () => {
+  it("installs the patched tarball built by scripts/build-conn-vendored-tarball.ts", () => {
+    const manifest = JSON.parse(read("package.json")) as {
+      dependencies: Record<string, string>;
+    };
+    expect(manifest.dependencies["react-native-enriched-markdown"]).toMatch(
+      /^file:deps\/react-native-enriched-markdown-.+-conn\.tgz$/,
+    );
+  });
+
+  it("sizes list markers per list in the installed package", () => {
+    const require = NodeModule.createRequire(NodePath.join(mobileRoot, "package.json"));
+    const packageDir = NodePath.dirname(
+      require.resolve("react-native-enriched-markdown/package.json"),
+    );
+    const renderer = NodeFS.readFileSync(
+      NodePath.join(packageDir, "ios/renderer/ListRenderer.m"),
+      "utf8",
+    );
+    expect(renderer).toContain("context.listMarkerWidth");
   });
 });

@@ -14,19 +14,11 @@ import { useWorkspaceTabs } from "./WorkspaceTabsContext";
 import type { WorkspaceTab } from "./workspace-tabs-state";
 
 const SWITCHER_HEIGHT = 48;
-const SWITCHER_PADDING = 3;
-// The group takes the width the toolbar leaves beside its two 48pt buttons.
-const TOOLBAR_MARGIN = 20;
-const TOOLBAR_BUTTON = 48;
-const TOOLBAR_GAP = 12;
-const SWITCHER_MAX_WIDTH = 360;
-
-function switcherWidth(windowWidth: number) {
-  return Math.min(
-    SWITCHER_MAX_WIDTH,
-    windowWidth - TOOLBAR_MARGIN * 2 - TOOLBAR_BUTTON * 2 - TOOLBAR_GAP * 2,
-  );
-}
+// The selected pill sits this far inside the glass, with concentric corners.
+const SWITCHER_PADDING = 4;
+const SWITCHER_ITEM_WIDTH = 72;
+// The toolbar keeps this much room for its two 48pt buttons, gaps and margins.
+const TOOLBAR_RESERVED = 20 * 2 + 48 * 2 + 12 * 2;
 
 const SWITCHER_ITEMS = [
   { key: "threads", label: "Threads", accessibilityLabel: "Threads", icon: "text.bubble" },
@@ -38,6 +30,13 @@ const SWITCHER_ITEMS = [
   },
   { key: "search", label: "Search", accessibilityLabel: "Search", icon: "magnifyingglass" },
 ] as const;
+
+function switcherWidth(windowWidth: number) {
+  return Math.min(
+    SWITCHER_ITEM_WIDTH * SWITCHER_ITEMS.length + SWITCHER_PADDING * 2,
+    windowWidth - TOOLBAR_RESERVED,
+  );
+}
 
 /** Threads, Pulls and Search share one glass group in the toolbar. */
 function WorkspacePhoneSwitcher(props: {
@@ -69,7 +68,7 @@ function WorkspacePhoneSwitcher(props: {
               if (item.key === "search") props.onSearch();
               else if (!selected) props.onSelect(item.key);
             }}
-            className={selected ? "bg-subtle-strong" : undefined}
+            className={selected ? "bg-foreground/12" : undefined}
             style={{
               width: itemWidth,
               borderRadius: (SWITCHER_HEIGHT - SWITCHER_PADDING * 2) / 2,

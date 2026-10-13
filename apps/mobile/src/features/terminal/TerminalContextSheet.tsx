@@ -104,7 +104,7 @@ export function TerminalContextSheet(props: {
         </View>
       </ScrollView>
       <View
-        className="gap-3 border-t border-border px-5 pt-4"
+        className="gap-3 border-t border-foreground/12 px-5 pt-4"
         style={{ paddingBottom: Math.max(16, insets.bottom) }}
       >
         {tooLarge ? (

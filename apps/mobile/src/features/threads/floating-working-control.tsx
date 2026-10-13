@@ -200,7 +200,7 @@ export function FloatingWorkingControl(props: {
           className="h-11 flex-row items-center"
           onLayout={(event) => setPreviewWidth(event.nativeEvent.layout.width)}
         >
-          {hasStatus ? <View className="h-4 w-px bg-border" /> : null}
+          {hasStatus ? <View className="h-4 w-px bg-foreground/12" /> : null}
           {props.devicePreview !== null ? (
             <DevicePreviewButton {...props.devicePreview} compact={previewCompact} />
           ) : null}
@@ -218,7 +218,7 @@ export function FloatingWorkingControl(props: {
           onLayout={(event) => setAgentsWidth(event.nativeEvent.layout.width)}
           className="h-11 flex-row items-center gap-1.5 px-3 active:opacity-70"
         >
-          {hasStatus || hasPreview ? <View className="mr-1 h-4 w-px bg-border" /> : null}
+          {hasStatus || hasPreview ? <View className="mr-1 h-4 w-px bg-foreground/12" /> : null}
           <SymbolView name="person.2" size={13} tintColorClassName="accent-foreground-muted" />
           <Text className="font-t3-medium text-xs tabular-nums" numberOfLines={1}>
             {agents.label}
@@ -236,7 +236,7 @@ export function FloatingWorkingControl(props: {
           className="h-11 flex-row items-center gap-2 px-3 active:opacity-70"
         >
           {hasStatus || hasPreview || hasAgents ? (
-            <View className="mr-1 h-4 w-px bg-border" />
+            <View className="mr-1 h-4 w-px bg-foreground/12" />
           ) : null}
           <SymbolView name="list.number" size={13} tintColorClassName="accent-foreground-muted" />
           <Text className="shrink font-t3-medium text-xs tabular-nums" numberOfLines={1}>

@@ -1,3 +1,4 @@
+import * as NodeURL from "node:url";
 import * as NodeZlib from "node:zlib";
 
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
@@ -221,6 +222,21 @@ export default defineConfig(() => {
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
     },
     resolve: {
+      // Conn: Lucide imports go to Conn's icon module (src/icons). An explicit
+      // alias, because the dev server serves bare package imports from its
+      // pre-bundled copies before tsconfig paths apply.
+      alias: [
+        {
+          find: /^lucide-react$/,
+          replacement: NodeURL.fileURLToPath(
+            new URL("./src/icons/lucide-react.ts", import.meta.url),
+          ),
+        },
+        {
+          find: /^lucide$/,
+          replacement: NodeURL.fileURLToPath(new URL("./src/icons/lucide.ts", import.meta.url)),
+        },
+      ],
       tsconfigPaths: true,
       dedupe: ["react", "react-dom"],
     },

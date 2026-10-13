@@ -62,6 +62,7 @@
     "jsonc-parser": "3.3.1",
     "jszip": "3.10.2",
     "lucide": "^0.564.0",
+    "lucide-original": "npm:lucide@^0.564.0",
     "lucide-react": "^0.564.0",
     "lucide-react-original": "npm:lucide-react@^0.564.0",
     "mermaid": "^11.17.2",

@@ -34,10 +34,9 @@ build and install the fork's desktop app is in
    user's theme is "Dark Ocean" (`~/.t3/dev/themes/dark-ocean.json`). Every
    built-in and custom theme must keep its own palette.
 2. **Never change the icon family or the fonts.** They are user settings. UI
-   icons are Phosphor, solid weight, served under Lucide names by
-   `apps/web/src/icons/lucide-react.ts`; import them from `lucide-react` as
-   upstream does and add a line there for a new name. Project and workspace
-   icons stay Lucide. Keep the configured sans and mono fonts.
+   icons are Lucide; icons in the thread timeline are Phosphor (solid), via
+   `apps/web/src/icons/lucide-react.ts`. Import icons from `lucide-react` as
+   upstream does and add a line there for a new name. Keep the configured sans and mono fonts.
 3. **Tokens over colors.** Use a shell token or a theme role. Shell tokens are
    `color-mix` values of `--sidebar`, `--background`, `--foreground` and other
    theme roles. Do not write literal colors or opacity tweaks such as

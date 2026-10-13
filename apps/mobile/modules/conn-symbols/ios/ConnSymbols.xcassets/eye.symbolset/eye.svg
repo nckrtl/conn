@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3300" height="2200">
+ <g id="Notes">
+  <text id="template-version" x="3036" y="1933">Template v.2.0</text>
+ </g>
+ <g id="Guides">
+  <line id="Baseline-S" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="696" y2="696"/>
+  <line id="Capline-S" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="625.541" y2="625.541"/>
+  <line id="Baseline-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1126" y2="1126"/>
+  <line id="Capline-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1055.54" y2="1055.54"/>
+  <line id="Baseline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1556" y2="1556"/>
+  <line id="Capline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1485.54" y2="1485.54"/>
+  <line id="left-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1500" x2="1500" y1="1026" y2="1146"/>
+  <line id="right-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1590" x2="1590" y1="1026" y2="1146"/>
+ </g>
+ <g id="Symbols">
+  <g id="Regular-M" transform="matrix(1 0 0 1 1500 1126)">
+   <path d="M 86.945 -36.369 c -0.123 -0.278 -3.101 -6.884 -9.721 -13.504 C 68.404 -58.693 57.262 -63.355 45 -63.355 S 21.596 -58.693 12.776 -49.873 C 6.156 -43.253 3.164 -36.636 3.055 -36.369 a 2.813 2.813 0 0 0 0 2.285 c 0.123 0.278 3.101 6.88 9.721 13.5 C 21.596 -11.767 32.738 -7.105 45 -7.105 s 23.404 -4.662 32.224 -13.479 c 6.62 -6.62 9.598 -13.222 9.721 -13.5 A 2.813 2.813 0 0 0 86.945 -36.369 Z M 45 -21.168 a 14.063 14.063 0 1 1 14.063 -14.062 A 14.063 14.063 0 0 1 45 -21.168 Z"/>
+  </g>
+ </g>
+</svg>

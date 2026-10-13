@@ -63,3 +63,27 @@ describe("Conn react-native-enriched-markdown patch", () => {
     expect(renderer).toContain("context.listMarkerWidth");
   });
 });
+
+describe("Conn symbols", () => {
+  it("ships a generated symbol for every name in symbols.json", () => {
+    const names = Object.keys(
+      JSON.parse(read("modules/conn-symbols/symbols.json")) as Record<string, unknown>,
+    );
+    const generated = read("modules/conn-symbols/ios/ConnSymbolNames.swift");
+    for (const name of names) {
+      expect(generated).toContain(`"${name}",`);
+      expect(
+        NodeFS.existsSync(
+          NodePath.join(
+            mobileRoot,
+            `modules/conn-symbols/ios/ConnSymbols.xcassets/${name}.symbolset`,
+          ),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("sends every iOS icon through expo-symbols", () => {
+    expect(read("src/components/AppSymbol.ios.tsx")).not.toContain("@tabler/icons-react-native");
+  });
+});

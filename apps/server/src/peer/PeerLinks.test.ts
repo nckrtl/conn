@@ -345,3 +345,11 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+it("treats the Orbit WireGuard network as encrypted for plain http", () => {
+  expect(PeerLinks.isOrbitWireGuardHost("10.44.0.6")).toBe(true);
+  expect(PeerLinks.isOrbitWireGuardHost("10.44.0.136")).toBe(true);
+  expect(PeerLinks.isOrbitWireGuardHost("10.45.0.6")).toBe(false);
+  expect(PeerLinks.isOrbitWireGuardHost("192.168.1.20")).toBe(false);
+  expect(PeerLinks.isOrbitWireGuardHost("10.44.0.6.example.com")).toBe(false);
+});

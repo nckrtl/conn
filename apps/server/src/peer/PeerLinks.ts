@@ -121,6 +121,14 @@ const failStorage = (cause: unknown) =>
  * code and then the link's token travel to it, so plain http is accepted only
  * where the network already encrypts: this machine, or a Tailscale address.
  */
+// Conn: the Orbit WireGuard network (see FORK.md, "Linked environments"). WireGuard encrypts
+// every packet between peers, so plain http there is as safe as on a tailnet.
+const ORBIT_WIREGUARD_PREFIX = "10.44.";
+export const isOrbitWireGuardHost = (host: string) =>
+  host.startsWith(ORBIT_WIREGUARD_PREFIX) &&
+  host.split(".").length === 4 &&
+  host.split(".").every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+
 const peerOrigin = (url: string) => {
   const parsed = URL.parse(url);
   if (parsed === null || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
@@ -134,12 +142,13 @@ const peerOrigin = (url: string) => {
   if (
     parsed.protocol === "http:" &&
     !isLocalLoopbackHost(parsed.hostname) &&
-    !isTailnetHost(parsed.hostname)
+    !isTailnetHost(parsed.hostname) &&
+    !isOrbitWireGuardHost(parsed.hostname)
   ) {
     return Effect.fail(
       new PeerLinkError({
         reason: "unreachable",
-        message: `${url} is plain http, which would send the link's credentials unencrypted. Use its https address, or its Tailscale address.`,
+        message: `${url} is plain http, which would send the link's credentials unencrypted. Use its https address, its Tailscale address, or its Orbit WireGuard address.`,
       }),
     );
   }

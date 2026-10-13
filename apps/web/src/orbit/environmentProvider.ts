@@ -3,6 +3,7 @@ import {
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
+  recordAccessPairing,
   recordPaired,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
@@ -10,12 +11,13 @@ import {
   type OrbitGatewayEnvironment,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { AuthAccessWriteScope, type EnvironmentId } from "@t3tools/contracts";
 import { create } from "zustand";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { readEnvironmentLacksScope } from "../state/session";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
@@ -72,7 +74,15 @@ export async function reconcileEnvironmentProvider(
       environmentId: String(environmentId),
       enabled: entry.enabled,
     }));
-  const plan = planEnvironmentProvider({ provider, saved, orbit, state });
+  // Conn: sessions Orbit paired before the Gateway asked for admin scopes cannot manage access.
+  const lacksAccess = saved
+    .filter((entry) =>
+      readEnvironmentLacksScope(entry.environmentId as EnvironmentId, AuthAccessWriteScope),
+    )
+    .map((entry) => entry.environmentId);
+  const now = Date.now();
+  const plan = planEnvironmentProvider({ provider, saved, orbit, state, lacksAccess, now });
+  const savedIds = new Set(saved.map((entry) => entry.environmentId));
 
   const setEnabled = (environmentId: string, enabled: boolean) =>
     runAtomCommand(
@@ -86,6 +96,7 @@ export async function reconcileEnvironmentProvider(
 
   let next = plan.state;
   for (const environmentId of plan.pair) {
+    if (savedIds.has(environmentId)) next = recordAccessPairing(next, environmentId, now);
     try {
       const pairing = await client.pair(environmentId);
       const result = await runAtomCommand(

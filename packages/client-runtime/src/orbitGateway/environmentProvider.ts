@@ -14,12 +14,17 @@ export interface OrbitEnvironmentState {
   readonly disabledByOrbit: readonly string[];
   /** Environments Orbit paired; switching back to `default` turns them off, `orbit` on again. */
   readonly pairedByOrbit: readonly string[];
+  /** Conn: when Orbit last paired a server again because its session could not manage access. */
+  readonly accessPairedAt?: Readonly<Record<string, number>>;
 }
 
 export const EMPTY_ORBIT_ENVIRONMENT_STATE: OrbitEnvironmentState = {
   disabledByOrbit: [],
   pairedByOrbit: [],
 };
+
+/** Conn: how long to wait before pairing a server again whose session still lacks `access:write`. */
+export const ACCESS_PAIRING_RETRY_MS = 6 * 60 * 60 * 1000;
 
 /** A saved environment the provider manages. The desktop's own local backend is never passed in. */
 export interface ManagedEnvironment {
@@ -30,7 +35,11 @@ export interface ManagedEnvironment {
 export interface EnvironmentProviderPlan {
   readonly enable: readonly string[];
   readonly disable: readonly string[];
-  /** Registered Orbit servers this client has not saved yet. Record each success with `recordPaired`. */
+  /**
+   * Registered Orbit servers this client has not saved yet, and (Conn) saved ones to pair again
+   * because their session lacks `access:write`. Record each success with `recordPaired`, and each
+   * attempt at the second kind with `recordAccessPairing`.
+   */
   readonly pair: readonly string[];
   readonly state: OrbitEnvironmentState;
 }
@@ -45,6 +54,9 @@ export function planEnvironmentProvider(input: {
   readonly saved: readonly ManagedEnvironment[];
   readonly orbit: readonly OrbitGatewayEnvironment[] | null;
   readonly state: OrbitEnvironmentState;
+  /** Conn: saved Orbit servers whose session is known to lack `access:write`. */
+  readonly lacksAccess?: readonly string[];
+  readonly now?: number;
 }): EnvironmentProviderPlan {
   const { saved, state } = input;
   const disabledByOrbit = new Set(state.disabledByOrbit);
@@ -83,19 +95,36 @@ export function planEnvironmentProvider(input: {
       if (!pairedByOrbit.has(id)) disabledByOrbit.add(id);
     }
   }
+  const lacksAccess = new Set(input.lacksAccess ?? []);
+  const now = input.now ?? 0;
   const pair = input.orbit
-    .filter(
-      (environment) =>
-        environment.status === "registered" && !savedIds.has(environment.environmentId),
-    )
+    .filter((environment) => {
+      if (environment.status !== "registered") return false;
+      const id = environment.environmentId;
+      if (!savedIds.has(id)) return true;
+      // Conn: pair again so the session can manage linked environments (see FORK.md, "Orbit").
+      const lastTry = state.accessPairedAt?.[id];
+      return (
+        lacksAccess.has(id) && (lastTry === undefined || now - lastTry >= ACCESS_PAIRING_RETRY_MS)
+      );
+    })
     .map((environment) => environment.environmentId);
 
   return {
     enable,
     disable,
     pair,
-    state: { disabledByOrbit: [...disabledByOrbit], pairedByOrbit: [...pairedByOrbit] },
+    state: { ...state, disabledByOrbit: [...disabledByOrbit], pairedByOrbit: [...pairedByOrbit] },
   };
+}
+
+/** Conn: records an attempt to pair a saved server again for access, successful or not. */
+export function recordAccessPairing(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+  now: number,
+): OrbitEnvironmentState {
+  return { ...state, accessPairedAt: { ...state.accessPairedAt, [environmentId]: now } };
 }
 
 export function recordPaired(
@@ -116,5 +145,15 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
   const ids = (list: unknown) =>
     Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === "string") : [];
-  return { disabledByOrbit: ids(record.disabledByOrbit), pairedByOrbit: ids(record.pairedByOrbit) };
+  const accessPairedAt: Record<string, number> = {};
+  if (typeof record.accessPairedAt === "object" && record.accessPairedAt !== null) {
+    for (const [id, at] of Object.entries(record.accessPairedAt)) {
+      if (typeof at === "number") accessPairedAt[id] = at;
+    }
+  }
+  return {
+    disabledByOrbit: ids(record.disabledByOrbit),
+    pairedByOrbit: ids(record.pairedByOrbit),
+    accessPairedAt,
+  };
 }

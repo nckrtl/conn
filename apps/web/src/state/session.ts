@@ -38,6 +38,24 @@ function sessionHasScope(
   return result._tag !== "Failure" && session !== null && sessionGrantsScope(session, scope);
 }
 
+/**
+ * Conn: true only when the environment's known, authenticated grant lacks `scope`. An unknown,
+ * loading or failed session is not judged.
+ */
+export function readEnvironmentLacksScope(
+  environmentId: EnvironmentId,
+  scope: AuthEnvironmentScope,
+): boolean {
+  const result = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
+  const session = Option.getOrNull(AsyncResult.value(result));
+  return (
+    result._tag !== "Failure" &&
+    session !== null &&
+    session.authenticated &&
+    !sessionGrantsScope(session, scope)
+  );
+}
+
 /** Subscribe to the grants of every selected environment. */
 export function useEnvironmentsWithScope(
   environments: ReadonlyArray<{ readonly environmentId: EnvironmentId }>,

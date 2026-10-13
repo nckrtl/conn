@@ -4,6 +4,7 @@ import {
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
+  recordAccessPairing,
   recordPaired,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
@@ -13,7 +14,7 @@ import {
   type OrbitGatewayWorkspace,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { AuthAccessWriteScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
@@ -21,6 +22,7 @@ import { AppState } from "react-native";
 import { environmentCatalog } from "../../connection/catalog";
 import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
 
@@ -111,12 +113,22 @@ async function reconcileEnvironments(
       environmentId: String(environmentId),
       enabled: entry.enabled,
     }));
+  // Conn: sessions Orbit paired before the Gateway asked for admin scopes cannot manage access.
+  const lacksAccess = saved
+    .filter((entry) =>
+      readEnvironmentLacksScope(entry.environmentId as EnvironmentId, AuthAccessWriteScope),
+    )
+    .map((entry) => entry.environmentId);
+  const now = Date.now();
   const plan = planEnvironmentProvider({
     provider: state.provider,
     saved,
     orbit,
     state: environmentState,
+    lacksAccess,
+    now,
   });
+  const savedIds = new Set(saved.map((entry) => entry.environmentId));
   const setEnabled = (environmentId: string, enabled: boolean) =>
     runAtomCommand(
       appAtomRegistry,
@@ -128,6 +140,7 @@ async function reconcileEnvironments(
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
   let next = plan.state;
   for (const environmentId of plan.pair) {
+    if (savedIds.has(environmentId)) next = recordAccessPairing(next, environmentId, now);
     try {
       const pairing = await client.pair(environmentId);
       const result = await runAtomCommand(

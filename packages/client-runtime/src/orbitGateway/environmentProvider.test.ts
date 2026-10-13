@@ -2,8 +2,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { OrbitGatewayEnvironment } from "./client.ts";
 import {
+  ACCESS_PAIRING_RETRY_MS,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
   planEnvironmentProvider,
+  recordAccessPairing,
   recordPaired,
   type ManagedEnvironment,
   type OrbitEnvironmentState,
@@ -125,5 +127,24 @@ describe("planEnvironmentProvider", () => {
       state: EMPTY_ORBIT_ENVIRONMENT_STATE,
     });
     expect(plan).toMatchObject({ enable: [], disable: [], pair: [] });
+  });
+
+  it("pairs a saved server again when its session cannot manage access, at most every few hours", () => {
+    const now = 1_000_000_000;
+    const input = {
+      provider: "orbit" as const,
+      saved: [saved("mini"), saved("beast")],
+      orbit: [orbit("mini"), orbit("beast")],
+      lacksAccess: ["mini"],
+      now,
+    };
+    const first = planEnvironmentProvider({ ...input, state: EMPTY_ORBIT_ENVIRONMENT_STATE });
+    expect(first.pair).toEqual(["mini"]);
+
+    const tried = recordAccessPairing(first.state, "mini", now);
+    expect(planEnvironmentProvider({ ...input, state: tried }).pair).toEqual([]);
+    expect(
+      planEnvironmentProvider({ ...input, state: tried, now: now + ACCESS_PAIRING_RETRY_MS }).pair,
+    ).toEqual(["mini"]);
   });
 });

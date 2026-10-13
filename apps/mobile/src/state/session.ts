@@ -15,6 +15,24 @@ import { appAtomRegistry } from "./atom-registry";
 
 export const environmentSession = createEnvironmentSessionAtoms(connectionAtomRuntime);
 
+/**
+ * Conn: true only when the environment's known, authenticated grant lacks `scope`. An unknown,
+ * loading or failed session is not judged.
+ */
+export function readEnvironmentLacksScope(
+  environmentId: EnvironmentId,
+  scope: AuthEnvironmentScope,
+): boolean {
+  const result = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
+  const session = Option.getOrNull(AsyncResult.value(result));
+  return (
+    result._tag !== "Failure" &&
+    session !== null &&
+    session.authenticated &&
+    !sessionGrantsScope(session, scope)
+  );
+}
+
 const EMPTY_SESSION_STATE_ATOM = Atom.make(AsyncResult.initial<AuthSessionState>());
 
 function sessionHasScope(

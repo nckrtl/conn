@@ -9,7 +9,10 @@
     "jsx": "react-jsx",
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "paths": {
-      "~/*": ["./src/*"]
+      "~/*": ["./src/*"],
+      // Conn: Lucide imports render Conn's Phosphor icons (src/icons/lucide-react.ts).
+      "lucide-react": ["./src/icons/lucide-react.ts"],
+      "lucide": ["./src/icons/lucide.ts"]
     },
     "plugins": [
       {

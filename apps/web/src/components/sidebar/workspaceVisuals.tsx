@@ -19,7 +19,7 @@ import {
   TerminalIcon,
   UsersIcon,
   ZapIcon,
-} from "lucide-react";
+} from "lucide-react-original";
 
 import { cn } from "../../lib/utils";
 import { workspaceLetter, type Workspace, type WorkspaceColor } from "../../workspaces.logic";

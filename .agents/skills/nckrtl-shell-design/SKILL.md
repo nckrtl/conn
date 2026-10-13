@@ -33,8 +33,11 @@ build and install the fork's desktop app is in
    blur, spacing and radii from ChatGPT desktop. Do not copy its colors. The
    user's theme is "Dark Ocean" (`~/.t3/dev/themes/dark-ocean.json`). Every
    built-in and custom theme must keep its own palette.
-2. **Never change the icon family or the fonts.** They are user settings. Keep
-   lucide icons and the configured sans and mono fonts.
+2. **Never change the icon family or the fonts.** They are user settings. UI
+   icons are Phosphor, solid weight, served under Lucide names by
+   `apps/web/src/icons/lucide-react.ts`; import them from `lucide-react` as
+   upstream does and add a line there for a new name. Project and workspace
+   icons stay Lucide. Keep the configured sans and mono fonts.
 3. **Tokens over colors.** Use a shell token or a theme role. Shell tokens are
    `color-mix` values of `--sidebar`, `--background`, `--foreground` and other
    theme roles. Do not write literal colors or opacity tweaks such as
@@ -175,7 +178,7 @@ build and install the fork's desktop app is in
   the rounded rectangle (`var(--radius)` / `6px`). Change both together.
 - Search and address fields use `InputGroup variant="soft"`: h-8,
   `rounded-(--toolbar-radius)`, a `--shell-divider-header` border, a leading
-  lucide search icon, 13px text, and an icon inset equal to the vertical inset.
+  search icon, 13px text, and an icon inset equal to the vertical inset.
   The browser address bar uses the same field as the Files search.
 - `ToolbarGroup` (`components/ToolbarGroup.tsx`) wraps related controls in
   every panel toolbar: browser chrome, Files, file preview, terminal, the

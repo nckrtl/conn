@@ -1,0 +1,52 @@
+#!/bin/sh
+# Renews this host's linked environments through the Orbit Gateway before they expire.
+#
+#   t3-orbit-relink [T3 CLI COMMAND...]
+#
+# A link holds a session on the other environment that ends after 30 days, and nothing renews it.
+# For each link that expires within RENEW_DAYS (default 10), this asks the Gateway for a pairing
+# link to that environment (the Gateway holds an admin session on every registered T3 server) and
+# links again with the same addresses and access. Linking again replaces the old link.
+# The T3 CLI command defaults to `t3`. Run it daily, like t3-orbit-register (see FORK.md).
+set -eu
+
+[ $# -ge 1 ] || set -- t3
+gateway=${ORBIT_GATEWAY_URL:-https://gateway.orbit}
+renew_days=${RENEW_DAYS:-10}
+
+due=$("$@" environment list --json | jq -c --argjson days "$renew_days" '
+  (now + $days * 86400) as $deadline
+  | .[]
+  | select((.expiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) <= $deadline)')
+
+[ -n "$due" ] || { echo "t3-orbit-relink: no link expires within $renew_days days."; exit 0; }
+
+failed=0
+while IFS= read -r link; do
+    id=$(printf '%s' "$link" | jq -r .environmentId)
+    label=$(printf '%s' "$link" | jq -r .label)
+    access=$(printf '%s' "$link" | jq -r .access)
+    url=$(printf '%s' "$link" | jq -r '.urls[0]')
+    alternates=$(printf '%s' "$link" | jq -r '.urls[1:][] | "--url\n" + .')
+
+    pairing=$(curl -fsS -m 30 -X POST -H 'Accept: application/json' \
+        "$gateway/api/v1/conn/environments/$id/pairings") || {
+        echo "t3-orbit-relink: the Gateway gave no pairing link for $label ($id)." >&2
+        failed=1
+        continue
+    }
+    code=$(printf '%s' "$pairing" | jq -r .data.pairing_url | sed -n 's/.*#token=//p')
+    [ -n "$code" ] || { echo "t3-orbit-relink: no pairing code for $label ($id)." >&2; failed=1; continue; }
+
+    # shellcheck disable=SC2086 # each alternate is a `--url ADDRESS` pair, one word per line
+    if (IFS='
+'; "$@" environment link "$url" $alternates --pairing-code "$code" --access "$access"); then
+        :
+    else
+        echo "t3-orbit-relink: linking $label ($id) again failed." >&2
+        failed=1
+    fi
+done <<LINKS
+$due
+LINKS
+exit "$failed"

@@ -255,7 +255,8 @@ function formatMessageTime(input: string): string {
 
 // Fixed heights mirror renderFeedEntry's classNames and are only used while
 // text fits at the current font settings. Larger accessibility text is measured.
-const TURN_FOLD_HEIGHT = 42; // min-h-11 (38.5) + mb-1 (3.5), with the mobile 14px rem
+// Conn: mb-3 puts the label's gap above the divider below it too (upstream mb-1, 42).
+const TURN_FOLD_HEIGHT = 49; // min-h-11 (38.5) + mb-3 (10.5), with the mobile 14px rem
 // Tailwind spacing on the mobile 14px rem: px-3.5 on the user bubble, px-1 on
 // assistant rows. Images size their frame from these before their own layout.
 const USER_BUBBLE_HORIZONTAL_PADDING = 3.5 * 3.5;
@@ -1029,9 +1030,9 @@ function renderFeedEntry(
         accessibilityState={{ expanded: entry.expanded }}
         onPress={() => props.onToggleTurnFold(entry.runId)}
         hitSlop={4}
-        className="mb-1 min-h-11 flex-row items-center gap-2 border-b border-border-subtle px-2"
+        className="mb-3 min-h-11 flex-row items-center gap-2 border-b border-border-subtle px-2"
         style={{
-          minHeight: Math.max(TURN_FOLD_HEIGHT - 3.5, props.workRowSizing.estimatedRowHeight),
+          minHeight: Math.max(TURN_FOLD_HEIGHT - 10.5, props.workRowSizing.estimatedRowHeight),
         }}
       >
         <Text

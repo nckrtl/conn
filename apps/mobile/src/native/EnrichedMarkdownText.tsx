@@ -118,8 +118,8 @@ function enrichedStyle(
       borderWidth: 2,
       gapWidth: 12,
     },
-    // nckrtl fork: about half upstream's gap between the marker and the item text.
-    list: { ...body, bulletColor: style.mutedColor, markerColor: style.mutedColor, gapWidth: 3 },
+    // nckrtl fork: the marker sits 8pt from the item text, as in the old renderer.
+    list: { ...body, bulletColor: style.mutedColor, markerColor: style.mutedColor, gapWidth: 8 },
     thematicBreak: { color: style.dividerColor, height: 1, marginTop: 8, marginBottom: 8 },
     table: {
       ...body,

@@ -185,8 +185,8 @@ importers:
         specifier: 6.40.0
         version: 6.40.0
       tsc-rs:
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: 0.7.0
+        version: 0.7.0
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -6556,38 +6556,38 @@ packages:
   '@tiptap/starter-kit@3.31.4':
     resolution: {integrity: sha512-u7HIJ9vK6kFe4S4J2CIcDLrhRZzoTMSyU0XxjQ6lUNF7pWW3rMi//pvi8RcsZmxGjyb8CpXAqYgNl7f9WyaUeA==}
 
-  '@tsc-rs/darwin-arm64@0.6.0':
-    resolution: {integrity: sha512-9aToB7RVGciaousuImyOqAx2xGiE9g+kCqrQaoR2uiGKxItPcRY+V/bsCP/VIg4O/qWrz6EU128gbyoxG5SKDA==}
+  '@tsc-rs/darwin-arm64@0.7.0':
+    resolution: {integrity: sha512-3execGkNh7DXNZr03dhQP2wqmsjB1Q4OJnTMgKIibjeQMsjNK8HTalJZPIG6PkiXeusXUweHP3+4yJjbi5auNw==}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
     os: [darwin]
 
-  '@tsc-rs/darwin-x64@0.6.0':
-    resolution: {integrity: sha512-OT/KmLYe47I4G7cCueorXeWRihCvOVd0+3dud8AtoQ+s6UrtasM9oz+rxvA9oK+F7eAWnxxrg9OeHAvmQtZVEA==}
+  '@tsc-rs/darwin-x64@0.7.0':
+    resolution: {integrity: sha512-Wi3CNYWgyIOcWTQjihXCFPTul+aTEXVq1og8rO22Cq6/Mz6lKk+9YSXycWOkJql6D0uE0l/S1nMStq4mx7ydpA==}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [darwin]
 
-  '@tsc-rs/linux-arm64@0.6.0':
-    resolution: {integrity: sha512-BG+gJQ3rE2vk/XhkZ5XIg2utrkiBp4Mk5y+CKTuOfy88+P8RgkLmPmPlk/cY3ona7xm61Dg4T5LuNjsY7nxsrQ==}
+  '@tsc-rs/linux-arm64@0.7.0':
+    resolution: {integrity: sha512-sm+xPELgQGKOoFeklJAmIi99Fi3fIUFgGPYQclC/IiVdUTzHtKw6yg6JRNEI74JIaSxGRAGbtmHcVvTkC93ZLw==}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
     os: [linux]
 
-  '@tsc-rs/linux-x64@0.6.0':
-    resolution: {integrity: sha512-I7OFBKqdLF9TzRYQ9VTRHFqKQiIAnpDo7EkSx/0jtwclYz9piosrual6yC3NP4sFaLSPCIMZkscHnGOs/6aCoA==}
+  '@tsc-rs/linux-x64@0.7.0':
+    resolution: {integrity: sha512-gyDPxVNmasL/RMPXzutxhaUqyLlPLTcPhWl5pWCkuZdV0dUfGpR4PG5h1Nht9Db3MMHs9ixzl+uS6Nc5+qA/jg==}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [linux]
 
-  '@tsc-rs/win32-arm64@0.6.0':
-    resolution: {integrity: sha512-/ZQTIaLdn7pSYrvvB0lTTQ9EREYNIRIfWC08qeMXwHIoABxDf0vKW8GdoOrZOB5RAOS6wmZYD9UpDfOW0qbmzg==}
+  '@tsc-rs/win32-arm64@0.7.0':
+    resolution: {integrity: sha512-dPLJLH5iXgBzMRiuSGz4awMu8dxOI2iXRN0ZDqs/LolZ1ShbjmgIcH1bwQeObdyFwyen44c6vK8mFIiJELsv4Q==}
     engines: {node: '>=16.20.0'}
     cpu: [arm64]
     os: [win32]
 
-  '@tsc-rs/win32-x64@0.6.0':
-    resolution: {integrity: sha512-0/2p/llHCgdopwRY/jsNpkS4foXHTeOGNsUKu/omX7FxXXhV57kodpDl+fjCZVPsInFHVGynrrN/fb2cfqw0cA==}
+  '@tsc-rs/win32-x64@0.7.0':
+    resolution: {integrity: sha512-n/bJeMWvr0KbBPYVXroe23ia82Q6ZizUBYhgoZvsUasK4RfZ/rsJdIoP1Jpcw0ONXEbC8AKwHVi8BSOiUlSOuw==}
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [win32]
@@ -7453,11 +7453,6 @@ packages:
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
-
-  acorn@8.16.0:
-    resolution: {integrity: sha512-UVJyE9MttOsBQIDKw1skb9nAwQuR5wuGD3+82K6JgJlm/Y+KI92oNsMNGZCYdDsVtRHSak0pcV5Dno5+4jh9sw==}
-    engines: {node: '>=0.4.0'}
-    hasBin: true
 
   acorn@8.19.0:
     resolution: {integrity: sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw==}
@@ -12135,8 +12130,8 @@ packages:
     resolution: {integrity: sha512-JfJeIHke7y2egdGGgRAvpCwYFUsHlM2gPcrVOxFkznt/4uzQ7HFmvE63iFHVLBJNDuyDOQgijDK/tXH/f6Msjg==}
     engines: {node: '>=6.10'}
 
-  tsc-rs@0.6.0:
-    resolution: {integrity: sha512-n2Y3ZF6rylMvIJHVwqDf2r7y4SpR5a81OqG4/FlmcasIl4GJ80fLiBa2xEj/nRAHhheQxzbhw5GSe/oU7ZeImA==}
+  tsc-rs@0.7.0:
+    resolution: {integrity: sha512-diVCBljoXLQjvXRkIuamR3QRrmNyqgYDePKA5SFXTSDPSjku2a2JXj/bOxG4DoPUbYkzWl/XFu1689z/46TCaA==}
     engines: {node: '>=16.20.0'}
     hasBin: true
 
@@ -13394,7 +13389,7 @@ snapshots:
   '@babel/core@7.29.7':
     dependencies:
       '@babel/code-frame': 7.29.7
-      '@babel/generator': 7.29.7
+      '@babel/generator': 7.29.8
       '@babel/helper-compilation-targets': 7.29.7
       '@babel/helper-module-transforms': 7.29.7(@babel/core@7.29.7)
       '@babel/helpers': 7.29.7
@@ -13865,7 +13860,7 @@ snapshots:
   '@babel/traverse@7.29.7':
     dependencies:
       '@babel/code-frame': 7.29.7
-      '@babel/generator': 7.29.7
+      '@babel/generator': 7.29.8
       '@babel/helper-globals': 7.29.7
       '@babel/parser': 7.29.8
       '@babel/template': 7.29.7
@@ -15097,7 +15092,7 @@ snapshots:
       2g: 0.4.4(typescript@7.0.2)
       '@babel/code-frame': 7.29.7
       '@babel/core': 7.29.7
-      '@babel/generator': 7.29.7
+      '@babel/generator': 7.29.8
       '@expo/config': 58.0.1(typescript@7.0.2)
       '@expo/env': 2.5.1
       '@expo/json-file': 11.2.1
@@ -17445,22 +17440,22 @@ snapshots:
       '@tiptap/extensions': 3.31.4(@tiptap/core@3.31.4(@tiptap/pm@3.31.4))(@tiptap/pm@3.31.4)
       '@tiptap/pm': 3.31.4
 
-  '@tsc-rs/darwin-arm64@0.6.0':
+  '@tsc-rs/darwin-arm64@0.7.0':
     optional: true
 
-  '@tsc-rs/darwin-x64@0.6.0':
+  '@tsc-rs/darwin-x64@0.7.0':
     optional: true
 
-  '@tsc-rs/linux-arm64@0.6.0':
+  '@tsc-rs/linux-arm64@0.7.0':
     optional: true
 
-  '@tsc-rs/linux-x64@0.6.0':
+  '@tsc-rs/linux-x64@0.7.0':
     optional: true
 
-  '@tsc-rs/win32-arm64@0.6.0':
+  '@tsc-rs/win32-arm64@0.7.0':
     optional: true
 
-  '@tsc-rs/win32-x64@0.6.0':
+  '@tsc-rs/win32-x64@0.7.0':
     optional: true
 
   '@tweenjs/tween.js@23.1.3': {}
@@ -18220,8 +18215,6 @@ snapshots:
     dependencies:
       mime-types: 3.0.2
       negotiator: 1.0.0
-
-  acorn@8.16.0: {}
 
   acorn@8.19.0: {}
 
@@ -19314,7 +19307,7 @@ snapshots:
   data-urls@8.0.0(@noble/hashes@1.8.0):
     dependencies:
       whatwg-mimetype: 5.0.0
-      whatwg-url: 17.1.2(@noble/hashes@1.8.0)
+      whatwg-url: 17.2.0(@noble/hashes@1.8.0)
     transitivePeerDependencies:
       - '@noble/hashes'
 
@@ -20677,7 +20670,7 @@ snapshots:
 
   html-encoding-sniffer@7.0.0(@noble/hashes@1.8.0):
     dependencies:
-      '@exodus/bytes': 1.15.1(@noble/hashes@1.8.0)
+      '@exodus/bytes': 1.16.0(@noble/hashes@1.8.0)
     transitivePeerDependencies:
       - '@noble/hashes'
 
@@ -21519,7 +21512,7 @@ snapshots:
   metro-transform-plugins@0.87.1:
     dependencies:
       '@babel/core': 7.29.7
-      '@babel/generator': 7.29.7
+      '@babel/generator': 7.29.8
       '@babel/template': 7.29.7
       '@babel/traverse': 7.29.7
       flow-enums-runtime: 0.0.6
@@ -21530,7 +21523,7 @@ snapshots:
   metro-transform-worker@0.87.1(bufferutil@4.1.0)(utf-8-validate@6.0.6):
     dependencies:
       '@babel/core': 7.29.7
-      '@babel/generator': 7.29.7
+      '@babel/generator': 7.29.8
       '@babel/parser': 7.29.8
       '@babel/types': 7.29.8
       flow-enums-runtime: 0.0.6
@@ -21551,7 +21544,7 @@ snapshots:
     dependencies:
       '@babel/code-frame': 7.29.7
       '@babel/core': 7.29.7
-      '@babel/generator': 7.29.7
+      '@babel/generator': 7.29.8
       '@babel/parser': 7.29.8
       '@babel/template': 7.29.7
       '@babel/traverse': 7.29.7
@@ -23767,7 +23760,7 @@ snapshots:
   terser@5.48.0:
     dependencies:
       '@jridgewell/source-map': 0.3.11
-      acorn: 8.16.0
+      acorn: 8.19.0
       commander: 2.20.3
       source-map-support: 0.5.21
 
@@ -23861,14 +23854,14 @@ snapshots:
 
   ts-dedent@2.3.0: {}
 
-  tsc-rs@0.6.0:
+  tsc-rs@0.7.0:
     optionalDependencies:
-      '@tsc-rs/darwin-arm64': 0.6.0
-      '@tsc-rs/darwin-x64': 0.6.0
-      '@tsc-rs/linux-arm64': 0.6.0
-      '@tsc-rs/linux-x64': 0.6.0
-      '@tsc-rs/win32-arm64': 0.6.0
-      '@tsc-rs/win32-x64': 0.6.0
+      '@tsc-rs/darwin-arm64': 0.7.0
+      '@tsc-rs/darwin-x64': 0.7.0
+      '@tsc-rs/linux-arm64': 0.7.0
+      '@tsc-rs/linux-x64': 0.7.0
+      '@tsc-rs/win32-arm64': 0.7.0
+      '@tsc-rs/win32-x64': 0.7.0
 
   tslib@2.8.1: {}
 
@@ -24301,7 +24294,7 @@ snapshots:
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
-      magic-string: 1.4.1
+      magic-string: 1.4.3
       obug: 2.2.1
       picomatch: 4.0.7
       std-env: 4.3.0
@@ -24325,7 +24318,7 @@ snapshots:
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
-      magic-string: 1.4.1
+      magic-string: 1.4.3
       obug: 2.2.1
       picomatch: 4.0.7
       std-env: 4.3.0

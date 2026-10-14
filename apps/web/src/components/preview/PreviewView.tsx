@@ -2,7 +2,10 @@
 
 import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { previewStreamDownloadUrl } from "@t3tools/client-runtime/preview/server-browser-stream";
+import {
+  previewStreamDownloadUrl,
+  type PreviewStreamControl,
+} from "@t3tools/client-runtime/preview/server-browser-stream";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -78,7 +81,11 @@ import { BrowserAnnotationControl } from "~/annotations/BrowserAnnotationControl
 import { Badge } from "~/components/ui/badge";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { alternatePreviewRuntime, useRendersServerTabNatively } from "~/browser/previewRuntime";
-import { ServerBrowserSurface, type ServerBrowserHandle } from "~/browser/ServerBrowserSurface";
+import {
+  ServerBrowserControls,
+  ServerBrowserSurface,
+  type ServerBrowserHandle,
+} from "~/browser/ServerBrowserSurface";
 import { cn } from "~/lib/utils";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { usePreviewSession } from "./usePreviewSession";
@@ -226,13 +233,18 @@ export function PreviewView({
       setServerToolbarWidth(Math.max(1, Math.round(entry?.contentRect.width ?? 0))),
     );
   }, [serverToolbarShown]);
-  const [serverControlledTabId, setServerControlledTabId] = useState<string | null>(null);
+  const [serverControlState, setServerControlState] = useState<{
+    tabId: string;
+    control: PreviewStreamControl | null;
+  } | null>(null);
+  const serverControl =
+    serverControlState?.tabId === runtimeTabId ? serverControlState.control : null;
   const runServerAnnotation = useCallback(
     (active: boolean, dictation: { startUrl: string; stopUrl: string }) =>
       serverSurfaceRef.current?.annotation(active, dictation.startUrl, dictation.stopUrl) ?? false,
     [],
   );
-  const serverInputDisabled = isServerTab && serverControlledTabId !== runtimeTabId;
+  const serverInputDisabled = isServerTab && serverControl?.controller !== "you";
   const [serverFrameTabId, setServerFrameTabId] = useState<string | null>(null);
   const desktopOverlay = tabId ? (previewState.desktopByTabId[tabId] ?? null) : null;
   const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
@@ -981,6 +993,14 @@ export function PreviewView({
         canGoForward={canGoForward && !serverInputDisabled}
         refreshDisabled={refreshDisabled || serverInputDisabled}
         inputDisabled={serverInputDisabled}
+        controlAction={
+          isServerTab && runtimeTabId && !showEmptyState && !isUnreachable ? (
+            <ServerBrowserControls
+              control={serverControl}
+              onToggleControl={() => serverSurfaceRef.current?.toggleControl()}
+            />
+          ) : null
+        }
         focusUrlNonce={focusUrlNonce}
         onBack={handleBack}
         onForward={handleForward}
@@ -1109,10 +1129,9 @@ export function PreviewView({
                 threadId={threadRef.threadId}
                 tabId={snapshot.tabId}
                 visible={visible}
+                showControls={false}
                 onFirstFrame={() => setServerFrameTabId(runtimeTabId)}
-                onControl={(control) =>
-                  setServerControlledTabId(control?.controller === "you" ? runtimeTabId : null)
-                }
+                onControl={(control) => setServerControlState({ tabId: runtimeTabId, control })}
                 onPopup={(popupTabId) => showPreviewPopup(threadRef, popupTabId, "panel")}
                 // Stays connected under the empty state so a URL picked there reaches the page.
                 className={cn(

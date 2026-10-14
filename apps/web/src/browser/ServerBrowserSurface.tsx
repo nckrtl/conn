@@ -46,6 +46,7 @@ import { observeResize } from "~/lib/observeResize";
 
 /** Chrome-row controls for a server tab; commands require current ownership. */
 export interface ServerBrowserHandle {
+  readonly toggleControl: () => void;
   readonly navigate: (url: string) => void;
   readonly history: (delta: -1 | 1) => void;
   readonly reload: (options?: { readonly ignoreCache?: boolean }) => void;
@@ -144,6 +145,36 @@ function offerDownload(download: PreviewStreamDownload) {
   });
 }
 
+/** Shared ownership controls for browser chrome and standalone floating surfaces. */
+export function ServerBrowserControls({
+  control,
+  onToggleControl,
+}: {
+  readonly control: PreviewStreamControl | null;
+  readonly onToggleControl: () => void;
+}) {
+  return (
+    <>
+      <span role="status" className="shrink-0 whitespace-nowrap text-ui text-muted-foreground">
+        {previewStreamControlLabel(control)}
+      </span>
+      {control?.canOperate ? (
+        <ToolbarGroup className="shrink-0">
+          <Button
+            variant="ghost"
+            size="xs"
+            type="button"
+            disabled={control.controller === "another-viewer"}
+            onClick={onToggleControl}
+          >
+            {control.controller === "you" ? "Release control" : "Take control"}
+          </Button>
+        </ToolbarGroup>
+      ) : null}
+    </>
+  );
+}
+
 export function ServerBrowserSurface(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: string;
@@ -153,6 +184,8 @@ export function ServerBrowserSurface(props: {
   readonly followSize?: boolean;
   /** Floating previews reserve the top edge for their existing hover controls. */
   readonly controlPosition?: "top" | "bottom";
+  /** The panel's browser chrome can host the controls instead of a separate row. */
+  readonly showControls?: boolean;
   readonly onFirstFrame?: () => void;
   readonly onViewport?: (viewport: PreviewStreamViewport) => void;
   readonly onControl?: (control: PreviewStreamControl | null) => void;
@@ -168,6 +201,7 @@ export function ServerBrowserSurface(props: {
     visible,
     followSize = true,
     controlPosition = "top",
+    showControls = true,
     onFirstFrame,
     onViewport,
     onControl,
@@ -232,6 +266,10 @@ export function ServerBrowserSurface(props: {
   const send = useCallback((input: PreviewStreamInput) => {
     clientRef.current?.send(input);
   }, []);
+
+  const toggleControl = useCallback(() => {
+    send({ type: controlRef.current?.controller === "you" ? "releaseControl" : "takeControl" });
+  }, [send]);
 
   const clearInput = useCallback(() => {
     if (inputFrameRef.current !== null) cancelAnimationFrame(inputFrameRef.current);
@@ -322,6 +360,7 @@ export function ServerBrowserSurface(props: {
   useImperativeHandle(
     ref,
     () => ({
+      toggleControl,
       navigate: (url) => send({ type: "navigate", url }),
       history: (delta) => send({ type: "history", delta }),
       reload: (options) =>
@@ -331,7 +370,7 @@ export function ServerBrowserSurface(props: {
         clientRef.current?.send({ type: "annotation", active, startUrl, stopUrl }) ?? false,
       canvas: () => (hasFrameRef.current ? canvasRef.current : null),
     }),
-    [send],
+    [send, toggleControl],
   );
 
   useEffect(() => {
@@ -744,30 +783,16 @@ export function ServerBrowserSurface(props: {
       className={cn("relative flex flex-col overflow-hidden", className)}
       data-server-browser-surface={tabId}
     >
-      <div
-        className={cn(
-          "visible relative z-20 flex shrink-0 items-center justify-between gap-2 border-(--shell-divider)! bg-background py-toolbar ps-3 pe-toolbar-end",
-          controlPosition === "bottom" ? "order-last border-t" : "border-b",
-        )}
-      >
-        <span role="status" className="text-ui text-muted-foreground">
-          {previewStreamControlLabel(control)}
-        </span>
-        {control?.canOperate ? (
-          <ToolbarGroup className="shrink-0">
-            <Button
-              variant="ghost"
-              size="xs"
-              disabled={control.controller === "another-viewer"}
-              onClick={() =>
-                send({ type: control.controller === "you" ? "releaseControl" : "takeControl" })
-              }
-            >
-              {control.controller === "you" ? "Release control" : "Take control"}
-            </Button>
-          </ToolbarGroup>
-        ) : null}
-      </div>
+      {showControls ? (
+        <div
+          className={cn(
+            "visible relative z-20 flex shrink-0 items-center justify-between gap-2 border-(--shell-divider)! bg-background py-toolbar ps-3 pe-toolbar-end",
+            controlPosition === "bottom" ? "order-last border-t" : "border-b",
+          )}
+        >
+          <ServerBrowserControls control={control} onToggleControl={toggleControl} />
+        </div>
+      ) : null}
       <div className="relative min-h-0 flex-1">
         <canvas
           ref={canvasRef}

@@ -58,6 +58,8 @@ interface Props {
   annotationAction?: ReactNode;
   /** The saved-login key, shown inside the address bar's trailing edge. */
   credentialAction?: ReactNode;
+  /** Stream ownership status and take/release controls share the browser toolbar. */
+  controlAction?: ReactNode;
   /**
    * Trailing slot rendered after the URL input. Used by the preview view
    * to mount the three-dot menu (hard reload, devtools, zoom, clear data).
@@ -99,6 +101,7 @@ export function PreviewChromeRow({
   leadingActions,
   annotationAction,
   credentialAction,
+  controlAction,
 }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState(url);
@@ -123,7 +126,7 @@ export function PreviewChromeRow({
     <div className="relative">
       <form
         onSubmit={submit}
-        className="flex h-10 min-h-10 shrink-0 items-center gap-2 border-b border-(--shell-divider)! bg-background px-2 in-data-[preview-panel-mode=inline]:h-auto in-data-[preview-panel-mode=inline]:min-h-0 in-data-[preview-panel-mode=inline]:mb-3 in-data-[preview-panel-mode=inline]:py-toolbar"
+        className="flex h-10 min-h-10 shrink-0 items-center gap-2 border-b border-(--shell-divider)! bg-background px-2 in-data-[preview-panel-mode=inline]:h-auto in-data-[preview-panel-mode=inline]:min-h-0 in-data-[preview-panel-mode=inline]:py-toolbar"
         data-surface-subheader
       >
         <ToolbarGroup role="group" aria-label="Navigation">
@@ -246,6 +249,10 @@ export function PreviewChromeRow({
             </InputGroupAddon>
           ) : null}
         </InputGroup>
+
+        {controlAction ? (
+          <div className="flex shrink-0 items-center gap-2">{controlAction}</div>
+        ) : null}
 
         <ToolbarGroup className="shrink-0 empty:hidden">
           {onPickElement ? (

@@ -61,6 +61,8 @@ describe("desktop tab runner", () => {
       (value) => redactSensitiveValues(value, remembered),
     );
     const cdp = await context.newCDPSession(page);
+    // Electron's manager retains an already-enabled debugger across shares.
+    await cdp.send("Runtime.enable");
     await runner.attach(
       {
         send: (method, params) => {

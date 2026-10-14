@@ -134,6 +134,9 @@ export class DesktopTabRunner {
         }.bind(this),
       ).pipe(Scope.provide(this.scope)),
     );
+    // The manager retains the debugger between shares. Re-enabling Runtime
+    // must announce existing contexts to this fresh Playwright connection.
+    await target.send("Runtime.disable", {}, undefined);
     this.browser = await chromium.connectOverCDP(endpoint);
     const pages = this.browser.contexts().flatMap((context) => context.pages());
     if (pages.length !== 1) throw new Error("Desktop tab relay requires exactly one page.");

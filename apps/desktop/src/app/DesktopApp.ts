@@ -44,7 +44,7 @@ const MAX_TCP_PORT = 65_535;
 const DESKTOP_BACKEND_PORT_PROBE_HOSTS = ["127.0.0.1", "0.0.0.0", "::"] as const;
 
 const makeDesktopRunId = Crypto.Crypto.pipe(
-  Effect.flatMap((crypto) => crypto.randomUUIDv4),
+  Effect.flatMap((crypto) => crypto.randomUUIDv4()),
   Effect.map((value) => value.replaceAll("-", "").slice(0, 12)),
 );
 
@@ -196,6 +196,14 @@ const bootstrap = Effect.gen(function* () {
     yield* logBootstrapInfo("bootstrap skipping local environment (disabled in settings)");
     if (!(yield* Ref.get(state.quitting))) {
       yield* desktopWindow.createMainIfBackendReady;
+      // Conn: the control socket (open-thread, select-workspace, used by Rooms)
+      // answers from the renderer, so it does not need the local backend.
+      yield* appActivation.start.pipe(
+        Effect.tap(() => logBootstrapInfo("desktop app control socket ready")),
+        Effect.catch((error) =>
+          logStartupError("desktop app control socket unavailable", { error }),
+        ),
+      );
     }
     return;
   }

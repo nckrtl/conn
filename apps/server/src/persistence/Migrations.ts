@@ -75,9 +75,10 @@ import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
-// Conn: upstream's preview shipped PeerLinks at 61, which upstream main gives to
-// PullRequestReviewGuides. See reconcileConnPeerLinksMigration.
-import Migration0062 from "./Migrations/062_PeerLinks.ts";
+import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
+// Conn: upstream's preview shipped PeerLinks at 61; Conn then kept it at 62, which
+// upstream main gives to ThreadFailureLookupIndex. See reconcileConnPeerLinksMigration.
+import Migration0063 from "./Migrations/063_PeerLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -153,7 +154,8 @@ export const migrationEntries = [
   [59, "McpAppModelContext", Migration0059],
   [60, "ThreadSnapshotWindowIndexes", Migration0060],
   [61, "PullRequestReviewGuides", Migration0061],
-  [62, "PeerLinks", Migration0062],
+  [62, "ThreadFailureLookupIndex", Migration0062],
+  [63, "PeerLinks", Migration0063],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -210,10 +212,13 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
 });
 
 /**
- * Conn builds from upstream's preview recorded PeerLinks at 61. Upstream main
- * gives 61 to PullRequestReviewGuides, which the migrator would skip on those
- * databases. Run that migration, record it at 61, and move PeerLinks to 62.
- * Both migrations only create their table if it is missing.
+ * Conn builds recorded PeerLinks at 61 (upstream's preview) and later at 62.
+ * Upstream main gives 61 to PullRequestReviewGuides and 62 to
+ * ThreadFailureLookupIndex, which the migrator would skip on those databases.
+ * Run the upstream migrations PeerLinks displaced, record them at their ids,
+ * and move PeerLinks to 63. PeerLinks and PullRequestReviewGuides only create
+ * their table if it is missing; the index migration has not run on such a
+ * database, because PeerLinks held its id.
  */
 const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigration")(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -226,18 +231,37 @@ const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigrati
       const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
           SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 61
         `;
-      const legacy = history.find((row) => row.migration_id === 61 && row.name === "PeerLinks");
+      const legacy = history.find(
+        (row) => (row.migration_id === 61 || row.migration_id === 62) && row.name === "PeerLinks",
+      );
       if (!legacy) return [];
-      if (history.some((row) => row !== legacy)) {
+      const expectedOthers =
+        legacy.migration_id === 62 ? [{ migration_id: 61, name: "PullRequestReviewGuides" }] : [];
+      const others = history.filter((row) => row !== legacy);
+      if (
+        others.length !== expectedOthers.length ||
+        !expectedOthers.every((expected) =>
+          others.some(
+            (row) => row.migration_id === expected.migration_id && row.name === expected.name,
+          ),
+        )
+      ) {
         return yield* new Migrator.MigrationError({
           kind: "BadState",
-          message: "Cannot move PeerLinks to 62 with unexpected later migrations.",
+          message: "Cannot move PeerLinks to 63 with unexpected later migrations.",
         });
       }
-      yield* Migration0061;
-      yield* sql`UPDATE effect_sql_migrations SET migration_id = 62 WHERE migration_id = 61 AND name = 'PeerLinks'`;
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (61, 'PullRequestReviewGuides')`;
-      return [[61, "PullRequestReviewGuides"] as const];
+      const executed: Array<readonly [number, string]> = [];
+      yield* sql`UPDATE effect_sql_migrations SET migration_id = 63 WHERE migration_id = ${legacy.migration_id} AND name = 'PeerLinks'`;
+      if (legacy.migration_id === 61) {
+        yield* Migration0061;
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (61, 'PullRequestReviewGuides')`;
+        executed.push([61, "PullRequestReviewGuides"] as const);
+      }
+      yield* Migration0062;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (62, 'ThreadFailureLookupIndex')`;
+      executed.push([62, "ThreadFailureLookupIndex"] as const);
+      return executed;
     }),
   );
 });
@@ -268,9 +292,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
-  // Move a Conn PeerLinks record off 61 before the skip check reads the history.
+  // Move a Conn PeerLinks record off 61/62 before the skip check reads the history.
   const connMigrations =
-    toMigrationInclusive === undefined || toMigrationInclusive >= 62
+    toMigrationInclusive === undefined || toMigrationInclusive >= 63
       ? yield* reconcileConnPeerLinksMigration()
       : [];
   if (includesV2) {

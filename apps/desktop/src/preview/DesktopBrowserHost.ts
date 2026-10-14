@@ -14,7 +14,7 @@ import {
   DesktopBrowserEvent,
   type DesktopBrowserEvent as DesktopBrowserEventType,
 } from "@t3tools/contracts";
-import { redactCdpMessage } from "@t3tools/shared/credentialFill";
+import { redactCdpMessage, redactSensitiveValues } from "@t3tools/shared/credentialFill";
 import * as Context from "effect/Context";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
@@ -95,6 +95,7 @@ export class DesktopBrowserHost extends Context.Service<
      */
     readonly rememberFilledSecret: (source: Electron.WebContents, value: string) => void;
     /** The agent's cursor positions for attached tabs, keyed by their server tab. */
+    readonly redactForPage: <A>(source: Electron.WebContents, value: A) => A;
     readonly pointers: Stream.Stream<{
       readonly key: DesktopBrowserTabKey;
       readonly phase: "move" | "click";
@@ -269,6 +270,8 @@ export const make = Effect.gen(function* () {
     placeDownload,
     humanStartedDownload,
     rememberFilledSecret,
+    redactForPage: (source, value) =>
+      redactSensitiveValues(value, [...(filledSecrets.get(source) ?? [])]),
   });
 });
 

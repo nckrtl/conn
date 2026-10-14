@@ -139,3 +139,10 @@ export const COMPLETE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:complete-legacy-lo
 export const VAULTWARDEN_SETUP_CHANNEL = "desktop:vaultwarden-setup";
 export const VAULT_LOGINS_CHANNEL = "desktop:vault-logins";
 export const VAULT_FILL_CHANNEL = "desktop:vault-fill";
+
+export const PREVIEW_TAB_HANDOVER_CHANNEL = "desktop:preview-tab-handover";
+export const PREVIEW_TAB_EXECUTE_CHANNEL = "desktop:preview-tab-execute";
+export const PREVIEW_TAB_STOP_SHARING_CHANNEL = "desktop:preview-tab-stop-sharing";
+export const PREVIEW_TAB_SHARING_CHANGE_CHANNEL = "desktop:preview-tab-sharing-change";
+
+export const PREVIEW_HOST_DEVICE_NAME_CHANNEL = "desktop:preview-host-device-name";

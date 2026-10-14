@@ -30,7 +30,7 @@ import {
 import { constVoid } from "effect/Function";
 import type { CDPSession, Locator, Page } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
-import { BrowserControlInterrupted } from "./SessionControl.ts";
+import { BrowserControlInterrupted } from "@t3tools/shared/previewSessionControl";
 
 const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
@@ -192,6 +192,7 @@ export const snapshot = async (input: {
   readonly consoleEntries: ReadonlyArray<PreviewAutomationConsoleEntry>;
   readonly networkEntries: ReadonlyArray<PreviewAutomationNetworkEntry>;
   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
+  readonly includeScreenshot?: boolean;
 }): Promise<PreviewAutomationSnapshot> => {
   const viewport = input.page.viewportSize() ?? { width: 1280, height: 800 };
   const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / (viewport.width * input.renderScale));
@@ -206,7 +207,9 @@ export const snapshot = async (input: {
       >
     >,
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
-    captureViewport(input.page, input.cdp, { format: "png", scale }),
+    input.includeScreenshot === false
+      ? Promise.resolve("")
+      : captureViewport(input.page, input.cdp, { format: "png", scale }),
   ]);
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(
@@ -230,8 +233,15 @@ export const snapshot = async (input: {
     screenshot: {
       mimeType: "image/png",
       data,
-      width: Math.round(viewport.width * input.renderScale * scale),
-      height: Math.round(viewport.height * input.renderScale * scale),
+      ...(input.includeScreenshot === false ? { unavailableReason: "desktopTab" as const } : {}),
+      width:
+        input.includeScreenshot === false
+          ? 0
+          : Math.round(viewport.width * input.renderScale * scale),
+      height:
+        input.includeScreenshot === false
+          ? 0
+          : Math.round(viewport.height * input.renderScale * scale),
     },
   };
 };
@@ -766,8 +776,15 @@ export const fillCredential = async (
   }
 };
 
-export const credentialLocked = async (page: Page) =>
-  (await page.evaluate(CREDENTIAL_LOCK_EXPRESSION)) === true;
+export const credentialLocked = async (page: Page) => {
+  const locked: unknown = await page.evaluate(CREDENTIAL_LOCK_EXPRESSION);
+  if (typeof locked !== "boolean")
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "Credential lock state could not be checked.",
+    );
+  return locked;
+};
 
 /**
  * Values of masked inputs and inputs filled with a credential. Agent-visible
@@ -776,7 +793,10 @@ export const credentialLocked = async (page: Page) =>
  */
 export const sensitiveInputValues = async (page: Page): Promise<ReadonlyArray<string>> => {
   const values: unknown = await page.evaluate(SENSITIVE_INPUT_VALUES_EXPRESSION);
-  return Array.isArray(values)
-    ? values.filter((value): value is string => typeof value === "string")
-    : [];
+  if (!Array.isArray(values) || !values.every((value) => typeof value === "string"))
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "Sensitive input values could not be checked.",
+    );
+  return values;
 };

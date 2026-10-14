@@ -309,7 +309,15 @@ import {
   TestLoginSummary,
   UpdateTestLoginInput,
 } from "./credentials.ts";
-import { PreviewAutomationError } from "./previewAutomation.ts";
+import {
+  DesktopTabBinding,
+  DesktopTabConnection,
+  DesktopTabReport,
+  DesktopTabRelayError,
+  PreviewAutomationStreamEvent,
+  PreviewAutomationResponse,
+  PreviewAutomationError,
+} from "./previewAutomation.ts";
 import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
@@ -476,6 +484,10 @@ export const WS_METHODS = {
   terminalClose: "terminal.close",
 
   // Preview methods
+  desktopTabRegister: "preview.desktopRegister",
+  desktopTabRequests: "preview.desktopRequests",
+  desktopTabReport: "preview.desktopReport",
+  desktopTabRespond: "preview.desktopRespond",
   previewOpen: "preview.open",
   previewNavigate: "preview.navigate",
   previewResize: "preview.resize",
@@ -1560,6 +1572,31 @@ const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
 });
 
+const desktopTabRpcError = Schema.Union([DesktopTabRelayError, EnvironmentAuthorizationError]);
+const WsDesktopTabRegisterRpc = Rpc.make(WS_METHODS.desktopTabRegister, {
+  payload: DesktopTabBinding,
+  success: DesktopTabConnection,
+  error: desktopTabRpcError,
+});
+const WsDesktopTabRequestsRpc = Rpc.make(WS_METHODS.desktopTabRequests, {
+  payload: DesktopTabConnection,
+  success: PreviewAutomationStreamEvent,
+  error: desktopTabRpcError,
+  stream: true,
+});
+const WsDesktopTabReportRpc = Rpc.make(WS_METHODS.desktopTabReport, {
+  payload: DesktopTabReport,
+  error: desktopTabRpcError,
+});
+const WsDesktopTabRespondRpc = Rpc.make(WS_METHODS.desktopTabRespond, {
+  payload: PreviewAutomationResponse,
+  error: Schema.Union([
+    DesktopTabRelayError,
+    PreviewAutomationError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
 const WsPreviewOpenRpc = Rpc.make(WS_METHODS.previewOpen, {
   payload: PreviewOpenInput,
   success: PreviewSessionSnapshot,
@@ -2163,6 +2200,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsTerminalCloseRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeTerminalMetadataRpc,
+  WsDesktopTabRegisterRpc,
+  WsDesktopTabRequestsRpc,
+  WsDesktopTabReportRpc,
+  WsDesktopTabRespondRpc,
   WsPreviewOpenRpc,
   WsPreviewNavigateRpc,
   WsPreviewResizeRpc,

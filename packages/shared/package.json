@@ -498,6 +498,14 @@
     "./previewAnnotation": {
       "types": "./src/previewAnnotation.ts",
       "import": "./src/previewAnnotation.ts"
+    },
+    "./previewSessionControl": {
+      "types": "./src/previewSessionControl.ts",
+      "import": "./src/previewSessionControl.ts"
+    },
+    "./previewPage": {
+      "types": "./src/previewPage.ts",
+      "import": "./src/previewPage.ts"
     }
   },
   "scripts": {
@@ -513,6 +521,7 @@
     "mdast-util-directive": "catalog:",
     "micromark-extension-directive": "catalog:",
     "micromark-util-character": "catalog:",
+    "playwright-core": "1.60.0",
     "rehype-raw": "catalog:",
     "rehype-sanitize": "catalog:",
     "remark-breaks": "catalog:",

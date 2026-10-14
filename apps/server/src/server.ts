@@ -70,6 +70,7 @@ import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
+import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
@@ -766,6 +767,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provideMerge(TestLoginStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
     ),
   ),
+  Layer.provide(DesktopTabRelay.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),

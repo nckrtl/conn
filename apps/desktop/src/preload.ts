@@ -368,6 +368,26 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
+    getHostDeviceName: () => ipcRenderer.invoke(IpcChannels.PREVIEW_HOST_DEVICE_NAME_CHANNEL),
+    handoverTab: (input) => ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_HANDOVER_CHANNEL, input),
+    executeTabRequest: (runtimeTabId, connectionId, request) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_EXECUTE_CHANNEL, {
+        runtimeTabId,
+        connectionId,
+        request,
+      }),
+    stopSharingTab: (tabId) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_STOP_SHARING_CHANNEL, { tabId }),
+    onTabSharingChange: (listener) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        tabId: string,
+        report: import("@t3tools/contracts").DesktopTabReport,
+      ) => listener(tabId, report);
+      ipcRenderer.on(IpcChannels.PREVIEW_TAB_SHARING_CHANGE_CHANNEL, handler);
+      return () =>
+        ipcRenderer.removeListener(IpcChannels.PREVIEW_TAB_SHARING_CHANGE_CHANNEL, handler);
+    },
     setForwardedShortcuts: (shortcuts) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_SET_FORWARDED_SHORTCUTS_CHANNEL, shortcuts),
     createTab: (tabId, defaults) =>

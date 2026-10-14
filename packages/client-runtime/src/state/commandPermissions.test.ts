@@ -10,6 +10,7 @@ import {
   AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
+  AuthPreviewOperateScope,
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
@@ -19,6 +20,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
@@ -26,6 +28,7 @@ import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
+import { createPreviewEnvironmentAtoms } from "./preview.ts";
 
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
@@ -325,6 +328,12 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
               writes++;
             }),
           ),
+        [WS_METHODS.desktopTabRequests]: () =>
+          Stream.fromEffect(
+            Effect.sync(() => {
+              writes++;
+            }),
+          ),
       },
     } as unknown as RpcSession;
     const supervisor = {
@@ -341,6 +350,109 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
       action: "commit",
     }).pipe(Stream.runDrain, Effect.provideService(EnvironmentSupervisor, supervisor), Effect.flip);
     expect(streamed._tag).toBe("EnvironmentAuthorizationError");
+    const relay = yield* runStreamGuarded(WS_METHODS.desktopTabRequests, {
+      connectionId: "fixture-connection",
+    }).pipe(Stream.runDrain, Effect.provideService(EnvironmentSupervisor, supervisor), Effect.flip);
+    expect(relay._tag).toBe("EnvironmentAuthorizationError");
     expect(writes).toBe(0);
   }),
+);
+
+it.effect("desktop relay commands require the destination preview grant", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      for (const tag of [
+        WS_METHODS.desktopTabRegister,
+        WS_METHODS.desktopTabReport,
+        WS_METHODS.desktopTabRespond,
+      ]) {
+        const command = createEnvironmentRpcCommand(runtime, { label: "desktop-relay", tag });
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthPreviewOperateScope],
+            permissions: [AuthPreviewOperateScope],
+          }),
+        );
+        expect(registry.get(command.permissionAtom(env))).toBe(true);
+        expect(registry.get(command.permissionAtom(other))).toBe(false);
+      }
+    }),
+  ),
+);
+
+it.effect(
+  "desktop request commands check grants, cancel the lease, and do not follow another session",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const opened = yield* Deferred.make<void>();
+        const closed = yield* Deferred.make<void>();
+        let subscriptions = 0;
+        const session = {
+          client: {
+            [WS_METHODS.desktopTabRequests]: () => {
+              subscriptions++;
+              return Stream.fromEffect(
+                Deferred.succeed(opened, undefined).pipe(
+                  Effect.as({ type: "connected" as const, connectionId: "fixture-connection" }),
+                ),
+              ).pipe(
+                Stream.concat(Stream.never),
+                Stream.ensuring(Deferred.succeed(closed, undefined)),
+              );
+            },
+          },
+        } as unknown as RpcSession;
+        const supervisor = {
+          target: { environmentId: env, label: "target" },
+          session: yield* SubscriptionRef.make(Option.some(session)),
+        } as unknown as EnvironmentSupervisor["Service"];
+        const relayRuntime = Atom.runtime(
+          Layer.succeed(EnvironmentRegistry, {
+            run: (
+              _id: EnvironmentId,
+              effect: Effect.Effect<unknown, never, EnvironmentSupervisor>,
+            ) => effect.pipe(Effect.provideService(EnvironmentSupervisor, supervisor)),
+          } as unknown as EnvironmentRegistry["Service"]),
+        );
+        const commands = createPreviewEnvironmentAtoms(relayRuntime);
+        const abort = new AbortController();
+        const input = {
+          environmentId: env,
+          input: {
+            connectionId: "fixture-connection",
+            onEvent: async () => {},
+            signal: abort.signal,
+          },
+        };
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        const denied = yield* Effect.promise(() => commands.desktopRequests.run(registry, input));
+        expect(denied._tag).toBe("Failure");
+        expect(subscriptions).toBe(0);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthPreviewOperateScope],
+            permissions: [AuthPreviewOperateScope],
+          }),
+        );
+        const running = yield* Effect.promise(() =>
+          commands.desktopRequests.run(registry, input),
+        ).pipe(Effect.forkScoped);
+        yield* Deferred.await(opened);
+        yield* SubscriptionRef.set(supervisor.session, Option.none());
+        yield* SubscriptionRef.set(supervisor.session, Option.some(session));
+        abort.abort();
+        yield* Deferred.await(closed);
+        expect((yield* Fiber.join(running))._tag).toBe("Success");
+        expect(subscriptions).toBe(1);
+      }),
+    ),
 );

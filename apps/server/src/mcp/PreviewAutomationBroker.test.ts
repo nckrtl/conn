@@ -1504,3 +1504,224 @@ it.effect("keeps the host connected when a background status read times out", ()
     }),
   ),
 );
+
+const desktopBinding = {
+  environmentId: scope.environmentId,
+  serverEpoch: "epoch-1",
+  threadId: scope.thread.threadId,
+  tabId: PreviewTabId.make("desktop-tab"),
+  deviceName: "Fixture desktop",
+};
+
+it.effect(
+  "explicit desktop targets override an existing server assignment without moving new agent tabs",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const serverReady = yield* Deferred.make<void>();
+        const events = yield* broker.connect(
+          makeHost({ clientId: SERVER_BROWSER_AUTOMATION_CLIENT_ID }),
+        );
+        yield* Stream.runForEach(events, (event) =>
+          event.type === "connected"
+            ? Deferred.succeed(serverReady, undefined)
+            : broker.respond({
+                clientId: SERVER_BROWSER_AUTOMATION_CLIENT_ID,
+                connectionId: event.connectionId,
+                requestId: event.request.requestId,
+                ok: true,
+                result: { host: "server" },
+              }),
+        ).pipe(Effect.forkScoped);
+        yield* Deferred.await(serverReady);
+        expect(yield* broker.invoke<void>({ scope, operation: "open", input: {} })).toEqual({
+          host: "server",
+        });
+        const { connectionId } = yield* broker.registerDesktop("session-1", desktopBinding);
+        yield* Stream.runForEach(broker.desktopRequests("session-1", connectionId), (event) =>
+          event.type === "request"
+            ? broker.respondDesktop("session-1", {
+                clientId: "forged",
+                connectionId,
+                requestId: event.request.requestId,
+                ok: true,
+                result: { host: "desktop" },
+              })
+            : Effect.void,
+        ).pipe(Effect.forkScoped);
+        expect(
+          yield* broker.invoke<void>({
+            scope,
+            operation: "snapshot",
+            tabId: desktopBinding.tabId,
+            input: {},
+          }),
+        ).toEqual({ host: "desktop" });
+        expect(yield* broker.invoke<void>({ scope, operation: "open", input: {} })).toEqual({
+          host: "server",
+        });
+      }),
+    ),
+);
+
+it.effect("desktop streams and reports are bound to the authenticated session", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const { connectionId } = yield* broker.registerDesktop("session-1", desktopBinding);
+      expect(
+        (yield* Stream.runDrain(broker.desktopRequests("session-2", connectionId)).pipe(
+          Effect.flip,
+        ))._tag,
+      ).toBe("DesktopTabRelayError");
+      expect(
+        (yield* broker
+          .reportDesktop("session-2", {
+            connectionId,
+            shared: false,
+            owner: "human",
+            generation: 1,
+            url: null,
+            title: null,
+          })
+          .pipe(Effect.flip))._tag,
+      ).toBe("DesktopTabRelayError");
+    }),
+  ),
+);
+
+it.effect("desktop tabs are isolated by thread and unsupported operations fail clearly", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      yield* broker.registerDesktop("session-1", desktopBinding);
+      const otherScope = {
+        ...scope,
+        thread: { ...scope.thread, threadId: ThreadId.make("other-thread") },
+      };
+      expect(
+        (yield* broker
+          .invoke<void>({
+            scope: otherScope,
+            operation: "snapshot",
+            tabId: desktopBinding.tabId,
+            input: {},
+          })
+          .pipe(Effect.flip))._tag,
+      ).toBe("PreviewAutomationNoAvailableHostError");
+      const error = yield* broker
+        .invoke<void>({ scope, operation: "evaluate", tabId: desktopBinding.tabId, input: {} })
+        .pipe(Effect.flip);
+      expect(error.message).toContain("Not supported on desktop tabs yet");
+      expect(yield* broker.desktopTabs(scope.environmentId, "other-thread")).toEqual([]);
+    }),
+  ),
+);
+
+it.effect("takeover fails pending desktop requests and ignores their late response", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const { connectionId } = yield* broker.registerDesktop("session-1", desktopBinding);
+      const delivered = yield* Deferred.make<PreviewAutomationRequest>();
+      yield* Stream.runForEach(broker.desktopRequests("session-1", connectionId), (event) =>
+        event.type === "request" ? Deferred.succeed(delivered, event.request) : Effect.void,
+      ).pipe(Effect.forkScoped);
+      const invocation = yield* broker
+        .invoke<void>({ scope, operation: "click", tabId: desktopBinding.tabId, input: {} })
+        .pipe(Effect.exit, Effect.forkScoped);
+      const request = yield* Deferred.await(delivered);
+      yield* broker.reportDesktop("session-1", {
+        connectionId,
+        shared: false,
+        owner: "human",
+        generation: 1,
+        url: null,
+        title: null,
+      });
+      const result = yield* Fiber.join(invocation);
+      expect(result._tag).toBe("Failure");
+      yield* broker.respondDesktop("session-1", {
+        clientId: "desktop",
+        connectionId,
+        requestId: request.requestId,
+        ok: true,
+        result: "late",
+      });
+      expect(
+        (yield* broker
+          .invoke<void>({ scope, operation: "snapshot", tabId: desktopBinding.tabId, input: {} })
+          .pipe(Effect.flip))._tag,
+      ).toBe("PreviewAutomationControlInterruptedError");
+    }),
+  ),
+);
+
+it.effect("disconnect revokes sharing, fails pending work, and rejects stale generations", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const { connectionId } = yield* broker.registerDesktop("session-1", desktopBinding);
+      const delivered = yield* Deferred.make<PreviewAutomationRequest>();
+      const stream = yield* Stream.runForEach(
+        broker.desktopRequests("session-1", connectionId),
+        (event) =>
+          event.type === "request" ? Deferred.succeed(delivered, event.request) : Effect.void,
+      ).pipe(Effect.forkScoped);
+      const invocation = yield* broker
+        .invoke<void>({ scope, operation: "type", tabId: desktopBinding.tabId, input: {} })
+        .pipe(Effect.exit, Effect.forkScoped);
+      const request = yield* Deferred.await(delivered);
+      yield* Fiber.interrupt(stream);
+      const result = yield* Fiber.join(invocation);
+      expect(result._tag).toBe("Failure");
+      expect(yield* broker.desktopTabs(scope.environmentId, scope.thread.threadId)).toEqual([]);
+      const replacement = yield* broker.registerDesktop("session-1", desktopBinding);
+      expect(replacement.connectionId).not.toBe(connectionId);
+      yield* broker.respondDesktop("session-1", {
+        clientId: "desktop",
+        connectionId,
+        requestId: request.requestId,
+        ok: true,
+        result: "stale",
+      });
+      expect(
+        (yield* broker
+          .reportDesktop("session-1", {
+            connectionId,
+            shared: true,
+            owner: "agent",
+            generation: 0,
+            url: null,
+            title: null,
+          })
+          .pipe(Effect.flip))._tag,
+      ).toBe("DesktopTabRelayError");
+    }),
+  ),
+);
+
+it.effect("expires abandoned desktop registrations without expiring active streams", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const abandoned = yield* broker.registerDesktop("session-1", desktopBinding);
+      yield* TestClock.adjust(30_000);
+      expect(yield* broker.desktopTabs(scope.environmentId, scope.thread.threadId)).toEqual([]);
+      const active = yield* broker.registerDesktop("session-1", desktopBinding);
+      const connected = yield* Deferred.make<void>();
+      yield* Stream.runForEach(broker.desktopRequests("session-1", active.connectionId), (event) =>
+        event.type === "connected" ? Deferred.succeed(connected, undefined) : Effect.void,
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+      yield* TestClock.adjust(30_000);
+      expect(yield* broker.desktopTabs(scope.environmentId, scope.thread.threadId)).toHaveLength(1);
+      expect(
+        (yield* Stream.runDrain(broker.desktopRequests("session-1", abandoned.connectionId)).pipe(
+          Effect.flip,
+        )).reason,
+      ).toBe("session");
+    }),
+  ),
+);

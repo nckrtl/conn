@@ -147,6 +147,11 @@ export const PreviewAutomationStatus = Schema.Struct({
         ownedByCaller: Schema.optional(Schema.Boolean),
         visible: Schema.optional(Schema.Boolean),
         profileId: Schema.optional(BrowserProfileId),
+        host: Schema.optional(Schema.String),
+        runtime: Schema.optional(Schema.Literals(["server", "desktop"])),
+        shared: Schema.optional(Schema.Boolean),
+        hostedHere: Schema.optional(Schema.Boolean),
+        generation: Schema.optional(Schema.Int),
       }),
     ),
   ),
@@ -740,6 +745,7 @@ export const PreviewAutomationSnapshot = Schema.Struct({
   screenshot: Schema.Struct({
     mimeType: Schema.Literal("image/png"),
     data: Schema.String,
+    unavailableReason: Schema.optional(Schema.Literal("desktopTab")),
     width: Schema.Int,
     height: Schema.Int,
   }),
@@ -769,6 +775,33 @@ export const PreviewAutomationClientId = TrimmedNonEmptyString.check(Schema.isMa
 export type PreviewAutomationClientId = typeof PreviewAutomationClientId.Type;
 export const PreviewAutomationConnectionId = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
 export type PreviewAutomationConnectionId = typeof PreviewAutomationConnectionId.Type;
+
+export const DesktopTabBinding = Schema.Struct({
+  environmentId: EnvironmentId,
+  serverEpoch: TrimmedNonEmptyString,
+  threadId: ThreadId,
+  tabId: PreviewTabId,
+  deviceName: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+export type DesktopTabBinding = typeof DesktopTabBinding.Type;
+export const DesktopTabConnection = Schema.Struct({ connectionId: PreviewAutomationConnectionId });
+export const DesktopTabReport = Schema.Struct({
+  ...DesktopTabConnection.fields,
+  shared: Schema.Boolean,
+  owner: PreviewAutomationTabOwner,
+  generation: Schema.Int,
+  url: Schema.NullOr(Schema.String),
+  title: Schema.NullOr(Schema.String),
+});
+export type DesktopTabReport = typeof DesktopTabReport.Type;
+export class DesktopTabRelayError extends Schema.TaggedError<DesktopTabRelayError>()(
+  "DesktopTabRelayError",
+  { reason: Schema.Literals(["binding", "session", "conflict"]) },
+) {
+  override get message() {
+    return `Desktop tab relay rejected the ${this.reason}. Share the tab again from its desktop toolbar.`;
+  }
+}
 
 export const PreviewAutomationHostIdentity = Schema.Struct({
   clientId: PreviewAutomationClientId,
@@ -807,6 +840,7 @@ export const PreviewAutomationRequest = Schema.Struct({
   threadId: ThreadId,
   tabId: Schema.optional(PreviewTabId),
   tabIdExplicit: Schema.optional(Schema.Boolean),
+  controlGeneration: Schema.optional(Schema.Int),
   /** Supplied by the broker from authenticated scope, never from tool input. */
   agentSessionId: Schema.optional(Schema.String),
   operation: PreviewAutomationOperation,
@@ -1207,3 +1241,15 @@ export const PreviewUrlResolution = Schema.Struct({
   environmentId: EnvironmentId,
 });
 export type PreviewUrlResolution = typeof PreviewUrlResolution.Type;
+
+export const DesktopTabHandover = Schema.Struct({
+  binding: DesktopTabBinding,
+  connectionId: PreviewAutomationConnectionId,
+  runtimeTabId: TrimmedNonEmptyString,
+});
+export type DesktopTabHandover = typeof DesktopTabHandover.Type;
+export const DesktopTabExecute = Schema.Struct({
+  runtimeTabId: TrimmedNonEmptyString,
+  connectionId: PreviewAutomationConnectionId,
+  request: PreviewAutomationRequest,
+});

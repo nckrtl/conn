@@ -80,11 +80,11 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewManager from "./Manager.ts";
-import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+import * as ServerBrowserPage from "@t3tools/shared/previewPage";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
-import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
+import { BrowserControlInterrupted, SessionControl } from "@t3tools/shared/previewSessionControl";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
 const RENDER_SCALE = 2;

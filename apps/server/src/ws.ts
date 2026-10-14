@@ -184,6 +184,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
+import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
 import * as TestLoginStore from "./credentials/TestLoginStore.ts";
@@ -1229,6 +1230,7 @@ const layerWsRpc = (
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
+  desktopTabRelay: DesktopTabRelay.DesktopTabRelay["Service"],
 ) =>
   ServerWsCoreRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -2952,13 +2954,19 @@ const layerWsRpc = (
               (unsubscribe) => Effect.sync(unsubscribe),
             ),
           ),
+        [WS_METHODS.desktopTabRegister]: (input) =>
+          desktopTabRelay.register(currentSessionId, input),
+        [WS_METHODS.desktopTabRequests]: (input) =>
+          desktopTabRelay.requests(currentSessionId, input.connectionId),
+        [WS_METHODS.desktopTabReport]: (input) => desktopTabRelay.report(currentSessionId, input),
+        [WS_METHODS.desktopTabRespond]: (input) => desktopTabRelay.respond(currentSessionId, input),
         [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
         [WS_METHODS.previewNavigate]: (input) => previewManager.navigate(input),
         [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
         [WS_METHODS.previewRefresh]: (input) => previewManager.refresh(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
-        [WS_METHODS.previewList]: (input) => previewManager.list(input),
+        [WS_METHODS.previewList]: (input) => desktopTabRelay.list(currentSessionId, input),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => serverBrowser.reportProfiles(input),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
@@ -3225,6 +3233,7 @@ export const WS_RPC_SERVER_OPTIONS = {
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
     const credentialAutofill = yield* CredentialAutofill.CredentialAutofill;
     const testLoginStore = yield* TestLoginStore.TestLoginStore;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
@@ -3288,6 +3297,7 @@ export const layer = Layer.unwrap(
                 clientAnalyticsProps,
                 previewAutomationBroker,
                 serverBrowser,
+                desktopTabRelay,
               ),
               layerWsForkRpc(credentialAutofill, testLoginStore),
             ).pipe(

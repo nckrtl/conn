@@ -31,7 +31,7 @@ import * as Schema from "effect/Schema";
 
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
-import type { CredentialFillRequest, CredentialLockResult } from "../preview/ServerBrowserPage.ts";
+import type { CredentialFillRequest, CredentialLockResult } from "@t3tools/shared/previewPage";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TestLoginStore from "./TestLoginStore.ts";
 import { parseTotpSetup, totpCode } from "./totp.ts";

@@ -1,4 +1,8 @@
 import {
+  DesktopTabRelayError,
+  type DesktopTabBinding,
+  type DesktopTabReport,
+  type PreviewAutomationStatus,
   PREVIEW_AUTOMATION_V1_OPERATIONS,
   PreviewAutomationClientDisconnectedError,
   PreviewAutomationControlInterruptedError,
@@ -37,6 +41,8 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Semaphore from "effect/Semaphore";
+import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -63,11 +69,37 @@ export interface PreviewAutomationConnectOptions {
    * browsing when every desktop disconnects.
    */
   readonly preferred?: boolean;
+  readonly desktop?: {
+    readonly sessionId: string;
+    readonly binding: DesktopTabBinding;
+    readonly report: DesktopTabReport;
+  };
 }
 
 export class PreviewAutomationBroker extends Context.Service<
   PreviewAutomationBroker,
   {
+    readonly registerDesktop: (
+      sessionId: string,
+      binding: DesktopTabBinding,
+    ) => Effect.Effect<{ connectionId: string }, DesktopTabRelayError>;
+    readonly desktopRequests: (
+      sessionId: string,
+      connectionId: string,
+    ) => Stream.Stream<PreviewAutomationStreamEvent, DesktopTabRelayError>;
+    readonly reportDesktop: (
+      sessionId: string,
+      report: DesktopTabReport,
+    ) => Effect.Effect<void, DesktopTabRelayError>;
+    readonly respondDesktop: (
+      sessionId: string,
+      response: PreviewAutomationResponse,
+    ) => Effect.Effect<void, DesktopTabRelayError | PreviewAutomationError>;
+    readonly desktopTabs: (
+      environmentId: PreviewAutomationHost["environmentId"],
+      threadId: string,
+      sessionId?: string,
+    ) => Effect.Effect<NonNullable<PreviewAutomationStatus["tabs"]>>;
     readonly connect: (
       host: PreviewAutomationHost,
       options?: PreviewAutomationConnectOptions,
@@ -89,6 +121,8 @@ interface ClientConnection {
   readonly supportedOperations: ReadonlySet<PreviewAutomationOperation>;
   readonly focused: boolean;
   readonly preferred: boolean;
+  readonly desktop?: NonNullable<PreviewAutomationConnectOptions["desktop"]>;
+  readonly subscribed?: boolean;
   readonly liveTabs: NonNullable<PreviewAutomationHostFocus["liveTabs"]>;
   readonly focusOrder: number;
   readonly queue: Queue.Queue<PreviewAutomationStreamEvent, Cause.Done>;
@@ -350,6 +384,8 @@ const classifyResponseError = (
 
 export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
   const crypto = yield* Crypto.Crypto;
+  const brokerScope = yield* Scope.Scope;
+  const desktopRegistration = yield* Semaphore.make(1);
   const state = yield* SynchronizedRef.make<BrokerState>({
     clients: new Map(),
     assignments: new Map(),
@@ -412,6 +448,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       supportedOperations: new Set(host.supportedOperations ?? PREVIEW_AUTOMATION_V1_OPERATIONS),
       focused: false,
       preferred: options?.preferred ?? false,
+      ...(options?.desktop ? { desktop: options.desktop } : {}),
       liveTabs: [],
       focusOrder: 0,
       queue,
@@ -505,6 +542,159 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     }
   });
 
+  const desktopConnection = (current: BrokerState, sessionId: string, connectionId: string) =>
+    [...current.clients.values()].find(
+      (host) => host.connectionId === connectionId && host.desktop?.sessionId === sessionId,
+    );
+  const registerDesktopImpl = Effect.fn("PreviewAutomationBroker.registerDesktop")(function* (
+    sessionId: string,
+    binding: DesktopTabBinding,
+  ) {
+    const current = yield* SynchronizedRef.get(state);
+    if (
+      [...current.clients.values()].some(
+        (host) =>
+          host.desktop?.binding.tabId === binding.tabId &&
+          host.environmentId === binding.environmentId,
+      )
+    )
+      return yield* new DesktopTabRelayError({ reason: "conflict" });
+    const clientId = `desktop-${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`;
+    const host = yield* acquireConnection(
+      { clientId, environmentId: binding.environmentId },
+      {
+        desktop: {
+          sessionId,
+          binding,
+          report: {
+            connectionId: "pending",
+            shared: true,
+            owner: "unclaimed",
+            generation: 0,
+            url: null,
+            title: null,
+          },
+        },
+      },
+    );
+    // Registration and its request stream are separate RPCs. A client that
+    // disappears between them must not reserve the tab indefinitely.
+    yield* Effect.sleep(30_000).pipe(
+      Effect.andThen(
+        SynchronizedRef.modifyEffect(state, (current) => {
+          const registered = current.clients.get(host.clientId);
+          if (registered?.queue !== host.queue || registered.subscribed)
+            return Effect.succeed([undefined, current] as const);
+          const removed = removeConnectionFromState(current, host.clientId, host.queue);
+          return closeConnection(host.queue, removed.disconnected).pipe(
+            Effect.as([undefined, removed.state] as const),
+          );
+        }),
+      ),
+      Effect.forkIn(brokerScope),
+    );
+    return { connectionId: host.connectionId };
+  });
+  const registerDesktop: PreviewAutomationBroker["Service"]["registerDesktop"] = (
+    sessionId,
+    binding,
+  ) => desktopRegistration.withPermits(1)(registerDesktopImpl(sessionId, binding));
+  const desktopRequests: PreviewAutomationBroker["Service"]["desktopRequests"] = (
+    sessionId,
+    connectionId,
+  ) =>
+    Stream.unwrap(
+      Effect.acquireRelease(
+        SynchronizedRef.modifyEffect(state, (current) => {
+          const host = desktopConnection(current, sessionId, connectionId);
+          if (!host || host.subscribed)
+            return Effect.fail(new DesktopTabRelayError({ reason: "session" }));
+          const clients = new Map(current.clients);
+          clients.set(host.clientId, { ...host, subscribed: true });
+          return Effect.succeed([host, { ...current, clients }] as const);
+        }),
+        (host) => disconnect(host.clientId, host.queue),
+      ).pipe(Effect.map((host) => Stream.fromQueue(host.queue))),
+    );
+  const reportDesktop: PreviewAutomationBroker["Service"]["reportDesktop"] = Effect.fn(
+    "PreviewAutomationBroker.reportDesktop",
+  )(function* (sessionId, report) {
+    yield* SynchronizedRef.modifyEffect(state, (current) => {
+      const host = desktopConnection(current, sessionId, report.connectionId);
+      if (!host?.desktop) return Effect.fail(new DesktopTabRelayError({ reason: "session" }));
+      if (report.generation < host.desktop.report.generation)
+        return Effect.succeed([undefined, current] as const);
+      const clients = new Map(current.clients);
+      clients.set(host.clientId, { ...host, desktop: { ...host.desktop, report } });
+      const pending = new Map(current.pending);
+      const interrupted: PendingRequest[] = [];
+      if (
+        !report.shared ||
+        report.owner === "human" ||
+        report.generation !== host.desktop.report.generation
+      ) {
+        for (const [id, entry] of pending)
+          if (entry.queue === host.queue) {
+            pending.delete(id);
+            interrupted.push(entry);
+          }
+      }
+      return Effect.forEach(
+        interrupted,
+        ({ deferred, context }) =>
+          Deferred.fail(
+            deferred,
+            new PreviewAutomationControlInterruptedError({
+              ...context,
+              remoteTag: "PreviewAutomationControlInterruptedError",
+              remoteMessageLength: 0,
+              cause: null,
+              reason: "interrupted",
+            }),
+          ),
+        { discard: true },
+      ).pipe(Effect.as([undefined, { ...current, clients, pending }] as const));
+    });
+  });
+  const respondDesktop: PreviewAutomationBroker["Service"]["respondDesktop"] = Effect.fn(
+    "PreviewAutomationBroker.respondDesktop",
+  )(function* (sessionId, response) {
+    const host = desktopConnection(
+      yield* SynchronizedRef.get(state),
+      sessionId,
+      response.connectionId,
+    );
+    if (!host) return; // Retired connection responses must never reach a replacement.
+    yield* respond({ ...response, clientId: host.clientId });
+  });
+  const desktopTabs: PreviewAutomationBroker["Service"]["desktopTabs"] = (
+    environmentId,
+    threadId,
+    sessionId,
+  ) =>
+    SynchronizedRef.get(state).pipe(
+      Effect.map((current) =>
+        [...current.clients.values()].flatMap((host) =>
+          host.desktop &&
+          host.environmentId === environmentId &&
+          host.desktop.binding.threadId === threadId
+            ? [
+                {
+                  tabId: host.desktop.binding.tabId,
+                  url: host.desktop.report.url,
+                  host: host.desktop.binding.deviceName,
+                  runtime: "desktop" as const,
+                  hostedHere: host.desktop.sessionId === sessionId,
+                  shared: host.desktop.report.shared,
+                  owner: host.desktop.report.owner,
+                  generation: host.desktop.report.generation,
+                },
+              ]
+            : [],
+        ),
+      ),
+    );
+
   const invoke = Effect.fn("PreviewAutomationBroker.invoke")(function* <A = unknown>(
     input: Parameters<PreviewAutomationBroker["Service"]["invoke"]>[0],
   ): Effect.fn.Return<A, PreviewAutomationError> {
@@ -536,14 +726,26 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             (!visibleOnly || tab.visible === true) &&
             (input.tabId === undefined || tab.tabId === input.tabId),
         );
+      const explicitDesktop =
+        input.tabId === undefined
+          ? undefined
+          : [...current.clients.values()].find(
+              (host) =>
+                host.desktop !== undefined &&
+                host.desktop.binding.tabId === input.tabId &&
+                host.desktop.binding.threadId === input.scope.thread.threadId &&
+                host.environmentId === input.scope.environmentId,
+            );
       const connection =
-        hasLiveAssignment && supportsOperation(assignedConnection, input.operation)
+        explicitDesktop ??
+        (hasLiveAssignment && supportsOperation(assignedConnection, input.operation)
           ? assignedConnection
           : hasLiveAssignment
             ? undefined
             : Array.from(current.clients.values())
                 .filter(
                   (host) =>
+                    !host.desktop &&
                     host.environmentId === input.scope.environmentId &&
                     supportsOperation(host, input.operation),
                 )
@@ -556,7 +758,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
                     Number(ownsTargetTab(right)) - Number(ownsTargetTab(left)) ||
                     Number(right.focused) - Number(left.focused) ||
                     right.focusOrder - left.focusOrder,
-                )[0];
+                )[0]);
       if (!connection) {
         if (!hasLiveAssignment) assignments.delete(assignmentKey);
         return [undefined, { ...current, assignments }] as const;
@@ -569,15 +771,16 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         assigned !== undefined &&
         assigned.connectionId === connection.connectionId &&
         assigned.queue === connection.queue;
-      assignments.set(assignmentKey, {
-        clientId: connection.clientId,
-        connectionId: connection.connectionId,
-        queue: connection.queue,
-        ...(canReuseAssignedTab && assigned.tabId !== undefined ? { tabId: assigned.tabId } : {}),
-        ...(canReuseAssignedTab && assigned.tabSequence !== undefined
-          ? { tabSequence: assigned.tabSequence }
-          : {}),
-      });
+      if (!connection.desktop)
+        assignments.set(assignmentKey, {
+          clientId: connection.clientId,
+          connectionId: connection.connectionId,
+          queue: connection.queue,
+          ...(canReuseAssignedTab && assigned.tabId !== undefined ? { tabId: assigned.tabId } : {}),
+          ...(canReuseAssignedTab && assigned.tabSequence !== undefined
+            ? { tabSequence: assigned.tabSequence }
+            : {}),
+        });
 
       const requestSequence = current.requestSequence;
       const requestId = `preview-${requestSequence}`;
@@ -614,6 +817,37 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     }
     const { connection, requestId, requestContext, requestSequence } = route;
     const { timeoutMs } = requestContext;
+    if (connection.desktop) {
+      const discard = SynchronizedRef.update(state, (current) => {
+        const pending = new Map(current.pending);
+        pending.delete(requestId);
+        return { ...current, pending };
+      });
+      if (!connection.desktop.report.shared && input.operation !== "status") {
+        yield* discard;
+        return yield* new PreviewAutomationControlInterruptedError({
+          ...requestContext,
+          remoteTag: "PreviewAutomationControlInterruptedError",
+          remoteMessageLength: 0,
+          cause: null,
+          reason: "humanControl",
+        });
+      }
+      if (
+        !["status", "navigate", "snapshot", "click", "type", "credentialLock"].includes(
+          input.operation,
+        )
+      ) {
+        yield* discard;
+        return yield* new PreviewAutomationExecutionError({
+          ...requestContext,
+          remoteTag: "PreviewAutomationExecutionError",
+          remoteMessageLength: 0,
+          cause: null,
+          reason: "Not supported on desktop tabs yet.",
+        });
+      }
+    }
     input.onTargetTab?.(requestContext.tabId);
     const removePending = SynchronizedRef.update(state, (next) => {
       if (!next.pending.has(requestId)) return next;
@@ -639,6 +873,9 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             threadId: input.scope.thread.threadId,
             tabId: requestContext.tabId,
             tabIdExplicit: input.tabId !== undefined,
+            ...(connection.desktop
+              ? { controlGeneration: connection.desktop.report.generation }
+              : {}),
             agentSessionId: hostAssignmentKey(input.scope),
             operation: input.operation,
             input: input.input,
@@ -673,8 +910,21 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         onSome: (value) => Effect.succeed(value as A),
       });
     });
-    const result = yield* awaitResponse().pipe(Effect.ensuring(removePending));
-    if (input.updateCurrentTab === false) return result;
+    let result = yield* awaitResponse().pipe(Effect.ensuring(removePending));
+    if (
+      input.operation === "status" &&
+      !connection.desktop &&
+      typeof result === "object" &&
+      result !== null
+    ) {
+      const tabs = yield* desktopTabs(input.scope.environmentId, input.scope.thread.threadId);
+      result = {
+        ...result,
+        available: (result as PreviewAutomationStatus).available || tabs.some((tab) => tab.shared),
+        tabs: [...((result as PreviewAutomationStatus).tabs ?? []), ...tabs],
+      } as A;
+    }
+    if (input.updateCurrentTab === false || connection.desktop) return result;
     const responseTabId = readResultTabId(result);
     const resultTabId = responseTabId === undefined ? input.tabId : responseTabId;
     if (resultTabId === undefined) return result;
@@ -705,7 +955,17 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     return result;
   });
 
-  return PreviewAutomationBroker.of({ connect, focusHost, respond, invoke });
+  return PreviewAutomationBroker.of({
+    registerDesktop,
+    desktopRequests,
+    reportDesktop,
+    respondDesktop,
+    desktopTabs,
+    connect,
+    focusHost,
+    respond,
+    invoke,
+  });
 }).pipe(Effect.withSpan("PreviewAutomationBroker.make"));
 
 export const layer = Layer.effect(PreviewAutomationBroker, make);

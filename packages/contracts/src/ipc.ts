@@ -1,3 +1,9 @@
+import type {
+  DesktopTabHandover,
+  DesktopTabReport,
+  PreviewAutomationRequest,
+  PreviewAutomationResponse,
+} from "./previewAutomation.ts";
 import type { VaultwardenSetupRequest, VaultwardenSetupResponse } from "./vaultwarden.ts";
 import type {
   VaultLoginsRequest,
@@ -1521,6 +1527,17 @@ export interface DesktopBridge {
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
 export interface DesktopPreviewBridge {
+  getHostDeviceName?: () => Promise<string>;
+  handoverTab?: (input: DesktopTabHandover) => Promise<void>;
+  executeTabRequest?: (
+    runtimeTabId: string,
+    connectionId: string,
+    request: PreviewAutomationRequest,
+  ) => Promise<PreviewAutomationResponse>;
+  stopSharingTab?: (runtimeTabId: string) => Promise<void>;
+  onTabSharingChange?: (
+    listener: (runtimeTabId: string, report: DesktopTabReport) => void,
+  ) => () => void;
   setForwardedShortcuts?: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;

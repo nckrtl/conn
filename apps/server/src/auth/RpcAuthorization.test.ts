@@ -151,6 +151,10 @@ describe("RPC authorization scopes", () => {
 
   it("separates preview control from observation", () => {
     for (const method of [
+      WS_METHODS.desktopTabRegister,
+      WS_METHODS.desktopTabRequests,
+      WS_METHODS.desktopTabReport,
+      WS_METHODS.desktopTabRespond,
       WS_METHODS.previewOpen,
       WS_METHODS.previewNavigate,
       WS_METHODS.previewResize,

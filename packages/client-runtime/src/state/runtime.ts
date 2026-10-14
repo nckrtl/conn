@@ -24,10 +24,12 @@ import {
   type EnvironmentRpcStreamFailure,
   type EnvironmentRpcStreamValue,
   type EnvironmentSubscriptionRpcTag,
+  type EnvironmentStreamCommandRpcTag,
   type EnvironmentUnaryRpcTag,
   EnvironmentRpcUnavailableError,
   request,
   requestGuarded,
+  runStreamGuarded,
   RpcPermissionGuard,
   subscribe,
 } from "../rpc/client.ts";
@@ -859,6 +861,49 @@ export function createEnvironmentRpcCommand<
         }),
         Effect.tap((result) => options.onSuccess?.(target, registry, result) ?? Effect.void),
         Effect.ensuring(options.onSettled?.(target, registry) ?? Effect.void),
+      );
+    },
+  });
+  return {
+    ...command,
+    requiredScopes: permissions.requiredScopes,
+    permissionAtom: permissions.permissionAtom,
+  };
+}
+
+/** A protected stream runs once; ending it releases the command's resources. */
+export function createEnvironmentRpcStreamCommand<
+  R,
+  ER,
+  TTag extends EnvironmentStreamCommandRpcTag,
+  Input,
+>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  options: {
+    readonly label: string;
+    readonly tag: TTag;
+    readonly payload: (input: Input) => EnvironmentRpcInput<TTag>;
+    readonly consume: (
+      stream: ReturnType<typeof runStreamGuarded<TTag>>,
+      input: Input,
+    ) => Effect.Effect<
+      void,
+      EnvironmentRpcStreamFailure<TTag> | EnvironmentRpcUnavailableError,
+      EnvironmentSupervisor.EnvironmentSupervisor | R
+    >;
+  },
+) {
+  const permissions = createCommandPermissions(runtime, options.tag);
+  const command = createEnvironmentCommand(runtime, {
+    label: options.label,
+    execute: (input: Input, registry, environmentId) => {
+      const payload = options.payload(input);
+      return permissions.authorize(registry, environmentId, payload).pipe(
+        Effect.andThen(() => options.consume(runStreamGuarded(options.tag, payload), input)),
+        Effect.provideService(RpcPermissionGuard, {
+          authorize: (id, method, value) =>
+            createCommandPermissions(runtime, method).authorize(registry, id, value),
+        }),
       );
     },
   });

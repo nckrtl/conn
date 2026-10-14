@@ -104,7 +104,7 @@ import { deviceEnvironment } from "../../state/device";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadDevicePreviews } from "../devices/threadDevicePreviews";
 import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
-import { useThreadServerBrowserTabs } from "../../state/preview";
+import { useThreadBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import {
@@ -357,7 +357,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       threadId: props.selectedThread.id,
     });
   }, [navigation, props.environmentId, props.selectedThread.id]);
-  const browserTabs = useThreadServerBrowserTabs({
+  const browserTabs = useThreadBrowserTabs({
     environmentId: props.environmentId,
     threadId: props.selectedThread.id,
     enabled: props.serverConfig?.environment.capabilities.serverBrowser === true,

@@ -8,13 +8,13 @@ import {
 } from "@t3tools/contracts";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert, AppState, Platform, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, AppState, Platform, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ControlPill } from "../../components/ControlPill";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { NativeHeaderToolbar } from "../../native/StackHeader";
-import { useThreadServerBrowserTabs } from "../../state/preview";
+import { useThreadBrowserTabs } from "../../state/preview";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { BrowserTabMenu } from "./BrowserTabMenu";
 import { browserTabTitle, browserTabUrl, latestBrowserTab } from "./browserTabs";
@@ -85,7 +85,7 @@ function BrowserPreviewScreen({
   const [streaming, setStreaming] = useState(false);
   const [canControl, setCanControl] = useState(false);
   const streamRef = useRef<PreviewStreamRef>(null);
-  const { tabs, loaded } = useThreadServerBrowserTabs({ environmentId, threadId, enabled: true });
+  const { tabs, loaded } = useThreadBrowserTabs({ environmentId, threadId, enabled: true });
   const tab = tabs.find((entry) => entry.tabId === selectedTabId) ?? latestBrowserTab(tabs);
   const tabId = tab?.tabId ?? null;
   // Pin the fallback so another tab's activity does not switch the view.
@@ -166,7 +166,11 @@ function BrowserPreviewScreen({
           />
         </NativeHeaderToolbar>
       ) : null}
-      {tab ? (
+      {tab?.runtime === "desktop" ? (
+        <View className="flex-1 items-center justify-center">
+          <Text className="text-muted-foreground">Hosted on {tab.host ?? "desktop"}</Text>
+        </View>
+      ) : tab ? (
         <>
           <BrowserAddressBar
             key={`address:${tab.tabId}`}

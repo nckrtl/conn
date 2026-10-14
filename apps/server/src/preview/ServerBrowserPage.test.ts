@@ -12,7 +12,7 @@ import {
 } from "@t3tools/shared/credentialFill";
 
 import { presentAsChrome } from "./ServerBrowserContexts.ts";
-import * as ServerBrowserPage from "./ServerBrowserPage.ts";
+import * as ServerBrowserPage from "@t3tools/shared/previewPage";
 
 describe("server browser element refs", () => {
   let browser: Browser;

@@ -1,5 +1,7 @@
 "use client";
 
+import { DesktopTabControls } from "./DesktopTabControls";
+
 import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -989,16 +991,45 @@ export function PreviewView({
       <PreviewChromeRow
         url={url}
         loading={loading || serverStreamPending}
-        canGoBack={canGoBack && !serverInputDisabled}
-        canGoForward={canGoForward && !serverInputDisabled}
-        refreshDisabled={refreshDisabled || serverInputDisabled}
-        inputDisabled={serverInputDisabled}
+        canGoBack={
+          canGoBack &&
+          !serverInputDisabled &&
+          Boolean((previewBridge && snapshot?.hostedHere !== false) || isServerTab)
+        }
+        canGoForward={
+          canGoForward &&
+          !serverInputDisabled &&
+          Boolean((previewBridge && snapshot?.hostedHere !== false) || isServerTab)
+        }
+        refreshDisabled={
+          refreshDisabled ||
+          serverInputDisabled ||
+          ((!previewBridge || snapshot?.hostedHere === false) && !isServerTab)
+        }
+        inputDisabled={
+          serverInputDisabled ||
+          ((!previewBridge || snapshot?.hostedHere === false) && !isServerTab)
+        }
         controlAction={
           isServerTab && runtimeTabId && !showEmptyState && !isUnreachable ? (
             <ServerBrowserControls
               control={serverControl}
               onToggleControl={() => serverSurfaceRef.current?.toggleControl()}
             />
+          ) : snapshot?.runtime === "desktop" &&
+            snapshot.hostedHere !== false &&
+            tabId &&
+            runtimeTabId &&
+            previewBridge?.handoverTab ? (
+            <DesktopTabControls
+              threadRef={threadRef}
+              tabId={tabId}
+              runtimeTabId={runtimeTabId}
+              serverEpoch={previewState.serverEpoch}
+              environmentLabel={environmentLabel}
+            />
+          ) : snapshot?.runtime === "desktop" && tabId ? (
+            <span>Hosted on {snapshot?.host ?? "desktop"}</span>
           ) : null
         }
         focusUrlNonce={focusUrlNonce}
@@ -1142,7 +1173,7 @@ export function PreviewView({
             </div>
           </>
         ) : runtimeTabId && snapshot && !showEmptyState ? (
-          previewBridge ? (
+          previewBridge && snapshot.hostedHere !== false ? (
             <BrowserSurfaceSlot
               key={runtimeTabId}
               tabId={runtimeTabId}
@@ -1152,7 +1183,7 @@ export function PreviewView({
           ) : (
             <div className="flex h-full items-center justify-center p-8 text-center">
               <p className="max-w-sm text-sm text-muted-foreground">
-                This tab is open in the T3 Code desktop app.
+                Hosted on {snapshot.host ?? "desktop"}
               </p>
             </div>
           )

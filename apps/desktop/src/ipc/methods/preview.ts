@@ -1,4 +1,7 @@
 import {
+  DesktopTabHandover,
+  DesktopTabExecute,
+  PreviewAutomationResponse,
   DesktopPreviewAnnotationSendEnabledInputSchema,
   DesktopPreviewAnnotationThemeInputSchema,
   DesktopPreviewArtifactInputSchema,
@@ -434,7 +437,48 @@ export const saveRecording = DesktopIpc.makeIpcMethod({
   }),
 });
 
+export const getHostDeviceName = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_HOST_DEVICE_NAME_CHANNEL,
+  payload: Schema.Void,
+  result: Schema.String,
+  handler: Effect.fn("desktop.ipc.preview.getHostDeviceName")(function* () {
+    return yield* (yield* PreviewManager.PreviewManager).getHostDeviceName();
+  }),
+});
+export const handoverTab = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_TAB_HANDOVER_CHANNEL,
+  payload: DesktopTabHandover,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.preview.handoverTab")(function* (input) {
+    return yield* (yield* PreviewManager.PreviewManager).handoverTab(input);
+  }),
+});
+export const executeTabRequest = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_TAB_EXECUTE_CHANNEL,
+  payload: DesktopTabExecute,
+  result: PreviewAutomationResponse,
+  handler: Effect.fn("desktop.ipc.preview.executeTabRequest")(function* (input) {
+    return yield* (yield* PreviewManager.PreviewManager).executeTabRequest(
+      input.runtimeTabId,
+      input.connectionId,
+      input.request,
+    );
+  }),
+});
+export const stopSharingTab = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_TAB_STOP_SHARING_CHANNEL,
+  payload: DesktopPreviewTabInputSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.preview.stopSharingTab")(function* ({ tabId }) {
+    return yield* (yield* PreviewManager.PreviewManager).stopSharingTab(tabId);
+  }),
+});
+
 export const methods = [
+  getHostDeviceName,
+  handoverTab,
+  executeTabRequest,
+  stopSharingTab,
   setForwardedShortcuts,
   createTab,
   closeTab,

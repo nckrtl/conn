@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
+import { BrowserControlInterrupted, SessionControl } from "@t3tools/shared/previewSessionControl";
 
 describe("SessionControl", () => {
   it("returns an action result before tracked navigation but drains it before already queued actions", async () => {

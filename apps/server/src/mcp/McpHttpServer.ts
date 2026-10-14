@@ -539,6 +539,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 readonly url: string;
                 readonly screenshot: {
                   readonly mimeType: "image/png";
+                  readonly unavailableReason?: "desktopTab";
                   readonly data: string;
                   readonly width: number;
                   readonly height: number;
@@ -600,7 +601,15 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                         },
                       ]),
                   ...(imageWithheld
-                    ? [{ type: "text" as const, text: SCREENSHOT_WITHHELD_NOTICE }]
+                    ? [
+                        {
+                          type: "text" as const,
+                          text:
+                            screenshot.unavailableReason === "desktopTab"
+                              ? "No screenshot: not supported on desktop tabs yet."
+                              : SCREENSHOT_WITHHELD_NOTICE,
+                        },
+                      ]
                     : includeImage
                       ? [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]
                       : []),

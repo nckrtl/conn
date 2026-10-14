@@ -27,6 +27,7 @@ import {
   buildOrbitRequestUrl,
   type OrbitHttpRequest,
   type OrbitTransport,
+  OrbitTransportError,
   parseHiddenShellOutput,
   parseOrbitCurlOutput,
 } from "./orbitTransport";
@@ -251,6 +252,29 @@ describe("checkOrbitAvailability", () => {
     await expect(
       checkOrbitAvailability(offline, shell("https://github.com/nckrtl/orbit.git"), "/x"),
     ).resolves.toEqual({ available: false, hidden: true });
+  });
+
+  it("explains a failed check instead of hiding the option", async () => {
+    const remote = shell("https://github.com/nckrtl/orbit.git");
+    const unreachable = fakeTransport(() => {
+      throw new OrbitTransportError("Orbit is not reachable from this machine: timeout");
+    });
+    await expect(checkOrbitAvailability(unreachable, remote, "/x")).resolves.toEqual({
+      available: false,
+      reason: "Orbit is not reachable from this machine: timeout",
+    });
+    const broken = fakeTransport(() => ok({ not: "a list" }));
+    await expect(checkOrbitAvailability(broken, remote, "/x")).resolves.toEqual({
+      available: false,
+      reason: "Orbit sent an invalid list. (orbit.response_invalid)",
+    });
+    const noShell: HiddenShellRunner = async () => {
+      throw new OrbitTransportError("Could not open a shell on this machine.");
+    };
+    await expect(checkOrbitAvailability(orbit(), noShell, "/x")).resolves.toEqual({
+      available: false,
+      reason: "Could not check Orbit on this machine: Could not open a shell on this machine.",
+    });
   });
 
   it("explains a Project without a default Instance on this machine", async () => {

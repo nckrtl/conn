@@ -100,17 +100,26 @@ export async function checkOrbitAvailability(
   let project;
   try {
     facts = await readOrbitLocalFacts(run, projectRoot);
-    const repository = facts.remote ? normalizeRepositoryUrl(facts.remote) : null;
-    if (repository === null) return HIDDEN;
+  } catch (error) {
+    // The hidden shell itself failed, so nothing is known about the
+    // repository yet; say so instead of hiding the option as "not Orbit".
+    return unavailable(`Could not check Orbit on this machine: ${describeOrbitError(error)}`);
+  }
+  const repository = facts.remote ? normalizeRepositoryUrl(facts.remote) : null;
+  if (repository === null) return HIDDEN;
+  try {
     const projects = await listOrbitProjects(transport);
     project = projects.find(
       (candidate) =>
         candidate.repositoryUrl !== null &&
         normalizeRepositoryUrl(candidate.repositoryUrl) === repository,
     );
-  } catch {
-    // No Orbit on this machine, or nothing that ties this repository to it.
-    return HIDDEN;
+  } catch (error) {
+    // Orbit does not know this machine: there is no Orbit here.
+    if (error instanceof OrbitApiError && error.code === "peer.identity_unknown") return HIDDEN;
+    // Orbit unreachable, a broken response, or a failed shell: the repository
+    // may well be an Orbit Project, so show the option with the reason.
+    return unavailable(describeOrbitError(error));
   }
   if (!project) return HIDDEN;
   try {

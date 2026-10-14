@@ -26,7 +26,8 @@ const inputGroupVariants = cva(
           "dropdown-glass rounded-2xl has-[input:focus-visible,textarea:focus-visible]:ring-0 has-[input:focus-visible,textarea:focus-visible]:border-[color-mix(in_srgb,var(--contrast-foreground)_18%,transparent)]",
         ghost:
           "border-transparent bg-transparent shadow-none hover:bg-muted/40 has-[input:focus-visible,textarea:focus-visible]:bg-background",
-        soft: "rounded-(--toolbar-radius) border-(--shell-divider-header)! text-ui sm:text-ui bg-(--shell-field) shadow-none hover:bg-(--shell-control) has-[input:focus-visible,textarea:focus-visible]:bg-(--shell-field) [&_input]:pe-3.5 [&_input]:ps-[11px] [&_[data-slot=input-group-addon]]:ps-[9px]",
+        // Keep the soft border at rest; focus and validation use the shared input styles.
+        soft: "rounded-(--toolbar-radius) not-has-[input:focus-visible,textarea:focus-visible,input[aria-invalid],textarea[aria-invalid]]:border-(--shell-divider-header)! text-ui sm:text-ui bg-(--shell-field) shadow-none hover:bg-(--shell-control) has-[input:focus-visible,textarea:focus-visible]:bg-(--shell-field) [&_input]:pe-3.5 [&_input]:ps-[11px] [&_[data-slot=input-group-addon]]:ps-[9px]",
       },
     },
   },

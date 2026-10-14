@@ -28,7 +28,6 @@ it.layer(layer)("desktop tab relay bindings", (it) => {
         const relay = yield* Relay.DesktopTabRelay;
         const tab = yield* manager.open({
           threadId,
-          runtime: "desktop",
           url: "https://fixture.test",
         });
         const listed = yield* manager.list({ threadId });

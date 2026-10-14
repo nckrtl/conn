@@ -155,7 +155,7 @@ export function ServerBrowserControls({
 }) {
   return (
     <>
-      <span role="status" className="shrink-0 whitespace-nowrap text-ui text-muted-foreground">
+      <span role="status" className="sr-only">
         {previewStreamControlLabel(control)}
       </span>
       {control?.canOperate ? (

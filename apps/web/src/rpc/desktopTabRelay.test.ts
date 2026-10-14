@@ -155,3 +155,41 @@ it("reads status during an action and re-registers the same tab without forwardi
     stop();
   }
 });
+
+it("retries a registration that overlaps a disconnect without another user action", async () => {
+  vi.useFakeTimers();
+  let attempts = 0;
+  mocks.phase = "connected";
+  mocks.connect.mockResolvedValue(undefined);
+  mocks.disconnect.mockResolvedValue(undefined);
+  mocks.runCommand.mockImplementation(async (_registry, command, { input }) => {
+    if (command === "register") {
+      attempts++;
+      return attempts === 1
+        ? AsyncResult.initial()
+        : AsyncResult.success({ connectionId: "recovered" });
+    }
+    const stream = input as { signal: AbortSignal };
+    return new Promise<void>((resolve) =>
+      stream.signal.addEventListener("abort", () => resolve(), { once: true }),
+    );
+  });
+  const stop = hostDesktopTab(
+    { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("thread") },
+    "tab",
+    "same-guest",
+  );
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(attempts).toBe(2);
+    expect(mocks.connect).toHaveBeenLastCalledWith(
+      expect.objectContaining({ runtimeTabId: "same-guest", connectionId: "recovered" }),
+    );
+  } finally {
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+  }
+});

@@ -49,7 +49,8 @@ export function hostDesktopTab(threadRef: ScopedThreadRef, tabId: string, runtim
             input: binding,
           },
         );
-        if (!AsyncResult.isSuccess(registration)) return;
+        if (!AsyncResult.isSuccess(registration))
+          throw new Error("Desktop host registration failed.");
         const { connectionId } = registration.value;
         const streamAbort = new AbortController();
         // Even if a disconnect overtook registration, subscribe and abort so the

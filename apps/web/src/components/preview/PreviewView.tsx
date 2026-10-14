@@ -227,6 +227,11 @@ export function PreviewView({
     );
   }, [serverToolbarShown]);
   const [serverControlledTabId, setServerControlledTabId] = useState<string | null>(null);
+  const runServerAnnotation = useCallback(
+    (active: boolean, dictation: { startUrl: string; stopUrl: string }) =>
+      serverSurfaceRef.current?.annotation(active, dictation.startUrl, dictation.stopUrl) ?? false,
+    [],
+  );
   const serverInputDisabled = isServerTab && serverControlledTabId !== runtimeTabId;
   const [serverFrameTabId, setServerFrameTabId] = useState<string | null>(null);
   const desktopOverlay = tabId ? (previewState.desktopByTabId[tabId] ?? null) : null;
@@ -1042,6 +1047,12 @@ export function PreviewView({
               runtimeTabId={runtimeTabId}
               pageUrl={navUrl}
               loading={loading}
+              {...(isServerTab
+                ? {
+                    inputDisabled: serverInputDisabled,
+                    runServerAnnotation,
+                  }
+                : {})}
             />
           ) : null
         }

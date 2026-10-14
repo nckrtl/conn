@@ -50,6 +50,7 @@ export interface ServerBrowserHandle {
   readonly history: (delta: -1 | 1) => void;
   readonly reload: (options?: { readonly ignoreCache?: boolean }) => void;
   readonly viewport: (setting: PreviewViewportSetting) => void;
+  readonly annotation: (active: boolean, startUrl: string, stopUrl: string) => boolean;
   readonly canvas: () => HTMLCanvasElement | null;
 }
 
@@ -326,6 +327,8 @@ export function ServerBrowserSurface(props: {
       reload: (options) =>
         send({ type: "reload", ...(options?.ignoreCache ? { ignoreCache: true } : {}) }),
       viewport: (setting) => send({ type: "viewport", setting }),
+      annotation: (active, startUrl, stopUrl) =>
+        clientRef.current?.send({ type: "annotation", active, startUrl, stopUrl }) ?? false,
       canvas: () => (hasFrameRef.current ? canvasRef.current : null),
     }),
     [send],

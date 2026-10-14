@@ -106,7 +106,8 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     reload: vi.fn(async () => {}),
     emulateMedia: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
-    evaluate: vi.fn(async () => ({
+    waitForFunction: vi.fn(async () => {}),
+    evaluate: vi.fn(async (_expression?: unknown) => ({
       url,
       title: "test page",
       loading: false,
@@ -1565,6 +1566,38 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
       // Without a viewer or agent, the server drives the page again, so its URL keeps reaching clients.
       while (desktopConnections.length < 2) yield* Effect.yieldNow;
       expect(desktopConnections).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("only the controlling viewer can activate annotations on the streamed page", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      yield* Effect.promise(() => page.goto("https://gateway-feedback.orbit.test/projects"));
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      const annotation = { type: "annotation", active: true, startUrl: "", stopUrl: "" };
+      page.evaluate.mockClear();
+      yield* viewer.input(annotation);
+      expect(page.evaluate).not.toHaveBeenCalled();
+      yield* viewer.input({ type: "takeControl" });
+      yield* viewer.input(annotation);
+      expect(page.waitForFunction).toHaveBeenCalledExactlyOnceWith(
+        "!!window.AgentAnnotation",
+        undefined,
+        { timeout: 10_000 },
+      );
+      expect(page.evaluate.mock.calls[0]?.[0]).toContain(
+        "https://gateway-feedback.orbit.test/__orbit/annotator/inject.js",
+      );
+      expect(page.evaluate.mock.calls[1]?.[0]).toContain("if (isOn === true)");
+      yield* viewer.input({ ...annotation, active: false });
+      expect(page.evaluate.mock.calls[3]?.[0]).toContain("if (isOn === false)");
+      yield* viewer.input({ type: "releaseControl" });
+      page.evaluate.mockClear();
+      yield* viewer.input(annotation);
+      expect(page.evaluate).not.toHaveBeenCalled();
     }),
   ).pipe(Effect.provide(layer)),
 );

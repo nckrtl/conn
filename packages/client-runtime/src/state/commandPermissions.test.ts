@@ -362,11 +362,7 @@ it.effect("desktop relay commands require the destination preview grant", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const registry = yield* setup;
-      for (const tag of [
-        WS_METHODS.desktopTabRegister,
-        WS_METHODS.desktopTabReport,
-        WS_METHODS.desktopTabRespond,
-      ]) {
+      for (const tag of [WS_METHODS.desktopTabRegister, WS_METHODS.desktopTabRespond]) {
         const command = createEnvironmentRpcCommand(runtime, { label: "desktop-relay", tag });
         registry.set(sessions(env), AsyncResult.success(grant(false)));
         expect(registry.get(command.permissionAtom(env))).toBe(false);

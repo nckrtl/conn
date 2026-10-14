@@ -415,6 +415,7 @@ describe("previewStateStore (single-tab)", () => {
     const active = makeSnapshot({ tabId: "tab_a" });
     const stale = makeSnapshot({
       tabId: "tab_stale",
+      runtime: "server",
       updatedAt: "2026-01-01T00:00:01.000Z",
     });
     applyPreviewServerSnapshot(ref, stale);
@@ -534,8 +535,43 @@ describe("previewStateStore (single-tab)", () => {
     expect(state.serverRevision).toBe(0);
   });
 
-  it("does not carry raw-tab state across a server restart", () => {
+  it("keeps a local desktop guest across empty restart lists until it is explicitly closed", () => {
+    const tab = makeSnapshot({ runtime: "desktop" });
+    applyPreviewServerSnapshot(ref, tab);
+    applyPreviewDesktopState(ref, tab.tabId, {
+      hasWebContents: true,
+      canGoBack: true,
+      canGoForward: false,
+      loading: false,
+      zoomFactor: 1,
+      pictureInPicture: false,
+      colorScheme: "dark",
+      audioMuted: false,
+      audible: false,
+      controller: "none",
+      favicon: null,
+    });
+    for (const revision of [0, 1]) {
+      reconcilePreviewServerSessions(ref, { sessions: [], serverEpoch: "server-b", revision });
+      const state = readThreadPreviewState(ref);
+      expect(state.sessions[tab.tabId]).toEqual(tab);
+      expect(state.activeTabId).toBe(tab.tabId);
+      expect(state.desktopOverlay?.hasWebContents).toBe(true);
+    }
+    applyPreviewServerEventImpl(ref, {
+      type: "closed",
+      threadId: tab.threadId,
+      tabId: tab.tabId,
+      createdAt: tab.updatedAt,
+      serverEpoch: "server-b",
+      revision: 2,
+    });
+    expect(readThreadPreviewState(ref).sessions).toEqual({});
+  });
+
+  it("does not carry server-tab state across a server restart", () => {
     const previous = makeSnapshot({
+      runtime: "server",
       navStatus: { _tag: "Success", url: "https://old.example", title: "Old" },
       updatedAt: "2026-01-01T00:00:02.000Z",
     });
@@ -563,6 +599,7 @@ describe("previewStateStore (single-tab)", () => {
       favicon: null,
     });
     const restarted = makeSnapshot({
+      runtime: "server",
       navStatus: { _tag: "Success", url: "https://new.example", title: "New" },
       updatedAt: "2026-01-01T00:00:01.000Z",
     });

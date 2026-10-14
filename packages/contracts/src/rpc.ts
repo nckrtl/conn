@@ -312,7 +312,6 @@ import {
 import {
   DesktopTabBinding,
   DesktopTabConnection,
-  DesktopTabReport,
   DesktopTabRelayError,
   PreviewAutomationStreamEvent,
   PreviewAutomationResponse,
@@ -486,7 +485,6 @@ export const WS_METHODS = {
   // Preview methods
   desktopTabRegister: "preview.desktopRegister",
   desktopTabRequests: "preview.desktopRequests",
-  desktopTabReport: "preview.desktopReport",
   desktopTabRespond: "preview.desktopRespond",
   previewOpen: "preview.open",
   previewNavigate: "preview.navigate",
@@ -1584,10 +1582,6 @@ const WsDesktopTabRequestsRpc = Rpc.make(WS_METHODS.desktopTabRequests, {
   error: desktopTabRpcError,
   stream: true,
 });
-const WsDesktopTabReportRpc = Rpc.make(WS_METHODS.desktopTabReport, {
-  payload: DesktopTabReport,
-  error: desktopTabRpcError,
-});
 const WsDesktopTabRespondRpc = Rpc.make(WS_METHODS.desktopTabRespond, {
   payload: PreviewAutomationResponse,
   error: Schema.Union([
@@ -2202,7 +2196,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeTerminalMetadataRpc,
   WsDesktopTabRegisterRpc,
   WsDesktopTabRequestsRpc,
-  WsDesktopTabReportRpc,
   WsDesktopTabRespondRpc,
   WsPreviewOpenRpc,
   WsPreviewNavigateRpc,

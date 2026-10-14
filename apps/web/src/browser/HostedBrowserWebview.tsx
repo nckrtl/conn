@@ -8,6 +8,7 @@ import type {
 import { useShallow } from "zustand/react/shallow";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { hostDesktopTab } from "~/rpc/desktopTabRelay";
 import { previewBridge } from "~/components/preview/previewBridge";
 import { usePreviewBridge } from "~/components/preview/usePreviewBridge";
 import { useClientSettingsHydrated } from "~/hooks/useSettings";
@@ -158,6 +159,7 @@ export function HostedBrowserWebview(props: {
     const bridge = previewBridge;
     if (!clientSettingsHydrated || !webview || !config || !bridge) return;
     let disposed = false;
+    let stopHost: (() => void) | undefined;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
     const register = () => {
       const lease = tabLeaseRef.current;
@@ -172,6 +174,12 @@ export function HostedBrowserWebview(props: {
           const webContentsId = webview.getWebContentsId();
           if (Number.isInteger(webContentsId) && webContentsId > 0) {
             await bridge.registerWebview(runtimeTabId, webContentsId);
+            if (!disposed && !serverDriven && !stopHost)
+              stopHost = hostDesktopTab(
+                { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+                tabId,
+                runtimeTabId,
+              );
           }
         } catch {
           // did-attach/dom-ready will retry if the guest was not ready yet.
@@ -209,6 +217,7 @@ export function HostedBrowserWebview(props: {
     register();
     return () => {
       disposed = true;
+      stopHost?.();
       if (recoveryTimeout !== null) clearTimeout(recoveryTimeout);
       webview.removeEventListener("did-attach", register);
       webview.removeEventListener("dom-ready", register);
@@ -216,7 +225,17 @@ export function HostedBrowserWebview(props: {
       webview.removeEventListener("focus", dismissHostPopups);
       webview.removeEventListener("ipc-message", relayLaravelToolbar);
     };
-  }, [clientSettingsHydrated, config, initialSrc, runtimeTabId, webviewGeneration]);
+  }, [
+    clientSettingsHydrated,
+    config,
+    initialSrc,
+    runtimeTabId,
+    webviewGeneration,
+    serverDriven,
+    tabId,
+    threadRef.environmentId,
+    threadRef.threadId,
+  ]);
 
   const active = presentation.visible && presentation.rect !== null;
   const lastRect = presentation.rect;

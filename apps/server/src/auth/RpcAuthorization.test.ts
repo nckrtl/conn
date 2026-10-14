@@ -153,7 +153,6 @@ describe("RPC authorization scopes", () => {
     for (const method of [
       WS_METHODS.desktopTabRegister,
       WS_METHODS.desktopTabRequests,
-      WS_METHODS.desktopTabReport,
       WS_METHODS.desktopTabRespond,
       WS_METHODS.previewOpen,
       WS_METHODS.previewNavigate,

@@ -1,7 +1,5 @@
 "use client";
 
-import { DesktopTabControls } from "./DesktopTabControls";
-
 import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -205,9 +203,7 @@ export function PreviewView({
   }, []);
 
   const tabId = requestedTabId ?? previewState.activeTabId;
-  const runtimeTabId = tabId
-    ? previewRuntimeTabId(threadRef, previewState.serverEpoch, tabId)
-    : null;
+  const runtimeTabId = tabId ? previewRuntimeTabId(threadRef, tabId) : null;
   const recordingRuntimeTabId =
     tabId && runtimeTabId
       ? activeRecordingTabIds.has(runtimeTabId)
@@ -1016,20 +1012,8 @@ export function PreviewView({
               control={serverControl}
               onToggleControl={() => serverSurfaceRef.current?.toggleControl()}
             />
-          ) : snapshot?.runtime === "desktop" &&
-            snapshot.hostedHere !== false &&
-            tabId &&
-            runtimeTabId &&
-            previewBridge?.handoverTab ? (
-            <DesktopTabControls
-              threadRef={threadRef}
-              tabId={tabId}
-              runtimeTabId={runtimeTabId}
-              serverEpoch={previewState.serverEpoch}
-              environmentLabel={environmentLabel}
-            />
-          ) : snapshot?.runtime === "desktop" && tabId ? (
-            <span>Hosted on {snapshot?.host ?? "desktop"}</span>
+          ) : snapshot?.runtime === "desktop" && snapshot.hostedHere === false ? (
+            <span>Hosted on {snapshot.host ?? "desktop"}</span>
           ) : null
         }
         focusUrlNonce={focusUrlNonce}

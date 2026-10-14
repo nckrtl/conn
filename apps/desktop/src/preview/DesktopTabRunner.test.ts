@@ -6,17 +6,24 @@ import {
   ThreadId,
   PreviewTabId,
   type PreviewAutomationRequest,
-  type DesktopTabReport,
 } from "@t3tools/contracts";
 import { credentialFieldExpression, redactSensitiveValues } from "@t3tools/shared/credentialFill";
 import { DesktopTabRunner } from "./DesktopTabRunner.ts";
 
 const binding = {
   environmentId: EnvironmentId.make("fixture-environment"),
-  serverEpoch: "fixture-epoch",
   threadId: ThreadId.make("fixture-thread"),
   tabId: PreviewTabId.make("fixture-tab"),
   deviceName: "Fixture desktop",
+  snapshot: {
+    threadId: ThreadId.make("fixture-thread"),
+    tabId: PreviewTabId.make("fixture-tab"),
+    runtime: "desktop" as const,
+    navStatus: { _tag: "Idle" as const },
+    canGoBack: false,
+    canGoForward: false,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  },
 };
 const request = (
   operation: PreviewAutomationRequest["operation"],
@@ -25,7 +32,6 @@ const request = (
   requestId: "request-1",
   threadId: binding.threadId,
   tabId: binding.tabId,
-  controlGeneration: 0,
   operation,
   input,
   timeoutMs: 1_000,
@@ -36,9 +42,8 @@ describe("desktop tab runner", () => {
   let context: BrowserContext;
   let page: Page;
   let runner: DesktopTabRunner;
-  let reports: DesktopTabReport[];
+  let reports: boolean[];
   let remembered: string[];
-  let nativeButton: "left" | "right" | undefined;
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
   });
@@ -53,7 +58,6 @@ describe("desktop tab runner", () => {
     );
     reports = [];
     remembered = [];
-    nativeButton = undefined;
     runner = new DesktopTabRunner(
       binding,
       "connection-1",
@@ -61,29 +65,11 @@ describe("desktop tab runner", () => {
       (value) => redactSensitiveValues(value, remembered),
     );
     const cdp = await context.newCDPSession(page);
-    // Electron's manager retains an already-enabled debugger across shares.
+    // Electron's manager retains an already-enabled debugger across connections.
     await cdp.send("Runtime.enable");
     await runner.attach(
       {
         send: (method, params) => {
-          if (method === "Input.dispatchMouseEvent") {
-            const type = {
-              mouseMoved: "mouseMove",
-              mousePressed: "mouseDown",
-              mouseReleased: "mouseUp",
-            }[String(params.type)];
-            if (type)
-              runner.nativeInput({
-                type,
-                x: Number(params.x),
-                y: Number(params.y),
-                ...(params.button === "left" ||
-                params.button === "middle" ||
-                params.button === "right"
-                  ? { button: nativeButton ?? params.button }
-                  : {}),
-              } as Electron.MouseInputEvent);
-          }
           return cdp.send(method as Parameters<typeof cdp.send>[0], params as never);
         },
         targetId: async () => (await cdp.send("Target.getTargetInfo")).targetInfo.targetId,
@@ -159,11 +145,13 @@ describe("desktop tab runner", () => {
     await cdp.detach();
     await page.evaluate(() => {
       document.body.append("fixture-secret-value");
+      document.title = "fixture-secret-value";
       document.querySelector("#password")?.remove();
     });
     const response = await runner.respond(request("snapshot"));
     expect(response.ok).toBe(true);
     expect(JSON.stringify(response)).not.toContain(secret);
+    expect(JSON.stringify(await runner.respond(request("status")))).not.toContain(secret);
     await page
       .evaluate(() => {
         Object.defineProperty(window, "__t3codeCredentialLocked", {
@@ -182,14 +170,6 @@ describe("desktop tab runner", () => {
       });
     });
     await page.goto("about:blank");
-    expect((await runner.respond(request("snapshot"))).ok).toBe(false);
-  });
-
-  it("a different native mouse button takes control even during an agent click", async () => {
-    nativeButton = "right";
-    const response = await runner.respond(request("click", { locator: "button" }));
-    expect(response.ok).toBe(false);
-    expect(reports.at(-1)?.shared).toBe(false);
     expect((await runner.respond(request("snapshot"))).ok).toBe(false);
   });
 
@@ -213,7 +193,7 @@ describe("desktop tab runner", () => {
     expect(snapshot.result).toMatchObject({ visibleText: "Arrived" });
   });
 
-  it("takeover rejects an already queued action and leaves the user's page open", async () => {
+  it("serializes queued actions and closes the relay without closing the page", async () => {
     let release!: () => void;
     let started!: () => void;
     const running = new Promise<void>((resolve) => {
@@ -226,15 +206,17 @@ describe("desktop tab runner", () => {
       });
     });
     await running;
-    const queued = runner.respond(request("type", { locator: "#name", text: "must not land" }));
-    runner.nativeInput({ type: "mouseDown", x: 9, y: 9, button: "left" });
+    const queued = runner.respond(request("type", { locator: "#name", text: "queued" }));
+    expect(await page.locator("#name").inputValue()).toBe("");
     release();
     await blocker;
-    expect((await queued).ok).toBe(false);
-    expect(await page.locator("#name").inputValue()).toBe("");
-    expect((await runner.respond(request("snapshot"))).ok).toBe(false);
+    expect((await queued).ok).toBe(true);
+    expect(await page.locator("#name").inputValue()).toBe("queued");
+    expect(reports.at(-1)).toBe(false);
     await runner.close();
     expect(page.isClosed()).toBe(false);
-    expect(reports.at(-1)?.shared).toBe(false);
+    expect((await runner.respond(request("type", { locator: "#name", text: "late" }))).ok).toBe(
+      false,
+    );
   });
 });

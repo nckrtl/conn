@@ -5,6 +5,7 @@ import {
   PREVIEW_VIEWPORT_MAX_AREA,
   PreviewRenderedViewportSize,
   PreviewTabId,
+  PreviewSessionSnapshot,
   PreviewViewportPresetId,
   PreviewViewportSetting,
   PreviewViewportSize,
@@ -149,9 +150,7 @@ export const PreviewAutomationStatus = Schema.Struct({
         profileId: Schema.optional(BrowserProfileId),
         host: Schema.optional(Schema.String),
         runtime: Schema.optional(Schema.Literals(["server", "desktop"])),
-        shared: Schema.optional(Schema.Boolean),
         hostedHere: Schema.optional(Schema.Boolean),
-        generation: Schema.optional(Schema.Int),
       }),
     ),
   ),
@@ -778,28 +777,19 @@ export type PreviewAutomationConnectionId = typeof PreviewAutomationConnectionId
 
 export const DesktopTabBinding = Schema.Struct({
   environmentId: EnvironmentId,
-  serverEpoch: TrimmedNonEmptyString,
   threadId: ThreadId,
   tabId: PreviewTabId,
   deviceName: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  snapshot: PreviewSessionSnapshot,
 });
 export type DesktopTabBinding = typeof DesktopTabBinding.Type;
 export const DesktopTabConnection = Schema.Struct({ connectionId: PreviewAutomationConnectionId });
-export const DesktopTabReport = Schema.Struct({
-  ...DesktopTabConnection.fields,
-  shared: Schema.Boolean,
-  owner: PreviewAutomationTabOwner,
-  generation: Schema.Int,
-  url: Schema.NullOr(Schema.String),
-  title: Schema.NullOr(Schema.String),
-});
-export type DesktopTabReport = typeof DesktopTabReport.Type;
 export class DesktopTabRelayError extends Schema.TaggedError<DesktopTabRelayError>()(
   "DesktopTabRelayError",
   { reason: Schema.Literals(["binding", "session", "conflict"]) },
 ) {
   override get message() {
-    return `Desktop tab relay rejected the ${this.reason}. Share the tab again from its desktop toolbar.`;
+    return `Desktop tab relay rejected the ${this.reason}.`;
   }
 }
 
@@ -840,7 +830,6 @@ export const PreviewAutomationRequest = Schema.Struct({
   threadId: ThreadId,
   tabId: Schema.optional(PreviewTabId),
   tabIdExplicit: Schema.optional(Schema.Boolean),
-  controlGeneration: Schema.optional(Schema.Int),
   /** Supplied by the broker from authenticated scope, never from tool input. */
   agentSessionId: Schema.optional(Schema.String),
   operation: PreviewAutomationOperation,
@@ -1242,12 +1231,12 @@ export const PreviewUrlResolution = Schema.Struct({
 });
 export type PreviewUrlResolution = typeof PreviewUrlResolution.Type;
 
-export const DesktopTabHandover = Schema.Struct({
+export const DesktopTabHost = Schema.Struct({
   binding: DesktopTabBinding,
   connectionId: PreviewAutomationConnectionId,
   runtimeTabId: TrimmedNonEmptyString,
 });
-export type DesktopTabHandover = typeof DesktopTabHandover.Type;
+export type DesktopTabHost = typeof DesktopTabHost.Type;
 export const DesktopTabExecute = Schema.Struct({
   runtimeTabId: TrimmedNonEmptyString,
   connectionId: PreviewAutomationConnectionId,

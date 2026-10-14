@@ -1,6 +1,5 @@
 import type {
-  DesktopTabHandover,
-  DesktopTabReport,
+  DesktopTabHost,
   PreviewAutomationRequest,
   PreviewAutomationResponse,
 } from "./previewAutomation.ts";
@@ -1528,16 +1527,13 @@ export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewReco
 
 export interface DesktopPreviewBridge {
   getHostDeviceName?: () => Promise<string>;
-  handoverTab?: (input: DesktopTabHandover) => Promise<void>;
+  connectTabHost?: (input: DesktopTabHost) => Promise<void>;
   executeTabRequest?: (
     runtimeTabId: string,
     connectionId: string,
     request: PreviewAutomationRequest,
   ) => Promise<PreviewAutomationResponse>;
-  stopSharingTab?: (runtimeTabId: string) => Promise<void>;
-  onTabSharingChange?: (
-    listener: (runtimeTabId: string, report: DesktopTabReport) => void,
-  ) => () => void;
+  disconnectTabHost?: (runtimeTabId: string) => Promise<void>;
   setForwardedShortcuts?: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;

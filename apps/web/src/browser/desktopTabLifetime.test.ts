@@ -111,7 +111,6 @@ describe("desktopTabLifetime", () => {
         environmentId: EnvironmentId.make("environment-a"),
         threadId: ThreadId.make("thread-a"),
       },
-      "epoch-a",
       "tab_1",
     );
     const tabB = previewRuntimeTabId(
@@ -119,7 +118,6 @@ describe("desktopTabLifetime", () => {
         environmentId: EnvironmentId.make("environment-b"),
         threadId: ThreadId.make("thread-b"),
       },
-      "epoch-b",
       "tab_1",
     );
 

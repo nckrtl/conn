@@ -21,7 +21,7 @@ const layer = Relay.layer.pipe(
 
 it.layer(layer)("desktop tab relay bindings", (it) => {
   it.effect(
-    "checks environment, epoch, thread, and desktop runtime before registering a host",
+    "checks environment, thread, snapshot, and desktop runtime before registering a host",
     () =>
       Effect.gen(function* () {
         const manager = yield* Manager.PreviewManager;
@@ -30,17 +30,16 @@ it.layer(layer)("desktop tab relay bindings", (it) => {
           threadId,
           url: "https://fixture.test",
         });
-        const listed = yield* manager.list({ threadId });
         const binding = {
           environmentId,
           threadId,
-          serverEpoch: listed.serverEpoch,
+          snapshot: tab,
           tabId: tab.tabId,
           deviceName: "Fixture Mac",
         };
         for (const invalid of [
           { ...binding, environmentId: EnvironmentId.make("other-environment") },
-          { ...binding, serverEpoch: "old-epoch" },
+          { ...binding, snapshot: { ...tab, tabId: "different-tab" } },
           { ...binding, threadId: ThreadId.make("other-thread") },
         ])
           expect((yield* relay.register("session", invalid).pipe(Effect.flip))._tag).toBe(
@@ -64,8 +63,7 @@ it.layer(layer)("desktop tab relay bindings", (it) => {
         const result = yield* relay.list("session", { threadId });
         expect(result.sessions.find((session) => session.tabId === tab.tabId)).toMatchObject({
           host: "Fixture Mac",
-          shared: true,
-          controlOwner: "unclaimed",
+          hostedHere: true,
         });
         expect(
           (yield* Stream.runDrain(relay.requests("other-session", registered.connectionId)).pipe(
@@ -73,5 +71,41 @@ it.layer(layer)("desktop tab relay bindings", (it) => {
           )).reason,
         ).toBe("session");
       }),
+  );
+  it.effect("re-registers the same client-owned tab after the server loses its preview index", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("restart-thread");
+      const oldManager = yield* Manager.make.pipe(Effect.provide(NodeServices.layer));
+      const tab = yield* oldManager.open({ threadId, url: "https://fixture.test" });
+      const oldEpoch = (yield* oldManager.list({ threadId })).serverEpoch;
+      const manager = yield* Manager.PreviewManager;
+      const relay = yield* Relay.DesktopTabRelay;
+      expect((yield* manager.list({ threadId })).sessions).toEqual([]);
+      const binding = {
+        environmentId,
+        threadId,
+        tabId: tab.tabId,
+        snapshot: tab,
+        deviceName: "Fixture Mac",
+      };
+      yield* relay.register("reconnected-session", binding);
+      const restored = yield* relay.list("reconnected-session", { threadId });
+      expect(restored.serverEpoch).not.toBe(oldEpoch);
+      expect(restored.sessions).toEqual([{ ...tab, host: "Fixture Mac", hostedHere: true }]);
+      expect((yield* manager.list({ threadId: ThreadId.make("other-thread") })).sessions).toEqual(
+        [],
+      );
+      const newTab = yield* manager.open({ threadId });
+      expect(newTab.tabId).not.toBe(tab.tabId);
+      expect(
+        (yield* relay
+          .register("other-session", {
+            ...binding,
+            threadId: ThreadId.make("other-thread"),
+            snapshot: { ...tab, threadId: ThreadId.make("other-thread") },
+          })
+          .pipe(Effect.flip)).reason,
+      ).toBe("binding");
+    }),
   );
 });

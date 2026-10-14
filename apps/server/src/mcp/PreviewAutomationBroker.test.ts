@@ -1507,10 +1507,18 @@ it.effect("keeps the host connected when a background status read times out", ()
 
 const desktopBinding = {
   environmentId: scope.environmentId,
-  serverEpoch: "epoch-1",
   threadId: scope.thread.threadId,
   tabId: PreviewTabId.make("desktop-tab"),
   deviceName: "Fixture desktop",
+  snapshot: {
+    threadId: scope.thread.threadId,
+    tabId: PreviewTabId.make("desktop-tab"),
+    runtime: "desktop" as const,
+    navStatus: { _tag: "Idle" as const },
+    canGoBack: false,
+    canGoForward: false,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  },
 };
 
 it.effect(
@@ -1558,6 +1566,22 @@ it.effect(
             input: {},
           }),
         ).toEqual({ host: "desktop" });
+        expect(yield* broker.invoke<void>({ scope, operation: "click", input: {} })).toEqual({
+          host: "desktop",
+        });
+        expect(
+          yield* broker.invoke<void>({
+            scope,
+            operation: "credentialLock",
+            input: {},
+            updateCurrentTab: false,
+          }),
+        ).toEqual({ host: "desktop" });
+        expect(
+          (yield* broker
+            .invoke<void>({ scope, operation: "evaluate", input: {} })
+            .pipe(Effect.flip)).message,
+        ).toContain("Not supported on desktop tabs yet");
         expect(yield* broker.invoke<void>({ scope, operation: "open", input: {} })).toEqual({
           host: "server",
         });
@@ -1574,18 +1598,6 @@ it.effect("desktop streams and reports are bound to the authenticated session", 
         (yield* Stream.runDrain(broker.desktopRequests("session-2", connectionId)).pipe(
           Effect.flip,
         ))._tag,
-      ).toBe("DesktopTabRelayError");
-      expect(
-        (yield* broker
-          .reportDesktop("session-2", {
-            connectionId,
-            shared: false,
-            owner: "human",
-            generation: 1,
-            url: null,
-            title: null,
-          })
-          .pipe(Effect.flip))._tag,
       ).toBe("DesktopTabRelayError");
     }),
   ),
@@ -1619,46 +1631,7 @@ it.effect("desktop tabs are isolated by thread and unsupported operations fail c
   ),
 );
 
-it.effect("takeover fails pending desktop requests and ignores their late response", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const broker = yield* makeBroker;
-      const { connectionId } = yield* broker.registerDesktop("session-1", desktopBinding);
-      const delivered = yield* Deferred.make<PreviewAutomationRequest>();
-      yield* Stream.runForEach(broker.desktopRequests("session-1", connectionId), (event) =>
-        event.type === "request" ? Deferred.succeed(delivered, event.request) : Effect.void,
-      ).pipe(Effect.forkScoped);
-      const invocation = yield* broker
-        .invoke<void>({ scope, operation: "click", tabId: desktopBinding.tabId, input: {} })
-        .pipe(Effect.exit, Effect.forkScoped);
-      const request = yield* Deferred.await(delivered);
-      yield* broker.reportDesktop("session-1", {
-        connectionId,
-        shared: false,
-        owner: "human",
-        generation: 1,
-        url: null,
-        title: null,
-      });
-      const result = yield* Fiber.join(invocation);
-      expect(result._tag).toBe("Failure");
-      yield* broker.respondDesktop("session-1", {
-        clientId: "desktop",
-        connectionId,
-        requestId: request.requestId,
-        ok: true,
-        result: "late",
-      });
-      expect(
-        (yield* broker
-          .invoke<void>({ scope, operation: "snapshot", tabId: desktopBinding.tabId, input: {} })
-          .pipe(Effect.flip))._tag,
-      ).toBe("PreviewAutomationControlInterruptedError");
-    }),
-  ),
-);
-
-it.effect("disconnect revokes sharing, fails pending work, and rejects stale generations", () =>
+it.effect("disconnect fails pending work, and rejects stale generations", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const broker = yield* makeBroker;
@@ -1679,6 +1652,36 @@ it.effect("disconnect revokes sharing, fails pending work, and rejects stale gen
       expect(yield* broker.desktopTabs(scope.environmentId, scope.thread.threadId)).toEqual([]);
       const replacement = yield* broker.registerDesktop("session-1", desktopBinding);
       expect(replacement.connectionId).not.toBe(connectionId);
+      const freshDelivered = yield* Deferred.make<PreviewAutomationRequest>();
+      yield* Stream.runForEach(
+        broker.desktopRequests("session-1", replacement.connectionId),
+        (event) =>
+          event.type === "request" ? Deferred.succeed(freshDelivered, event.request) : Effect.void,
+      ).pipe(Effect.forkScoped);
+      const fresh = yield* broker
+        .invoke<string>({ scope, operation: "snapshot", tabId: desktopBinding.tabId, input: {} })
+        .pipe(Effect.forkScoped);
+      const freshRequest = yield* Deferred.await(freshDelivered);
+      for (const [sessionId, responseConnection] of [
+        ["session-1", connectionId],
+        ["other-session", replacement.connectionId],
+      ]) {
+        yield* broker.respondDesktop(sessionId!, {
+          clientId: "desktop",
+          connectionId: responseConnection!,
+          requestId: freshRequest.requestId,
+          ok: true,
+          result: "must not settle the new request",
+        });
+      }
+      yield* broker.respondDesktop("session-1", {
+        clientId: "desktop",
+        connectionId: replacement.connectionId,
+        requestId: freshRequest.requestId,
+        ok: true,
+        result: "fresh",
+      });
+      expect(yield* Fiber.join(fresh)).toBe("fresh");
       yield* broker.respondDesktop("session-1", {
         clientId: "desktop",
         connectionId,
@@ -1686,18 +1689,6 @@ it.effect("disconnect revokes sharing, fails pending work, and rejects stale gen
         ok: true,
         result: "stale",
       });
-      expect(
-        (yield* broker
-          .reportDesktop("session-1", {
-            connectionId,
-            shared: true,
-            owner: "agent",
-            generation: 0,
-            url: null,
-            title: null,
-          })
-          .pipe(Effect.flip))._tag,
-      ).toBe("DesktopTabRelayError");
     }),
   ),
 );

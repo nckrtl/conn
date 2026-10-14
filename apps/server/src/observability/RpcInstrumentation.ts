@@ -190,7 +190,6 @@ const RPC_AGGREGATES = {
   [WS_METHODS.subscribeTerminalMetadata]: "terminal",
   [WS_METHODS.desktopTabRegister]: "preview",
   [WS_METHODS.desktopTabRequests]: "preview",
-  [WS_METHODS.desktopTabReport]: "preview",
   [WS_METHODS.desktopTabRespond]: "preview",
   [WS_METHODS.previewOpen]: "preview",
   [WS_METHODS.previewNavigate]: "preview",

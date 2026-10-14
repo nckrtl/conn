@@ -215,8 +215,6 @@ export const PreviewSessionSnapshot = Schema.Struct({
   runtime: Schema.optional(PreviewRuntime),
   host: Schema.optional(Schema.String),
   hostedHere: Schema.optional(Schema.Boolean),
-  shared: Schema.optional(Schema.Boolean),
-  controlOwner: Schema.optional(Schema.Literals(["human", "agent", "unclaimed"])),
   /** Authenticated provider session owning an isolated server tab. */
   automationOwner: Schema.optional(Schema.String),
   /** An agent opened this tab and asked to show it, so viewers float it. */

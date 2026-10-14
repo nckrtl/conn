@@ -1,7 +1,6 @@
 import {
   DesktopTabRelayError,
   type DesktopTabBinding,
-  type DesktopTabReport,
   type PreviewAutomationResponse,
   type PreviewAutomationStreamEvent,
   type PreviewListInput,
@@ -25,10 +24,6 @@ export class DesktopTabRelay extends Context.Service<
       sessionId: string,
       connectionId: string,
     ) => Stream.Stream<PreviewAutomationStreamEvent, DesktopTabRelayError>;
-    readonly report: (
-      sessionId: string,
-      report: DesktopTabReport,
-    ) => Effect.Effect<void, DesktopTabRelayError>;
     readonly respond: (
       sessionId: string,
       response: PreviewAutomationResponse,
@@ -49,11 +44,11 @@ const make = Effect.gen(function* () {
     binding: DesktopTabBinding,
   ) {
     const environmentId = yield* environment.getEnvironmentId;
-    const listed = yield* manager.list({ threadId: binding.threadId });
     if (
       binding.environmentId !== environmentId ||
-      binding.serverEpoch !== listed.serverEpoch ||
-      !listed.sessions.some((tab) => tab.tabId === binding.tabId && tab.runtime === "desktop")
+      binding.snapshot.threadId !== binding.threadId ||
+      binding.snapshot.tabId !== binding.tabId ||
+      !(yield* manager.restoreDesktop(binding.snapshot))
     )
       return yield* new DesktopTabRelayError({ reason: "binding" });
     return yield* broker.registerDesktop(sessionId, binding);
@@ -77,8 +72,6 @@ const make = Effect.gen(function* () {
               ...tab,
               host: host.host,
               hostedHere: host.hostedHere,
-              shared: host.shared,
-              controlOwner: host.owner,
             }
           : tab;
       }),
@@ -87,7 +80,6 @@ const make = Effect.gen(function* () {
   return DesktopTabRelay.of({
     register,
     requests: broker.desktopRequests,
-    report: broker.reportDesktop,
     respond: broker.respondDesktop,
     list,
   });

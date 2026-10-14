@@ -282,7 +282,7 @@ const TEST_THREAD_REF = {
   environmentId: EnvironmentId.make("environment-1"),
   threadId: ThreadId.make("thread-1"),
 } as const;
-const TEST_RUNTIME_TAB_ID = previewRuntimeTabId(TEST_THREAD_REF, null, "tab-1");
+const TEST_RUNTIME_TAB_ID = previewRuntimeTabId(TEST_THREAD_REF, "tab-1");
 
 // ReactDOM needs a host, but this unit suite intentionally has no DOM dependency.
 class TestNode {
@@ -379,7 +379,7 @@ describe("PreviewView navigation", () => {
     mocks.recordVisitForThread.mockClear();
   });
 
-  it("shows the cursor in a replacement browser while the old instance still records", async () => {
+  it("keeps the same recording guest and cursor state across a remote restart", async () => {
     const document = installTestDom();
     const { createRoot } = await import("react-dom/client");
     const container = document.createElement("div");
@@ -397,7 +397,7 @@ describe("PreviewView navigation", () => {
       await act(() => {
         root.render(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />);
       });
-      expect(hasCursor(container)).toBe(true);
+      expect(hasCursor(container)).toBe(false);
       expect(mocks.recordingTabIds.has(TEST_RUNTIME_TAB_ID)).toBe(true);
     } finally {
       await act(() => root.unmount());

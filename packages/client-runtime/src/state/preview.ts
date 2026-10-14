@@ -27,16 +27,12 @@ export function createPreviewEnvironmentAtoms<R, E>(
       label: "preview:desktop-register",
       tag: WS_METHODS.desktopTabRegister,
     }),
-    desktopReport: createEnvironmentRpcCommand(runtime, {
-      label: "preview:desktop-report",
-      tag: WS_METHODS.desktopTabReport,
-    }),
     desktopRespond: createEnvironmentRpcCommand(runtime, {
       label: "preview:desktop-respond",
       tag: WS_METHODS.desktopTabRespond,
     }),
-    // A relay lease ends with its stream. Durable subscriptions would silently
-    // reconnect a tab after the user granted only one connection's access.
+    // Each stream belongs to one connection generation. The desktop host
+    // re-registers its surviving tab when the environment reconnects.
     desktopRequests: createEnvironmentRpcStreamCommand(runtime, {
       label: "preview:desktop-requests",
       tag: WS_METHODS.desktopTabRequests,

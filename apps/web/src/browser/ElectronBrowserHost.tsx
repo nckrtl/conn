@@ -34,19 +34,19 @@ export function ElectronBrowserHost() {
         // Server tabs of other environments stream; this desktop's own server tabs render here.
         return threadRef
           ? Object.values(previewState.sessions)
-              .filter(
-                (snapshot) =>
-                  snapshot.runtime !== "server" ||
-                  rendersServerTabNatively(threadRef.environmentId, primaryEnvironmentId, snapshot),
+              .filter((snapshot) =>
+                snapshot.runtime !== "server"
+                  ? snapshot.hostedHere !== false
+                  : rendersServerTabNatively(
+                      threadRef.environmentId,
+                      primaryEnvironmentId,
+                      snapshot,
+                    ),
               )
               .map((snapshot) => ({
                 threadRef,
                 snapshot,
-                runtimeTabId: previewRuntimeTabId(
-                  threadRef,
-                  previewState.serverEpoch,
-                  snapshot.tabId,
-                ),
+                runtimeTabId: previewRuntimeTabId(threadRef, snapshot.tabId),
                 pictureInPicture:
                   previewState.desktopByTabId[snapshot.tabId]?.pictureInPicture ?? false,
                 zoomFactor: previewState.desktopByTabId[snapshot.tabId]?.zoomFactor ?? 1,

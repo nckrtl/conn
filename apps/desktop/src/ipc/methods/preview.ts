@@ -1,5 +1,5 @@
 import {
-  DesktopTabHandover,
+  DesktopTabHost,
   DesktopTabExecute,
   PreviewAutomationResponse,
   DesktopPreviewAnnotationSendEnabledInputSchema,
@@ -445,12 +445,12 @@ export const getHostDeviceName = DesktopIpc.makeIpcMethod({
     return yield* (yield* PreviewManager.PreviewManager).getHostDeviceName();
   }),
 });
-export const handoverTab = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_TAB_HANDOVER_CHANNEL,
-  payload: DesktopTabHandover,
+export const connectTabHost = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_TAB_HOST_CONNECT_CHANNEL,
+  payload: DesktopTabHost,
   result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.handoverTab")(function* (input) {
-    return yield* (yield* PreviewManager.PreviewManager).handoverTab(input);
+  handler: Effect.fn("desktop.ipc.preview.connectTabHost")(function* (input) {
+    return yield* (yield* PreviewManager.PreviewManager).connectTabHost(input);
   }),
 });
 export const executeTabRequest = DesktopIpc.makeIpcMethod({
@@ -465,20 +465,20 @@ export const executeTabRequest = DesktopIpc.makeIpcMethod({
     );
   }),
 });
-export const stopSharingTab = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_TAB_STOP_SHARING_CHANNEL,
+export const disconnectTabHost = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_TAB_HOST_DISCONNECT_CHANNEL,
   payload: DesktopPreviewTabInputSchema,
   result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.stopSharingTab")(function* ({ tabId }) {
-    return yield* (yield* PreviewManager.PreviewManager).stopSharingTab(tabId);
+  handler: Effect.fn("desktop.ipc.preview.disconnectTabHost")(function* ({ tabId }) {
+    return yield* (yield* PreviewManager.PreviewManager).disconnectTabHost(tabId);
   }),
 });
 
 export const methods = [
   getHostDeviceName,
-  handoverTab,
+  connectTabHost,
   executeTabRequest,
-  stopSharingTab,
+  disconnectTabHost,
   setForwardedShortcuts,
   createTab,
   closeTab,

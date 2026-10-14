@@ -319,7 +319,14 @@ export function reconcilePreviewServerSessions(
       return current;
     }
     const snapshots = result.sessions;
-    const sessions: Record<string, PreviewSessionSnapshot> = {};
+    // A desktop guest outlives the remote server's in-memory index. Its host
+    // restores this record on reconnect; explicit closed events still remove it.
+    const sessions: Record<string, PreviewSessionSnapshot> = Object.fromEntries(
+      Object.entries(current.sessions).filter(
+        ([tabId, snapshot]) =>
+          snapshot.runtime !== "server" && current.desktopByTabId[tabId]?.hasWebContents,
+      ),
+    );
     const currentSuppressedTabIds = sameServer ? current.suppressedTabIds : new Set<string>();
     let recentlySeenUrls = current.recentlySeenUrls;
     for (const snapshot of snapshots) {
@@ -336,11 +343,12 @@ export function reconcilePreviewServerSessions(
         ? current.activeTabId
         : (fallback?.tabId ?? null);
     const snapshot = activeTabId ? (sessions[activeTabId] ?? null) : null;
-    const desktopByTabId = sameServer
-      ? Object.fromEntries(
-          Object.entries(current.desktopByTabId).filter(([tabId]) => sessions[tabId] !== undefined),
-        )
-      : {};
+    const desktopByTabId = Object.fromEntries(
+      Object.entries(current.desktopByTabId).filter(
+        ([tabId]) =>
+          sessions[tabId] !== undefined && (sameServer || sessions[tabId]?.runtime !== "server"),
+      ),
+    );
     const suppressedTabIds = new Set(
       [...currentSuppressedTabIds].filter((tabId) =>
         snapshots.some((snapshot) => snapshot.tabId === tabId),

@@ -2958,7 +2958,6 @@ const layerWsRpc = (
           desktopTabRelay.register(currentSessionId, input),
         [WS_METHODS.desktopTabRequests]: (input) =>
           desktopTabRelay.requests(currentSessionId, input.connectionId),
-        [WS_METHODS.desktopTabReport]: (input) => desktopTabRelay.report(currentSessionId, input),
         [WS_METHODS.desktopTabRespond]: (input) => desktopTabRelay.respond(currentSessionId, input),
         [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
         [WS_METHODS.previewNavigate]: (input) => previewManager.navigate(input),

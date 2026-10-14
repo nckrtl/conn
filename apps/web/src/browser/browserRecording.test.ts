@@ -601,7 +601,7 @@ describe("browser recording", () => {
       environmentId: EnvironmentId.make("environment-recording"),
       threadId: ThreadId.make("thread-recording-scoped"),
     };
-    const runtimeTabId = previewRuntimeTabId(threadRef, "epoch-a", "tab_1");
+    const runtimeTabId = previewRuntimeTabId(threadRef, "tab_1");
     await startBrowserRecording(runtimeTabId, threadRef, "tab_1");
 
     expect(startScreencast).toHaveBeenCalledWith(runtimeTabId);
@@ -610,12 +610,6 @@ describe("browser recording", () => {
       { runtimeTabId, serverTabId: "tab_1" },
     ]);
     expect(findActiveBrowserRecordingRuntimeTabId(threadRef, "tab_1")).toBe(runtimeTabId);
-
-    const replacementRuntimeTabId = previewRuntimeTabId(threadRef, "epoch-b", "tab_1");
-    await expect(
-      startBrowserRecording(replacementRuntimeTabId, threadRef, "tab_1"),
-    ).rejects.toBeInstanceOf(BrowserRecordingConflictError);
-    expect(startScreencast).toHaveBeenCalledTimes(1);
 
     await stopBrowserRecording(runtimeTabId);
   });

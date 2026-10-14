@@ -52,6 +52,7 @@ export class PreviewManager extends Context.Service<
         readonly beforePublish?: (snapshot: PreviewSessionSnapshot) => void;
       },
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
+    readonly restoreDesktop: (snapshot: PreviewSessionSnapshot) => Effect.Effect<boolean>;
     readonly navigate: (
       input: PreviewNavigateInput,
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
@@ -208,7 +209,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     function* (input) {
       const runtime = input.runtime ?? "desktop";
       // Persisted client surfaces must not bind to a different tab after a server restart.
-      const tabId = `${newPreviewTabId()}${runtime === "server" ? `_${serverEpoch}` : ""}`;
+      const tabId = `${newPreviewTabId()}_${serverEpoch}`;
       const updatedAt = yield* currentIsoTimestamp;
       const snapshot: PreviewSessionSnapshot = {
         threadId: input.threadId,
@@ -252,6 +253,38 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       return snapshot;
     },
   );
+
+  const restoreDesktop = (snapshot: PreviewSessionSnapshot) =>
+    SynchronizedRef.modifyEffect(stateRef, (state) =>
+      Effect.gen(function* () {
+        if (snapshot.runtime !== "desktop") return [false, state] as const;
+        const existing = [...state.sessions.values()].find(
+          (session) => session.tabId === snapshot.tabId,
+        );
+        if (existing)
+          return [
+            existing.threadId === snapshot.threadId && existing.snapshot.runtime === "desktop",
+            state,
+          ] as const;
+        const revision = state.revision + 1;
+        const sessions = new Map(state.sessions);
+        sessions.set(compositeKey(snapshot.threadId, snapshot.tabId), {
+          threadId: snapshot.threadId,
+          tabId: snapshot.tabId,
+          snapshot,
+        });
+        yield* PubSub.publish(eventsPubSub, {
+          type: "opened",
+          threadId: snapshot.threadId,
+          tabId: snapshot.tabId,
+          createdAt: snapshot.updatedAt,
+          serverEpoch,
+          revision,
+          snapshot,
+        });
+        return [true, { sessions, revision }] as const;
+      }),
+    );
 
   const navigate: PreviewManager["Service"]["navigate"] = Effect.fn("PreviewManager.navigate")(
     function* (input) {
@@ -501,6 +534,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   return PreviewManager.of({
     open,
+    restoreDesktop,
     requestReveal,
     navigate,
     reportStatus,

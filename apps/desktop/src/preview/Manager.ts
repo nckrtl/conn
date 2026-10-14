@@ -1,7 +1,6 @@
 import * as NodeOS from "node:os";
 import { DesktopTabRunner } from "./DesktopTabRunner.ts";
-import type { DesktopTabHandover, PreviewAutomationRequest } from "@t3tools/contracts";
-import { PREVIEW_TAB_SHARING_CHANGE_CHANNEL } from "../ipc/channels.ts";
+import type { DesktopTabHost, PreviewAutomationRequest } from "@t3tools/contracts";
 /**
  * Desktop side of the in-app browser preview.
  *
@@ -593,7 +592,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const annotationThemeRef = yield* Ref.make(DEFAULT_ANNOTATION_THEME);
   const annotationSendEnabled = new Map<string, boolean>();
   const mainWindowRef = yield* Ref.make<Option.Option<BrowserWindow>>(Option.none());
-  const sharedTabRunners = new Map<string, DesktopTabRunner>();
+  const tabRunners = new Map<string, DesktopTabRunner>();
   const tabsRef = yield* SynchronizedRef.make<ReadonlyMap<string, PreviewTabState>>(new Map());
   const attachedRef = yield* Ref.make<ReadonlyMap<number, ManagedListeners>>(new Map());
   const listenersRef = yield* Ref.make<ReadonlySet<Listener>>(new Set());
@@ -1827,7 +1826,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
 
   const closeTab = Effect.fn("PreviewManager.closeTab")(function* (tabId: string) {
-    yield* stopSharingTab(tabId).pipe(Effect.ignore);
+    yield* disconnectTabHost(tabId).pipe(Effect.ignore);
     const claimed = yield* Ref.modify(closingTabIdsRef, (closingTabIds) => {
       if (closingTabIds.has(tabId)) return [false, closingTabIds] as const;
       return [true, new Set([...closingTabIds, tabId])] as const;
@@ -2469,37 +2468,35 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       }
     }).pipe(Effect.ignore);
 
-  const stopSharingTab = Effect.fn("PreviewManager.stopSharingTab")(function* (tabId: string) {
-    const runner = sharedTabRunners.get(tabId);
-    sharedTabRunners.delete(tabId);
-    if (runner) yield* attemptPromise({ operation: "stopSharingTab", tabId }, () => runner.close());
+  const disconnectTabHost = Effect.fn("PreviewManager.disconnectTabHost")(function* (
+    tabId: string,
+  ) {
+    const runner = tabRunners.get(tabId);
+    tabRunners.delete(tabId);
+    if (runner)
+      yield* attemptPromise({ operation: "disconnectTabHost", tabId }, () => runner.close());
   });
-  const handoverTab = Effect.fn("PreviewManager.handoverTab")(function* (
-    input: DesktopTabHandover,
+  const connectTabHost = Effect.fn("PreviewManager.connectTabHost")(function* (
+    input: DesktopTabHost,
   ) {
     const tabId = input.runtimeTabId;
-    yield* stopSharingTab(tabId);
+    yield* disconnectTabHost(tabId);
     const wc = yield* requireWebContents(tabId);
     const state = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
     if (state?.serverTab) return yield* new PreviewTabNotFoundError({ tabId });
     const control = yield* ensureControlSession(wc);
-    const sharingHost = wc.hostWebContents;
     const runner = new DesktopTabRunner(
       input.binding,
       input.connectionId,
-      (report) => {
-        runFork(
-          update(tabId, { controller: report.owner === "unclaimed" ? "none" : report.owner }).pipe(
-            Effect.ignore,
-          ),
-        );
-        if (sharingHost && !sharingHost.isDestroyed())
-          sharingHost.send(PREVIEW_TAB_SHARING_CHANGE_CHANNEL, tabId, report);
+      (active) => {
+        runFork(update(tabId, { controller: active ? "agent" : "none" }).pipe(Effect.ignore));
       },
       (value) => browserHost.redactForPage(wc, value),
+      (point, phase) =>
+        Effect.runPromise(emitAgentPointer({ runtimeTabId: tabId, ...point, phase })),
     );
-    sharedTabRunners.set(tabId, runner);
-    yield* attemptPromise({ operation: "handoverTab", tabId }, () =>
+    tabRunners.set(tabId, runner);
+    yield* attemptPromise({ operation: "connectTabHost", tabId }, () =>
       runner.attach(
         {
           send: (method, params, sessionId) =>
@@ -2522,37 +2519,29 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               params: unknown,
               sessionId: string,
             ) => listener(method, params, sessionId);
-            const take = (
-              _event: Electron.Event,
-              input: Electron.Input | Electron.MouseInputEvent,
-            ) => runner.nativeInput(input);
             const gone = () => {
-              sharedTabRunners.delete(tabId);
+              tabRunners.delete(tabId);
               void runner.close().catch(() => undefined);
             };
             control.debugger.on("message", onMessage);
             control.debugger.once("detach", gone);
-            wc.on("before-input-event", take);
-            wc.on("before-mouse-event", take);
             wc.once("destroyed", gone);
             return () => {
               control.debugger.off("message", onMessage);
               control.debugger.off("detach", gone);
-              wc.off("before-input-event", take);
-              wc.off("before-mouse-event", take);
               wc.off("destroyed", gone);
             };
           },
         },
       ),
-    ).pipe(Effect.tapError(() => stopSharingTab(tabId).pipe(Effect.ignore)));
+    ).pipe(Effect.tapError(() => disconnectTabHost(tabId).pipe(Effect.ignore)));
   });
   const executeTabRequest = Effect.fn("PreviewManager.executeTabRequest")(function* (
     tabId: string,
     connectionId: string,
     request: PreviewAutomationRequest,
   ) {
-    const runner = sharedTabRunners.get(tabId);
+    const runner = tabRunners.get(tabId);
     if (!runner || runner.connectionId !== connectionId)
       return yield* new PreviewTabNotFoundError({ tabId });
     return yield* attemptPromise({ operation: "executeTabRequest", tabId }, () =>
@@ -3527,15 +3516,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
    * drives here. The live cursor and desktop recordings draw it like any agent.
    */
   const emitAgentPointer = Effect.fn("PreviewManager.emitAgentPointer")(function* (pointer: {
-    readonly key: { readonly threadId: string; readonly tabId: string };
+    readonly key?: { readonly threadId: string; readonly tabId: string };
+    readonly runtimeTabId?: string;
     readonly phase: "move" | "click";
     readonly x: number;
     readonly y: number;
   }) {
     const tab = [...(yield* SynchronizedRef.get(tabsRef)).values()].find(
       (candidate) =>
-        candidate.serverTab?.threadId === pointer.key.threadId &&
-        candidate.serverTab.tabId === pointer.key.tabId,
+        candidate.tabId === pointer.runtimeTabId ||
+        (pointer.key !== undefined &&
+          candidate.serverTab?.threadId === pointer.key.threadId &&
+          candidate.serverTab.tabId === pointer.key.tabId),
     );
     if (!tab) return;
     const event: DesktopPreviewPointerEvent = {
@@ -3632,9 +3624,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     prepareWebview,
     reapplyZoom,
     refresh,
-    handoverTab,
+    connectTabHost,
     executeTabRequest,
-    stopSharingTab,
+    disconnectTabHost,
     registerWebview,
     resetZoom: (tabId: string) => applyZoom(tabId, () => DEFAULT_ZOOM_FACTOR),
     setZoomFactor: (tabId: string, zoomFactor: number) =>
@@ -3826,13 +3818,13 @@ export class PreviewManager extends Context.Service<
     ) => Effect.Effect<PreviewTabState, PreviewManagerError>;
     readonly closeTab: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly getHostDeviceName: () => Effect.Effect<string>;
-    readonly handoverTab: (input: DesktopTabHandover) => Effect.Effect<void, PreviewManagerError>;
+    readonly connectTabHost: (input: DesktopTabHost) => Effect.Effect<void, PreviewManagerError>;
     readonly executeTabRequest: (
       tabId: string,
       connectionId: string,
       request: PreviewAutomationRequest,
     ) => Effect.Effect<unknown, PreviewManagerError>;
-    readonly stopSharingTab: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
+    readonly disconnectTabHost: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly registerWebview: (
       tabId: string,
       webContentsId: number,
@@ -4001,9 +3993,9 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     createTab: operations.createTab,
     closeTab: operations.closeTab,
     getHostDeviceName: () => Effect.sync(() => NodeOS.hostname()),
-    handoverTab: operations.handoverTab,
+    connectTabHost: operations.connectTabHost,
     executeTabRequest: operations.executeTabRequest,
-    stopSharingTab: operations.stopSharingTab,
+    disconnectTabHost: operations.disconnectTabHost,
     registerWebview: operations.registerWebview,
     prepareWebview: operations.prepareWebview,
     navigate: operations.navigate,

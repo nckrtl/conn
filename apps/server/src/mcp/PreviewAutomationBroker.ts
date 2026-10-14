@@ -1,7 +1,6 @@
 import {
   DesktopTabRelayError,
   type DesktopTabBinding,
-  type DesktopTabReport,
   type PreviewAutomationStatus,
   PREVIEW_AUTOMATION_V1_OPERATIONS,
   PreviewAutomationClientDisconnectedError,
@@ -72,7 +71,6 @@ export interface PreviewAutomationConnectOptions {
   readonly desktop?: {
     readonly sessionId: string;
     readonly binding: DesktopTabBinding;
-    readonly report: DesktopTabReport;
   };
 }
 
@@ -87,10 +85,6 @@ export class PreviewAutomationBroker extends Context.Service<
       sessionId: string,
       connectionId: string,
     ) => Stream.Stream<PreviewAutomationStreamEvent, DesktopTabRelayError>;
-    readonly reportDesktop: (
-      sessionId: string,
-      report: DesktopTabReport,
-    ) => Effect.Effect<void, DesktopTabRelayError>;
     readonly respondDesktop: (
       sessionId: string,
       response: PreviewAutomationResponse,
@@ -566,14 +560,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         desktop: {
           sessionId,
           binding,
-          report: {
-            connectionId: "pending",
-            shared: true,
-            owner: "unclaimed",
-            generation: 0,
-            url: null,
-            title: null,
-          },
         },
       },
     );
@@ -616,46 +602,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         (host) => disconnect(host.clientId, host.queue),
       ).pipe(Effect.map((host) => Stream.fromQueue(host.queue))),
     );
-  const reportDesktop: PreviewAutomationBroker["Service"]["reportDesktop"] = Effect.fn(
-    "PreviewAutomationBroker.reportDesktop",
-  )(function* (sessionId, report) {
-    yield* SynchronizedRef.modifyEffect(state, (current) => {
-      const host = desktopConnection(current, sessionId, report.connectionId);
-      if (!host?.desktop) return Effect.fail(new DesktopTabRelayError({ reason: "session" }));
-      if (report.generation < host.desktop.report.generation)
-        return Effect.succeed([undefined, current] as const);
-      const clients = new Map(current.clients);
-      clients.set(host.clientId, { ...host, desktop: { ...host.desktop, report } });
-      const pending = new Map(current.pending);
-      const interrupted: PendingRequest[] = [];
-      if (
-        !report.shared ||
-        report.owner === "human" ||
-        report.generation !== host.desktop.report.generation
-      ) {
-        for (const [id, entry] of pending)
-          if (entry.queue === host.queue) {
-            pending.delete(id);
-            interrupted.push(entry);
-          }
-      }
-      return Effect.forEach(
-        interrupted,
-        ({ deferred, context }) =>
-          Deferred.fail(
-            deferred,
-            new PreviewAutomationControlInterruptedError({
-              ...context,
-              remoteTag: "PreviewAutomationControlInterruptedError",
-              remoteMessageLength: 0,
-              cause: null,
-              reason: "interrupted",
-            }),
-          ),
-        { discard: true },
-      ).pipe(Effect.as([undefined, { ...current, clients, pending }] as const));
-    });
-  });
   const respondDesktop: PreviewAutomationBroker["Service"]["respondDesktop"] = Effect.fn(
     "PreviewAutomationBroker.respondDesktop",
   )(function* (sessionId, response) {
@@ -681,13 +627,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             ? [
                 {
                   tabId: host.desktop.binding.tabId,
-                  url: host.desktop.report.url,
+                  url: null,
                   host: host.desktop.binding.deviceName,
                   runtime: "desktop" as const,
                   hostedHere: host.desktop.sessionId === sessionId,
-                  shared: host.desktop.report.shared,
-                  owner: host.desktop.report.owner,
-                  generation: host.desktop.report.generation,
+                  owner: "unclaimed" as const,
                 },
               ]
             : [],
@@ -712,7 +656,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       const assignmentKey = hostAssignmentKey(input.scope);
       const assigned = assignments.get(assignmentKey);
       const assignedConnection = assigned ? current.clients.get(assigned.clientId) : undefined;
-      const hasLiveAssignment = assignedConnection?.environmentId === input.scope.environmentId;
+      const hasLiveAssignment =
+        assignedConnection?.environmentId === input.scope.environmentId &&
+        (!assignedConnection.desktop ||
+          assignedConnection.desktop.binding.threadId === input.scope.thread.threadId) &&
+        !(assignedConnection.desktop && input.operation === "open");
       // Keep one provider session on one physical desktop runtime so a
       // multi-step browser interaction cannot jump between independent
       // Electron cookie/DOM state. A live assignment that predates an
@@ -738,7 +686,8 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             );
       const connection =
         explicitDesktop ??
-        (hasLiveAssignment && supportsOperation(assignedConnection, input.operation)
+        (hasLiveAssignment &&
+        (assignedConnection.desktop || supportsOperation(assignedConnection, input.operation))
           ? assignedConnection
           : hasLiveAssignment
             ? undefined
@@ -771,7 +720,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         assigned !== undefined &&
         assigned.connectionId === connection.connectionId &&
         assigned.queue === connection.queue;
-      if (!connection.desktop)
+      if (input.updateCurrentTab !== false)
         assignments.set(assignmentKey, {
           clientId: connection.clientId,
           connectionId: connection.connectionId,
@@ -823,16 +772,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         pending.delete(requestId);
         return { ...current, pending };
       });
-      if (!connection.desktop.report.shared && input.operation !== "status") {
-        yield* discard;
-        return yield* new PreviewAutomationControlInterruptedError({
-          ...requestContext,
-          remoteTag: "PreviewAutomationControlInterruptedError",
-          remoteMessageLength: 0,
-          cause: null,
-          reason: "humanControl",
-        });
-      }
       if (
         !["status", "navigate", "snapshot", "click", "type", "credentialLock"].includes(
           input.operation,
@@ -873,9 +812,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             threadId: input.scope.thread.threadId,
             tabId: requestContext.tabId,
             tabIdExplicit: input.tabId !== undefined,
-            ...(connection.desktop
-              ? { controlGeneration: connection.desktop.report.generation }
-              : {}),
             agentSessionId: hostAssignmentKey(input.scope),
             operation: input.operation,
             input: input.input,
@@ -917,14 +853,36 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       typeof result === "object" &&
       result !== null
     ) {
-      const tabs = yield* desktopTabs(input.scope.environmentId, input.scope.thread.threadId);
+      const hosted = yield* desktopTabs(input.scope.environmentId, input.scope.thread.threadId);
+      // Read current, redacted metadata from the guest. Registration snapshots
+      // may predate navigation and must not become an unredacted read path.
+      const tabs = yield* Effect.forEach(
+        hosted,
+        (tab) =>
+          invoke<PreviewAutomationStatus>({
+            scope: input.scope,
+            operation: "status",
+            input: {},
+            tabId: tab.tabId,
+            timeoutMs: 500,
+            updateCurrentTab: false,
+          }).pipe(
+            Effect.map((status) => ({
+              ...tab,
+              url: status.url,
+              owner: status.control?.owner ?? tab.owner,
+            })),
+            Effect.orElseSucceed(() => tab),
+          ),
+        { concurrency: 4 },
+      );
       result = {
         ...result,
-        available: (result as PreviewAutomationStatus).available || tabs.some((tab) => tab.shared),
+        available: (result as PreviewAutomationStatus).available || tabs.length > 0,
         tabs: [...((result as PreviewAutomationStatus).tabs ?? []), ...tabs],
       } as A;
     }
-    if (input.updateCurrentTab === false || connection.desktop) return result;
+    if (input.updateCurrentTab === false) return result;
     const responseTabId = readResultTabId(result);
     const resultTabId = responseTabId === undefined ? input.tabId : responseTabId;
     if (resultTabId === undefined) return result;
@@ -958,7 +916,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
   return PreviewAutomationBroker.of({
     registerDesktop,
     desktopRequests,
-    reportDesktop,
     respondDesktop,
     desktopTabs,
     connect,

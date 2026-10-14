@@ -30,6 +30,7 @@ import { DesktopAppActivationCoordinator } from "../components/desktop/DesktopAp
 import { DesktopWebLinkCoordinator } from "../components/desktop/DesktopWebLinkCoordinator";
 import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
+import { DesktopUpdateLaunchNotice } from "../components/sidebar/updateEverythingRun";
 import { NightlyMobileBetaNotice } from "../components/NightlyMobileBeta";
 import { LegacyThreadMigrationToast } from "../components/LegacyThreadMigrationToast";
 import { ThreadNotificationCoordinator } from "../components/ThreadNotificationCoordinator";
@@ -308,6 +309,7 @@ function RootRouteView() {
           {primaryEnvironmentAuthenticated && isMainWindow ? (
             <ProviderUpdateLaunchNotification />
           ) : null}
+          {isElectron ? <DesktopUpdateLaunchNotice /> : null}
           {/* Hosted Nightly is "hosted-static", not authenticated, and needs it too. */}
           {isMainWindow ? <NightlyMobileBetaNotice /> : null}
           {appShell}

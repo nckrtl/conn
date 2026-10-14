@@ -46,7 +46,7 @@ export function withDevRendererAllowedOrigin(environment) {
     T3CODE_DEV_ALLOWED_ORIGINS: [...new Set([...existing, origin])].join(","),
   };
 }
-const LAUNCHER_VERSION = 21;
+const LAUNCHER_VERSION = 22;
 const developmentMacIconPngPath = NodePath.join(repoRoot, brand.icons.dev.macPng);
 const productionMacIconPngPath = NodePath.join(repoRoot, brand.icons.prod.macPng);
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher script has no Effect runtime.
@@ -352,6 +352,8 @@ function patchMainBundleInfoPlist(appBundlePath, iconPath, executableName) {
   for (const [key, value] of Object.entries(resolveMacBundleInfoPlistStrings(executableName))) {
     setPlistString(infoPlistPath, key, value);
   }
+  // macOS 26 offers Messages/Mail codes in every text field unless opted out.
+  setPlistJson(infoPlistPath, "NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac", true);
   setPlistJson(infoPlistPath, "CFBundleURLTypes", [
     {
       CFBundleURLName: APP_BUNDLE_ID,

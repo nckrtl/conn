@@ -358,6 +358,7 @@ import {
 } from "./chat/composerProviderState";
 import { confirmTerminalClose, isTerminalCloseConfirmPending } from "../lib/terminalCloseConfirm";
 import { isPreviewFocused } from "../lib/previewFocus";
+import { isAnnotationToggleShortcut } from "../annotations/browserAnnotationKeyboard";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
 import {
   preventRepeatedTerminalCloseShortcut,
@@ -8156,6 +8157,9 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const shortcutContext = getShortcutContext(event.target);
+      // The browser toolbar owns this chord while the preview has focus. Do not
+      // change composer mode before its capture listener can consume the event.
+      if (shortcutContext.previewFocus && isAnnotationToggleShortcut(event)) return;
 
       if (
         !shortcutContext.terminalFocus &&

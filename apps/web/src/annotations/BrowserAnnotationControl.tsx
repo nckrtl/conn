@@ -23,6 +23,7 @@ import { Switch } from "~/components/ui/switch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useClientSettings, useUpdatePrimarySettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
+import { isPreviewFocused } from "~/lib/previewFocus";
 
 import {
   type AnnotationDictation,
@@ -40,6 +41,7 @@ import {
 import { useAnnotationWatch, useAnnotationWatchStore } from "./annotationWatchStore";
 import { sendAnnotationPrompt } from "./sendAnnotationPrompt";
 import { useAnnotatorQueue } from "./useAnnotatorQueue";
+import { handleBrowserAnnotationKey } from "./browserAnnotationKeyboard";
 
 type PreviewWebview = HTMLElement & {
   executeJavaScript?: (code: string) => Promise<unknown>;
@@ -103,47 +105,64 @@ export function BrowserAnnotationControl({
     [dictationStartUrl, dictationStopUrl],
   );
 
-  // Restoring the mode must not re-run the page-load effect when the mode toggles.
-  const restoreMode = useEffectEvent((tabId: string) => {
-    if (annotating) runInPage(tabId, overlaySetModeScript(true));
-  });
   const bootstrap = useEffectEvent((tabId: string, target: NonNullable<typeof endpoint>) =>
     runInPage(tabId, overlayBootstrapScript(target, dictation)),
   );
-  const restoreServerMode = useEffectEvent(() => {
-    if (annotating && !inputDisabled) runServerAnnotation?.(true, dictation);
+  const configureServerMode = useEffectEvent(() => {
+    if (!inputDisabled) runServerAnnotation?.(annotating, dictation);
   });
 
-  // Each page load (and reload) starts without the overlay; load it and restore the mode.
+  const applyMode = useCallback(
+    (active: boolean) => {
+      if (runtimeTabId === null || !available || inputDisabled) return;
+      if (runServerAnnotation) {
+        if (!runServerAnnotation(active, dictation)) return;
+      } else {
+        runInPage(runtimeTabId, overlaySetModeScript(active));
+      }
+      setAnnotating(active);
+    },
+    [runtimeTabId, available, inputDisabled, runServerAnnotation, dictation],
+  );
+  const resetMode = useEffectEvent(() => applyMode(false));
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) =>
+      handleBrowserAnnotationKey(
+        event,
+        { focused: isPreviewFocused(), active: annotating, disabled: inputDisabled || !available },
+        applyMode,
+      );
+    window.addEventListener("keydown", handleKey, true);
+    return () => window.removeEventListener("keydown", handleKey, true);
+  }, [annotating, inputDisabled, available, applyMode]);
+
+  // Navigation starts with annotation off. Never restore a stale toolbar state after
+  // the page has handled Escape, or when a viewer takes control again.
   useEffect(() => {
     if (!available || loading || endpoint === null || runtimeTabId === null) return;
     if (runServerAnnotation) {
-      restoreServerMode();
+      resetMode();
       return;
     }
     bootstrap(runtimeTabId, endpoint);
     // The overlay mounts once its script has run; give it a moment.
-    const timer = setTimeout(() => restoreMode(runtimeTabId), 400);
+    const timer = setTimeout(() => resetMode(), 400);
     return () => clearTimeout(timer);
   }, [available, endpoint, loading, runtimeTabId, inputDisabled, runServerAnnotation]);
 
   // Changed dictation settings apply to the running overlay without a reload.
   useEffect(() => {
-    if (runServerAnnotation) {
-      restoreServerMode();
-    } else if (runtimeTabId !== null) runInPage(runtimeTabId, overlayConfigureScript(dictation));
+    if (runServerAnnotation) configureServerMode();
+  }, [dictation, runServerAnnotation]);
+  useEffect(() => {
+    if (!runServerAnnotation && runtimeTabId !== null)
+      runInPage(runtimeTabId, overlayConfigureScript(dictation));
   }, [dictation, runtimeTabId, runServerAnnotation]);
 
   const toggleAnnotating = useCallback(() => {
-    if (runtimeTabId === null || !available || inputDisabled) return;
-    const next = !annotating;
-    if (runServerAnnotation) {
-      if (runServerAnnotation(next, dictation)) setAnnotating(next);
-    } else {
-      setAnnotating(next);
-      runInPage(runtimeTabId, overlaySetModeScript(next));
-    }
-  }, [annotating, available, runtimeTabId, inputDisabled, runServerAnnotation, dictation]);
+    applyMode(!annotating);
+  }, [annotating, applyMode]);
 
   // Stay in the toolbar even when this page has no annotator, so the control is
   // where it is in browser mode. The popover explains why annotation cannot start.

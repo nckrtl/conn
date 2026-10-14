@@ -61,8 +61,10 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
 }));
 
 function makeSession() {
+  const events = new NodeEvents.EventEmitter();
   return {
-    on: vi.fn(),
+    on: vi.fn((name: string, callback: (...args: unknown[]) => void) => events.on(name, callback)),
+    emit: (name: string, ...args: unknown[]) => events.emit(name, ...args),
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, _input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
@@ -278,6 +280,39 @@ beforeEach(() => {
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
+
+it.live("keeps the requested frame resolution and quality during scroll bursts", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* viewer.input({ type: "takeControl" });
+      const session = contexts[0]!.sessions.at(-1)!;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+      yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
+
+      for (let index = 0; index < 8; index++) {
+        yield* viewer.input({ type: "wheel", x: 10, y: 10, deltaX: 0, deltaY: 100 });
+        session.emit("Page.screencastFrame", {
+          data: "ZnJhbWU=",
+          sessionId: index + 1,
+        });
+      }
+      yield* viewer.input({ type: "wheel", x: 10, y: 10, deltaX: 0, deltaY: 100 });
+
+      const starts = session.send.mock.calls.filter(
+        ([method]) => method === "Page.startScreencast",
+      );
+      expect(starts).toEqual([
+        ["Page.startScreencast", { format: "jpeg", quality: 70, maxWidth: 1280, maxHeight: 800 }],
+      ]);
+      expect(session.send).toHaveBeenCalledWith(
+        "Input.dispatchMouseEvent",
+        expect.objectContaining({ type: "mouseWheel", deltaY: 100 }),
+      );
+    }),
+  ).pipe(Effect.provide(layer)),
+);
 
 it.live("readiness none responds immediately but takeover input waits for navigation commit", () =>
   Effect.scoped(

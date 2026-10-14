@@ -49,6 +49,7 @@ const makeAuth = (
 };
 
 const mutations = [
+  { type: "annotation", active: true, startUrl: "", stopUrl: "" },
   { type: "resize", width: 390, height: 844 },
   { type: "mouse", action: "down", x: 10, y: 10, button: "left", buttons: 1 },
   { type: "key", action: "down", key: "Enter" },

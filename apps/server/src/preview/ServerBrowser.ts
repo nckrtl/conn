@@ -1,3 +1,4 @@
+import { overlayBootstrapScript, overlaySetModeScript } from "@t3tools/shared/previewAnnotation";
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
@@ -2226,6 +2227,29 @@ const make = Effect.gen(function* () {
         }
         await tab.page.reload(VIEWER_NAVIGATION_OPTIONS);
         return;
+      case "annotation": {
+        if (
+          typeof message.active !== "boolean" ||
+          typeof message.startUrl !== "string" ||
+          typeof message.stopUrl !== "string"
+        )
+          return;
+        const origin = new URL(tab.page.url()).origin;
+        if (!/^https?:\/\//.test(origin)) return;
+        const base = `${origin}/__orbit/annotator`;
+        await tab.page.evaluate(
+          overlayBootstrapScript(
+            {
+              annotationsUrl: `${base}/annotations`,
+              injectUrl: `${base}/inject.js`,
+            },
+            { startUrl: message.startUrl, stopUrl: message.stopUrl },
+          ),
+        );
+        await tab.page.waitForFunction("!!window.AgentAnnotation", undefined, { timeout: 10_000 });
+        await tab.page.evaluate(overlaySetModeScript(message.active));
+        return;
+      }
       case "probe": {
         const x = num(message.x);
         const y = num(message.y);

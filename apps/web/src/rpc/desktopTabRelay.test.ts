@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({ runAtomCommand: mocks.runCommand }));
 vi.mock("./atomRegistry", () => ({
   appAtomRegistry: {
+    refresh: vi.fn(),
     get: (atom: string) =>
       atom === "thread"
         ? {
@@ -44,6 +45,7 @@ vi.mock("~/connection/catalog", () => ({ environmentCatalog: { stateAtom: () => 
 vi.mock("~/state/threads", () => ({ environmentThreadDetails: { stateAtom: () => "thread" } }));
 vi.mock("~/state/preview", () => ({
   previewEnvironment: {
+    list: () => "list",
     desktopRegister: "register",
     desktopRequests: "requests",
     desktopRespond: "respond",

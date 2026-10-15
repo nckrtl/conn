@@ -4,6 +4,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as Fiber from "effect/Fiber";
 import * as Broker from "../mcp/PreviewAutomationBroker.ts";
 import * as Manager from "./Manager.ts";
 import * as Relay from "./DesktopTabRelay.ts";
@@ -20,6 +21,60 @@ const layer = Relay.layer.pipe(
 );
 
 it.layer(layer)("desktop tab relay bindings", (it) => {
+  it.effect("adopts a disconnected desktop's tab without stealing a connected host", () =>
+    Effect.gen(function* () {
+      const manager = yield* Manager.PreviewManager;
+      const relay = yield* Relay.DesktopTabRelay;
+      const threadId = ThreadId.make("adoption-thread");
+      const saved = {
+        ...(yield* manager.open({ threadId, url: "https://example.com/old-tab" })),
+        tabId: "saved-orphan",
+        host: "Old Mac",
+        hostedHere: false,
+      };
+      yield* manager.restoreDesktop(saved);
+      expect(
+        (yield* manager.list({ threadId })).sessions.find((t) => t.tabId === saved.tabId),
+      ).not.toHaveProperty("hostedHere");
+      expect(
+        (yield* relay.list("new-session", { threadId })).sessions.find(
+          (t) => t.tabId === saved.tabId,
+        ),
+      ).toMatchObject({ hostedHere: true, navStatus: saved.navStatus });
+      const binding = {
+        environmentId,
+        threadId,
+        tabId: saved.tabId,
+        snapshot: saved,
+        deviceName: "Other Mac",
+      };
+      const registration = yield* relay.register("old-session", binding);
+      const requests = yield* Stream.runDrain(
+        relay.requests("old-session", registration.connectionId),
+      ).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      expect(
+        (yield* relay.list("new-session", { threadId })).sessions.find(
+          (t) => t.tabId === saved.tabId,
+        ),
+      ).toMatchObject({ hostedHere: false, host: "Other Mac" });
+      expect((yield* relay.register("new-session", binding).pipe(Effect.flip)).reason).toBe(
+        "conflict",
+      );
+      yield* Fiber.interrupt(requests);
+      expect(
+        (yield* relay.list("new-session", { threadId })).sessions.find(
+          (t) => t.tabId === saved.tabId,
+        ),
+      ).toMatchObject({ hostedHere: true, navStatus: saved.navStatus });
+      yield* relay.register("new-session", { ...binding, deviceName: "New Mac" });
+      expect(
+        (yield* relay.list("new-session", { threadId })).sessions.find(
+          (t) => t.tabId === saved.tabId,
+        ),
+      ).toMatchObject({ hostedHere: true, host: "New Mac" });
+    }),
+  );
   it.effect(
     "checks environment, thread, snapshot, and desktop runtime before registering a host",
     () =>

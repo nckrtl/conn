@@ -34,13 +34,18 @@ vi.mock("~/state/threads", async () => {
   return { environmentThreadDetails: { stateAtom: () => state } };
 });
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({ runAtomCommand: mocks.runCommand }));
-vi.mock("~/state/preview", () => ({
-  previewEnvironment: {
-    desktopRegister: "register",
-    desktopRequests: "requests",
-    desktopRespond: "respond",
-  },
-}));
+vi.mock("~/state/preview", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const list = Atom.make(null);
+  return {
+    previewEnvironment: {
+      list: () => list,
+      desktopRegister: "register",
+      desktopRequests: "requests",
+      desktopRespond: "respond",
+    },
+  };
+});
 vi.mock("~/components/preview/previewBridge", () => ({
   previewBridge: {
     createTab: mocks.createTab,

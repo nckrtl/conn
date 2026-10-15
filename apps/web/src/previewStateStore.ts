@@ -185,7 +185,11 @@ export function applyPreviewServerEvent(ref: ScopedThreadRef, event: PreviewEven
         case "opened":
         case "navigated":
         case "resized": {
-          const snapshot = event.snapshot;
+          const existing = current.sessions[event.snapshot.tabId];
+          const snapshot =
+            existing?.runtime === "desktop" && event.snapshot.runtime === "desktop"
+              ? { ...event.snapshot, host: existing.host, hostedHere: existing.hostedHere }
+              : event.snapshot;
           if (current.suppressedTabIds.has(snapshot.tabId)) return current;
           const recentlySeenUrls =
             snapshot.navStatus._tag === "Idle"
@@ -332,7 +336,12 @@ export function reconcilePreviewServerSessions(
     for (const snapshot of snapshots) {
       if (currentSuppressedTabIds.has(snapshot.tabId)) continue;
       const existing = sameServer ? current.sessions[snapshot.tabId] : undefined;
-      const next = existing && existing.updatedAt > snapshot.updatedAt ? existing : snapshot;
+      // Navigation timestamps do not order ownership. A host may disconnect
+      // without navigating, so the authoritative list always owns these fields.
+      const next =
+        existing && existing.updatedAt > snapshot.updatedAt
+          ? { ...existing, host: snapshot.host, hostedHere: snapshot.hostedHere }
+          : snapshot;
       sessions[next.tabId] = next;
       recentlySeenUrls = rememberSnapshotUrl(recentlySeenUrls, next);
     }

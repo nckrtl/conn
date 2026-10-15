@@ -66,6 +66,17 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
     get.addFinalizer(() => {
       disposed = true;
     });
+    // A remote guest may disappear without a page event. Recheck only while
+    // waiting for another host, so its orphaned tabs can be adopted here.
+    const ownershipRefresh = setInterval(() => {
+      if (
+        Object.values(readThreadPreviewState(threadRef).sessions).some(
+          (tab) => tab.runtime === "desktop" && tab.hostedHere === false,
+        )
+      )
+        get.refresh(sessionsAtom);
+    }, 5_000);
+    get.addFinalizer(() => clearInterval(ownershipRefresh));
     const initialEvent = get.once(eventsAtom);
     get.subscribe(sessionsAtom, (result) => {
       reconcileSessions(result);

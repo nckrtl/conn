@@ -67,6 +67,14 @@ export function hostDesktopTab(
             input: binding,
           },
         );
+        // Registration can lose a race to another desktop. Resolve the owner
+        // instead of retrying a local guest forever against that live host.
+        appAtomRegistry.refresh(
+          previewEnvironment.list({
+            environmentId: threadRef.environmentId,
+            input: { threadId: threadRef.threadId },
+          }),
+        );
         if (!AsyncResult.isSuccess(registration))
           throw new Error("Desktop host registration failed.");
         const { connectionId } = registration.value;

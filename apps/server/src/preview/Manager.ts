@@ -266,12 +266,14 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             existing.threadId === snapshot.threadId && existing.snapshot.runtime === "desktop",
             state,
           ] as const;
+        // Host identity belongs to the live relay, never the page's saved state.
+        const { host: _host, hostedHere: _hostedHere, ...page } = snapshot;
         const revision = state.revision + 1;
         const sessions = new Map(state.sessions);
         sessions.set(compositeKey(snapshot.threadId, snapshot.tabId), {
           threadId: snapshot.threadId,
           tabId: snapshot.tabId,
-          snapshot,
+          snapshot: page,
         });
         yield* PubSub.publish(eventsPubSub, {
           type: "opened",
@@ -280,7 +282,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           createdAt: snapshot.updatedAt,
           serverEpoch,
           revision,
-          snapshot,
+          snapshot: page,
         });
         return [true, { sessions, revision }] as const;
       }),

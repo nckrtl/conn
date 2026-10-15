@@ -61,6 +61,37 @@ beforeEach(() => {
 });
 
 describe("previewStateStore (single-tab)", () => {
+  it("refreshes ownership independently of navigation and keeps it across page events", () => {
+    const newer = makeSnapshot({
+      runtime: "desktop",
+      hostedHere: false,
+      host: "Old Mac",
+      updatedAt: "2026-02-01T00:00:00Z",
+    });
+    reconcilePreviewServerSessions(ref, { sessions: [newer], serverEpoch, revision: 1 });
+    const older = makeSnapshot({ runtime: "desktop", hostedHere: true });
+    reconcilePreviewServerSessions(ref, { sessions: [older], serverEpoch, revision: 1 });
+    expect(readThreadPreviewState(ref).snapshot).toMatchObject({
+      hostedHere: true,
+      updatedAt: newer.updatedAt,
+    });
+    reconcilePreviewServerSessions(ref, {
+      sessions: [{ ...older, hostedHere: false, host: "Live Mac" }],
+      serverEpoch,
+      revision: 1,
+    });
+    applyPreviewServerEvent(ref, {
+      type: "navigated",
+      threadId: ref.threadId,
+      tabId: newer.tabId,
+      createdAt: newer.updatedAt,
+      snapshot: { ...newer, hostedHere: undefined, host: undefined },
+    });
+    expect(readThreadPreviewState(ref).snapshot).toMatchObject({
+      hostedHere: false,
+      host: "Live Mac",
+    });
+  });
   it("keeps independent state atoms for each thread", () => {
     expect(previewStateAtom(scopedThreadKey(ref))).toBe(previewStateAtom(scopedThreadKey(ref)));
     expect(previewStateAtom(scopedThreadKey(ref))).not.toBe(

@@ -1,6 +1,7 @@
 "use client";
 
 import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
+import { Button } from "~/components/ui/button";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   previewStreamDownloadUrl,
@@ -506,6 +507,28 @@ export function PreviewView({
     useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
     await closePreviewSession({ closePreview, snapshot, tabId, threadRef });
   }, [closePreview, moveTarget, open, snapshot, tabId, threadRef, url, viewport]);
+
+  const handleOpenHere = async () => {
+    const result = await openPreviewSession({
+      openPreview: open,
+      threadRef,
+      ...(url ? { url: resolveDiscoveredServerUrl(threadRef.environmentId, url) } : {}),
+      viewport,
+      ...(snapshot?.profileId ? { profileId: snapshot.profileId } : {}),
+      runtime: "desktop",
+    });
+    if (result._tag === "Failure") {
+      if (isAtomCommandInterrupted(result)) return;
+      const error = squashAtomCommandFailure(result);
+      toastManager.add({
+        type: "error",
+        title: "Unable to open the browser tab here",
+        description: error instanceof Error ? error.message : "An error occurred.",
+      });
+      return;
+    }
+    useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
+  };
 
   const handlePictureInPicture = useCallback(() => {
     if (!tabId) return;
@@ -1165,10 +1188,15 @@ export function PreviewView({
               className="absolute inset-0 h-full w-full"
             />
           ) : (
-            <div className="flex h-full items-center justify-center p-8 text-center">
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
               <p className="max-w-sm text-sm text-muted-foreground">
                 Hosted on {snapshot.host ?? "desktop"}
               </p>
+              {previewBridge ? (
+                <Button variant="outline" size="sm" onClick={() => void handleOpenHere()}>
+                  Open here
+                </Button>
+              ) : null}
             </div>
           )
         ) : null}

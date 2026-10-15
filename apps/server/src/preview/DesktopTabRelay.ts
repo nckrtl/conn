@@ -73,7 +73,9 @@ const make = Effect.gen(function* () {
               host: host.host,
               hostedHere: host.hostedHere,
             }
-          : tab;
+          : tab.runtime === "desktop"
+            ? { ...tab, host: undefined, hostedHere: true }
+            : tab;
       }),
     };
   });

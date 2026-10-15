@@ -257,7 +257,16 @@ const RunContextSelector = memo(function RunContextSelector({
           ) : (
             <EnvironmentMachineIcon
               kind={activeEnvironment?.machine ?? "server"}
-              className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0 mx-0!"}
+              className={
+                isPanel
+                  ? cn(
+                      THREAD_DETAILS_PANEL_ICON_CLASS,
+                      (activeEnvironment?.machine === "mac-mini" ||
+                        activeEnvironment?.machine === "mac-studio") &&
+                        "scale-110",
+                    )
+                  : "size-3 shrink-0 mx-0!"
+              }
             />
           )}
         </TooltipTrigger>
@@ -352,7 +361,10 @@ const RunContextSelector = memo(function RunContextSelector({
                     }}
                   >
                     <span className="flex min-w-0 items-center gap-1.5">
-                      <ScaleIcon className="size-3" aria-hidden="true" />
+                      <ScaleIcon
+                        className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3"}
+                        aria-hidden="true"
+                      />
                       <span className="min-w-0 truncate">
                         {autoEnvironmentLabel ?? "Auto balance"}
                       </span>
@@ -367,7 +379,18 @@ const RunContextSelector = memo(function RunContextSelector({
                     closeOnClick
                   >
                     <span className="flex min-w-0 items-center gap-1.5">
-                      <EnvironmentMachineIcon kind={env.machine} className="size-3" />
+                      <EnvironmentMachineIcon
+                        kind={env.machine}
+                        className={
+                          isPanel
+                            ? cn(
+                                THREAD_DETAILS_PANEL_ICON_CLASS,
+                                (env.machine === "mac-mini" || env.machine === "mac-studio") &&
+                                  "scale-110",
+                              )
+                            : "size-3"
+                        }
+                      />
                       <span className="min-w-0 truncate">{env.label}</span>
                     </span>
                   </MenuRadioItem>

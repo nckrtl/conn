@@ -200,7 +200,10 @@ export const resolveOpenInOptions = (
     .map((option) => ({ ...option, label: editorLabelForPlatform(option.value, platform) }));
 };
 
-function getOpenInIconClass(kind: OpenInOption["kind"]) {
+function getOpenInIconClass(kind: OpenInOption["kind"], panel = false) {
+  // Brand artwork fills its viewBox; glyphs leave an inset on the same 16px grid.
+  if (panel && kind === "brand")
+    return cn(THREAD_DETAILS_PANEL_ICON_CLASS, "p-px fill-current dark:fill-current");
   return cn(kind === "brand" ? "text-foreground opacity-100" : "text-muted-foreground");
 }
 
@@ -349,7 +352,7 @@ export const OpenInPicker = memo(function OpenInPicker({
                 }
               }}
             >
-              <Icon aria-hidden="true" className={getOpenInIconClass(kind)} />
+              <Icon aria-hidden="true" className={getOpenInIconClass(kind, isPanel)} />
               <MenuItemLabel>{label}</MenuItemLabel>
               {value === preferredEditor && openFavoriteEditorShortcutLabel && (
                 <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
@@ -375,7 +378,9 @@ export const OpenInPicker = memo(function OpenInPicker({
             disabled={!openInCwd || !canOpenEditor}
             onClick={() => openInEditor(preferredEditor)}
           >
-            <primaryOption.Icon className={cn("size-4", getOpenInIconClass(primaryOption.kind))} />
+            <primaryOption.Icon
+              className={cn("size-4", getOpenInIconClass(primaryOption.kind, isPanel))}
+            />
             <MenuItemLabel>Open in {primaryOption.label}</MenuItemLabel>
             {openFavoriteEditorShortcutLabel && (
               <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
@@ -407,7 +412,7 @@ export const OpenInPicker = memo(function OpenInPicker({
           {primaryOption?.Icon && (
             <primaryOption.Icon
               aria-hidden="true"
-              className={cn("size-3.5", getOpenInIconClass(primaryOption.kind))}
+              className={cn("size-3.5", getOpenInIconClass(primaryOption.kind, isPanel))}
             />
           )}
         </Button>
@@ -445,7 +450,7 @@ export const OpenInPicker = memo(function OpenInPicker({
             aria-hidden="true"
             className={cn(
               isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3.5",
-              getOpenInIconClass(primaryOption.kind),
+              getOpenInIconClass(primaryOption.kind, isPanel),
             )}
           />
         ) : isPanel ? (

@@ -455,7 +455,7 @@ export default function ProjectScriptsControl({
               />
             }
           >
-            <PlusIcon className="size-3.5" />
+            <PlusIcon className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3.5"} />
             <span
               className={cn(
                 "sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5",

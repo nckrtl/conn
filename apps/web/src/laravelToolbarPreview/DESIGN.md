@@ -6,7 +6,7 @@ context, store, T3 components and CSS from this checkout. There is no second too
 
 ## Working on it
 
-- The active checkout is `~/.cache/t3-patches-045`, branch `main`. Edit
+- The checkout is `~/apps/conn`, branch `main`. Edit
   `apps/web/src/laravelToolbar/ui/` to change both the preview and the shipped toolbar.
   Vite updates the preview on save. Commit and push accepted changes to `origin/main`.
 - `main.tsx` supplies browser chrome, a page screenshot and the theme. `source.ts` and

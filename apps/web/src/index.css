@@ -2622,3 +2622,22 @@ html {
     }
   }
 }
+
+/* The native macOS material blurs windows behind Conn. Keep only the outer
+   frame clear; inset content cards retain their opaque theme fills. The boot
+   script sets an inline HTML background, so this override must win over it. */
+html.electron-macos,
+html.electron-macos body {
+  background: transparent !important;
+}
+
+html.electron-macos {
+  --shell-fill: color-mix(in srgb, var(--sidebar) 60%, transparent);
+}
+html.electron-macos.dark {
+  --shell-fill: color-mix(
+    in srgb,
+    color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 60%,
+    transparent
+  );
+}

@@ -660,6 +660,9 @@ describe("DesktopWindow", () => {
         assert.equal(createdWindowOptions[0]?.height, 780);
         assert.isUndefined(createdWindowOptions[0]?.x);
         assert.isUndefined(createdWindowOptions[0]?.y);
+        assert.equal(createdWindowOptions[0]?.vibrancy, "under-window");
+        assert.equal(createdWindowOptions[0]?.visualEffectState, "followWindow");
+        assert.equal(createdWindowOptions[0]?.backgroundColor, "#00000000");
         assert.isTrue(createdWindowOptions[0]?.disableAutoHideCursor);
         assert.isFalse(createdWindowOptions[0]?.webPreferences?.backgroundThrottling);
         assert.deepEqual(fakeWindow.setAutoHideCursor.mock.calls, [[false]]);

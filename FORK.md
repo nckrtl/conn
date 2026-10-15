@@ -9,9 +9,8 @@ applies to everything else.
 
 - `main` is the only long-lived branch. It holds every customization. New
   work lands on `main` directly. Until 2026-10-11 this line was the `nckrtl`
-  branch of `nckrtl/t3code`; the old `nckrtl` and `rooms-patches-*` branches
-  are history, and `upstream-mirror` is the old upstream copy. Do not build
-  from them or commit to them. `wip/*` branches hold unreviewed saved work.
+  branch of `nckrtl/t3code`; that branch and the old `rooms-patches-*` and
+  `upstream-mirror` branches are merged into `main` and deleted. `wip/*` branches hold unreviewed saved work.
 - Conn tracks upstream `main`, synced every night so each sync stays small.
   The Grok bot runs the nightly sync with the procedure below; a manual sync
   follows the same steps.

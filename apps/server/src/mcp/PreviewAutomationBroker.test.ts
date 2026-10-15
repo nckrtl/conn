@@ -1738,3 +1738,58 @@ it.effect("expires abandoned desktop registrations without expiring active strea
     }),
   ),
 );
+
+it.effect(
+  "completes a timed-out desktop host stream and accepts a fresh registration for the surviving tab",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const broker = yield* makeBroker;
+        const { connectionId } = yield* broker.registerDesktop("session-1", desktopBinding);
+        const delivered = yield* Deferred.make<void>();
+        const consumer = yield* Stream.runForEach(
+          broker.desktopRequests("session-1", connectionId),
+          () => Deferred.succeed(delivered, undefined),
+        ).pipe(Effect.forkScoped);
+        const invocation = yield* broker
+          .invoke<void>({
+            scope,
+            tabId: desktopBinding.tabId,
+            operation: "snapshot",
+            input: {},
+            timeoutMs: 1000,
+          })
+          .pipe(Effect.flip, Effect.forkScoped);
+        yield* Deferred.await(delivered);
+        yield* TestClock.adjust(2000);
+        expect(yield* Fiber.join(invocation)).toMatchObject({
+          _tag: "PreviewAutomationTimeoutError",
+        });
+        expect(Exit.isSuccess(yield* Fiber.await(consumer))).toBe(true);
+        expect(yield* broker.desktopTabs(scope.environmentId, scope.thread.threadId)).toEqual([]);
+        const replacement = yield* broker.registerDesktop("session-1", desktopBinding);
+        expect(replacement.connectionId).not.toBe(connectionId);
+        yield* Stream.runForEach(
+          broker.desktopRequests("session-1", replacement.connectionId),
+          (event) =>
+            event.type === "request"
+              ? broker.respondDesktop("session-1", {
+                  clientId: "desktop",
+                  connectionId: replacement.connectionId,
+                  requestId: event.request.requestId,
+                  ok: true,
+                  result: "recovered",
+                })
+              : Effect.void,
+        ).pipe(Effect.forkScoped);
+        expect(
+          yield* broker.invoke<string>({
+            scope,
+            tabId: desktopBinding.tabId,
+            operation: "snapshot",
+            input: {},
+          }),
+        ).toBe("recovered");
+      }),
+    ),
+);

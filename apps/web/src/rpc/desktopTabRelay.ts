@@ -15,6 +15,7 @@ import { environmentCatalog } from "~/connection/catalog";
 import { previewEnvironment } from "~/state/preview";
 import { environmentThreadDetails } from "~/state/threads";
 import { readThreadPreviewState } from "~/previewStateStore";
+import { acquireBrowserSurfaceActivity } from "~/browser/browserSurfaceStore";
 import { previewBridge } from "~/components/preview/previewBridge";
 
 const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResult);
@@ -29,6 +30,10 @@ export function hostDesktopTab(
 ) {
   const bridge = previewBridge;
   if (!bridge?.connectTabHost || !bridge.executeTabRequest) return () => {};
+  // Public CDP clients can capture at any time. An offscreen Electron guest
+  // stops compositing even with background throttling disabled, so keep the
+  // hosted tab paintable behind the app until its guest is released.
+  const releaseSurfaceActivity = acquireBrowserSurfaceActivity(runtimeTabId);
   const connectionAtom = environmentCatalog.stateAtom(threadRef.environmentId);
   let disposed = false;
   let connected = false;
@@ -186,6 +191,7 @@ export function hostDesktopTab(
   sync();
   return () => {
     disposed = true;
+    releaseSurfaceActivity();
     unsubscribe();
     unsubscribeThread();
     schedule();

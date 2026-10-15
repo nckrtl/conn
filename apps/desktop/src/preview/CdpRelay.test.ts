@@ -71,6 +71,27 @@ describe("CDP relay", () => {
     });
   });
 
+  it.each([
+    "Browser.close",
+    "Target.closeTarget",
+    "Page.close",
+    "Page.crash",
+    "Runtime.disable",
+    "Page.disable",
+  ])("rejects %s without changing the shared debugger or guest", async (method) => {
+    const send = vi.fn(async () => ({}));
+    const written: Array<Record<string, unknown>> = [];
+    const relay = createCdpRelayConnection(makeTarget(send), (raw) =>
+      written.push(JSON.parse(raw)),
+    );
+    relay.receive(JSON.stringify({ id: 1, method }));
+    relay.receive(JSON.stringify({ id: 2, method, sessionId: "t3-preview-page" }));
+    await settle();
+    expect(send).not.toHaveBeenCalled();
+    expect(written).toHaveLength(2);
+    expect(written.every((reply) => reply.error)).toBe(true);
+  });
+
   it("forwards page commands to the tab and lets a slow one finish last", async () => {
     const pending: Array<() => void> = [];
     const send = vi.fn(

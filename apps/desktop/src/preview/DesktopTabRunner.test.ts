@@ -51,6 +51,9 @@ describe("desktop tab runner", () => {
   let reports: boolean[];
   let remembered: string[];
   let commands: string[];
+  let stallScreenshot = false;
+  let attachRunner: () => Promise<void>;
+  let screenshotStarted: (() => void) | undefined;
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
   });
@@ -68,6 +71,8 @@ describe("desktop tab runner", () => {
     reports = [];
     remembered = [];
     commands = [];
+    stallScreenshot = false;
+    screenshotStarted = undefined;
     runner = new DesktopTabRunner(
       binding,
       "connection-1",
@@ -77,47 +82,53 @@ describe("desktop tab runner", () => {
     const cdp = await context.newCDPSession(page);
     // Electron's manager retains an already-enabled debugger across connections.
     await cdp.send("Runtime.enable");
-    await runner.attach(
-      {
-        send: (method, params) => {
-          commands.push(method);
-          return cdp.send(method as Parameters<typeof cdp.send>[0], params as never);
+    attachRunner = () =>
+      runner.attach(
+        {
+          send: (method, params) => {
+            commands.push(method);
+            if (stallScreenshot && method === "Page.captureScreenshot") {
+              screenshotStarted?.();
+              return new Promise(() => {});
+            }
+            return cdp.send(method as Parameters<typeof cdp.send>[0], params as never);
+          },
+          targetId: async () => (await cdp.send("Target.getTargetInfo")).targetInfo.targetId,
+          url: () => page.url(),
+          title: () => "Fixture",
+          userAgent: () => "Fixture",
+          setDownloadDirectory: () => {},
         },
-        targetId: async () => (await cdp.send("Target.getTargetInfo")).targetInfo.targetId,
-        url: () => page.url(),
-        title: () => "Fixture",
-        userAgent: () => "Fixture",
-        setDownloadDirectory: () => {},
-      },
-      {
-        on: (listener) => {
-          const forward = (event: { method: string; params: unknown }) =>
-            listener(event.method, event.params, "");
-          // The native debugger emits the same page events the CDP client receives.
-          const methods = [
-            "Page.frameNavigated",
-            "Page.lifecycleEvent",
-            "Page.frameStartedLoading",
-            "Page.frameStoppedLoading",
-            "Runtime.executionContextCreated",
-            "Runtime.executionContextDestroyed",
-            "Runtime.executionContextsCleared",
-            "Page.javascriptDialogOpening",
-            "Page.javascriptDialogClosed",
-            "Page.fileChooserOpened",
-            "Input.dragIntercepted",
-          ];
-          const removers = methods.map((method) => {
-            const handler = (params: unknown) => forward({ method, params });
-            cdp.on(method as Parameters<typeof cdp.on>[0], handler);
-            return () => cdp.off(method as Parameters<typeof cdp.off>[0], handler);
-          });
-          return () => {
-            for (const remove of removers) remove();
-          };
+        {
+          on: (listener) => {
+            const forward = (event: { method: string; params: unknown }) =>
+              listener(event.method, event.params, "");
+            // The native debugger emits the same page events the CDP client receives.
+            const methods = [
+              "Page.frameNavigated",
+              "Page.lifecycleEvent",
+              "Page.frameStartedLoading",
+              "Page.frameStoppedLoading",
+              "Runtime.executionContextCreated",
+              "Runtime.executionContextDestroyed",
+              "Runtime.executionContextsCleared",
+              "Page.javascriptDialogOpening",
+              "Page.javascriptDialogClosed",
+              "Page.fileChooserOpened",
+              "Input.dragIntercepted",
+            ];
+            const removers = methods.map((method) => {
+              const handler = (params: unknown) => forward({ method, params });
+              cdp.on(method as Parameters<typeof cdp.on>[0], handler);
+              return () => cdp.off(method as Parameters<typeof cdp.off>[0], handler);
+            });
+            return () => {
+              for (const remove of removers) remove();
+            };
+          },
         },
-      },
-    );
+      );
+    await attachRunner();
   });
   afterEach(async () => {
     await runner?.close();
@@ -289,6 +300,45 @@ describe("desktop tab runner", () => {
     await disconnected;
     await expect(chromium.connectOverCDP(second, { timeout: 500 })).rejects.toThrow();
     expect(page.isClosed()).toBe(false);
+  });
+
+  it("keeps agent automation working after a public Playwright browser closes", async () => {
+    const endpoint = ((await runner.respond(request("cdpEndpoint"))).result as { endpoint: string })
+      .endpoint;
+    const script = await chromium.connectOverCDP(endpoint, { timeout: 2_000 });
+    const scriptPage = script.contexts()[0]!.pages()[0]!;
+    await scriptPage.locator("#name").fill("Public script");
+    await script.close();
+    expect(page.isClosed()).toBe(false);
+    expect(await runner.respond(request("snapshot"))).toMatchObject({ ok: true });
+    expect(
+      await runner.respond(request("type", { locator: "#name", text: "Agent recovered" })),
+    ).toMatchObject({ ok: true });
+    expect(await page.locator("#name").inputValue()).toBe("Public scriptAgent recovered");
+    await expect(chromium.connectOverCDP(endpoint, { timeout: 1_000 })).rejects.not.toThrow(
+      /Timeout/,
+    );
+  });
+
+  it("can close a runner with a stalled capture and rehost the same guest", async () => {
+    const endpoint = ((await runner.respond(request("cdpEndpoint"))).result as { endpoint: string })
+      .endpoint;
+    const script = await chromium.connectOverCDP(endpoint);
+    stallScreenshot = true;
+    const capturing = new Promise<void>((resolve) => {
+      screenshotStarted = resolve;
+    });
+    const snapshot = runner.respond(request("snapshot"));
+    await capturing;
+    expect(await runner.respond(request("status"))).toMatchObject({ ok: true });
+    await runner.close();
+    expect((await snapshot).ok).toBe(false);
+    expect(script.isConnected()).toBe(false);
+    expect(page.isClosed()).toBe(false);
+    stallScreenshot = false;
+    runner = new DesktopTabRunner(binding, "connection-2", (report) => reports.push(report));
+    await attachRunner();
+    expect(await runner.respond(request("snapshot"))).toMatchObject({ ok: true });
   });
 
   it("revokes public endpoints before a Vault fill and refuses scripts and new endpoints", async () => {

@@ -24,6 +24,7 @@ import { BrowserControlInterrupted, SessionControl } from "@t3tools/shared/previ
 import { redactSensitiveValues } from "@t3tools/shared/credentialFill";
 import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import type { NodeWS } from "@effect/platform-node/NodeSocket";
 import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
@@ -153,25 +154,30 @@ export class DesktopTabRunner {
     return Effect.runPromise(
       Effect.gen(function* () {
         const path = `/${NodeCrypto.randomBytes(24).toString("base64url")}`;
+        let connected = false;
         const server = yield* NodeSocketServer.makeWebSocket({
           host: "127.0.0.1",
           port: 0,
           path,
+          // Reject reuse during the HTTP upgrade. Closing a paused websocket
+          // after accepting it leaves Playwright waiting for its CDP handshake.
+          verifyClient: () => {
+            if (connected) return false;
+            connected = true;
+            return true;
+          },
         });
-        let connected = false;
         yield* server
           .run((socket) =>
             Effect.gen(function* () {
               // NodeSocketServer supplies the native socket to each handler.
               const client = yield* Effect.withFiber((fiber) =>
-                Effect.succeed(Context.getUnsafe(fiber.context, Socket.WebSocket)),
+                Effect.succeed(
+                  Context.getUnsafe(fiber.context, Socket.WebSocket) as NodeWS.WebSocket,
+                ),
               );
-              if (connected) {
-                client.close();
-                return;
-              }
-              connected = true;
-              const close = () => client.close();
+              // Rehosting must not wait for an abandoned script's close handshake.
+              const close = () => client.terminate();
               closeClients.add(close);
               yield* Effect.addFinalizer(() =>
                 Effect.sync(() => {

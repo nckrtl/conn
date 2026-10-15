@@ -299,3 +299,46 @@ it("publishes viewport and appearance choices and rehosts the same guest when th
     mocks.stoppedRun = "";
   }
 });
+
+it("re-registers after a timeout eviction completes the host stream while the environment stays connected", async () => {
+  vi.useFakeTimers();
+  mocks.phase = "connected";
+  mocks.stoppedRun = "";
+  let registration = 0;
+  const evicted = deferred<unknown>();
+  const streams: AbortSignal[] = [];
+  mocks.connect.mockResolvedValue(undefined);
+  mocks.disconnect.mockResolvedValue(undefined);
+  mocks.runCommand.mockImplementation(async (_registry, command, { input }) => {
+    if (command === "register")
+      return AsyncResult.success({ connectionId: `timeout-${++registration}` });
+    const { signal } = input as { signal: AbortSignal };
+    streams.push(signal);
+    if (streams.length === 1) return evicted.promise;
+    return new Promise<void>((resolve) =>
+      signal.addEventListener("abort", () => resolve(), { once: true }),
+    );
+  });
+  const stop = hostDesktopTab(
+    { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("thread") },
+    "tab",
+    "same-guest",
+    () => {},
+  );
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(registration).toBe(1);
+    // The broker ends only this stream; the environment socket remains healthy.
+    evicted.resolve(AsyncResult.success(undefined));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(registration).toBe(2);
+    expect(streams[0]?.aborted).toBe(true);
+    expect(mocks.connect).toHaveBeenLastCalledWith(
+      expect.objectContaining({ runtimeTabId: "same-guest", connectionId: "timeout-2" }),
+    );
+  } finally {
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+  }
+});

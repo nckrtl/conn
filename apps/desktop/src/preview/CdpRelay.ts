@@ -158,6 +158,12 @@ export function createCdpRelayConnection(
   };
 
   const pageCommand = (command: CdpCommand): Promise<unknown> => {
+    // All relay clients share the desktop's debugger. A script must not close
+    // its guest or disable the events the internal automation connection uses.
+    if (["Page.close", "Page.crash", "Runtime.disable", "Page.disable"].includes(command.method))
+      return Promise.reject(
+        new Error(`Not supported for a desktop preview tab: ${command.method}`),
+      );
     if (
       command.method.startsWith("Browser.") ||
       (command.method.startsWith("Target.") && command.method !== "Target.setAutoAttach")

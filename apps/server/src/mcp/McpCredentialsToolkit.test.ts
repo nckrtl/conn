@@ -1,3 +1,5 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ServerConfig from "../config.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
   type CredentialAutofillSettings,
@@ -154,13 +156,20 @@ const makeHarness = (scenario: Scenario = {}) => {
       }
     },
   });
-  const layer = McpHttpServer.layerCredentialsToolkit.pipe(
+  const layer = Layer.merge(
+    McpHttpServer.layerCredentialsToolkit,
+    McpHttpServer.layerPreviewToolkit,
+  ).pipe(
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
     Layer.provideMerge(CredentialAutofill.layer),
     Layer.provide(broker),
     Layer.provide(ServerSettings.layerTest({ credentialAutofill: scenario.settings ?? {} })),
     Layer.provide(testLoginStore),
+    Layer.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-credentials-toolkit-test-" }),
+    ),
+    Layer.provide(NodeServices.layer),
   );
   const call = (name: string, args: Record<string, unknown>, capabilities = ["preview"] as const) =>
     Effect.gen(function* () {
@@ -204,11 +213,14 @@ describe("credentials MCP tools", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
-      expect(server.tools.map(({ tool }) => tool.name).toSorted()).toEqual([
-        "fill_credential",
-        "request_credentials",
-        "save_test_login",
-      ]);
+      expect(
+        server.tools
+          .filter(({ tool }) =>
+            ["fill_credential", "request_credentials", "save_test_login"].includes(tool.name),
+          )
+          .map(({ tool }) => tool.name)
+          .toSorted(),
+      ).toEqual(["fill_credential", "request_credentials", "save_test_login"]);
       const result = yield* harness.call("request_credentials", { domain: "github.com" });
       expect(result.isError).toBe(false);
       expect(result.structuredContent).toEqual({
@@ -305,6 +317,28 @@ describe("credentials MCP tools", () => {
         // A new document starts without the mark.
         harness.page.locked = false;
         yield* autofill.guardScript(harness.scope, undefined);
+      }).pipe(Effect.scoped, Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "refuses preview evaluate and CDP endpoint tools on a Vault-locked desktop document",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        harness.page.locked = true;
+        for (const [name, args] of [
+          ["preview_evaluate", { expression: "document.title", tabId: "tab-1" }],
+          ["preview_cdp_endpoint", { tabId: "tab-1" }],
+        ] as const) {
+          const result = yield* harness.call(name, args);
+          expect(result.isError).toBe(true);
+          expect(toJson(result)).toContain("JavaScript is blocked in this tab");
+        }
+        expect(harness.brokerCalls.map((call) => call.operation)).toEqual([
+          "credentialLock",
+          "credentialLock",
+        ]);
       }).pipe(Effect.scoped, Effect.provide(harness.layer));
     },
   );

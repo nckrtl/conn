@@ -8,6 +8,7 @@ import {
   PreviewAutomationRecordingDesktopUpdateRequiredError,
   PreviewAutomationRecordingArtifact,
   type ToolActivityIcon,
+  type PreviewAutomationCdpEndpointResult,
   type ThreadId,
   type PreviewAutomationOperation,
   type PreviewAutomationOpenInput,
@@ -199,6 +200,14 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
 const WITHHELD_SCREENSHOT = { data: "", width: 0, height: 0 } as const;
 
 const handlers = {
+  preview_cdp_endpoint: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+      const autofill = yield* CredentialAutofill.CredentialAutofill;
+      yield* autofill.guardScript(scope, input?.tabId);
+      return yield* invokeTargeted<PreviewAutomationCdpEndpointResult>("cdpEndpoint", input ?? {});
+    }),
+  ),
   preview_dialog: McpToolAccess.actsAsCaller((input) =>
     invokeTargeted<PreviewAutomationStatus>("dialog", input),
   ),

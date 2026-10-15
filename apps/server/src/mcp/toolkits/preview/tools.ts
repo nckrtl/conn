@@ -2,6 +2,7 @@ import {
   OrchestratorMcpFailure,
   ToolActivityIcon,
   PreviewAutomationClickInput,
+  PreviewAutomationCdpEndpointResult,
   PreviewAutomationDialogInput,
   PreviewAutomationDragInput,
   PreviewAutomationError,
@@ -92,7 +93,7 @@ const PreviewOpenTool = browserTool(
 const PreviewDialogTool = browserTool(
   Tool.make("preview_dialog", {
     description:
-      "Accept or dismiss the server browser dialog reported by preview_status. For a prompt, supply promptText when accepting. Requires this agent to own the tab, or the tab to be unclaimed with no human in control. Desktop hosts may not support this operation.",
+      "Accept or dismiss the browser dialog reported by preview_status. For a prompt, supply promptText when accepting. Requires this agent to own the tab, or the tab to be unclaimed with no human in control.",
     parameters: PreviewAutomationDialogInput,
     success: PreviewAutomationStatus,
     failure: PreviewToolFailure,
@@ -144,7 +145,7 @@ const PreviewSetAppearanceTool = safeBrowserTool(
 export const PreviewSnapshotTool = safeBrowserTool(
   Tool.make("preview_snapshot", {
     description:
-      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Server snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. Set save=true to write the PNG to disk and get back only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
+      "Inspect a page before interacting. Pass tabId to inspect a specific tab, including one the user opened (see preview_status tabs), even while they control it; omit it to use this agent session's current tab, or the tab the user is viewing when you have none. Returns page state, semantic elements, diagnostics, action history, and screenshot dimensions. Snapshots include an accessibilityTree with refs; pass locator=aria-ref=<ref> to target one exact element, including inside frames. Refresh refs after navigation, another snapshot, or human takeover. The text is capped near 20 KB and lists what it omitted; use preview_evaluate to read more. Set includeImage=true only when you need to see the page; the image stays in tool history. Set save=true to write the PNG to disk and get back only the url and screenshotPath. Embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
     parameters: Schema.Struct({
       ...PreviewAutomationTabTargetInput.fields,
       includeImage: Schema.optional(
@@ -167,10 +168,21 @@ export const PreviewSnapshotTool = safeBrowserTool(
   }).annotate(Tool.Title, "Inspect browser page"),
 );
 
+const PreviewCdpEndpointTool = browserTool(
+  Tool.make("preview_cdp_endpoint", {
+    description:
+      "Create a fresh temporary CDP WebSocket endpoint for the tab selected by tabId, or this agent session's current tab when omitted. Connect a project script with chromium.connectOverCDP(endpoint); the connection exposes only this thread's selected tab. The endpoint listens on 127.0.0.1 on the machine hosting the tab, and closes when the thread stops, the tab closes, its desktop host disconnects, or before a Vault fill. It works from a local headless server on the same Mac as desktop tabs, not from another machine. Saved-credential script locks still apply. Desktop tabs only; server tabs return an explicit error.",
+    parameters: PreviewAutomationTabTargetInput,
+    success: Schema.Struct({ ...PreviewAutomationCdpEndpointResult.fields, ...presentationFields }),
+    failure: PreviewToolFailure,
+    dependencies: [...dependencies, CredentialAutofill.CredentialAutofill],
+  }).annotate(Tool.Title, "Get preview CDP endpoint"),
+);
+
 const PreviewClickTool = browserTool(
   Tool.make("preview_click", {
     description:
-      "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y must be supplied together. Set button=right for a context menu or clickCount=2 for a double-click; server browser tabs only.",
+      "Click exactly one target in the tab selected by tabId, or this agent session's current tab when omitted. Prefer a Playwright locator; selector accepts legacy CSS; x and y must be supplied together. Set button=right for a context menu or clickCount=2 for a double-click.",
     parameters: PreviewAutomationClickInput,
     success: PreviewActionResult,
     failure: PreviewToolFailure,
@@ -192,7 +204,7 @@ const PreviewTypeTool = browserTool(
 const PreviewHoverTool = safeBrowserTool(
   Tool.make("preview_hover", {
     description:
-      "Move the mouse over exactly one target in the tab selected by tabId, or this agent session's current tab when omitted, to reveal hover menus and tooltips. Server browser tabs only.",
+      "Move the mouse over exactly one target in the tab selected by tabId, or this agent session's current tab when omitted, to reveal hover menus and tooltips.",
     parameters: PreviewAutomationHoverInput,
     success: PreviewActionResult,
     failure: PreviewToolFailure,
@@ -203,7 +215,7 @@ const PreviewHoverTool = safeBrowserTool(
 const PreviewSelectTool = browserTool(
   Tool.make("preview_select", {
     description:
-      "Choose options in one native <select> in the tab selected by tabId, or this agent session's current tab when omitted, by option value or visible label. Custom dropdowns are not <select>; click them open and click the option instead. Server browser tabs only.",
+      "Choose options in one native <select> in the tab selected by tabId, or this agent session's current tab when omitted, by option value or visible label. Custom dropdowns are not <select>; click them open and click the option instead.",
     parameters: PreviewAutomationSelectInput,
     success: Schema.Struct({
       ...PreviewAutomationSelectResult.fields,
@@ -217,7 +229,7 @@ const PreviewSelectTool = browserTool(
 const PreviewDragTool = browserTool(
   Tool.make("preview_drag", {
     description:
-      "Drag one element onto another in the tab selected by tabId, or this agent session's current tab when omitted. Server browser tabs only.",
+      "Drag one element onto another in the tab selected by tabId, or this agent session's current tab when omitted.",
     parameters: PreviewAutomationDragInput,
     success: PreviewActionResult,
     failure: PreviewToolFailure,
@@ -228,7 +240,7 @@ const PreviewDragTool = browserTool(
 const PreviewUploadTool = browserTool(
   Tool.make("preview_upload", {
     description:
-      "Give files on the environment to the page in the tab selected by tabId, or this agent session's current tab when omitted. After clicking an upload control, preview_status reports the open fileChooser; call this with absolute paths to answer it, or with an empty list to cancel. Pass a locator for an <input type=file> to set its files without a picker. Server browser tabs only.",
+      "Give files on the tab host to the page in the tab selected by tabId, or this agent session's current tab when omitted. After clicking an upload control, preview_status reports the open fileChooser; call this with absolute paths to answer it, or with an empty list to cancel. Pass a locator for an <input type=file> to set its files without a picker.",
     parameters: PreviewAutomationUploadInput,
     success: PreviewActionResult,
     failure: PreviewToolFailure,
@@ -321,6 +333,7 @@ export const PreviewToolkit = Toolkit.make(
   PreviewNavigateTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
+  PreviewCdpEndpointTool,
   PreviewSnapshotTool,
   PreviewClickTool,
   PreviewTypeTool,
@@ -343,6 +356,7 @@ export const PreviewStandardToolkit = Toolkit.make(
   PreviewNavigateTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
+  PreviewCdpEndpointTool,
   PreviewClickTool,
   PreviewTypeTool,
   PreviewHoverTool,

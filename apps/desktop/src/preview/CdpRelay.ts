@@ -158,6 +158,11 @@ export function createCdpRelayConnection(
   };
 
   const pageCommand = (command: CdpCommand): Promise<unknown> => {
+    if (
+      command.method.startsWith("Browser.") ||
+      (command.method.startsWith("Target.") && command.method !== "Target.setAutoAttach")
+    )
+      return browserCommand(command);
     const child = sessions.get(command.sessionId!) === "page" ? undefined : command.sessionId;
     // The page itself is already running, but its child frames are not:
     // Playwright auto-attaches with waitForDebuggerOnStart, so Chromium pauses

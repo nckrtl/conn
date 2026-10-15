@@ -179,6 +179,7 @@ export function HostedBrowserWebview(props: {
                 { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
                 tabId,
                 runtimeTabId,
+                () => webview.focus(),
               );
           }
         } catch {

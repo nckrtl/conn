@@ -10,6 +10,10 @@ import {
   type PreviewAutomationSnapshot,
   type PreviewAutomationStatus,
 } from "@t3tools/contracts";
+import {
+  CREDENTIAL_LOCK_EXPRESSION,
+  SENSITIVE_INPUT_VALUES_EXPRESSION,
+} from "@t3tools/shared/credentialFill";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -71,7 +75,10 @@ function makeFrame() {
   return frame;
 }
 
-function makeSession(frame?: ReturnType<typeof makeFrame>) {
+function makeSession(
+  frame?: ReturnType<typeof makeFrame>,
+  viewport = () => ({ width: 1280, height: 800 }),
+) {
   const events = new NodeEvents.EventEmitter();
   return {
     on: vi.fn((name: string, callback: (...args: unknown[]) => void) => events.on(name, callback)),
@@ -79,7 +86,15 @@ function makeSession(frame?: ReturnType<typeof makeFrame>) {
     detach: vi.fn(async () => {}),
     send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
-      if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 0 } };
+      if (method === "Page.getLayoutMetrics")
+        return {
+          cssVisualViewport: {
+            pageX: 0,
+            pageY: 0,
+            clientWidth: viewport().width,
+            clientHeight: viewport().height,
+          },
+        };
       if (method === "Page.captureScreenshot") return { data: "ZnJhbWU=" };
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
@@ -137,13 +152,19 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     emulateMedia: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
     waitForFunction: vi.fn(async () => {}),
-    evaluate: vi.fn(async (_expression?: unknown) => ({
-      url,
-      title: "test page",
-      loading: false,
-      visibleText: "delete",
-      interactiveElements: [],
-    })),
+    evaluate: vi.fn(async (_expression?: unknown) =>
+      _expression === SENSITIVE_INPUT_VALUES_EXPRESSION
+        ? []
+        : _expression === CREDENTIAL_LOCK_EXPRESSION
+          ? false
+          : {
+              url,
+              title: "test page",
+              loading: false,
+              visibleText: "delete",
+              interactiveElements: [],
+            },
+    ),
     ariaSnapshot: vi.fn(async () => '- button "delete" [ref=e1]'),
     locator: vi.fn(() => {
       throw new Error("Unexpected locator action");
@@ -164,6 +185,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     newCDPSession: async (target: unknown) => {
       const session = makeSession(
         target === page ? undefined : (target as ReturnType<typeof makeFrame>),
+        () => viewport,
       );
       sessions.push(session);
       return session;
@@ -313,6 +335,18 @@ beforeEach(() => {
   releasedDesktopTabs.length = 0;
   desktopConnections.length = 0;
 });
+
+it.live("reports that temporary CDP endpoints require a desktop tab", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const error = yield* broker
+        .invoke<void>({ scope, tabId, operation: "cdpEndpoint", input: {} })
+        .pipe(Effect.flip);
+      expect(error.message).toContain("Not supported on server tabs: temporary CDP endpoints");
+    }),
+  ).pipe(Effect.provide(layer)),
+);
 
 it.live("keeps the requested frame resolution and quality during scroll bursts", () =>
   Effect.scoped(

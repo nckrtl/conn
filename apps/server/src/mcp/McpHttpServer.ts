@@ -326,9 +326,8 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
 
   // Per-field caps do not sum below the ceiling: three log arrays of 40 capped
   // entries alone can pass 60 KB, and the caps count characters, not bytes.
-  // Halve one thing per round until the JSON fits: logs first, then page
-  // text, then the locators. The identifier caps bound the rest, so this
-  // terminates.
+  // Halve one field per round until the JSON fits: logs first, then balance
+  // page text and ARIA refs, then legacy locators. Identifier caps bound the rest.
   const shedOrder = [
     "actionTimeline",
     "networkEntries",
@@ -362,7 +361,7 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
       shedOrder.find(
         (candidate) => candidate !== "interactiveElements" && lists[candidate].length > 0,
       ) ??
-      (visibleTextChars > 0
+      (visibleTextChars > 0 && (ariaTreeChars === 0 || visibleTextChars >= ariaTreeChars / 2)
         ? "visibleText"
         : lists.interactiveElements.length > 0
           ? "interactiveElements"
@@ -539,7 +538,6 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 readonly url: string;
                 readonly screenshot: {
                   readonly mimeType: "image/png";
-                  readonly unavailableReason?: "desktopTab";
                   readonly data: string;
                   readonly width: number;
                   readonly height: number;
@@ -604,10 +602,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                     ? [
                         {
                           type: "text" as const,
-                          text:
-                            screenshot.unavailableReason === "desktopTab"
-                              ? "No screenshot: not supported on desktop tabs yet."
-                              : SCREENSHOT_WITHHELD_NOTICE,
+                          text: SCREENSHOT_WITHHELD_NOTICE,
                         },
                       ]
                     : includeImage

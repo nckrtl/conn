@@ -1538,7 +1538,7 @@ const make = Effect.gen(function* () {
       try {
         await encoder.evaluate(ServerBrowserPage.RECORDING_ENCODER_SCRIPT);
         // Seed idle pages before returning so an immediate stop has a frame to encode.
-        const firstFrame = await ServerBrowserPage.captureViewport(tab.page, tab.cdp, {
+        const firstFrame = await ServerBrowserPage.captureViewport(tab.cdp, {
           format: "jpeg",
           quality: RECORDING_SCREENCAST.quality,
           scale: 1,
@@ -2022,6 +2022,11 @@ const make = Effect.gen(function* () {
         );
         return statusWithTitle(tab, request.agentSessionId);
       }
+      case "cdpEndpoint":
+        throw new ServerBrowserPage.ServerBrowserOperationError(
+          "PreviewAutomationExecutionError",
+          "Not supported on server tabs: temporary CDP endpoints. Use a desktop tab.",
+        );
       case "resize": {
         const setting = resolvePreviewViewport(input as PreviewAutomationResizeInput);
         await Effect.runPromise(
@@ -2437,7 +2442,7 @@ const make = Effect.gen(function* () {
       // Full scale: a scaled capture would flash in every other viewer.
       const pushStill = async () => {
         const data = await withCaptureLock(tab, () =>
-          ServerBrowserPage.captureViewport(tab.page, session, {
+          ServerBrowserPage.captureViewport(session, {
             format: "jpeg",
             quality,
             scale: 1,

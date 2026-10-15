@@ -1,19 +1,32 @@
-import type {
-  PreviewAutomationRequest,
-  PreviewAutomationResponse,
-  ScopedThreadRef,
+import {
+  PreviewAutomationResizeResult,
+  PreviewAutomationSetColorSchemeResult,
+  type PreviewAutomationRequest,
+  type PreviewAutomationResponse,
+  type ScopedThreadRef,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import { updatePreviewServerSnapshot } from "~/previewStateStore";
 import { AsyncResult } from "effect/reactivity";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import * as Option from "effect/Option";
 import { appAtomRegistry } from "./atomRegistry";
 import { environmentCatalog } from "~/connection/catalog";
 import { previewEnvironment } from "~/state/preview";
+import { environmentThreadDetails } from "~/state/threads";
 import { readThreadPreviewState } from "~/previewStateStore";
 import { previewBridge } from "~/components/preview/previewBridge";
 
+const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResult);
+const decodeAppearanceResult = Schema.decodeUnknownSync(PreviewAutomationSetColorSchemeResult);
+
 /** The guest owns its lifetime; each transport connection gets a fresh host. */
-export function hostDesktopTab(threadRef: ScopedThreadRef, tabId: string, runtimeTabId: string) {
+export function hostDesktopTab(
+  threadRef: ScopedThreadRef,
+  tabId: string,
+  runtimeTabId: string,
+  focus: () => void,
+) {
   const bridge = previewBridge;
   if (!bridge?.connectTabHost || !bridge.executeTabRequest) return () => {};
   const connectionAtom = environmentCatalog.stateAtom(threadRef.environmentId);
@@ -62,7 +75,37 @@ export function hostDesktopTab(threadRef: ScopedThreadRef, tabId: string, runtim
           if (!live(version)) return;
           let response: PreviewAutomationResponse;
           try {
+            // Electron routes keyboard input through the embedder's focused webview.
+            // Focusing only its native webContents leaves input in the composer.
+            if (
+              !["status", "snapshot", "credentialLock", "dialog", "waitFor"].includes(
+                request.operation,
+              )
+            )
+              focus();
             response = await bridge.executeTabRequest!(runtimeTabId, connectionId, request);
+            if (!live(version)) return;
+            // Publish rendering choices through the same state as the panel controls.
+            // The runner has already applied the operation in its SessionControl queue.
+            if (response.ok && request.operation === "resize") {
+              const { setting } = decodeResizeResult(response.result);
+              const resized = await runAtomCommand(appAtomRegistry, previewEnvironment.resize, {
+                environmentId: threadRef.environmentId,
+                input: { threadId: threadRef.threadId, tabId: request.tabId!, viewport: setting },
+              });
+              if (!AsyncResult.isSuccess(resized))
+                throw new Error("Desktop viewport update failed.");
+              if (live(version)) updatePreviewServerSnapshot(threadRef, resized.value);
+            } else if (response.ok && request.operation === "setColorScheme") {
+              const { colorScheme } = decodeAppearanceResult(response.result);
+              const adjusted = await runAtomCommand(appAtomRegistry, previewEnvironment.adjust, {
+                environmentId: threadRef.environmentId,
+                input: { threadId: threadRef.threadId, tabId: request.tabId!, colorScheme },
+              });
+              if (!AsyncResult.isSuccess(adjusted))
+                throw new Error("Desktop appearance update failed.");
+              if (live(version)) updatePreviewServerSnapshot(threadRef, adjusted.value);
+            }
           } catch {
             response = {
               clientId: "desktop",
@@ -124,11 +167,27 @@ export function hostDesktopTab(threadRef: ScopedThreadRef, tabId: string, runtim
     connected = next;
     schedule();
   };
+  // Stop also revokes scripts already connected directly over CDP. Rehosting
+  // keeps the user's page open, with fresh endpoints available to the next run.
+  const threadAtom = environmentThreadDetails.stateAtom(threadRef);
+  let stoppedRun: string | undefined;
+  const syncThread = () => {
+    const thread = Option.getOrUndefined(appAtomRegistry.get(threadAtom).data);
+    if (!thread) return;
+    const stopped =
+      thread.runs.findLast((run) => run.status === "interrupted" || run.status === "cancelled")
+        ?.id ?? "";
+    if (stoppedRun !== undefined && stopped !== stoppedRun) schedule();
+    stoppedRun = stopped;
+  };
+  const unsubscribeThread = appAtomRegistry.subscribe(threadAtom, syncThread);
+  syncThread();
   const unsubscribe = appAtomRegistry.subscribe(connectionAtom, sync);
   sync();
   return () => {
     disposed = true;
     unsubscribe();
+    unsubscribeThread();
     schedule();
   };
 }

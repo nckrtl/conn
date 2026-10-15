@@ -766,26 +766,19 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     }
     const { connection, requestId, requestContext, requestSequence } = route;
     const { timeoutMs } = requestContext;
-    if (connection.desktop) {
-      const discard = SynchronizedRef.update(state, (current) => {
+    if (connection.desktop && ["recordingStart", "recordingStop"].includes(input.operation)) {
+      yield* SynchronizedRef.update(state, (current) => {
         const pending = new Map(current.pending);
         pending.delete(requestId);
         return { ...current, pending };
       });
-      if (
-        !["status", "navigate", "snapshot", "click", "type", "credentialLock"].includes(
-          input.operation,
-        )
-      ) {
-        yield* discard;
-        return yield* new PreviewAutomationExecutionError({
-          ...requestContext,
-          remoteTag: "PreviewAutomationExecutionError",
-          remoteMessageLength: 0,
-          cause: null,
-          reason: "Not supported on desktop tabs yet.",
-        });
-      }
+      return yield* new PreviewAutomationExecutionError({
+        ...requestContext,
+        remoteTag: "PreviewAutomationExecutionError",
+        remoteMessageLength: 0,
+        cause: null,
+        reason: "Recording is not supported on desktop tabs.",
+      });
     }
     input.onTargetTab?.(requestContext.tabId);
     const removePending = SynchronizedRef.update(state, (next) => {

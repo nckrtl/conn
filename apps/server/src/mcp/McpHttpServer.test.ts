@@ -591,7 +591,11 @@ it.effect("bounds large ARIA trees without dropping every server locator", () =>
       yield* serveSnapshots("mcp-large-server-refs", { ...snapshotResult, accessibilityTree });
       const result = yield* callSnapshot({ includeImage: false });
       expect(result.isError).toBe(false);
-      const metadata = result.structuredContent as { accessibilityTree: string };
+      const metadata = result.structuredContent as {
+        accessibilityTree: string;
+        visibleText: string;
+      };
+      expect(metadata.visibleText).toBe(snapshotResult.visibleText);
       expect(metadata.accessibilityTree).toContain("[ref=t3-snapshot-e0]");
       expect(metadata.accessibilityTree.length).toBeLessThan(accessibilityTree.length);
       const body = result.content[1];
@@ -1295,29 +1299,4 @@ it.effect(
         expect(yield* start("root/default")).toBe(400);
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
-);
-
-it.effect("desktop tab snapshots report unsupported images without saving an artifact", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      yield* serveSnapshots("desktop-text-client", {
-        ...snapshotResult,
-        screenshot: {
-          mimeType: "image/png",
-          data: "",
-          width: 0,
-          height: 0,
-          unavailableReason: "desktopTab",
-        },
-      });
-      const snapshot = yield* callSnapshot({ includeImage: true, save: true });
-      expect(snapshot.isError).toBe(false);
-      expect(snapshot.content.map(({ type }) => type)).not.toContain("image");
-      expect(snapshot.structuredContent).not.toHaveProperty("screenshotPath");
-      expect(snapshot.content.at(-1)).toMatchObject({
-        type: "text",
-        text: "No screenshot: not supported on desktop tabs yet.",
-      });
-    }),
-  ).pipe(Effect.provide(layerTest)),
 );

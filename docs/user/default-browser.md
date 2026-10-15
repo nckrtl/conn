@@ -15,6 +15,10 @@ A link that launches T3 Code waits until the app has connected to its environmen
 
 ## Use desktop tabs with an agent
 
-An agent can use its thread's desktop tabs as soon as they open, including when the desktop connects to another trusted environment. Ask the agent to navigate, inspect text, click, or type. Stop the thread to stop the agent. Other browser tools and screenshots are not supported on desktop tabs yet.
+An agent can use its thread's desktop tabs as soon as they open, including when the desktop connects to another trusted environment. Ask the agent to inspect text or screenshots, navigate, fill forms, upload files from the tab host, and use the other browser actions. Desktop recording is not supported. Stop the thread to stop the agent.
 
 Open tabs stay on your desktop when an environment disconnects or restarts. Agent tools can use the same tabs again after reconnecting. Requests interrupted by the disconnect fail and are not replayed.
+
+For a project’s Playwright script, ask the agent for `preview_cdp_endpoint` and connect with `chromium.connectOverCDP(endpoint)`. Each request creates a fresh temporary endpoint for that thread’s selected desktop tab. It closes when you stop the thread, close the tab, or disconnect its desktop host. The endpoint is local to the machine hosting the tab: a thread on Nick’s local headless server can drive his Mac’s desktop tab, but a script on another machine cannot connect. Server tabs do not offer this endpoint.
+
+Personal Vault logins stay private: after a Vault fill, agent scripts and new CDP endpoints are blocked for that document, screenshots are withheld, and existing endpoints close before the value is inserted. Agents can still use Conn’s built-in test logins.

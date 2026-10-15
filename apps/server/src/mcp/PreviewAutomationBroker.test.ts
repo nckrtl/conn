@@ -1577,11 +1577,28 @@ it.effect(
             updateCurrentTab: false,
           }),
         ).toEqual({ host: "desktop" });
+        for (const operation of [
+          "hover",
+          "press",
+          "scroll",
+          "select",
+          "drag",
+          "waitFor",
+          "upload",
+          "dialog",
+          "evaluate",
+          "resize",
+          "setColorScheme",
+          "cdpEndpoint",
+        ] as const)
+          expect(yield* broker.invoke({ scope, operation, input: {} })).toEqual({
+            host: "desktop",
+          });
         expect(
           (yield* broker
-            .invoke<void>({ scope, operation: "evaluate", input: {} })
+            .invoke<void>({ scope, operation: "recordingStart", input: {} })
             .pipe(Effect.flip)).message,
-        ).toContain("Not supported on desktop tabs yet");
+        ).toContain("Recording is not supported on desktop tabs");
         expect(yield* broker.invoke<void>({ scope, operation: "open", input: {} })).toEqual({
           host: "server",
         });
@@ -1616,16 +1633,21 @@ it.effect("desktop tabs are isolated by thread and unsupported operations fail c
         (yield* broker
           .invoke<void>({
             scope: otherScope,
-            operation: "snapshot",
+            operation: "cdpEndpoint",
             tabId: desktopBinding.tabId,
             input: {},
           })
           .pipe(Effect.flip))._tag,
       ).toBe("PreviewAutomationNoAvailableHostError");
       const error = yield* broker
-        .invoke<void>({ scope, operation: "evaluate", tabId: desktopBinding.tabId, input: {} })
+        .invoke<void>({
+          scope,
+          operation: "recordingStart",
+          tabId: desktopBinding.tabId,
+          input: {},
+        })
         .pipe(Effect.flip);
-      expect(error.message).toContain("Not supported on desktop tabs yet");
+      expect(error.message).toContain("Recording is not supported on desktop tabs");
       expect(yield* broker.desktopTabs(scope.environmentId, "other-thread")).toEqual([]);
     }),
   ),

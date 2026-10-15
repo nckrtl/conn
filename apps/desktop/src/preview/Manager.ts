@@ -2476,66 +2476,68 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     if (runner)
       yield* attemptPromise({ operation: "disconnectTabHost", tabId }, () => runner.close());
   });
-  const connectTabHost = Effect.fn("PreviewManager.connectTabHost")(function* (
-    input: DesktopTabHost,
-  ) {
-    const tabId = input.runtimeTabId;
-    yield* disconnectTabHost(tabId);
-    const wc = yield* requireWebContents(tabId);
-    const state = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
-    if (state?.serverTab) return yield* new PreviewTabNotFoundError({ tabId });
-    const control = yield* ensureControlSession(wc);
-    const runner = new DesktopTabRunner(
-      input.binding,
-      input.connectionId,
-      (active) => {
-        runFork(update(tabId, { controller: active ? "agent" : "none" }).pipe(Effect.ignore));
-      },
-      (value) => browserHost.redactForPage(wc, value),
-      (point, phase) =>
-        Effect.runPromise(emitAgentPointer({ runtimeTabId: tabId, ...point, phase })),
-    );
-    tabRunners.set(tabId, runner);
-    yield* attemptPromise({ operation: "connectTabHost", tabId }, () =>
-      runner.attach(
-        {
-          send: (method, params, sessionId) =>
-            sessionId === undefined
-              ? control.debugger.sendCommand(method, params)
-              : control.debugger.sendCommand(method, params, sessionId),
-          targetId: async () =>
-            (await control.debugger.sendCommand("Target.getTargetInfo")).targetInfo
-              .targetId as string,
-          url: () => wc.getURL(),
-          title: () => wc.getTitle(),
-          userAgent: () => wc.getUserAgent(),
-          setDownloadDirectory: () => {},
+  const connectTabHost = Effect.fn("PreviewManager.connectTabHost")(
+    function* (input: DesktopTabHost) {
+      const tabId = input.runtimeTabId;
+      yield* disconnectTabHost(tabId);
+      const wc = yield* requireWebContents(tabId);
+      const state = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
+      if (state?.serverTab) return yield* new PreviewTabNotFoundError({ tabId });
+      const control = yield* ensureControlSession(wc);
+      const runner = new DesktopTabRunner(
+        input.binding,
+        input.connectionId,
+        (active) => {
+          runFork(update(tabId, { controller: active ? "agent" : "none" }).pipe(Effect.ignore));
         },
-        {
-          on: (listener) => {
-            const onMessage = (
-              _event: Electron.Event,
-              method: string,
-              params: unknown,
-              sessionId: string,
-            ) => listener(method, params, sessionId);
-            const gone = () => {
-              tabRunners.delete(tabId);
-              void runner.close().catch(() => undefined);
-            };
-            control.debugger.on("message", onMessage);
-            control.debugger.once("detach", gone);
-            wc.once("destroyed", gone);
-            return () => {
-              control.debugger.off("message", onMessage);
-              control.debugger.off("detach", gone);
-              wc.off("destroyed", gone);
-            };
+        (value) => browserHost.redactForPage(wc, value),
+        (point, phase) =>
+          Effect.runPromise(emitAgentPointer({ runtimeTabId: tabId, ...point, phase })),
+        () => wc.focus(),
+      );
+      tabRunners.set(tabId, runner);
+      yield* attemptPromise({ operation: "connectTabHost", tabId }, () =>
+        runner.attach(
+          {
+            send: (method, params, sessionId) =>
+              sessionId === undefined
+                ? control.debugger.sendCommand(method, params)
+                : control.debugger.sendCommand(method, params, sessionId),
+            targetId: async () =>
+              (await control.debugger.sendCommand("Target.getTargetInfo")).targetInfo
+                .targetId as string,
+            url: () => wc.getURL(),
+            title: () => wc.getTitle(),
+            userAgent: () => wc.getUserAgent(),
+            setDownloadDirectory: () => {},
           },
-        },
-      ),
-    ).pipe(Effect.tapError(() => disconnectTabHost(tabId).pipe(Effect.ignore)));
-  });
+          {
+            on: (listener) => {
+              const onMessage = (
+                _event: Electron.Event,
+                method: string,
+                params: unknown,
+                sessionId: string,
+              ) => listener(method, params, sessionId);
+              const gone = () => {
+                tabRunners.delete(tabId);
+                void runner.close().catch(() => undefined);
+              };
+              control.debugger.on("message", onMessage);
+              control.debugger.once("detach", gone);
+              wc.once("destroyed", gone);
+              return () => {
+                control.debugger.off("message", onMessage);
+                control.debugger.off("detach", gone);
+                wc.off("destroyed", gone);
+              };
+            },
+          },
+        ),
+      ).pipe(Effect.tapError(() => disconnectTabHost(tabId).pipe(Effect.ignore)));
+    },
+    (effect, input) => withTabLifecycleLock(input.runtimeTabId, effect),
+  );
   const executeTabRequest = Effect.fn("PreviewManager.executeTabRequest")(function* (
     tabId: string,
     connectionId: string,
@@ -2565,76 +2567,82 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
    * to the server, which redacts it from everything the page sends later.
    * The page's document is marked, so the server blocks agent scripts there.
    */
-  const fillCredential = Effect.fn("PreviewManager.fillCredential")(function* (
-    tabId: string,
-    input: PreviewCredentialFillInput,
-  ) {
-    const result = (status: DesktopCredentialFillStatus): DesktopCredentialFillResult => ({
-      status,
-    });
-    const wc = yield* requireWebContents(tabId);
-    if (originOf(wc.getURL()) !== input.expectedOrigin) return result("origin_mismatch");
-    const control = yield* ensureControlSession(wc);
-    const send = (method: string, params: Record<string, unknown>) =>
-      attemptPromise({ operation: "fillCredential", tabId, webContentsId: wc.id }, () =>
-        control.debugger.sendCommand(method, params),
-      ) as Effect.Effect<
-        {
-          readonly result?: {
-            readonly value?: unknown;
-            readonly subtype?: string;
-            readonly objectId?: string;
-          };
-          readonly exceptionDetails?: unknown;
-        },
-        PreviewOperationError
-      >;
-    const callOnField = (objectId: string, functionDeclaration: string, args: unknown[]) =>
-      send("Runtime.callFunctionOn", {
-        objectId,
-        functionDeclaration,
-        arguments: args.map((value) => ({ value })),
-        returnByValue: true,
-        userGesture: true,
-      }).pipe(
-        Effect.map((response) => (response.exceptionDetails ? null : response.result?.value)),
-      );
-    return yield* Effect.gen(function* () {
-      const found = yield* send("Runtime.evaluate", {
-        expression: credentialFieldExpression(input.field),
-        returnByValue: false,
-        objectGroup: CREDENTIAL_OBJECT_GROUP,
+  const fillCredential = Effect.fn("PreviewManager.fillCredential")(
+    function* (tabId: string, input: PreviewCredentialFillInput) {
+      const result = (status: DesktopCredentialFillStatus): DesktopCredentialFillResult => ({
+        status,
       });
-      const objectId =
-        !found.exceptionDetails && found.result?.subtype === "node"
-          ? found.result.objectId
-          : undefined;
-      if (!objectId) return result("field_not_found");
-      const prepared = yield* callOnField(objectId, CREDENTIAL_PREPARE_FUNCTION, [input.field]);
-      if (prepared !== "ready")
-        return result(prepared === "not_editable" ? "not_editable" : "insert_failed");
-      // The page may have navigated while the field was found.
+      const wc = yield* requireWebContents(tabId);
       if (originOf(wc.getURL()) !== input.expectedOrigin) return result("origin_mismatch");
-      if (input.field !== "username") browserHost.rememberFilledSecret(wc, input.value);
-      // Bind the write to the resolved field; keyboard input can reach the
-      // host composer when Electron has not activated the guest webview.
-      const finished = yield* callOnField(objectId, CREDENTIAL_INSERT_FUNCTION, [
-        input.field,
-        input.value,
-        input.expectedOrigin,
-        true,
-      ]);
-      if (finished === "filled") return result("filled");
-      return result(finished === "origin_mismatch" ? "origin_mismatch" : "insert_failed");
-    }).pipe(
-      Effect.ensuring(
-        send("Runtime.releaseObjectGroup", { objectGroup: CREDENTIAL_OBJECT_GROUP }).pipe(
-          Effect.ignore,
+      const control = yield* ensureControlSession(wc);
+      const send = (method: string, params: Record<string, unknown>) =>
+        attemptPromise({ operation: "fillCredential", tabId, webContentsId: wc.id }, () =>
+          control.debugger.sendCommand(method, params),
+        ) as Effect.Effect<
+          {
+            readonly result?: {
+              readonly value?: unknown;
+              readonly subtype?: string;
+              readonly objectId?: string;
+            };
+            readonly exceptionDetails?: unknown;
+          },
+          PreviewOperationError
+        >;
+      const callOnField = (objectId: string, functionDeclaration: string, args: unknown[]) =>
+        send("Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration,
+          arguments: args.map((value) => ({ value })),
+          returnByValue: true,
+          userGesture: true,
+        }).pipe(
+          Effect.map((response) => (response.exceptionDetails ? null : response.result?.value)),
+        );
+      const insert = Effect.gen(function* () {
+        const found = yield* send("Runtime.evaluate", {
+          expression: credentialFieldExpression(input.field),
+          returnByValue: false,
+          objectGroup: CREDENTIAL_OBJECT_GROUP,
+        });
+        const objectId =
+          !found.exceptionDetails && found.result?.subtype === "node"
+            ? found.result.objectId
+            : undefined;
+        if (!objectId) return result("field_not_found");
+        const prepared = yield* callOnField(objectId, CREDENTIAL_PREPARE_FUNCTION, [input.field]);
+        if (prepared !== "ready")
+          return result(prepared === "not_editable" ? "not_editable" : "insert_failed");
+        // The page may have navigated while the field was found.
+        if (originOf(wc.getURL()) !== input.expectedOrigin) return result("origin_mismatch");
+        if (input.field !== "username") browserHost.rememberFilledSecret(wc, input.value);
+        // Bind the write to the resolved field; keyboard input can reach the
+        // host composer when Electron has not activated the guest webview.
+        const finished = yield* callOnField(objectId, CREDENTIAL_INSERT_FUNCTION, [
+          input.field,
+          input.value,
+          input.expectedOrigin,
+          true,
+        ]);
+        if (finished === "filled") return result("filled");
+        return result(finished === "origin_mismatch" ? "origin_mismatch" : "insert_failed");
+      }).pipe(
+        Effect.ensuring(
+          send("Runtime.releaseObjectGroup", { objectGroup: CREDENTIAL_OBJECT_GROUP }).pipe(
+            Effect.ignore,
+          ),
         ),
-      ),
-    );
-  });
-
+      );
+      const runner = tabRunners.get(tabId);
+      if (!runner) return yield* insert;
+      const exit = yield* attemptPromise({ operation: "fillCredential", tabId }, () =>
+        runner.fillCredential(() => Effect.runPromiseExit(insert)),
+      );
+      if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+      return exit.value;
+    },
+    (effect, tabId) => withTabLifecycleLock(tabId, effect),
+  );
   const setColorScheme = Effect.fn("PreviewManager.setColorScheme")(function* (
     tabId: string,
     colorScheme: DesktopPreviewColorScheme,

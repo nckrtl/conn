@@ -44,6 +44,33 @@ describe("CDP relay", () => {
     });
   });
 
+  it("does not expose other targets through a page session", async () => {
+    const send = vi.fn(async () => ({}));
+    const written: Array<Record<string, unknown>> = [];
+    const relay = createCdpRelayConnection(makeTarget(send), (raw) =>
+      written.push(JSON.parse(raw)),
+    );
+    relay.receive(
+      JSON.stringify({
+        id: 1,
+        method: "Target.attachToTarget",
+        sessionId: "t3-preview-page",
+        params: { targetId: "OTHER-TAB" },
+      }),
+    );
+    relay.receive(JSON.stringify({ id: 2, method: "Browser.close", sessionId: "t3-preview-page" }));
+    relay.receive(
+      JSON.stringify({ id: 3, method: "Target.getTargets", sessionId: "t3-preview-page" }),
+    );
+    await settle();
+    expect(send).not.toHaveBeenCalled();
+    expect(written.find((message) => message.id === 1)).toHaveProperty("error");
+    expect(written.find((message) => message.id === 2)).toHaveProperty("error");
+    expect(written.find((message) => message.id === 3)).toMatchObject({
+      result: { targetInfos: [expect.objectContaining({ targetId: "GUEST-TARGET" })] },
+    });
+  });
+
   it("forwards page commands to the tab and lets a slow one finish last", async () => {
     const pending: Array<() => void> = [];
     const send = vi.fn(

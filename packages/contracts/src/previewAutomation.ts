@@ -61,6 +61,7 @@ export const PREVIEW_AUTOMATION_SERVER_OPERATIONS = [
   "hover",
   "select",
   "drag",
+  "cdpEndpoint",
 ] as const;
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_SERVER_OPERATIONS);
 export type PreviewAutomationOperation = typeof PreviewAutomationOperation.Type;
@@ -79,6 +80,14 @@ const PreviewAutomationTabTargetFields = {
 
 export const PreviewAutomationTabTargetInput = Schema.Struct(PreviewAutomationTabTargetFields);
 export type PreviewAutomationTabTargetInput = typeof PreviewAutomationTabTargetInput.Type;
+
+export const PreviewAutomationCdpEndpointResult = Schema.Struct({
+  tabId: PreviewTabId,
+  endpoint: Schema.String.annotate({
+    description: "Temporary CDP WebSocket URL on the tab host's loopback interface.",
+  }),
+});
+export type PreviewAutomationCdpEndpointResult = typeof PreviewAutomationCdpEndpointResult.Type;
 
 /** `human`: a person controls the tab now; `agent`: an agent session opened it; `unclaimed`: neither. */
 export const PreviewAutomationTabOwner = Schema.Literals(["agent", "human", "unclaimed"]);
@@ -382,7 +391,7 @@ export type PreviewAutomationSetColorSchemeResult =
 
 const Locator = TrimmedNonEmptyString.annotate({
   description:
-    "Use locator='aria-ref=<ref>' with a ref from the latest server snapshot (including iframe elements), or a unique Playwright role/text selector. Refs expire on navigation, a new snapshot, or control handoff; refresh the snapshot after a stale-ref error.",
+    "Use locator='aria-ref=<ref>' with a ref from the latest snapshot (including iframe elements), or a unique Playwright role/text selector. Refs expire on navigation, a new snapshot, or control handoff; refresh the snapshot after a stale-ref error.",
 });
 
 const LegacySelector = TrimmedNonEmptyString.annotate({
@@ -398,7 +407,7 @@ const PointerTargetFields = {
   }),
   locator: Schema.optional(Locator).annotate({
     description:
-      "Use locator='aria-ref=<ref>' with a ref from the latest server snapshot (including iframe elements), or a unique Playwright role/text selector. Refs expire on navigation, a new snapshot, or control handoff; refresh the snapshot after a stale-ref error.",
+      "Use locator='aria-ref=<ref>' with a ref from the latest snapshot (including iframe elements), or a unique Playwright role/text selector. Refs expire on navigation, a new snapshot, or control handoff; refresh the snapshot after a stale-ref error.",
   }),
   x: Schema.optional(
     Schema.Finite.annotate({
@@ -509,7 +518,7 @@ export const PreviewAutomationUploadInput = Schema.Struct({
   ...PreviewAutomationTabTargetFields,
   paths: Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(20)).annotate({
     description:
-      "Absolute paths of files on the environment to give the page. An empty list cancels the open file picker.",
+      "Absolute paths of files on the tab host to give the page. An empty list cancels the open file picker.",
   }),
   selector: Schema.optional(LegacySelector).annotate({
     description: "Legacy CSS selector for an <input type=file>. Prefer locator.",
@@ -744,7 +753,6 @@ export const PreviewAutomationSnapshot = Schema.Struct({
   screenshot: Schema.Struct({
     mimeType: Schema.Literal("image/png"),
     data: Schema.String,
-    unavailableReason: Schema.optional(Schema.Literal("desktopTab")),
     width: Schema.Int,
     height: Schema.Int,
   }),

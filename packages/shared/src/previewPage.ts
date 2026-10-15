@@ -162,14 +162,16 @@ const SNAPSHOT_SCRIPT = `(() => {
 
 // Scaled captures repaint live screencasts, so callers pause them. Clips use document offsets.
 export const captureViewport = async (
-  page: Page,
   cdp: CDPSession,
   options: { readonly format: "png" | "jpeg"; readonly quality?: number; readonly scale: number },
 ) => {
   let clip;
   if (options.scale < 1) {
-    const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
     const { cssVisualViewport } = await cdp.send("Page.getLayoutMetrics");
+    const viewport = {
+      width: cssVisualViewport.clientWidth,
+      height: cssVisualViewport.clientHeight,
+    };
     clip = {
       x: cssVisualViewport.pageX,
       y: cssVisualViewport.pageY,
@@ -194,7 +196,8 @@ export const snapshot = async (input: {
   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
   readonly includeScreenshot?: boolean;
 }): Promise<PreviewAutomationSnapshot> => {
-  const viewport = input.page.viewportSize() ?? { width: 1280, height: 800 };
+  const { cssVisualViewport } = await input.cdp.send("Page.getLayoutMetrics");
+  const viewport = { width: cssVisualViewport.clientWidth, height: cssVisualViewport.clientHeight };
   const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / (viewport.width * input.renderScale));
   const state = refsFor(input.page);
   invalidateRefs(input.page);
@@ -209,7 +212,7 @@ export const snapshot = async (input: {
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
     input.includeScreenshot === false
       ? Promise.resolve("")
-      : captureViewport(input.page, input.cdp, { format: "png", scale }),
+      : captureViewport(input.cdp, { format: "png", scale }),
   ]);
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(
@@ -233,15 +236,8 @@ export const snapshot = async (input: {
     screenshot: {
       mimeType: "image/png",
       data,
-      ...(input.includeScreenshot === false ? { unavailableReason: "desktopTab" as const } : {}),
-      width:
-        input.includeScreenshot === false
-          ? 0
-          : Math.round(viewport.width * input.renderScale * scale),
-      height:
-        input.includeScreenshot === false
-          ? 0
-          : Math.round(viewport.height * input.renderScale * scale),
+      width: data ? Math.round(viewport.width * input.renderScale * scale) : 0,
+      height: data ? Math.round(viewport.height * input.renderScale * scale) : 0,
     },
   };
 };

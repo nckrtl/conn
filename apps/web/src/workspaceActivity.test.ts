@@ -18,6 +18,7 @@ function thread(environmentId = local, id = "t1") {
     id: ThreadId.make(id),
     projectId: ProjectId.make("p1"),
     archivedAt: null,
+    lineage: { parentThreadId: null, rootThreadId: ThreadId.make(id), relationshipToParent: null },
     settledOverride: null,
     hasPendingApprovals: false,
     hasPendingUserInput: false,
@@ -168,6 +169,30 @@ describe("workspace attention", () => {
     expect(
       workspaceAttention([{ ...history, settledOverride: "active" as const }], visits).unread,
     ).toBe(1);
+  });
+  it("does not show attention from settled history, including stale requests", () => {
+    for (const request of [{ hasPendingApprovals: true }, { hasPendingUserInput: true }, {}]) {
+      expect(
+        workspaceAttention([{ ...completed, ...request, settledOverride: "settled" }], visited()),
+      ).toEqual({ unread: 0, approval: 0, input: 0 });
+    }
+  });
+  it("uses the sidebar roster so hidden subagent completions cannot light the workspace", () => {
+    const child = {
+      ...completed,
+      lineage: {
+        parentThreadId: ThreadId.make("parent"),
+        rootThreadId: ThreadId.make("parent"),
+        relationshipToParent: "subagent" as const,
+      },
+    };
+    expect(workspaceAttention(workspaceThreads([child], null), visited()).unread).toBe(0);
+    expect(
+      workspaceThreads(
+        [{ ...child, lineage: { ...child.lineage, relationshipToParent: "fork" as const } }],
+        null,
+      ),
+    ).toHaveLength(1);
   });
   it("stops counting a project's unread completions when it is removed from the workspace", () => {
     const former = { ...completed, id: ThreadId.make("old"), projectId: ProjectId.make("former") };

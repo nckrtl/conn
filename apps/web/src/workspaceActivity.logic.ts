@@ -4,6 +4,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 
 import {
+  filterSidebarV2VisibleThreads,
   hasUnseenCompletion,
   resolveSidebarThreadStatus,
   resolveThreadLastVisitedAt,
@@ -16,6 +17,7 @@ type WorkspaceThread = Pick<
   | "id"
   | "projectId"
   | "archivedAt"
+  | "lineage"
   | "settledOverride"
   | "hasPendingApprovals"
   | "hasPendingUserInput"
@@ -31,11 +33,7 @@ export function workspaceThreads<T extends WorkspaceThread>(
   threads: readonly T[],
   projectRefs: ReadonlySet<string> | null,
 ) {
-  return threads.filter(
-    (thread) =>
-      thread.archivedAt === null &&
-      (projectRefs === null || projectRefs.has(`${thread.environmentId}:${thread.projectId}`)),
-  );
+  return filterSidebarV2VisibleThreads(threads, projectRefs);
 }
 
 export function lastWorkspaceThread(
@@ -72,6 +70,8 @@ export function workspaceAttention(
   let approval = 0;
   let input = 0;
   for (const thread of threads) {
+    // Settled history is deliberately outside the workspace inbox.
+    if (thread.settledOverride === "settled") continue;
     const status = resolveSidebarThreadStatus(thread);
     if (status === "approval") approval++;
     else if (status === "input") input++;
@@ -82,7 +82,6 @@ export function workspaceAttention(
     // A mid-run checkpoint can set completedAt while the agent is still working.
     if (
       status === "ready" &&
-      thread.settledOverride !== "settled" &&
       thread.latestRun?.status === "completed" &&
       !backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks) &&
       hasUnseenCompletion({ ...thread, lastVisitedAt })

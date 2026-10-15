@@ -119,9 +119,9 @@ const make = Effect.gen(function* () {
   const save: TestLoginStore["Service"]["save"] = (input, createdBy) =>
     change((logins) =>
       Effect.gen(function* () {
-        const id = yield* crypto.randomUUIDv4.pipe(
-          Effect.mapError((cause) => new TestLoginStoreError({ cause })),
-        );
+        const id = yield* crypto
+          .randomUUIDv4()
+          .pipe(Effect.mapError((cause) => new TestLoginStoreError({ cause })));
         const now = DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis));
         const login: StoredTestLogin = {
           id,

@@ -16,6 +16,7 @@ import * as Schema from "effect/Schema";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as CredentialAutofill from "../credentials/CredentialAutofill.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TestLoginStore from "../credentials/TestLoginStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
@@ -57,6 +58,7 @@ const client = McpSchema.McpServerClient.of({
 const toJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 interface Scenario {
+  readonly realStore?: boolean;
   readonly tabUrl?: string | null;
   readonly fillFails?: boolean;
   readonly storeFails?: boolean;
@@ -165,7 +167,11 @@ const makeHarness = (scenario: Scenario = {}) => {
     Layer.provideMerge(CredentialAutofill.layer),
     Layer.provide(broker),
     Layer.provide(ServerSettings.layerTest({ credentialAutofill: scenario.settings ?? {} })),
-    Layer.provide(testLoginStore),
+    Layer.provideMerge(
+      scenario.realStore
+        ? TestLoginStore.layer.pipe(Layer.provide(ServerSecretStore.layer))
+        : testLoginStore,
+    ),
     Layer.provide(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-credentials-toolkit-test-" }),
     ),
@@ -209,6 +215,64 @@ const fillForUser = (
   });
 
 describe("credentials MCP tools", () => {
+  it.effect("saves, lists and fills a persisted test login through agent tools", () => {
+    const harness = makeHarness({ realStore: true });
+    return Effect.gen(function* () {
+      const store = yield* TestLoginStore.TestLoginStore;
+      expect(yield* store.list).toEqual([]);
+      const saved = yield* harness.call("save_test_login", {
+        url: "https://github.com/login",
+        username: "fixture@example.test",
+        password: SECRET,
+        label: "fixture",
+        otpSecret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+      });
+      expect(saved.isError).toBe(false);
+      const [login] = yield* store.list;
+      expect(login).toMatchObject({
+        username: "fixture@example.test",
+        password: SECRET,
+        createdBy: "agent",
+      });
+      expect(login!.id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(saved.structuredContent).toEqual(TestLoginStore.summarizeTestLogin(login!));
+      const found = yield* harness.call("request_credentials", { domain: "github.com" });
+      expect(found.structuredContent).toEqual({
+        items: [
+          {
+            id: login!.id,
+            title: "fixture",
+            username: "fixture@example.test",
+            urls: ["https://github.com/login"],
+            source: "test",
+          },
+        ],
+      });
+      const replies = [saved, found];
+      for (const field of ["username", "password", "otp"] as const) {
+        const filled = yield* harness.call("fill_credential", { itemId: login!.id, field });
+        expect(filled.structuredContent).toMatchObject({ status: "filled" });
+        replies.push(filled);
+      }
+      const fills = harness.brokerCalls.filter((entry) => entry.operation === "credentialFill");
+      expect(fills.map((entry) => entry.input)).toMatchObject([
+        { field: "username", value: "fixture@example.test", initiator: "agent" },
+        { field: "password", value: SECRET, initiator: "agent" },
+        { field: "otp", value: expect.stringMatching(/^\d{6}$/), initiator: "agent" },
+      ]);
+      expect(toJson(replies)).not.toContain(SECRET);
+      expect(toJson(replies)).not.toContain(login!.otpSecret!);
+      harness.brokerCalls.length = 0;
+      const denied = yield* fillForUser(
+        harness,
+        { itemId: login!.id, fields: ["password"] },
+        "vault",
+      );
+      expect(denied.results).toEqual([{ field: "password", status: "provider_unavailable" }]);
+      expect(harness.brokerCalls).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(harness.layer));
+  });
+
   it.effect("lists matching logins as metadata without revealing fields", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

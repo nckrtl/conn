@@ -822,7 +822,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       if (!offered) {
         const completion = yield* Deferred.poll(deferred);
         if (Option.isSome(completion)) {
-          return (yield* completion.value) as A;
+          return yield* completion.value;
         }
         return yield* new PreviewAutomationRequestQueueClosedError(requestContext);
       }
@@ -843,7 +843,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             }
             return yield* new PreviewAutomationTimeoutError(requestContext);
           }),
-        onSome: (value) => Effect.succeed(value as A),
+        onSome: (value) => Effect.succeed(value),
       });
     });
     let result = yield* awaitResponse().pipe(Effect.ensuring(removePending));
@@ -876,16 +876,17 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
           ),
         { concurrency: 4 },
       );
+      const status = result as PreviewAutomationStatus;
       result = {
-        ...result,
-        available: (result as PreviewAutomationStatus).available || tabs.length > 0,
-        tabs: [...((result as PreviewAutomationStatus).tabs ?? []), ...tabs],
-      } as A;
+        ...status,
+        available: status.available || tabs.length > 0,
+        tabs: [...(status.tabs ?? []), ...tabs],
+      } satisfies PreviewAutomationStatus;
     }
-    if (input.updateCurrentTab === false) return result;
+    if (input.updateCurrentTab === false) return result as A;
     const responseTabId = readResultTabId(result);
     const resultTabId = responseTabId === undefined ? input.tabId : responseTabId;
-    if (resultTabId === undefined) return result;
+    if (resultTabId === undefined) return result as A;
     const assignmentKey = hostAssignmentKey(input.scope);
     yield* SynchronizedRef.update(state, (current) => {
       const assignment = current.assignments.get(assignmentKey);
@@ -910,7 +911,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       }
       return { ...current, assignments };
     });
-    return result;
+    return result as A;
   });
 
   return PreviewAutomationBroker.of({

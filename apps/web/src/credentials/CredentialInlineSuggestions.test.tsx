@@ -7,6 +7,7 @@ vi.mock("~/components/ui/popover", () => ({ Popover: "aside", PopoverPopup: "sec
 vi.mock("~/components/ui/button", () => ({ Button: "button" }));
 vi.mock("~/components/ui/spinner", () => ({ Spinner: "spinner" }));
 import { CredentialInlineSuggestions } from "./CredentialInlineSuggestions";
+import { trackWebviewDomReady } from "~/browser/webviewDomReady";
 
 let renderer: ReactTestRenderer | undefined;
 let report: (value: unknown) => void;
@@ -15,6 +16,24 @@ const onFocus = vi.fn(),
   onChoose = vi.fn();
 const focus = vi.fn();
 const execute = vi.fn();
+let webview: ReturnType<typeof createGuest>;
+let guests: ReturnType<typeof createGuest>[];
+let mutate: () => void;
+let stopTracking: (() => void)[];
+function createGuest() {
+  const guest = Object.assign(new EventTarget(), {
+    isConnected: true,
+    getAttribute: () => "tab",
+    executeJavaScript: execute,
+    focus,
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+  });
+  stopTracking.push(trackWebviewDomReady(guest));
+  return guest;
+}
+const ready = async (guest = webview) => {
+  await act(async () => guest.dispatchEvent(new Event("dom-ready")));
+};
 const field = {
   field: "username",
   x: 20,
@@ -53,18 +72,16 @@ const render = async (options = props) => {
 };
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const webview = {
-    getAttribute: () => "tab",
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    executeJavaScript: execute,
-    focus,
-    getBoundingClientRect: () => ({ x: 0, y: 0, width: 800, height: 600 }),
-  };
-  vi.stubGlobal("document", { body: {}, querySelectorAll: () => [webview], hasFocus: () => true });
+  stopTracking = [];
+  webview = createGuest();
+  guests = [webview];
+  vi.stubGlobal("document", { body: {}, querySelectorAll: () => guests, hasFocus: () => true });
   vi.stubGlobal(
     "MutationObserver",
     class {
+      constructor(callback: () => void) {
+        mutate = callback;
+      }
       observe() {}
       disconnect() {}
     },
@@ -82,12 +99,14 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => renderer?.unmount());
   renderer = undefined;
+  for (const stop of stopTracking) stop();
   vi.unstubAllGlobals();
   vi.resetAllMocks();
 });
 
 it("shows an explicit unlock action on field focus and replaces it with matches", async () => {
   await render();
+  await ready();
   await act(async () => report({ revision: 1, kind: "focus", anchor: field }));
   expect(onFocus).toHaveBeenCalledTimes(1);
   expect(onUnlock).not.toHaveBeenCalled();
@@ -105,6 +124,7 @@ it("shows an explicit unlock action on field focus and replaces it with matches"
 });
 it("closes when the field is left or the browser becomes hidden", async () => {
   await render();
+  await ready();
   await act(async () => report({ revision: 1, kind: "focus", anchor: field }));
   expect(renderer!.root.findAllByType("section")).toHaveLength(1);
   await act(async () => report({ revision: 2, kind: "dismiss", anchor: null }));
@@ -112,4 +132,86 @@ it("closes when the field is left or the browser becomes hidden", async () => {
   await act(async () => report({ revision: 3, kind: "focus", anchor: field }));
   await render({ ...props, enabled: false });
   expect(renderer!.root.findAllByType("section")).toHaveLength(0);
+});
+
+it("waits for dom-ready, including when the picker mounts after the guest is ready", async () => {
+  await render();
+  expect(execute).not.toHaveBeenCalled();
+  await ready();
+  expect(execute).toHaveBeenCalledTimes(1);
+  await render({ ...props, enabled: false });
+  execute.mockClear();
+  await render();
+  expect(execute).toHaveBeenCalledTimes(1);
+});
+
+it("does not call a detached guest during project-switch cleanup or accept its late reply", async () => {
+  await render();
+  await ready();
+  const oldReport = report;
+  execute.mockClear();
+  webview.isConnected = false;
+  await render({ ...props, enabled: false });
+  expect(execute).not.toHaveBeenCalled();
+  await act(async () => oldReport({ revision: 1, kind: "focus", anchor: field }));
+  expect(onFocus).not.toHaveBeenCalled();
+  expect(renderer!.root.findAllByType("section")).toHaveLength(0);
+});
+
+it("clears a removed guest and waits for the replacement's own dom-ready", async () => {
+  await render();
+  await ready();
+  await act(async () => report({ revision: 1, kind: "focus", anchor: field }));
+  const oldReport = report;
+  execute.mockClear();
+  webview.isConnected = false;
+  guests = [];
+  await act(async () => mutate());
+  expect(execute).not.toHaveBeenCalled();
+  expect(renderer!.root.findAllByType("section")).toHaveLength(0);
+  const replacement = createGuest();
+  guests = [replacement];
+  await act(async () => mutate());
+  await ready(webview);
+  expect(execute).not.toHaveBeenCalled();
+  await ready(replacement);
+  expect(execute).toHaveBeenCalledTimes(1);
+  await act(async () => oldReport({ revision: 2, kind: "focus", anchor: field }));
+  expect(onFocus).toHaveBeenCalledTimes(1);
+});
+
+it.each(["throw", "reject"])(
+  "contains a synchronous or async cleanup failure: %s",
+  async (failure) => {
+    await render();
+    await ready();
+    execute.mockImplementation(() => {
+      if (failure === "throw") throw new Error("guest destroyed");
+      return Promise.reject(new Error("guest destroyed"));
+    });
+    await render({ ...props, enabled: false });
+    expect(renderer!.root.findAllByType("section")).toHaveLength(0);
+  },
+);
+
+it("stops on main-document navigation and ignores replies from the previous document", async () => {
+  await render();
+  await ready();
+  await act(async () => report({ revision: 1, kind: "focus", anchor: field }));
+  const oldReport = report;
+  execute.mockClear();
+  await act(async () =>
+    webview.dispatchEvent(
+      Object.assign(new Event("did-start-navigation"), {
+        isMainFrame: true,
+        isInPlace: false,
+      }),
+    ),
+  );
+  expect(execute).not.toHaveBeenCalled();
+  expect(renderer!.root.findAllByType("section")).toHaveLength(0);
+  await act(async () => oldReport({ revision: 2, kind: "focus", anchor: field }));
+  expect(onFocus).toHaveBeenCalledTimes(1);
+  await ready();
+  expect(execute).toHaveBeenCalledTimes(1);
 });

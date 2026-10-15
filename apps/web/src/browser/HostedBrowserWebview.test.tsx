@@ -109,7 +109,7 @@ describe("HostedBrowserWebview settings hydration", () => {
     mocks.createTab.mockReturnValueOnce(tabCreation.promise);
     const acquire = vi.spyOn(desktopTabLifetime, "acquireDesktopTab");
     const createGuest = vi.fn((_attributes: unknown) =>
-      Object.assign(new EventTarget(), { getWebContentsId: () => 41 }),
+      Object.assign(new EventTarget(), { isConnected: true, getWebContentsId: vi.fn(() => 41) }),
     );
     const threadRef = {
       environmentId: EnvironmentId.make("host-settings-retry"),
@@ -189,11 +189,28 @@ describe("HostedBrowserWebview settings hydration", () => {
     });
     expect(mocks.registerWebview).not.toHaveBeenCalled();
 
+    const guest = createGuest.mock.results[0]!.value;
+    expect(guest.getWebContentsId).not.toHaveBeenCalled();
+    await act(async () => {
+      guest.dispatchEvent(new Event("did-attach"));
+    });
+    expect(guest.getWebContentsId).not.toHaveBeenCalled();
+    await act(async () => {
+      guest.dispatchEvent(new Event("dom-ready"));
+    });
+    expect(guest.getWebContentsId).toHaveBeenCalledOnce();
+    await act(async () => {
+      guest.dispatchEvent(
+        Object.assign(new Event("did-start-navigation"), { isMainFrame: true, isInPlace: false }),
+      );
+    });
+
     await act(async () => {
       tabCreation.resolve();
       await tabCreation.promise;
     });
     expect(mocks.registerWebview).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 41);
+    expect(guest.getWebContentsId).toHaveBeenCalledOnce();
     expect(mocks.closeTab).not.toHaveBeenCalled();
     expect(mocks.setClientSettings).not.toHaveBeenCalled();
   });

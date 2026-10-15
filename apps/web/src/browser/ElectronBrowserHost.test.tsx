@@ -151,7 +151,11 @@ it("keeps thread A's guest hosted and paintable when the preview switches to thr
       <ElectronBrowserHost />
     </AppAtomRegistryProvider>
   );
-  const guest = Object.assign(new EventTarget(), { getWebContentsId: () => 41, focus: () => {} });
+  const guest = Object.assign(new EventTarget(), {
+    isConnected: true,
+    getWebContentsId: () => 41,
+    focus: () => {},
+  });
   await act(async () => {
     renderer = create(view("thread-a"), {
       createNodeMock: (element) =>
@@ -159,6 +163,7 @@ it("keeps thread A's guest hosted and paintable when the preview switches to thr
     });
   });
   await act(async () => {
+    guest.dispatchEvent(new Event("dom-ready"));
     await ready;
   });
   expect(mocks.connect).toHaveBeenCalledOnce();

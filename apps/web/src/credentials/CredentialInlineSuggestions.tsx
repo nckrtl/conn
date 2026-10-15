@@ -5,6 +5,11 @@ import { Popover, PopoverPopup } from "~/components/ui/popover";
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
 import {
+  executeReadyWebviewScript,
+  isNewWebviewDocument,
+  isWebviewDomReady,
+} from "~/browser/webviewDomReady";
+import {
   credentialInlineCommandScript,
   credentialInlineRect,
   credentialInlineWatchScript,
@@ -44,13 +49,21 @@ export function CredentialInlineSuggestions(props: {
   const command = useCallback((name: "dismiss" | "keyboard", value = false) => {
     const current = channel.current;
     if (current)
-      void current.webview
-        .executeJavaScript(credentialInlineCommandScript(current.owner, name, value))
-        .catch(() => {});
+      void executeReadyWebviewScript(
+        current.webview,
+        credentialInlineCommandScript(current.owner, name, value),
+      );
   }, []);
   const close = (restore = false) => {
     setOpen(false);
-    if (restore) channel.current?.webview.focus();
+    const guest = channel.current?.webview;
+    if (restore && guest && isWebviewDomReady(guest)) {
+      try {
+        guest.focus();
+      } catch {
+        // A guest being removed cannot receive focus.
+      }
+    }
     command("dismiss", restore);
   };
 
@@ -64,16 +77,17 @@ export function CredentialInlineSuggestions(props: {
       const current = channel.current;
       channel.current = null;
       if (current)
-        void current.webview
-          .executeJavaScript(credentialInlineCommandScript(current.owner, "dispose"))
-          .catch(() => {});
+        void executeReadyWebviewScript(
+          current.webview,
+          credentialInlineCommandScript(current.owner, "dispose"),
+        );
     };
     const start = () => {
       stop();
       setOpen(false);
       setAnchor(null);
       setKeyboard(0);
-      if (!webview || disposed) return;
+      if (!webview || disposed || !isWebviewDomReady(webview)) return;
       const guest = webview,
         owner = `inline-${++nextWatcher}`,
         current = generation;
@@ -81,13 +95,18 @@ export function CredentialInlineSuggestions(props: {
       void (async () => {
         let revision = -1;
         while (true) {
-          if (disposed || current !== generation) return;
-          const value = await guest.executeJavaScript(
+          if (disposed || current !== generation || !isWebviewDomReady(guest)) return;
+          const value = await executeReadyWebviewScript(
+            guest,
             credentialInlineWatchScript(owner, origin, revision),
           );
-          if (disposed || current !== generation) return;
+          if (disposed || current !== generation || !isWebviewDomReady(guest)) return;
           const event = parseCredentialInlineEvent(value);
-          if (!event || event.revision <= revision) return;
+          if (!event) {
+            setOpen(false);
+            return;
+          }
+          if (event.revision <= revision) return;
           revision = event.revision;
           setAnchor(event.anchor);
           if (!event.anchor || event.kind === "dismiss") {
@@ -106,15 +125,33 @@ export function CredentialInlineSuggestions(props: {
         if (!disposed && current === generation) setOpen(false);
       });
     };
+    const reset = () => {
+      stop();
+      setOpen(false);
+      setAnchor(null);
+      setKeyboard(0);
+    };
+    const navigate = (event: Event) => {
+      if (isNewWebviewDocument(event)) reset();
+    };
+    const detach = () => {
+      webview?.removeEventListener("dom-ready", start);
+      webview?.removeEventListener("did-start-navigation", navigate);
+      webview?.removeEventListener("render-process-gone", reset);
+    };
     const attach = () => {
       const found = Array.from(
         document.querySelectorAll<ScriptableWebview>("webview[data-preview-tab]"),
-      ).find((node) => node.getAttribute("data-preview-tab") === runtimeTabId);
-      if (!found || found === webview) return;
-      webview?.removeEventListener("dom-ready", start);
+      ).find((node) => node.isConnected && node.getAttribute("data-preview-tab") === runtimeTabId);
+      if (found === webview) return;
+      detach();
+      reset();
       webview = found;
-      setGuestElement(found);
+      setGuestElement(found ?? null);
+      if (!webview) return;
       webview.addEventListener("dom-ready", start);
+      webview.addEventListener("did-start-navigation", navigate);
+      webview.addEventListener("render-process-gone", reset);
       start();
     };
     // The hosted webview can attach after its toolbar or be replaced after a crash.
@@ -124,7 +161,7 @@ export function CredentialInlineSuggestions(props: {
     return () => {
       disposed = true;
       observer.disconnect();
-      webview?.removeEventListener("dom-ready", start);
+      detach();
       stop();
     };
   }, [enabled, origin, runtimeTabId]);

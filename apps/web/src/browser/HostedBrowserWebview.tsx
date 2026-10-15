@@ -28,6 +28,7 @@ import { acquireDesktopTab, type AcquiredDesktopTab, withDesktopTab } from "./de
 import { resolveHostedBrowserWebviewWrapperStyle } from "./hostedBrowserWebviewStyle";
 import { usePreviewWebviewConfig } from "./previewWebviewConfigState";
 import { useBrowserViewportResize } from "./useBrowserViewportResize";
+import { isWebviewDomReady, trackWebviewDomReady } from "./webviewDomReady";
 import {
   INITIAL_WEBVIEW_CRASH_RECOVERY_STATE,
   planWebviewCrashRecovery,
@@ -152,6 +153,12 @@ export function HostedBrowserWebview(props: {
 
   const setWebviewRef = useCallback((node: HTMLElement | null) => {
     webviewRef.current = node as ElectronWebview | null;
+    if (!node) return;
+    const stopTracking = trackWebviewDomReady(node);
+    return () => {
+      stopTracking();
+      if (webviewRef.current === node) webviewRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -159,19 +166,23 @@ export function HostedBrowserWebview(props: {
     const bridge = previewBridge;
     if (!clientSettingsHydrated || !webview || !config || !bridge) return;
     let disposed = false;
+    let registrationPending = false;
     let stopHost: (() => void) | undefined;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
     const register = () => {
       const lease = tabLeaseRef.current;
-      if (!lease) return;
+      if (!lease || disposed || registrationPending || !isWebviewDomReady(webview)) return;
+      registrationPending = true;
       void (async () => {
         try {
+          // Capture the guest id while this element is dom-ready. The server
+          // can start another navigation while the tab lease is being created.
+          const webContentsId = webview.getWebContentsId();
           // The main-process tab and the DOM webview are created by separate
           // effects. Wait for the former so registration cannot race and fail
           // with PreviewTabNotFoundError on a fast about:blank attachment.
           await lease.ready;
-          if (disposed || webviewRef.current !== webview) return;
-          const webContentsId = webview.getWebContentsId();
+          if (disposed || webviewRef.current !== webview || !webview.isConnected) return;
           if (Number.isInteger(webContentsId) && webContentsId > 0) {
             await bridge.registerWebview(runtimeTabId, webContentsId);
             if (!disposed && !serverDriven && !stopHost)
@@ -183,7 +194,9 @@ export function HostedBrowserWebview(props: {
               );
           }
         } catch {
-          // did-attach/dom-ready will retry if the guest was not ready yet.
+          // dom-ready will retry if the guest was not ready yet.
+        } finally {
+          registrationPending = false;
         }
       })();
     };
@@ -210,7 +223,6 @@ export function HostedBrowserWebview(props: {
     };
     const relayLaravelToolbar = (event: Event) =>
       relayLaravelToolbarMessage(runtimeTabId, webview, event);
-    webview.addEventListener("did-attach", register);
     webview.addEventListener("dom-ready", register);
     webview.addEventListener("render-process-gone", recoverGuest);
     webview.addEventListener("focus", dismissHostPopups);
@@ -220,7 +232,6 @@ export function HostedBrowserWebview(props: {
       disposed = true;
       stopHost?.();
       if (recoveryTimeout !== null) clearTimeout(recoveryTimeout);
-      webview.removeEventListener("did-attach", register);
       webview.removeEventListener("dom-ready", register);
       webview.removeEventListener("render-process-gone", recoverGuest);
       webview.removeEventListener("focus", dismissHostPopups);

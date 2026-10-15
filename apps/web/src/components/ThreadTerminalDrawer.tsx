@@ -1613,7 +1613,7 @@ export default function ThreadTerminalDrawer({
         data-terminal-owner={isPanel ? "right-panel" : "drawer"}
         className={cn(
           "relative flex min-w-0 flex-col overflow-hidden bg-background",
-          isPanel ? "h-full flex-1" : "shrink-0 border-t border-white/15",
+          isPanel ? "h-full flex-1" : "shrink-0 border-t border-(--shell-divider)!",
         )}
         style={isPanel ? undefined : { height: `${drawerHeight}px` }}
       >
@@ -1650,7 +1650,7 @@ export default function ThreadTerminalDrawer({
       data-terminal-owner={isPanel ? "right-panel" : "drawer"}
       className={cn(
         "relative flex min-w-0 flex-col overflow-hidden bg-background",
-        isPanel ? "h-full flex-1" : "shrink-0 border-t border-white/15",
+        isPanel ? "h-full flex-1" : "shrink-0 border-t border-(--shell-divider)!",
       )}
       style={isPanel ? undefined : { height: `${drawerHeight}px` }}
     >
@@ -1732,11 +1732,7 @@ export default function ThreadTerminalDrawer({
                         splitDirection === "vertical"
                           ? "border-t first:border-t-0"
                           : "border-l first:border-l-0"
-                      } ${
-                        terminalId === resolvedActiveTerminalId
-                          ? "border-border"
-                          : "border-border/70"
-                      }`}
+                      } border-(--shell-divider)!`}
                       onPointerDown={() => {
                         if (terminalId !== resolvedActiveTerminalId) {
                           onActiveTerminalChange(terminalId);
@@ -1801,8 +1797,8 @@ export default function ThreadTerminalDrawer({
           </div>
 
           {hasTerminalSidebar && (
-            <aside className="flex w-36 min-w-36 flex-col border border-border/70 bg-muted/10">
-              <div className="flex h-[22px] items-stretch justify-end border-b border-border/70">
+            <aside className="flex w-36 min-w-36 flex-col border-l border-(--shell-divider)! bg-muted/10">
+              <div className="flex h-[22px] items-stretch justify-end border-b border-(--shell-divider)!">
                 <div className="inline-flex h-full items-stretch">
                   <TerminalActionButton
                     disabled={!canOperateTerminal}

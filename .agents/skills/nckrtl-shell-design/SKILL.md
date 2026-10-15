@@ -67,9 +67,10 @@ build and install the fork's desktop app is in
   frame's 60% tint, sharing its native material and 40px outer CSS blur. These are Conn adaptations;
   DesignKit uses a system material with no numeric blur and an opaque inner fill.
   Keep `--shell-card` opaque for nested controls, editors and toolbar sheets.
-- The inner edge follows DesignKit: 0.5px border at 8% black/white (light/dark),
-  plus a 1px white top highlight at 71.25%/5.25%, fading over 28px down the sides.
+- The inner edge keeps a 0.5px border at 8% black/white (light/dark). At the
+  panel seams, the single 1px divider replaces both adjacent panel edges.
   Reduce Transparency uses opaque surfaces.
+- Conn's web shell has no top highlight (Nick, 2026-10-15).
 - Corners are concentric: inner radius = outer radius - inset. Top and bottom
   outer corners of cards use `--shell-corner`. Rail tiles use
   `rounded-tile` inside the 10px rail button. Hover shapes must follow the

@@ -3,8 +3,8 @@
 All shell tokens live at the end of `apps/web/src/index.css` (`:root` and
 `:root.dark`). Scale tokens live in the `@theme inline` block. Every color is a
 mix of the active theme's own roles (`--sidebar`, `--background`,
-`--foreground`, `--popover`, `--muted`, `--primary`). The inner-shell white highlight and black/white separator model physical
-lighting from DesignKit; other surfaces keep their theme roles.
+`--foreground`, `--popover`, `--muted`, `--primary`). The inner-shell black/white separator models physical lighting from
+DesignKit; other surfaces keep their theme roles.
 
 Values below are the dark values unless noted. Read `index.css` for the light
 values before you change a token.
@@ -100,5 +100,5 @@ values before you change a token.
 - macOS inner fill: card at 76% over the frame's 60% tint; the shared native material and 40px outer CSS blur (no extra per-panel blur).
   These strengths adapt native system frosting; DesignKit has no fixed blur radius.
 - `--shell-inner-border`: 8% black (light) / white (dark), 0.5px inset.
-- `--shell-inner-highlight`: white at 71.25% / 5.25%, 1px, fading over
-  `--shell-inner-highlight-depth` (28px). From DesignKit `Shell.swift` and `Palette.swift`.
+- Conn's web shell has no top highlight (Nick, 2026-10-15). The full-height
+  1px panel divider replaces the adjacent inner-panel edges at each seam.

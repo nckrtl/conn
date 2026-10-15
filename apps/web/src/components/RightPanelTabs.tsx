@@ -1577,6 +1577,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           props.mode === "inline" &&
             "overflow-hidden rounded-tr-(--shell-corner) rounded-br-(--shell-corner) shell-inner-panel [--control-radius:6px] [--background:var(--shell-card)] [--code-background:var(--shell-card)] [--terminal-background:var(--shell-card)]",
         )}
+        data-shell-join-left={props.mode === "inline" ? "" : undefined}
         data-right-panel-surface-content
       >
         {props.activeSurfaceId === null ? (

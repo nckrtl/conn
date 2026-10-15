@@ -143,6 +143,7 @@ function SettingsContentLayout() {
 
         <div
           key={`${contentScopeKey}:${restoreSignal}`}
+          data-shell-sidebar-edge=""
           // Same card as the chat: shell fill, --shell-inset gap, right corners match the nav panel's left corners.
           className="relative z-0 mr-(--shell-inset) mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tr-(--shell-corner) rounded-br-(--shell-corner) shell-inner-panel [--background:var(--shell-card)]"
         >

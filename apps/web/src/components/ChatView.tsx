@@ -11745,6 +11745,8 @@ export default function ChatView(props: ChatViewProps) {
         {/* Messages and the terminal share one card. Its --shell-inset gap matches the thread panel, and its right corners match that panel's left corners. */}
         <div
           data-chat-terminal-group=""
+          data-shell-sidebar-edge=""
+          data-shell-join-right={rightPanelPresent && !shouldUsePlanSidebarSheet ? "" : undefined}
           className={cn(
             // Same fill as the thread panel, so both cards sit on the frosted shell alike.
             "relative z-0 mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden shell-inner-panel [--background:var(--shell-card)] [--terminal-background:var(--shell-card)]",

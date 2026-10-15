@@ -11,6 +11,7 @@ interface Props {
  *
  * - Sits on top of the panel's border with a 4px overlap on each side so the
  *   user can grab a few pixels off the edge without aiming.
+ * - Offset by the panel's 1px border so the indicator covers that same pixel.
  * - Visual indicator is a 1px line that lights up on hover/active to mirror
  *   VS Code / Cursor.
  */
@@ -27,7 +28,7 @@ export function RightPanelResizeHandle({ handlers, className }: Props) {
     >
       <span
         aria-hidden
-        className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors duration-150 group-hover:bg-border group-active:bg-primary/60"
+        className="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-px bg-transparent transition-colors duration-150 group-hover:bg-border group-active:bg-primary/60"
       />
     </div>
   );

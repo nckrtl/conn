@@ -148,6 +148,8 @@ build and install the fork's desktop app is in
 - Plain `border-(--x)` loses to the global border rules (`* { border-border }`
   and theme border colors). Write `border-(--x)!` or `divide-(--x)!`.
   `border-image` utilities win without `!`.
+- Sidebar resize handles keep a 16px drag target but paint a 1px hover stripe
+  on the existing divider. Do not widen the visible line on hover.
 - Panel splits: one continuous line under the toolbar across both columns,
   plus the vertical divider, meeting in a clean T (Files preview, Diff). No
   double lines: drop the toolbar's own bottom border when the split line

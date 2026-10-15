@@ -195,6 +195,7 @@ export const snapshot = async (input: {
   readonly networkEntries: ReadonlyArray<PreviewAutomationNetworkEntry>;
   readonly actionTimeline: PreviewAutomationSnapshot["actionTimeline"];
   readonly includeScreenshot?: boolean;
+  readonly captureScreenshot?: (scale: number) => Promise<string>;
 }): Promise<PreviewAutomationSnapshot> => {
   const { cssVisualViewport } = await input.cdp.send("Page.getLayoutMetrics");
   const viewport = { width: cssVisualViewport.clientWidth, height: cssVisualViewport.clientHeight };
@@ -212,7 +213,9 @@ export const snapshot = async (input: {
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
     input.includeScreenshot === false
       ? Promise.resolve("")
-      : captureViewport(input.cdp, { format: "png", scale }),
+      : input.captureScreenshot
+        ? input.captureScreenshot(scale)
+        : captureViewport(input.cdp, { format: "png", scale }),
   ]);
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(

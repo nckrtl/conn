@@ -422,6 +422,9 @@ export class DesktopTabRunner {
             networkEntries: [],
             actionTimeline: [],
             includeScreenshot: !initiallyLocked,
+            ...(this.target?.captureScreenshot
+              ? { captureScreenshot: this.target.captureScreenshot }
+              : {}),
           });
           const locked = await PageOperations.credentialLocked(page);
           const secrets = await PageOperations.sensitiveInputValues(page);

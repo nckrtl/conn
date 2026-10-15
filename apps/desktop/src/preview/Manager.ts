@@ -648,6 +648,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     errorContext: PreviewOperationContext,
     tabId: string,
     wc: Electron.WebContents,
+    options?: Electron.Opts,
   ) {
     const requireCurrentGuest = Effect.gen(function* () {
       const tabs = yield* SynchronizedRef.get(tabsRef);
@@ -660,7 +661,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       yield* requireCurrentGuest;
       const image = yield* Effect.tryPromise({
         // An abort-signal parameter makes a stalled promise interruptible.
-        try: (_signal) => wc.capturePage(),
+        try: (_signal) => (options ? wc.capturePage(undefined, options) : wc.capturePage()),
         catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
       }).pipe(
         Effect.timeout(CAPTURE_PAGE_ATTEMPT_TIMEOUT_MS),
@@ -2510,6 +2511,30 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             title: () => wc.getTitle(),
             userAgent: () => wc.getUserAgent(),
             setDownloadDirectory: () => {},
+            // CDP's scaled capture repaints the page and can stall while its
+            // thread is hidden. Native capture holds a capturer lease without
+            // bringing the guest or its window to the foreground.
+            captureScreenshot: (scale) =>
+              Effect.runPromise(
+                capturePageWithRetry(
+                  { operation: "tabSnapshot.capturePage", tabId, webContentsId: wc.id },
+                  tabId,
+                  wc,
+                  { stayHidden: true },
+                ).pipe(
+                  Effect.map((image) => {
+                    const size = image.getSize();
+                    const scaled =
+                      scale < 1
+                        ? image.resize({
+                            width: Math.max(1, Math.round(size.width * scale)),
+                            height: Math.max(1, Math.round(size.height * scale)),
+                          })
+                        : image;
+                    return scaled.toPNG().toString("base64");
+                  }),
+                ),
+              ),
           },
           {
             on: (listener) => {

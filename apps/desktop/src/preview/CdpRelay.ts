@@ -27,6 +27,8 @@ export interface CdpRelayTarget {
    * Playwright reads the file where it asked for it.
    */
   readonly setDownloadDirectory: (directory: string | null) => void;
+  /** Native viewport capture avoids CDP repainting an occluded Electron guest. */
+  readonly captureScreenshot?: (scale: number) => Promise<string>;
 }
 
 export interface CdpRelayConnection {

@@ -2,7 +2,16 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
-import { beforeAll, afterAll, beforeEach, afterEach, describe, it, expect } from "vite-plus/test";
+import {
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  describe,
+  it,
+  expect,
+  vi,
+} from "vite-plus/test";
 import {
   EnvironmentId,
   ThreadId,
@@ -15,6 +24,7 @@ import {
   redactSensitiveValues,
 } from "@t3tools/shared/credentialFill";
 import { DesktopTabRunner } from "./DesktopTabRunner.ts";
+import { captureViewport } from "@t3tools/shared/previewPage";
 
 const binding = {
   environmentId: EnvironmentId.make("fixture-environment"),
@@ -52,6 +62,7 @@ describe("desktop tab runner", () => {
   let remembered: string[];
   let commands: string[];
   let stallScreenshot = false;
+  let nativeCapture: ((scale: number) => Promise<string>) | undefined;
   let attachRunner: () => Promise<void>;
   let screenshotStarted: (() => void) | undefined;
   beforeAll(async () => {
@@ -72,6 +83,7 @@ describe("desktop tab runner", () => {
     remembered = [];
     commands = [];
     stallScreenshot = false;
+    nativeCapture = undefined;
     screenshotStarted = undefined;
     runner = new DesktopTabRunner(
       binding,
@@ -98,6 +110,7 @@ describe("desktop tab runner", () => {
           title: () => "Fixture",
           userAgent: () => "Fixture",
           setDownloadDirectory: () => {},
+          ...(nativeCapture ? { captureScreenshot: nativeCapture } : {}),
         },
         {
           on: (listener) => {
@@ -155,6 +168,47 @@ describe("desktop tab runner", () => {
       ok: true,
       result: 2,
     });
+  });
+
+  it("captures snapshots through the native adapter when the guest's CDP capture stalls", async () => {
+    await runner.close();
+    await page.setViewportSize({ width: 1600, height: 900 });
+    nativeCapture = vi.fn(async (scale: number) => {
+      // A separate capture source models Electron's native surface, which
+      // still works when the guest debugger's screenshot command stalls.
+      const native = await context.newCDPSession(page);
+      try {
+        return await captureViewport(native, { format: "png", scale });
+      } finally {
+        await native.detach();
+      }
+    });
+    runner = new DesktopTabRunner(binding, "connection-native", () => {});
+    await attachRunner();
+    commands = [];
+    stallScreenshot = true;
+
+    const response = await runner.respond(request("snapshot"));
+    expect(response.ok).toBe(true);
+    const snapshot = response.result as {
+      visibleText: string;
+      screenshot: { data: string; width: number; height: number };
+    };
+    expect(snapshot.visibleText).toBe("Send");
+    expect(nativeCapture).toHaveBeenCalledWith(0.8);
+    expect(commands).not.toContain("Page.captureScreenshot");
+    expect(snapshot.screenshot).toMatchObject({ width: 1280, height: 720 });
+    const png = Buffer.from(snapshot.screenshot.data, "base64");
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1280, 720]);
+
+    await page.evaluate(() => {
+      Object.defineProperty(window, "__t3codeCredentialLocked", { value: true });
+    });
+    expect(await runner.respond(request("snapshot"))).toMatchObject({
+      ok: true,
+      result: { screenshot: { data: "", width: 0, height: 0 } },
+    });
+    expect(nativeCapture).toHaveBeenCalledTimes(1);
   });
 
   it("scrolls, hovers, selects, presses, drags and waits on the attached page", async () => {

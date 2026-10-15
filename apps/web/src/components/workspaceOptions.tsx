@@ -83,6 +83,9 @@ export function useWorkspaceOptions({
     : orbitResult !== null && !orbitResult.available && orbitResult.hidden !== true
       ? orbitResult.reason
       : null;
+  // Orbit's folder for a Project is no checkout: a thread there can only start in a new Instance.
+  const orbitOnly =
+    orbitResult !== null && orbitResult.hidden !== true && orbitResult.projectFolder === true;
 
   const options = useMemo(() => {
     const currentLabel = resolveCurrentWorkspaceLabel(activeWorktreePath);
@@ -114,7 +117,8 @@ export function useWorkspaceOptions({
         disabled: false,
       },
     ];
-    if (showOrbit) {
+    if (orbitOnly) list.length = 0;
+    if (showOrbit || orbitOnly) {
       list.push({
         value: "orbit",
         label: resolveEnvModeLabel("orbit"),
@@ -122,7 +126,7 @@ export function useWorkspaceOptions({
         disabled: orbitDisabled && effectiveEnvMode !== "orbit",
       });
     }
-    if (previousWorktreeLabel) {
+    if (previousWorktreeLabel && !orbitOnly) {
       list.push({
         value: PREVIOUS_WORKTREE_OPTION,
         label: previousWorktreeLabel,
@@ -137,6 +141,7 @@ export function useWorkspaceOptions({
     forceNewWorktree,
     orbitDisabled,
     orbitNote,
+    orbitOnly,
     previousWorktreeBranch,
     previousWorktreeLabel,
     showOrbit,

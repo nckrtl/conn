@@ -428,7 +428,7 @@ import { terminalEnvironment } from "../state/terminal";
 import { createOrbitWorktree, orbitInstanceNameForBranch } from "../orbit/orbitInstances";
 import { useOrbitThreadStore } from "../orbit/orbitThreadStore";
 import { runHiddenShell } from "../orbit/orbitTransport";
-import { getOrbitAvailability } from "../orbit/useOrbitAvailability";
+import { getOrbitAvailability, useOrbitAvailability } from "../orbit/useOrbitAvailability";
 import { threadEnvironment } from "../state/threads";
 import { workspacePreparationRetryRunIds } from "@t3tools/client-runtime/state/turn-item-presentation";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
@@ -4336,6 +4336,19 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
   const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  // Conn: a project rooted at Orbit's folder for a Project (e.g. `/fast/apps/orbit`) is no
+  // repository; its threads start in a new Orbit Instance of the `default` checkout.
+  const orbitFolderAvailability = useOrbitAvailability({
+    environmentId,
+    projectRoot: activeProject?.workspaceRoot ?? null,
+    enabled: !isGitRepo && activeProject !== null,
+  });
+  const isOrbitProjectFolder =
+    !isGitRepo &&
+    orbitFolderAvailability !== null &&
+    !("status" in orbitFolderAvailability) &&
+    orbitFolderAvailability.hidden !== true &&
+    orbitFolderAvailability.projectFolder === true;
   // When context is enabled, keep a hidden, off-flow strip mounted so the composer
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
@@ -4371,7 +4384,7 @@ export default function ChatView(props: ChatViewProps) {
     isDraftHeroState,
     persistInActiveThreads: settings.persistComposerContextStrip,
     hasActiveProject: activeProject !== null && !showProviderSubagentBar,
-    isGitRepo,
+    isGitRepo: isGitRepo || isOrbitProjectFolder,
     showEnvironmentIndicator: showComposerEnvironmentIndicator,
     hostsRestingComposerControls: routeKind === "server",
   });
@@ -4379,7 +4392,7 @@ export default function ChatView(props: ChatViewProps) {
     isDraftHeroState,
     persistInActiveThreads: settings.persistComposerContextStrip,
     hasActiveProject: activeProject !== null && !showProviderSubagentBar,
-    isGitRepo,
+    isGitRepo: isGitRepo || isOrbitProjectFolder,
     showEnvironmentIndicator: showComposerEnvironmentIndicator,
     hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
   });
@@ -7098,10 +7111,12 @@ export default function ChatView(props: ChatViewProps) {
       ? (pendingServerThreadStartFromOriginByThreadId[activeThread?.id ?? ""] ??
         activeProjectSettings.settings.newWorktreesStartFromOrigin)
       : false;
-  const sendEnvMode = resolveSendEnvMode({
-    requestedEnvMode: envMode,
-    isGitRepo,
-  });
+  const sendEnvMode = isOrbitProjectFolder
+    ? "orbit"
+    : resolveSendEnvMode({
+        requestedEnvMode: envMode,
+        isGitRepo,
+      });
   const localCheckoutBranchMismatch = useMemo(
     () =>
       isServerThread
@@ -9451,7 +9466,8 @@ export default function ChatView(props: ChatViewProps) {
       sendEnvMode === "orbit" &&
       !activeThread.worktreePath &&
       multipleModelSelections === null;
-    if (shouldCreateOrbitInstance && !activeThreadBranch) {
+    // An Orbit project folder has no branches; the Instance starts from the Project's default branch.
+    if (shouldCreateOrbitInstance && !activeThreadBranch && !isOrbitProjectFolder) {
       setThreadError(
         threadIdForSend,
         "Select a base branch before sending in New Orbit instance mode.",
@@ -10133,7 +10149,7 @@ export default function ChatView(props: ChatViewProps) {
             // The worktree belongs to the `default` Instance's repository, so
             // Orbit's setup steps find that Instance as its upstream.
             projectRoot: source.checkoutPath,
-            baseBranch: activeThreadBranch!,
+            baseBranch: activeThreadBranch ?? source.defaultBranch ?? "main",
             temporaryBranch,
             worktreePath,
           },
@@ -12136,7 +12152,9 @@ export default function ChatView(props: ChatViewProps) {
                               restingControlsHost={restingComposerControlsHost}
                               restingControlsHaveLeadingContext={
                                 mountComposerContextStrip &&
-                                (isGitRepo || showComposerEnvironmentIndicator)
+                                (isGitRepo ||
+                                  isOrbitProjectFolder ||
+                                  showComposerEnvironmentIndicator)
                               }
                               onRestingControlsVisibilityChange={setRestingComposerControlsVisible}
                               getTimelineScrollableNode={getTimelineScrollableNode}
@@ -12214,12 +12232,13 @@ export default function ChatView(props: ChatViewProps) {
                                 ref={branchToolbarRef}
                                 environmentId={activeThread.environmentId}
                                 threadId={activeThread.id}
-                                showGitControls={isGitRepo}
+                                showGitControls={isGitRepo || isOrbitProjectFolder}
+                                orbitProjectFolder={isOrbitProjectFolder}
                                 {...(routeKind === "draft" && draftId ? { draftId } : {})}
                                 onEnvModeChange={onEnvModeChange}
                                 startFromOrigin={startFromOrigin}
                                 onStartFromOriginChange={onStartFromOriginChange}
-                                envMode={envMode}
+                                envMode={isOrbitProjectFolder ? "orbit" : envMode}
                                 {...(canOverrideServerThreadEnvMode
                                   ? {
                                       activeThreadBranchOverride: activeThreadBranch,

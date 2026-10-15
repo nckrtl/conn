@@ -85,6 +85,8 @@ interface BranchToolbarProps {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   showGitControls: boolean;
+  /** Orbit's folder for a Project: no branches, only new Orbit Instances. */
+  orbitProjectFolder?: boolean;
   draftId?: DraftId;
   onEnvModeChange: (mode: EnvMode) => void;
   /** The thread's env mode as ChatView resolves it. */
@@ -602,6 +604,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   environmentId,
   threadId,
   showGitControls,
+  orbitProjectFolder = false,
   draftId,
   onEnvModeChange,
   envMode,
@@ -747,7 +750,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             orbitTarget={orbitTarget}
           />
         ) : null}
-        {panelSection !== "workspace" ? (
+        {panelSection !== "workspace" && !orbitProjectFolder ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
             className="w-full"
@@ -860,7 +863,7 @@ export const BranchToolbar = memo(function BranchToolbar({
         />
       ) : null}
 
-      {showGitControls ? (
+      {showGitControls && !orbitProjectFolder ? (
         <BranchToolbarBranchSelector
           forceNewWorktree={forceNewWorktree}
           ref={branchSelectorRef}

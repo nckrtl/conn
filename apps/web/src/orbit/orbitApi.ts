@@ -103,6 +103,7 @@ export interface OrbitProject {
   readonly id: number;
   readonly slug: string;
   readonly repositoryUrl: string | null;
+  readonly defaultBranch: string | null;
 }
 
 export interface OrbitInstanceSummary {
@@ -125,7 +126,16 @@ export async function listOrbitProjects(transport: OrbitTransport): Promise<Orbi
     const data = record(value);
     const id = int(data?.id);
     const slug = text(data?.slug);
-    return id === null || !slug ? [] : [{ id, slug, repositoryUrl: text(data?.repository_url) }];
+    return id === null || !slug
+      ? []
+      : [
+          {
+            id,
+            slug,
+            repositoryUrl: text(data?.repository_url),
+            defaultBranch: text(data?.default_branch),
+          },
+        ];
   });
 }
 

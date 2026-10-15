@@ -193,6 +193,7 @@ describe("checkOrbitAvailability", () => {
       id: 33,
       slug: "orbit-website",
       repository_url: "https://github.com/nckrtl/orbit-website.git",
+      default_branch: "main",
     },
     { id: 46, slug: "orbit", repository_url: "https://github.com/nckrtl/orbit.git" },
   ];
@@ -206,8 +207,8 @@ describe("checkOrbitAvailability", () => {
   };
   const BEAST_NODE = { ...BEAST, wireguard_ip: "10.44.0.7" };
   const shell =
-    (remote: string, addresses = "127.0.0.1\n10.44.0.7"): HiddenShellRunner =>
-    async () => ({ exitCode: 0, output: `${remote}\n---\n${addresses}` });
+    (remote: string, addresses = "127.0.0.1\n10.44.0.7", defaultCheckout = ""): HiddenShellRunner =>
+    async () => ({ exitCode: 0, output: `${remote}\n---\n${addresses}\n---\n${defaultCheckout}` });
   const orbit = (overrides: { nodes?: unknown[]; instances?: unknown[] } = {}) =>
     fakeTransport((request) => {
       if (request.path === "/api/v1/projects") return ok(PROJECTS);
@@ -236,8 +237,43 @@ describe("checkOrbitAvailability", () => {
         nodeName: "beast",
         tld: "test",
         projectAppsPath: "/fast/apps/orbit-website",
+        defaultBranch: "main",
       },
     });
+  });
+
+  it("treats Orbit's folder for a Project as that Project", async () => {
+    await expect(
+      checkOrbitAvailability(orbit(), shell("", undefined, "yes"), "/fast/apps/orbit-website/"),
+    ).resolves.toMatchObject({
+      available: true,
+      projectFolder: true,
+      source: { projectSlug: "orbit-website", checkoutPath: "/fast/apps/orbit-website/default" },
+    });
+    await expect(
+      checkOrbitAvailability(
+        orbit({ instances: [{ ...DEFAULT_INSTANCE, status: "stopped" }] }),
+        shell("", undefined, "yes"),
+        "/fast/apps/orbit-website",
+      ),
+    ).resolves.toEqual({
+      available: false,
+      projectFolder: true,
+      reason: "The default instance of orbit-website on beast is stopped",
+    });
+  });
+
+  it("hides the option for a folder that is no checkout and no Orbit folder", async () => {
+    const untouched = fakeTransport(() => {
+      throw new Error("no Gateway call expected");
+    });
+    await expect(checkOrbitAvailability(untouched, shell(""), "/tmp/notes")).resolves.toEqual({
+      available: false,
+      hidden: true,
+    });
+    await expect(
+      checkOrbitAvailability(orbit(), shell("", undefined, "yes"), "/srv/other"),
+    ).resolves.toEqual({ available: false, hidden: true });
   });
 
   it("hides the option for repositories Orbit does not manage", async () => {

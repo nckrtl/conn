@@ -29,16 +29,30 @@ export interface OrbitCopySource {
   readonly tld: string;
   /** Orbit's folder for this Project's checkouts, e.g. `/fast/apps/orbit-website`. */
   readonly projectAppsPath: string;
+  /** The Project's default branch, the base when the thread has no branch of its own. */
+  readonly defaultBranch: string | null;
 }
 
 /**
  * `hidden`: the repository has nothing to do with Orbit, so the option is not
  * shown. `available: false` with a reason: Orbit manages the repository but
- * cannot make an Instance for it on this machine.
+ * cannot make an Instance for it on this machine. `projectFolder`: the project
+ * is Orbit's folder for a Project (e.g. `/fast/apps/orbit`), not a checkout,
+ * so its threads can only start in a new Orbit Instance.
  */
 export type OrbitAvailability =
-  | { readonly available: true; readonly hidden?: false; readonly source: OrbitCopySource }
-  | { readonly available: false; readonly hidden?: false; readonly reason: string }
+  | {
+      readonly available: true;
+      readonly hidden?: false;
+      readonly projectFolder?: true;
+      readonly source: OrbitCopySource;
+    }
+  | {
+      readonly available: false;
+      readonly hidden?: false;
+      readonly projectFolder?: true;
+      readonly reason: string;
+    }
   | { readonly available: false; readonly hidden: true };
 
 export const ORBIT_APP_DEV_ROLE = "app-dev";
@@ -68,28 +82,44 @@ export function normalizeRepositoryUrl(url: string): string | null {
   return match ? `${match[1]}/${match[2]}` : null;
 }
 
-/** The project folder's `origin` URL and this machine's IPv4 addresses. */
+/**
+ * The project folder's `origin` URL, whether it holds a `default` checkout
+ * (Orbit's folder for a Project), and this machine's IPv4 addresses.
+ */
 export async function readOrbitLocalFacts(
   run: HiddenShellRunner,
   projectRoot: string,
-): Promise<{ readonly remote: string | null; readonly addresses: ReadonlyArray<string> }> {
+): Promise<{
+  readonly remote: string | null;
+  readonly hasDefaultCheckout: boolean;
+  readonly addresses: ReadonlyArray<string>;
+}> {
   const script = [
     `git -C ${shellQuote(projectRoot)} remote get-url origin 2>/dev/null || true`,
     "echo ---",
     "{ ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1; ifconfig 2>/dev/null | awk '$1 == \"inet\" {print $2}'; } | sort -u",
+    "echo ---",
+    `[ -e ${shellQuote(`${trimTrailingSlash(projectRoot)}/${ORBIT_SOURCE_INSTANCE}/.git`)} ] && echo yes || true`,
   ].join("\n");
   const { output } = await run(script, 20);
-  const [remotePart = "", addressPart = ""] = output.split("---");
+  const [remotePart = "", addressPart = "", defaultPart = ""] = output.split("---");
   return {
     remote: remotePart.trim() || null,
+    hasDefaultCheckout: defaultPart.trim() === "yes",
     addresses: addressPart.split(/\s+/).filter((address) => address !== ""),
   };
+}
+
+function trimTrailingSlash(path: string): string {
+  return path.replace(/\/+$/, "") || "/";
 }
 
 /**
  * The option is offered when the project's repository is an Orbit Project,
  * this machine is an app-dev Node, and the Project has an active `default`
- * Instance on it. Repositories Orbit does not manage hide the option.
+ * Instance on it. A project rooted at Orbit's folder for a Project (the
+ * `default` Instance's parent, no repository itself) counts as that Project.
+ * Repositories and folders Orbit does not manage hide the option.
  */
 export async function checkOrbitAvailability(
   transport: OrbitTransport,
@@ -97,7 +127,6 @@ export async function checkOrbitAvailability(
   projectRoot: string,
 ): Promise<OrbitAvailability> {
   let facts;
-  let project;
   try {
     facts = await readOrbitLocalFacts(run, projectRoot);
   } catch (error) {
@@ -106,22 +135,29 @@ export async function checkOrbitAvailability(
     return unavailable(`Could not check Orbit on this machine: ${describeOrbitError(error)}`);
   }
   const repository = facts.remote ? normalizeRepositoryUrl(facts.remote) : null;
-  if (repository === null) return HIDDEN;
+  const projectFolder = repository === null && facts.hasDefaultCheckout;
+  if (repository === null && !projectFolder) return HIDDEN;
+  const blocked = (reason: string): OrbitAvailability =>
+    projectFolder ? { available: false, projectFolder: true, reason } : unavailable(reason);
+  let projects;
   try {
-    const projects = await listOrbitProjects(transport);
-    project = projects.find(
-      (candidate) =>
-        candidate.repositoryUrl !== null &&
-        normalizeRepositoryUrl(candidate.repositoryUrl) === repository,
-    );
+    projects = await listOrbitProjects(transport);
   } catch (error) {
     // Orbit does not know this machine: there is no Orbit here.
     if (error instanceof OrbitApiError && error.code === "peer.identity_unknown") return HIDDEN;
     // Orbit unreachable, a broken response, or a failed shell: the repository
     // may well be an Orbit Project, so show the option with the reason.
-    return unavailable(describeOrbitError(error));
+    return blocked(describeOrbitError(error));
   }
-  if (!project) return HIDDEN;
+  let project =
+    repository === null
+      ? undefined
+      : projects.find(
+          (candidate) =>
+            candidate.repositoryUrl !== null &&
+            normalizeRepositoryUrl(candidate.repositoryUrl) === repository,
+        );
+  if (repository !== null && !project) return HIDDEN;
   try {
     const [nodes, instances] = await Promise.all([
       listOrbitNodes(transport),
@@ -131,25 +167,31 @@ export async function checkOrbitAvailability(
       (candidate) =>
         candidate.wireguardIp !== null && facts.addresses.includes(candidate.wireguardIp),
     );
-    if (!node) return unavailable("This machine is not an Orbit Node");
+    if (!node) return blocked("This machine is not an Orbit Node");
     if (!node.roles.includes(ORBIT_APP_DEV_ROLE)) {
-      return unavailable("This machine has no app-dev role");
+      return blocked("This machine has no app-dev role");
     }
+    const folderCheckout = `${trimTrailingSlash(projectRoot)}/${ORBIT_SOURCE_INSTANCE}`;
     const source = instances.find(
       (instance) =>
-        instance.projectId === project.id &&
         instance.nodeId === node.id &&
-        instance.name === ORBIT_SOURCE_INSTANCE,
+        instance.name === ORBIT_SOURCE_INSTANCE &&
+        (project
+          ? instance.projectId === project.id
+          : instance.checkoutPath !== null &&
+            trimTrailingSlash(instance.checkoutPath) === folderCheckout),
     );
+    project ??= source
+      ? projects.find((candidate) => candidate.id === source.projectId)
+      : undefined;
+    if (!project) return HIDDEN;
     if (!source || !source.checkoutPath) {
-      return unavailable(`Orbit project ${project.slug} has no default instance on ${node.name}`);
+      return blocked(`Orbit project ${project.slug} has no default instance on ${node.name}`);
     }
     if (source.status !== "active") {
-      return unavailable(
-        `The default instance of ${project.slug} on ${node.name} is ${source.status}`,
-      );
+      return blocked(`The default instance of ${project.slug} on ${node.name} is ${source.status}`);
     }
-    if (!node.tld) return unavailable(`Orbit reports no domain suffix for ${node.name}`);
+    if (!node.tld) return blocked(`Orbit reports no domain suffix for ${node.name}`);
     // Registration moves a source into `<apps-root>/<project-slug>/<name>`;
     // a worktree created there stays put under the running agent.
     const projectAppsPath = node.appsPath
@@ -157,6 +199,7 @@ export async function checkOrbitAvailability(
       : source.checkoutPath.replace(/\/[^/]+\/?$/, "");
     return {
       available: true,
+      ...(projectFolder ? { projectFolder: true as const } : {}),
       source: {
         instanceId: source.id,
         instanceName: source.name,
@@ -167,10 +210,11 @@ export async function checkOrbitAvailability(
         nodeName: node.name,
         tld: node.tld,
         projectAppsPath,
+        defaultBranch: project.defaultBranch,
       },
     };
   } catch (error) {
-    return unavailable(describeOrbitError(error));
+    return blocked(describeOrbitError(error));
   }
 }
 

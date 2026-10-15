@@ -1,11 +1,11 @@
 # Build and install the nckrtl desktop app
 
 Conn is the fork's one customizations branch: `main` of `nckrtl/conn` (renamed
-from `nckrtl/t3code` and its `nckrtl` branch on 2026-10-11; the old upstream
-mirror is kept as `upstream-mirror`). It is checked out on this MacBook
-(`~/apps/conn`) and tracks `origin/main`. Merge `upstream/main` into it to take
-upstream changes (it carries merge commits, so a rebase replays them), then
-run the sync procedure in [SKILL.md](../SKILL.md).
+from `nckrtl/t3code` and its `nckrtl` branch on 2026-10-11). It is checked out
+on this MacBook (`~/apps/conn`) and tracks `origin/main`. Merge
+`upstream/main` into it to take upstream changes (it carries merge commits,
+so a rebase replays them), then run the sync procedure in
+[SKILL.md](../SKILL.md).
 
 ## What the fork's build already does
 

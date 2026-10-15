@@ -9,10 +9,8 @@ file before you merge upstream, build, or change shared UI. Upstream's
 
 - `main` is the only long-lived development branch. It holds every
   customization, and new work lands there directly. Until 2026-10-11 this line
-  was the `nckrtl` branch of `nckrtl/t3code`. The `nckrtl` and `upstream-mirror`
-  branches were deleted on 2026-10-15 after being merged. The old
-  `rooms-patches-*` lines are retired; `rooms-patches-0.0.43` and
-  `rooms-patches-0.0.44` still exist locally and on origin as of that date.
+  was the `nckrtl` branch of `nckrtl/t3code`. That branch and the old
+  `upstream-mirror` and `rooms-patches*` branches were deleted on 2026-10-15.
   `wip/*` branches hold unreviewed saved work.
 - Conn tracks upstream `main`. The Grok bot runs a nightly sync to keep each
   merge small; manual syncs follow the same procedure below. Merge

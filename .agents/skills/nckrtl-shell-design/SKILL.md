@@ -61,10 +61,17 @@ build and install the fork's desktop app is in
 
 ### Shell and window
 
-- Window corner is `--window-radius` (16px). Inset cards sit `--shell-inset`
-  (4px) from the window edge.
-- Corners are concentric: inner radius = outer radius - inset. Outer bottom
-  corners of cards use `rounded-br-(--shell-corner)`. Rail tiles use
+- DesignKit geometry (`Tokens.swift`, `Shell.swift`): `--window-radius` 18px,
+  `--shell-inset` 4px and `--shell-corner` 14px. macOS owns the native window mask.
+- Inner panels use `shell-inner-panel`: on macOS, a 76% theme-card tint over the outer
+  frame's 60% tint, sharing its native material and 40px outer CSS blur. These are Conn adaptations;
+  DesignKit uses a system material with no numeric blur and an opaque inner fill.
+  Keep `--shell-card` opaque for nested controls, editors and toolbar sheets.
+- The inner edge follows DesignKit: 0.5px border at 8% black/white (light/dark),
+  plus a 1px white top highlight at 71.25%/5.25%, fading over 28px down the sides.
+  Reduce Transparency uses opaque surfaces.
+- Corners are concentric: inner radius = outer radius - inset. Top and bottom
+  outer corners of cards use `--shell-corner`. Rail tiles use
   `rounded-tile` inside the 10px rail button. Hover shapes must follow the
   shell curve (the Settings Back button got extra bottom padding for this).
 - Headers are 44px (`--shell-header-height`) and transparent over the frosted
@@ -75,7 +82,7 @@ build and install the fork's desktop app is in
 - The fixed header controls sit `--workspace-controls-right` (11px) from the
   edge, so the last header toggle centers over the last group button in the
   panel below.
-- Chat, right panel and Settings content are cards on `bg-(--shell-card)` that
+- Chat, right panel and Settings content use `shell-inner-panel` and
   re-root `[--background:var(--shell-card)]`,
   `[--terminal-background:var(--shell-card)]` and (right panel)
   `[--code-background:var(--shell-card)]`, so the content inside follows: the
@@ -83,7 +90,7 @@ build and install the fork's desktop app is in
   keep their own code background.
 - Page containers inside the window use `h-full`, never `h-dvh` (`h-dvh`
   overflowed the window and clipped the inset).
-- The shell containers use `backdrop-blur`, which makes them stacking contexts.
+- The outer shell uses `backdrop-blur`, which makes it a stacking context.
   The browser page is a fixed webview layer (z 30) mounted at the app root, so
   any overlay that must sit above the page (flyouts, sheets) portals to `body`
   with `fixed` positioning. A `z-*` inside the shell cannot rise above it (#122:

@@ -144,7 +144,7 @@ function SettingsContentLayout() {
         <div
           key={`${contentScopeKey}:${restoreSignal}`}
           // Same card as the chat: shell fill, --shell-inset gap, right corners match the nav panel's left corners.
-          className="relative z-0 mr-(--shell-inset) mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tr-lg rounded-br-(--shell-corner) bg-(--shell-card) [--background:var(--shell-card)]"
+          className="relative z-0 mr-(--shell-inset) mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tr-(--shell-corner) rounded-br-(--shell-corner) shell-inner-panel [--background:var(--shell-card)]"
         >
           <SettingsScopeBoundary pathname={location.pathname}>
             <Outlet />

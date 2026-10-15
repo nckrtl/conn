@@ -2409,13 +2409,17 @@ html {
    sidebar for the thread panel, overlay for floating surfaces. Mixes run in
    oklab toward the theme's foreground so each theme keeps its hue. */
 :root {
-  /* macOS 26+ window corner radius (measured on a real window; macOS exposes no
-     API for it). The web build draws its mock window with it, and the cards'
-     outer bottom corners stay concentric with it across the inset and border. */
-  --window-radius: 16px;
+  /* DesignKit Tokens.swift / Shell.swift: 18 pt window, 4 pt inset, 14 pt
+     container. Native macOS owns the actual window mask. */
+  --window-radius: 18px;
   /* Gap between the inset cards and the window edge. */
   --shell-inset: 4px;
-  --shell-corner: calc(var(--window-radius) - var(--shell-inset) - 1px);
+  --shell-corner: calc(var(--window-radius) - var(--shell-inset));
+  --shell-inner-fill: var(--shell-card);
+  --shell-inner-border: rgb(0 0 0 / 8%);
+  /* KitShell's 1 pt stroke: kitPanelHighlight (95% / 7% white) at 75%. */
+  --shell-inner-highlight: rgb(255 255 255 / 71.25%);
+  --shell-inner-highlight-depth: calc(var(--shell-corner) * 2);
   --shell-blur: 40px;
   --shell-saturate: 1.6;
   --shell-fill: color-mix(in srgb, var(--sidebar) 88%, transparent);
@@ -2476,6 +2480,8 @@ html {
 }
 
 :root.dark {
+  --shell-inner-border: rgb(255 255 255 / 8%);
+  --shell-inner-highlight: rgb(255 255 255 / 5.25%);
   --shell-fill: color-mix(
     in srgb,
     color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 86%,
@@ -2623,15 +2629,19 @@ html {
   }
 }
 
-/* The native macOS material blurs windows behind Conn. Keep only the outer
-   frame clear; inset content cards retain their opaque theme fills. The boot
-   script sets an inline HTML background, so this override must win over it. */
+/* The native macOS material blurs windows behind Conn. The frame and inner
+   panels tint that backdrop at different strengths. Keep semantic card colors
+   opaque: nested controls and editors must not repeatedly composite glass.
+   The boot script's inline HTML background needs an important override. */
 html.electron-macos,
 html.electron-macos body {
   background: transparent !important;
 }
 
 html.electron-macos {
+  /* Conn's subtle inner frost: 76% tint over the outer frame's 60% tint.
+     Share the native material and outer 40px CSS blur; do not blur each panel again. */
+  --shell-inner-fill: color-mix(in srgb, var(--shell-card) 76%, transparent);
   --shell-fill: color-mix(in srgb, var(--sidebar) 60%, transparent);
 }
 html.electron-macos.dark {
@@ -2640,4 +2650,29 @@ html.electron-macos.dark {
     color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 60%,
     transparent
   );
+}
+
+/* One inner-shell treatment for thread lists, chat, Settings and right panels.
+   Like KitShell, the light edge follows the rounded top and fades over 28px. */
+.shell-inner-panel {
+  position: relative;
+  background: var(--shell-inner-fill);
+  box-shadow: inset 0 0 0 0.5px var(--shell-inner-border);
+}
+.shell-inner-panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  border: 1px solid var(--shell-inner-highlight);
+  border-radius: inherit;
+  mask-image: linear-gradient(to bottom, #000, transparent var(--shell-inner-highlight-depth));
+  pointer-events: none;
+}
+@media (prefers-reduced-transparency: reduce) {
+  html.electron-macos,
+  html.electron-macos.dark {
+    --shell-fill: var(--sidebar);
+    --shell-inner-fill: var(--shell-card);
+  }
 }

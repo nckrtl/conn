@@ -11747,10 +11747,10 @@ export default function ChatView(props: ChatViewProps) {
           data-chat-terminal-group=""
           className={cn(
             // Same fill as the thread panel, so both cards sit on the frosted shell alike.
-            "relative z-0 mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--shell-card) [--background:var(--shell-card)] [--terminal-background:var(--shell-card)]",
+            "relative z-0 mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden shell-inner-panel [--background:var(--shell-card)] [--terminal-background:var(--shell-card)]",
             rightPanelPresent && !shouldUsePlanSidebarSheet
               ? null
-              : "mr-(--shell-inset) rounded-tr-lg rounded-br-(--shell-corner)",
+              : "mr-(--shell-inset) rounded-tr-(--shell-corner) rounded-br-(--shell-corner)",
           )}
         >
           {/* Chat column */}

@@ -1575,7 +1575,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           "flex min-h-0 flex-1 flex-col",
           // Same card as the chat and thread panel: tinted glass, right corners match the thread panel.
           props.mode === "inline" &&
-            "overflow-hidden rounded-tr-lg rounded-br-(--shell-corner) bg-(--shell-card) [--control-radius:6px] [--background:var(--shell-card)] [--code-background:var(--shell-card)] [--terminal-background:var(--shell-card)]",
+            "overflow-hidden rounded-tr-(--shell-corner) rounded-br-(--shell-corner) shell-inner-panel [--control-radius:6px] [--background:var(--shell-card)] [--code-background:var(--shell-card)] [--terminal-background:var(--shell-card)]",
         )}
         data-right-panel-surface-content
       >

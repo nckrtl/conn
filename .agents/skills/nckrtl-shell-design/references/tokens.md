@@ -3,36 +3,36 @@
 All shell tokens live at the end of `apps/web/src/index.css` (`:root` and
 `:root.dark`). Scale tokens live in the `@theme inline` block. Every color is a
 mix of the active theme's own roles (`--sidebar`, `--background`,
-`--foreground`, `--popover`, `--muted`, `--primary`). Never replace a mix with
-a literal color.
+`--foreground`, `--popover`, `--muted`, `--primary`). The inner-shell white highlight and black/white separator model physical
+lighting from DesignKit; other surfaces keep their theme roles.
 
 Values below are the dark values unless noted. Read `index.css` for the light
 values before you change a token.
 
 ## Window and layout
 
-| Token                              | Value                               | Use                                                                                              |
-| ---------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `--window-radius`                  | 16px                                | macOS 26 window corner, measured on a real window. The web mock window uses it.                  |
-| `--shell-inset`                    | 4px                                 | Gap between an inset card and the window edge.                                                   |
-| `--shell-corner`                   | `window-radius - shell-inset - 1px` | Outer bottom corners of inset cards, so they stay concentric with the window.                    |
-| `--shell-header-height`            | 44px                                | Glass header over chat, right panel and Settings. Two-tone dividers switch color at this height. |
-| `--shell-blur`, `--shell-saturate` | 40px, 1.6                           | Backdrop blur for the frame and floating surfaces.                                               |
+| Token                              | Value                                | Use                                                                                              |
+| ---------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `--window-radius`                  | 18px                                 | DesignKit window geometry; macOS owns its native window mask.                                    |
+| `--shell-inset`                    | 4px                                  | Gap between an inset card and the window edge.                                                   |
+| `--shell-corner`                   | `window-radius - shell-inset` (14px) | Outer top and bottom corners of inset cards, so they stay concentric with the window.            |
+| `--shell-header-height`            | 44px                                 | Glass header over chat, right panel and Settings. Two-tone dividers switch color at this height. |
+| `--shell-blur`, `--shell-saturate` | 40px, 1.6                            | Backdrop blur for the frame and floating surfaces.                                               |
 
 ## Surfaces
 
-| Token                 | Dark value                       | Goes on                                                                                                                        |
-| --------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `--shell-fill`        | sidebar 92% + fg, at 86% opacity | The frosted window frame and glass headers.                                                                                    |
-| `--shell-panel`       | `--sidebar`                      | The inset thread panel.                                                                                                        |
-| `--shell-card`        | `= --shell-panel`                | Chat card, right-panel card, Settings content card. These cards re-root `--background` and `--terminal-background` on it.      |
-| `--shell-raised`      | background 86% + fg              | Raised controls.                                                                                                               |
-| `--shell-overlay`     | popover 96% + fg, at 94% opacity | Menus, selects, comboboxes, popovers, tooltips, toasts, annotation panels (via `dropdown-glass`).                              |
-| `--shell-highlight`   | fg at 8% (light: 6%)             | Hover and active pills: menu rows, panel tabs, file tree hover, selected provider row, settings group fill, `Kbd` raised caps. |
-| `--shell-tile`        | sidebar 80% + fg                 | Empty-state icon tiles. Lighter than the card.                                                                                 |
-| `--shell-tile-border` | sidebar 92% + fg                 | Tile border: the raised card's color made opaque.                                                                              |
-| `--shell-field`       | sidebar 92% + fg                 | Soft input fields (Files search, browser address).                                                                             |
-| `--shell-control`     | sidebar 91% + fg                 | `ToolbarGroup` fill, soft field hover. Slightly darker than the field.                                                         |
+| Token                 | Dark value                                    | Goes on                                                                                                                        |
+| --------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `--shell-fill`        | sidebar 92% + fg, at 86% opacity (macOS: 60%) | The frosted window frame and glass headers.                                                                                    |
+| `--shell-panel`       | `--sidebar`                                   | The inset thread panel.                                                                                                        |
+| `--shell-card`        | `= --shell-panel`                             | Chat card, right-panel card, Settings content card. These cards re-root `--background` and `--terminal-background` on it.      |
+| `--shell-raised`      | background 86% + fg                           | Raised controls.                                                                                                               |
+| `--shell-overlay`     | popover 96% + fg, at 94% opacity              | Menus, selects, comboboxes, popovers, tooltips, toasts, annotation panels (via `dropdown-glass`).                              |
+| `--shell-highlight`   | fg at 8% (light: 6%)                          | Hover and active pills: menu rows, panel tabs, file tree hover, selected provider row, settings group fill, `Kbd` raised caps. |
+| `--shell-tile`        | sidebar 80% + fg                              | Empty-state icon tiles. Lighter than the card.                                                                                 |
+| `--shell-tile-border` | sidebar 92% + fg                              | Tile border: the raised card's color made opaque.                                                                              |
+| `--shell-field`       | sidebar 92% + fg                              | Soft input fields (Files search, browser address).                                                                             |
+| `--shell-control`     | sidebar 91% + fg                              | `ToolbarGroup` fill, soft field hover. Slightly darker than the field.                                                         |
 
 ## Dividers and text
 
@@ -92,3 +92,13 @@ values before you change a token.
   the same rules through `PIERRE_TREE_UNSAFE_CSS`.
 - `.mock-window-shadow`, `.mock-traffic-light-*`: web-only mock window in
   `routes/__root.tsx`. Fixed system colors on purpose.
+
+## Inner shell (DesignKit geometry)
+
+- `--window-radius` 18px, `--shell-inset` 4px, `--shell-corner` 14px.
+- `shell-inner-panel` paints `--shell-inner-fill`; semantic `--shell-card` stays opaque.
+- macOS inner fill: card at 76% over the frame's 60% tint; the shared native material and 40px outer CSS blur (no extra per-panel blur).
+  These strengths adapt native system frosting; DesignKit has no fixed blur radius.
+- `--shell-inner-border`: 8% black (light) / white (dark), 0.5px inset.
+- `--shell-inner-highlight`: white at 71.25% / 5.25%, 1px, fading over
+  `--shell-inner-highlight-depth` (28px). From DesignKit `Shell.swift` and `Palette.swift`.

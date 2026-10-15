@@ -344,7 +344,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
             <>
               <SidebarChromeHeader isElectron={isElectron} />
               {/* The same inset panel as the thread list. Without the rail beside it, it also keeps the --shell-inset gap from the window's left edge. */}
-              <div className="relative z-10 -mt-[calc(var(--workspace-topbar-height)-44px)] mb-(--shell-inset) ml-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tl-lg rounded-bl-(--shell-corner) bg-(--shell-panel)">
+              <div className="relative z-10 -mt-[calc(var(--workspace-topbar-height)-44px)] mb-(--shell-inset) ml-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tl-(--shell-corner) rounded-bl-(--shell-corner) shell-inner-panel">
                 <SettingsSidebarNav pathname={pathname} />
               </div>
             </>

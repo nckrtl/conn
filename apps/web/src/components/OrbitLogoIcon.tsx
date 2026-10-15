@@ -1,11 +1,14 @@
 import type { SVGProps } from "react";
 
-/** The Orbit logo ring. Sized and colored like a lucide icon (`size-3`, currentColor). */
+/**
+ * The Orbit logo ring. Sized and colored like a lucide icon (`size-3`, currentColor).
+ * The viewBox insets the ring like lucide's 2px-in-24 padding, so it spaces evenly beside them.
+ */
 export function OrbitLogoIcon({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 100 100"
+      viewBox="-10 -10 120 120"
       fill="currentColor"
       aria-hidden
       className={className}

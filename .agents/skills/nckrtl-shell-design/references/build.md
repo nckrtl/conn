@@ -57,6 +57,14 @@ node scripts/sign-macos-local.ts "$tmp/Conn.app"   # or add an identity name as 
 ditto -c -k --keepParent "$tmp/Conn.app" "release/Conn-<version>-arm64-signed.zip"
 ```
 
-Copy the signed zip to the target Mac, quit the old app, put `Conn.app` in
-`/Applications`, and open it. The first launch copies the old app's user data
+Copy the signed zip to the target Mac. Stage only as `Conn.app` inside a temporary
+directory (for example `/Applications/.conn-install-XXXXXX/Conn.app`); never rename
+the bundle to a staging label, which Spotlight can retain after installation.
+Keep backups as `<backup-directory>/Conn.app` too. Verify the designated requirements
+of the app and helpers against the installed build, make and verify a backup, then
+quit only `/Applications/Conn.app/Contents/MacOS/Conn` and replace the bundle.
+Unregister temporary and obsolete backup paths with `lsregister -u`, register
+`/Applications/Conn.app` with `lsregister -f`, and check its name and path in
+`lsregister -dump`. Do not reset the whole LaunchServices database. Launch only
+when the user requests it. The first launch copies the old app's user data
 (see FORK.md, "Conn"). User data in `~/.t3` is untouched.

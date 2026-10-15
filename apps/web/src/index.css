@@ -2676,3 +2676,19 @@ html.electron-macos.dark {
     --shell-inner-fill: var(--shell-card);
   }
 }
+
+/* Navigation sits on translucent glass. Opaque theme row colors can be darker
+   than that backdrop, so use lighting overlays for every sidebar and rail row.
+   Keep these local: Settings cards still use the theme's opaque surface roles. */
+[data-app-sidebar],
+html[data-theme-id] [data-app-sidebar] {
+  --sidebar-row-hover: rgb(0 0 0 / 3%);
+  --sidebar-row-selected: rgb(0 0 0 / 5%);
+  --sidebar-row-active: rgb(0 0 0 / 7%);
+}
+html.dark [data-app-sidebar],
+html.dark[data-theme-id] [data-app-sidebar] {
+  --sidebar-row-hover: rgb(255 255 255 / 4%);
+  --sidebar-row-selected: rgb(255 255 255 / 6%);
+  --sidebar-row-active: rgb(255 255 255 / 8%);
+}

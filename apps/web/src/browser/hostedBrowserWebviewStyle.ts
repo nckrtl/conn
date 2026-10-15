@@ -12,6 +12,7 @@ export interface HostedBrowserWebviewWrapperStyle {
   readonly height: number;
   readonly zIndex: number;
   readonly pointerEvents: "auto" | "none";
+  readonly opacity?: number;
   readonly borderRadius?: number;
   readonly visibility?: "hidden" | "visible";
 }
@@ -51,7 +52,9 @@ export function resolveHostedBrowserWebviewWrapperStyle(input: {
   if (renderingActive) {
     // Electron stops compositing a guest that is fully outside the window, even
     // when background throttling is disabled. Keep capture-active guests inside
-    // the viewport but behind the app so recordings receive complete frames.
+    // the viewport so recordings receive complete frames. A negative z-index alone
+    // leaks the native guest through translucent shells after a thread switch.
+    // Composite it at zero opacity; guest captures retain their own page pixels.
     return {
       left: 0,
       top: 0,
@@ -59,6 +62,7 @@ export function resolveHostedBrowserWebviewWrapperStyle(input: {
       height: hiddenSize.height,
       zIndex: -1,
       pointerEvents: "none",
+      opacity: 0,
       visibility: "visible",
     };
   }
@@ -70,6 +74,7 @@ export function resolveHostedBrowserWebviewWrapperStyle(input: {
     height: hiddenSize.height,
     zIndex: -1,
     pointerEvents: "none",
+    opacity: 0,
     visibility: keepPaintableWhenInactive ? "visible" : "hidden",
   };
 }

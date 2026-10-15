@@ -59,11 +59,12 @@ describe("resolveHostedBrowserWebviewWrapperStyle", () => {
       height: 852,
       zIndex: -1,
       pointerEvents: "none",
+      opacity: 0,
       visibility: "hidden",
     });
   });
 
-  it("keeps an active background task paintable behind the app", () => {
+  it("keeps a background guest captureable without exposing it through the shell", () => {
     const style = resolveHostedBrowserWebviewWrapperStyle({
       active: false,
       renderingActive: true,
@@ -78,6 +79,7 @@ describe("resolveHostedBrowserWebviewWrapperStyle", () => {
       height: 800,
       zIndex: -1,
       pointerEvents: "none",
+      opacity: 0,
       visibility: "visible",
     });
   });
@@ -98,7 +100,24 @@ describe("resolveHostedBrowserWebviewWrapperStyle", () => {
       height: 800,
       zIndex: -1,
       pointerEvents: "none",
+      opacity: 0,
       visibility: "visible",
     });
+  });
+  it("restores the same guest when a background tab is presented again", () => {
+    const input = {
+      renderingActive: true,
+      rect: { x: 640, y: 92, width: 456, height: 684 },
+      hiddenSize: { width: 456, height: 684 },
+    };
+    const shown = resolveHostedBrowserWebviewWrapperStyle({ ...input, active: true });
+    const parked = resolveHostedBrowserWebviewWrapperStyle({ ...input, active: false });
+    const restored = resolveHostedBrowserWebviewWrapperStyle({ ...input, active: true });
+    expect(parked.opacity).toBe(0);
+    expect(parked.visibility).toBe("visible");
+    expect([parked.width, parked.height]).toEqual([shown.width, shown.height]);
+    expect(restored).toEqual(shown);
+    expect(restored.opacity).toBeUndefined();
+    expect(restored.pointerEvents).toBe("auto");
   });
 });

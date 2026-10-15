@@ -132,6 +132,9 @@ build and install the fork's desktop app is in
 - Table and list rows inside panels are transparent. Hover is
   `bg-foreground/4`; the selected row is `--shell-highlight` (lighter than the
   surface, never darker `bg-muted`). Tab strips have no fill either.
+- Navigation row fills are lighting overlays: hover/selected/active use 3%/5%/7% black
+  in light mode and 4%/6%/8% white in dark mode. Keep all sidebar and rail rows on
+  `--sidebar-row-*`; opaque theme row fills can darken the translucent shell.
 - Selected rail workspace: `ring-2 ring-inset ring-sidebar-foreground/90`, tile
   shrunk to leave a visible gap inside the ring.
 

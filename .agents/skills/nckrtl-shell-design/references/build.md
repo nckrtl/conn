@@ -3,9 +3,11 @@
 Conn is the fork's one customizations branch: `main` of `nckrtl/conn` (renamed
 from `nckrtl/t3code` and its `nckrtl` branch on 2026-10-11; the old upstream
 mirror is kept as `upstream-mirror`). It is checked out on this MacBook
-(`~/apps/conn`) and tracks `origin/main`. Merge `upstream/main` into it to take
-upstream changes (it carries merge commits, so a rebase replays them), then
-run the sync procedure in [SKILL.md](../SKILL.md).
+(`~/apps/conn`) and tracks `origin/main`. Take upstream changes only from
+stable upstream tags (`vX.Y.Z` on `pingdotgg/t3code`, no `-nightly`/`-preview`),
+never from `upstream/main`: merge the tag into a `conn-sync-<tag>` branch off
+`main` (it carries merge commits, so a rebase replays them), then run the sync
+procedure in [SKILL.md](../SKILL.md).
 
 ## What the fork's build already does
 

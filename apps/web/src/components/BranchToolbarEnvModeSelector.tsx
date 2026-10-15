@@ -2,7 +2,7 @@ import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { ComposerSelectControl } from "./chat/ComposerControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { FolderGit2Icon, FolderGitIcon, FolderIcon, GlobeIcon } from "lucide-react";
-import { memo, useMemo, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, type MouseEvent as ReactMouseEvent } from "react";
 
 import {
   resolveCurrentWorkspaceLabel,
@@ -12,11 +12,10 @@ import {
 } from "./BranchToolbar.logic";
 import { useOpenLink } from "../browser/useOpenLink";
 import type { OrbitThreadInstance } from "../orbit/orbitThreadStore";
-import { useOrbitAvailability } from "../orbit/useOrbitAvailability";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
 import { Badge } from "./ui/badge";
-import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
+import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
 import {
   Select,
   SelectGroup,
@@ -26,29 +25,6 @@ import {
   SelectValue,
 } from "./ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-
-const PREVIOUS_WORKTREE_SELECT_VALUE = "previous-worktree";
-
-function OrbitInstanceItemContent({ note }: { note: string | null }) {
-  const label = resolveEnvModeLabel("orbit");
-  if (!note) {
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        <OrbitLogoIcon className="size-3" />
-        {label}
-      </span>
-    );
-  }
-  return (
-    <span className="flex min-w-0 items-start gap-1.5">
-      <OrbitLogoIcon className="mt-1 size-3" />
-      <span className="flex min-w-0 flex-col">
-        <span>{label}</span>
-        <span className="min-w-0 truncate text-xs text-muted-foreground">{note}</span>
-      </span>
-    </span>
-  );
-}
 
 function OrbitInstanceUrlChip({ url, threadRef }: { url: string; threadRef: ScopedThreadRef }) {
   const openLink = useOpenLink(threadRef);
@@ -138,39 +114,14 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   threadRef = null,
 }: BranchToolbarEnvModeSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
-  const showPreviousWorktree = Boolean(previousWorktreeLabel && onUsePreviousWorktree);
-  // Checked up front (and cached), so the option never pops in or out while the picker is open.
-  const orbitAvailability = useOrbitAvailability({
-    environmentId: orbitTarget?.environmentId ?? ("" as EnvironmentId),
-    projectRoot: orbitTarget?.projectRoot ?? null,
-    enabled: orbitTarget !== null,
+  const { options, orbitNote } = useWorkspaceOptions({
+    activeWorktreePath,
+    effectiveEnvMode,
+    forceNewWorktree,
+    orbitTarget,
+    previousWorktreeLabel: onUsePreviousWorktree ? (previousWorktreeLabel ?? null) : null,
+    previousWorktreeBranch,
   });
-  const orbitChecking = orbitAvailability !== null && "status" in orbitAvailability;
-  const orbitResult = orbitAvailability === null || orbitChecking ? null : orbitAvailability;
-  // Repositories Orbit does not manage never show the option.
-  const showOrbit =
-    orbitTarget !== null &&
-    (effectiveEnvMode === "orbit" || (orbitResult !== null && orbitResult.hidden !== true));
-  const orbitDisabled = orbitResult === null || !orbitResult.available;
-  const orbitNote = orbitChecking
-    ? "Checking Orbit…"
-    : orbitResult !== null && !orbitResult.available && orbitResult.hidden !== true
-      ? orbitResult.reason
-      : null;
-  const envModeItems = useMemo(
-    () => [
-      {
-        value: "local",
-        label: resolveCurrentWorkspaceLabel(activeWorktreePath),
-      },
-      { value: "worktree", label: resolveEnvModeLabel("worktree") },
-      ...(showOrbit ? [{ value: "orbit", label: resolveEnvModeLabel("orbit") }] : []),
-      ...(showPreviousWorktree && previousWorktreeLabel
-        ? [{ value: PREVIOUS_WORKTREE_SELECT_VALUE, label: previousWorktreeLabel }]
-        : []),
-    ],
-    [activeWorktreePath, previousWorktreeLabel, showOrbit, showPreviousWorktree],
-  );
 
   const stopContextMenuMouseDown = (event: ReactMouseEvent) => {
     if (event.button !== 0 || event.ctrlKey) {
@@ -244,13 +195,13 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
       modal={false}
       value={effectiveEnvMode}
       onValueChange={(value: string | null) => {
-        if (value === PREVIOUS_WORKTREE_SELECT_VALUE) {
+        if (value === PREVIOUS_WORKTREE_OPTION) {
           onUsePreviousWorktree?.();
           return;
         }
         onEnvModeChange(value as EnvMode);
       }}
-      items={envModeItems}
+      items={options}
     >
       <Tooltip>
         <TooltipTrigger
@@ -289,38 +240,15 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
       <SelectPopup
         alignItemWithTrigger={false}
         {...composerFloatingLayerProps}
-        className={
-          showPreviousWorktree || showOrbit ? "w-[min(21rem,calc(100vw-2rem))]" : undefined
-        }
+        className={options.length > 2 ? "w-[min(21rem,calc(100vw-2rem))]" : undefined}
       >
         <SelectGroup>
           <SelectGroupLabel>Workspace</SelectGroupLabel>
-          <SelectItem value="local">
-            <span className="inline-flex items-center gap-1.5">
-              {activeWorktreePath ? (
-                <FolderGitIcon className="size-3" />
-              ) : (
-                <FolderIcon className="size-3" />
-              )}
-              {resolveCurrentWorkspaceLabel(activeWorktreePath)}
-            </span>
-          </SelectItem>
-          <SelectItem value="worktree">
-            <span className="inline-flex items-center gap-1.5">
-              <FolderGit2Icon className="size-3" />
-              {resolveEnvModeLabel("worktree")}
-            </span>
-          </SelectItem>
-          {showOrbit ? (
-            <SelectItem value="orbit" disabled={orbitDisabled && effectiveEnvMode !== "orbit"}>
-              <OrbitInstanceItemContent note={orbitNote} />
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
+              {option.content}
             </SelectItem>
-          ) : null}
-          {showPreviousWorktree && previousWorktreeLabel ? (
-            <SelectItem value={PREVIOUS_WORKTREE_SELECT_VALUE}>
-              <PreviousWorktreeItemContent branch={previousWorktreeBranch} />
-            </SelectItem>
-          ) : null}
+          ))}
         </SelectGroup>
       </SelectPopup>
     </Select>

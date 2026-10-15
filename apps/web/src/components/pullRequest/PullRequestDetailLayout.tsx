@@ -6,6 +6,9 @@ import { cn } from "~/lib/utils";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { PullRequestMetaLine } from "./pullRequestPresentation";
 
+export const PULL_REQUEST_DETAIL_HEADER_CLASS =
+  "@container/pr-header grid min-w-0 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 pt-toolbar";
+
 export function PullRequestDetailHeaderBody({
   title,
   author,

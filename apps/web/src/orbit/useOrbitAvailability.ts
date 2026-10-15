@@ -1,6 +1,7 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
+import { useEnvironment } from "../state/environments";
 import { checkOrbitAvailability, type OrbitAvailability } from "./orbitInstances";
 import { createTerminalOrbitTransport, runHiddenShell } from "./orbitTransport";
 
@@ -51,12 +52,16 @@ export function useOrbitAvailability(input: {
 }): OrbitAvailabilityState | null {
   const { enabled, environmentId, projectRoot } = input;
   const key = projectRoot === null ? null : cacheKey(environmentId, projectRoot);
+  // The check runs a shell over the environment's connection. Before that connection is up
+  // (right after a page load) the shell cannot open, and that failure would stick in the menu.
+  const environment = useEnvironment(projectRoot === null ? null : environmentId);
+  const connected = environment?.connection.phase === "connected";
   const [state, setState] = useState<{
     readonly key: string;
     readonly value: OrbitAvailability;
   } | null>(null);
   useEffect(() => {
-    if (!enabled || projectRoot === null || key === null) return;
+    if (!enabled || !connected || projectRoot === null || key === null) return;
     let cancelled = false;
     void getOrbitAvailability(environmentId, projectRoot).then((value) => {
       if (!cancelled) setState({ key, value });
@@ -64,7 +69,7 @@ export function useOrbitAvailability(input: {
     return () => {
       cancelled = true;
     };
-  }, [enabled, environmentId, key, projectRoot]);
+  }, [connected, enabled, environmentId, key, projectRoot]);
   if (key === null) return null;
   if (state?.key === key) return state.value;
   return enabled ? { status: "checking" } : null;

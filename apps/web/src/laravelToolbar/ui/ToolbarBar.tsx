@@ -188,7 +188,7 @@ export function ToolbarBar({ initialPanel = null }: { initialPanel?: PanelId | n
                 }}
               />
               <div
-                className="pointer-events-auto absolute overflow-hidden rounded-xl border border-(--shell-divider-header)! bg-(--shell-control) text-foreground shadow-lg [--background:var(--shell-control)] [--contrast-border:var(--shell-divider-raised)] [--toolbar-group-border:var(--shell-control-raised-border)] [--toolbar-group-fill:var(--shell-control-raised)]"
+                className="pointer-events-auto absolute overflow-hidden rounded-xl border border-(--shell-divider-header)! bg-(--shell-card) text-foreground shadow-lg [--background:var(--shell-card)] [--contrast-border:var(--shell-divider-raised)] [--toolbar-group-border:var(--shell-control-raised-border)] [--toolbar-group-fill:var(--shell-control-raised)] dark:border-(--shell-divider)! dark:[--contrast-border:var(--shell-divider)] dark:[--contrast-input:var(--shell-divider)] dark:[--toolbar-group-border:var(--shell-divider)] dark:[--toolbar-group-fill:var(--shell-control)]"
                 style={{
                   inset: TOOLBAR_SHEET_INSET,
                 }}
@@ -215,7 +215,7 @@ export function ToolbarBar({ initialPanel = null }: { initialPanel?: PanelId | n
           )
         : null}
       {/* Narrow browsers drop the versions; the route name truncates. */}
-      <div className="@container flex items-center gap-2 overflow-hidden border-t border-(--shell-divider)! bg-background px-1.5 py-toolbar">
+      <div className="@container flex items-center gap-2 overflow-hidden border-t border-(--shell-divider)! bg-(--shell-card) px-1.5 py-toolbar">
         <ToolbarGroup className="min-w-0 shrink">
           {item(
             "requests",

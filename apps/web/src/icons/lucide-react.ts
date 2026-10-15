@@ -275,6 +275,7 @@ import {
   CircleArrowUpIcon as LuCircleArrowUp,
   CircleCheckIcon as LuCircleCheck,
   CircleDashedIcon as LuCircleDashed,
+  CircleDotDashedIcon as LuCircleDotDashed,
   CircleDotIcon as LuCircleDot,
   CircleHelpIcon as LuCircleHelp,
   CircleSlashIcon as LuCircleSlash,
@@ -605,6 +606,8 @@ export const CircleCheckIcon = connIcon(PhCheckCircle, LuCircleCheck, "circle-ch
   CircleCheck = CircleCheckIcon;
 export const CircleDashedIcon = connIcon(PhCircleDashed, LuCircleDashed, "circle-dashed"),
   CircleDashed = CircleDashedIcon;
+export const CircleDotDashedIcon = connIcon(PhCircleDashed, LuCircleDotDashed, "circle-dot-dashed"),
+  CircleDotDashed = CircleDotDashedIcon;
 export const CircleDotIcon = connIcon(PhRecord, LuCircleDot, "circle-dot"),
   CircleDot = CircleDotIcon;
 export const CircleHelpIcon = connIcon(PhQuestion, LuCircleHelp, "circle-help"),

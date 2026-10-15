@@ -1572,6 +1572,8 @@ const make = Effect.gen(function* () {
         status,
         workState: terminal ? "result_available" : "working",
         hasPendingChildRuns: false,
+        // A linked environment's child questions are answered there, not here.
+        hasPendingQuestion: false,
         providerInstanceId: task.providerInstanceId,
         model: task.model,
         summary: task.result,

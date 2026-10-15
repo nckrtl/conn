@@ -46,7 +46,7 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { isOrbitCheckout, useOrbitCheckout } from "../orbit/orbitThreadStore";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
-import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
+import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -65,7 +65,6 @@ import {
 } from "./ui/menu";
 import { Separator } from "./ui/separator";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { MiddleTruncate } from "./ui/middle-truncate";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { measureRestingComposerControls } from "./chat/restingComposerControlsMeasurement";
@@ -159,6 +158,7 @@ interface RunContextSelectorProps {
   previousWorktreeLabel: string | null;
   previousWorktreeBranch: string | null;
   onUsePreviousWorktree: () => void;
+  orbitTarget: { readonly environmentId: EnvironmentId; readonly projectRoot: string } | null;
 }
 
 const RunContextSelector = memo(function RunContextSelector({
@@ -180,8 +180,17 @@ const RunContextSelector = memo(function RunContextSelector({
   previousWorktreeLabel,
   previousWorktreeBranch,
   onUsePreviousWorktree,
+  orbitTarget,
 }: RunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
+  const { options: workspaceOptions } = useWorkspaceOptions({
+    activeWorktreePath,
+    effectiveEnvMode,
+    forceNewWorktree,
+    orbitTarget,
+    previousWorktreeLabel,
+    previousWorktreeBranch,
+  });
   const activeEnvironment = useMemo(
     () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
     [availableEnvironments, environmentId],
@@ -313,7 +322,7 @@ const RunContextSelector = memo(function RunContextSelector({
         className={
           isPanel
             ? "w-(--anchor-width)"
-            : previousWorktreeLabel
+            : workspaceOptions.length > 2
               ? "w-[min(21rem,calc(100vw-2rem))]"
               : undefined
         }
@@ -371,34 +380,23 @@ const RunContextSelector = memo(function RunContextSelector({
           <MenuRadioGroup
             value={effectiveEnvMode}
             onValueChange={(value) => {
-              if (value === "previous-worktree") {
+              if (value === PREVIOUS_WORKTREE_OPTION) {
                 onUsePreviousWorktree();
                 return;
               }
               onEnvModeChange(value as EnvMode);
             }}
           >
-            <MenuRadioItem disabled={envModeLocked || forceNewWorktree} value="local" closeOnClick>
-              <span className="flex min-w-0 items-center gap-1.5">
-                {activeWorktreePath ? (
-                  <FolderGitIcon className="size-3" />
-                ) : (
-                  <FolderIcon className="size-3" />
-                )}
-                <MiddleTruncate value={resolveCurrentWorkspaceLabel(activeWorktreePath)} />
-              </span>
-            </MenuRadioItem>
-            <MenuRadioItem disabled={envModeLocked} value="worktree" closeOnClick>
-              <span className="flex min-w-0 items-center gap-1.5">
-                <FolderGit2Icon className="size-3" />
-                <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
-              </span>
-            </MenuRadioItem>
-            {previousWorktreeLabel ? (
-              <MenuRadioItem disabled={envModeLocked} value="previous-worktree" closeOnClick>
-                <PreviousWorktreeItemContent branch={previousWorktreeBranch} />
+            {workspaceOptions.map((option) => (
+              <MenuRadioItem
+                key={option.value}
+                disabled={envModeLocked || option.disabled}
+                value={option.value}
+                closeOnClick
+              >
+                {option.content}
               </MenuRadioItem>
-            ) : null}
+            ))}
           </MenuRadioGroup>
         </MenuGroup>
       </MenuPopup>
@@ -746,6 +744,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
+            orbitTarget={orbitTarget}
           />
         ) : null}
         {panelSection !== "workspace" ? (
@@ -800,6 +799,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
+            orbitTarget={orbitTarget}
           />
         </div>
       ) : null}

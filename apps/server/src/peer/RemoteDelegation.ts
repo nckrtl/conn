@@ -228,7 +228,7 @@ const make = Effect.gen(function* () {
       // One key for the launch there and the record here, so a retry finds both.
       // Both are scoped to the provider session, as every key a caller passes is:
       // the forwarder scopes the launch's, and the record's names it.
-      const key = input.clientRequestId ?? (yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+      const key = input.clientRequestId ?? (yield* crypto.randomUUIDv4().pipe(Effect.orDie));
       const task = taskPrompt(input);
       const launched = yield* forwarding.call(
         scope,
@@ -334,7 +334,7 @@ const make = Effect.gen(function* () {
     stoppedThere: "ran-out" | "stopped" | undefined,
   ) =>
     Effect.gen(function* () {
-      const attempt = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+      const attempt = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       yield* threads
         .dispatch({
           type: "delegated_task.remote.complete",
@@ -611,7 +611,7 @@ const make = Effect.gen(function* () {
       const there = followScope(scope.thread, remote);
       // A later cancel stops what started there since; a retry of this one, nothing new.
       const key = `cancel:${encodeURIComponent(scope.requestNamespace)}:${
-        input.clientRequestId ?? (yield* crypto.randomUUIDv4.pipe(Effect.orDie))
+        input.clientRequestId ?? (yield* crypto.randomUUIDv4().pipe(Effect.orDie))
       }`;
       if (task.result !== null) {
         // Best effort: the result stands whether or not the stop gets there.

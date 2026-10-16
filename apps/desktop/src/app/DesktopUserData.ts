@@ -62,7 +62,7 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
       appBrand.previous !== null
         ? {
             current: input.isDevelopment ? appBrand.devUserDataDirName : appBrand.userDataDirName,
-            legacy: appBrandDisplayName(appBrand, input.isDevelopment ? "Dev" : "Alpha"),
+            legacy: appBrandDisplayName(appBrand, input.isDevelopment ? "Dev" : "Beta"),
           }
         : input.isDevelopment
           ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }

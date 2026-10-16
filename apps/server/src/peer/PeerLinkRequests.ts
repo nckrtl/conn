@@ -173,7 +173,7 @@ const make = Effect.gen(function* () {
           } as const;
         }
       }
-      const key = input.clientRequestId ?? (yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+      const key = input.clientRequestId ?? (yield* crypto.randomUUIDv4().pipe(Effect.orDie));
       // Turn item ids are global; scope the key to this thread. A retry with
       // the same clientRequestId finds this card and records nothing.
       const turnItemId = TurnItemId.make(

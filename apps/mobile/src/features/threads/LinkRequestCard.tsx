@@ -25,8 +25,8 @@ import { useMemo, useRef, useState } from "react";
 import { Modal, Platform, Pressable, ScrollView, View, type ColorValue } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { useLinkableMachines } from "../../state/peerLinks";
 import { mintPairingCodeOn } from "../../state/peerPairingCode";

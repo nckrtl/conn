@@ -20,7 +20,7 @@ const devBundleIdSuffix = NodePath.basename(repoRoot)
   .replaceAll(/[^a-z0-9]+/g, "");
 // The fork's identity, with upstream's as the default (src/branding/appBrand.ts).
 const brand = resolveForkBrand(process.env);
-const APP_DISPLAY_NAME = appBrandDisplayName(brand, isDevelopment ? "Dev" : "Alpha");
+const APP_DISPLAY_NAME = appBrandDisplayName(brand, isDevelopment ? "Dev" : "Beta");
 const APP_BUNDLE_ID = isDevelopment
   ? `${brand.devAppId}.${devBundleIdSuffix || "local"}`
   : brand.appId;

@@ -3,10 +3,10 @@ import type { ComponentProps, ReactNode } from "react";
 import { Platform, View } from "react-native";
 import { useResolveClassNames } from "uniwind";
 
-import { SymbolView } from "../../../components/AppSymbol";
-import { ListRow } from "../../../components/ListRow";
-import { ListRowLayout } from "../../../components/ListRowLayout";
-import { RowPressable } from "../../../components/RowPressable";
+import { SymbolView } from "../../../components/ui/AppSymbol";
+import { ListRow } from "../../../components/ui/ListRow";
+import { ListRowLayout } from "../../../components/ui/ListRowLayout";
+import { RowPressable } from "../../../components/ui/RowPressable";
 import type { SettingsLegalDocumentTarget, SettingsSheetTarget } from "./settings-sheet-targets";
 
 export function SettingsRow(props: {

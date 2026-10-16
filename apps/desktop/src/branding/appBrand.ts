@@ -13,7 +13,7 @@
  * launcher scripts resolve the brand themselves with `resolveAppBrand`.
  */
 
-export type AppBrandStage = "Alpha" | "Dev" | "Nightly";
+export type AppBrandStage = "Alpha" | "Beta" | "Dev" | "Nightly";
 
 /** Repo-relative paths of the app icon files one channel (dev or packaged) uses. */
 export interface AppBrandIconSet {
@@ -35,7 +35,7 @@ export interface AppBrandSource {
   readonly appId?: string;
   readonly scheme?: string;
   readonly appleTeamId?: string;
-  /** A stage label that is left out of the app name, such as "Alpha" for a packaged "Conn". */
+  /** A stage label that is left out of the app name, such as "Beta" for a packaged "Conn". */
   readonly omitStageLabel?: AppBrandStage;
   /** Icon files that replace upstream's; a missing file keeps upstream's. */
   readonly icons?: {

@@ -92,7 +92,7 @@ Sources:
 
 - `apps/mobile/modules/conn-symbols/` (`symbols.json`, `ios/`).
 - `scripts/build-conn-symbols.ts`.
-- Mobile (`apps/mobile/src/`): `components/AppSymbol.ios.tsx`,
+- Mobile (`apps/mobile/src/`): `components/ui/AppSymbol.ios.tsx`,
   `components/ConnSymbolScope.tsx`, `features/threads/ThreadDetailScreen.tsx`.
 
 ### Workspaces
@@ -576,7 +576,7 @@ Sources:
      `<MessagesTimeline>`;
      `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: keep
      `<ConnSymbolScope>` around `<ThreadFeed>`.
-   - `apps/mobile/src/components/AppSymbol.ios.tsx`: keep Conn's version (no
+   - `apps/mobile/src/components/ui/AppSymbol.ios.tsx`: keep Conn's version (no
      Tabler; `conn.` names inside `ConnSymbolScope`).
    - Work-log icon unions (`thread-work-log.tsx`): keep both sides' icons.
    - `apps/web/vite.config.ts` (`resolve.alias`), `apps/web/tsconfig.json`

@@ -2,10 +2,10 @@ import type { EnvironmentProvider } from "@t3tools/client-runtime/orbit-gateway"
 import { useState } from "react";
 import { ActivityIndicator, Pressable, TextInput, View } from "react-native";
 
-import { SymbolView } from "../../components/AppSymbol";
-import { AppText as Text } from "../../components/AppText";
-import { ControlPillMenu } from "../../components/ControlPillMenu";
-import { ErrorBanner } from "../../components/ErrorBanner";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { Menu } from "../../components/ui/Menu";
+import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { ConnectionSheetButton } from "./OrbitSheetButton";
 import { SettingsSection } from "../settings/components/SettingsSection";
@@ -53,7 +53,7 @@ export function EnvironmentProviderPicker() {
         {switching ? (
           <ActivityIndicator />
         ) : (
-          <ControlPillMenu
+          <Menu
             accessible
             accessibilityRole="button"
             accessibilityLabel={`Environment provider: ${current.label}`}
@@ -79,7 +79,7 @@ export function EnvironmentProviderPicker() {
               <Text className="text-base text-foreground-muted">{current.label}</Text>
               <SymbolView name="chevron.down" size={14} tintColorClassName="accent-chevron" />
             </Pressable>
-          </ControlPillMenu>
+          </Menu>
         )}
       </View>
     </SettingsSection>

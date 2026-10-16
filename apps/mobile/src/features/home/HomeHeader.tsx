@@ -1,4 +1,5 @@
-import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
+import { Toolbar } from "../../components/ui/Toolbar";
+import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { use, useCallback, useEffect, useRef } from "react";
 import { useNavigation, type ParamListBase } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
@@ -116,7 +117,7 @@ export function HomeHeader(props: HomeHeaderProps) {
                 ]
               : [],
           // The keys below are set per-branch (not `undefined`) so a later
-          // reapply cannot clobber options owned by NativeHeaderToolbar.
+          // reapply cannot clobber options owned by Toolbar.
           ...(sidebarHeader
             ? {
                 headerSearchBarOptions: {
@@ -191,17 +192,17 @@ export function HomeHeader(props: HomeHeaderProps) {
       />
 
       {sidebarHeader || usesNativeMailSearchToolbar ? null : (
-        <NativeHeaderToolbar placement="bottom">
-          <NativeHeaderToolbar.Button
+        <Toolbar placement="bottom">
+          <Toolbar.Button
             accessibilityLabel="Open settings"
             icon="ellipsis"
             onPress={props.onOpenSettings}
             separateBackground
           />
-          <NativeHeaderToolbar.Spacer flexible />
+          <Toolbar.Spacer flexible />
           {/* The pull-down search lives in the nav bar here, so the filter
               cannot sit inside it; it stays beside the create button. */}
-          <NativeHeaderToolbar.Menu
+          <Toolbar.Menu
             accessibilityLabel="Filter threads"
             icon={
               hasCustomListOptions
@@ -212,77 +213,77 @@ export function HomeHeader(props: HomeHeaderProps) {
             separateBackground
           >
             {workspaces.length > 0 ? (
-              <NativeHeaderToolbar.Menu title="Workspace">
-                <NativeHeaderToolbar.Label>Workspace</NativeHeaderToolbar.Label>
-                <NativeHeaderToolbar.MenuAction
+              <Toolbar.Menu title="Workspace">
+                <Toolbar.Label>Workspace</Toolbar.Label>
+                <Toolbar.MenuAction
                   isOn={gateway.selectedWorkspaceId === null}
                   onPress={() => selectOrbitWorkspace(null)}
                   subtitle="Show threads from every workspace"
                 >
-                  <NativeHeaderToolbar.Label>All projects</NativeHeaderToolbar.Label>
-                </NativeHeaderToolbar.MenuAction>
+                  <Toolbar.Label>All projects</Toolbar.Label>
+                </Toolbar.MenuAction>
                 {workspaces.map((workspace) => (
-                  <NativeHeaderToolbar.MenuAction
+                  <Toolbar.MenuAction
                     key={workspace.id}
                     isOn={gateway.selectedWorkspaceId === workspace.id}
                     onPress={() => selectOrbitWorkspace(workspace.id)}
                   >
-                    <NativeHeaderToolbar.Label>{workspace.label}</NativeHeaderToolbar.Label>
-                  </NativeHeaderToolbar.MenuAction>
+                    <Toolbar.Label>{workspace.label}</Toolbar.Label>
+                  </Toolbar.MenuAction>
                 ))}
-              </NativeHeaderToolbar.Menu>
+              </Toolbar.Menu>
             ) : null}
 
-            <NativeHeaderToolbar.Menu title="Environment">
-              <NativeHeaderToolbar.Label>Environment</NativeHeaderToolbar.Label>
-              <NativeHeaderToolbar.MenuAction
+            <Toolbar.Menu title="Environment">
+              <Toolbar.Label>Environment</Toolbar.Label>
+              <Toolbar.MenuAction
                 isOn={props.selectedEnvironmentId === null}
                 onPress={() => props.onEnvironmentChange(null)}
                 subtitle="Show threads from every environment"
               >
-                <NativeHeaderToolbar.Label>All environments</NativeHeaderToolbar.Label>
-              </NativeHeaderToolbar.MenuAction>
+                <Toolbar.Label>All environments</Toolbar.Label>
+              </Toolbar.MenuAction>
               {props.environments.map((environment) => (
-                <NativeHeaderToolbar.MenuAction
+                <Toolbar.MenuAction
                   key={environment.environmentId}
                   isOn={props.selectedEnvironmentId === environment.environmentId}
                   onPress={() => props.onEnvironmentChange(environment.environmentId)}
                 >
-                  <NativeHeaderToolbar.Label>{environment.label}</NativeHeaderToolbar.Label>
-                </NativeHeaderToolbar.MenuAction>
+                  <Toolbar.Label>{environment.label}</Toolbar.Label>
+                </Toolbar.MenuAction>
               ))}
-            </NativeHeaderToolbar.Menu>
+            </Toolbar.Menu>
 
             {props.projects.length > 0 ? (
-              <NativeHeaderToolbar.Menu title="Project">
-                <NativeHeaderToolbar.Label>Project</NativeHeaderToolbar.Label>
-                <NativeHeaderToolbar.MenuAction
+              <Toolbar.Menu title="Project">
+                <Toolbar.Label>Project</Toolbar.Label>
+                <Toolbar.MenuAction
                   isOn={props.selectedProjectKey === null}
                   onPress={() => props.onProjectChange(null)}
                   subtitle="Show threads from every project"
                 >
-                  <NativeHeaderToolbar.Label>All projects</NativeHeaderToolbar.Label>
-                </NativeHeaderToolbar.MenuAction>
+                  <Toolbar.Label>All projects</Toolbar.Label>
+                </Toolbar.MenuAction>
                 {props.projects.map((project) => (
-                  <NativeHeaderToolbar.MenuAction
+                  <Toolbar.MenuAction
                     key={project.key}
                     isOn={props.selectedProjectKey === project.key}
                     onPress={() => props.onProjectChange(project.key)}
                     subtitle={project.subtitle}
                   >
-                    <NativeHeaderToolbar.Label>{project.label}</NativeHeaderToolbar.Label>
-                  </NativeHeaderToolbar.MenuAction>
+                    <Toolbar.Label>{project.label}</Toolbar.Label>
+                  </Toolbar.MenuAction>
                 ))}
-              </NativeHeaderToolbar.Menu>
+              </Toolbar.Menu>
             ) : null}
-          </NativeHeaderToolbar.Menu>
-          <NativeHeaderToolbar.Button
+          </Toolbar.Menu>
+          <Toolbar.Button
             accessibilityLabel="New task"
             icon="plus"
             onPress={props.onStartNewTask}
             separateBackground
           />
-        </NativeHeaderToolbar>
+        </Toolbar>
       )}
     </>
   );

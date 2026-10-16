@@ -3,7 +3,7 @@
   "appId": "com.nckrtl.conn",
   "scheme": "conn",
   "appleTeamId": "9SVJ4SYB9B",
-  "omitStageLabel": "Alpha",
+  "omitStageLabel": "Beta",
   "icons": {
     "dev": {
       "macPng": "assets/conn/dev/conn-dev-macos-1024.png",

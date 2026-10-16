@@ -493,6 +493,8 @@ const makeLaptop = (
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+      Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),
+      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
       Layer.fresh,
     );
     const here = yield* Layer.build(layerHere);

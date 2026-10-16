@@ -61,8 +61,6 @@ import {
   ensureInlineContextReferences,
   formatInlineContextReference,
   removeInlineContextReference,
-  toComposerContextId,
-  toKindScopedComposerContextId,
 } from "./lib/composerContextReferences";
 import {
   fileContextReference,
@@ -85,7 +83,11 @@ import {
   RecentKeyChanges,
 } from "./lib/desktopWindowContext";
 import { getDefaultServerModel } from "./providerModels";
-import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
+import {
+  replaceComposerContextReferences,
+  toComposerContextId,
+  toKindScopedComposerContextId,
+} from "@t3tools/shared/composerContextReferences";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
 import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewCommentContext";
 const isRuntimeMode = Schema.is(RuntimeMode);

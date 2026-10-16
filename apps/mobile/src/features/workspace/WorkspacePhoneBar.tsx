@@ -3,7 +3,7 @@ import { use, useCallback, useEffect, useRef } from "react";
 import { Keyboard, Pressable, Text, View, useWindowDimensions } from "react-native";
 import type { SearchBarCommands } from "react-native-screens";
 
-import { SymbolView } from "../../components/AppSymbol";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { NativeWorkspaceTabActivityContext } from "../../native/v5-workspace-context";
 import type { HomeListFilterMenu } from "../home/home-list-filter-menu";

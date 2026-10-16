@@ -32,7 +32,7 @@ describe("app brand", () => {
       userDataDirName: "conn",
       devUserDataDirName: "conn-dev",
       appleTeamId: "9SVJ4SYB9B",
-      omitStageLabel: "Alpha",
+      omitStageLabel: "Beta",
       icons: {
         dev: {
           macPng: "assets/conn/dev/conn-dev-macos-1024.png",
@@ -68,7 +68,7 @@ describe("app brand", () => {
 
   it("names the packaged app without a stage label and the others with one", () => {
     const brand = resolveForkBrand({});
-    expect(appBrandDisplayName(brand, "Alpha")).toBe("Conn");
+    expect(appBrandDisplayName(brand, "Beta")).toBe("Conn");
     expect(appBrandDisplayName(brand, "Dev")).toBe("Conn (Dev)");
     expect(appBrandDisplayName(brand, "Nightly")).toBe("Conn (Nightly)");
   });

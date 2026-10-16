@@ -2779,7 +2779,7 @@ export function resolveDesktopProductName(
   const nightly = resolveDesktopUpdateChannel(version) === "nightly";
   // A renamed fork app ("Conn") names itself; the nightly label stays.
   if (brand.name !== UPSTREAM_APP_BRAND.name) {
-    return appBrandDisplayName(brand, nightly ? "Nightly" : "Alpha");
+    return appBrandDisplayName(brand, nightly ? "Nightly" : "Beta");
   }
   return nightly ? "T3 Code (Nightly)" : (desktopPackageJson.productName ?? "T3 Code");
 }

@@ -10,8 +10,8 @@ import {
   type ViewProps,
 } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
 import { MONO_FONT_FAMILY } from "../../lib/fonts";
+import { AppText as Text } from "../../components/ui/AppText";
 import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {

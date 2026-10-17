@@ -104,14 +104,11 @@ interface RightPanelTabsProps {
   open?: boolean;
   keybindings: ResolvedKeybindingsConfig;
   getShortcutContext: () => ShortcutMatchContext;
-  /** Forwarded to PreviewPanelShell so this surface persists its own width. */
   widthStorageKey?: string;
-  /** Forwarded to PreviewPanelShell as the initial width before a user resize. */
   defaultWidth?: number;
   inlineSize?: PreviewPanelInlineSize;
   layoutControls?: ReactNode;
   surfaces: readonly RightPanelSurface[];
-  /** Fallback environment for surfaces that do not carry their own. */
   environmentId: EnvironmentId | null;
   activeSurfaceId: string | null;
   pendingSurfaceIds: ReadonlySet<string>;
@@ -130,7 +127,6 @@ interface RightPanelTabsProps {
   onCloseOtherSurfaces: (surface: RightPanelSurface) => void;
   onCloseSurfacesToRight: (surface: RightPanelSurface) => void;
   onCloseAllSurfaces: () => void;
-  /** Tabs are draggable only when the owner can persist the new order. */
   onMoveSurface?: (surfaceId: string, toIndex: number) => void;
   onCopyFilePath: (relativePath: string) => void;
   onAddBrowser: () => void;
@@ -195,7 +191,6 @@ const SURFACE_DISABLED_REASONS = {
   mcp: `The MCP panel is only available in the ${APP_BASE_NAME} desktop app, from a project thread.`,
 } as const;
 
-/** Overlays that must win over the launcher's letter shortcuts. */
 const LAUNCHER_SHORTCUT_BLOCKING_LAYERS = [
   '[data-slot="dialog-popup"]',
   '[data-slot="alert-dialog-popup"]',
@@ -207,7 +202,6 @@ const LAUNCHER_SHORTCUT_BLOCKING_LAYERS = [
   '[data-slot="autocomplete-popup"]',
 ].join(",");
 
-/** One-line unavailability hints for the empty-state rows. */
 const SURFACE_UNAVAILABLE_HINTS = {
   browser: "Only available in the desktop app.",
   terminal: "Available when a project is open.",
@@ -237,10 +231,6 @@ function tabScrollViewport(root: HTMLDivElement | null): HTMLDivElement | null {
   return root?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null;
 }
 
-/**
- * Desktop preview tab backing a surface, or null for non-preview surfaces, the
- * "new browser tab" placeholder, and the web build where no desktop tab exists.
- */
 function previewTabIdOf(
   surface: RightPanelSurface,
   sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
@@ -250,7 +240,6 @@ function previewTabIdOf(
 }
 
 /**
- * Label and enabled state for a preview tab's mute menu entry.
  * Stays disabled until desktop overlay state arrives: a server session id can
  * resolve while the preview manager's createTab is still in flight, and muting
  * then fails with a PreviewTabNotFoundError nothing surfaces to the user.
@@ -268,10 +257,6 @@ export function tabMuteMenuItem(input: {
 
 type TabAudioState = "none" | "audible" | "muted";
 
-/**
- * A muted tab that is not making sound shows nothing: mute is armed silently,
- * and the indicator only appears once there is audio to speak of.
- */
 function tabAudioState(overlay: DesktopPreviewOverlay | null): TabAudioState {
   if (!overlay?.audible) return "none";
   return overlay.audioMuted ? "muted" : "audible";
@@ -295,12 +280,9 @@ export function surfaceShortcutActionForKey<
 }
 
 /**
- * A focused editable is a typing context whether or not it has text yet: an
- * empty chat composer at rest is still where the user's next keystrokes are
- * meant to land, and claiming launcher letters from it would redirect prompts
- * into whatever surface opens. The `:not` clause lets `closest` see past
- * non-editable islands (`contenteditable="false"`) to an editable host around
- * them, matching ComposerPendingUserInputPanel's typing guard.
+ * The `:not` clause lets `closest` see past non-editable islands
+ * (`contenteditable="false"`) to an editable host around them, matching
+ * ComposerPendingUserInputPanel's typing guard.
  */
 export function surfaceShortcutTargetsTypingContext(
   target: { closest(selectors: string): unknown } | null,
@@ -342,13 +324,6 @@ function SurfaceMenuItem(props: {
   return <DisabledReasonTooltip reason={props.disabledReason} trigger={item} />;
 }
 
-/**
- * List launcher shown when the right panel has no surfaces. Keyboard-first
- * without palette chrome: a surface's letter opens it directly from anywhere
- * outside a typing context, and arrows plus Enter work while the launcher is
- * focused. The highlight only appears on hover or arrow use. Unavailable
- * surfaces stay visible with a one-line reason.
- */
 function RightPanelEmptyState(props: {
   onAddBrowser: () => void;
   onAddBrowserInProfile: (profileId: string) => void;
@@ -376,7 +351,6 @@ function RightPanelEmptyState(props: {
   pullRequestsAvailable: boolean;
   deviceAvailable: boolean;
 }) {
-  // -1 means no highlight: it only appears on hover or arrow use.
   const [highlight, setHighlight] = useState(-1);
 
   const actions = [
@@ -475,10 +449,6 @@ function RightPanelEmptyState(props: {
   const highlightIndex =
     availableActions.length === 0 ? -1 : Math.min(highlight, availableActions.length - 1);
 
-  // Letter shortcuts work while the launcher is visible, not only while it
-  // is focused; focus moves around too easily (stray clicks) to carry them.
-  // Capture phase so app-level key handlers cannot swallow the event first;
-  // typing contexts and already-handled events are left alone.
   const shortcutActionsRef = useRef(availableActions);
   useEffect(() => {
     shortcutActionsRef.current = availableActions;
@@ -488,7 +458,6 @@ function RightPanelEmptyState(props: {
       const action = surfaceShortcutActionForKey(shortcutActionsRef.current, event);
       if (!action) return;
       if (document.querySelector(LAUNCHER_SHORTCUT_BLOCKING_LAYERS)) return;
-      // The composed path starts at the real target, which may sit inside a shadow root.
       const target = event.composedPath()[0] ?? event.target;
       if (target instanceof Element && surfaceShortcutTargetsTypingContext(target)) return;
       event.preventDefault();
@@ -517,7 +486,6 @@ function RightPanelEmptyState(props: {
       return;
     }
     if (event.key === "Enter") {
-      // Only activate the highlight when the launcher itself has focus.
       if (event.target !== event.currentTarget) return;
       const action = availableActions[highlightIndex];
       if (!action) return;
@@ -553,8 +521,6 @@ function RightPanelEmptyState(props: {
       data-surface-launcher-keys={availableActions.map((action) => action.shortcut).join("")}
       className={cn(
         "scrollbar-gutter-both flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 outline-none",
-        // The panel topbar sits above this container; matching bottom padding
-        // keeps the list centered against the full panel, not the leftover.
         "pb-(--workspace-topbar-height)",
       )}
     >
@@ -563,10 +529,6 @@ function RightPanelEmptyState(props: {
         <div className="flex flex-col gap-0.5">
           {actions.map((action) =>
             action.available ? (
-              // The row is itself a button, so the profile chooser sits beside
-              // it in a wrapper rather than inside it. Hover lives on the
-              // wrapper: the chooser overlays the row, and a pointer moving
-              // onto it must not read as leaving the row.
               <div
                 key={action.label}
                 className="group relative"
@@ -596,11 +558,6 @@ function RightPanelEmptyState(props: {
                   </span>
                   <Kbd>{action.shortcut}</Kbd>
                 </button>
-                {/*
-                  Same choice the tab bar's "+" menu offers: the row opens the
-                  default profile, the chevron picks another. Only worth showing
-                  once there is something to choose between.
-                */}
                 {action.label === "Browser" && props.browserProfiles.length > 1 ? (
                   <Menu>
                     <MenuTrigger
@@ -865,9 +822,6 @@ function PullRequestSurfaceIcon({
     [surface.projectId, surface.repository, surface.number],
   );
   const sharedSummary = useSharedPullRequestSummary(resolvedEnvironmentId, reference, null);
-  // The compact tab intentionally shows lifecycle and draft state only. Conflict warnings have
-  // their own presentation on surfaces that have mergeability, while this tab stays stable as
-  // detail data arrives.
   const status = linkedSnapshot ?? newestPullRequestSummary(detail, sharedSummary) ?? seed ?? null;
   if (status === null) {
     return <PullRequestGlyph.pullRequest className="size-4 shrink-0 text-muted-foreground" />;
@@ -879,10 +833,6 @@ function PullRequestSurfaceIcon({
   return <presentation.Icon className={cn("size-4 shrink-0", presentation.toneClassName)} />;
 }
 
-/**
- * Lets its tabs be dragged into a new order. Neighbours slide aside while dragging,
- * and the order commits on drop.
- */
 function SortableTabList(props: {
   surfaces: readonly RightPanelSurface[];
   onMove: ((surfaceId: string, toIndex: number) => void) | undefined;
@@ -1113,16 +1063,11 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
         items.push({ id: "copy-path", label: "Copy path" });
       }
       const menuPreviewTabId = previewTabIdOf(surface, props.previewSessions);
-      // Desktop overlay state only arrives once the preview manager has created
-      // the tab. A server session id alone can still be ahead of that, and
-      // muting then fails with PreviewTabNotFoundError that nobody surfaces.
       const menuOverlay = menuPreviewTabId
         ? (props.desktopByTabId[menuPreviewTabId] ?? null)
         : null;
       const menuMuted = menuOverlay?.audioMuted ?? false;
       if (surface.kind === "preview") {
-        // Not gated on audibility: silencing a quiet tab ahead of time is the
-        // point, so the item is offered whenever the tab is mutable at all.
         items.push({
           id: "toggle-mute",
           ...tabMuteMenuItem({
@@ -1161,8 +1106,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           }
           break;
         case "toggle-mute": {
-          // menuOverlay repeats the disabled gate above: the desktop tab must
-          // exist before it can be addressed, however the menu was dismissed.
           const runtimeTabId =
             menuPreviewTabId && menuOverlay
               ? (props.previewRuntimeTabId?.(menuPreviewTabId) ?? null)
@@ -1296,8 +1239,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                   props.terminalLabelsById,
                 );
                 const previewTabId = previewTabIdOf(surface, props.previewSessions);
-                // Desktop state is keyed by the session id, but desktop actions
-                // must be addressed with the runtime id.
                 const audio = tabAudioState(
                   previewTabId ? (props.desktopByTabId[previewTabId] ?? null) : null,
                 );
@@ -1350,8 +1291,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                               className="cursor-pointer flex size-5 shrink-0 items-center justify-center rounded-sm hover:bg-muted"
                               aria-label={audio === "muted" ? `Unmute ${title}` : `Mute ${title}`}
                               onClick={(event) => {
-                                // Sibling of the close button, inside a tab that
-                                // activates on click: keep this to the toggle.
                                 event.stopPropagation();
                                 void previewBridge
                                   ?.setAudioMuted(audioRuntimeTabId, audio !== "muted")
@@ -1447,11 +1386,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                 >
                   {addSurfaceActions.map((action) => {
                     const Icon = action.icon;
-                    // Browser collapses into one row: clicking the trigger opens
-                    // the default profile (the common case stays one click),
-                    // while hover or arrow reveals the profiles. The choice
-                    // lives at open time because a tab's profile is fixed then —
-                    // Electron only honours a partition before attach.
                     if (action.label === "Browser" && action.available) {
                       return (
                         <MenuSub key={action.label}>
@@ -1464,10 +1398,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                                 typeof event.nativeEvent.pointerType === "string"
                                   ? event.nativeEvent.pointerType
                                   : undefined;
-                              // Touch has no hover path to the profile choices:
-                              // its first tap opens the submenu, then a profile
-                              // is selected there. Mouse click keeps the common
-                              // default-profile action at one click.
                               if (!shouldOpenDefaultBrowserProfileFromMenuClick(pointerType))
                                 return;
                               setAddSurfaceMenuOpen(false);
@@ -1478,11 +1408,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                             {action.label}
                             <MenuShortcut>{action.shortcut}</MenuShortcut>
                           </MenuSubTrigger>
-                          {/*
-                            Capped and truncated: profile names are user-supplied
-                            and run to 48 characters, which would otherwise widen
-                            the popup to fit-content and wrap.
-                          */}
                           <MenuSubPopup className="max-w-56">
                             {browserProfiles.map((profile) => (
                               <MenuItem
@@ -1560,7 +1485,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
         ) : null}
         {props.layoutControls}
         {ownsDesktopTitleBar && !props.layoutControls ? (
-          // Keeps the tabs clear of the window controls when the layout toggles live elsewhere.
           <span aria-hidden className="hidden w-24 shrink-0 wco:block" />
         ) : null}
         {ownsDesktopTitleBar ? (

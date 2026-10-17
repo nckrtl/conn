@@ -1,46 +1,59 @@
 diff -ruN a/ios/renderer/ListItemRenderer.m b/ios/renderer/ListItemRenderer.m
---- a/ios/renderer/ListItemRenderer.m
-+++ b/ios/renderer/ListItemRenderer.m
-@@ -83,9 +83,9 @@
+--- a/ios/renderer/ListItemRenderer.m	2026-10-17 03:38:32
++++ b/ios/renderer/ListItemRenderer.m	2026-10-17 03:38:33
+@@ -83,10 +83,10 @@
  
    // currentDepth - 1 handles the horizontal offset for nested lists
    const NSInteger nestingLevel = currentDepth - 1;
--  const CGFloat baseMarkerWidth = isTask                                  ? [_config effectiveListMarginLeftForTask]
+-  // A task in a widened ordered list moves with its numbered siblings.
++  // Conn: bullets and numbers use their list's own marker width (see ListRenderer).
++  // Tasks still move with a widened ordered list via listMarkerExtra (upstream t3.15).
+   const CGFloat baseMarkerWidth = isTask ? [_config effectiveListMarginLeftForTask] + context.listMarkerExtra
 -                                  : (context.listType == ListTypeOrdered) ? context.listMarkerWidth
 -                                                                          : [_config effectiveListMarginLeftForBullet];
-+  // Conn: bullets and numbers use their list's own marker width (see ListRenderer).
-+  const CGFloat baseMarkerWidth = isTask ? [_config effectiveListMarginLeftForTask]
 +                                         : MAX([_config listStyleMarkerMinWidth], context.listMarkerWidth);
  
    const CGFloat blockquoteIndent =
        blockquoteIndentForDepth(context.blockquoteDepth, [_config blockquoteBorderWidth] + [_config blockquoteGapWidth]);
 diff -ruN a/ios/renderer/ListRenderer.m b/ios/renderer/ListRenderer.m
---- a/ios/renderer/ListRenderer.m
-+++ b/ios/renderer/ListRenderer.m
-@@ -108,7 +108,19 @@
-     }
+--- a/ios/renderer/ListRenderer.m	2026-10-17 03:38:32
++++ b/ios/renderer/ListRenderer.m	2026-10-17 03:38:33
+@@ -94,20 +94,20 @@
+   if (prevDepth > 0) {
+     context.ancestorMarkerOffset += context.listItemMarkerExtra;
    }
- 
--  context.listMarkerExtra = context.listMarkerWidth - defaultMarkerWidth;
+-  context.listMarkerWidth = defaultMarkerWidth;
 +  // Conn: size the marker column to this list's widest number, so "1." starts at the
 +  // list's edge like a bullet does, instead of right-aligning in a "99." column.
 +  // Nested lists shift only by the width past upstream's "99." gutter.
-+  if (_isOrdered) {
++  // Upstream t3.15 only widened past 100; Conn always sizes to the widest number.
+   if (_isOrdered) {
+-    NSInteger number = startNumber;
+-    for (MarkdownASTNode *item in node.children) {
+-      if (item.type != MarkdownNodeTypeListItem)
+-        continue;
+-      // Keep the existing gutter for one- and two-digit markers.
+-      if (number >= 100 && ![item.attributes[@"isTask"] isEqualToString:@"true"]) {
+-        context.listMarkerWidth = MAX(context.listMarkerWidth, [_config effectiveListMarginLeftForNumber:number]);
+-      }
+-      number++;
+-    }
 +    NSInteger lastNumber = startNumber + MAX((NSInteger)1, (NSInteger)node.children.count) - 1;
 +    UIFont *markerFont = [_config listMarkerFont] ?: _config.listStyleFont;
 +    NSString *widest = [NSString stringWithFormat:@"%ld.", (long)lastNumber];
 +    context.listMarkerWidth = [widest sizeWithAttributes:@{NSFontAttributeName : markerFont}].width;
 +  } else {
 +    context.listMarkerWidth = [_config listStyleBulletSize];
-+  }
+   }
+-  context.listMarkerExtra = context.listMarkerWidth - defaultMarkerWidth;
 +
 +  context.listMarkerExtra = MAX((CGFloat)0, context.listMarkerWidth - defaultMarkerWidth);
  
    [context setBlockStyle:_isOrdered ? BlockTypeOrderedList : BlockTypeUnorderedList
                      font:_config.listStyleFont
 diff -ruN a/ios/utils/ListMarkerDrawer.m b/ios/utils/ListMarkerDrawer.m
---- a/ios/utils/ListMarkerDrawer.m
-+++ b/ios/utils/ListMarkerDrawer.m
+--- a/ios/utils/ListMarkerDrawer.m	2026-10-17 03:38:32
++++ b/ios/utils/ListMarkerDrawer.m	2026-10-17 03:38:33
 @@ -107,7 +107,10 @@
                                                     centerY:baselineY - (font.capHeight / 2.0)
                                                     checked:marker.isChecked];

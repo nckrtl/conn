@@ -26,12 +26,13 @@ export function HomeHeader(props: HomeHeaderProps) {
   const navigation = useNavigation<NativeStackNavigationProp<ParamListBase>>();
   const { layout, panes, togglePrimarySidebar } = useAdaptiveWorkspaceLayout();
   const usesNativeMailSearchToolbar = useNativeMailSearchToolbar();
+  const deviceType = useDeviceType();
   const primaryColumn = use(NativePrimaryColumnContext);
   const sidebarHeader =
     Platform.OS === "ios" &&
     primaryColumn !== null &&
-    (Platform.isPad || !usesNativeMailSearchToolbar);
-  const showsCompactCompose = Platform.OS === "ios" && Platform.isPad && !layout.usesSplitView;
+    (deviceType === "pad" || !usesNativeMailSearchToolbar);
+  const showsCompactCompose = deviceType === "pad" && !layout.usesSplitView;
   const searchBarRef = useRef<SearchBarCommands>(null);
   const focusAfterReveal = useRef(false);
   useEffect(
@@ -87,8 +88,6 @@ export function HomeHeader(props: HomeHeaderProps) {
       <NativeStackScreenOptions
         optionsVersion={[filterMenu.items, showsCompactCompose]}
         options={{
-          // Static header config (glass, title, fonts) lives in Stack.tsx
-          // (GLASS_HEADER_OPTIONS). Only dynamic values are set here.
           headerTintColor: iconColor,
           // On iPhone, settings lives in the bottom bar; the header carries no items.
           unstable_headerRightItems: () =>

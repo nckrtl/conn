@@ -17,10 +17,6 @@ import {
   type WorkspaceConnectionStatusPresentation,
 } from "./workspace-connection-status";
 
-/**
- * Delay before a connection interruption surfaces in the title slot. Sub-second
- * blips (the common reconnect case) resolve without any UI at all.
- */
 const STATUS_SHOW_DELAY_MS = 800;
 const FADE_IN_MS = 250;
 
@@ -70,10 +66,10 @@ export function useDelayedConnectionStatus(
 }
 
 /**
- * One-shot entrance fade for the status label. Deliberately JS-driven: this can
- * mount inside a native header item (RNSScreenStackHeaderSubview), where
- * native-driver animated nodes blank the re-hosted view entirely. The JS driver
- * updates opacity through the ordinary style path, which those subviews handle.
+ * Deliberately JS-driven: this can mount inside a native header item
+ * (RNSScreenStackHeaderSubview), where native-driver animated nodes blank the
+ * re-hosted view entirely. The JS driver updates opacity through the ordinary
+ * style path, which those subviews handle.
  */
 function StatusFadeIn(props: {
   readonly children: ReactNode;
@@ -104,27 +100,12 @@ function StatusFadeIn(props: {
   );
 }
 
-/**
- * Renders the brand/title slot of a thread-list surface, swapping the brand
- * for the workspace connection status while an environment is unavailable.
- *
- * Both states occupy the same slot, so connection changes never shift the
- * layout below. While connected the brand renders untouched — no wrapper —
- * keeping the native header item on the exact element tree that predates the
- * status swap. Replaces the old WorkspaceConnectionStatus pill, which inserted
- * a row above the thread list.
- */
 export function WorkspaceConnectionTitle(props: {
-  /** Content shown while connected (brand lockup or a screen title). */
   readonly brand: ReactNode;
-  /** Opens environment settings. Status is not pressable when omitted. */
   readonly onPress?: () => void;
-  /** Fill the available row width (in-flow headers) instead of hugging content (native title slots). */
   readonly grow?: boolean;
   readonly size?: "navbar" | "pageTitle";
-  /** Horizontal correction so the status aligns with the brand in native title slots. */
   readonly statusOffset?: number;
-  /** Space available beside the native header actions. */
   readonly maxWidth?: number;
   /** Presentation to show instead of this component's own debounced status. */
   readonly status?: WorkspaceConnectionStatusPresentation | null;
@@ -223,8 +204,6 @@ export function getConnectionAwareBrandHeaderOptions(opts: {
   readonly onOpenEnvironments: () => void;
   readonly fallbackTitleStyle?: NativeStackNavigationOptions["headerTitleStyle"];
 }): NativeStackNavigationOptions {
-  // Leave room for bar margins, title spacing and the 44-point native actions.
-  // Long status labels must not push Settings into UIKit's overflow menu.
   const maxWidth = Math.max(0, opts.headerWidth - 64 - 44 * (opts.trailingItemCount ?? 1));
 
   return {

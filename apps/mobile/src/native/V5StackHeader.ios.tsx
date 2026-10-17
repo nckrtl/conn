@@ -7,7 +7,7 @@ import { isValidElement, useEffect, useRef } from "react";
 import { Platform, StyleSheet, useWindowDimensions } from "react-native";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import { useMobileNavigationTheme } from "../lib/useMobileNavigationTheme";
-import { useNativeLayoutMetrics } from "../native/native-layout-metrics";
+import { useDeviceType, useNativeLayoutMetrics } from "../native/native-layout-metrics";
 import {
   SearchBar,
   Stack,
@@ -70,7 +70,6 @@ function convertMenu(menu: MenuInput, id: string): StackHeaderMenuIOS {
         },
       ];
     }
-    // Use actions even for checked entries: the app owns their durable state.
     return [
       {
         id: childId,
@@ -138,7 +137,6 @@ function convertItems(items: NativeStackHeaderItem[], prefix: string): HeaderIte
   });
 }
 
-/** Translate the existing screen options to v5's native header API. */
 export function V5StackHeader(props: {
   readonly options: Options;
   readonly canGoBack: boolean;
@@ -147,6 +145,7 @@ export function V5StackHeader(props: {
   const { options } = props;
   const theme = useMobileNavigationTheme();
   const nativeMetrics = useNativeLayoutMetrics();
+  const deviceType = useDeviceType();
   const searchRef = useRef<SearchBarCommands>(null);
   // Conn: search fields use the composer's text size, which follows the
   // appearance settings and Dynamic Type like the composer's TextInput.
@@ -165,7 +164,7 @@ export function V5StackHeader(props: {
   const mailSearch = toolbar.find(
     (item): item is HeaderBarButtonMailSearchToolbarItem => item.type === "mailSearchToolbar",
   );
-  const bottomSearch = Boolean(mailSearch) && Platform.OS === "ios" && !Platform.isPad;
+  const bottomSearch = Boolean(mailSearch) && deviceType !== "pad";
   const bottom = toolbar.flatMap<HeaderItem>((item, index) => {
     if (item.type === "mailSearchToolbar") return [];
     if (item.type === "searchBarPlacement")

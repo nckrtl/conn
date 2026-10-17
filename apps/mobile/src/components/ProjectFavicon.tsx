@@ -212,7 +212,6 @@ function ProjectFaviconImage(props: {
         />
       ) : null}
 
-      {/* Favicon image (hidden until loaded) */}
       {requestIsActive ? (
         <Image
           key={faviconRequest.faviconUrl}

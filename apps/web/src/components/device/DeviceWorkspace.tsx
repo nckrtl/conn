@@ -15,7 +15,6 @@ import { DeviceStreamView, type DeviceStreamHandle } from "./DeviceStreamView";
 import { DeviceToolsPanel } from "./DeviceToolsPanel";
 import { useDeviceControls } from "./useDeviceControls";
 
-/** Keyed by environment and device; the screen, quick controls and drawer share the same session. */
 export function DeviceWorkspace(props: {
   threadRef: ScopedThreadRef;
   environmentId: EnvironmentId;

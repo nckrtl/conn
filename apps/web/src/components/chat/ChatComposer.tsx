@@ -6425,6 +6425,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // effect, no eager focus) live in makeComposerMentionDragHandlers.
   const composerMentionDragHandlers = makeComposerMentionDragHandlers({
     insertMentionAtEnd: (text) => insertComposerTextAtEnd(text, { ensureLeadingBoundary: true }),
+    insertPullRequestAtEnd: (pullRequest) => {
+      const comment = buildPullRequestReferenceContext(pullRequest);
+      const inserted = insertComposerTextAtEnd(
+        `${formatInlineContextReference(reviewCommentContextReference(comment))} `,
+        { ensureLeadingBoundary: true },
+      );
+      if (inserted) {
+        addComposerDraftReviewComment(composerDraftTarget, comment, { appendReference: false });
+      }
+      return inserted;
+    },
     setDragActive: setIsDragOverComposer,
     onInsertRejected: () => {
       toastManager.add({

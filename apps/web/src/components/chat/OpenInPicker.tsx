@@ -393,7 +393,7 @@ export const OpenInPicker = memo(function OpenInPicker({
           aria-label="Open file in preferred editor"
           size="icon-xs"
           variant="ghost"
-          disabled={!preferredEditor || !openInCwd || remote.mode === "remote-unavailable"}
+          disabled={!preferredEditor || !openInCwd || !canOpenEditor}
           onClick={() => openInEditor(preferredEditor)}
         >
           {primaryOption?.Icon && (
@@ -403,8 +403,9 @@ export const OpenInPicker = memo(function OpenInPicker({
             />
           )}
         </Button>
-        <Menu>
+        <Menu open={menuOpen} onOpenChange={setMenuOpen}>
           <MenuTrigger
+            disabled={isHostEditorDenied}
             render={<Button aria-label="Choose editor" size="icon-xs" variant="ghost" />}
           >
             <ChevronDownIcon aria-hidden="true" className="size-4" />

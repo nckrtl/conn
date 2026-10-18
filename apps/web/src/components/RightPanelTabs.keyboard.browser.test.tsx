@@ -210,6 +210,11 @@ describe("right panel new-tab shortcut", () => {
     await press("ArrowDown");
     await press("ArrowDown");
     await press("ArrowDown");
+    // Conn: API, Database and MCP sit between Browser and Terminal.
+    expect(document.activeElement?.textContent).toContain("Database");
+    await press("ArrowDown");
+    await press("ArrowDown");
+    await press("ArrowDown");
     expect(document.activeElement?.textContent).toContain("Files");
     await press("Enter");
     expect(addFiles).toHaveBeenCalledOnce();

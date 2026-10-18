@@ -10,8 +10,11 @@ import type {
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { lazy, Suspense } from "react";
+import { ApiPanel } from "../../api/ApiPanel";
 import type { ComposerImageAttachment, DraftId } from "../../composerDraftStore";
+import { DatabasePanel } from "../../database/DatabasePanel";
 import type { ShortcutMatchContext } from "../../keybindings";
+import { McpPanel } from "../../mcp/McpPanel";
 import { type RightPanelSurface, useRightPanelStore } from "../../rightPanelStore";
 import {
   PersistentThreadTerminalPanel,
@@ -57,6 +60,15 @@ export interface RightPanelFileProps {
   readonly onPendingChange: (relativePath: string, pending: boolean) => void;
 }
 
+/** Conn: the project the API, Database and MCP panels belong to. */
+export interface RightPanelConnProjectProps {
+  readonly projectKey: string | null;
+  readonly environmentId: EnvironmentId | null;
+  readonly workspaceRoot: string | null;
+  /** The app URL requests and MCP servers default to. */
+  readonly baseUrl: string | null;
+}
+
 /** The body of the thread's right panel for the surface it is showing. */
 export function RightPanelSurfaceContent(props: {
   readonly surface: RightPanelSurface | null;
@@ -77,6 +89,7 @@ export function RightPanelSurfaceContent(props: {
   readonly terminal: RightPanelTerminalProps;
   readonly pullRequest: RightPanelPullRequestProps;
   readonly files: RightPanelFileProps;
+  readonly connProject: RightPanelConnProjectProps;
 }) {
   const { surface, threadRef, visible } = props;
   if (surface === null) return null;
@@ -162,6 +175,41 @@ export function RightPanelSurfaceContent(props: {
     }
     case "pull-requests":
       return <ThreadPullRequestsPanel threadRef={threadRef} />;
+    case "api": {
+      const project = props.connProject;
+      if (!project.projectKey) return null;
+      return (
+        <ApiPanel threadRef={threadRef} projectKey={project.projectKey} baseUrl={project.baseUrl} />
+      );
+    }
+    case "database": {
+      const project = props.connProject;
+      if (!project.projectKey || !project.environmentId || project.workspaceRoot === null) {
+        return null;
+      }
+      return (
+        <DatabasePanel
+          threadRef={threadRef}
+          projectKey={project.projectKey}
+          environmentId={project.environmentId}
+          cwd={project.workspaceRoot}
+        />
+      );
+    }
+    case "mcp": {
+      const project = props.connProject;
+      if (!project.projectKey || !project.environmentId || project.workspaceRoot === null) {
+        return null;
+      }
+      return (
+        <McpPanel
+          projectKey={project.projectKey}
+          environmentId={project.environmentId}
+          cwd={project.workspaceRoot}
+          baseUrl={project.baseUrl}
+        />
+      );
+    }
     case "device":
       return (
         <Suspense fallback={null}>

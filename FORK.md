@@ -481,9 +481,11 @@ The fork retains linked environments, delegation to them and environment link
 MCP tools from upstream's `t3code/peer/*` stack, imported through the v0.0.46
 preview tag. The stack is not yet on the synced upstream `main`.
 
-Its migration is `063_PeerLinks`; upstream uses 61 and 62.
-`reconcileConnPeerLinksMigration` moves records from 61 or 62 to 63 and runs the
-upstream migrations they displaced. See the merge rules below for the required
+Its migration is `064_PeerLinks`; upstream uses 61, 62 and 63.
+`reconcileConnPeerLinksMigration` moves records from 61, 62 or 63 to 64 and runs
+the upstream migrations they displaced. A runtime from before the move (63) cannot
+start on a database that a 64 runtime has migrated, so a rollback past it also
+needs the database backup taken before the update. See the merge rules below for the required
 startup order and future ID conflicts.
 
 Plain HTTP links also work for Orbit WireGuard addresses in `10.44.0.0/16`
@@ -568,7 +570,7 @@ Sources:
    them:
    - `apps/server/src/persistence/Migrations.ts`: keep Conn's
      `reconcileConnPeerLinksMigration` call in `runMigrations`, before
-     upstream's `assertV2MigrationsCanRun`, and keep `063_PeerLinks` after
+     upstream's `assertV2MigrationsCanRun`, and keep `064_PeerLinks` after
      upstream's IDs (move it past any new upstream ID and extend the reconcile).
    - `apps/web/src/components/chat/ChatComposer.tsx`: take upstream's draft
      changes, but keep `composerEnvironmentContexts` from `composerDraft`.

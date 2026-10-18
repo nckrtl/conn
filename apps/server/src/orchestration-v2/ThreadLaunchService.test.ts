@@ -3021,8 +3021,10 @@ it.effect.each(
           return;
         }
         const delegated = yield* service.delegateTask(scope, input);
+        // Conn: a task delegated to a linked environment has no local child thread.
+        const childThreadId = delegated.childThreadId!;
         yield* Deferred.await(setupEntered);
-        const child = yield* threads.getThreadProjection(delegated.childThreadId);
+        const child = yield* threads.getThreadProjection(childThreadId);
         assert.equal(child.thread.lineage.parentThreadId, parentThreadId);
         assert.equal(child.thread.worktreePath, "/repo-worktrees/feature");
         assert.equal(child.runs[0]?.status, cancelAsync ? "starting" : "preparing");
@@ -3043,7 +3045,7 @@ it.effect.each(
           yield* service.cancelTask(scope, { taskId: delegated.taskId });
           yield* Deferred.await(terminalClosed);
           if (!cancelAsync) {
-            yield* threads.streamStoredEventsFrom({ threadId: delegated.childThreadId }).pipe(
+            yield* threads.streamStoredEventsFrom({ threadId: childThreadId }).pipe(
               Stream.filter(
                 (stored) =>
                   stored.event.type === "thread.metadata-updated" &&
@@ -3054,7 +3056,7 @@ it.effect.each(
           }
           assert.equal(harness.closeTerminal.mock.calls.length, 1);
           assert.equal(harness.removeWorktree.mock.calls.length, cancelAsync ? 0 : 1);
-          const cancelled = yield* threads.getThreadProjection(delegated.childThreadId);
+          const cancelled = yield* threads.getThreadProjection(childThreadId);
           assert.equal(cancelled.runs[0]?.status, "interrupted");
           if (cancelAsync) {
             assert.equal(cancelled.thread.worktreePath, "/repo-worktrees/feature");
@@ -3067,7 +3069,7 @@ it.effect.each(
         }
         yield* Deferred.succeed(allowSetup, undefined);
         yield* threads
-          .streamStoredEventsFrom({ threadId: delegated.childThreadId, eventType: "run.updated" })
+          .streamStoredEventsFrom({ threadId: childThreadId, eventType: "run.updated" })
           .pipe(
             Stream.filter(
               (stored) =>
@@ -3076,7 +3078,7 @@ it.effect.each(
             ),
             Stream.runHead,
           );
-        const prepared = yield* threads.getThreadProjection(delegated.childThreadId);
+        const prepared = yield* threads.getThreadProjection(childThreadId);
         if (failSetup) {
           assert.isEmpty(prepared.checkpointScopes);
         } else {

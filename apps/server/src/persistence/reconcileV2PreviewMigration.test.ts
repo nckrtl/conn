@@ -9,7 +9,7 @@ import { migrationManifest, runMigrations } from "./Migrations.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
-import PeerLinks from "./Migrations/063_PeerLinks.ts";
+import PeerLinks from "./Migrations/064_PeerLinks.ts";
 
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -43,7 +43,8 @@ describe("V2 preview upgrade", () => {
         [60, "ThreadSnapshotWindowIndexes"],
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
-        [63, "PeerLinks"],
+        [63, "DropUnusedV1Projections"],
+        [64, "PeerLinks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -129,7 +130,8 @@ describe("V2 preview upgrade", () => {
         [60, "ThreadSnapshotWindowIndexes"],
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
-        [63, "PeerLinks"],
+        [63, "DropUnusedV1Projections"],
+        [64, "PeerLinks"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -150,8 +152,9 @@ describe("V2 preview upgrade", () => {
 });
 
 // Conn shipped upstream's preview with PeerLinks at 61, then kept it at 62;
-// upstream main gives 61 to PullRequestReviewGuides and 62 to
-// ThreadFailureLookupIndex, and Conn keeps PeerLinks at 63.
+// upstream main gives 61 to PullRequestReviewGuides, 62 to
+// ThreadFailureLookupIndex and 63 to DropUnusedV1Projections, and Conn keeps
+// PeerLinks at 64.
 const seedPeerLink = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
@@ -181,7 +184,7 @@ const assertReconciled = Effect.gen(function* () {
   assert.strictEqual((yield* sql`SELECT * FROM peer_environment_links`).length, 1);
 });
 describe("Conn PeerLinks upgrade", () => {
-  it.effect("moves PeerLinks from 61 to 63 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 61 to 64 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 60 });
       yield* Migrator.make({})({
@@ -191,18 +194,33 @@ describe("Conn PeerLinks upgrade", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [61, "PullRequestReviewGuides"],
         [62, "ThreadFailureLookupIndex"],
+        [63, "DropUnusedV1Projections"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 62 to 63 and runs the index migration it displaced", () =>
+  it.effect("moves PeerLinks from 62 to 64 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 61 });
       yield* Migrator.make({})({
         loader: Migrator.fromRecord({ "62_PeerLinks": PeerLinks }),
       });
       yield* seedPeerLink;
-      assert.deepStrictEqual(yield* runMigrations(), [[62, "ThreadFailureLookupIndex"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [62, "ThreadFailureLookupIndex"],
+        [63, "DropUnusedV1Projections"],
+      ]);
+      yield* assertReconciled;
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+  it.effect("moves PeerLinks from 63 to 64 and runs the projection cleanup it displaced", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 62 });
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord({ "63_PeerLinks": PeerLinks }),
+      });
+      yield* seedPeerLink;
+      assert.deepStrictEqual(yield* runMigrations(), [[63, "DropUnusedV1Projections"]]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

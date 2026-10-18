@@ -10,10 +10,8 @@ import {
   createContext,
   type ComponentPropsWithoutRef,
   type ReactNode,
-  useCallback,
   useContext,
   useEffect,
-  useMemo,
   useState,
 } from "react";
 
@@ -73,10 +71,7 @@ function SettingsSearchTargetProvider({
   onTargetHandled?: () => void;
   children: ReactNode;
 }) {
-  const value = useMemo(
-    () => ({ targetId, highlightTarget, onTargetHandled }),
-    [highlightTarget, onTargetHandled, targetId],
-  );
+  const value = { targetId, highlightTarget, onTargetHandled };
   return <SettingsSearchTargetContext value={value}>{children}</SettingsSearchTargetContext>;
 }
 
@@ -116,15 +111,12 @@ export function useSettingsSearchTargetId(): string | null {
 export function useSettingsSearchTarget<T extends HTMLElement>(id: string | undefined) {
   const { targetId, highlightTarget, onTargetHandled } = useContext(SettingsSearchTargetContext);
   const isSearchTarget = id !== undefined && id === targetId;
-  const targetRef = useCallback(
-    (target: T | null) => {
-      if (target && isSearchTarget) {
-        scrollAndFocusSettingsTarget(target, highlightTarget);
-        onTargetHandled();
-      }
-    },
-    [highlightTarget, isSearchTarget, onTargetHandled],
-  );
+  const targetRef = (target: T | null) => {
+    if (target && isSearchTarget) {
+      scrollAndFocusSettingsTarget(target, highlightTarget);
+      onTargetHandled();
+    }
+  };
 
   return targetRef;
 }
@@ -249,6 +241,32 @@ export function SettingsUnavailableGroup({
   );
 }
 
+function projectOverrides(
+  context: ReturnType<typeof useOptionalSettingsScope>,
+  scopedKeys: ReadonlyArray<keyof ServerSettings>,
+): SettingOverridingProject[] {
+  if (context === null || scopedKeys.length === 0) return [];
+  return listProjectOverrides(context.connectedEnvironments, scopedKeys).flatMap((entry) => {
+    const group = context.groups.find((candidate) =>
+      candidate.memberProjects.some(
+        (member) => member.environmentId === entry.environmentId && member.id === entry.projectId,
+      ),
+    );
+    if (!group) return [];
+    return [
+      {
+        ...entry,
+        label: group.displayName,
+        open: () =>
+          context.selectScope({
+            project: group.projectKey,
+            ...(context.search.machine ? { machine: context.search.machine } : {}),
+          }),
+      },
+    ];
+  });
+}
+
 /**
  * One setting. `serverScoped` marks rows whose value lives in the primary
  * environment's settings.json; where there is no primary (the hosted app)
@@ -332,41 +350,16 @@ export function SettingsRow({
           (environment) => environment.environmentId === context.scope.environmentIds[0],
         )?.label ?? "environment")
       : "environment";
-  const environmentSettingsById = useMemo(
-    () =>
-      new Map(
-        (context?.connectedEnvironments ?? []).flatMap((environment) =>
-          environment.serverConfig
-            ? [[environment.environmentId, environment.serverConfig.settings] as const]
-            : [],
-        ),
-      ),
-    [context?.connectedEnvironments],
+  const environmentSettingsById = new Map(
+    (context?.connectedEnvironments ?? []).flatMap((environment) =>
+      environment.serverConfig
+        ? [[environment.environmentId, environment.serverConfig.settings] as const]
+        : [],
+    ),
   );
   // At environment scope, projects with their own value keep it when the
   // environment default changes; the chain names them and can reset them.
-  const overridingProjects = useMemo((): SettingOverridingProject[] => {
-    if (context === null || isProjectScope || scopedKeys.length === 0) return [];
-    return listProjectOverrides(context.connectedEnvironments, scopedKeys).flatMap((entry) => {
-      const group = context.groups.find((candidate) =>
-        candidate.memberProjects.some(
-          (member) => member.environmentId === entry.environmentId && member.id === entry.projectId,
-        ),
-      );
-      if (!group) return [];
-      return [
-        {
-          ...entry,
-          label: group.displayName,
-          open: () =>
-            context.selectScope({
-              project: group.projectKey,
-              ...(context.search.machine ? { machine: context.search.machine } : {}),
-            }),
-        },
-      ];
-    });
-  }, [context, isProjectScope, scopedKeys]);
+  const overridingProjects = isProjectScope ? [] : projectOverrides(context, scopedKeys);
   const renderedReset = unavailable ? null : isProjectScope && scopedKeys.length > 0 ? (
     source === "project" || source === "mixed" ? (
       <SettingResetButton
@@ -570,7 +563,7 @@ export function SettingsPageContainer({
     select: (location) => location.state.settingsTargetHighlight !== false,
   });
   const targetId = hash.replace(/^#/, "") || null;
-  const clearTargetHash = useCallback(() => {
+  const clearTargetHash = () => {
     void navigate({
       hash: "",
       replace: true,
@@ -578,7 +571,7 @@ export function SettingsPageContainer({
       hashScrollIntoView: false,
       state: { settingsTargetHighlight: true },
     });
-  }, [navigate]);
+  };
 
   return (
     <SettingsSearchTargetProvider

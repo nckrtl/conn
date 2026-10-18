@@ -91,9 +91,6 @@ const RENDER_SCALE = 2;
 // Chromium allows three unacked frames, so 100 ms pacing caps viewers near 30 fps.
 const SCREENCAST_ACK_PACE_MS = 100;
 const SCREENCAST_SETTLE_MS = 200;
-const SCREENCAST_MOTION_FRAMES = 4;
-const SCREENCAST_MOTION_WINDOW_MS = 300;
-const SCREENCAST_MOTION_QUALITY = 50;
 const HOST_RECONNECT_DELAY = "1 second";
 const DESKTOP_ATTACH_TIMEOUT = "10 seconds";
 const VIEWER_OUTPUT_LIMIT = 64;
@@ -252,7 +249,6 @@ interface ViewerState {
   readonly push: (output: ServerBrowserViewerOutput) => void;
   readonly pause: () => Promise<void>;
   readonly resume: () => Promise<void>;
-  scrolledAt: number;
 
   requestedSize: { width: number; height: number; order: number } | null;
 }
@@ -2368,20 +2364,6 @@ const make = Effect.gen(function* () {
         if (framesInFlight > 0) mayHaveDropped = true;
         framesInFlight += 1;
         const arrivedAt = Date.now();
-        recentFrames.push(arrivedAt);
-        while (recentFrames[0]! < arrivedAt - SCREENCAST_MOTION_WINDOW_MS) recentFrames.shift();
-        if (
-          !motion &&
-          recentFrames.length >= SCREENCAST_MOTION_FRAMES &&
-          arrivedAt - viewer.scrolledAt < SCREENCAST_MOTION_WINDOW_MS
-        ) {
-          motion = true;
-          void startScreencast(0.5);
-        } else if (motion && arrivedAt - viewer.scrolledAt > SCREENCAST_SETTLE_MS) {
-          motion = false;
-          recentFrames.length = 0;
-          void startScreencast(1);
-        }
         if (settleTimer !== null) clearTimeout(settleTimer);
         settleTimer = setTimeout(() => {
           settleTimer = null;

@@ -1,5 +1,6 @@
 import type { KeybindingCommand, ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { useEffect, useLayoutEffect, useRef } from "react";
+import { isAnnotationToggleShortcut } from "../../annotations/browserAnnotationKeyboard";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { resolveChatShortcutCommand, type ShortcutMatchContext } from "../../keybindings";
 import { isTerminalCloseConfirmPending } from "../../lib/terminalCloseConfirm";
@@ -59,6 +60,9 @@ export function useChatShortcuts(input: ChatShortcutsInput) {
       const terminalFocusOwner = getTerminalFocusOwner();
       if (event.defaultPrevented && terminalFocusOwner === null) return;
       const shortcutContext = current.getShortcutContext(event.target);
+      // Conn: the browser toolbar owns this chord while the preview has focus. Do not
+      // change composer mode before its capture listener can consume the event.
+      if (shortcutContext.previewFocus && isAnnotationToggleShortcut(event)) return;
 
       if (
         !shortcutContext.terminalFocus &&

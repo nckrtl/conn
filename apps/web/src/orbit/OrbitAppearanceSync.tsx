@@ -4,9 +4,9 @@ import { useCustomThemes } from "../hooks/useCustomThemes";
 import { useEnvironmentThemeDefinitions } from "../hooks/useEnvironmentTheme";
 import {
   getClientSettings,
+  updateClientSettings,
   useClientSettings,
   useClientSettingsHydrated,
-  useUpdateClientSettings,
 } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { createAppearanceChannel, pruneProfileThemeCopies } from "./appearanceProfileSync";
@@ -25,7 +25,6 @@ export function OrbitAppearanceSync() {
     useTheme();
   const customThemes = useCustomThemes();
   const environmentThemes = useEnvironmentThemeDefinitions();
-  const updateSettings = useUpdateClientSettings();
   const contrast = useClientSettings((settings) => settings.appearanceContrast);
   const deviceValues = useClientSettings((settings) =>
     JSON.stringify(readDesktopDeviceSection(settings)),
@@ -36,17 +35,17 @@ export function OrbitAppearanceSync() {
     return setProfileSyncChannels([
       createAppearanceChannel({
         contrast: () => getClientSettings().appearanceContrast,
-        setContrast: (appearanceContrast) => void updateSettings({ appearanceContrast }),
+        setContrast: (appearanceContrast) => void updateClientSettings({ appearanceContrast }),
         setTheme,
         setThemeHalf,
         setAppearanceMode,
       }),
       createDesktopDeviceChannel({
         read: getClientSettings,
-        update: (patch) => void updateSettings(patch),
+        update: (patch) => void updateClientSettings(patch),
       }),
     ]);
-  }, [settingsHydrated, updateSettings, setTheme, setThemeHalf, setAppearanceMode]);
+  }, [settingsHydrated, setTheme, setThemeHalf, setAppearanceMode]);
 
   // A copy of a theme from the profile gives way once the environment publishes it live.
   useEffect(() => {

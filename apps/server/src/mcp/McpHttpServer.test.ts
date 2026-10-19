@@ -33,6 +33,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerConfig from "../config.ts";
 import * as CredentialAutofill from "../credentials/CredentialAutofill.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
@@ -184,6 +185,7 @@ const layerRecordingTools = (calls: Array<unknown>) => {
         McpToolAccessTestkit.liveThreadsLayer,
         Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(PeerForwarding.PeerForwarding)({}),
         NodeServices.layer,
       ),
     ),

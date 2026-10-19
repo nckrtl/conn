@@ -675,6 +675,7 @@ it("sendToThread reports why the orchestrator refused the message", async () => 
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
           list: () => Effect.succeed([]),
         } satisfies Partial<ProviderAdapterRegistry.ProviderAdapterRegistryV2["Service"]>),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
         NodeCrypto.layer,
       ),
     ),

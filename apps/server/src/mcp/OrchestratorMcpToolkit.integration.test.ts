@@ -1961,7 +1961,7 @@ describe("orchestrator MCP toolkit", () => {
                   createdBy: "agent",
                   creationSource: "server",
                   commandId: CommandId.make(`command:mcp-child:${name}`),
-                  threadId: child.childThreadId,
+                  threadId: localChild(child.childThreadId),
                   messageId,
                   text: cancellationPrompt,
                   attachments: [],
@@ -1970,7 +1970,7 @@ describe("orchestrator MCP toolkit", () => {
                 });
                 const running = yield* waitForProjection(
                   orchestrator,
-                  child.childThreadId,
+                  localChild(child.childThreadId),
                   (projection) => {
                     const run = projection.runs.find((row) => row.userMessageId === messageId);
                     return (
@@ -2021,7 +2021,7 @@ describe("orchestrator MCP toolkit", () => {
               clientRequestId: "steer-untasked-run-interrupt",
             });
             yield* waitForChildRun(
-              steeredSend.child.childThreadId,
+              localChild(steeredSend.child.childThreadId),
               steeredSend.sent.runId,
               "interrupted",
             );
@@ -2044,7 +2044,7 @@ describe("orchestrator MCP toolkit", () => {
             const restartedTaskId = restarted.sent.taskId;
             expect(restartedTaskId).toBeDefined();
             yield* waitForChildRun(
-              restarted.child.childThreadId,
+              localChild(restarted.child.childThreadId),
               restarted.sent.runId,
               "completed",
             );
@@ -2054,9 +2054,9 @@ describe("orchestrator MCP toolkit", () => {
               ),
             );
             expect(
-              (yield* orchestrator.getThreadProjection(restarted.child.childThreadId)).runs.find(
-                (run) => run.id === restarted.sent.runId,
-              )?.delegatedTaskId,
+              (yield* orchestrator.getThreadProjection(
+                localChild(restarted.child.childThreadId),
+              )).runs.find((run) => run.id === restarted.sent.runId)?.delegatedTaskId,
             ).toBe(restartedTaskId);
             yield* invoke("task_status", { taskId: steeredSend.child.taskId });
             yield* invoke("task_status", { taskId: restarted.child.taskId });

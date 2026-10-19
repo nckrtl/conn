@@ -857,6 +857,7 @@ describe("PreviewManager", () => {
         getFocusedWebContents.mockReturnValue(inactive.webContents);
         // A focused child iframe is valid too; it need not be the main frame.
         Object.assign(active.webContents, { mainFrame: {}, focusedFrame: {} });
+        Object.assign(inactive.webContents, { focusedFrame: null });
         const paste = {
           type: "keyDown",
           key: "v",

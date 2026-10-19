@@ -423,13 +423,10 @@ function ThreadRouteContent(
 
   const usesNativeHeaderGlass = NATIVE_LIQUID_GLASS_SUPPORTED;
   const delegatedFrom = selectedThread?.delegatedFrom ?? null;
-  const delegatedFromRef = useMemo(
-    () =>
-      delegatedFrom === null
-        ? null
-        : scopeThreadRef(delegatedFrom.environmentId, delegatedFrom.threadId),
-    [delegatedFrom],
-  );
+  const delegatedFromRef =
+    delegatedFrom === null
+      ? null
+      : scopeThreadRef(delegatedFrom.environmentId, delegatedFrom.threadId);
   // The title it had at delegation, until this client sees the parent itself.
   const delegatedFromThread = useThreadShell(delegatedFromRef);
   const headerSubtitle = [

@@ -443,10 +443,7 @@ export function HomeScreen(props: HomeScreenProps) {
 
   const orbitGateway = useOrbitGateway();
   // The workspace selected from the device's Orbit profile; a selected project narrows it further.
-  const workspaceProjectRefs = useMemo(
-    () => selectedWorkspaceProjectRefs(orbitGateway),
-    [orbitGateway],
-  );
+  const workspaceProjectRefs = selectedWorkspaceProjectRefs(orbitGateway);
   const v2ProjectScopeKey = props.selectedProjectKey;
   const v2ScopedProjectGroup = findHomeProjectScope(projectScopes, v2ProjectScopeKey);
   const v2ProjectTitleByProjectKey = new Map(

@@ -486,8 +486,6 @@ const makeFaviconWebContents = (options?: {
   const webContents = {
     id: options?.id ?? 42,
     isDestroyed: () => destroyed,
-    isFocused: vi.fn(() => false),
-    focusedFrame: null as Electron.WebFrameMain | null,
     getType: () => "webview",
     getURL: () => currentUrl,
     getTitle: () => "Preview",

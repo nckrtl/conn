@@ -41,7 +41,6 @@ function layerElectronApp(
     whenReady: Effect.void,
     requestSingleInstanceLock: Effect.succeed(true),
     quit: Effect.void,
-    requestSingleInstanceLock: Effect.succeed(true),
     exit: () => Effect.void,
     relaunch: () => Effect.void,
     setPath: () => Effect.void,

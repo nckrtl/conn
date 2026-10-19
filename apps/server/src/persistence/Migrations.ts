@@ -10,7 +10,9 @@
 
 import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
+import type * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
 // Import all migrations statically
@@ -230,12 +232,18 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
  * PeerLinks held its id.
  */
 const CONN_PEER_LINKS_MIGRATION_ID = 65;
-const CONN_DISPLACED_MIGRATIONS = [
+const CONN_DISPLACED_MIGRATIONS: ReadonlyArray<
+  readonly [
+    number,
+    string,
+    Effect.Effect<unknown, SqlError | Schema.SchemaError, SqlClient.SqlClient>,
+  ]
+> = [
   [61, "PullRequestReviewGuides", Migration0061],
   [62, "ThreadFailureLookupIndex", Migration0062],
   [63, "DropUnusedV1Projections", Migration0063],
   [64, "CanonicalizeThreadPullRequestLinks", Migration0064],
-] as const;
+];
 const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigration")(function* () {
   const sql = yield* SqlClient.SqlClient;
   return yield* sql.withTransaction(
@@ -276,7 +284,17 @@ const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigrati
       yield* sql`UPDATE effect_sql_migrations SET migration_id = ${CONN_PEER_LINKS_MIGRATION_ID} WHERE migration_id = ${legacy.migration_id} AND name = 'PeerLinks'`;
       for (const [id, name, migration] of CONN_DISPLACED_MIGRATIONS) {
         if (id < legacy.migration_id) continue;
-        yield* migration;
+        // Like the migrator, report a failed migration as a MigrationError.
+        yield* migration.pipe(
+          Effect.mapError(
+            (cause) =>
+              new Migrator.MigrationError({
+                cause,
+                kind: "Failed",
+                message: `Migration "${id}_${name}" failed`,
+              }),
+          ),
+        );
         yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (${id}, ${name})`;
         executed.push([id, name] as const);
       }

@@ -25,6 +25,9 @@ import {
   SelectValue,
 } from "./ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { useAtomValue } from "@effect/atom-react";
+import { shortcutLabelForCommand } from "../keybindings";
+import { primaryServerKeybindingsAtom } from "../state/server";
 
 function OrbitInstanceUrlChip({ url, threadRef }: { url: string; threadRef: ScopedThreadRef }) {
   const openLink = useOpenLink(threadRef);
@@ -114,6 +117,10 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   threadRef = null,
 }: BranchToolbarEnvModeSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
+  const shortcutLabel = shortcutLabelForCommand(
+    useAtomValue(primaryServerKeybindingsAtom),
+    "composer.workspace",
+  );
   const { options, orbitNote } = useWorkspaceOptions({
     activeWorktreePath,
     effectiveEnvMode,
@@ -235,6 +242,7 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
             : effectiveEnvMode === "worktree" || effectiveEnvMode === "orbit"
               ? resolveEnvModeLabel(effectiveEnvMode)
               : resolveCurrentWorkspaceLabel(activeWorktreePath)}
+          {shortcutLabel ? ` · ${shortcutLabel}` : null}
         </TooltipPopup>
       </Tooltip>
       <SelectPopup

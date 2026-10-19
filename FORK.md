@@ -463,28 +463,16 @@ Sources:
   `native/EdgeBlur*`.
 - `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorModule.swift`.
 
-### iOS 27.0 SDK build
-
-The 27.0 SDK build skips hinge metrics using `UIHingeInteraction`, which needs
-the iOS 27.1 SDK. Xcode 27.0 and 27.1 both ship Swift 6.4, so the podspec sets
-`T3_IOS_27_0_SDK` to distinguish them. Drop this workaround when upstream fixes
-it.
-
-Sources:
-
-- Under `apps/mobile/modules/t3-native-controls/ios/`:
-  `T3LayoutMetricsView.swift`, `T3NativeControls.podspec`.
-
 ### Linked environments (peer links)
 
 The fork retains linked environments, delegation to them and environment link
 MCP tools from upstream's `t3code/peer/*` stack, imported through the v0.0.46
 preview tag. The stack is not yet on the synced upstream `main`.
 
-Its migration is `064_PeerLinks`; upstream uses 61, 62 and 63.
-`reconcileConnPeerLinksMigration` moves records from 61, 62 or 63 to 64 and runs
-the upstream migrations they displaced. A runtime from before the move (63) cannot
-start on a database that a 64 runtime has migrated, so a rollback past it also
+Its migration is `065_PeerLinks`; upstream uses 61, 62, 63 and 64.
+`reconcileConnPeerLinksMigration` moves records from 61, 62, 63 or 64 to 65 and
+runs the upstream migrations they displaced. A runtime from before the move (64)
+cannot start on a database that a 65 runtime has migrated, so a rollback past it also
 needs the database backup taken before the update. See the merge rules below for the required
 startup order and future ID conflicts.
 
@@ -570,7 +558,7 @@ Sources:
    them:
    - `apps/server/src/persistence/Migrations.ts`: keep Conn's
      `reconcileConnPeerLinksMigration` call in `runMigrations`, before
-     upstream's `assertV2MigrationsCanRun`, and keep `064_PeerLinks` after
+     upstream's `assertV2MigrationsCanRun`, and keep `065_PeerLinks` after
      upstream's IDs (move it past any new upstream ID and extend the reconcile).
    - `apps/web/src/components/chat/ChatComposer.tsx`: take upstream's draft
      changes, but keep `composerEnvironmentContexts` from `composerDraft`.

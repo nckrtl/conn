@@ -70,6 +70,7 @@ function PreviewPanelShellFrame(
   const maximized = props.maximized ?? false;
   const localHostRef = useRef<HTMLDivElement | null>(null);
   const hostRef = props.hostRef ?? localHostRef;
+  const returnedFocus = useRef(false);
   const { width, handlers } = props.inlineSize;
   // Derive suppression before the layout commits so the browser never creates
   // a width transition for resize or maximize changes.
@@ -108,6 +109,35 @@ function PreviewPanelShellFrame(
       window.cancelAnimationFrame(restoreFrame);
     };
   }, [suppressWidthTransition]);
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host || !collapsible) return;
+    return () => {
+      if (!host.contains(host.ownerDocument.activeElement) && !returnedFocus.current) return;
+      // The toggle moves when the shell unmounts, after an animation or immediately.
+      // Restore focus at its committed location if removal cleared focus to body.
+      queueMicrotask(() => {
+        if (host.ownerDocument.activeElement === host.ownerDocument.body) {
+          host.ownerDocument.querySelector<HTMLButtonElement>("[data-right-panel-toggle]")?.focus();
+        }
+      });
+    };
+  }, [collapsible, hostRef]);
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const collapsed = collapsible && !open;
+    if (!collapsed) returnedFocus.current = false;
+    // Move focus before making its current owner inert, while the toggle is reachable.
+    if (collapsed && host.contains(host.ownerDocument.activeElement)) {
+      const toggle = host.ownerDocument.querySelector<HTMLButtonElement>(
+        "[data-right-panel-toggle]",
+      );
+      toggle?.focus();
+      returnedFocus.current = toggle !== null && host.ownerDocument.activeElement === toggle;
+    }
+    host.toggleAttribute("inert", collapsed);
+  }, [collapsible, open, hostRef]);
   return (
     <div
       ref={hostRef}
@@ -119,10 +149,11 @@ function PreviewPanelShellFrame(
           ? cn(
               maximized ? "flex-1" : "shrink-0",
               // The split divider runs the full height, through the header, and matches the
-              // sidebar's divider.
+              // sidebar's divider. Maximized, the panel's left edge meets the sidebar's own
+              // border (or the window edge), so a second border would double it.
               props.splitHeader
-                ? "shell-divider-l"
-                : "rounded-tr-lg rounded-br-lg border-l border-border",
+                ? !maximized && "shell-divider-l"
+                : cn("rounded-tr-lg rounded-br-lg", !maximized && "border-l border-border"),
             )
           : "w-full",
         collapsible &&

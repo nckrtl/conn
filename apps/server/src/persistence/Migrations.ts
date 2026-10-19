@@ -77,10 +77,11 @@ import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
 import Migration0063 from "./Migrations/063_DropUnusedV1Projections.ts";
-// Conn: upstream's preview shipped PeerLinks at 61; Conn then kept it at 62 and 63,
-// which upstream main gives to ThreadFailureLookupIndex and DropUnusedV1Projections.
-// See reconcileConnPeerLinksMigration.
-import Migration0064 from "./Migrations/064_PeerLinks.ts";
+import Migration0064 from "./Migrations/064_CanonicalizeThreadPullRequestLinks.ts";
+// Conn: upstream's preview shipped PeerLinks at 61; Conn then kept it at 62, 63 and 64,
+// which upstream main gives to ThreadFailureLookupIndex, DropUnusedV1Projections and
+// CanonicalizeThreadPullRequestLinks. See reconcileConnPeerLinksMigration.
+import Migration0065 from "./Migrations/065_PeerLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -158,7 +159,8 @@ export const migrationEntries = [
   [61, "PullRequestReviewGuides", Migration0061],
   [62, "ThreadFailureLookupIndex", Migration0062],
   [63, "DropUnusedV1Projections", Migration0063],
-  [64, "PeerLinks", Migration0064],
+  [64, "CanonicalizeThreadPullRequestLinks", Migration0064],
+  [65, "PeerLinks", Migration0065],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -215,20 +217,24 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
 });
 
 /**
- * Conn builds recorded PeerLinks at 61 (upstream's preview), later at 62 and
- * then at 63. Upstream main gives 61 to PullRequestReviewGuides, 62 to
- * ThreadFailureLookupIndex and 63 to DropUnusedV1Projections, which the
- * migrator would skip on those databases. Move PeerLinks to 64, then run the
- * upstream migrations it displaced and record them at their ids. PeerLinks and
- * PullRequestReviewGuides only create their table if it is missing, and
- * DropUnusedV1Projections only drops tables that exist; the index migration
- * has not run on such a database, because PeerLinks held its id.
+ * Conn builds recorded PeerLinks at 61 (upstream's preview), later at 62, 63
+ * and then at 64. Upstream main gives 61 to PullRequestReviewGuides, 62 to
+ * ThreadFailureLookupIndex, 63 to DropUnusedV1Projections and 64 to
+ * CanonicalizeThreadPullRequestLinks, which the migrator would skip on those
+ * databases. Move PeerLinks to 65, then run the upstream migrations it
+ * displaced and record them at their ids. PeerLinks and
+ * PullRequestReviewGuides only create their table if it is missing,
+ * DropUnusedV1Projections only drops tables that exist, and
+ * CanonicalizeThreadPullRequestLinks only rewrites rows without pull request
+ * links; the index migration has not run on such a database, because
+ * PeerLinks held its id.
  */
-const CONN_PEER_LINKS_MIGRATION_ID = 64;
+const CONN_PEER_LINKS_MIGRATION_ID = 65;
 const CONN_DISPLACED_MIGRATIONS = [
   [61, "PullRequestReviewGuides", Migration0061],
   [62, "ThreadFailureLookupIndex", Migration0062],
   [63, "DropUnusedV1Projections", Migration0063],
+  [64, "CanonicalizeThreadPullRequestLinks", Migration0064],
 ] as const;
 const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigration")(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -305,7 +311,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
-  // Move a Conn PeerLinks record off 61-63 before the skip check reads the history.
+  // Move a Conn PeerLinks record off 61-64 before the skip check reads the history.
   const connMigrations =
     toMigrationInclusive === undefined || toMigrationInclusive >= CONN_PEER_LINKS_MIGRATION_ID
       ? yield* reconcileConnPeerLinksMigration()

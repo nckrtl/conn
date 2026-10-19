@@ -97,6 +97,7 @@ function TweenGhost() {
   );
 }
 
+/** Frames the input while leaving the shared edge open for the context strip's outline. */
 function Host({ className, children, ...props }: ComponentProps<"div">) {
   return (
     <div
@@ -121,6 +122,7 @@ function Host({ className, children, ...props }: ComponentProps<"div">) {
   );
 }
 
+/** Covers the input surface when an attached banner or the model strip transition replaces the outer glass backdrop. */
 function Main({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
@@ -146,13 +148,14 @@ function Main({ className, ...props }: ComponentProps<"div">) {
   );
 }
 
+/** Mask offsets use the position hint so class merging preserves the transparent and black stops. */
 function ContextStrip({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
       data-slot="composer-context-strip"
       className={cn(
         "group/composer-context relative isolate mx-auto -mt-4 flex w-[calc(100%-2*var(--chat-composer-drawer-inset))] items-center gap-2 overflow-x-clip overflow-y-visible px-2 pt-5 pb-1",
-        "before:absolute before:inset-0 before:-z-1 before:rounded-b-2xl before:border before:border-(--chat-composer-outline) before:mask-b-from-transparent before:mask-b-from-4 before:mask-b-to-black before:mask-b-to-4 before:shadow-composer",
+        "before:absolute before:inset-0 before:-z-1 before:rounded-b-2xl before:border before:border-(--chat-composer-outline) before:mask-b-from-transparent before:mask-b-from-(position:--spacing-composer-seam) before:mask-b-to-black before:mask-b-to-(position:--spacing-composer-seam) before:shadow-composer",
         // Dark: the Shell backdrop stops above the strip, so the strip blurs the page itself.
         "dark:before:border-white/7 dark:before:bg-(--chat-composer-drawer-surface) dark:before:backdrop-blur-(--glass-blur) dark:before:backdrop-saturate-(--glass-saturation) dark:before:shadow-composer-dark",
         "dark:group-has-data-[composer-banner-surface=attached]/composer-surface:before:bg-(--chat-composer-drawer-surface)",

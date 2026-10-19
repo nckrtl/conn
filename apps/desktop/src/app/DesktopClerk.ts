@@ -87,6 +87,7 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
 function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
   return createClerkBridge({
     storage: storage({ path: stateDir }),
+    manageSingleInstanceLock: false,
     passkeys: true,
     renderer: {
       scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
@@ -105,21 +106,21 @@ export const make = Effect.gen(function* () {
   const userDataPath = yield* DesktopUserData.resolveUserDataPath(environment);
   yield* electronApp.setPath("userData", userDataPath);
 
-  // Take the lock before the SDK bridge. The bridge only takes it on
-  // Windows/Linux, but a directly spawned macOS process (dev, CLI launches)
-  // skips LaunchServices' one-instance rule, and two processes sharing
-  // userData and the backend leave one window with empty state.
-  const isPrimaryInstance = yield* electronApp.requestSingleInstanceLock;
-  if (!isPrimaryInstance) {
-    return DesktopClerk.of({
-      configure: Effect.gen(function* () {
-        // app.quit() is asynchronous, so stop bootstrap here before
-        // whenReady can fire.
-        yield* (yield* ElectronApp.ElectronApp).quit;
-        return yield* Effect.interrupt;
-      }).pipe(Effect.withSpan("desktop.clerk.configure")),
-    });
+  // T3 owns the profile-scoped lock on every platform; Clerk skips it on macOS.
+  // Quit is asynchronous, so interrupt before the application runtime is built.
+  if (!(yield* electronApp.requestSingleInstanceLock)) {
+    yield* electronApp.quit;
+    return yield* Effect.interrupt;
   }
+
+  // Retain launch arguments while asynchronous startup builds the application runtime.
+  const pendingSecondInstances: Array<readonly string[]> = [];
+  let handleSecondInstance = (argv: readonly string[]) => {
+    pendingSecondInstances.push(argv);
+  };
+  yield* electronApp.on("second-instance", (_event: unknown, argv: readonly string[]) => {
+    handleSecondInstance(argv);
+  });
 
   yield* Effect.acquireRelease(
     Effect.try({
@@ -227,7 +228,7 @@ export const make = Effect.gen(function* () {
         event.preventDefault();
         void runPromise(webLinks.receive(NodeURL.pathToFileURL(path).href));
       });
-      yield* electronApp.on("second-instance", (_event: unknown, argv: readonly string[]) => {
+      handleSecondInstance = (argv) => {
         if (
           argv?.some(
             (value) =>
@@ -241,7 +242,8 @@ export const make = Effect.gen(function* () {
             if (Option.isSome(mainWindow)) yield* electronWindow.reveal(mainWindow.value);
           }),
         );
-      });
+      };
+      for (const argv of pendingSecondInstances.splice(0)) handleSecondInstance(argv);
     }).pipe(Effect.withSpan("desktop.clerk.configure")),
   });
 });

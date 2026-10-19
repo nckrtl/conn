@@ -66,25 +66,25 @@ export function WorkflowOpeningBlock(props: {
       <header className="flex min-w-0 items-start gap-2">
         <WorkflowIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <p className="text-2xs font-medium text-muted-foreground">Workflow started</p>
+          <p className="text-xs font-medium text-muted-foreground">Workflow started</p>
           <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text="true">
             {headline.title}
           </h3>
           {headline.description ? (
-            <p className="text-xs text-muted-foreground" data-thread-find-text="true">
+            <p className="text-ui text-muted-foreground" data-thread-find-text="true">
               {headline.description}
             </p>
           ) : null}
         </div>
         {headline.agents ? (
-          <span aria-live="polite" className="shrink-0 text-2xs tabular-nums text-muted-foreground">
+          <span aria-live="polite" className="shrink-0 text-xs tabular-nums text-muted-foreground">
             {headline.agents}
           </span>
         ) : null}
       </header>
       {phases.map((phase) => (
         <section key={phase.index} aria-label={`${phase.title} phase`}>
-          <h4 className="flex items-baseline gap-2 px-2 pb-0.5 text-2xs font-medium text-muted-foreground">
+          <h4 className="flex items-baseline gap-2 px-2 pb-0.5 text-xs font-medium text-muted-foreground">
             <span className="min-w-0 truncate" data-thread-find-text="true">
               {phase.title}
             </span>
@@ -154,13 +154,13 @@ function WorkflowMemberRow(props: {
             status={member.status}
           />
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-xs font-medium text-foreground">
+            <span className="block truncate text-ui font-medium text-foreground">
               {member.title}
             </span>
             {detail ? (
               <span
                 className={cn(
-                  "block truncate text-2xs leading-relaxed",
+                  "block truncate text-xs leading-relaxed",
                   failed ? "text-destructive" : "text-muted-foreground",
                 )}
               >

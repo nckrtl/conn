@@ -461,6 +461,7 @@ export function DeviceStreamView(props: {
           className={cn("relative select-none", showPhone && "invisible pointer-events-none")}
           style={{ width: frame.width, height: frame.height }}
           onPointerDown={(event) => {
+            if (event.button !== 0) return;
             if (props.annotating) return;
             event.currentTarget.setPointerCapture(event.pointerId);
             pointerCapture.current = { id: event.pointerId, target: event.currentTarget };

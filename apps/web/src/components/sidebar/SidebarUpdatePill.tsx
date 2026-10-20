@@ -15,6 +15,7 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateDownloadedVersion,
+  getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -244,6 +245,8 @@ function SidebarUpdateControl({ variant }: { variant: "footer" | "rail" }) {
     isDownloading,
     showCheckIcon,
   });
+  const idleTooltip =
+    !showUpdateDetails && !showCheckIcon ? getDesktopUpdateIdleTooltip(state) : null;
   const tooltip = runsEverything
     ? everything.summary
     : showUpdateDetails
@@ -252,7 +255,7 @@ function SidebarUpdateControl({ variant }: { variant: "footer" | "rail" }) {
         : "Update available"
       : showCheckIcon
         ? "Checking for updates…"
-        : "Check for updates";
+        : (idleTooltip?.title ?? "Check for updates");
   const disabled = showCheckIcon
     ? true
     : runsEverything
@@ -449,7 +452,7 @@ function SidebarUpdateControl({ variant }: { variant: "footer" | "rail" }) {
   const updateButton = (
     <button
       type="button"
-      aria-label={tooltip}
+      aria-label={idleTooltip?.detail ? `${tooltip}: ${idleTooltip.detail}` : tooltip}
       aria-disabled={isInteractionDisabled || undefined}
       className={cn(
         inRail
@@ -531,7 +534,14 @@ function SidebarUpdateControl({ variant }: { variant: "footer" | "rail" }) {
               side={inRail ? "right" : "top"}
               variant={showUpdateDetails ? "glass" : "default"}
             >
-              <span className="whitespace-pre-line">{tooltip}</span>
+              {idleTooltip?.detail ? (
+                <div className="text-left">
+                  <div className="font-medium">{idleTooltip.title}</div>
+                  <div className="text-muted-foreground">{idleTooltip.detail}</div>
+                </div>
+              ) : (
+                <span className="whitespace-pre-line">{tooltip}</span>
+              )}
             </TooltipPopup>
           ) : null}
         </Tooltip>

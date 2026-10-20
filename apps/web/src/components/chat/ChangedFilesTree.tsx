@@ -1,5 +1,13 @@
 import { type RunId } from "@t3tools/contracts";
-import { type MouseEvent, memo, useState } from "react";
+import {
+  type CSSProperties,
+  type MouseEvent,
+  type ReactNode,
+  memo,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { type TurnDiffFileChange } from "../../types";
 import {
   buildTurnDiffTree,
@@ -15,8 +23,16 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { MorphIcon } from "~/components/MorphIcon";
+import { observeResize } from "~/lib/observeResize";
 
 const EMPTY_DIRECTORY_OVERRIDES: Record<string, boolean> = {};
+const VIRTUALIZE_AFTER_ROWS = 250;
+const ROW_OVERSCAN = 8;
+
+interface ChangedFileRow {
+  node: TurnDiffTreeNode;
+  depth: number;
+}
 
 export type ChangedFileContextMenuHandler = (filePath: string, event: MouseEvent) => void;
 
@@ -162,49 +178,48 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
     });
   };
 
-  const renderTreeNode = (node: TurnDiffTreeNode, depth: number) => {
+  const rows = collectExpandedRows(treeNodes, expandedDirectories, allDirectoriesExpanded);
+  const virtualized = rows.length > VIRTUALIZE_AFTER_ROWS;
+
+  const renderRow = ({ node, depth }: ChangedFileRow) => {
     const leftPadding = 4 + depth * 14;
     if (node.kind === "directory") {
       const isExpanded = expandedDirectories[node.path] ?? allDirectoriesExpanded;
       return (
-        <div key={`dir:${node.path}`}>
-          <button
-            type="button"
-            data-scroll-anchor-ignore
-            aria-expanded={isExpanded}
-            className="group flex w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
-            style={{ paddingLeft: `${leftPadding}px` }}
-            onClick={() => toggleDirectory(node.path)}
+        <button
+          key={`dir:${node.path}`}
+          type="button"
+          data-scroll-anchor-ignore
+          aria-expanded={isExpanded}
+          className="group flex h-7 w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+          style={{ paddingLeft: `${leftPadding}px` }}
+          onClick={() => toggleDirectory(node.path)}
+        >
+          {/* Only the caret takes the hover highlight; the whole row stays the click target. */}
+          <span
+            aria-hidden="true"
+            className="flex size-4 shrink-0 items-center justify-center rounded-sm transition-colors group-hover:bg-accent"
           >
-            {/* Only the caret takes the hover highlight; the whole row stays the click target. */}
-            <span
-              aria-hidden="true"
-              className="flex size-4 shrink-0 items-center justify-center rounded-sm transition-colors group-hover:bg-accent"
-            >
-              <ChevronRightIcon
-                className={cn(
-                  "size-3 text-muted-foreground transition-transform",
-                  isExpanded && "rotate-90",
-                )}
+            <ChevronRightIcon
+              className={cn(
+                "size-3 text-muted-foreground transition-transform",
+                isExpanded && "rotate-90",
+              )}
+            />
+          </span>
+          <span className="truncate text-ui leading-4.5 text-muted-foreground/90 group-hover:text-foreground/90">
+            {node.name}
+          </span>
+          {hasNonZeroStat(node.stat) && (
+            <span className="ml-auto flex shrink-0 text-ui leading-4.5 tabular-nums">
+              <DiffStatLabel
+                additions={node.stat.additions}
+                deletions={node.stat.deletions}
+                font="sans"
               />
             </span>
-            <span className="truncate text-ui leading-4.5 text-muted-foreground/90 group-hover:text-foreground/90">
-              {node.name}
-            </span>
-            {hasNonZeroStat(node.stat) && (
-              <span className="ml-auto flex shrink-0 text-ui leading-4.5 tabular-nums">
-                <DiffStatLabel
-                  additions={node.stat.additions}
-                  deletions={node.stat.deletions}
-                  font="sans"
-                />
-              </span>
-            )}
-          </button>
-          {isExpanded && (
-            <div>{node.children.map((childNode) => renderTreeNode(childNode, depth + 1))}</div>
           )}
-        </div>
+        </button>
       );
     }
 
@@ -212,7 +227,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
       <button
         key={`file:${node.path}`}
         type="button"
-        className="group flex w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+        className="group flex h-7 w-full items-center gap-1 rounded-md py-1 pr-2.5 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
         style={{ paddingLeft: `${leftPadding}px` }}
         onClick={() => onOpenTurnDiff(runId, node.path)}
         onContextMenu={
@@ -250,16 +265,157 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
   };
 
   return (
-    // Top-level nodes carry the largest counts, since a directory sums its children.
-    <div
-      className="px-2 pt-1 pb-2"
-      data-diff-stat-columns=""
-      style={diffStatColumnsStyle(treeNodes.map((node) => node.stat))}
-    >
-      {treeNodes.map((node) => renderTreeNode(node, 0))}
-    </div>
+    <ChangedFilesRows
+      rows={rows}
+      renderRow={renderRow}
+      virtualized={virtualized}
+      // Top-level nodes carry the largest counts, since a directory sums its children.
+      columnsStyle={diffStatColumnsStyle(treeNodes.map((node) => node.stat))}
+    />
   );
 });
+
+function ChangedFilesRows({
+  rows,
+  renderRow,
+  virtualized,
+  columnsStyle,
+}: {
+  rows: ReadonlyArray<ChangedFileRow>;
+  renderRow: (row: ChangedFileRow) => ReactNode;
+  virtualized: boolean;
+  columnsStyle: CSSProperties;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const rowSizeRef = useRef<HTMLDivElement>(null);
+  const [range, setRange] = useState({ start: 0, end: 40, rowHeight: 28 });
+  const [focusedPath, setFocusedPath] = useState<string | null>(null);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const rowSize = rowSizeRef.current;
+    if (!virtualized || !container || !rowSize) return;
+
+    // The card is inside a virtualized timeline item, so its own scrollTop is always zero.
+    // Observe its ancestors too: streaming text and timeline layout can move the card.
+    const ancestors: HTMLElement[] = [container, rowSize];
+    let scrollElement: HTMLElement | null = null;
+    for (let parent = container.parentElement; parent; parent = parent.parentElement) {
+      ancestors.push(parent);
+      if (/auto|scroll/.test(getComputedStyle(parent).overflowY)) {
+        scrollElement = parent;
+        break;
+      }
+    }
+
+    const measure = () => {
+      const rowHeight = rowSize.getBoundingClientRect().height;
+      if (rowHeight <= 0) return;
+      const listTop = container.getBoundingClientRect().top;
+      const viewportTop = scrollElement
+        ? scrollElement.getBoundingClientRect().top + scrollElement.clientTop
+        : 0;
+      const viewportHeight = scrollElement?.clientHeight ?? document.documentElement.clientHeight;
+      const start = Math.max(
+        0,
+        Math.min(rows.length, Math.floor((viewportTop - listTop) / rowHeight) - ROW_OVERSCAN),
+      );
+      const end = Math.max(
+        start,
+        Math.min(
+          rows.length,
+          Math.ceil((viewportTop + viewportHeight - listTop) / rowHeight) + ROW_OVERSCAN,
+        ),
+      );
+      setRange((current) =>
+        current.start === start && current.end === end && current.rowHeight === rowHeight
+          ? current
+          : { start, end, rowHeight },
+      );
+    };
+    measure();
+    const scrollTarget = scrollElement ?? globalThis.window;
+    let frame = 0;
+    const onScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measure();
+      });
+    };
+    scrollTarget.addEventListener("scroll", onScroll, { passive: true });
+    globalThis.window.addEventListener("resize", onScroll);
+    const stopObserving = observeResize(ancestors, measure);
+    return () => {
+      scrollTarget.removeEventListener("scroll", onScroll);
+      globalThis.window.removeEventListener("resize", onScroll);
+      if (frame) cancelAnimationFrame(frame);
+      stopObserving();
+    };
+  }, [virtualized, rows.length]);
+
+  const focusedIndex =
+    focusedPath === null ? -1 : rows.findIndex((row) => row.node.path === focusedPath);
+  const start = virtualized ? range.start : 0;
+  const end = virtualized ? Math.min(rows.length, range.end) : rows.length;
+  const indices = Array.from({ length: Math.max(0, end - start) }, (_, index) => start + index);
+  // Keep keyboard focus on its row when mouse scrolling moves it outside the render window.
+  if (focusedIndex >= 0 && focusedIndex < start) indices.unshift(focusedIndex);
+  if (focusedIndex >= end) indices.push(focusedIndex);
+  return (
+    <div className="px-2 pt-1 pb-2" data-diff-stat-columns="" style={columnsStyle}>
+      <div
+        ref={containerRef}
+        className="relative"
+        style={virtualized ? { height: rows.length * range.rowHeight } : undefined}
+        onFocusCapture={(event) => {
+          const row = event.target.closest<HTMLElement>("[data-changed-file-row]");
+          setFocusedPath(row?.dataset.changedFileRow ?? null);
+        }}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setFocusedPath(null);
+        }}
+      >
+        {virtualized && (
+          <div
+            ref={rowSizeRef}
+            aria-hidden="true"
+            className="pointer-events-none invisible absolute h-7"
+          />
+        )}
+        {indices.map((index) => {
+          const row = rows[index]!;
+          return (
+            <div
+              key={`${row.node.kind}:${row.node.path}`}
+              data-changed-file-row={row.node.path}
+              className={virtualized ? "absolute inset-x-0" : undefined}
+              style={virtualized ? { top: index * range.rowHeight } : undefined}
+            >
+              {renderRow(row)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function collectExpandedRows(
+  nodes: ReadonlyArray<TurnDiffTreeNode>,
+  overrides: Readonly<Record<string, boolean>>,
+  allDirectoriesExpanded: boolean,
+  depth = 0,
+  rows: ChangedFileRow[] = [],
+): ChangedFileRow[] {
+  for (const node of nodes) {
+    rows.push({ node, depth });
+    if (node.kind === "directory" && (overrides[node.path] ?? allDirectoriesExpanded)) {
+      collectExpandedRows(node.children, overrides, allDirectoriesExpanded, depth + 1, rows);
+    }
+  }
+  return rows;
+}
 
 function collectDirectoryPaths(nodes: ReadonlyArray<TurnDiffTreeNode>): string[] {
   const paths: string[] = [];

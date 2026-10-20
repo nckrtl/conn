@@ -23,7 +23,12 @@ import {
   PREVIEW_ZOOM_LEVELS,
   type PreviewAdjustInput,
 } from "@t3tools/contracts";
-import { normalizePreviewUrl, resolveAddressBarInput } from "@t3tools/shared/preview";
+import {
+  normalizePreviewUrl,
+  resolveAddressBarInput,
+  previewPdfAssetUrl,
+  resolveSearchUrlTemplate,
+} from "@t3tools/shared/preview";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import {
@@ -36,6 +41,7 @@ import {
 import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
 import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
 import { ensureLocalApi } from "~/localApi";
+import { getClientSettings } from "~/hooks/useSettings";
 import {
   rememberPreviewUrl,
   updatePreviewServerSnapshot,
@@ -74,6 +80,7 @@ import {
 import { browserResponsiveViewportForToggle, useBrowserDefaults } from "~/browser/browserDefaults";
 import { BrowserDeviceToolbar } from "~/browser/BrowserDeviceToolbar";
 import { BROWSER_DEVICE_TOOLBAR_HEIGHT } from "~/browser/browserViewportLayout";
+import { useBrowserLayoutZoomFactor } from "~/browser/useBrowserLayoutZoomFactor";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
 import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
 import { PreviewFileNotShown, PreviewUnreachable } from "./PreviewUnreachable";
@@ -231,6 +238,7 @@ export function PreviewView({
   const serverInputDisabled = isServerTab && serverControl?.controller !== "you";
   const [serverFrameTabId, setServerFrameTabId] = useState<string | null>(null);
   const desktopOverlay = tabId ? (previewState.desktopByTabId[tabId] ?? null) : null;
+  const layoutZoomFactor = useBrowserLayoutZoomFactor(desktopOverlay?.zoomFactor ?? 1);
   const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
   const url = navStatus._tag === "Idle" ? "" : navStatus.url;
   const loading = desktopOverlay?.loading ?? navStatus._tag === "Loading";
@@ -295,7 +303,7 @@ export function PreviewView({
 
   const handleSubmitUrl = async (next: string) => {
     try {
-      const resolved = resolveAddressBarInput(next);
+      const resolved = resolveAddressBarInput(next, resolveSearchUrlTemplate(getClientSettings()));
       if (await navigateToResolvedUrl(resolved)) {
         recordVisitForThread(threadRef, resolved);
       }
@@ -401,7 +409,7 @@ export function PreviewView({
       browserResponsiveViewportForToggle({
         defaults: browserDefaults,
         panelRect,
-        zoomFactor: serverOwnsRendering ? serverZoomFactor : desktopOverlay?.zoomFactor,
+        zoomFactor: isServerTab ? serverZoomFactor : layoutZoomFactor,
       }),
     ).catch(() => undefined);
   };
@@ -1088,6 +1096,11 @@ export function PreviewView({
                 environmentId={threadRef.environmentId}
                 threadId={threadRef.threadId}
                 tabId={snapshot.tabId}
+                pdfUrl={
+                  navStatus._tag === "Success"
+                    ? previewPdfAssetUrl(url, environmentHttpBaseUrl)
+                    : null
+                }
                 visible={visible}
                 showControls={false}
                 onFirstFrame={() => setServerFrameTabId(runtimeTabId)}
@@ -1142,7 +1155,7 @@ export function PreviewView({
         !activeRecordingTabIds.has(runtimeTabId) ? (
           <AgentBrowserCursor
             tabId={runtimeTabId}
-            zoomFactor={desktopOverlay.zoomFactor}
+            zoomFactor={layoutZoomFactor}
             controller={controller}
           />
         ) : null}

@@ -104,6 +104,23 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
 
+## Build in nick-vm
+
+Build, run and test the iOS app (`apps/mobile`) in the macOS VM `nick-vm`, never on Nick's Mac.
+Checkouts live in `~/apps` there. Other agents build in the VM at the same time:
+
+- Work in your own checkout or worktree.
+- Build from the command line, with output in a git-ignored folder of your
+  checkout. Do not open Xcode.app.
+- Create your own simulator (`xcrun simctl create "conn-<task>" "iPhone 18 Pro"`),
+  pass its UDID to every build, test and screenshot, and delete it when done.
+- Run Metro on a free port: `npx expo run:ios --device <udid> --port <port>`.
+- Never kill or shut down Xcode, simulators, Metro or apps you did not start.
+- Before a GUI step, run `mkdir /tmp/vm-gui.lock` in the VM (retry every 20 s)
+  and `rmdir /tmp/vm-gui.lock` right after.
+
+The full rules are under "Share the VM" in `~/apps/AGENTS.md`.
+
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.

@@ -23,9 +23,9 @@ export function HostedEmptyState() {
   const localEnvironmentOff = isLocalEnvironmentDisabled();
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
-        <WorkspacePageHeader electron={isElectron} className="border-b border-border">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden">
+        <WorkspacePageHeader electron={isElectron} className="border-b border-(--shell-divider)!">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-foreground md:text-muted-foreground/60">
               {APP_DISPLAY_NAME}
@@ -106,7 +106,7 @@ export function T3ConnectSteps() {
                     return next;
                   }),
               }}
-              empty={<p className="text-xs text-muted-foreground">Waiting for your computer…</p>}
+              empty={<p className="text-ui text-muted-foreground">Waiting for your computer…</p>}
             />
           </div>
         ) : null}
@@ -151,7 +151,7 @@ function RunOnComputer({ command }: { readonly command: string }) {
       <p>Run on your computer:</p>
       <CommandBlock command={command} className="mt-2" />
       <a
-        className="mt-2 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+        className="mt-2 inline-block text-ui text-muted-foreground underline underline-offset-2 hover:text-foreground"
         href={DESKTOP_DOWNLOAD_URL}
         target="_blank"
         rel="noreferrer noopener"

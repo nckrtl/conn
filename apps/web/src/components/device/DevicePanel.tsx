@@ -199,7 +199,7 @@ export function DevicePanel(props: {
           </div>
           <DeviceHostUpdates state={state} environmentId={environmentId} />
           {bootingDevices.length > 0 ? (
-            <div role="status" className="border-b px-3 py-2 text-xs text-muted-foreground">
+            <div role="status" className="border-b px-3 py-2 text-ui text-muted-foreground">
               Starting {bootingDevices.map((device) => device.name).join(", ")}… This can take a
               minute.
             </div>
@@ -289,7 +289,7 @@ export function DevicePanel(props: {
                                 <span className="truncate text-sm font-medium text-foreground">
                                   {device.name}
                                 </span>
-                                <span className="truncate text-xs text-muted-foreground">
+                                <span className="truncate text-ui text-muted-foreground">
                                   {`${state.hosts.find((host) => host.id === device.hostId)?.label} · ${device.version} · ${device.booted ? "Running" : "Stopped"}`}
                                 </span>
                               </div>
@@ -319,7 +319,7 @@ export function DevicePanel(props: {
                 {hostReady &&
                 !state.devices.some((device) => device.platform === "android") &&
                 !unavailablePlatforms.some((platform) => platform.platform === "android") ? (
-                  <p className="max-w-sm text-xs">
+                  <p className="max-w-sm text-ui">
                     No Android virtual devices found. Create one in Android Studio's Device Manager,
                     then refresh.
                   </p>
@@ -352,7 +352,7 @@ function DeviceNotice(props: {
     <div
       role="alert"
       className={cn(
-        "flex items-start gap-2 border-b px-3 py-2 text-xs",
+        "flex items-start gap-2 border-b px-3 py-2 text-ui",
         props.tone === "warning"
           ? "bg-warning-surface text-warning-foreground"
           : "bg-destructive/5 text-destructive",

@@ -106,6 +106,9 @@ afterEach(async () => {
 it("keeps thread A's guest hosted and paintable when the preview switches to thread B", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("window", globalThis);
+  // useBrowserLayoutZoomFactor listens for window resize.
+  vi.stubGlobal("addEventListener", () => {});
+  vi.stubGlobal("removeEventListener", () => {});
   vi.stubGlobal("navigator", { platform: "MacIntel" });
   vi.stubGlobal("requestAnimationFrame", () => 0);
   vi.stubGlobal("cancelAnimationFrame", () => {});

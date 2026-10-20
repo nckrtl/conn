@@ -1942,9 +1942,9 @@ describe("orchestrator MCP toolkit", () => {
               ),
             );
             expect(
-              (yield* orchestrator.getThreadProjection(delegated.childThreadId)).runs.find(
-                (run) => run.id === heldFollowup.runId,
-              ),
+              (yield* orchestrator.getThreadProjection(
+                localChild(delegated.childThreadId),
+              )).runs.find((run) => run.id === heldFollowup.runId),
             ).toMatchObject({ status: "queued", queueHeld: true, startedAt: null });
             const cancelHeldCall = yield* invoke("task_cancel", {
               taskId: heldFollowup.taskId,
@@ -1960,9 +1960,9 @@ describe("orchestrator MCP toolkit", () => {
               ),
             );
             expect(
-              (yield* orchestrator.getThreadProjection(delegated.childThreadId)).runs.find(
-                (run) => run.id === heldFollowup.runId,
-              ),
+              (yield* orchestrator.getThreadProjection(
+                localChild(delegated.childThreadId),
+              )).runs.find((run) => run.id === heldFollowup.runId),
             ).toMatchObject({ status: "cancelled", startedAt: null });
 
             expect(childFollowup.taskId).toBeDefined();

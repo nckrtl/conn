@@ -27,6 +27,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { useLinkableMachines } from "../../state/peerLinks";
 import { mintPairingCodeOn } from "../../state/peerPairingCode";
@@ -35,7 +36,6 @@ import { useEnvironmentScope, usePreparedConnection } from "../../state/session"
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsChoiceRow } from "../settings/components/SettingsChoiceRow";
 import { SettingsSection } from "../settings/components/SettingsSection";
-import { RequestActionButton } from "./RequestActionButton";
 import { RUNTIME_MODE_CHOICES } from "./thread-settings-options";
 
 /** The same five levels as web's access picker: read-only, then the runtime modes. */
@@ -156,8 +156,10 @@ function PendingLinkRequest(props: {
       ) : null}
       {canAnswer ? (
         <>
-          <RequestActionButton
+          <Button
             label={picksMachine(item) ? "Choose machine…" : "Review link…"}
+            tone="primary"
+            fullWidth
             disabled={declining}
             onPress={() => setOpen(true)}
           />
@@ -443,18 +445,14 @@ function LinkRequestSheet(props: {
             {error}
           </Text>
         ) : null}
-        <RequestActionButton
+        <Button
           label={busy ? "Linking…" : useExisting ? "Use this link" : "Link"}
-          size="large"
+          tone="primary"
+          fullWidth
           disabled={busy || !ready}
           onPress={() => void submit()}
         />
-        <RequestActionButton
-          label="Cancel"
-          tone="secondary"
-          disabled={busy}
-          onPress={props.onClose}
-        />
+        <Button label="Cancel" tone="secondary" fullWidth disabled={busy} onPress={props.onClose} />
       </ScrollView>
     </Modal>
   );

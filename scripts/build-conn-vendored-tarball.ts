@@ -62,7 +62,9 @@ try {
   manifest.version = `${manifest.version}-conn`;
   NodeFS.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
-  const output = NodePath.join(depsDir, `${packageName}-${manifest.version}.tgz`);
+  // Name it after upstream's tarball so a new upstream build (upstream adds a
+  // source-commit suffix instead of bumping the version) gets a new path too.
+  const output = NodePath.join(depsDir, NodePath.basename(source).replace(/\.tgz$/, "-conn.tgz"));
   // COPYFILE_DISABLE keeps macOS bsdtar from adding ._ metadata entries.
   NodeChildProcess.execFileSync("tar", ["-czf", output, "-C", work, "package"], {
     env: { ...process.env, COPYFILE_DISABLE: "1" },

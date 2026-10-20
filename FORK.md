@@ -654,7 +654,7 @@ rebuilt tarball next to upstream's:
   to upstream's.
 
 `node scripts/build-conn-vendored-tarball.ts <package>` applies a patch to
-upstream's tarball and writes `<package>-<version>-conn.tgz`;
+upstream's tarball and writes `<upstream tarball name>-conn.tgz`;
 `apps/mobile/package.json` points at that file.
 
 After a merge that bumps upstream's tarball, keep upstream's new tarball, delete

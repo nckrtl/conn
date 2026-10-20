@@ -134,8 +134,8 @@ const make = Effect.gen(function* () {
       ...(wake === undefined ? {} : { wake }),
     });
 
-  const request: PeerLinkRequests["Service"]["request"] = (scope, input) =>
-    Effect.gen(function* () {
+  const request: PeerLinkRequests["Service"]["request"] = Effect.fn("PeerLinkRequests.request")(
+    function* (scope, input) {
       // The card is shown in, and answered from, the caller's own thread.
       const threadScope = yield* McpInvocationContext.requireThreadScope(
         scope,
@@ -233,7 +233,8 @@ const make = Effect.gen(function* () {
         ),
       );
       return pendingResult(turnItemId);
-    }).pipe(Effect.withSpan("PeerLinkRequests.request"));
+    },
+  );
 
   const linkedOutcome = (linked: PeerLink): LinkRequestOutcome => ({
     linkStatus: "linked",
@@ -292,8 +293,8 @@ const make = Effect.gen(function* () {
 
   // One answer at a time: two answers racing on one card must not both link.
   const answerLock = yield* Semaphore.make(1);
-  const answer: PeerLinkRequests["Service"]["answer"] = (input) =>
-    Effect.gen(function* () {
+  const answer: PeerLinkRequests["Service"]["answer"] = Effect.fn("PeerLinkRequests.answer")(
+    function* (input) {
       yield* Effect.annotateCurrentSpan({
         "orchestration_v2.thread_id": input.threadId,
         "link_request.answer": input.answer.type,
@@ -323,7 +324,9 @@ const make = Effect.gen(function* () {
       ).pipe(
         Effect.mapError((cause) => new PeerLinkRequestError({ reason: "record_failed", cause })),
       );
-    }).pipe(answerLock.withPermits(1), Effect.withSpan("PeerLinkRequests.answer"));
+    },
+    answerLock.withPermits(1),
+  );
 
   return PeerLinkRequests.of({ request, answer });
 });

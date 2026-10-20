@@ -968,8 +968,8 @@ export function createServerEnvironmentAtoms<R, E>(
     label: "environment-data:server:restart-server",
     scheduler: updateScheduler,
     concurrency: configConcurrency,
-    execute: ({ environmentId }, atomRegistry) =>
-      Effect.gen(function* () {
+    execute: Effect.fn("environmentData.server.restartServer")(
+      function* ({ environmentId }, atomRegistry) {
         const environmentRegistry = yield* EnvironmentRegistry.EnvironmentRegistry;
         atomRegistry.set(serverRestartingAtom(environmentId), true);
         yield* restartAndAwaitReconnect({
@@ -978,11 +978,14 @@ export function createServerEnvironmentAtoms<R, E>(
           restart: environmentRegistry.run(environmentId, request(WS_METHODS.serverRestart, {})),
           retryNow: environmentRegistry.retryNow(environmentId),
         });
-      }).pipe(
-        Effect.ensuring(
-          Effect.sync(() => atomRegistry.set(serverRestartingAtom(environmentId), false)),
+      },
+      (effect, { environmentId }, atomRegistry) =>
+        effect.pipe(
+          Effect.ensuring(
+            Effect.sync(() => atomRegistry.set(serverRestartingAtom(environmentId), false)),
+          ),
         ),
-      ),
+    ),
   });
   const restartingAtom = (environmentId: EnvironmentId | null) =>
     environmentId === null ? NOT_RESTARTING_ATOM : serverRestartingAtom(environmentId);

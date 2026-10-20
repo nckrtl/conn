@@ -961,29 +961,30 @@ export const make = Effect.gen(function* () {
     return window;
   });
 
-  const presentOnItsSpace = (browserWindow: Electron.BrowserWindow) =>
-    Effect.gen(function* () {
-      const failed = yield* Effect.sync((): unknown => {
-        try {
-          if (browserWindow.isDestroyed()) return null;
-          if (browserWindow.isMinimized()) browserWindow.restore();
-          // show() switches to the Space that holds this window. Activating the
-          // app on its own would follow the main window instead.
-          browserWindow.show();
-          browserWindow.focus();
-          if (environment.platform === "darwin") {
-            Electron.app.focus({ steal: true });
-          }
-          if (!browserWindow.isDestroyed()) browserWindow.focus();
-          return null;
-        } catch (cause) {
-          return cause;
+  const presentOnItsSpace = Effect.fn("desktop.window.presentOnItsSpace")(function* (
+    browserWindow: Electron.BrowserWindow,
+  ) {
+    const failed = yield* Effect.sync((): unknown => {
+      try {
+        if (browserWindow.isDestroyed()) return null;
+        if (browserWindow.isMinimized()) browserWindow.restore();
+        // show() switches to the Space that holds this window. Activating the
+        // app on its own would follow the main window instead.
+        browserWindow.show();
+        browserWindow.focus();
+        if (environment.platform === "darwin") {
+          Electron.app.focus({ steal: true });
         }
-      });
-      if (failed !== null) {
-        yield* logWindowWarning("failed to present the workspace window", { cause: failed });
+        if (!browserWindow.isDestroyed()) browserWindow.focus();
+        return null;
+      } catch (cause) {
+        return cause;
       }
     });
+    if (failed !== null) {
+      yield* logWindowWarning("failed to present the workspace window", { cause: failed });
+    }
+  });
 
   const workspaceClaimSnapshot = () => {
     const focused = Electron.BrowserWindow.getFocusedWindow();

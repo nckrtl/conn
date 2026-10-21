@@ -64,7 +64,7 @@ export function DeviceHostDiagnostics(props: {
   const diagnostics = deviceHostDiagnostics(props.hosts, props.hostStatuses);
   if (diagnostics.length === 0) return null;
   return (
-    <div role="status" className={cn("space-y-1 text-xs text-muted-foreground", props.className)}>
+    <div role="status" className={cn("space-y-1 text-ui text-muted-foreground", props.className)}>
       {diagnostics.map(({ hostId, label, detail }) => (
         <p key={hostId} className="whitespace-pre-line break-words">
           {label}: {detail}

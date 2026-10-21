@@ -442,7 +442,7 @@ function ReviewThreadEvent({
             showPath={false}
           />
           {thread.replies.length > 0 ? (
-            <div className="ml-2 space-y-1 border-l border-border/60 pl-3">
+            <div className="ml-2 space-y-1 border-l border-(--shell-divider)! pl-3">
               {thread.replies.map((reply) => (
                 <ConversationCard
                   key={reply.id}

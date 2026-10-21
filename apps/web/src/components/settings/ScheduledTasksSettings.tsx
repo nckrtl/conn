@@ -1593,7 +1593,7 @@ function ScheduledTaskEditorForm({
                     }
                   />
                 </Field>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-ui text-muted-foreground">
                   Replay keys suppress repeat deliveries for 7 days. Coalescing runs the latest
                   payload once when the window from the first delivery closes. Empty keys run
                   normally.

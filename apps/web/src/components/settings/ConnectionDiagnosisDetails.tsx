@@ -89,7 +89,7 @@ export function ConnectionDiagnosisSummary({
   readonly onToggle: () => void;
 }) {
   return (
-    <div className="text-xs">
+    <div className="text-ui">
       <p className="text-destructive">{diagnosis.headline}</p>
       <p className="flex flex-wrap items-center gap-1 text-muted-foreground">
         {retryAt !== null ? <RetryCountdown retryAt={retryAt} /> : null}
@@ -141,7 +141,7 @@ export function ConnectionDiagnosisPanel({
       ),
   });
   return (
-    <div className="mt-2 grid gap-3 border-t border-border/50 pt-2 text-xs">
+    <div className="mt-2 grid gap-3 border-t border-(--shell-divider)! pt-2 text-ui">
       <ol className="grid gap-0.5">
         {diagnosis.hops.map((hop) => (
           <li

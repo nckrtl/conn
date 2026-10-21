@@ -214,7 +214,7 @@ function CleanupResults({
                 <span className={`block ${entry.outcome === "failed" ? "text-destructive" : ""}`}>
                   {entry.reason}
                 </span>
-                <span className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 border-l border-border/60 pl-3">
+                <span className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 border-l border-(--shell-divider)! pl-3">
                   <span>Machine</span>
                   <span className="text-foreground/80">{environmentLabel}</span>
                   {entry.projectPath && (

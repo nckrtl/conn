@@ -114,7 +114,7 @@ export function EasDeviceHostsSettings(props: { environmentId: EnvironmentId | n
                   <p className="flex items-center gap-1.5 truncate font-medium">
                     <CloudIcon className="size-3.5 shrink-0" /> {host.label}
                   </p>
-                  <p className="truncate text-xs text-muted-foreground">{easSessionLimits(host)}</p>
+                  <p className="truncate text-ui text-muted-foreground">{easSessionLimits(host)}</p>
                 </div>
                 <div className="flex shrink-0 gap-1">
                   <Button
@@ -331,8 +331,8 @@ function EasDeviceHostEditor(props: {
                 ) : null}
               </div>
             </div>
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2.5">
-              <p role="status" className="min-w-0 text-xs text-muted-foreground">
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-(--shell-divider)! px-3 py-2.5">
+              <p role="status" className="min-w-0 text-ui text-muted-foreground">
                 {account.status === "signed-in"
                   ? `Signed in as ${account.account.signedInAs} with ${CREDENTIAL_SOURCES[account.account.credentialSource]}.`
                   : account.status === "failed"
@@ -385,7 +385,7 @@ function EasDeviceHostEditor(props: {
                   ))}
                 </SelectPopup>
               </Select>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-ui text-muted-foreground">
                 Sessions bill the project's Expo account. "From the thread's project" reads
                 extra.eas.projectId from the project's app config.
               </p>
@@ -395,14 +395,14 @@ function EasDeviceHostEditor(props: {
               {limit("maxSessionMinutes", "Session minutes", 115)}
               {limit("idleMinutes", "Idle minutes", 60)}
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-ui text-muted-foreground">
               Expo allows sessions of up to 40 minutes on free accounts and 115 on paid ones, and
               ends one after the idle minutes without activity, so idle minutes must be smaller than
               session minutes.
               {props.isNew ? null : " Saving restarts this host, which stops its running sessions."}
             </p>
             {problem === null ? null : (
-              <p className="text-xs text-destructive" role="alert">
+              <p className="text-ui text-destructive" role="alert">
                 {problem}
               </p>
             )}

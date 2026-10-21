@@ -234,7 +234,7 @@ function CollapsedComment({
           <div className="flex flex-wrap items-baseline gap-2">
             <CommentIdentity comment={comment} detail={detail} />
             {replyCount > 0 ? (
-              <span className="shrink-0 py-1 text-xs text-muted-foreground">
+              <span className="shrink-0 py-1 text-ui text-muted-foreground">
                 {replyCount} {replyCount === 1 ? "reply" : "replies"}
               </span>
             ) : null}
@@ -625,7 +625,7 @@ export function PullRequestSummaryTab({
     const thread = item.kind === "thread" ? item.thread : undefined;
     const replies =
       item.kind === "thread" && item.replies.length > 0 ? (
-        <div className="ml-4 space-y-2 border-l-2 border-border/60 pl-3">
+        <div className="ml-4 space-y-2 border-l-2 border-(--shell-divider)! pl-3">
           {item.replies.map((reply) => renderCommentCard(reply, undefined, { reply: true }))}
         </div>
       ) : null;

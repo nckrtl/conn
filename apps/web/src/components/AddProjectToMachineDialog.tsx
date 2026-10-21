@@ -221,11 +221,11 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
                   />
                   <span className="truncate">{source?.label ?? "This machine"}</span>
                 </span>
-                <span className="flex min-w-0 font-mono text-muted-foreground text-xs">
+                <span className="flex min-w-0 font-mono text-muted-foreground text-ui">
                   <MiddleTruncate value={project?.workspaceRoot ?? ""} />
                 </span>
               </div>
-              <div className="flex w-28 flex-col items-center gap-0.5 text-muted-foreground text-xs">
+              <div className="flex w-28 flex-col items-center gap-0.5 text-muted-foreground text-ui">
                 <span>git clone</span>
                 <span className="flex w-full items-center">
                   <span className="h-px flex-1 bg-border" />
@@ -271,7 +271,7 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
                     <span className="truncate">{target?.label ?? "No machine available"}</span>
                   </span>
                 )}
-                <span className="flex min-w-0 font-mono text-muted-foreground text-xs">
+                <span className="flex min-w-0 font-mono text-muted-foreground text-ui">
                   <MiddleTruncate value={destinationPath} />
                 </span>
               </div>
@@ -292,7 +292,7 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
                   <Toggle value="https">HTTPS</Toggle>
                 </ToggleGroup>
               ) : null}
-              <span className="truncate font-mono text-muted-foreground text-xs">{remoteUrl}</span>
+              <span className="truncate font-mono text-muted-foreground text-ui">{remoteUrl}</span>
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -312,7 +312,7 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
                   <Label className="flex-1">Copy ignored files</Label>
                   {copyable.length > 0 ? (
                     <>
-                      <span className="text-muted-foreground text-xs">
+                      <span className="text-muted-foreground text-ui">
                         {selectedFiles.size} of {files.length}
                         {selectedBytes > 0 ? ` · ${formatBytes(selectedBytes)}` : ""}
                       </span>
@@ -334,15 +334,15 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
                   ) : null}
                 </div>
                 {ignoredFiles.error ? (
-                  <p className="text-destructive-foreground text-xs">{ignoredFiles.error}</p>
+                  <p className="text-destructive-foreground text-ui">{ignoredFiles.error}</p>
                 ) : files.length === 0 ? (
-                  <p className="text-muted-foreground text-xs">
+                  <p className="text-muted-foreground text-ui">
                     {ignoredFiles.isSuccess
                       ? "No ignored files to copy."
                       : "Finding ignored files…"}
                   </p>
                 ) : (
-                  <div className="max-h-52 overflow-y-auto rounded-md border">
+                  <div className="scrollbar-inset max-h-52 overflow-y-auto rounded-md border border-(--shell-divider)!">
                     {files.map((file) => (
                       <IgnoredFileRow
                         key={file.path}
@@ -354,11 +354,11 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
                   </div>
                 )}
                 {ignoredFiles.data?.truncated ? (
-                  <p className="text-muted-foreground text-xs">
+                  <p className="text-muted-foreground text-ui">
                     Showing the first {files.length} files.
                   </p>
                 ) : null}
-                <p className="text-muted-foreground text-xs">
+                <p className="text-muted-foreground text-ui">
                   Files are copied after the clone finishes. Folders git ignores whole, like
                   node_modules, are left out.
                 </p>
@@ -417,8 +417,8 @@ function IgnoredFileRow({
   return (
     <label className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-sm not-last:border-b has-disabled:cursor-not-allowed has-disabled:opacity-64">
       <Checkbox checked={checked} disabled={tooLarge} onCheckedChange={onCheckedChange} />
-      <span className="min-w-0 flex-1 truncate font-mono text-xs">{file.path}</span>
-      <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
+      <span className="min-w-0 flex-1 truncate font-mono text-ui">{file.path}</span>
+      <span className="shrink-0 text-muted-foreground text-ui tabular-nums">
         {tooLarge ? "Over 1 MB" : formatBytes(file.byteLength)}
       </span>
     </label>

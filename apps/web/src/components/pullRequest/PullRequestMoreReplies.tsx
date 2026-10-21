@@ -7,7 +7,7 @@ export function PullRequestMoreReplies({
 }: PullRequestReplyAvailability) {
   if (!hasMoreReplies) return null;
   return (
-    <div className="flex flex-wrap items-baseline gap-2 py-1 text-xs text-muted-foreground">
+    <div className="flex flex-wrap items-baseline gap-2 py-1 text-ui text-muted-foreground">
       <span>
         {moreReplies > 0
           ? `${moreReplies.toLocaleString()} more ${moreReplies === 1 ? "reply" : "replies"}`

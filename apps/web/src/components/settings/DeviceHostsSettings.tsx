@@ -438,7 +438,7 @@ function DeviceHostList({
                     result.status?.status === "ready" && result.status.androidDiscoveryIncomplete,
                 )
                 .map((result) => (
-                  <p key={result.environmentId} role="status" className="mt-1 text-xs text-warning">
+                  <p key={result.environmentId} role="status" className="mt-1 text-ui text-warning">
                     {compact ? `${result.label}: ` : ""}
                     {result.status?.detail ??
                       "The Android device list may be incomplete. Refresh devices to try again."}

@@ -416,6 +416,7 @@ describe("OrchestratorMcpService", () => {
           turnItems: [],
         } as unknown as OrchestrationV2ThreadProjection;
         const layerDependencies = Layer.mergeAll(
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
           NodeServices.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadRecords: (threadId) =>
@@ -2135,6 +2136,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           result: null,
         };
         const dependencies = Layer.mergeAll(
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
           NodeServices.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadRecords: (threadId) =>
@@ -2232,6 +2234,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             result: null,
           };
           const dependencies = Layer.mergeAll(
+            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
             NodeServices.layer,
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               hasReceipt: () => Effect.succeed(false),

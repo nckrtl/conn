@@ -1669,6 +1669,7 @@ const make = Effect.gen(function* () {
       hasPendingChildRuns: false,
       // A linked environment's child questions are answered there, not here.
       hasPendingQuestion: false,
+      pendingApproval: null,
       providerInstanceId: task.providerInstanceId,
       model: task.model,
       summary: task.result,

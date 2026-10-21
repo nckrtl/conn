@@ -24,6 +24,7 @@ import { appAtomRegistry } from "./rpc/atomRegistry";
 
 const environmentId = "env-1" as EnvironmentId;
 const ref = scopeThreadRef(environmentId, ThreadId.make("thread-1"));
+const otherRef = scopeThreadRef(environmentId, ThreadId.make("thread-2"));
 
 const makeSnapshot = (overrides: Partial<PreviewSessionSnapshot> = {}): PreviewSessionSnapshot => ({
   threadId: "thread-1",

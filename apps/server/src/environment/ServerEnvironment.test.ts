@@ -20,6 +20,12 @@ import {
 import * as ServerConfig from "../config.ts";
 import * as ServerRestart from "../serverRestart.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
+import * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
+
+const isServerEnvironmentIdPersistenceError = Schema.is(
+  ServerEnvironment.ServerEnvironmentIdPersistenceError,
+);
 
 const layerServerEnvironment = (baseDir: string) =>
   ServerEnvironment.layer.pipe(

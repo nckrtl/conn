@@ -8,7 +8,7 @@ import type {
 import type { ComposerContextRecord } from "@t3tools/contracts";
 import { contextChipPresentation } from "../lib/composerChipPresentation";
 import { CONTEXT_CHIP_ICON_SOURCES } from "../lib/contextChipIcons.generated";
-import { FONT_FAMILIES } from "../lib/fontFamilies";
+import { SANS_FONT_FAMILY } from "../lib/fonts";
 import { markdownFileIconSource } from "../lib/markdownFileIcons";
 import { markdownLinkIconSource } from "../lib/markdownLinkIcons";
 import { resolveMarkdownLinkIcon, resolveMarkdownLinkPresentation } from "../lib/markdownLinks";
@@ -114,7 +114,8 @@ export function useEnrichedLinkVariants(
                 paddingHorizontal: 5,
                 paddingVertical: 2,
               },
-              fontFamily: chipForeground ? FONT_FAMILIES.medium : textStyle.fontFamily,
+              fontFamily: chipForeground ? SANS_FONT_FAMILY : textStyle.fontFamily,
+              ...(chipForeground ? { fontWeight: "500" } : {}),
               color: chipForeground ?? link.color ?? textStyle.fileTextColor,
               underline: false,
               backgroundColor: "transparent",

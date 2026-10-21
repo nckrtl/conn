@@ -50,6 +50,7 @@ import {
   runDesktopCommitWithReconnectObserver,
 } from "./server.ts";
 import { applyServerConfigProjection } from "./serverConfigProjection.ts";
+import * as TestClock from "effect/testing/TestClock";
 
 const CONFIG = {
   availableEditors: [],

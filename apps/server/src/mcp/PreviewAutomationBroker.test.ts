@@ -20,6 +20,9 @@ import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as Exit from "effect/Exit";
+import * as Scheduler from "effect/Scheduler";
+import * as TestClock from "effect/testing/TestClock";
 
 const makeBroker = PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
 

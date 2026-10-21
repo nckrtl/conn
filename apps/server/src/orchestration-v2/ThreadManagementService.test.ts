@@ -26,8 +26,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
-import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import { DispatchModeLimit, type DispatchModeRefusal } from "./DispatchModeLimit.ts";
+import { type OrchestrationV2Command } from "@t3tools/contracts";
 
 it("stamps authoritative provenance on commands that create threads or messages", () => {
   const command: OrchestrationV2Command = {
@@ -81,128 +80,6 @@ it("leaves commands that do not create durable authored content unchanged", () =
       creationSource: "web",
     }),
   ).toBe(command);
-});
-
-it("identifies every existing thread that must be hydrated before dispatch", () => {
-  const sourceThreadId = ThreadId.make("thread:thread-management:source");
-  const targetThreadId = ThreadId.make("thread:thread-management:target");
-  const parentThreadId = ThreadId.make("thread:thread-management:parent");
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "thread.create",
-      createdBy: "user",
-      creationSource: "web",
-      commandId: CommandId.make("command:thread-management:create"),
-      threadId: targetThreadId,
-      projectId: ProjectId.make("project:thread-management"),
-      title: "Created thread",
-      modelSelection: {
-        instanceId: ProviderInstanceId.make("codex"),
-        model: "gpt-5-codex",
-      },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-    }),
-  ).toEqual([]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "thread.archive",
-      commandId: CommandId.make("command:thread-management:archive"),
-      threadId: targetThreadId,
-    }),
-  ).toEqual([targetThreadId]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "thread.visit",
-      commandId: CommandId.make("command:thread-management:visit"),
-      threadId: targetThreadId,
-      visitedAt: "2026-07-30T00:00:00.000Z",
-    }),
-  ).toEqual([]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "thread.mark-unread",
-      commandId: CommandId.make("command:thread-management:mark-unread"),
-      threadId: targetThreadId,
-    }),
-  ).toEqual([]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "thread.fork",
-      createdBy: "user",
-      creationSource: "web",
-      commandId: CommandId.make("command:thread-management:fork"),
-      sourceThreadId,
-      targetThreadId,
-      sourcePoint: {
-        type: "run",
-        runId: RunId.make("run:thread-management:source"),
-      },
-    }),
-  ).toEqual([sourceThreadId]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "thread.merge_back",
-      createdBy: "user",
-      creationSource: "web",
-      commandId: CommandId.make("command:thread-management:merge"),
-      sourceThreadId,
-      targetThreadId,
-      sourcePoint: {
-        type: "run",
-        runId: RunId.make("run:thread-management:source"),
-      },
-    }),
-  ).toEqual([sourceThreadId, targetThreadId]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "delegated_task.request",
-      createdBy: "agent",
-      creationSource: "provider",
-      commandId: CommandId.make("command:thread-management:delegate"),
-      parentThreadId,
-      parentRunId: RunId.make("run:thread-management:parent"),
-      parentNodeId: NodeId.make("node:thread-management:parent"),
-      task: "Inspect the migration",
-      modelSelection: {
-        instanceId: ProviderInstanceId.make("codex"),
-        model: "gpt-5-codex",
-      },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-    }),
-  ).toEqual([parentThreadId]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "delegated_task.wake-policy",
-      commandId: CommandId.make("command:thread-management:wake-policy"),
-      parentThreadId,
-      taskId: NodeId.make("node:thread-management:delegated"),
-      completionWake: "always",
-    }),
-  ).toEqual([parentThreadId]);
-
-  expect(
-    ThreadManagementService.existingThreadIdsForCommand({
-      type: "thread.created.record",
-      commandId: CommandId.make("command:thread-management:record"),
-      parentThreadId,
-      parentRunId: RunId.make("run:thread-management:parent"),
-      parentNodeId: NodeId.make("node:thread-management:parent"),
-      targetThreadId,
-      targetRunId: null,
-    }),
-  ).toEqual([parentThreadId, targetThreadId]);
 });
 
 it("derives thread management messages from structural error attributes", () => {

@@ -265,9 +265,6 @@ import {
 } from "../previewMiniPlayerStore";
 import { threadPullRequestPanelTarget } from "./pullRequest/pullRequestDetail.logic";
 import { RightPanelTabs } from "./RightPanelTabs";
-import { ApiPanel } from "../api/ApiPanel";
-import { DatabasePanel } from "../database/DatabasePanel";
-import { McpPanel } from "../mcp/McpPanel";
 import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
 import { useDeviceState } from "~/state/device";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
@@ -4925,12 +4922,17 @@ export default function ChatView(props: ChatViewProps) {
       ? (pendingServerThreadStartFromOriginByThreadId[activeThread?.id ?? ""] ??
         activeProjectSettings.settings.newWorktreesStartFromOrigin)
       : false;
+  // Conn: Orbit mode passes through like worktree; upstream's helper knows only local/worktree.
   const sendEnvMode = isOrbitProjectFolder
     ? "orbit"
-    : resolveSendEnvMode({
-        requestedEnvMode: envMode,
-        isGitRepo,
-      });
+    : envMode === "orbit"
+      ? isGitRepo
+        ? "orbit"
+        : "local"
+      : resolveSendEnvMode({
+          requestedEnvMode: envMode,
+          isGitRepo,
+        });
   const localCheckoutBranchMismatch = isServerThread
     ? resolveLocalCheckoutBranchMismatch({
         effectiveEnvMode: envMode,

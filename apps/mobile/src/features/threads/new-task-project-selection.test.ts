@@ -7,6 +7,7 @@ import {
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
 } from "./new-task-project-selection";
+import { filterProjectScopes, getProjectScopeSelectionTarget } from "./new-task-project-selection";
 
 function makeProject(
   id: string,

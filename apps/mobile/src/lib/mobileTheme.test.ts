@@ -24,6 +24,12 @@ import {
   themeColorWithAlpha,
   themeColorToNativeColor,
 } from "./mobileTheme";
+import {
+  getMobileThemePreviewColors,
+  mixOklab,
+  normalizeMobileThemeId,
+  normalizeMobileThemeMode,
+} from "./mobileTheme";
 
 function relativeLuminance(hex: string): number {
   const channels = hex

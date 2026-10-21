@@ -1,5 +1,4 @@
 import { EdgeBlur } from "../../native/EdgeBlur";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   isAtomCommandInterrupted,
   settlePromise,

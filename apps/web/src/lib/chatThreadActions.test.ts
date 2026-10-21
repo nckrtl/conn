@@ -5,16 +5,26 @@ import {
   ProviderInstanceId,
   type ModelSelection,
 } from "@t3tools/contracts";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 import { useWorkspaceStore } from "../workspaceStore";
 import {
   resolveThreadActionProjectRef,
-  hasExplicitComposerModelSelection,
-  resolveNewDraftStartFromOrigin,
   resolveNewThreadModelSelectionOverride,
-  startNewThreadFromContext,
   type ChatThreadActionContext,
 } from "./chatThreadActions";
+
+const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
+const PROJECT_ID = ProjectId.make("project-1");
+const FALLBACK_PROJECT_ID = ProjectId.make("project-2");
+function createContext(overrides: Partial<ChatThreadActionContext> = {}): ChatThreadActionContext {
+  return {
+    activeDraftThread: null,
+    activeThread: undefined,
+    defaultProjectRef: scopeProjectRef(ENVIRONMENT_ID, FALLBACK_PROJECT_ID),
+    handleNewThread: async () => {},
+    ...overrides,
+  };
+}
 
 const PROJECT_DEFAULT_SELECTION: ModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),

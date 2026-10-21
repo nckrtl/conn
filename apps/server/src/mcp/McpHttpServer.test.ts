@@ -35,6 +35,8 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");

@@ -60,6 +60,8 @@ import {
   WSL_RUNTIME_ARCHIVE_HASH_NAME,
   WSL_RUNTIME_ARCHIVE_NAME,
   wslRuntimeArchiveStem,
+  resolveDesktopBuildIconAssets,
+  resolveDesktopWebIconOverride,
 } from "./build-desktop-artifact.ts";
 import { resolveAppBrand } from "../apps/desktop/src/branding/appBrand.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";

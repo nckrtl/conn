@@ -32,6 +32,10 @@ import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
+import {
+  CREDENTIAL_LOCK_EXPRESSION,
+  SENSITIVE_INPUT_VALUES_EXPRESSION,
+} from "@t3tools/shared/credentialFill";
 
 vi.mock("./ServerBrowserContexts.ts", () => ({
   presentAsChrome: async () => {},

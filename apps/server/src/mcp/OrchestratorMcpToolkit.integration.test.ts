@@ -47,6 +47,10 @@ import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
+import { delegatedTaskRun, hasPendingChildRuns } from "./OrchestratorMcpService.ts";
 
 /** A task delegated here always has a local child thread. */
 const localChild = (childThreadId: ThreadId | null): ThreadId => {

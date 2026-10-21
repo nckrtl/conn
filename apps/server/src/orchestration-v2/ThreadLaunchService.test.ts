@@ -63,6 +63,8 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 
 const projectId = ProjectId.make("project:launch-test");
 const otherProjectId = ProjectId.make("project:launch-other");

@@ -64,6 +64,9 @@ const declaredFailure = (result: McpSchema.CallToolResult) => {
   return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
 };
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+import * as PeerForwarding from "../../peer/PeerForwarding.ts";
+import * as PeerLinkRequests from "../../peer/PeerLinkRequests.ts";
+import * as PeerLinks from "../../peer/PeerLinks.ts";
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);

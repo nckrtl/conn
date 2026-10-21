@@ -36,7 +36,10 @@ layer("055_OrchestrationV2", (it) => {
         [62, "ThreadFailureLookupIndex"],
         [63, "DropUnusedV1Projections"],
         [64, "CanonicalizeThreadPullRequestLinks"],
-        [65, "PeerLinks"],
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
+        [68, "PeerLinks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -67,7 +70,10 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 62, name: "ThreadFailureLookupIndex" },
         { migration_id: 63, name: "DropUnusedV1Projections" },
         { migration_id: 64, name: "CanonicalizeThreadPullRequestLinks" },
-        { migration_id: 65, name: "PeerLinks" },
+        { migration_id: 65, name: "CodexUsageNativeTurnIndex" },
+        { migration_id: 66, name: "RepairClientSettlementTimestamps" },
+        { migration_id: 67, name: "WebhookDedupe" },
+        { migration_id: 68, name: "PeerLinks" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

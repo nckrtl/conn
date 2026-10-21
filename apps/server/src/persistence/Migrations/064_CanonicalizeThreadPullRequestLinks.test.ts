@@ -123,7 +123,6 @@ layer("064_CanonicalizeThreadPullRequestLinks", (it) => {
           'user', ${v1Payload}, '{}', 1)
       `;
 
-      // Conn: stop at 64; Conn's PeerLinks follows at 65.
       assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 64 }), [
         [64, "CanonicalizeThreadPullRequestLinks"],
       ]);

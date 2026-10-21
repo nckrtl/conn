@@ -9,7 +9,7 @@ import { migrationManifest, runMigrations } from "./Migrations.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
-import PeerLinks from "./Migrations/065_PeerLinks.ts";
+import PeerLinks from "./Migrations/068_PeerLinks.ts";
 
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -45,7 +45,10 @@ describe("V2 preview upgrade", () => {
         [62, "ThreadFailureLookupIndex"],
         [63, "DropUnusedV1Projections"],
         [64, "CanonicalizeThreadPullRequestLinks"],
-        [65, "PeerLinks"],
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
+        [68, "PeerLinks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -133,7 +136,10 @@ describe("V2 preview upgrade", () => {
         [62, "ThreadFailureLookupIndex"],
         [63, "DropUnusedV1Projections"],
         [64, "CanonicalizeThreadPullRequestLinks"],
-        [65, "PeerLinks"],
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
+        [68, "PeerLinks"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -153,10 +159,12 @@ describe("V2 preview upgrade", () => {
   );
 });
 
-// Conn shipped upstream's preview with PeerLinks at 61, then kept it at 62, 63
-// and 64; upstream main gives 61 to PullRequestReviewGuides, 62 to
-// ThreadFailureLookupIndex, 63 to DropUnusedV1Projections and 64 to
-// CanonicalizeThreadPullRequestLinks, and Conn keeps PeerLinks at 65.
+// Conn shipped upstream's preview with PeerLinks at 61, then kept it at 62, 63,
+// 64 and 65; upstream main gives 61 to PullRequestReviewGuides, 62 to
+// ThreadFailureLookupIndex, 63 to DropUnusedV1Projections, 64 to
+// CanonicalizeThreadPullRequestLinks, 65 to CodexUsageNativeTurnIndex, 66 to
+// RepairClientSettlementTimestamps and 67 to WebhookDedupe, and Conn keeps
+// PeerLinks at 68.
 const seedPeerLink = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
@@ -183,10 +191,14 @@ const assertReconciled = Effect.gen(function* () {
     yield* sql`SELECT name FROM sqlite_master WHERE name = 'orchestration_v2_projection_turn_items_failed_error_idx'`,
     [{ name: "orchestration_v2_projection_turn_items_failed_error_idx" }],
   );
+  assert.deepStrictEqual(
+    yield* sql`SELECT name FROM sqlite_master WHERE name = 'scheduled_task_webhook_pending'`,
+    [{ name: "scheduled_task_webhook_pending" }],
+  );
   assert.strictEqual((yield* sql`SELECT * FROM peer_environment_links`).length, 1);
 });
 describe("Conn PeerLinks upgrade", () => {
-  it.effect("moves PeerLinks from 61 to 65 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 61 to 68 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 60 });
       yield* Migrator.make({})({
@@ -198,11 +210,14 @@ describe("Conn PeerLinks upgrade", () => {
         [62, "ThreadFailureLookupIndex"],
         [63, "DropUnusedV1Projections"],
         [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 62 to 65 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 62 to 68 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 61 });
       yield* Migrator.make({})({
@@ -213,11 +228,14 @@ describe("Conn PeerLinks upgrade", () => {
         [62, "ThreadFailureLookupIndex"],
         [63, "DropUnusedV1Projections"],
         [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 63 to 65 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 63 to 68 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 62 });
       yield* Migrator.make({})({
@@ -227,18 +245,41 @@ describe("Conn PeerLinks upgrade", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [63, "DropUnusedV1Projections"],
         [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 64 to 65 and runs the link canonicalization it displaced", () =>
+  it.effect("moves PeerLinks from 64 to 68 and runs the link canonicalization it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 63 });
       yield* Migrator.make({})({
         loader: Migrator.fromRecord({ "64_PeerLinks": PeerLinks }),
       });
       yield* seedPeerLink;
-      assert.deepStrictEqual(yield* runMigrations(), [[64, "CanonicalizeThreadPullRequestLinks"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [64, "CanonicalizeThreadPullRequestLinks"],
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
+      ]);
+      yield* assertReconciled;
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+  it.effect("moves PeerLinks from 65 to 68 and runs the migrations it displaced", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 64 });
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord({ "65_PeerLinks": PeerLinks }),
+      });
+      yield* seedPeerLink;
+      assert.deepStrictEqual(yield* runMigrations(), [
+        [65, "CodexUsageNativeTurnIndex"],
+        [66, "RepairClientSettlementTimestamps"],
+        [67, "WebhookDedupe"],
+      ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

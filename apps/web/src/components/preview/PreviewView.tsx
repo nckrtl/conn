@@ -1,5 +1,3 @@
-"use client";
-
 import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
 import { Button } from "~/components/ui/button";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";

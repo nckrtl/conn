@@ -143,6 +143,10 @@ export function manualServerUpdateCommand(
   return `${runner} t3@${targetVersion}`;
 }
 
+export function serverUpdateGuidance(capability: ServerSelfUpdateCapability): string {
+  return capability === "desktop-managed" ? "Update the desktop app" : "Update to stay in sync";
+}
+
 export function buildVersionMismatchDismissalKey(
   environmentId: EnvironmentId,
   mismatch: Pick<VersionMismatch, "clientVersion" | "serverVersion">,
@@ -194,18 +198,4 @@ export function dismissVersionMismatch(dismissalKey: string | null | undefined):
   writeVersionMismatchDismissals({
     keys: [...document.keys, dismissalKey],
   });
-}
-
-export function appendVersionMismatchHint(
-  message: string | null | undefined,
-  mismatch: VersionMismatch | null | undefined,
-): string | null {
-  const normalizedMessage = normalizeVersion(message);
-  if (!normalizedMessage) {
-    return mismatch?.hint ?? null;
-  }
-  if (!mismatch) {
-    return normalizedMessage;
-  }
-  return `${normalizedMessage} Hint: ${mismatch.hint}`;
 }

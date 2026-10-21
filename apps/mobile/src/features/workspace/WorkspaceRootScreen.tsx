@@ -116,6 +116,7 @@ function WorkspaceRootContent() {
               headerShown: !connPhoneBar,
               unstable_headerLeftItems: () => [],
               headerTitle: renderHeaderTitle,
+              ...(state.selectedTab === "threads" ? {} : { nativeSidebarFilter: undefined }),
             }}
           />
         ) : (

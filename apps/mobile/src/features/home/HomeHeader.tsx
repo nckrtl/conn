@@ -13,7 +13,10 @@ import { useCreateNativeMailSearchToolbarItem } from "../layout/native-mail-sear
 import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-toolbar";
 import { selectOrbitWorkspace, useOrbitGateway } from "../orbit/orbitGatewayStore";
 import { buildHomeListFilterMenu } from "./home-list-filter-menu";
-import { createSidebarHeaderItems } from "../threads/sidebar-native-header-items";
+import {
+  createSidebarFilterHeaderItem,
+  createSidebarHeaderItems,
+} from "../threads/sidebar-native-header-items";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { WorkspacePhoneBar } from "../workspace/WorkspacePhoneBar";
@@ -80,6 +83,18 @@ export function HomeHeader(props: HomeHeaderProps) {
   if (props.usesWorkspaceToolbar) {
     return connPhoneBar ? (
       <WorkspacePhoneBar filterMenu={filterMenu} filterActive={hasCustomListOptions} />
+    ) : deviceType === "duo-unfolded" ? (
+      <NativeStackScreenOptions
+        optionsVersion={filterMenu.items}
+        options={{
+          nativeSidebarFilter: createSidebarFilterHeaderItem({
+            filterIcon: hasCustomListOptions
+              ? "line.3.horizontal.decrease.circle.fill"
+              : "line.3.horizontal.decrease.circle",
+            filterMenu,
+          }),
+        }}
+      />
     ) : null;
   }
 

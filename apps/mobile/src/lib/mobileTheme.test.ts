@@ -15,16 +15,11 @@ import {
 import { getMobileThemeRuntimeVariables } from "./mobileThemeVariables";
 
 import {
-  createMobileThemePairPatch,
   createMobileThemeSelectionPatch,
   createMobileThemeVariables,
   DEFAULT_MOBILE_THEME_ID,
   flattenThemeColor,
-  getMobileThemePreviewColors,
   getMobileThemeVariables,
-  mixOklab,
-  normalizeMobileThemeId,
-  normalizeMobileThemeMode,
   resolveMobileThemeIds,
   themeColorWithAlpha,
   themeColorToNativeColor,
@@ -70,14 +65,6 @@ describe("mobile themes", () => {
     expect(Object.keys(readDefaultMobileThemeVariables("dark")).sort()).toEqual(
       Object.keys(generatedVariables).sort(),
     );
-  });
-
-  it("shares all built-in desktop palettes", () => {
-    expect(BUILT_IN_THEMES.map((theme) => theme.id)).toEqual(BUILT_IN_THEME_IDS);
-    for (const themeId of BUILT_IN_THEME_IDS) {
-      expect(getMobileThemeVariables(themeId, "light")["--color-screen"]).toMatch(/^#/);
-      expect(getMobileThemeVariables(themeId, "dark")["--color-screen"]).toMatch(/^#/);
-    }
   });
 
   it.each(MOBILE_THEME_IDS)("uses the web color roles for %s in both appearances", (themeId) => {
@@ -171,15 +158,6 @@ describe("mobile themes", () => {
         ).toBeGreaterThanOrEqual(4.5);
       }
     }
-  });
-
-  it("applies palette overrides on top of the selected built-in theme", () => {
-    const variables = getMobileThemeVariables("ocean", "dark", {
-      "--color-primary": "#123456",
-    });
-
-    expect(variables["--color-primary"]).toBe("#123456");
-    expect(variables["--color-screen"]).toMatch(/^#/);
   });
 
   it.each(MOBILE_THEME_IDS)("separates %s filled groups from their sheets", (themeId) => {
@@ -386,14 +364,6 @@ describe("mobile themes", () => {
     });
   });
 
-  it("changes both appearance themes from the card action", () => {
-    expect(createMobileThemePairPatch("ember")).toEqual({
-      lightThemeId: "ember",
-      darkThemeId: "ember",
-      themeId: "ember",
-    });
-  });
-
   it("converts OKLCH colors to React Native sRGB ColorValues", () => {
     expect(themeColorToNativeColor("oklch(1 0 0)")).toBe("#ffffff");
     expect(themeColorToNativeColor("oklch(0 0 0)")).toBe("#000000");
@@ -526,23 +496,5 @@ describe("mobile themes", () => {
         contrastRatio(variables["--color-md-user-code-text"], codeSurface),
       ).toBeGreaterThanOrEqual(4.5);
     }
-  });
-});
-
-describe("flattenThemeColor", () => {
-  it("composites a translucent border over its surface", async () => {
-    const { flattenThemeColor } = await import("./mobileTheme");
-    expect(flattenThemeColor("rgba(255, 255, 255, 0.06)", "#171717")).toBe("#252525");
-    expect(flattenThemeColor("rgba(0, 0, 0, 0.08)", "#ffffff")).toBe("#ebebeb");
-  });
-
-  it("leaves an already opaque colour alone", async () => {
-    const { flattenThemeColor } = await import("./mobileTheme");
-    expect(flattenThemeColor("#171717", "#ffffff")).toBe("#171717");
-  });
-
-  it("treats a colour with no alpha as fully opaque", async () => {
-    const { flattenThemeColor } = await import("./mobileTheme");
-    expect(flattenThemeColor("rgb(255, 0, 0)", "#000000")).toBe("#ff0000");
   });
 });

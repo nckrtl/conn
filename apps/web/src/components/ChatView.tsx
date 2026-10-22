@@ -101,7 +101,6 @@ import {
 import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/model";
 import { projectScriptCwd, resolveProjectScripts } from "@t3tools/shared/projectScripts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
-import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import { resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
@@ -223,10 +222,8 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import { createOrbitWorktree, orbitInstanceNameForBranch } from "../orbit/orbitInstances";
 import { useOrbitThreadStore } from "../orbit/orbitThreadStore";
-import { runHiddenShell } from "../orbit/orbitTransport";
-import { getOrbitAvailability, useOrbitAvailability } from "../orbit/useOrbitAvailability";
+import { useOrbitAvailability } from "../orbit/useOrbitAvailability";
 import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
@@ -370,6 +367,8 @@ const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import { ConnIconScope } from "../icons/connIcon";
+import { buildThreadRouteParams } from "../threadRoutes";
+import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -2492,6 +2491,40 @@ export default function ChatView(props: ChatViewProps) {
     onDiffPanelOpen,
     closeRightPanelSurface,
   });
+  // nckrtl fork: the API panel sends from the desktop shell, per project.
+  const apiAvailable =
+    activeThreadRef !== null &&
+    activeProjectKey !== null &&
+    typeof window !== "undefined" &&
+    window.desktopBridge?.apiSend !== undefined;
+  const addApiSurface = () => {
+    if (!activeThreadRef || !apiAvailable) return;
+    useRightPanelStore.getState().open(activeThreadRef, "api");
+  };
+  const orbitInstanceUrl = useOrbitThreadStore((state) =>
+    activeThreadRef ? (state.byThreadKey[scopedThreadKey(activeThreadRef)]?.url ?? null) : null,
+  );
+  const apiBaseUrl = orbitInstanceUrl ?? configuredPreviewUrls[0] ?? null;
+  // nckrtl fork: the Database panel connects from the desktop shell.
+  const databaseAvailable =
+    activeThreadRef !== null &&
+    activeProject !== null &&
+    typeof window !== "undefined" &&
+    window.desktopBridge?.databaseRun !== undefined;
+  const addDatabaseSurface = () => {
+    if (!activeThreadRef || !activeProject || !databaseAvailable) return;
+    useRightPanelStore.getState().open(activeThreadRef, "database");
+  };
+  // nckrtl fork: the MCP panel holds its sessions in the desktop shell.
+  const mcpAvailable =
+    activeThreadRef !== null &&
+    activeProject !== null &&
+    typeof window !== "undefined" &&
+    window.desktopBridge?.mcpConnect !== undefined;
+  const addMcpSurface = () => {
+    if (!activeThreadRef || !activeProject || !mcpAvailable) return;
+    useRightPanelStore.getState().open(activeThreadRef, "mcp");
+  };
   const pullRequestSurfaceAvailable = supportsPullRequests && pullRequestPanelTarget !== null;
   const nowMinute = useNowMinute();
   const {
@@ -2666,9 +2699,12 @@ export default function ChatView(props: ChatViewProps) {
       : null;
   const composerBannerItems = (() => {
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
-    const backgroundWorkItems = [childInputBanner, goalBanner, backgroundWorkBanner].filter(
-      (item) => item !== null,
-    );
+    const backgroundWorkItems = [
+      childInputBanner,
+      annotationWatchBannerItem,
+      goalBanner,
+      backgroundWorkBanner,
+    ].filter((item) => item !== null);
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -2960,6 +2996,7 @@ export default function ChatView(props: ChatViewProps) {
     activeEnvironmentUnavailable,
     isSendBusy,
     sendQueuesBehindSetup,
+    isOrbitProjectFolder,
     isDraftHeroState,
     panelAnimationsActive,
     panelAnimationDurationMs,

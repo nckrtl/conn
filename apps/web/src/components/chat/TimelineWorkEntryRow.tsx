@@ -65,6 +65,8 @@ import {
   workEntryIconName,
   remarkThoughtPreview,
 } from "./TimelineWorkEntryRow.logic";
+import { CircleHelpIcon } from "lucide-react";
+import { MessageCircleIcon } from "lucide-react";
 
 export function useThreadReadTarget(entry: TimelineWorkEntry, environmentId: EnvironmentId) {
   const rawThreadId = threadReadTargetId(entry);

@@ -39,6 +39,14 @@ import {
   useSettingsSearchTargetId,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { MAX_CODE_LINE_HEIGHT } from "@t3tools/contracts/settings";
+import { MAX_INTERFACE_LINE_HEIGHT } from "@t3tools/contracts/settings";
+import { MAX_PROMPT_LINE_HEIGHT } from "@t3tools/contracts/settings";
+import { MAX_TERMINAL_LINE_HEIGHT } from "@t3tools/contracts/settings";
+import { MIN_CODE_LINE_HEIGHT } from "@t3tools/contracts/settings";
+import { MIN_INTERFACE_LINE_HEIGHT } from "@t3tools/contracts/settings";
+import { MIN_PROMPT_LINE_HEIGHT } from "@t3tools/contracts/settings";
+import { MIN_TERMINAL_LINE_HEIGHT } from "@t3tools/contracts/settings";
 
 function useFontDefaultFamilies() {
   const settings = useScopedSettings();

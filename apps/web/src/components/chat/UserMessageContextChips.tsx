@@ -54,6 +54,7 @@ import {
   type ReviewCommentContext,
 } from "../../reviewCommentContext";
 import { TimelineRowCtx } from "./timelineRowContext";
+import { EnvironmentContextChip } from "../EnvironmentContextChip";
 
 function UserMessageMentionChip(props: {
   record: Extract<KnownComposerContextRecord, { kind: "mention" }>;

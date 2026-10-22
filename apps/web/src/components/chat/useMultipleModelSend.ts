@@ -80,6 +80,9 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     reportFailure: false,
   });
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
+  const setComposerDraftEnvironmentContexts = useComposerDraftStore(
+    (store) => store.setEnvironmentContexts,
+  );
   const fanoutSelectionsAtom = draftFanoutSelectionsAtom(routeThreadKey);
   const { sendInFlight: sendInFlightRef, uncertainSubmissions: uncertainSubmissionsRef } =
     draftSendState(routeThreadKey);
@@ -115,6 +118,11 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     readonly isCurrentSend: () => boolean;
   }) => {
     const { attachments: attachmentsSnapshot, messageText } = sendSnapshot;
+    // Conn: machine mentions live on the draft, not in the send snapshot.
+    const composerEnvironmentContextsSnapshot = [
+      ...(useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+        ?.environmentContexts ?? []),
+    ];
     const failedSelections: ModelSelection[] = [];
     let clearedDraft = false;
     let releasedComposer = false;

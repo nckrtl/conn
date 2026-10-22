@@ -38,6 +38,9 @@ import {
   searchSlashCommandItems,
   slashCommandItemsForPromptPosition,
 } from "./composerSlashCommandSearch";
+import { matchComposerEnvironmentItems } from "@t3tools/client-runtime/composerThreadItems";
+import { useEnvironmentIdentities } from "~/state/environments";
+import { useEnvironmentMachines } from "~/state/environments";
 
 const COMPOSER_PULL_REQUEST_LIST_LIMIT = 99;
 const COMPOSER_PULL_REQUEST_RESULT_LIMIT = 12;

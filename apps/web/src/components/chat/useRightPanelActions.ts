@@ -1,7 +1,6 @@
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import type { Dispatch } from "react";
 import type { ThreadPreviewState } from "../../previewStateStore";
-import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { resolveExplicitDiffOpenOnActivate } from "../ChatView.logic";
@@ -141,40 +140,6 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     useRightPanelStore.getState().open(activeThreadRef, "files");
   };
   const addFilesSurfaceStable = useStableCallback(addFilesSurface);
-  // nckrtl fork: the API panel sends from the desktop shell, per project.
-  const apiAvailable =
-    activeThreadRef !== null &&
-    activeProjectKey !== null &&
-    typeof window !== "undefined" &&
-    window.desktopBridge?.apiSend !== undefined;
-  const addApiSurface = () => {
-    if (!activeThreadRef || !apiAvailable) return;
-    useRightPanelStore.getState().open(activeThreadRef, "api");
-  };
-  const orbitInstanceUrl = useOrbitThreadStore((state) =>
-    activeThreadRef ? (state.byThreadKey[scopedThreadKey(activeThreadRef)]?.url ?? null) : null,
-  );
-  const apiBaseUrl = orbitInstanceUrl ?? configuredPreviewUrls[0] ?? null;
-  // nckrtl fork: the Database panel connects from the desktop shell.
-  const databaseAvailable =
-    activeThreadRef !== null &&
-    activeProject !== null &&
-    typeof window !== "undefined" &&
-    window.desktopBridge?.databaseRun !== undefined;
-  const addDatabaseSurface = () => {
-    if (!activeThreadRef || !activeProject || !databaseAvailable) return;
-    useRightPanelStore.getState().open(activeThreadRef, "database");
-  };
-  // nckrtl fork: the MCP panel holds its sessions in the desktop shell.
-  const mcpAvailable =
-    activeThreadRef !== null &&
-    activeProject !== null &&
-    typeof window !== "undefined" &&
-    window.desktopBridge?.mcpConnect !== undefined;
-  const addMcpSurface = () => {
-    if (!activeThreadRef || !activeProject || !mcpAvailable) return;
-    useRightPanelStore.getState().open(activeThreadRef, "mcp");
-  };
   const addPullRequestsSurface = () => {
     if (!activeThreadRef || !pullRequestsSurfaceAvailable) return;
     useRightPanelStore.getState().open(activeThreadRef, "pull-requests");

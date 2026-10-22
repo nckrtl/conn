@@ -56,7 +56,6 @@ import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import {
   backgroundWorkBannerItem,
   childInputBannerItem,
-  annotationWatchBannerItem,
   goalBannerItem,
 } from "./ThreadActivityBanners";
 import type { useLocalDispatchState } from "./useLocalDispatchState";

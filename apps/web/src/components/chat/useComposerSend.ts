@@ -136,6 +136,13 @@ import type { useQueuedRunEdit } from "./useQueuedRunEdit";
 import type { useTimelineFollow } from "./useTimelineFollow";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
+import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
+import { createOrbitWorktree } from "../../orbit/orbitInstances";
+import { getOrbitAvailability } from "../../orbit/useOrbitAvailability";
+import { orbitInstanceNameForBranch } from "../../orbit/orbitInstances";
+import { randomUUID } from "~/lib/utils";
+import { runHiddenShell } from "../../orbit/orbitTransport";
+import { useOrbitThreadStore } from "../../orbit/orbitThreadStore";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -196,6 +203,8 @@ interface ComposerSendInput {
   readonly activeEnvironmentUnavailable: boolean;
   readonly isSendBusy: boolean;
   readonly sendQueuesBehindSetup: boolean;
+  /** Conn: an Orbit project folder has no branches; its Instance starts from the default branch. */
+  readonly isOrbitProjectFolder: boolean;
   readonly isDraftHeroState: boolean;
   readonly panelAnimationsActive: boolean;
   readonly panelAnimationDurationMs: number;
@@ -283,6 +292,7 @@ export function useComposerSend(input: ComposerSendInput) {
     activeEnvironmentUnavailable,
     isSendBusy,
     sendQueuesBehindSetup,
+    isOrbitProjectFolder,
     isDraftHeroState,
     panelAnimationsActive,
     panelAnimationDurationMs,
@@ -321,6 +331,10 @@ export function useComposerSend(input: ComposerSendInput) {
   const navigate = useNavigate();
   const clientSettingsHydrated = useClientSettingsHydrated();
   const planModeEnabled = useEnvironmentSettings(environmentId, selectPlanModeEnabled);
+  // Conn: a New Orbit instance send records the instance's branch and worktree on the thread.
+  const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
@@ -782,6 +796,7 @@ export function useComposerSend(input: ComposerSendInput) {
       threadContexts: composerThreadContextsSnapshot,
       messageText: messageTextForSend,
     } = sendSnapshot;
+    const composerEnvironmentContextsSnapshot = [...composerEnvironmentContexts];
     const {
       missingWorktreeBaseBranch,
       baseBranchForWorktree,
@@ -805,6 +820,7 @@ export function useComposerSend(input: ComposerSendInput) {
       setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
       return;
     }
+    const isFirstMessage = !sendQueuesBehindSetup && (!isServerThread || activeMessageCount === 0);
     const shouldCreateOrbitInstance =
       isFirstMessage &&
       sendEnvMode === "orbit" &&

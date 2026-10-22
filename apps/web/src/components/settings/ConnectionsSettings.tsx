@@ -138,6 +138,8 @@ import {
   SavedBackendListRow,
 } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
+import { APP_BASE_NAME } from "../../branding";
+import { supportsServerRestart } from "~/versionSkew";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];

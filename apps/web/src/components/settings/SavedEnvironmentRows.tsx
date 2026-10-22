@@ -65,6 +65,8 @@ import {
   ServerUpdateProgress,
 } from "../ServerUpdateAction";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
+import { ServerRestartMenuItem } from "../ServerRestartAction";
+import { supportsServerRestart } from "~/versionSkew";
 
 type SavedBackendListRowProps = {
   environment: EnvironmentPresentation;

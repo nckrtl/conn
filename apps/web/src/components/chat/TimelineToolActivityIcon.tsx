@@ -4,7 +4,6 @@ import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
 import { getProjectFaviconCacheKey } from "@t3tools/shared/projectFavicon";
 import { use, useState } from "react";
 import { T3Wordmark } from "../T3Wordmark";
-import { EnvironmentContextChip } from "../EnvironmentContextChip";
 import {
   BotIcon,
   BrainIcon,
@@ -26,6 +25,8 @@ import {
 import { useAssetUrlState } from "../../assets/assetUrls";
 import { cn } from "~/lib/utils";
 import { TimelineRowCtx } from "./timelineRowContext";
+import { CircleHelpIcon } from "lucide-react";
+import { KeyRoundIcon } from "lucide-react";
 
 export const failedToolIconClassName = "text-tool-error-icon/40";
 

@@ -96,6 +96,7 @@ import {
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { BackgroundActivitySettingsRow } from "./BackgroundActivitySettings";
+import { APP_BASE_NAME } from "../../branding";
 
 const RESPONSE_STREAMING_MODE_LABELS: Record<ResponseStreamingMode, string> = {
   turn: "Wait for the full response",

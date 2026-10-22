@@ -105,6 +105,9 @@ export function useComposerContextImport(input: {
     (store) => store.addPreviewAnnotation,
   );
   const addComposerDraftThreadContexts = useComposerDraftStore((store) => store.addThreadContexts);
+  const addComposerDraftEnvironmentContexts = useComposerDraftStore(
+    (store) => store.addEnvironmentContexts,
+  );
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, { reportFailure: false });
   const loadThreadTranscript = useAtomCommand(orchestrationEnvironment.threadTranscript, {
     reportFailure: false,

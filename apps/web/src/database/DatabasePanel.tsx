@@ -407,8 +407,13 @@ function ConnectionMenu({
   onDelete: () => void;
 }) {
   const select = (id: unknown) => onSelect(String(id));
+  // Vault entries change while Conn runs (Orbit publishes new databases), so read them again on
+  // each open. The read never prompts; a locked Vault keeps its unlock item.
+  const reloadVault = (open: boolean) => {
+    if (open && vault.available) vault.reload(false);
+  };
   return (
-    <Menu>
+    <Menu onOpenChange={reloadVault}>
       <MenuTrigger
         render={
           <Button

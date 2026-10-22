@@ -57,6 +57,25 @@ function newWorkspaceId(): string {
 export const WORKSPACE_STORAGE_KEY = "t3code:workspaces:v1";
 
 /**
+ * The stored workspaces, reusing this window's objects for the ones that did
+ * not change. Another window's write rehydrates this store; fresh objects for
+ * unchanged workspaces would re-run every effect that depends on them, and
+ * those effects write the store back, which rehydrates the other window.
+ */
+export function keepUnchangedWorkspaces(current: Workspace[], stored: Workspace[]): Workspace[] {
+  const byId = new Map(current.map((workspace) => [workspace.id, workspace]));
+  const next = stored.map((workspace) => {
+    const existing = byId.get(workspace.id);
+    return existing !== undefined && JSON.stringify(existing) === JSON.stringify(workspace)
+      ? existing
+      : workspace;
+  });
+  return next.length === current.length && next.every((workspace, i) => workspace === current[i])
+    ? current
+    : next;
+}
+
+/**
  * The stored selection belongs to the main window. An extra window keeps its
  * selection in memory and writes back the stored one unchanged.
  */
@@ -185,7 +204,7 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
           Pick<WorkspaceStoreState, "workspaces" | "activeWorkspaceId" | "lastThreadByWorkspace">
         >;
         const workspaces = Array.isArray(stored.workspaces)
-          ? stored.workspaces
+          ? keepUnchangedWorkspaces(current.workspaces, stored.workspaces)
           : current.workspaces;
         const activeWorkspaceId = isAdditionalDesktopWindow()
           ? current.activeWorkspaceId

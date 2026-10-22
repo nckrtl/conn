@@ -181,7 +181,11 @@ export interface ThreadComposerProps {
   readonly onStopThread: () => void;
   /** Present while the thread's queue is held. */
   readonly onResumeQueue: (() => Promise<void>) | null;
-  readonly onSendMessage: (followUp?: ActiveTurnComposerAction) => Promise<MessageId | null>;
+  /** `stillSendable` reports whether the draft is unchanged after any wait before sending. */
+  readonly onSendMessage: (
+    followUp?: ActiveTurnComposerAction,
+    stillSendable?: () => boolean,
+  ) => Promise<MessageId | null>;
   readonly onShowUsageLimits: (report: UsageLimitsReport | null) => void;
   readonly canSwitchProvider: boolean;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
@@ -348,6 +352,10 @@ export function ComposerSurface(props: {
   );
 }
 
+/** Space below the composer pill, inside the bottom inset it is given. */
+// Conn: iOS keeps the composer tighter to the bottom bar than Android.
+export const THREAD_COMPOSER_BOTTOM_GUTTER = Platform.OS === "ios" ? 2 : 6;
+
 export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps) {
   const project = useProject(scopeProjectRef(props.environmentId, props.selectedThread.projectId));
   const { themeVariables: materialTheme } = useAppearancePreferences();
@@ -359,6 +367,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const inputRef = props.editorRef ?? fallbackInputRef;
   const [isFocused, setIsFocused] = useState(false);
   const pendingPastedTextAttachmentCountRef = useRef(0);
+  const pendingNativeImagePasteCountRef = useRef(0);
   const [pendingPastedTextAttachmentCount, setPendingPastedTextAttachmentCount] = useState(0);
   const settingsSheetPresentation = useThreadSettingsSheetPresentation({
     editorRef: inputRef,
@@ -603,7 +612,12 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     setComposerEditing(false);
   };
   const handleSend = async (followUp?: ActiveTurnComposerAction) => {
-    if (isSubmissionLocked || pendingPastedTextAttachmentCountRef.current > 0) return;
+    if (
+      isSubmissionLocked ||
+      pendingPastedTextAttachmentCountRef.current > 0 ||
+      pendingNativeImagePasteCountRef.current > 0
+    )
+      return;
     if (usageLimitsOffered && isUsageLimitsCommand(draftMessage) && draftAttachments.length === 0) {
       if (openUsageLimits()) onChangeDraftMessage("");
       return;
@@ -611,7 +625,20 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     const threadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
     if (inFlightThreadIdsRef.current.has(threadKey)) return;
     inFlightThreadIdsRef.current.add(threadKey);
-    const sent = await settlePromise(() => onSendMessage(followUp));
+    const draftAtSend = getComposerDraftSnapshot(composerDraftKey);
+    const stillSendable = () => {
+      const draft = getComposerDraftSnapshot(composerDraftKey);
+      return (
+        pendingPastedTextAttachmentCountRef.current === 0 &&
+        pendingNativeImagePasteCountRef.current === 0 &&
+        draft.text === draftAtSend.text &&
+        draft.attachments.length === draftAtSend.attachments.length &&
+        draft.attachments.every(
+          (attachment, index) => attachment.id === draftAtSend.attachments[index]?.id,
+        )
+      );
+    };
+    const sent = await settlePromise(() => onSendMessage(followUp, stillSendable));
     inFlightThreadIdsRef.current.delete(threadKey);
     if (AsyncResult.isFailure(sent)) {
       // The composer state already surfaces send errors; only the lock needed releasing.
@@ -787,7 +814,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         paddingTop: usesCard ? 8 : 6,
         paddingBottom:
           (props.bottomInset ?? 0) +
-          (Platform.OS === "ios" ? (usesCard ? 4 : 2) : usesCard ? 8 : 6),
+          (usesCard ? (Platform.OS === "ios" ? 4 : 8) : THREAD_COMPOSER_BOTTOM_GUTTER),
         backgroundColor:
           Platform.OS === "android" ? themeColorWithAlpha(composerPanel, 1) : undefined,
       }}
@@ -928,7 +955,11 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                 }}
                 onSelectionChange={composerMenu.onSelectionChange}
                 onPasteImages={(uris) => {
-                  if (!isSubmissionLocked) void props.onNativePasteImages(uris);
+                  if (isSubmissionLocked) return;
+                  pendingNativeImagePasteCountRef.current += 1;
+                  void props.onNativePasteImages(uris).finally(() => {
+                    pendingNativeImagePasteCountRef.current -= 1;
+                  });
                 }}
                 onPasteText={(paste) => {
                   if (isSubmissionLocked) return;

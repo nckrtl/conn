@@ -42,6 +42,7 @@ import type { SavedRemoteConnection } from "../../lib/connection";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
 import { nativeHeaderScrollEdgeEffects } from "../../native/scrollEdgeEffects";
+import { useRestingTopOffset } from "../../native/useRestingTopOffset";
 import {
   useNativeColumnLayoutMetrics,
   useNativeLayoutMetrics,
@@ -253,6 +254,7 @@ export function HomeConnectionStatusOverlay(props: {
 function HomeScrollView(props: ComponentProps<typeof ScrollView>) {
   const insets = useSafeAreaInsets();
   const primaryColumn = use(NativePrimaryColumnContext);
+  const restingOffset = useRestingTopOffset(insets.top, props);
   if (Platform.OS !== "ios") return <ScrollView {...props} />;
 
   // v5 needs the actual content scroll view registered with its screen controller.
@@ -267,6 +269,7 @@ function HomeScrollView(props: ComponentProps<typeof ScrollView>) {
     >
       <ScrollView
         {...props}
+        {...restingOffset}
         // UIKit's scroll-edge material needs the scroll view's own surface color.
         className={cn(props.className, primaryColumn ? "bg-drawer" : "bg-screen")}
         // Use the column's measured inset so UIKit recognizes the resting top.
@@ -274,7 +277,6 @@ function HomeScrollView(props: ComponentProps<typeof ScrollView>) {
         // past its edge, activating scroll-edge protection before any scroll.
         automaticallyAdjustContentInsets={false}
         contentInsetAdjustmentBehavior="never"
-        contentOffset={props.contentOffset ?? { x: 0, y: -insets.top }}
       />
     </ScrollViewMarker>
   );

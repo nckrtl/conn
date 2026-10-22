@@ -1,7 +1,10 @@
 import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
 import { Maximize2, Minimize2 } from "lucide";
 import { MorphIcon } from "~/components/MorphIcon";
-import { memo, type ReactElement } from "react";
+import { memo, type ReactElement, type ReactNode } from "react";
+
+import { isElectron } from "~/env";
+import { cn } from "~/lib/utils";
 
 import type { ThreadPanelPresentation } from "../../rightPanelLayout";
 import { PopoverCreateHandle, PopoverTrigger } from "../ui/popover";
@@ -160,3 +163,67 @@ export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl
     </Tooltip>
   );
 });
+
+/** The thread panel toggle on a header whose right side the inline right panel covers. */
+export function ThreadPanelHeaderControl(props: PanelLayoutControlsProps) {
+  return (
+    <div
+      // Inset from the chat header's edge, not the window's: --workspace-controls-right also
+      // clears the native window buttons, which sit over the right panel, not this header.
+      className={cn(
+        "absolute right-[calc(env(safe-area-inset-right)+0.6875rem)] z-50 flex items-center [-webkit-app-region:no-drag]",
+        isElectron
+          ? "top-[var(--workspace-controls-top)] h-(--shell-header-height)"
+          : "top-[8px] h-7",
+      )}
+      data-workspace-titlebar-controls
+    >
+      <PanelLayoutControls {...props} showTerminalControl={false} showRightPanelControl={false} />
+    </div>
+  );
+}
+
+/** The window's top-right panel controls, with the maximize toggle while the panel is open. */
+export function WorkspaceTitlebarControls(props: {
+  readonly showMaximizeControl: boolean;
+  readonly rightPanelOpen: boolean;
+  readonly animationsActive: boolean;
+  readonly maximized: boolean;
+  readonly onToggleMaximized: () => void;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        // Keep one viewport anchor inside the header's no-drag region. The
+        // header can shrink behind the right panel without moving the controls.
+        "pointer-events-none fixed right-[var(--workspace-controls-right)] z-50 mr-px flex items-center gap-1 [-webkit-app-region:no-drag]",
+        isElectron
+          ? "top-[var(--workspace-controls-top)] h-(--shell-header-height)"
+          : "top-[8px] h-7",
+      )}
+      data-workspace-titlebar-controls
+    >
+      {props.showMaximizeControl ? (
+        <span
+          aria-hidden={!props.rightPanelOpen}
+          className={cn(
+            "flex shrink-0",
+            props.animationsActive &&
+              "motion-safe:transition-opacity motion-safe:duration-(--panel-animation-duration) motion-safe:ease-out",
+            props.rightPanelOpen
+              ? "pointer-events-auto opacity-100"
+              : "pointer-events-none absolute right-full mr-1 opacity-0",
+          )}
+          inert={!props.rightPanelOpen}
+        >
+          <RightPanelMaximizeControl
+            maximized={props.maximized}
+            onToggle={props.onToggleMaximized}
+          />
+        </span>
+      ) : null}
+      <div className="pointer-events-auto flex h-full items-center">{props.children}</div>
+    </div>
+  );
+}

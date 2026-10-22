@@ -36,7 +36,11 @@ describe("Conn react-native-screens patch", () => {
   });
 
   it("keeps the home filter inside the bottom search field", () => {
-    expect(read("src/features/home/HomeHeader.tsx")).toContain("filterInsideSearch: true");
+    // Upstream moved the iOS thread list into the workspace; the phone bar owns its search.
+    expect(read("src/features/home/HomeHeader.tsx")).toContain("<WorkspacePhoneBar filterMenu=");
+    expect(read("src/features/workspace/WorkspacePhoneBar.tsx")).toContain(
+      "filterInsideSearch: true",
+    );
     expect(read("src/native/V5StackHeader.ios.tsx")).toContain("searchFieldAccessory:");
   });
 });

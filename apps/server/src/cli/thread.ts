@@ -222,6 +222,8 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
         // the project's default mode, never at this ceiling by default.
         access: "full-access",
         client: { deviceType: "bot" },
+        // Conn: a local CLI session is not a peer link.
+        peerLink: false,
       }),
       (session) =>
         environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),

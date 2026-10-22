@@ -45,6 +45,7 @@ beforeEach(() => {
     id,
     projectId: "p1",
     archivedAt: null,
+    lineage: { relationshipToParent: null, parentThreadId: null },
   }));
   useWorkspaceStore.setState({
     workspaces: [workspace("a"), workspace("b")],

@@ -375,14 +375,16 @@ function VaultIcon() {
 function ConnectionItems({ connections }: { connections: readonly DatabaseConnection[] }) {
   return connections.map((connection) => (
     <MenuRadioItem key={connection.id} value={connection.id}>
-      {connection.source === "vault" ? <VaultIcon /> : null}
-      <span className="truncate">{connection.name}</span>
-      {/* A Vault entry is known by its name; its address can be long and adds nothing. */}
-      {connection.source === "vault" ? null : (
-        <span className="ms-auto truncate ps-3 text-muted-foreground">
-          {connectionTarget(connection)}
-        </span>
-      )}
+      <span className="flex min-w-0 items-center gap-1.5">
+        {connection.source === "vault" ? <VaultIcon /> : null}
+        <span className="min-w-0 truncate">{connection.name}</span>
+        {/* A Vault entry is known by its name; its address can be long and adds nothing. */}
+        {connection.source === "vault" ? null : (
+          <span className="ms-auto truncate ps-3 text-muted-foreground">
+            {connectionTarget(connection)}
+          </span>
+        )}
+      </span>
     </MenuRadioItem>
   ));
 }

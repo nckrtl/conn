@@ -133,4 +133,23 @@ describe("workspace store across windows", () => {
     expect(fake.reportWorkspace).toHaveBeenCalledTimes(1);
     expect(fake.reportWorkspace).toHaveBeenLastCalledWith({ id: "a", name: "Alpha 2" });
   });
+
+  it("does not report again when another window edits a workspace this window is not showing", async () => {
+    useWorkspaceStore.setState({ workspaces: [workspace], activeWorkspaceId: "a" });
+    await act(() => {
+      renderer = create(<Probe />);
+    });
+    await settle();
+    fake.reportWorkspace.mockClear();
+
+    const stored = JSON.parse(fake.items.get(WORKSPACE_STORAGE_KEY)!) as {
+      state: { workspaces: unknown[] };
+    };
+    stored.state.workspaces = [...stored.state.workspaces, { ...workspace, id: "b", name: "Beta" }];
+    fake.writeFromOtherWindow(WORKSPACE_STORAGE_KEY, JSON.stringify(stored));
+    await settle();
+
+    expect(useWorkspaceStore.getState().workspaces.map((w) => w.id)).toEqual(["a", "b"]);
+    expect(fake.reportWorkspace).not.toHaveBeenCalled();
+  });
 });

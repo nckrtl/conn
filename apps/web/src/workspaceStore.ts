@@ -227,13 +227,23 @@ export const useWorkspaceStore = create<WorkspaceStoreState>()(
   ),
 );
 
+/** The last workspace this window reported, as "<id>\n<name>". */
+let reportedWorkspace: string | null = null;
+
 function publishActiveWorkspace(): void {
   if (typeof window === "undefined") return;
   const report = window.desktopBridge?.reportWorkspace;
   if (report === undefined) return;
   const { workspaces, activeWorkspaceId } = useWorkspaceStore.getState();
   const active = workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
-  void report({ id: active?.id ?? null, name: active?.name ?? null }).catch(() => undefined);
+  const id = active?.id ?? null;
+  const name = active?.name ?? null;
+  // Any workspace edit lands here; the shell only needs to hear when this
+  // window's id or name changes.
+  const key = `${id}\n${name}`;
+  if (key === reportedWorkspace) return;
+  reportedWorkspace = key;
+  void report({ id, name }).catch(() => undefined);
 }
 
 // Hold reports until the extra window has applied its launch workspace, so a

@@ -9,7 +9,7 @@ import { migrationManifest, runMigrations } from "./Migrations.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
-import PeerLinks from "./Migrations/068_PeerLinks.ts";
+import PeerLinks from "./Migrations/069_PeerLinks.ts";
 
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -48,7 +48,8 @@ describe("V2 preview upgrade", () => {
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
         [67, "WebhookDedupe"],
-        [68, "PeerLinks"],
+        [68, "ShellStopRequestIndex"],
+        [69, "PeerLinks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -139,7 +140,8 @@ describe("V2 preview upgrade", () => {
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
         [67, "WebhookDedupe"],
-        [68, "PeerLinks"],
+        [68, "ShellStopRequestIndex"],
+        [69, "PeerLinks"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -160,11 +162,11 @@ describe("V2 preview upgrade", () => {
 });
 
 // Conn shipped upstream's preview with PeerLinks at 61, then kept it at 62, 63,
-// 64 and 65; upstream main gives 61 to PullRequestReviewGuides, 62 to
+// 64, 65 and 68; upstream main gives 61 to PullRequestReviewGuides, 62 to
 // ThreadFailureLookupIndex, 63 to DropUnusedV1Projections, 64 to
 // CanonicalizeThreadPullRequestLinks, 65 to CodexUsageNativeTurnIndex, 66 to
-// RepairClientSettlementTimestamps and 67 to WebhookDedupe, and Conn keeps
-// PeerLinks at 68.
+// RepairClientSettlementTimestamps, 67 to WebhookDedupe and 68 to
+// ShellStopRequestIndex, and Conn keeps PeerLinks at 69.
 const seedPeerLink = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
@@ -195,10 +197,14 @@ const assertReconciled = Effect.gen(function* () {
     yield* sql`SELECT name FROM sqlite_master WHERE name = 'scheduled_task_webhook_pending'`,
     [{ name: "scheduled_task_webhook_pending" }],
   );
+  assert.deepStrictEqual(
+    yield* sql`SELECT name FROM sqlite_master WHERE name = 'orchestration_v2_projection_turn_items_stop_request_idx'`,
+    [{ name: "orchestration_v2_projection_turn_items_stop_request_idx" }],
+  );
   assert.strictEqual((yield* sql`SELECT * FROM peer_environment_links`).length, 1);
 });
 describe("Conn PeerLinks upgrade", () => {
-  it.effect("moves PeerLinks from 61 to 68 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 61 to 69 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 60 });
       yield* Migrator.make({})({
@@ -213,11 +219,12 @@ describe("Conn PeerLinks upgrade", () => {
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
         [67, "WebhookDedupe"],
+        [68, "ShellStopRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 62 to 68 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 62 to 69 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 61 });
       yield* Migrator.make({})({
@@ -231,11 +238,12 @@ describe("Conn PeerLinks upgrade", () => {
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
         [67, "WebhookDedupe"],
+        [68, "ShellStopRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 63 to 68 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 63 to 69 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 62 });
       yield* Migrator.make({})({
@@ -248,11 +256,12 @@ describe("Conn PeerLinks upgrade", () => {
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
         [67, "WebhookDedupe"],
+        [68, "ShellStopRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 64 to 68 and runs the link canonicalization it displaced", () =>
+  it.effect("moves PeerLinks from 64 to 69 and runs the link canonicalization it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 63 });
       yield* Migrator.make({})({
@@ -264,11 +273,12 @@ describe("Conn PeerLinks upgrade", () => {
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
         [67, "WebhookDedupe"],
+        [68, "ShellStopRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
-  it.effect("moves PeerLinks from 65 to 68 and runs the migrations it displaced", () =>
+  it.effect("moves PeerLinks from 65 to 69 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 64 });
       yield* Migrator.make({})({
@@ -279,7 +289,19 @@ describe("Conn PeerLinks upgrade", () => {
         [65, "CodexUsageNativeTurnIndex"],
         [66, "RepairClientSettlementTimestamps"],
         [67, "WebhookDedupe"],
+        [68, "ShellStopRequestIndex"],
       ]);
+      yield* assertReconciled;
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+  it.effect("moves PeerLinks from 68 to 69 and runs the shell stop index it displaced", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 67 });
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord({ "68_PeerLinks": PeerLinks }),
+      });
+      yield* seedPeerLink;
+      assert.deepStrictEqual(yield* runMigrations(), [[68, "ShellStopRequestIndex"]]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

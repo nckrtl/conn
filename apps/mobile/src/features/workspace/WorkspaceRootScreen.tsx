@@ -59,7 +59,7 @@ function WorkspaceRootTitle(props: {
 function WorkspaceRootContent() {
   const navigation = useNavigation();
   const { width: windowWidth } = useWindowDimensions();
-  const { layout } = useAdaptiveWorkspaceLayout();
+  const { layout, startNewTask } = useAdaptiveWorkspaceLayout();
   const primaryColumn = use(NativePrimaryColumnContext);
   const columnMetrics = useNativeColumnLayoutMetrics();
   const nativeMetrics = useNativeLayoutMetrics();
@@ -101,7 +101,9 @@ function WorkspaceRootContent() {
       : Platform.OS === "ios"
         ? Math.max(insets.bottom, keyboardHeight) +
           (systemTabBar || sidebarTabs || tab.searchMode !== "resting"
-            ? 16
+            ? sidebarPicker
+              ? 80
+              : 16
             : WORKSPACE_DOCK.height + WORKSPACE_DOCK.bottomGap + 16)
         : keyboardHeight > 0 && tab.searchMode !== "resting"
           ? keyboardHeight + 64
@@ -150,10 +152,10 @@ function WorkspaceRootContent() {
             ]}
           />
         )}
-        {sidebarPicker ? <WorkspaceSidebarTabs /> : null}
         <SafeAreaInsetsContext value={sidebarPicker ? { ...insets, top: 0 } : insets}>
           {state.selectedTab === "threads" ? <HomeRouteScreen /> : <PullRequestsScreen />}
         </SafeAreaInsetsContext>
+        {sidebarPicker ? <WorkspaceSidebarTabs /> : null}
         {connPhoneBar ? (
           <HomeConnectionStatusOverlay
             bottom={insets.bottom + NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET + 8}
@@ -167,10 +169,7 @@ function WorkspaceRootContent() {
         ) : null}
         {/* Conn: on iPhone, each list renders WorkspacePhoneBar instead. */}
         {connPhoneBar ? null : (
-          <WorkspaceToolbar
-            sidebar={sidebarNavigation}
-            onNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
-          />
+          <WorkspaceToolbar sidebar={sidebarNavigation} onNewTask={startNewTask} />
         )}
       </View>
     </WorkspaceTabsContext>

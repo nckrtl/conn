@@ -43,6 +43,7 @@ import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { SidebarBrandWidthProbe, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
+import type { SidebarRouteReveal } from "./sidebar/routeReveal";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import { WorkspaceRail } from "./sidebar/WorkspaceRail";
 import { useProjects } from "../state/entities";
@@ -331,6 +332,10 @@ function ProjectProjectionRetention() {
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const legacySidebarEnabled = useLegacySidebarEnabled();
+  const [sidebarRouteReveal] = useState<SidebarRouteReveal>(() => ({
+    observedKey: null,
+    pendingKey: null,
+  }));
   const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
     usePanelAnimationSettings();
   useThreadVisitedMigration();
@@ -426,13 +431,13 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
               </div>
             </>
           ) : legacySidebarEnabled ? (
-            <LegacyThreadSidebar />
+            <LegacyThreadSidebar routeReveal={sidebarRouteReveal} />
           ) : (
             // The workspace rail sits beside the thread sidebar (rooms-patches).
             <div className="flex h-full min-h-0 w-full">
               <WorkspaceRail isElectron={isElectron} />
               <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                <ThreadSidebar />
+                <ThreadSidebar routeReveal={sidebarRouteReveal} />
               </div>
             </div>
           )}

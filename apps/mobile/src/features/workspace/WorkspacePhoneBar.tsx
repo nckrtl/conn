@@ -8,6 +8,7 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { NativeWorkspaceTabActivityContext } from "../../native/v5-workspace-context";
 import type { HomeListFilterMenu } from "../home/home-list-filter-menu";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
+import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
 import { useCreateNativeMailSearchToolbarItem } from "../layout/native-mail-search-toolbar";
 import { useWorkspaceTabs } from "./WorkspaceTabsContext";
@@ -152,7 +153,7 @@ export function WorkspacePhoneBar(props: {
     return () => cancelAnimationFrame(frame);
   }, [restoreSearch, tabActive]);
 
-  const openNewTask = () => navigation.navigate("NewTaskSheet", { screen: "NewTask" });
+  const { startNewTask: openNewTask } = useAdaptiveWorkspaceLayout();
   const settingsItem = withNativeGlassHeaderItem({
     accessibilityLabel: "Open settings",
     axisBehavior: "horizontalOnly",

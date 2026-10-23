@@ -66,6 +66,7 @@ function WorkspaceRootContent() {
   const deviceType = useDeviceType();
   const systemTabBar = useSystemWorkspaceTabBar();
   const sidebarTabs = useSidebarWorkspaceTabs();
+  const sidebarPicker = sidebarTabs === "picker";
   const connPhoneBar = useWorkspacePhoneBar();
   const sidebarNavigation =
     primaryColumn !== null &&

@@ -21,7 +21,7 @@ describe("Conn icon module", () => {
   it("draws Phosphor only inside the thread timeline", () => {
     const scope = chatView.indexOf("<ConnIconScope>");
     expect(scope).toBeGreaterThan(-1);
-    expect(chatView.indexOf("<MessagesTimeline", scope)).toBeGreaterThan(scope);
+    expect(chatView.indexOf("<ThreadTimeline", scope)).toBeGreaterThan(scope);
   });
 
   it("keeps workspace icons on the original Lucide package", () => {

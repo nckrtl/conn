@@ -334,6 +334,25 @@ function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function commandResultContent(value: unknown): string | null {
+  const direct = nonEmptyString(value);
+  if (direct) return direct;
+
+  const directContent = Array.isArray(value) ? value : null;
+  const record = asRecord(value);
+  const content = record?.content;
+  const contentText = nonEmptyString(content);
+  if (contentText) return contentText;
+  const blocks = directContent ?? (Array.isArray(content) ? content : null);
+  if (!blocks) return null;
+
+  const chunks = blocks.flatMap((entry) => {
+    const text = nonEmptyString(entry) ?? nonEmptyString(asRecord(entry)?.text);
+    return text ? [text] : [];
+  });
+  return chunks.length > 0 ? chunks.join("\n") : null;
+}
+
 function workLogEntryIsToolLike(entry: WorkLogPresentationEntry): boolean {
   if (entry.tone === "tool" || entry.tone === "thinking" || entry.tone === "error") return true;
   if (entry.command !== undefined && entry.command.trim().length > 0) return true;

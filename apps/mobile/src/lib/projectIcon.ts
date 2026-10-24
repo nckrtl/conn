@@ -1,4 +1,6 @@
+import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import type { ProjectIconColor, ProjectIconOverride } from "@t3tools/contracts";
+import { isProjectFaviconFallbackUrl } from "@t3tools/shared/projectFavicon";
 import { deriveProjectIdentity } from "@t3tools/shared/projectIdentity";
 
 import { themeColorWithAlpha } from "./mobileTheme";
@@ -57,6 +59,28 @@ export function resolveProjectFallbackGlyph(projectTitle: string): ProjectMonogr
   return { kind: "monogram", text: identity.monogram, color: identity.color };
 }
 
+/** Upstream's name for the generated monogram; Conn derives it with `deriveProjectIdentity`. */
+export const projectAutoMonogram = resolveProjectFallbackGlyph;
+
+export type ProjectChipIcon = { readonly kind: "favicon"; readonly uri: string } | ProjectIconGlyph;
+
+export function resolveProjectChipIcon(
+  project: {
+    readonly title: string;
+    readonly workspaceRoot: string;
+    readonly projectIcon?: ProjectIconOverride | null;
+  } | null,
+  scratchWorkspaceRoot: string | null | undefined,
+  faviconUrl: () => string | null,
+): ProjectChipIcon | null {
+  if (!project || isScratchProject(project, scratchWorkspaceRoot)) return null;
+  const glyph = resolveProjectIconGlyph(project.projectIcon, project.title);
+  if (glyph) return glyph;
+  const url = faviconUrl();
+  if (url && !isProjectFaviconFallbackUrl(url)) return { kind: "favicon", uri: url };
+  return projectAutoMonogram(project.title);
+}
+
 // Tailwind 600 on light themes and 400 on dark themes, the shades web uses for
 // `text-<color>-600 dark:text-<color>-400`.
 const PROJECT_ICON_COLORS: Record<
@@ -87,4 +111,33 @@ const PROJECT_ICON_COLORS: Record<
 export function projectIconColors(color: ProjectIconColor, appearance: "light" | "dark") {
   const text = PROJECT_ICON_COLORS[color][appearance];
   return { text, background: themeColorWithAlpha(text, 0.14) };
+}
+
+// Class names for the chip icon rasterizer (upstream's `ProjectChipIconImages`).
+const PROJECT_ICON_COLOR_CLASSES: Record<
+  ProjectIconColor,
+  { readonly text: string; readonly background: string }
+> = {
+  gray: { text: "text-gray-500", background: "bg-gray-500/15" },
+  red: { text: "text-red-500", background: "bg-red-500/15" },
+  orange: { text: "text-orange-500", background: "bg-orange-500/15" },
+  amber: { text: "text-amber-500", background: "bg-amber-500/15" },
+  yellow: { text: "text-yellow-500", background: "bg-yellow-500/15" },
+  lime: { text: "text-lime-500", background: "bg-lime-500/15" },
+  green: { text: "text-green-500", background: "bg-green-500/15" },
+  emerald: { text: "text-emerald-500", background: "bg-emerald-500/15" },
+  teal: { text: "text-teal-500", background: "bg-teal-500/15" },
+  cyan: { text: "text-cyan-500", background: "bg-cyan-500/15" },
+  sky: { text: "text-sky-500", background: "bg-sky-500/15" },
+  blue: { text: "text-blue-500", background: "bg-blue-500/15" },
+  indigo: { text: "text-indigo-500", background: "bg-indigo-500/15" },
+  violet: { text: "text-violet-500", background: "bg-violet-500/15" },
+  purple: { text: "text-purple-500", background: "bg-purple-500/15" },
+  fuchsia: { text: "text-fuchsia-500", background: "bg-fuchsia-500/15" },
+  pink: { text: "text-pink-500", background: "bg-pink-500/15" },
+  rose: { text: "text-rose-500", background: "bg-rose-500/15" },
+};
+
+export function projectIconColorClassNames(color: ProjectIconColor) {
+  return PROJECT_ICON_COLOR_CLASSES[color];
 }

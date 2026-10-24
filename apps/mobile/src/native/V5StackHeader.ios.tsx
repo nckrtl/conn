@@ -6,6 +6,7 @@ import type {
 import { isValidElement, useEffect, useRef } from "react";
 import { Platform, StyleSheet, useWindowDimensions } from "react-native";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
+import { isDuoDevice } from "../lib/device-type";
 import { useMobileNavigationTheme } from "../lib/useMobileNavigationTheme";
 import { useDeviceType, useNativeLayoutMetrics } from "../native/native-layout-metrics";
 import {
@@ -14,6 +15,7 @@ import {
   type HeaderBarButtonMailSearchToolbarItem,
   type SearchBarCommands,
   type StackHeaderConfigProps,
+  type StackHeaderMinimizationBehaviorIOS,
   type StackHeaderMenuElementIOS,
   type StackHeaderMenuIOS,
   type HeaderBarButtonItemWithMenu,
@@ -27,6 +29,7 @@ type ToolbarItem =
   | HeaderBarButtonSearchBarPlacementItem;
 type Options = NativeStackNavigationOptions & {
   readonly unstable_navigationItemStyle?: "editor" | "navigator";
+  readonly unstable_headerMinimizationBehavior?: StackHeaderMinimizationBehaviorIOS;
   readonly headerSubtitle?: string;
   readonly unstable_headerSubtitle?: string;
   readonly headerSubtitleStyle?: { color?: string; fontSize?: number; fontFamily?: string };
@@ -289,6 +292,10 @@ export function V5StackHeader(props: {
       backButtonHidden={options.headerBackVisible === false}
       ios={{
         navigationItemStyle: options.unstable_navigationItemStyle,
+        // Opt-ins apply only on the Duo's short display; unset falls back to the system default.
+        minimizationBehavior: isDuoDevice(deviceType)
+          ? options.unstable_headerMinimizationBehavior
+          : undefined,
         tintColor: options.headerTintColor,
         searchBar:
           mailSearch || searchOptions ? (

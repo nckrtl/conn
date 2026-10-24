@@ -3,6 +3,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 export interface CommandPaletteItem {
   readonly key: string;
   readonly kind: "action" | "project" | "thread";
+  readonly project?: EnvironmentProject;
   readonly title: string;
   readonly detail?: string;
   /** Set on project rows so the palette can draw the project's own icon. */

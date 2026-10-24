@@ -18,6 +18,7 @@ import {
 
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
+import { ProjectFavicon } from "../../components/ProjectFavicon";
 import { GlassSurface } from "../../components/ui/GlassSurface";
 import { RowPressable } from "../../components/ui/RowPressable";
 import { AppText as Text } from "../../components/ui/AppText";
@@ -69,7 +70,6 @@ const ACTION_ICONS: Record<string, AppSymbolName> = {
 };
 
 function itemIcon(item: CommandPaletteItem): AppSymbolName {
-  if (item.kind === "project") return "folder";
   if (item.kind === "thread") return "text.bubble";
   return ACTION_ICONS[item.key] ?? "ellipsis";
 }
@@ -345,7 +345,10 @@ export function CommandPalette(props: {
         }),
     }));
     const threadItems: CommandPaletteItem[] = threads
-      .filter((thread) => thread.archivedAt === null)
+      .filter(
+        (thread) =>
+          thread.archivedAt === null && thread.lineage.relationshipToParent !== "subagent",
+      )
       .sort((left, right) =>
         (right.latestUserMessageAt ?? right.updatedAt).localeCompare(
           left.latestUserMessageAt ?? left.updatedAt,

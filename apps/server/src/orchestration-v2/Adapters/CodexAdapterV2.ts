@@ -116,6 +116,7 @@ import {
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
+import { makeCodexMcpNetworkGate } from "../../provider/codexMcpNetworkGate.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -1559,13 +1560,17 @@ function isSensitiveCodexProtocolKey(key: string): boolean {
 export const layerAppServerClientFactory: Layer.Layer<
   CodexAppServerClientFactory,
   never,
-  ChildProcessSpawner.ChildProcessSpawner | ProviderEventLoggers.ProviderEventLoggers
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+  | Path.Path
+  | ProviderEventLoggers.ProviderEventLoggers
 > = Layer.effect(
   CodexAppServerClientFactory,
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
+    const waitForMcpNetwork = yield* makeCodexMcpNetworkGate;
 
     return CodexAppServerClientFactory.of({
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
@@ -1574,6 +1579,16 @@ export const layerAppServerClientFactory: Layer.Layer<
           ...codexAppServerEnvironment(input.environment),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
         };
+        // Conn: hold the first spawn until Orbit MCP hosts answer (FORK.md › Codex MCP network wait).
+        const mcpNetwork = yield* waitForMcpNetwork({ ...process.env, ...environment });
+        if (!mcpNetwork.ready || mcpNetwork.waitedMs >= 1_000) {
+          yield* (mcpNetwork.ready ? Effect.logInfo : Effect.logWarning)(
+            mcpNetwork.ready
+              ? "codex app-server: Orbit MCP hosts reachable"
+              : "codex app-server: Orbit MCP hosts unreachable, starting anyway",
+            mcpNetwork,
+          );
+        }
         const command = yield* makeCodexAppServerSpawnCommand({
           command: input.settings.binaryPath || "codex",
           args: codexAppServerArgs(

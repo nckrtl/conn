@@ -543,6 +543,25 @@ Sources:
 
 - `packages/contracts/src/rpc.ts`, `apps/server/src/ws.ts` (`layerWsForkRpc`).
 
+### Codex MCP network wait
+
+Codex starts a thread's MCP servers once and never retries one that failed.
+After a reboot the Orbit network (WireGuard, `*.orbit`) can come up after the
+T3 server spawns `codex app-server`, and those threads run without Recall or
+executor tools. Before it spawns `codex app-server`, the Codex adapter waits
+until every enabled `*.orbit` URL under `[mcp_servers.*]` in the effective
+`config.toml` accepts a TCP connection. The wait has a 120-second budget, set
+with `T3CODE_CODEX_MCP_WAIT_SECONDS` (`0` turns it off), then the spawn goes
+ahead with a warning. The result is cached per config file, so only the first
+spawn per server process can wait. Configs without `*.orbit` MCP URLs never
+wait.
+
+Sources:
+
+- `apps/server/src/provider/codexMcpNetworkGate.ts`.
+- `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`
+  (`layerAppServerClientFactory`).
+
 ## Keep the customizations through an upstream merge
 
 1. Merge `upstream/main` into the sync branch. Work through every conflict,

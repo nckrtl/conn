@@ -23,8 +23,8 @@ import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-
 import { composerPullRequests } from "../../state/pull-requests";
 import { useDebouncedValue } from "../../state/queries";
 import {
-  createNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET,
+  useCreateNativeMailSearchToolbarItem,
 } from "../layout/native-mail-search-toolbar";
 import { pullRequestFilterChoices, pullRequestLabelColors } from "./pullRequestList";
 import { usePullRequestListControls } from "./usePullRequestListControls";
@@ -64,6 +64,7 @@ export function PullRequestFilterSearchScreen({
   const listControls = usePullRequestListControls();
   const controls = listControls.controlsFor(environmentId);
   const integratedSearch = useNativeMailSearchToolbar();
+  const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const searchRef = useRef<TextInputInstance>(null);
   const [query, setQuery] = useState("");
   const typed = query.trim().slice(0, 100);

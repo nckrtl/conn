@@ -9,8 +9,8 @@ import { Toolbar } from "../../components/ui/Toolbar";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-toolbar";
 import {
-  createNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET,
+  useCreateNativeMailSearchToolbarItem,
 } from "../layout/native-mail-search-toolbar";
 
 /**
@@ -30,6 +30,8 @@ export function PullRequestSearchSheet(props: {
 }) {
   const navigation = useNavigation();
   const integratedSearch = useNativeMailSearchToolbar();
+  // Conn: the scaled search toolbar item follows the app's text size.
+  const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const searchRef = useRef<TextInputInstance>(null);
   const list = props.children({
     paddingBottom: integratedSearch ? NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET + 16 : 16,

@@ -186,6 +186,7 @@ export class DesktopTabRunner {
                 }),
               );
               const output = yield* Queue.unbounded<string>();
+              const runFork = Effect.runForkWith(yield* Effect.context<never>());
               const relay = createCdpRelayConnection(
                 {
                   ...target,
@@ -201,7 +202,7 @@ export class DesktopTabRunner {
                   },
                 },
                 (message) => {
-                  Effect.runFork(Queue.offer(output, message));
+                  runFork(Queue.offer(output, message));
                 },
               );
               const listener = (method: string, params: unknown, sessionId: string) =>

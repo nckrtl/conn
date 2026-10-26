@@ -24,7 +24,6 @@ import {
   redactSensitiveValues,
 } from "@t3tools/shared/credentialFill";
 import { DesktopTabRunner } from "./DesktopTabRunner.ts";
-import { captureViewport } from "@t3tools/shared/previewPage";
 
 const binding = {
   environmentId: EnvironmentId.make("fixture-environment"),
@@ -178,7 +177,12 @@ describe("desktop tab runner", () => {
       // still works when the guest debugger's screenshot command stalls.
       const native = await context.newCDPSession(page);
       try {
-        return await captureViewport(native, { format: "png", scale });
+        // Electron's capturePage scales on its own; a clipped CDP capture stands in for it.
+        const { data } = await native.send("Page.captureScreenshot", {
+          format: "png",
+          clip: { x: 0, y: 0, width: 1600, height: 900, scale },
+        });
+        return data;
       } finally {
         await native.detach();
       }

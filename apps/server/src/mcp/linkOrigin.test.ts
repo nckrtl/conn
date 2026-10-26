@@ -132,7 +132,7 @@ const layerTools = Layer.mergeAll(
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
   Layer.provide(
     Layer.mock(ProjectService.ProjectService)({
-      getById: () => Effect.die("unused"),
+      getById: () => Effect.succeedNone,
       update: () => Effect.die("A linked caller must never reach a project update."),
     }),
   ),
@@ -147,7 +147,7 @@ const layerTools = Layer.mergeAll(
   ),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
   Layer.provide(Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({})),
-  Layer.provide(Layer.mock(DocumentText.DocumentText)({})),
+  Layer.provide(DocumentText.layer.pipe(Layer.provide(NodeServices.layer))),
   Layer.provide(
     ServerConfig.layerTest(process.cwd(), { prefix: "t3-link-origin-" }).pipe(
       Layer.provide(NodeServices.layer),

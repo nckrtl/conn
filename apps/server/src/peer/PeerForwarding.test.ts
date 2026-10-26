@@ -164,7 +164,7 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
       Layer.provide(
         Layer.mergeAll(
           Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
-          Layer.mock(DocumentText.DocumentText)({}),
+          DocumentText.layer.pipe(Layer.provide(NodeServices.layer)),
         ),
       ),
       Layer.provide(
@@ -176,7 +176,9 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
       Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
       Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-      Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+      Layer.provide(
+        Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+      ),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
@@ -218,7 +220,7 @@ const makeLaptop = Effect.gen(function* () {
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
-        Layer.mock(DocumentText.DocumentText)({}),
+        DocumentText.layer.pipe(Layer.provide(NodeServices.layer)),
       ),
     ),
     Layer.provide(
@@ -252,7 +254,7 @@ const makeLaptop = Effect.gen(function* () {
     Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
     Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
     Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-    Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+    Layer.provide(Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone })),
     Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),

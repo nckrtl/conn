@@ -193,6 +193,7 @@ import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/Outpu
 import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
+import * as AnnotatorServer from "./preview/AnnotatorServer.ts";
 import * as TestLoginStore from "./credentials/TestLoginStore.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -577,6 +578,7 @@ const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.testLoginsUpdate,
   WS_METHODS.testLoginsRemove,
   WS_METHODS.testLoginsReveal,
+  WS_METHODS.annotatorServer,
 );
 const ServerWsForkRpcGroup =
   ForkWsRpcGroup.middleware(RpcScopeAuthorization).middleware(RpcInstrumentation);
@@ -3295,6 +3297,8 @@ export const layerWsRpc = (
 const layerWsForkRpc = (
   credentialAutofill: CredentialAutofill.CredentialAutofill["Service"],
   testLoginStore: TestLoginStore.TestLoginStore["Service"],
+  annotatorServer: AnnotatorServer.AnnotatorServer["Service"],
+  clientHost: string | undefined,
 ) =>
   ServerWsForkRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -3322,6 +3326,7 @@ const layerWsForkRpc = (
         [WS_METHODS.testLoginsUpdate]: (input) => testLoginStore.update(input),
         [WS_METHODS.testLoginsRemove]: (input) => testLoginStore.remove(input.id),
         [WS_METHODS.testLoginsReveal]: (input) => testLoginStore.reveal(input.id),
+        [WS_METHODS.annotatorServer]: (input) => annotatorServer.run({ ...input, clientHost }),
       });
     }),
   );
@@ -3340,6 +3345,7 @@ export const layer = Layer.unwrap(
     const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
     const credentialAutofill = yield* CredentialAutofill.CredentialAutofill;
     const testLoginStore = yield* TestLoginStore.TestLoginStore;
+    const annotatorServer = yield* AnnotatorServer.AnnotatorServer;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
@@ -3420,7 +3426,12 @@ export const layer = Layer.unwrap(
                 serverBrowser,
                 desktopTabRelay,
               ),
-              layerWsForkRpc(credentialAutofill, testLoginStore),
+              layerWsForkRpc(
+                credentialAutofill,
+                testLoginStore,
+                annotatorServer,
+                requestUrl.value.hostname,
+              ),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

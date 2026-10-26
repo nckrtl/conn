@@ -481,6 +481,8 @@ export const make = Effect.gen(function* () {
         nodeIntegration: false,
         sandbox: true,
         webviewTag: true,
+        // Browser annotations reach a plain-HTTP @nckrtl/annotator server from this secure origin.
+        allowRunningInsecureContent: true,
         // Read by the preload script (desktopBridge.windowContext).
         ...(additional === undefined
           ? {}
@@ -618,6 +620,8 @@ export const make = Effect.gen(function* () {
       webPreferences.nodeIntegrationInSubFrames = false;
       webPreferences.contextIsolation = false;
       webPreferences.disableHtmlFullscreenWindowResize = true;
+      // The annotation overlay posts from HTTPS pages to a plain-HTTP @nckrtl/annotator server.
+      webPreferences.allowRunningInsecureContent = true;
       if (previewPasskeys.bridgeEnabled) {
         webPreferences.additionalArguments = [
           ...(webPreferences.additionalArguments ?? []),

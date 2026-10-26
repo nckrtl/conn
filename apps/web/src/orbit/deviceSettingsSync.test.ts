@@ -46,6 +46,7 @@ describe("desktop device settings", () => {
       "browserProfiles",
       "browserDefaultProfileId",
       "annotationDictationUrl",
+      "annotationServerUrl",
       "deviceAnnotationsUrl",
       "snapShotShortcut",
       "confirmQuit",

@@ -84,6 +84,7 @@ import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
+import * as AnnotatorServer from "./preview/AnnotatorServer.ts";
 import * as TestLoginStore from "./credentials/TestLoginStore.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
@@ -826,6 +827,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(DesktopTabRelay.layer),
+  Layer.provide(AnnotatorServer.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),

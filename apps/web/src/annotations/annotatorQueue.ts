@@ -9,9 +9,10 @@ export {
 // Fork patch: browser annotations backed by an @nckrtl/annotator server.
 //
 // Orbit publishes one annotator per development Instance on the app's own origin
-// (`/__orbit/annotator`). The browser panel probes that path, loads the overlay from it,
-// and lets the active thread work through the queue: Send prompts the thread once,
-// Watch prompts it whenever the thread is idle and annotations wait.
+// (`/__orbit/annotator`). A configured annotator server URL replaces that path for every
+// page. The browser panel probes the annotator, loads the overlay from it, and lets the
+// active thread work through the queue: Send prompts the thread once, Watch prompts it
+// whenever the thread is idle and annotations wait.
 
 export const ANNOTATOR_PATH = "/__orbit/annotator";
 export const ANNOTATOR_SERVICE = "@nckrtl/annotator";
@@ -46,19 +47,48 @@ export interface AnnotatorEndpoint {
   readonly origin: string;
 }
 
-export function annotatorEndpointForPage(pageUrl: string): AnnotatorEndpoint | null {
-  let url: URL;
+function parseHttpUrl(value: string): URL | null {
   try {
-    url = new URL(pageUrl);
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
   } catch {
     return null;
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  const base = `${url.origin}${ANNOTATOR_PATH}`;
+}
+
+/**
+ * The annotations URL of a configured annotator server, such as the
+ * `http://10.44.0.7:47821/annotations` that `annotator start` prints. A bare server
+ * address gets `/annotations`. `null` when the value is empty or not an http(s) URL.
+ */
+export function normalizeAnnotatorServerUrl(value: string): string | null {
+  const url = parseHttpUrl(value.trim());
+  if (url === null) return null;
+  const path = url.pathname.replace(/\/+$/, "");
+  return `${url.origin}${path.endsWith("/annotations") ? path : `${path}/annotations`}`;
+}
+
+/** `serverUrl` is the configured annotator server; empty uses the page's Orbit annotator. */
+export function annotatorEndpointForPage(
+  pageUrl: string,
+  serverUrl = "",
+): AnnotatorEndpoint | null {
+  const page = parseHttpUrl(pageUrl);
+  if (page === null) return null;
+  const annotationsUrl = normalizeAnnotatorServerUrl(serverUrl);
+  if (annotationsUrl !== null) {
+    // The server serves the overlay next to its annotations path.
+    return {
+      annotationsUrl,
+      injectUrl: `${annotationsUrl.slice(0, -"/annotations".length)}/inject.js`,
+      origin: new URL(annotationsUrl).host,
+    };
+  }
+  const base = `${page.origin}${ANNOTATOR_PATH}`;
   return {
     annotationsUrl: `${base}/annotations`,
     injectUrl: `${base}/inject.js`,
-    origin: url.host,
+    origin: page.host,
   };
 }
 

@@ -929,6 +929,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["agent opens browser device simulator pop into view hide"],
   },
   {
+    id: "annotation-server-url",
+    title: "Annotator server URL",
+    to: "/settings/integrations",
+    searchTerms: ["annotate annotator browser page queue server nckrtl"],
+  },
+  {
     id: "annotation-dictation-url",
     title: "Annotation dictation URL",
     to: "/settings/integrations",

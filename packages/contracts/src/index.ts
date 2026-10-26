@@ -60,6 +60,7 @@ export * from "./device.ts";
 export * from "./preview.ts";
 export * from "./previewAutomation.ts";
 export * from "./credentials.ts";
+export * from "./annotator.ts";
 export * from "./previewCapture.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./usage.ts";

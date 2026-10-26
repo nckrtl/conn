@@ -207,6 +207,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.testLoginsUpdate]: AuthSettingsWriteScope,
   [WS_METHODS.testLoginsRemove]: AuthSettingsWriteScope,
   [WS_METHODS.testLoginsReveal]: AuthSettingsWriteScope,
+  // Browser annotations start the project's annotator from the browser panel.
+  [WS_METHODS.annotatorServer]: AuthPreviewOperateScope,
   [WS_METHODS.subscribePreviewEvents]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,
   [WS_METHODS.deviceConfigure]: AuthSettingsWriteScope,

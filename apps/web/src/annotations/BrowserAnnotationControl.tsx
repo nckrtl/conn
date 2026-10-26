@@ -6,15 +6,14 @@ import {
   CircleIcon,
   MessageCircleQuestionIcon,
   MessageSquareTextIcon,
-  MicIcon,
   SendIcon,
+  ServerIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useEffectEvent, useId, useMemo, useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { DraftInput } from "~/components/ui/draft-input";
 import { Kbd } from "~/components/ui/kbd";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { Popover, PopoverTrigger } from "~/components/ui/popover";
@@ -22,6 +21,12 @@ import { Spinner } from "~/components/ui/spinner";
 import { Switch } from "~/components/ui/switch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useClientSettings, useUpdatePrimarySettings } from "~/hooks/useSettings";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { AnnotatorServerStatus } from "@t3tools/contracts";
+import { AsyncResult } from "effect/reactivity";
+import { useQuietThreadShell } from "~/state/entities";
+import { previewEnvironment } from "~/state/preview";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
 import { isPreviewFocused } from "~/lib/previewFocus";
 
@@ -31,6 +36,7 @@ import {
   annotationState,
   annotatorEndpointForPage,
   clearDoneAnnotations,
+  normalizeAnnotatorServerUrl,
   countAnnotations,
   removeIdleAnnotations,
   openAnnotationCount,
@@ -67,7 +73,8 @@ function runInPage(runtimeTabId: string, code: string): void {
 }
 
 /**
- * Browser toolbar control for pages served with an Orbit annotator. Hover shows the
+ * Browser toolbar control for pages served with an Orbit annotator, or for any page when
+ * an annotator server is set. Hover shows the
  * shared queue; a click turns annotation mode on or off in the page.
  */
 export function BrowserAnnotationControl({
@@ -85,9 +92,10 @@ export function BrowserAnnotationControl({
   runServerAnnotation?: (active: boolean, dictation: AnnotationDictation) => boolean;
   inputDisabled?: boolean;
 }) {
+  const serverUrl = useClientSettings((settings) => settings.annotationServerUrl);
   const endpoint = useMemo(
-    () => (pageUrl === null ? null : annotatorEndpointForPage(pageUrl)),
-    [pageUrl],
+    () => (pageUrl === null ? null : annotatorEndpointForPage(pageUrl, serverUrl)),
+    [pageUrl, serverUrl],
   );
   const annotations = useAnnotatorQueue(endpoint);
   const available = annotations !== null;
@@ -100,6 +108,17 @@ export function BrowserAnnotationControl({
   const dictationStartUrl = useClientSettings((settings) => settings.annotationDictationUrl);
   const dictationStopUrl = useClientSettings((settings) => settings.annotationDictationStopUrl);
   const updateSettings = useUpdatePrimarySettings();
+  const projectAnnotator = useProjectAnnotator(threadRef, {
+    onStarted: (url) => {
+      updateSettings({ annotationServerUrl: url });
+      setWatching(threadKey, url);
+    },
+    onStopped: (url) => {
+      // Pages fall back to their own annotator instead of a server that is gone.
+      if (url !== null && url === serverUrl) updateSettings({ annotationServerUrl: "" });
+      setWatching(threadKey, null);
+    },
+  });
   const dictation = useMemo(
     () => ({ startUrl: dictationStartUrl, stopUrl: dictationStopUrl }),
     [dictationStartUrl, dictationStopUrl],
@@ -176,9 +195,10 @@ export function BrowserAnnotationControl({
 
   return (
     <Popover
-      onOpenChange={(_open, details) => {
+      onOpenChange={(open, details) => {
         // Hover shows the queue; a click toggles annotation mode instead.
         if (details.reason === "trigger-press") details.cancel();
+        else if (open) projectAnnotator.refresh();
       }}
     >
       <PopoverTrigger
@@ -292,7 +312,9 @@ export function BrowserAnnotationControl({
             ) : null}
             {!available ? (
               <p className="border-t border-(--glass-divider)! px-3 py-3 text-ui text-muted-foreground">
-                This page has no annotator. Open a page that serves one, then click an element.
+                {serverUrl === ""
+                  ? "This page has no annotator. Open a page that serves one, or set an annotator server below."
+                  : `No annotator answers at ${endpoint.annotationsUrl}.`}
               </p>
             ) : queue.length === 0 ? (
               <p className="border-t border-(--glass-divider)! px-3 py-3 text-ui text-muted-foreground">
@@ -369,17 +391,21 @@ export function BrowserAnnotationControl({
               )}
             </div>
             <div className="flex items-center gap-2 border-t border-(--glass-divider)! px-3 py-2 text-ui">
-              <MicIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="shrink-0 font-medium text-muted-foreground">Dictation</span>
-              <DraftInput
-                size="sm"
-                className="min-w-0 flex-1"
-                value={dictationStartUrl}
-                onCommit={(next) => updateSettings({ annotationDictationUrl: next.trim() })}
-                placeholder="Off"
-                spellCheck={false}
-                aria-label="Annotation dictation URL"
-              />
+              <ServerIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                {projectAnnotator.label}
+              </span>
+              <Button
+                size="xs"
+                variant="outline"
+                className="shrink-0"
+                disabled={!projectAnnotator.ready || projectAnnotator.busy}
+                onClick={() =>
+                  projectAnnotator.running ? projectAnnotator.stop() : projectAnnotator.start()
+                }
+              >
+                {projectAnnotator.running ? "Stop" : "Start annotations"}
+              </Button>
             </div>
             <label
               htmlFor={watchSwitchId}
@@ -438,4 +464,83 @@ function QueueStateLabel({ state }: { state: AnnotationQueueState }) {
         </span>
       );
   }
+}
+
+/**
+ * The @nckrtl/annotator server of the thread's project, run by the thread's environment.
+ * `server` is null until the first status read.
+ */
+function useProjectAnnotator(
+  threadRef: ScopedThreadRef,
+  handlers: {
+    readonly onStarted: (url: string) => void;
+    readonly onStopped: (url: string | null) => void;
+  },
+) {
+  const projectId = useQuietThreadShell(threadRef)?.projectId ?? null;
+  const command = useAtomCommand(previewEnvironment.annotatorServer, { reportFailure: false });
+  const [state, setState] = useState<{
+    readonly projectId: string;
+    readonly server: AnnotatorServerStatus | null;
+    readonly busy: "start" | "stop" | "status" | null;
+    readonly error: string | null;
+  } | null>(null);
+  const current = state !== null && state.projectId === projectId ? state : null;
+  const server = current?.server ?? null;
+
+  const run = async (action: "start" | "stop" | "status") => {
+    // A status read never blocks Start or Stop; the server runs one CLI call at a time.
+    if (projectId === null || (current?.busy ?? "status") !== "status") return null;
+    setState({ projectId, server, busy: action, error: null });
+    const result = await command({
+      environmentId: threadRef.environmentId,
+      input: { projectId, action },
+    });
+    if (!AsyncResult.isSuccess(result)) {
+      const cause = squashAtomCommandFailure(result);
+      setState({
+        projectId,
+        server,
+        busy: null,
+        error: cause instanceof Error ? cause.message : "The annotation server did not answer.",
+      });
+      return null;
+    }
+    const url =
+      result.value.url === null
+        ? null
+        : (normalizeAnnotatorServerUrl(result.value.url) ?? result.value.url);
+    const next = { running: result.value.running, url };
+    setState({ projectId, server: next, busy: null, error: null });
+    return next;
+  };
+
+  const busy = current?.busy ?? null;
+  return {
+    ready: projectId !== null,
+    busy: busy !== null && busy !== "status",
+    running: server?.running === true,
+    label:
+      busy === "start"
+        ? "Starting the annotator…"
+        : busy === "stop"
+          ? "Stopping the annotator…"
+          : (current?.error ??
+            (server === null
+              ? "Checking this project's annotator…"
+              : server.running && server.url !== null
+                ? `Annotator at ${server.url}`
+                : "No annotator runs for this project.")),
+    refresh: () => void run("status"),
+    start: () =>
+      void run("start").then((next) => {
+        if (next?.running && next.url !== null) handlers.onStarted(next.url);
+      }),
+    stop: () => {
+      const url = server?.url ?? null;
+      void run("stop").then((next) => {
+        if (next !== null) handlers.onStopped(url);
+      });
+    },
+  };
 }

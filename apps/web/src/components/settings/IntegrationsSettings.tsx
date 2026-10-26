@@ -44,6 +44,7 @@ import { PREVIEW_VIEWPORT_PRESETS } from "@t3tools/shared/previewViewport";
 import { MoreVertical, Plus as PlusIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
+import { normalizeAnnotatorServerUrl } from "~/annotations/annotatorQueue";
 import { ScreenRotationIcon } from "~/browser/ScreenRotationIcon";
 import { AnimatedHeight } from "~/components/AnimatedHeight";
 import { resolveEnvironmentOptionLabel } from "~/components/BranchToolbar.logic";
@@ -1152,15 +1153,45 @@ function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled
   );
 }
 
-// rooms-patches: the desktop dictation app that browser annotations start and stop.
+// rooms-patches: the annotator server browser annotations go to, and the desktop dictation
+// app they start and stop.
 function AnnotationDictationSettings({ disabled }: { readonly disabled: boolean }) {
   const startUrl = useClientSettings((settings) => settings.annotationDictationUrl);
   const stopUrl = useClientSettings((settings) => settings.annotationDictationStopUrl);
   const deviceUrl = useClientSettings((settings) => settings.deviceAnnotationsUrl);
+  const serverUrl = useClientSettings((settings) => settings.annotationServerUrl);
   const updateSettings = useUpdatePrimarySettings();
 
   return (
     <>
+      <SettingsRow
+        {...searchableSetting("annotation-server-url")}
+        description="The annotator queue that browser annotations on every page go to, such as the URL annotator start prints. Leave empty to use each page's own Orbit annotator."
+        resetAction={
+          !disabled && serverUrl !== "" ? (
+            <SettingResetButton
+              label="annotator server URL"
+              onClick={() => updateSettings({ annotationServerUrl: "" })}
+            />
+          ) : null
+        }
+        control={
+          <DraftInput
+            size="sm"
+            className="w-full sm:w-72"
+            disabled={disabled}
+            value={serverUrl}
+            onCommit={(next) =>
+              updateSettings({
+                annotationServerUrl: normalizeAnnotatorServerUrl(next) ?? next.trim(),
+              })
+            }
+            placeholder="http://127.0.0.1:47821/annotations"
+            spellCheck={false}
+            aria-label="Annotator server URL"
+          />
+        }
+      />
       <SettingsRow
         {...searchableSetting("annotation-dictation-url")}
         description="Annotations POST here when a comment opens, to start your dictation app. Leave empty to turn dictation off."

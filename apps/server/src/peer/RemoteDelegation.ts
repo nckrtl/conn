@@ -480,13 +480,14 @@ const make = Effect.gen(function* () {
       // `false` means it is still running there: follow again straight away.
       Effect.repeat({ while: (done) => !done }),
       Effect.catchTags({
-        OrchestratorMcpFailure: (error) =>
-          Effect.gen(function* () {
-            const reason = yield* finalReason(parentThreadId, taskId, error);
-            if (reason === undefined) return yield* error;
-            // Gone there, or no link to reach it by: nothing left to stop there.
-            yield* complete(parentThreadId, taskId, "failed", reason, "stopped");
-          }),
+        OrchestratorMcpFailure: Effect.fn("RemoteDelegation.followFailed")(function* (
+          error: OrchestratorMcpFailure,
+        ) {
+          const reason = yield* finalReason(parentThreadId, taskId, error);
+          if (reason === undefined) return yield* error;
+          // Gone there, or no link to reach it by: nothing left to stop there.
+          yield* complete(parentThreadId, taskId, "failed", reason, "stopped");
+        }),
       }),
       Effect.retry(backoff),
       Effect.ignoreCause({ log: true }),

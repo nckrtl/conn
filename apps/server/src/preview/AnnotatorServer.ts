@@ -117,7 +117,7 @@ const make = Effect.gen(function* () {
     function* ({ projectId, action, clientHost }) {
       const project = yield* projects.getById(projectId).pipe(
         Effect.catchTags({
-          ProjectOperationError: () => Effect.succeed(Option.none()),
+          ProjectOperationError: () => Effect.succeedNone,
         }),
       );
       if (Option.isNone(project)) return yield* new AnnotatorProjectNotFoundError({ projectId });

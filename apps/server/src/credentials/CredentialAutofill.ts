@@ -370,7 +370,9 @@ const make = Effect.gen(function* () {
     fill,
     listForSite,
     fillForSite,
-    saveTestLogin: (input) => testLogins.save(input, "agent"),
+    saveTestLogin: Effect.fn("CredentialAutofill.saveTestLogin")((input) =>
+      testLogins.save(input, "agent"),
+    ),
     isScriptLocked,
     guardScript,
   });

@@ -166,7 +166,7 @@ function SidebarUtilityItem({
   );
 }
 
-export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
+const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const navigate = useNavigate();
   const navigateToMainApp = useNavigateToMainApp();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -222,7 +222,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           {pullRequestsSupported ? (
             <SidebarUtilityItem
               icon={<PullRequestGlyph.pullRequest />}
-              label="Pull Requests"
+              label="Pull requests"
               onClick={handlePullRequestsClick}
             />
           ) : null}
@@ -239,8 +239,10 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
 });
 
 export const SidebarChromeFooter = memo(function SidebarChromeFooter({
+  showUndoNotice = false,
   utilities = true,
 }: {
+  showUndoNotice?: boolean;
   /**
    * False when the workspace rail shows the updates and utility actions (rooms-patches).
    */
@@ -248,7 +250,7 @@ export const SidebarChromeFooter = memo(function SidebarChromeFooter({
 }) {
   return (
     <SidebarFooter>
-      <SidebarThreadUndoNotice />
+      {showUndoNotice ? <SidebarThreadUndoNotice /> : null}
       {utilities ? <SidebarProviderUpdatePill /> : null}
       <SidebarUpdateArchitectureWarning />
       {utilities ? <SidebarUtilityMenu /> : null}

@@ -48,11 +48,7 @@ export const PreviewViewportSize = Schema.Struct({
 }).check(viewportAreaFilter);
 export type PreviewViewportSize = typeof PreviewViewportSize.Type;
 
-/**
- * The page's measured viewport can be smaller than the minimum selectable
- * fixed size while fill mode follows a narrow panel. Keep measurement
- * validation separate from the stricter user-selectable size constraints.
- */
+/** Fill mode can measure below selectable minimum sizes; validate measurements separately. */
 export const PreviewRenderedViewportSize = Schema.Struct({
   width: Schema.Int.check(Schema.isGreaterThan(0)),
   height: Schema.Int.check(Schema.isGreaterThan(0)),
@@ -206,11 +202,7 @@ export const PreviewSessionSnapshot = Schema.Struct({
   colorScheme: Schema.optional(PreviewAppearancePreference),
   /** Server tabs only. Absent means 1. */
   zoomFactor: Schema.optional(PreviewZoomFactor),
-  /**
-   * Browser profile the tab's Chromium partition is derived from. Fixed at
-   * open: Electron only honours a `<webview>`'s partition before attach, so
-   * switching would require tearing the guest down and losing page state.
-   */
+  /** Fixed at open; Electron cannot change a webview partition after attach without losing page state. */
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
   host: Schema.optional(Schema.String),

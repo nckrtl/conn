@@ -1,6 +1,6 @@
 /**
  * Marks theme changes the user did not make. The profile sync shares the user's own picks only,
- * so a theme an environment pushes (`t3 theme set`, applied by `useDefaultThemeAdoption`) must
+ * so a theme an environment pushes (`t3 theme set`, applied by `startDefaultThemeAdoption`) must
  * not reach the other devices.
  *
  * `asDefaultThemeAdoption` wraps the change; every tracker registered here is told before and

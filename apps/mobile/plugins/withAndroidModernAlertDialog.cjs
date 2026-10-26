@@ -60,9 +60,7 @@ function withAlertDialogStyles(config) {
 
     const appTheme = resources.style.find((style) => style.$?.name === "AppTheme");
     if (appTheme) {
-      // React Native's dialog module builds an androidx.appcompat AlertDialog,
-      // which resolves its theme from the AppCompat attr; the framework attr is
-      // set too for any native code that inflates a platform AlertDialog.
+      // React Native uses the AppCompat attr; platform dialogs need the framework attr too.
       assignStyleItem(appTheme, "alertDialogTheme", "@style/AppAlertDialog");
       assignStyleItem(appTheme, "android:alertDialogTheme", "@style/AppAlertDialog");
     }

@@ -19,7 +19,7 @@ function Shell({
         "[html[data-theme-id]_&]:[--chat-composer-glass-surface:var(--app-theme-surface-raised)] [html[data-theme-id]_&]:[--chat-composer-outline:var(--app-theme-toolbar-border)]",
         "dark:[html[data-theme-id]:not([data-theme-id=t3-chat])_&]:[--chat-composer-outline:color-mix(in_srgb,var(--app-theme-input)_30%,var(--background))]",
         "dark:[html[data-theme-id=t3-chat]_&]:[--chat-composer-outline:#241e28]",
-        "before:pointer-events-none before:absolute before:inset-0 before:z-0 before:rounded-3xl before:bg-(--chat-composer-glass-surface)/(--glass-opacity) before:backdrop-blur-(--glass-blur) before:backdrop-saturate-(--glass-saturation)",
+        "before:pointer-events-none before:absolute before:inset-0 before:z-0 before:rounded-2xl before:bg-(--chat-composer-glass-surface)/(--glass-opacity) before:backdrop-blur-(--glass-blur) before:backdrop-saturate-(--glass-saturation)",
         "not-supports-[((backdrop-filter:blur(1px))_or_(-webkit-backdrop-filter:blur(1px)))]:before:bg-(--chat-composer-glass-surface)",
         // Dark: the raised shell surface, a step lighter than the chat card.
         // The fill is opaque, so a backdrop filter would only re-blur the timeline on every scroll.
@@ -31,7 +31,7 @@ function Shell({
           "[--chat-composer-context-extension:2.25rem] sm:[--chat-composer-context-extension:2rem]",
           // Keep one continuous backdrop around the fixed-pixel corners and rem-sized strip inset.
           "supports-[clip-path:shape(from_0_0,line_to_1px_1px)]:before:rounded-none",
-          "before:[clip-path:shape(from_0_22px,curve_to_22px_0_with_0_9.85px/9.85px_0,line_to_calc(100%-22px)_0,curve_to_100%_22px_with_calc(100%-9.85px)_0/100%_9.85px,line_to_100%_calc(100%-var(--chat-composer-context-extension)-var(--chat-composer-drawer-inset)),curve_to_calc(100%-var(--chat-composer-drawer-inset))_calc(100%-var(--chat-composer-context-extension))_with_100%_calc(100%-var(--chat-composer-context-extension)-var(--chat-composer-drawer-inset)*0.4477)/calc(100%-var(--chat-composer-drawer-inset)*0.4477)_calc(100%-var(--chat-composer-context-extension)),line_to_calc(100%-var(--chat-composer-drawer-inset))_calc(100%-16px),curve_to_calc(100%-var(--chat-composer-drawer-inset)-16px)_100%_with_calc(100%-var(--chat-composer-drawer-inset))_calc(100%-7.16px)/calc(100%-var(--chat-composer-drawer-inset)-7.16px)_100%,line_to_calc(var(--chat-composer-drawer-inset)+16px)_100%,curve_to_var(--chat-composer-drawer-inset)_calc(100%-16px)_with_calc(var(--chat-composer-drawer-inset)+7.16px)_100%/var(--chat-composer-drawer-inset)_calc(100%-7.16px),line_to_var(--chat-composer-drawer-inset)_calc(100%-var(--chat-composer-context-extension)),curve_to_0_calc(100%-var(--chat-composer-context-extension)-var(--chat-composer-drawer-inset))_with_calc(var(--chat-composer-drawer-inset)*0.4477)_calc(100%-var(--chat-composer-context-extension))/0_calc(100%-var(--chat-composer-context-extension)-var(--chat-composer-drawer-inset)*0.4477),line_to_0_22px,close)]",
+          "before:[clip-path:shape(from_0_16px,curve_to_16px_0_with_0_7.16px/7.16px_0,line_to_calc(100%-16px)_0,curve_to_100%_16px_with_calc(100%-7.16px)_0/100%_7.16px,line_to_100%_calc(100%-var(--chat-composer-context-extension)-16px),curve_to_calc(100%-16px)_calc(100%-var(--chat-composer-context-extension))_with_100%_calc(100%-var(--chat-composer-context-extension)-7.16px)/calc(100%-7.16px)_calc(100%-var(--chat-composer-context-extension)),line_to_calc(100%-var(--chat-composer-drawer-inset))_calc(100%-var(--chat-composer-context-extension)),line_to_calc(100%-var(--chat-composer-drawer-inset))_calc(100%-16px),curve_to_calc(100%-var(--chat-composer-drawer-inset)-16px)_100%_with_calc(100%-var(--chat-composer-drawer-inset))_calc(100%-7.16px)/calc(100%-var(--chat-composer-drawer-inset)-7.16px)_100%,line_to_calc(var(--chat-composer-drawer-inset)+16px)_100%,curve_to_var(--chat-composer-drawer-inset)_calc(100%-16px)_with_calc(var(--chat-composer-drawer-inset)+7.16px)_100%/var(--chat-composer-drawer-inset)_calc(100%-7.16px),line_to_var(--chat-composer-drawer-inset)_calc(100%-var(--chat-composer-context-extension)),line_to_16px_calc(100%-var(--chat-composer-context-extension)),curve_to_0_calc(100%-var(--chat-composer-context-extension)-16px)_with_7.16px_calc(100%-var(--chat-composer-context-extension))/0_calc(100%-var(--chat-composer-context-extension)-7.16px),line_to_0_16px,close)]",
           "not-supports-[clip-path:shape(from_0_0,line_to_1px_1px)]:before:bottom-(--chat-composer-context-extension)",
           // Dark: the strip is translucent, so the Host paints the opaque raised fill itself.
           // A fixed-extent backdrop here would stop short when the strip is a different height.
@@ -97,7 +97,6 @@ function TweenGhost() {
   );
 }
 
-/** Frames the input while leaving the shared edge open for the context strip's outline. */
 function Host({ className, children, ...props }: ComponentProps<"div">) {
   return (
     <div
@@ -122,14 +121,12 @@ function Host({ className, children, ...props }: ComponentProps<"div">) {
   );
 }
 
-/** Covers the input surface when an attached banner or the model strip transition replaces the outer glass backdrop. */
 function Main({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
       data-chat-composer-main-surface="true"
       className={cn(
-        "group relative z-10 rounded-3xl p-px",
-        // The host also wraps shoulder tabs, so its backdrop would extend above the input.
+        "group relative z-10 rounded-2xl p-px",
         "group-data-model-strip-transition/composer-surface:bg-(--chat-composer-glass-surface)/(--glass-opacity) group-data-model-strip-transition/composer-surface:backdrop-blur-(--glass-blur) group-data-model-strip-transition/composer-surface:backdrop-saturate-(--glass-saturation)",
         "dark:group-data-model-strip-transition/composer-surface:bg-(--shell-raised) dark:group-data-model-strip-transition/composer-surface:backdrop-filter-none",
         outlineClasses,
@@ -148,7 +145,8 @@ function Main({ className, ...props }: ComponentProps<"div">) {
   );
 }
 
-/** Mask offsets use the position hint so class merging preserves the transparent and black stops. */
+// Position hints keep class merging from dropping mask color stops.
+// Dark goes transparent only where the Shell backdrop paints the strip; scoping it keeps dark: from beating the fills below.
 function ContextStrip({ className, ...props }: ComponentProps<"div">) {
   return (
     <div

@@ -14,9 +14,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import { useTheme } from "../hooks/useTheme";
 import useDefaultThemeSource from "../hooks/useDefaultTheme.ts?raw";
-import { invalidateCustomThemes, setEnvironmentThemes } from "../themePalette";
+import {
+  desktopLocalThemesAtom,
+  invalidateCustomThemes,
+  type ThemeDefinition,
+} from "../themePalette";
 import { createAppearanceChannel, type AppearanceHost } from "./appearanceProfileSync";
 import { asDefaultThemeAdoption, trackNonUserThemeChanges } from "./themeOrigin";
+import type { EnvironmentTheme } from "@t3tools/contracts";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+
+// The published palettes come from the server atom; tests stand in for it
+// with the desktop's local themes, which take precedence.
+const setEnvironmentThemes = (themes: ReadonlyArray<ThemeDefinition>) =>
+  appAtomRegistry.set(
+    desktopLocalThemesAtom,
+    themes.length === 0
+      ? null
+      : themes.map((theme) => ({
+          id: theme.id as EnvironmentTheme["id"],
+          name: theme.label,
+          appearance: theme.appearance,
+          colors: theme.colors,
+        })),
+  );
 
 // The latest `useTheme()` result, set after each render.
 const handle: { current: ReturnType<typeof useTheme> | null } = { current: null };
@@ -163,7 +184,7 @@ describe("a theme the environment pushed (t3 theme set)", () => {
     stop();
   });
 
-  it("is how useDefaultThemeAdoption applies it (guards the upstream merge)", () => {
+  it("is how startDefaultThemeAdoption applies it (guards the upstream merge)", () => {
     expect(useDefaultThemeSource).toContain("asDefaultThemeAdoption(() => setTheme(defaultTheme))");
     expect(useDefaultThemeSource).toContain(
       "asDefaultThemeAdoption(() => setAppearanceMode(half))",

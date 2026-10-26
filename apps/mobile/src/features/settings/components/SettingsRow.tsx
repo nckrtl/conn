@@ -59,7 +59,20 @@ export function SettingsRow(props: {
         onPress={onPress}
         className={cn("rounded-2xl", selected && "bg-subtle-strong")}
       >
-        <ListRowLayout {...content} />
+        {props.leading !== undefined && props.leading !== null ? (
+          // Conn: keep the Orbit ring in the iPad sidebar too.
+          <View className="flex-row items-center pl-4">
+            <View className={props.disabled ? "size-6 opacity-45" : "size-6"}>
+              <View className="flex-1 items-center justify-center">{props.leading}</View>
+            </View>
+            {/* ListRowLayout pads 16pt where its icon gap is 12pt. */}
+            <View className="-ml-1 min-w-0 flex-1">
+              <ListRowLayout {...content} icon={undefined} />
+            </View>
+          </View>
+        ) : (
+          <ListRowLayout {...content} />
+        )}
       </RowPressable>
     );
   }

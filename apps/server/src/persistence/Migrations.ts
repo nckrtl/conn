@@ -84,9 +84,10 @@ import Migration0065 from "./Migrations/065_CodexUsageNativeTurnIndex.ts";
 import Migration0066 from "./Migrations/066_RepairClientSettlementTimestamps.ts";
 import Migration0067 from "./Migrations/067_WebhookDedupe.ts";
 import Migration0068 from "./Migrations/068_ShellStopRequestIndex.ts";
-// Conn: upstream's preview shipped PeerLinks at 61; Conn then kept it at 62 through 68,
+import Migration0069 from "./Migrations/069_ThreadMessageSearch.ts";
+// Conn: upstream's preview shipped PeerLinks at 61; Conn then kept it at 62 through 69,
 // which upstream main gives to its own migrations. See reconcileConnPeerLinksMigration.
-import Migration0069 from "./Migrations/069_PeerLinks.ts";
+import Migration0070 from "./Migrations/070_PeerLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -169,7 +170,8 @@ export const migrationEntries = [
   [66, "RepairClientSettlementTimestamps", Migration0066],
   [67, "WebhookDedupe", Migration0067],
   [68, "ShellStopRequestIndex", Migration0068],
-  [69, "PeerLinks", Migration0069],
+  [69, "ThreadMessageSearch", Migration0069],
+  [70, "PeerLinks", Migration0070],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -227,20 +229,21 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
 
 /**
  * Conn builds recorded PeerLinks at 61 (upstream's preview), later at 62, 63,
- * 64, 65 and then at 68. Upstream main gives 61 to PullRequestReviewGuides, 62 to
- * ThreadFailureLookupIndex, 63 to DropUnusedV1Projections, 64 to
+ * 64, 65, 68 and then at 69. Upstream main gives 61 to PullRequestReviewGuides,
+ * 62 to ThreadFailureLookupIndex, 63 to DropUnusedV1Projections, 64 to
  * CanonicalizeThreadPullRequestLinks, 65 to CodexUsageNativeTurnIndex, 66 to
- * RepairClientSettlementTimestamps, 67 to WebhookDedupe and 68 to
- * ShellStopRequestIndex, which the migrator would skip on those databases.
- * Move PeerLinks to 69, then run the upstream
+ * RepairClientSettlementTimestamps, 67 to WebhookDedupe, 68 to
+ * ShellStopRequestIndex and 69 to ThreadMessageSearch, which the migrator would
+ * skip on those databases. Move PeerLinks to 70, then run the upstream
  * migrations it displaced and record them at their ids. PeerLinks and
  * PullRequestReviewGuides only create their table if it is missing,
  * DropUnusedV1Projections only drops tables that exist, and
  * CanonicalizeThreadPullRequestLinks only rewrites rows without pull request
- * links; the index, settlement-repair and webhook migrations have not run on
- * such a database, because PeerLinks held an id at or below theirs.
+ * links; the index, settlement-repair, webhook and message-search migrations
+ * have not run on such a database, because PeerLinks held an id at or below
+ * theirs.
  */
-const CONN_PEER_LINKS_MIGRATION_ID = 69;
+const CONN_PEER_LINKS_MIGRATION_ID = 70;
 const CONN_DISPLACED_MIGRATIONS: ReadonlyArray<
   readonly [
     number,
@@ -256,6 +259,7 @@ const CONN_DISPLACED_MIGRATIONS: ReadonlyArray<
   [66, "RepairClientSettlementTimestamps", Migration0066],
   [67, "WebhookDedupe", Migration0067],
   [68, "ShellStopRequestIndex", Migration0068],
+  [69, "ThreadMessageSearch", Migration0069],
 ];
 const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigration")(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -342,7 +346,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
-  // Move a Conn PeerLinks record off 61-68 before the skip check reads the history.
+  // Move a Conn PeerLinks record off 61-69 before the skip check reads the history.
   const connMigrations =
     toMigrationInclusive === undefined || toMigrationInclusive >= CONN_PEER_LINKS_MIGRATION_ID
       ? yield* reconcileConnPeerLinksMigration()

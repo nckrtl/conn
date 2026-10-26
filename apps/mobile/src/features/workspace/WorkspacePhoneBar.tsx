@@ -1,4 +1,4 @@
-import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import { useFocusEffect } from "@react-navigation/native";
 import { use, useCallback, useEffect, useRef } from "react";
 import { Keyboard, Pressable, Text, View, useWindowDimensions } from "react-native";
 import type { SearchBarCommands } from "react-native-screens";
@@ -11,6 +11,7 @@ import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
 import { useCreateNativeMailSearchToolbarItem } from "../layout/native-mail-search-toolbar";
+import { useSelectWorkspaceTab } from "./useSelectWorkspaceTab";
 import { useWorkspaceTabs } from "./WorkspaceTabsContext";
 import type { WorkspaceTab } from "./workspace-tabs-state";
 
@@ -109,7 +110,6 @@ export function WorkspacePhoneBar(props: {
   readonly filterActive?: boolean;
 }) {
   const workspace = useWorkspaceTabs()!;
-  const navigation = useNavigation();
   const createSearchItem = useCreateNativeMailSearchToolbarItem();
   const { width: windowWidth } = useWindowDimensions();
   const tabActive = use(NativeWorkspaceTabActivityContext)?.active ?? true;
@@ -154,17 +154,14 @@ export function WorkspacePhoneBar(props: {
   }, [restoreSearch, tabActive]);
 
   const { startNewTask: openNewTask } = useAdaptiveWorkspaceLayout();
+  const selectTab = useSelectWorkspaceTab();
   const settingsItem = withNativeGlassHeaderItem({
     accessibilityLabel: "Open settings",
     axisBehavior: "horizontalOnly",
     icon: { name: "ellipsis", type: "sfSymbol" } as const,
     identifier: "workspace-settings",
     label: "",
-    onPress: () =>
-      navigation.navigate("SettingsSheet", {
-        screen: "SettingsContent",
-        params: { screen: "Settings" },
-      }),
+    onPress: () => selectTab("settings"),
     type: "button",
   });
 

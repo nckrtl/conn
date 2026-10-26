@@ -1,4 +1,4 @@
-import type { DiffsHighlighter } from "@pierre/diffs";
+import type { DiffsHighlighter, ThemedToken } from "@pierre/diffs";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
@@ -13,7 +13,7 @@ const ITALIC = 1;
 const BOLD = 2;
 const UNDERLINE = 4;
 
-type Tokens = ReturnType<DiffsHighlighter["codeToTokensBase"]>;
+type Tokens = ThemedToken[][];
 
 /**
  * The query editor. A transparent-text textarea sits over a `<pre>` that shows
@@ -53,7 +53,7 @@ export function SqlEditor({
   const tokens = useMemo<Tokens | null>(() => {
     if (!highlighter || value.length > MAX_HIGHLIGHTED_CHARS) return null;
     try {
-      return highlighter.codeToTokensBase(value, { lang: "sql", theme: themeName });
+      return highlighter.codeToTokens(value, { lang: "sql", theme: themeName }).tokens;
     } catch {
       return null;
     }

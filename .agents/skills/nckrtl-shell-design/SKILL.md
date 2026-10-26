@@ -239,6 +239,9 @@ build and install the fork's desktop app is in
 
 - Settings uses the same shell as the chat: inset nav like the thread panel,
   content card under a 44px glass header, thread-row hover colors.
+- Settings and Usage open as upstream's route modals. The modal popup is the
+  frosted frame; the nav (`APP_ROUTE_MODAL_NAV_CLASS`) and the card
+  (`AppRouteModalCard`) sit inside it under `AppRouteModalHeader`.
 - Rows inside a group are square (`rounded-none`), with
   `--shell-divider-raised` dividers. No double divider at the bottom.
 - Trailing controls (switches, selects) align with the title line, not the
@@ -298,7 +301,7 @@ Do not reintroduce these:
      `ui/toggle.tsx`, `ui/toggle-group.tsx`, `ui/sidebar.tsx` (`row`,
      dividers), `ui/empty.tsx`, `chat/ComposerControl.tsx` (`field`).
    - `settings/SettingsGroup.tsx`, `settings/settingsLayout.tsx`,
-     `routes/settings.tsx`, `ChatView.tsx` header and card,
+     `AppRouteModal.tsx`, `routes/_chat.settings.tsx`, `ChatView.tsx` header and card,
      `RightPanelTabs.tsx`, `routes/__root.tsx` (mock window).
 2. Scan new and changed upstream UI for regressions:
 

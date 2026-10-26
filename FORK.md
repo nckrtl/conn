@@ -38,13 +38,22 @@ colors: inset cards, two-tone dividers, glass popovers, toolbar groups, soft
 fields, inset scrollbars and a 44px header. This covers chat, sidebar, Settings,
 browser, Files, Diff, terminal, Agents and fork panels.
 
+Settings and Usage are upstream's route modals (`_chat.settings.*`, `_chat.usage`
+over the thread view through `mainAppLocation`). Conn keeps upstream's modal
+behavior and draws the shell inside it: `AppRouteModal` is the frosted frame,
+`AppRouteModalHeader` the transparent 44px header, `AppRouteModalCard` the inset
+card, and `APP_ROUTE_MODAL_NAV_CLASS` the inset Settings nav beside the card.
+On a conflict there, take upstream's routing and dismissal logic and keep these
+four pieces.
+
 The [nckrtl-shell-design skill][shell] has the full rules.
 
 Sources:
 
 - Web (`apps/web/src/`): `index.css` (shell tokens at the end),
   `components/ui/*` variants, `components/ToolbarGroup.tsx`,
-  `components/settings/*`, `components/ChatView.tsx`,
+  `components/settings/*`, `components/AppRouteModal.tsx`,
+  `routes/_chat.settings.tsx`, `components/ChatView.tsx`,
   `components/RightPanelTabs.tsx`, `routes/__root.tsx`, `pierre-tree-theme.ts`.
 - Desktop traffic lights: `apps/desktop/src/window/DesktopWindow.ts`.
 

@@ -32,6 +32,12 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import {
+  AnnotatorProjectNotFoundError,
+  AnnotatorServerError,
+  AnnotatorServerInput,
+  AnnotatorServerStatus,
+} from "./annotator.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -514,6 +520,7 @@ export const WS_METHODS = {
   testLoginsUpdate: "testLogins.update",
   testLoginsRemove: "testLogins.remove",
   testLoginsReveal: "testLogins.reveal",
+  annotatorServer: "annotator.server",
 
   // Device methods
   deviceConfigure: "device.configure",
@@ -1736,6 +1743,16 @@ const WsTestLoginsRevealRpc = Rpc.make(WS_METHODS.testLoginsReveal, {
   error: TestLoginRpcError,
 });
 
+const WsAnnotatorServerRpc = Rpc.make(WS_METHODS.annotatorServer, {
+  payload: AnnotatorServerInput,
+  success: AnnotatorServerStatus,
+  error: Schema.Union([
+    AnnotatorServerError,
+    AnnotatorProjectNotFoundError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
 const WsSubscribePreviewEventsRpc = Rpc.make(WS_METHODS.subscribePreviewEvents, {
   payload: Schema.Struct({}),
   success: PreviewEvent,
@@ -2098,6 +2115,7 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsTestLoginsUpdateRpc,
   WsTestLoginsRemoveRpc,
   WsTestLoginsRevealRpc,
+  WsAnnotatorServerRpc,
 );
 
 export const WsRpcGroup = RpcGroup.make(

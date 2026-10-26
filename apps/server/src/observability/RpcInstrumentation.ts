@@ -209,6 +209,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.testLoginsUpdate]: "credentials",
   [WS_METHODS.testLoginsRemove]: "credentials",
   [WS_METHODS.testLoginsReveal]: "credentials",
+  [WS_METHODS.annotatorServer]: "preview",
   [WS_METHODS.previewClearProfile]: "preview",
   [WS_METHODS.previewReportProfiles]: "preview",
   [WS_METHODS.previewReportStatus]: "preview",

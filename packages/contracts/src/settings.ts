@@ -461,6 +461,11 @@ export const ClientSettingsSchema = Schema.Struct({
   annotationDictationStopUrl: Schema.String.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_ANNOTATION_DICTATION_STOP_URL)),
   ),
+  /**
+   * rooms-patches: an @nckrtl/annotator server that browser annotations on every page use.
+   * Empty uses the page's own Orbit annotator at `/__orbit/annotator`.
+   */
+  annotationServerUrl: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   deviceAnnotationsUrl: Schema.String.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_DEVICE_ANNOTATIONS_URL)),
   ),
@@ -1992,6 +1997,7 @@ export const ClientSettingsPatch = Schema.Struct({
   browserAutoShowFloatingPreview: Schema.optionalKey(Schema.Boolean),
   annotationDictationUrl: Schema.optionalKey(Schema.String),
   annotationDictationStopUrl: Schema.optionalKey(Schema.String),
+  annotationServerUrl: Schema.optionalKey(Schema.String),
   deviceAnnotationsUrl: Schema.optionalKey(Schema.String),
   browserProfiles: Schema.optionalKey(Schema.Array(BrowserProfile)),
   browserDefaultProfileId: Schema.optionalKey(BrowserProfileId),

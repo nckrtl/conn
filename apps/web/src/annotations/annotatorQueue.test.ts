@@ -7,6 +7,7 @@ import {
   buildAnnotationPrompt,
   clearDoneAnnotations,
   countAnnotations,
+  normalizeAnnotatorServerUrl,
   openAnnotationCount,
   overlayBootstrapScript,
   overlayOptions,
@@ -38,6 +39,48 @@ describe("annotatorEndpointForPage", () => {
   it("ignores pages that are not http(s)", () => {
     expect(annotatorEndpointForPage("about:blank")).toBeNull();
     expect(annotatorEndpointForPage("not a url")).toBeNull();
+    expect(
+      annotatorEndpointForPage("about:blank", "http://10.44.0.7:47821/annotations"),
+    ).toBeNull();
+  });
+
+  it("uses a configured annotator server for every page", () => {
+    expect(
+      annotatorEndpointForPage("https://example.com/docs", "http://10.44.0.7:47821/annotations"),
+    ).toEqual({
+      annotationsUrl: "http://10.44.0.7:47821/annotations",
+      injectUrl: "http://10.44.0.7:47821/inject.js",
+      origin: "10.44.0.7:47821",
+    });
+  });
+
+  it("falls back to the Orbit annotator when the configured server is not an http(s) URL", () => {
+    expect(annotatorEndpointForPage("https://shop.test/", "ftp://host/annotations")).toEqual(
+      annotatorEndpointForPage("https://shop.test/"),
+    );
+  });
+});
+
+describe("normalizeAnnotatorServerUrl", () => {
+  it("accepts the printed URL with stray whitespace and trailing slashes", () => {
+    expect(normalizeAnnotatorServerUrl("  http://10.44.0.7:47821/annotations/ ")).toBe(
+      "http://10.44.0.7:47821/annotations",
+    );
+  });
+
+  it("adds the annotations path to a bare server address", () => {
+    expect(normalizeAnnotatorServerUrl("http://10.44.0.7:47821")).toBe(
+      "http://10.44.0.7:47821/annotations",
+    );
+    expect(normalizeAnnotatorServerUrl("https://shop.test/__orbit/annotator/")).toBe(
+      "https://shop.test/__orbit/annotator/annotations",
+    );
+  });
+
+  it("rejects empty and non-http values", () => {
+    expect(normalizeAnnotatorServerUrl("")).toBeNull();
+    expect(normalizeAnnotatorServerUrl("10.44.0.7:47821")).toBeNull();
+    expect(normalizeAnnotatorServerUrl("javascript:alert(1)")).toBeNull();
   });
 });
 

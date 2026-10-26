@@ -31,6 +31,11 @@ export function createPreviewEnvironmentAtoms<R, E>(
       label: "preview:desktop-respond",
       tag: WS_METHODS.desktopTabRespond,
     }),
+    /** rooms-patches: starts, stops or reads the project's @nckrtl/annotator server. */
+    annotatorServer: createEnvironmentRpcCommand(runtime, {
+      label: "preview:annotator-server",
+      tag: WS_METHODS.annotatorServer,
+    }),
     // Each stream belongs to one connection generation. The desktop host
     // re-registers its surviving tab when the environment reconnects.
     desktopRequests: createEnvironmentRpcStreamCommand(runtime, {

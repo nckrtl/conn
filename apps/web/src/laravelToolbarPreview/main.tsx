@@ -1,5 +1,5 @@
 import { MoreHorizontal } from "lucide-react";
-import { StrictMode } from "react";
+import { StrictMode, useRef } from "react";
 import { createRoot } from "react-dom/client";
 
 import "../index.css";
@@ -31,11 +31,13 @@ seedPreview();
 const noop = () => {};
 
 function Preview() {
+  const urlInputRef = useRef<HTMLInputElement | null>(null);
   return (
     <TooltipProvider>
       <div className="flex h-screen flex-col bg-background text-foreground">
         <PreviewChromeRow
           url="https://main.drift-website.test/"
+          urlInputRef={urlInputRef}
           loading={false}
           canGoBack
           canGoForward={false}

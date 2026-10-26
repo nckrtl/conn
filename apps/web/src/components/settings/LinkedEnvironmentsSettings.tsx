@@ -7,7 +7,7 @@ import {
 import { peerLinkHealth } from "@t3tools/client-runtime/state/peerLinks";
 import * as DateTime from "effect/DateTime";
 import { PlusIcon } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { peerLinkEnvironment } from "~/state/peerLinks";
@@ -30,7 +30,7 @@ import { Input } from "../ui/input";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import { LinkAccessPicker } from "./LinkAccessPicker";
-import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 
 const failureToast = (title: string, description: string) =>
@@ -81,6 +81,17 @@ export function LinkedEnvironmentsSettings({
       )}
     </SettingsSection>
   );
+}
+
+/** Re-renders every `intervalMs` so link health labels stay current. */
+function useRelativeTimeTick(intervalMs: number) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  // oxlint-disable-next-line t3code/react-effect-budget -- a wall-clock timer is an external system.
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return nowMs;
 }
 
 function LinkedEnvironmentRow({

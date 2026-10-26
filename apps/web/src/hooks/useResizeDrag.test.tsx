@@ -28,6 +28,7 @@ it.each([
     const value = useResizeDrag<HTMLDivElement>(() => ({
       width: 400,
       edge,
+      bounds: { min: 0, max: 1_000 },
       resize: (value) => value,
       finish,
     }));

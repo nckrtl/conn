@@ -82,6 +82,7 @@ export function useToolbarPanelResize(
     return {
       width: height,
       edge: "top",
+      bounds: { min: minHeight, max: availableHeight },
       resize(value) {
         const nextHeight = clampRef.current(value);
         setPreferredHeight(nextHeight);

@@ -158,7 +158,9 @@ import { PencilLineIcon as PhPencilLine } from "@phosphor-icons/react/dist/csr/P
 import { PencilRulerIcon as PhPencilRuler } from "@phosphor-icons/react/dist/csr/PencilRuler";
 import { PencilSimpleIcon as PhPencilSimple } from "@phosphor-icons/react/dist/csr/PencilSimple";
 import { PictureInPictureIcon as PhPictureInPicture } from "@phosphor-icons/react/dist/csr/PictureInPicture";
+import { PauseIcon as PhPause } from "@phosphor-icons/react/dist/csr/Pause";
 import { PlayIcon as PhPlay } from "@phosphor-icons/react/dist/csr/Play";
+import { ScanIcon as PhScan } from "@phosphor-icons/react/dist/csr/Scan";
 import { PlugIcon as PhPlug } from "@phosphor-icons/react/dist/csr/Plug";
 import { PlugsIcon as PhPlugs } from "@phosphor-icons/react/dist/csr/Plugs";
 import { PlusIcon as PhPlus } from "@phosphor-icons/react/dist/csr/Plus";
@@ -397,7 +399,9 @@ import {
   PilcrowIcon as LuPilcrow,
   PinIcon as LuPin,
   PinOffIcon as LuPinOff,
+  PauseIcon as LuPause,
   PlayIcon as LuPlay,
+  ScanIcon as LuScan,
   PlugIcon as LuPlug,
   Plug2Icon as LuPlug2,
   PlusIcon as LuPlus,
@@ -897,8 +901,12 @@ export const PinIcon = connIcon(PhPushPin, LuPin, "pin"),
   Pin = PinIcon;
 export const PinOffIcon = connIcon(PhPushPinSlash, LuPinOff, "pin-off"),
   PinOff = PinOffIcon;
+export const PauseIcon = connIcon(PhPause, LuPause, "pause"),
+  Pause = PauseIcon;
 export const PlayIcon = connIcon(PhPlay, LuPlay, "play"),
   Play = PlayIcon;
+export const ScanIcon = connIcon(PhScan, LuScan, "scan"),
+  Scan = ScanIcon;
 export const PlugIcon = connIcon(PhPlug, LuPlug, "plug"),
   Plug = PlugIcon;
 export const Plug2Icon = connIcon(PhPlug, LuPlug2, "plug-2"),

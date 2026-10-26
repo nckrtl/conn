@@ -12,7 +12,7 @@ import {
   getThemeDefinition,
   installCustomTheme,
   invalidateCustomThemes,
-  setEnvironmentThemes,
+  desktopLocalThemesAtom,
   toCanonicalThemeColor,
   type ThemeDefinition,
 } from "../themePalette";
@@ -24,6 +24,23 @@ import {
   serializeAppearance,
   type AppearanceHost,
 } from "./appearanceProfileSync";
+import type { EnvironmentTheme } from "@t3tools/contracts";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+
+// The published palettes come from the server atom; tests stand in for it
+// with the desktop's local themes, which take precedence.
+const setEnvironmentThemes = (themes: ReadonlyArray<ThemeDefinition>) =>
+  appAtomRegistry.set(
+    desktopLocalThemesAtom,
+    themes.length === 0
+      ? null
+      : themes.map((theme) => ({
+          id: theme.id as EnvironmentTheme["id"],
+          name: theme.label,
+          appearance: theme.appearance,
+          colors: theme.colors,
+        })),
+  );
 
 // The latest `useTheme()` result, set after each render.
 const handle: { current: ReturnType<typeof useTheme> | null } = { current: null };

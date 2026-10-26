@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - a one-off build helper run by hand.
 /**
  * Builds a Conn tarball of a vendored package: upstream's tarball in
  * apps/mobile/deps with patches/<package>-conn.patch applied.
@@ -20,8 +21,9 @@ import * as NodePath from "node:path";
 
 const repoRoot = NodePath.resolve(import.meta.dirname, "..");
 const depsDir = NodePath.join(repoRoot, "apps/mobile/deps");
-const packageName = process.argv[2];
-if (!packageName) throw new Error("Pass the package name, e.g. react-native-screens.");
+const packageArg = process.argv[2];
+if (!packageArg) throw new Error("Pass the package name, e.g. react-native-screens.");
+const packageName: string = packageArg;
 const patchFile = NodePath.join(repoRoot, `patches/${packageName}-conn.patch`);
 
 function upstreamTarball(): string {

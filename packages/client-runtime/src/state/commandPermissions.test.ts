@@ -454,6 +454,8 @@ it.effect(
           } as unknown as EnvironmentRegistry["Service"]),
         );
         const commands = createPreviewEnvironmentAtoms(relayRuntime);
+        // The preview stream API takes a plain AbortSignal; this test never aborts it.
+        // @effect-diagnostics-next-line abortControllerInEffect:off
         const abort = new AbortController();
         const input = {
           environmentId: env,

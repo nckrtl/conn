@@ -25,10 +25,24 @@ export function getMobileThemeRuntimeVariables(
   platform: string,
   publishedThemes: ReadonlyArray<PublishedMobileTheme> = [],
 ): MobileThemeVariables {
-  const usesDefaultPalette = themeId === DEFAULT_MOBILE_THEME_ID || themeId === "material-you";
-  const variables = usesDefaultPalette
-    ? defaults[appearance]
-    : getMobileThemeVariables(themeId, appearance);
+  const publishedColors = isPublishedMobileThemeId(themeId)
+    ? findPublishedThemeColors(publishedThemes, themeId, appearance)
+    : null;
+  // A published theme that is offline or lacks this appearance falls back to
+  // the default palette until its machine publishes it again.
+  const usesDefaultPalette =
+    themeId === DEFAULT_MOBILE_THEME_ID ||
+    themeId === "material-you" ||
+    (isPublishedMobileThemeId(themeId) && publishedColors === null);
+  const variables = publishedColors
+    ? (createMobileThemeVariables(
+        publishedColors,
+        appearance,
+        shellHighlightColor(publishedColors, appearance),
+      ) as MobileThemeVariables)
+    : usesDefaultPalette || isPublishedMobileThemeId(themeId)
+      ? defaults[appearance]
+      : getMobileThemeVariables(themeId, appearance);
   const frame = themeColorWithAlpha(
     // nckrtl shell: the screen is the sidebar color, so the frame steps up to
     // the shell highlight to stay distinct from it.

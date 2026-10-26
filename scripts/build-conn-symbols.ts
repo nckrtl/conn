@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off - a one-off asset generator run by hand.
 /**
  * Builds Conn's iOS custom symbols: one `.symbolset` per entry in
  * apps/mobile/modules/conn-symbols/symbols.json, drawn from the Phosphor icon it
@@ -22,10 +23,13 @@ type Weight = "fill" | "bold" | "regular";
 type Entry = string | { icon: string; weight?: Weight; mirrored?: boolean };
 
 const webRequire = NodeModule.createRequire(NodePath.join(repoRoot, "apps/web/package.json"));
-const React = webRequire("react") as typeof import("react");
-const { renderToStaticMarkup } = webRequire(
-  "react-dom/server",
-) as typeof import("react-dom/server");
+// scripts has no React types; describe only the two calls used here.
+const React = webRequire("react") as {
+  createElement: (type: never, props: Record<string, unknown>) => unknown;
+};
+const { renderToStaticMarkup } = webRequire("react-dom/server") as {
+  renderToStaticMarkup: (element: unknown) => string;
+};
 const phosphorEntry = webRequire
   .resolve("@phosphor-icons/react")
   .replace("index.cjs.js", "index.es.js");

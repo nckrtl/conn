@@ -454,6 +454,7 @@ import {
   UnplugIcon as LuUnplug,
   UploadIcon as LuUpload,
   UserCheckIcon as LuUserCheck,
+  UserIcon as LuUser,
   UserLockIcon as LuUserLock,
   UserPlusIcon as LuUserPlus,
   UserRoundIcon as LuUserRound,
@@ -1028,6 +1029,8 @@ export const UploadIcon = connIcon(PhUploadSimple, LuUpload, "upload"),
   Upload = UploadIcon;
 export const UserCheckIcon = connIcon(PhUserCheck, LuUserCheck, "user-check"),
   UserCheck = UserCheckIcon;
+export const UserIcon = connIcon(PhUser, LuUser, "user"),
+  User = UserIcon;
 export const UserLockIcon = connIcon(PhUserGear, LuUserLock, "user-lock"),
   UserLock = UserLockIcon;
 export const UserPlusIcon = connIcon(PhUserPlus, LuUserPlus, "user-plus"),

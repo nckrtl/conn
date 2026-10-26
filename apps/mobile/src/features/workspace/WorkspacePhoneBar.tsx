@@ -1,6 +1,6 @@
 import { useFocusEffect } from "@react-navigation/native";
 import { use, useCallback, useEffect, useRef } from "react";
-import { Keyboard, Pressable, Text, View, useWindowDimensions } from "react-native";
+import { Pressable, Text, View, useWindowDimensions } from "react-native";
 import type { SearchBarCommands } from "react-native-screens";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
@@ -32,6 +32,7 @@ const SWITCHER_ITEMS = [
     accessibilityLabel: "Pull requests",
     icon: "arrow.triangle.pull",
   },
+  { key: "usage", label: "Usage", accessibilityLabel: "Usage", icon: "chart.bar.xaxis" },
   { key: "search", label: "Search", accessibilityLabel: "Search", icon: "magnifyingglass" },
 ] as const;
 
@@ -39,14 +40,18 @@ function switcherWidth(windowWidth: number) {
   return Math.min(SWITCHER_ITEM_WIDTH * SWITCHER_ITEMS.length, windowWidth - TOOLBAR_RESERVED);
 }
 
-/** Threads, Pulls and Search share one glass group in the toolbar. */
+/** Threads, Pulls, Usage and Search share one glass group in the toolbar. */
 function WorkspacePhoneSwitcher(props: {
   readonly width: number;
   readonly selectedTab: WorkspaceTab;
   readonly onSelect: (tab: WorkspaceTab) => void;
   readonly onSearch: () => void;
 }) {
-  const itemWidth = props.width / SWITCHER_ITEMS.length;
+  // Usage has nothing to search, so it drops the Search item.
+  const items = SWITCHER_ITEMS.filter(
+    (item) => item.key !== "search" || props.selectedTab !== "usage",
+  );
+  const itemWidth = props.width / items.length;
   return (
     <View
       accessibilityRole="tablist"
@@ -57,7 +62,7 @@ function WorkspacePhoneSwitcher(props: {
         paddingVertical: SWITCHER_PADDING,
       }}
     >
-      {SWITCHER_ITEMS.map((item) => {
+      {items.map((item) => {
         const selected = item.key === props.selectedTab;
         return (
           <Pressable
@@ -101,7 +106,7 @@ function WorkspacePhoneSwitcher(props: {
 }
 
 /**
- * Conn's iPhone bottom bar: settings, the Threads / Pulls / Search group, and New chat.
+ * Conn's iPhone bottom bar: settings, the Threads / Pulls / Usage / Search group, and New chat.
  * Search swaps the group for the toolbar search field, with the filter menu inside it,
  * and searches the selected tab. Cancelling, or leaving the field empty, brings the group back.
  */
@@ -120,7 +125,7 @@ export function WorkspacePhoneBar(props: {
   const searching = tab.searchMode !== "resting";
 
   const startSearch = useCallback(() => {
-    if (!workspace.isTabActive(selectedTab)) return false;
+    if (selectedTab === "usage" || !workspace.isTabActive(selectedTab)) return false;
     workspace.dispatch({
       type: "scroll",
       tab: selectedTab,
@@ -220,10 +225,7 @@ export function WorkspacePhoneBar(props: {
                     <WorkspacePhoneSwitcher
                       width={switcherWidth(windowWidth)}
                       selectedTab={selectedTab}
-                      onSelect={(next) => {
-                        Keyboard.dismiss();
-                        workspace.dispatch({ type: "select", tab: next });
-                      }}
+                      onSelect={selectTab}
                       onSearch={startSearch}
                     />
                   ),

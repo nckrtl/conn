@@ -469,10 +469,10 @@ The fork retains linked environments, delegation to them and environment link
 MCP tools from upstream's `t3code/peer/*` stack, imported through the v0.0.46
 preview tag. The stack is not yet on the synced upstream `main`.
 
-Its migration is `068_PeerLinks`; upstream uses 61 through 67.
-`reconcileConnPeerLinksMigration` moves records from 61 through 65 to 68 and
-runs the upstream migrations they displaced. A runtime from before the move (65)
-cannot start on a database that a 68 runtime has migrated, so a rollback past it also
+Its migration is `070_PeerLinks`; upstream uses 61 through 69.
+`reconcileConnPeerLinksMigration` moves records from 61 through 69 to 70 and
+runs the upstream migrations they displaced. A runtime from before the move (69)
+cannot start on a database that a 70 runtime has migrated, so a rollback past it also
 needs the database backup taken before the update. See the merge rules below for the required
 startup order and future ID conflicts.
 
@@ -577,7 +577,7 @@ Sources:
    them:
    - `apps/server/src/persistence/Migrations.ts`: keep Conn's
      `reconcileConnPeerLinksMigration` call in `runMigrations`, before
-     upstream's `assertV2MigrationsCanRun`, and keep `068_PeerLinks` after
+     upstream's `assertV2MigrationsCanRun`, and keep `070_PeerLinks` after
      upstream's IDs (move it past any new upstream ID and extend the reconcile).
    - `apps/web/src/components/chat/ChatComposer.tsx`: take upstream's draft
      changes, but keep `composerEnvironmentContexts` from `composerDraft`.

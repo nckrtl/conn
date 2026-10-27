@@ -11,10 +11,20 @@ import { isPreviewFocused } from "~/lib/previewFocus";
 import { previewBridge } from "~/components/preview/previewBridge";
 
 import { AnnotationQueuePopover } from "./AnnotationQueuePopover";
-import { type AnnotationDictation, hostDictationUrls, overlayOptions } from "./annotationQueue";
+import {
+  type AnnotationDictation,
+  annotationsInScope,
+  hostDictationUrls,
+  overlayOptions,
+  pageOrigin,
+} from "./annotationQueue";
 import { handleBrowserAnnotationKey } from "./browserAnnotationKeyboard";
 import { injectOverlay, setOverlayMode } from "./overlayBridge";
-import { useAnnotationQueue, useThreadAnnotationTarget } from "./useAnnotationQueue";
+import {
+  useAnnotationQueue,
+  useThreadAnnotationScope,
+  useThreadAnnotationTarget,
+} from "./useAnnotationQueue";
 
 type PreviewWebview = HTMLElement & {
   readonly isConnected: boolean;
@@ -29,19 +39,10 @@ function readyWebview(runtimeTabId: string): PreviewWebview | null {
   return webview !== null && isWebviewDomReady(webview) ? webview : null;
 }
 
-function pageOrigin(pageUrl: string | null): string | null {
-  if (pageUrl === null) return null;
-  try {
-    const url = new URL(pageUrl);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Browser toolbar control for annotations. A click loads the overlay into the page and turns
- * annotation mode on; hover shows the project's queue. Desktop tabs run the overlay in the
+ * annotation mode on; hover shows the queue of the
+ * sites open in the thread. Desktop tabs run the overlay in the
  * webview; server tabs ask the server to run it (`runServerAnnotation`).
  */
 export function BrowserAnnotationControl({
@@ -61,6 +62,7 @@ export function BrowserAnnotationControl({
 }) {
   const target = useThreadAnnotationTarget(threadRef);
   const { annotations, error } = useAnnotationQueue(target);
+  const scope = useThreadAnnotationScope(threadRef);
   const [annotating, setAnnotating] = useState(false);
   // A new document, tab or viewer starts with annotation off; never restore a stale state.
   const [modeScope, setModeScope] = useState({ runtimeTabId, loading, inputDisabled });
@@ -152,7 +154,7 @@ export function BrowserAnnotationControl({
     <AnnotationQueuePopover
       threadRef={threadRef}
       target={target}
-      annotations={annotations}
+      annotations={annotations === null ? null : annotationsInScope(annotations, scope)}
       error={error}
       annotating={annotating}
       onToggle={() => applyMode(!annotating)}

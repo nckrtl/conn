@@ -2,11 +2,13 @@ import { type AnnotationRecord, ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  annotationsInScope,
   annotationState,
   buildAnnotationPrompt,
   countAnnotations,
   hostDictationUrls,
   overlayOptions,
+  pageOrigin,
   waitingIdsToSend,
 } from "./annotationQueue";
 
@@ -161,5 +163,61 @@ describe("hostDictationUrls", () => {
     expect(
       hostDictationUrls({ startUrl: "http://127.0.0.1:1/x", stopUrl: "file:///etc/passwd" }),
     ).toEqual({ startUrl: "http://127.0.0.1:1/x", stopUrl: null });
+  });
+});
+
+describe("thread annotation scope", () => {
+  const scope = (origins: string[], devicePathnames: string[] = []) => ({
+    origins: new Set(origins),
+    devicePathnames: new Set(devicePathnames),
+  });
+  const queue = [
+    record("app", 1, { source: "browser", url: "https://app.test/settings" }),
+    record("docs", 2, { url: "http://localhost:5173/docs" }),
+    record("phone", 3, { source: "device", pathname: "device/mac/iphone" }),
+    record("bare", 4),
+  ];
+
+  it("keeps browser annotations of the open origins only", () => {
+    expect(
+      annotationsInScope(queue, scope(["https://app.test"])).map((annotation) => annotation.id),
+    ).toEqual(["app"]);
+    expect(
+      annotationsInScope(queue, scope(["https://app.test", "http://localhost:5173"])).map(
+        (annotation) => annotation.id,
+      ),
+    ).toEqual(["app", "docs"]);
+  });
+
+  it("is empty when the thread has nothing open", () => {
+    expect(annotationsInScope(queue, scope([]))).toEqual([]);
+  });
+
+  it("keeps device annotations out of browser scope, and in for an open device", () => {
+    expect(
+      annotationsInScope(
+        [
+          record("phone", 1, {
+            source: "device",
+            url: "https://app.test/",
+            pathname: "device/mac/iphone",
+          }),
+        ],
+        scope(["https://app.test"]),
+      ),
+    ).toEqual([]);
+    expect(
+      annotationsInScope(queue, scope([], ["device/mac/iphone"])).map(
+        (annotation) => annotation.id,
+      ),
+    ).toEqual(["phone"]);
+    expect(annotationsInScope(queue, scope([], ["device/mac/ipad"]))).toEqual([]);
+  });
+
+  it("reads http(s) page origins only", () => {
+    expect(pageOrigin("https://app.test/a?b=1")).toBe("https://app.test");
+    expect(pageOrigin("about:blank")).toBeNull();
+    expect(pageOrigin("not a url")).toBeNull();
+    expect(pageOrigin(null)).toBeNull();
   });
 });

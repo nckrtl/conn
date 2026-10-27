@@ -1,4 +1,5 @@
 import type { AnnotationRecord } from "@t3tools/contracts";
+import { annotationBelongsToOrigin } from "@t3tools/shared/annotationBridge";
 
 export { overlayOptions, type AnnotationDictation } from "@t3tools/shared/previewAnnotation";
 import type { AnnotationDictation } from "@t3tools/shared/previewAnnotation";
@@ -7,6 +8,40 @@ import type { AnnotationDictation } from "@t3tools/shared/previewAnnotation";
 // browser overlay and the Device panel add to it, and the thread works through it with the
 // `annotations_*` MCP tools. Send prompts the thread once; Watch prompts it whenever the
 // thread is idle and annotations wait.
+
+/** The http(s) origin of a page URL, or null for other or invalid URLs. */
+export function pageOrigin(pageUrl: string | null): string | null {
+  if (pageUrl === null) return null;
+  try {
+    const url = new URL(pageUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What a thread has open: the origins of its browser tabs and its Device panel devices. */
+export interface AnnotationScope {
+  readonly origins: ReadonlySet<string>;
+  readonly devicePathnames: ReadonlySet<string>;
+}
+
+/**
+ * The part of the project queue a thread works on: browser annotations of sites open in
+ * its tabs, and device annotations of devices open in its Device panel.
+ */
+export function annotationsInScope(
+  annotations: ReadonlyArray<AnnotationRecord>,
+  scope: AnnotationScope,
+): AnnotationRecord[] {
+  return annotations.filter((annotation) => {
+    if (annotation.source === "device") return scope.devicePathnames.has(annotation.pathname ?? "");
+    for (const origin of scope.origins) {
+      if (annotationBelongsToOrigin(annotation, origin)) return true;
+    }
+    return false;
+  });
+}
 
 /** The state a person sees on a pin and in the queue. */
 export type AnnotationQueueState = "waiting" | "working" | "done" | "question";

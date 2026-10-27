@@ -6,7 +6,7 @@ import { Button } from "../components/ui/button";
 import { countAnnotations, waitingIdsToSend } from "./annotationQueue";
 import { useAnnotationWatch, useAnnotationWatchStore } from "./annotationWatchStore";
 import { sendAnnotationPrompt } from "./sendAnnotationPrompt";
-import { useAnnotationQueue, useThreadAnnotationTarget } from "./useAnnotationQueue";
+import { useThreadAnnotations, useThreadAnnotationTarget } from "./useAnnotationQueue";
 
 const EMPTY_IDS: string[] = [];
 
@@ -22,7 +22,7 @@ export function useAnnotationWatchBanner(threadKey: string | null): ComposerBann
   const lastSentIds = useAnnotationWatchStore((state) =>
     threadKey === null ? EMPTY_IDS : (state.lastSentIdsByThreadKey[threadKey] ?? EMPTY_IDS),
   );
-  const { annotations, error } = useAnnotationQueue(watch ?? threadTarget);
+  const { annotations, error } = useThreadAnnotations(threadRef, watch ?? threadTarget);
   if (threadKey === null || threadRef === null) return null;
   const counts = countAnnotations(annotations ?? []);
   if (watch !== null) {

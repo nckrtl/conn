@@ -1,19 +1,22 @@
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { useEffect, useEffectEvent } from "react";
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useShallow } from "zustand/react/shallow";
 
+import { usePreviewSession } from "../components/preview/usePreviewSession";
 import { useThreadShell } from "../state/entities";
 import { useEnvironment } from "../state/environments";
 import { waitingIdsToSend } from "./annotationQueue";
 import { useAnnotationWatch, useAnnotationWatchStore } from "./annotationWatchStore";
 import { sendAnnotationPrompt } from "./sendAnnotationPrompt";
-import { useAnnotationQueue } from "./useAnnotationQueue";
+import { useThreadAnnotations } from "./useAnnotationQueue";
 
 /**
  * Watch mode: prompts each watched thread when it is idle and annotations it has not
- * been told about are waiting. Mounted once, in the main window. The server queues the
- * message, so idle only has to mean "nothing is running, queued or waiting on the user".
+ * been told about are waiting on the sites and devices the thread has open. Mounted once,
+ * in the main window. The server queues the message, so idle only has to mean "nothing is
+ * running, queued or waiting on the user".
  */
 export function AnnotationWatchCoordinator() {
   const threadKeys = useAnnotationWatchStore(
@@ -30,7 +33,7 @@ function ThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
   const lastSentIds = useAnnotationWatchStore(
     (state) => state.lastSentIdsByThreadKey[threadKey] ?? EMPTY_IDS,
   );
-  const { annotations } = useAnnotationQueue(watch);
+  const { annotations } = useThreadAnnotations(threadRef, watch);
   const threadIdle = useThreadIdle(threadKey);
 
   const toSend = waitingIdsToSend({
@@ -48,6 +51,12 @@ function ThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
   useEffect(() => {
     if (sendKey !== "") send();
   }, [sendKey]);
+  return threadRef === null ? null : <ThreadPreviewSync threadRef={threadRef} />;
+}
+
+/** Watch follows the thread's open tabs while the thread is not on screen. */
+function ThreadPreviewSync({ threadRef }: { threadRef: ScopedThreadRef }) {
+  usePreviewSession(threadRef);
   return null;
 }
 

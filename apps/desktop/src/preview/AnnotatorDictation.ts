@@ -49,7 +49,7 @@ const httpUrl = (value: string | null): string | null => {
 };
 
 /** `https://host[:port]` of a page URL; null for anything that is not an http(s) page. */
-export function pageOrigin(url: string | undefined): string | null {
+function pageOrigin(url: string | undefined): string | null {
   if (url === undefined) return null;
   try {
     const parsed = new URL(url);

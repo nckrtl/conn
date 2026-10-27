@@ -27,6 +27,7 @@ import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
+import { queuedRunEditBlockedReason } from "@t3tools/client-runtime/queued-run-edit";
 import {
   childThreadInputsTitle,
   type CodexFeedbackSubmission,
@@ -819,6 +820,9 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
   // A pending user-input request or a failed creation owns the composer slot.
   const composerSlotHidden =
     activeUserInputRequestId !== null || props.creationState?.kind === "failed";
+  const pendingMessageEditBlocked =
+    queuedRunEditBlockedReason({ openQuestionCount: activeUserInputRequestId === null ? 0 : 1 }) !==
+    null;
   // The open /usage-limits panel for this thread, model and turn. Only the open
   // moment is stored: the rows read live provider data, so a redeemed reset
   // credit or refreshed probe shows through. Anything that spends quota closes
@@ -1222,6 +1226,7 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
   };
 
   const handleEditPendingMessage = async (message: QueuedThreadMessage) => {
+    if (pendingMessageEditBlocked) return;
     const scope = threadScope.current.signal;
     const edited = await settlePromise(() => editPendingThreadMessage(message));
     if (AsyncResult.isFailure(edited)) {
@@ -1353,7 +1358,9 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                 dispatchingMessageId={props.dispatchingMessageId}
                 // A native subagent has no composer to edit a pending message in;
                 // Cancel on the edit banner would discard it.
-                onEditPendingMessage={isProviderSubagent ? null : handleEditPendingMessage}
+                onEditPendingMessage={
+                  isProviderSubagent || pendingMessageEditBlocked ? null : handleEditPendingMessage
+                }
                 contentPresentation={props.contentPresentation}
                 agentLabel={agentLabel}
                 threadTitle={props.selectedThread.title}
@@ -1434,40 +1441,40 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
                 onLayout={handleComposerOverlayLayout}
                 className="w-full"
               >
-                <FloatingWorkingControl
-                  colorScheme={isDarkMode ? "dark" : "light"}
-                  status={floatingStatus}
-                  lift={floatingControlLift}
-                  devicePreview={
-                    devicePreviews.length > 0
-                      ? { count: devicePreviews.length, onPress: openDevicePreview }
-                      : null
-                  }
-                  browserPreview={
-                    browserTabs.tabs.length > 0
-                      ? { count: browserTabs.tabs.length, onPress: () => openBrowserPreview() }
-                      : null
-                  }
-                  showScrollToEnd={showScrollToEndButton}
-                  onScrollToEnd={handleScrollToEnd}
-                  agents={agentsSegment}
-                  onOpenAgents={() => {
-                    Keyboard.dismiss();
-                    navigation.navigate("ThreadAgents", {
-                      environmentId: props.environmentId,
-                      threadId: props.selectedThread.id,
-                    });
-                  }}
-                  queuedCount={queuedCount}
-                  onOpenQueue={() => {
-                    Keyboard.dismiss();
-                    navigation.navigate("ThreadQueue", {
-                      environmentId: props.environmentId,
-                      threadId: props.selectedThread.id,
-                    });
-                  }}
-                />
                 <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
+                  <FloatingWorkingControl
+                    colorScheme={isDarkMode ? "dark" : "light"}
+                    status={floatingStatus}
+                    lift={floatingControlLift}
+                    devicePreview={
+                      devicePreviews.length > 0
+                        ? { count: devicePreviews.length, onPress: openDevicePreview }
+                        : null
+                    }
+                    browserPreview={
+                      browserTabs.tabs.length > 0
+                        ? { count: browserTabs.tabs.length, onPress: () => openBrowserPreview() }
+                        : null
+                    }
+                    showScrollToEnd={showScrollToEndButton}
+                    onScrollToEnd={handleScrollToEnd}
+                    agents={agentsSegment}
+                    onOpenAgents={() => {
+                      Keyboard.dismiss();
+                      navigation.navigate("ThreadAgents", {
+                        environmentId: props.environmentId,
+                        threadId: props.selectedThread.id,
+                      });
+                    }}
+                    queuedCount={queuedCount}
+                    onOpenQueue={() => {
+                      Keyboard.dismiss();
+                      navigation.navigate("ThreadQueue", {
+                        environmentId: props.environmentId,
+                        threadId: props.selectedThread.id,
+                      });
+                    }}
+                  />
                   {props.queuedRunEdit !== null ? (
                     <Animated.View
                       className="shrink-0"

@@ -142,6 +142,7 @@ const TERMINAL_PREVIEW_TRANSCRIPT =
   "  \x1b[42;30m READY \x1b[0m \x1b[2mwatching for changes, press\x1b[0m \x1b[1mq\x1b[0m \x1b[2mto quit\x1b[0m\r\n" +
   "\r\n" +
   TERMINAL_PROMPT;
+const TERMINAL_PREVIEW_ROWS = TERMINAL_PREVIEW_TRANSCRIPT.split("\r\n").length;
 
 /** The surface treats an omitted family or size as "use the built-in default". */
 function previewTerminalFont(
@@ -173,8 +174,17 @@ export function TerminalFontPreview({
   const [initialFont] = useState(() => previewTerminalFont(family, size, lineHeight));
   const { theme, resolvedTheme } = useTheme();
 
+  // The box grows with the font so the whole transcript shows without scrolling.
   useEffect(() => {
-    void surface?.setFont(previewTerminalFont(family, size, lineHeight));
+    if (!surface) return;
+    void surface.setFont(previewTerminalFont(family, size, lineHeight)).then(() => {
+      const mount = mountRef.current;
+      if (!mount) return;
+      // The border sits inside the box's height and is not part of the terminal's grid.
+      const border = mount.offsetHeight - mount.clientHeight;
+      mount.style.height = `${surface.heightForRows(TERMINAL_PREVIEW_ROWS) + border}px`;
+      surface.fit();
+    });
   }, [surface, family, size, lineHeight]);
 
   // Palette changes may preserve light/dark mode; re-read terminal tokens for every theme change.

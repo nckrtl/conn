@@ -787,6 +787,8 @@ function threadTitle(input: {
   return detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
 }
 
+// Conn: taskPrompt lives in delegatedTaskModes.ts (shared with peer delegation); re-exported for upstream evals.
+export { taskPrompt };
 function threadSettlement(
   thread: Pick<OrchestrationV2ThreadShell, "settledOverride" | "settledAt">,
 ): Pick<OrchestratorMcpThreadListItem, "settled" | "settledAt"> {

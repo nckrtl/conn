@@ -153,6 +153,10 @@ Checkouts live in `~/apps` there. Other agents build in the VM at the same time:
 
 The full rules are under "Share the VM" in `~/apps/AGENTS.md`.
 
+## Evals
+
+`evals/` checks how real models behave with T3 Code's model-facing text: agent instructions, MCP tool descriptions and schemas, and generated titles. Before you change that text, read [evals/README.md](evals/README.md) and run the evals it names. When you fix a model behavior bug, add a case that fails before the fix.
+
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.

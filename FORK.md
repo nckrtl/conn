@@ -109,6 +109,13 @@ Sources:
 A workspace rail sits beside the thread sidebar. Workspaces have their own
 projects, icons and extra windows. New threads stay in the selected workspace.
 
+Upstream has one desktop window, so upstream code often assumes a single main
+window. In the fork every window must behave the same. `DesktopWindow.ts`
+registers each window with `PreviewManager.addWindow`, and the preview manager
+accepts browser guests hosted by any of them. When an upstream sync adds code
+that reads a main window, make it work in workspace windows too, or the browser
+panel and its tools break there.
+
 Sources:
 
 - Web: `apps/web/src/workspace*.ts`; under `apps/web/src/components/sidebar/`,

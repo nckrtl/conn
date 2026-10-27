@@ -3,6 +3,8 @@ import { dictationEnabled, stopsOnNextElement, triggersDesktopDictation } from "
 import { resolveDictationSettings } from "./dictation-settings";
 import {
   cancelHostSession,
+  resetHostSessionSupport,
+  startHostDictation,
   stopHostSession,
   triggerDictation,
   usesHostSessions,
@@ -16,6 +18,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetch);
 });
 afterEach(() => {
+  resetHostSessionSupport();
   vi.unstubAllGlobals();
   fetch.mockReset();
 });
@@ -152,4 +155,38 @@ it("fails a stop the host refuses, and cancels by id without failing", async () 
     ["stop", "s2"],
     ["cancel", "s2"],
   ]);
+});
+
+it("falls back to the pasting host start when sessions are unsupported, and remembers it", async () => {
+  let refuse!: (result: { unsupported: true }) => void;
+  const dictationSession = vi.fn<NonNullable<AnnotatorHost["dictationSession"]>>(
+    () =>
+      new Promise((resolve) => {
+        refuse = resolve;
+      }),
+  );
+  const dictation = vi.fn<AnnotatorHost["dictation"]>(async () => true);
+  window.__ANNOTATOR_HOST__ = { dictation, dictationSession };
+  const signal = new AbortController().signal;
+
+  const first = startHostDictation("s1", signal);
+  expect(dictation).not.toHaveBeenCalled();
+  refuse({ unsupported: true });
+  expect(await first).toBe("paste");
+  expect(dictation.mock.calls.map(([action]) => action)).toEqual(["start"]);
+  expect(usesHostSessions({ provider: "host" })).toBe(false);
+
+  expect(await startHostDictation("s2", signal)).toBe("paste");
+  expect(dictationSession).toHaveBeenCalledOnce();
+  expect(dictation.mock.calls.map(([action]) => action)).toEqual(["start", "start"]);
+});
+
+it("keeps sessions after a start that fails for another reason", async () => {
+  const dictation = vi.fn<AnnotatorHost["dictation"]>(async () => true);
+  window.__ANNOTATOR_HOST__ = { dictation, dictationSession: async () => false };
+  await expect(startHostDictation("s1", new AbortController().signal)).rejects.toThrow(
+    "The host did not start dictation.",
+  );
+  expect(dictation).not.toHaveBeenCalled();
+  expect(usesHostSessions({ provider: "host" })).toBe(true);
 });

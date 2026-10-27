@@ -1,7 +1,7 @@
 import { holdCapture } from "./capture-gate";
 import {
   cancelHostSession,
-  startHostSession,
+  startHostDictation,
   stopHostSession,
   triggerDictation,
   usesHostSessions,
@@ -147,11 +147,12 @@ export function useDictation(options: Options) {
     session.current.state = "triggering";
     setState("triggering");
     options.onBeforeTrigger();
+    let mode: "session" | "paste";
     try {
       // Not aborted on unmount: a start that reaches the host is then cancelled below.
-      const request = startHostSession(id, new AbortController().signal);
+      const request = startHostDictation(id, new AbortController().signal);
       releaseCapture();
-      await request;
+      mode = await request;
     } catch (cause) {
       if (session.current.disposed) return cancelHostSession(id);
       setError(
@@ -164,6 +165,14 @@ export function useDictation(options: Options) {
       return;
     } finally {
       releaseCapture();
+    }
+    if (mode === "paste") {
+      // An older dictation app records and pastes as before; this box stops on its own.
+      session.current.hostSessions = false;
+      if (session.current.disposed) return;
+      session.current.state = "idle";
+      setState("idle");
+      return;
     }
     if (session.current.disposed) return cancelHostSession(id);
     session.current.state = "recording";

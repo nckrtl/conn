@@ -168,6 +168,7 @@ export function reloadAnnotations(pathname: string = window.location.pathname): 
   currentPathname = pathname;
   annotations.value = loadAnnotations(pathname);
   clearPendingPlacement();
+  finishing.value = [];
   draft.value = null;
   hover.value = null;
 }
@@ -852,6 +853,8 @@ export function handleNavigation(): void {
 
   if (pathChanged) {
     clearPendingPlacement();
+    // Their boxes belong to the old page; finishDraft still saves them.
+    finishing.value = [];
     draft.value = null;
     hover.value = null;
   }

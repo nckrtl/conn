@@ -592,6 +592,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
                 Effect.orElseSucceed(() => ""),
                 Effect.map((body) => ({
                   ok: response.status >= 200 && response.status < 300,
+                  status: response.status,
                   body,
                 })),
               ),

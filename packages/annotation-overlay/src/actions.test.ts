@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
-import { finishDraft, finishDraftAndMove } from "./actions";
+import { finishDraft, finishDraftAndMove, handleNavigation, reloadAnnotations } from "./actions";
 import { startHostSession, type AnnotatorHost } from "./dictation-trigger";
 import { annotationMode, annotations, draft, finishing } from "./state";
 import { resetPinStore } from "./store";
@@ -81,6 +81,7 @@ beforeEach(() => {
   annotationMode.value = true;
 });
 afterEach(() => {
+  reloadAnnotations("/page");
   configureAnnotationService(undefined);
   resetPinStore();
   draft.value = null;
@@ -172,4 +173,17 @@ it("still saves a box that finishes after annotation mode turns off", async () =
   stop("a", { text: "Keep me" });
   await finished;
   expect(comments()).toEqual(["Keep me"]);
+});
+
+it("drops finishing boxes from the screen on navigation, and still saves them", async () => {
+  const { stop, comments } = setup();
+  const finished = finishDraft(draftFor("a"), "", "a");
+  window.location.pathname = "/other";
+  handleNavigation();
+  expect(finishing.value).toEqual([]);
+
+  stop("a", { text: "Old page note" });
+  await finished;
+  expect(comments()).toEqual(["Old page note"]);
+  expect(annotations.value).toEqual([]);
 });

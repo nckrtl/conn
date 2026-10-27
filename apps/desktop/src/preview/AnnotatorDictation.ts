@@ -6,8 +6,11 @@ import { ANNOTATOR_DICTATION_CHANNEL } from "./GuestProtocol.ts";
 
 export type DictationAction = "start" | "stop";
 export type SessionAction = "start" | "stop" | "cancel";
-/** `{ text }` answers a session stop: the session's final transcript. */
-export type DictationResult = boolean | { readonly text: string };
+/**
+ * `{ text }` answers a session stop: the session's final transcript. `{ unsupported }` answers
+ * a session start the dictation app refuses because it predates sessions.
+ */
+export type DictationResult = boolean | { readonly text: string } | { readonly unsupported: true };
 
 export interface DictationUrls {
   readonly startUrl: string | null;
@@ -23,9 +26,9 @@ const isSessionId = (value: unknown): value is string =>
 
 const toResult = (value: unknown): DictationResult => {
   if (value === true) return true;
-  if (typeof value === "object" && value !== null && "text" in value) {
-    return typeof value.text === "string" ? { text: value.text } : false;
-  }
+  if (typeof value !== "object" || value === null) return false;
+  if ("unsupported" in value && value.unsupported === true) return { unsupported: true };
+  if ("text" in value && typeof value.text === "string") return { text: value.text };
   return false;
 };
 
@@ -153,7 +156,7 @@ export function makeDictationRelay(options: {
   readonly fetch: (
     url: string,
     init: RequestInit & { readonly body?: string },
-  ) => Promise<{ readonly ok: boolean; readonly body?: string }>;
+  ) => Promise<{ readonly ok: boolean; readonly status?: number; readonly body?: string }>;
 }): DictationRelay {
   const urls = new Map<number, DictationUrls>();
 
@@ -187,6 +190,10 @@ export function makeDictationRelay(options: {
       stop ? STOP_TIMEOUT_MS : TIMEOUT_MS,
       JSON.stringify({ session }),
     );
+    // An Operator from before sessions rejects the session body (400) or the route (404).
+    if (action === "start" && (response.status === 400 || response.status === 404)) {
+      return { unsupported: true };
+    }
     if (!response.ok) return false;
     return stop ? transcript(response.body ?? "") : true;
   };

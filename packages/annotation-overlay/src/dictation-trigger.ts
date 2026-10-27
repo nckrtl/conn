@@ -15,13 +15,14 @@ export interface AnnotatorHost {
   dictation(action: HostDictationAction, options: { signal: AbortSignal }): Promise<boolean>;
   /**
    * Dictation keyed by the annotation's session id: the host keeps the transcript instead of
-   * pasting it, and a stop resolves with `{ text }` once it is final. `false` means it failed.
+   * pasting it, and a stop resolves with `{ text }` once it is final. `false` means it failed;
+   * `{ unsupported: true }` means the dictation app predates sessions.
    */
   dictationSession?(
     action: HostSessionAction,
     session: string,
     options: { signal: AbortSignal },
-  ): Promise<{ text?: string } | boolean>;
+  ): Promise<{ text?: string; unsupported?: boolean } | boolean>;
 }
 
 declare global {
@@ -40,6 +41,7 @@ export function hostDictationAvailable(): boolean {
 export function usesHostSessions(settings?: DictationSettings | null): boolean {
   return (
     settings?.provider === "host" &&
+    !sessionsUnsupported &&
     typeof window !== "undefined" &&
     typeof window.__ANNOTATOR_HOST__?.dictationSession === "function"
   );
@@ -116,6 +118,15 @@ const SESSION_START_LIMIT_MS = 10_000;
 // Operator waits up to 120 s for a transcript to become final.
 const SESSION_STOP_LIMIT_MS = 130_000;
 const stops = new Map<string, Promise<string>>();
+// Set once the dictation app refuses a session start; the page then uses `dictation()`.
+let sessionsUnsupported = false;
+
+class HostSessionsUnsupported extends Error {}
+
+/** Test seam: forget that the dictation app refused sessions. */
+export function resetHostSessionSupport(): void {
+  sessionsUnsupported = false;
+}
 
 async function callSession(
   action: HostSessionAction,
@@ -127,13 +138,14 @@ async function callSession(
     throw new Error("The host has no dictation sessions.");
   }
   const result = await untilAborted(
-    new Promise<{ text?: string } | boolean>((resolve) =>
+    new Promise<{ text?: string; unsupported?: boolean } | boolean>((resolve) =>
       resolve(host.dictationSession!(action, session, { signal })),
     ),
     signal,
   );
   if (result === true) return "";
   if (typeof result === "object" && result !== null) {
+    if (result.unsupported === true) throw new HostSessionsUnsupported("No dictation sessions.");
     return typeof result.text === "string" ? result.text : "";
   }
   throw new Error(`The host did not ${action} dictation.`);
@@ -150,6 +162,27 @@ export async function startHostSession(session: string, signal: AbortSignal): Pr
   } finally {
     recordDictationTiming("annotate:dictate-request", start);
   }
+}
+
+/**
+ * Starts a session, or, when the dictation app predates sessions, a pasting `dictation()`
+ * start; every later box on the page then starts that way too.
+ */
+export async function startHostDictation(
+  session: string,
+  signal: AbortSignal,
+): Promise<"session" | "paste"> {
+  if (!sessionsUnsupported) {
+    try {
+      await startHostSession(session, signal);
+      return "session";
+    } catch (cause) {
+      if (!(cause instanceof HostSessionsUnsupported)) throw cause;
+      sessionsUnsupported = true;
+    }
+  }
+  await callHost("start", AbortSignal.any([signal, AbortSignal.timeout(SESSION_START_LIMIT_MS)]));
+  return "paste";
 }
 
 /** The session's final transcript. Every caller for one session shares a single stop request. */

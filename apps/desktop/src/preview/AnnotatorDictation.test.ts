@@ -214,4 +214,23 @@ describe("makeDictationRelay", () => {
     expect(await listener?.({}, "stop", "s2")).toEqual({ text: "Done" });
     expect(fetch.mock.calls[0]?.[0]).toBe("http://127.0.0.1:12321/dictate/stop");
   });
+
+  it("reports a session start refused with 400 or 404 as unsupported, other failures as false", async () => {
+    const answer = (status: number) => {
+      const fetch = vi.fn(async () => ({ ok: status < 300, status, body: "" }));
+      const relay = makeDictationRelay({ fetch });
+      relay.setUrls(7, URLS);
+      return relay;
+    };
+    expect(await answer(400).send(7, "start", null, "s1")).toEqual({ unsupported: true });
+    expect(await answer(404).send(7, "start", null, "s1")).toEqual({ unsupported: true });
+    expect(await answer(500).send(7, "start", null, "s1")).toBe(false);
+    expect(await answer(404).send(7, "stop", null, "s1")).toBe(false);
+    expect(await answer(409).send(7, "stop", null, "s1")).toBe(false);
+  });
+
+  it("passes an unsupported answer through the page host", async () => {
+    const host = makeAnnotatorHost(async () => ({ unsupported: true }));
+    expect(await host.dictationSession("start", "s1")).toEqual({ unsupported: true });
+  });
 });

@@ -30,6 +30,9 @@ export const floatingControl = createRef(true);
 export const annotationMode = createRef(false);
 export const annotations = createRef<Annotation[]>([]);
 export const draft = createRef<AnnotationDraft | null>(null);
+/** Drafts whose dictation is being transcribed; each saves when its transcript arrives. */
+export type FinishingDraft = { session: string; draft: AnnotationDraft; typed: string };
+export const finishing = createRef<FinishingDraft[]>([]);
 export const hover = createRef<HoverTarget | null>(null);
 export const shakeToken = createRef(0);
 export const viewportTick = createRef(0);

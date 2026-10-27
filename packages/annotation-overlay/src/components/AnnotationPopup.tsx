@@ -1,9 +1,14 @@
 import { pushAnnotation } from "../sync";
 import { annotations } from "../state";
 import { applyCreatedAnnotations } from "../actions";
-import { onOutsideAnnotationClick, stopAndWaitForPaste } from "../outside-click";
-import { submitDraftAndMove } from "../actions";
+import {
+  onFinishActiveDraft,
+  onOutsideAnnotationClick,
+  stopAndWaitForPaste,
+} from "../outside-click";
+import { finishDraft, finishDraftAndMove, submitDraftAndMove } from "../actions";
 import { stopsOnNextElement } from "../dictation";
+import { usesHostSessions } from "../dictation-trigger";
 import { ArrowUpIcon, Cog6ToothIcon, MicrophoneIcon, TrashIcon } from "../icons";
 import {
   useEffect,
@@ -116,19 +121,38 @@ export default function AnnotationPopup({
     toggle: toggleDictation,
     onEnter: onDictationEnter,
     onEscape: onDictationEscape,
+    handOff: handOffDictation,
   } = useDictation({
     comment: commentRef,
     autoStart: !isEditing && settings.autoStart !== false,
     settings,
+    sessionId: draft.draftId ?? "",
     onBeforeTrigger: () => textarea.current?.focus(),
     onSubmit: () => submit(),
+    onFinish: () => finishRecording(),
   });
 
+  const typedText = () => textarea.current?.value ?? commentRef.value;
+
+  function finishRecording(): boolean {
+    const session = handOffDictation();
+    if (!session) return false;
+    void finishDraft(currentDraft.current, typedText(), session);
+    return true;
+  }
+
   useEffect(() => {
-    if (!stopsOnNextElement(settings)) return;
+    const unfinish = onFinishActiveDraft(() => void finishRecording());
+    if (!stopsOnNextElement(settings)) return unfinish;
     const unsubscribe = onOutsideAnnotationClick((next) => {
       const field = textarea.current;
       if (!field || pendingMove.current || dictationState === "triggering") return;
+      if (usesHostSessions(settings)) {
+        const session = handOffDictation();
+        if (session) void finishDraftAndMove(currentDraft.current, field.value, session, next);
+        else submitDraftAndMove(field.value, currentDraft.current, next);
+        return;
+      }
       const controller = new AbortController();
       pendingMove.current = controller;
       setMoving(true);
@@ -150,7 +174,10 @@ export default function AnnotationPopup({
           }
         });
     });
-    return unsubscribe;
+    return () => {
+      unfinish();
+      unsubscribe();
+    };
   }, [settings, dictationState, draft]);
 
   useEffect(
@@ -218,7 +245,8 @@ export default function AnnotationPopup({
   };
 
   function submit() {
-    const text = (textarea.current?.value ?? commentRef.value).trim();
+    if (finishRecording()) return;
+    const text = typedText().trim();
 
     if (pendingMove.current || !text) {
       return;

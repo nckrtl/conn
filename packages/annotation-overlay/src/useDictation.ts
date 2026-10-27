@@ -1,5 +1,11 @@
 import { holdCapture } from "./capture-gate";
-import { triggerDictation } from "./dictation-trigger";
+import {
+  cancelHostSession,
+  startHostSession,
+  stopHostSession,
+  triggerDictation,
+  usesHostSessions,
+} from "./dictation-trigger";
 import { useEffect, useRef, useState } from "react";
 import { dictate, triggersDesktopDictation, type DictationSettings } from "./dictation";
 import { setDictationKeyHandlers } from "./dictation-keys";
@@ -12,8 +18,12 @@ type Options = {
   comment: Ref<string>;
   autoStart: boolean;
   settings: DictationSettings;
+  /** The host dictation session id; the draft's own id. */
+  sessionId: string;
   onBeforeTrigger: () => void;
   onSubmit: () => void;
+  /** Enter on a host session that is still recording: hand it to the finishing list. */
+  onFinish: () => void;
 };
 
 export function useDictation(options: Options) {
@@ -23,6 +33,7 @@ export function useDictation(options: Options) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [levels, setLevels] = useState([0.12, 0.16, 0.14, 0.18]);
   const enabled = isDictationEnabled(options.settings);
+  const hostSessions = usesHostSessions(options.settings) && options.sessionId !== "";
 
   const session = useRef<{
     stop: AbortController | null;
@@ -33,7 +44,11 @@ export function useDictation(options: Options) {
     comment: Ref<string>;
     settings: DictationSettings;
     onSubmit: () => void;
+    onFinish: () => void;
     enabled: boolean;
+    hostSessions: boolean;
+    sessionId: string;
+    handedOff: boolean;
     disposed: boolean;
   }>({
     stop: null,
@@ -44,14 +59,25 @@ export function useDictation(options: Options) {
     comment: options.comment,
     settings: options.settings,
     onSubmit: options.onSubmit,
+    onFinish: options.onFinish,
     enabled,
+    hostSessions,
+    sessionId: options.sessionId,
+    handedOff: false,
     disposed: false,
   });
 
   session.current.comment = options.comment;
   session.current.settings = options.settings;
   session.current.onSubmit = options.onSubmit;
+  session.current.onFinish = options.onFinish;
   session.current.enabled = enabled;
+  session.current.hostSessions = hostSessions;
+  session.current.sessionId = options.sessionId;
+
+  const sessionLive = () =>
+    session.current.hostSessions &&
+    (session.current.state === "recording" || session.current.state === "transcribing");
 
   const startElapsed = () => {
     session.current.elapsedStarted = Date.now();
@@ -67,7 +93,31 @@ export function useDictation(options: Options) {
     session.current.elapsedTimer = 0;
   };
 
+  const stopHostRecording = () => {
+    stopElapsed();
+    session.current.state = "transcribing";
+    setState("transcribing");
+    void stopHostSession(session.current.sessionId)
+      .then(
+        (text) => {
+          if (session.current.disposed) return;
+          session.current.comment.value = mergeTranscript(session.current.comment.value, text);
+        },
+        () => undefined,
+      )
+      .finally(() => {
+        if (session.current.disposed) return;
+        session.current.state = "idle";
+        setState("idle");
+      });
+  };
+
   const beginStop = (): boolean => {
+    if (session.current.hostSessions && session.current.state === "recording") {
+      stopHostRecording();
+      return true;
+    }
+
     if (session.current.state !== "recording" || !session.current.stop) {
       return false;
     }
@@ -81,12 +131,52 @@ export function useDictation(options: Options) {
   };
 
   const cancelSession = () => {
+    if (sessionLive() && !session.current.handedOff) {
+      cancelHostSession(session.current.sessionId);
+    }
     stopElapsed();
     session.current.abort?.abort();
     session.current.stop = null;
     session.current.abort = null;
     session.current.state = "idle";
     setState("idle");
+  };
+
+  const startHostRecording = async (releaseCapture: () => void): Promise<void> => {
+    const id = session.current.sessionId;
+    session.current.state = "triggering";
+    setState("triggering");
+    options.onBeforeTrigger();
+    try {
+      // Not aborted on unmount: a start that reaches the host is then cancelled below.
+      const request = startHostSession(id, new AbortController().signal);
+      releaseCapture();
+      await request;
+    } catch (cause) {
+      if (session.current.disposed) return cancelHostSession(id);
+      setError(
+        cause instanceof Error
+          ? `Could not trigger local dictation: ${cause.message}`
+          : "Could not trigger local dictation.",
+      );
+      session.current.state = "idle";
+      setState("idle");
+      return;
+    } finally {
+      releaseCapture();
+    }
+    if (session.current.disposed) return cancelHostSession(id);
+    session.current.state = "recording";
+    setState("recording");
+    startElapsed();
+  };
+
+  /** Releases a live host session to the caller, who stops it; null when none is live. */
+  const handOff = (): string | null => {
+    if (!sessionLive()) return null;
+    session.current.handedOff = true;
+    stopElapsed();
+    return session.current.sessionId;
   };
 
   const start = async (): Promise<void> => {
@@ -97,6 +187,10 @@ export function useDictation(options: Options) {
     setEmptySpeech(false);
     setError(null);
     const releaseCapture = holdCapture();
+    if (session.current.hostSessions) {
+      await startHostRecording(releaseCapture);
+      return;
+    }
     session.current.stop = new AbortController();
     session.current.abort = new AbortController();
     if (triggersDesktopDictation(session.current.settings)) {
@@ -194,6 +288,11 @@ export function useDictation(options: Options) {
   };
 
   const onEnter = (): boolean => {
+    if (sessionLive()) {
+      session.current.onFinish();
+      return true;
+    }
+
     if (beginStop()) {
       return true;
     }
@@ -243,5 +342,6 @@ export function useDictation(options: Options) {
     toggle,
     onEnter,
     onEscape,
+    handOff,
   };
 }

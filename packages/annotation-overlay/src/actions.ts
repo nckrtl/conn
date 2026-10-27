@@ -1,10 +1,18 @@
 import { annotationMetadata } from "./hooks";
-import { requestAnnotationMove } from "./outside-click";
+import { finishActiveDraft, requestAnnotationMove } from "./outside-click";
 import { deepElementFromPoint, isAnnotationUi, isElementFixed } from "./dom";
 import { identifyElement } from "./identify";
 import { readInertiaPage } from "./inertia-page";
 import { formatReactHoverPath } from "./react-inspect";
-import { annotationMode, annotations, draft, hover, shakeToken, dictationSettings } from "./state";
+import {
+  annotationMode,
+  annotations,
+  draft,
+  finishing,
+  hover,
+  shakeToken,
+  dictationSettings,
+} from "./state";
 import {
   clearStoredAnnotations,
   isDismissed,
@@ -13,7 +21,8 @@ import {
   saveAnnotations,
 } from "./store";
 import { consumeDictationEnter, consumeDictationEscape } from "./dictation-keys";
-import { isUnrelatedEditable, isDictationEnabled } from "./dictation-settings";
+import { isUnrelatedEditable, isDictationEnabled, mergeTranscript } from "./dictation-settings";
+import { stopHostSession } from "./dictation-trigger";
 import { resolveAnnotationContext } from "./context";
 import { annotationContextFields, annotationPayload } from "./payload";
 import { releaseMicrophone, triggersDesktopDictation, warmMicrophone } from "./dictation";
@@ -422,6 +431,11 @@ export function submitDraft(comment: string, source: AnnotationDraft | null = dr
     return;
   }
 
+  saveDraft(current, trimmed);
+  draft.value = null;
+}
+
+function saveDraft(current: AnnotationDraft, trimmed: string): void {
   const saved: Annotation = current.annotationId
     ? {
         ...(annotations.value.find((annotation) => annotation.id === current.annotationId) ?? {
@@ -442,11 +456,13 @@ export function submitDraft(comment: string, source: AnnotationDraft | null = dr
         ...annotationPayload(current, trimmed),
       };
 
-  annotations.value = current.annotationId
-    ? annotations.value.map((annotation) => (annotation.id === saved.id ? saved : annotation))
-    : [...annotations.value, saved];
-
-  persist();
+  // A draft that finishes after a navigation belongs to its own page, not this one.
+  if (annotationBelongsToCurrentPage(saved)) {
+    annotations.value = current.annotationId
+      ? annotations.value.map((annotation) => (annotation.id === saved.id ? saved : annotation))
+      : [...annotations.value, saved];
+    persist();
+  }
   const generation = annotationGeneration;
   void pushAnnotation(saved).then((updated) => {
     if (generation !== annotationGeneration || !updated) {
@@ -464,7 +480,6 @@ export function submitDraft(comment: string, source: AnnotationDraft | null = dr
       applyInProgressAnnotations([updated.id]);
     }
   });
-  draft.value = null;
 }
 
 export function submitDraftAndMove(
@@ -478,6 +493,49 @@ export function submitDraftAndMove(
   draft.value = next;
   hover.value = null;
   scheduleDraftScreenshot(next);
+}
+
+/**
+ * Closes the draft at once and saves it when its dictation session's transcript arrives,
+ * merged with the typed text. Without any text, or when the stop fails, nothing is shown.
+ */
+export function finishDraft(
+  source: AnnotationDraft,
+  typed: string,
+  session: string,
+): Promise<void> {
+  finishing.value = [...finishing.value, { session, draft: source, typed }];
+  if (draft.value === source) {
+    clearPendingPlacement();
+    draft.value = null;
+  }
+  return stopHostSession(session)
+    .then(
+      (text) => mergeTranscript(typed, text),
+      () => typed,
+    )
+    .then((comment) => {
+      finishing.value = finishing.value.filter((entry) => entry.session !== session);
+      const trimmed = comment.trim();
+      if (trimmed) saveDraft(source, trimmed);
+    });
+}
+
+/** Hands a recording draft to `finishDraft` and opens the next one without waiting. */
+export function finishDraftAndMove(
+  source: AnnotationDraft,
+  typed: string,
+  session: string,
+  next: AnnotationDraft,
+): Promise<void> {
+  const open = draft.value === source && annotationMode.value;
+  const finished = finishDraft(source, typed, session);
+  if (open) {
+    draft.value = next;
+    hover.value = null;
+    scheduleDraftScreenshot(next);
+  }
+  return finished;
 }
 
 function resetPagePins(): void {
@@ -560,6 +618,7 @@ export function startEdit(annotation: Annotation, clientX?: number, clientY?: nu
 
   const next: AnnotationDraft = {
     ...annotationContextFields(annotation),
+    draftId: createAnnotationId(),
     annotationId: annotation.id,
     x: annotation.x,
     y: annotation.y,
@@ -586,6 +645,7 @@ export function setAnnotationMode(active: boolean): void {
   document.documentElement.classList.toggle("conn-annotating", active);
 
   if (!active) {
+    finishActiveDraft();
     clearPendingPlacement();
     draft.value = null;
     hover.value = null;

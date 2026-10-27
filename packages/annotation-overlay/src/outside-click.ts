@@ -18,6 +18,20 @@ export function requestAnnotationMove(next: AnnotationDraft): boolean {
   return true;
 }
 
+let finisher: (() => void) | null = null;
+
+/** The open popup hands its recording to the finishing list before it closes. */
+export function onFinishActiveDraft(callback: () => void): () => void {
+  finisher = callback;
+  return () => {
+    if (finisher === callback) finisher = null;
+  };
+}
+
+export function finishActiveDraft(): void {
+  finisher?.();
+}
+
 /** Listen before stopping so a paste arriving before the stop response is retained. */
 export async function stopAndWaitForPaste(
   field: HTMLTextAreaElement,

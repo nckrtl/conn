@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { dictationEnabled, stopsOnNextElement, triggersDesktopDictation } from "./dictation";
 import { resolveDictationSettings } from "./dictation-settings";
-import { triggerDictation, type AnnotatorHost } from "./dictation-trigger";
+import {
+  cancelHostSession,
+  stopHostSession,
+  triggerDictation,
+  usesHostSessions,
+  type AnnotatorHost,
+} from "./dictation-trigger";
 
 const fetch = vi.fn();
 
@@ -106,4 +112,44 @@ it("rejects with the abort reason when the host does not settle in time", async 
   await expect(
     triggerDictation({ provider: "host" }, "stop", AbortSignal.timeout(20)),
   ).rejects.toMatchObject({ name: "TimeoutError" });
+});
+
+function sessionHost(dictationSession: NonNullable<AnnotatorHost["dictationSession"]>) {
+  const spy = vi.fn(dictationSession);
+  window.__ANNOTATOR_HOST__ = { dictation: async () => true, dictationSession: spy };
+  return spy;
+}
+
+it("uses sessions only for a host that offers them", () => {
+  host(async () => true);
+  expect(usesHostSessions({ provider: "host" })).toBe(false);
+  sessionHost(async () => true);
+  expect(usesHostSessions({ provider: "host" })).toBe(true);
+  expect(usesHostSessions({ provider: "post", postUrl: "https://x.test/start" })).toBe(false);
+});
+
+it("shares one stop request per session and answers its transcript", async () => {
+  let answer!: (result: { text: string }) => void;
+  const dictationSession = sessionHost(
+    () =>
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+  );
+  const first = stopHostSession("s1");
+  const second = stopHostSession("s1");
+  answer({ text: "Hello" });
+  expect(await Promise.all([first, second])).toEqual(["Hello", "Hello"]);
+  expect(dictationSession).toHaveBeenCalledOnce();
+  expect(dictationSession.mock.calls[0]?.slice(0, 2)).toEqual(["stop", "s1"]);
+});
+
+it("fails a stop the host refuses, and cancels by id without failing", async () => {
+  const dictationSession = sessionHost(async (action) => action !== "stop");
+  await expect(stopHostSession("s2")).rejects.toThrow("The host did not stop dictation.");
+  cancelHostSession("s2");
+  expect(dictationSession.mock.calls.map(([action, session]) => [action, session])).toEqual([
+    ["stop", "s2"],
+    ["cancel", "s2"],
+  ]);
 });

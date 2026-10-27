@@ -3,6 +3,7 @@ import { cancelDraft, deleteDraft, startEdit, submitDraft } from "../actions";
 import AnnotationHighlight from "./AnnotationHighlight";
 import AnnotationMarker from "./AnnotationMarker";
 import AnnotationPopup from "./AnnotationPopup";
+import FinishingAnnotation from "./FinishingAnnotation";
 import { AnnotationFloatingControl } from "./AnnotationFloatingControl";
 import { useAnnotationAccent } from "../accent";
 import { getAnnotationRootElement } from "../host";
@@ -12,6 +13,7 @@ import {
   floatingControl,
   annotations,
   draft,
+  finishing,
   hover,
   shakeToken,
   useRefValue,
@@ -25,6 +27,7 @@ export default function AnnotationOverlay() {
   const isActive = useRefValue(annotationMode);
   const currentAnnotations = useRefValue(annotations);
   const currentDraft = useRefValue(draft);
+  const finishingDrafts = useRefValue(finishing);
   const currentHover = useRefValue(hover);
   const currentShake = useRefValue(shakeToken);
   useRefValue(viewportTick);
@@ -82,6 +85,9 @@ export default function AnnotationOverlay() {
   return (
     <div className="contents">
       {showControl ? <AnnotationFloatingControl /> : null}
+      {finishingDrafts.map((entry) => (
+        <FinishingAnnotation key={entry.session} entry={entry} />
+      ))}
       {!isActive ? null : (
         <>
           {currentHover && !currentDraft ? <AnnotationHighlight rect={currentHover.rect} /> : null}

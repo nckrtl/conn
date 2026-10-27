@@ -127,8 +127,8 @@ function RailButton({
                 : undefined
             }
             className={cn(
-              // Follows the window corner. The badge inside stays rounded, 4px in.
-              "relative flex size-9.5 shrink-0 items-center justify-center rounded-lg text-muted-foreground",
+              // Concentric with the badge inside, so the selected ring follows its curve.
+              "relative flex size-9.5 shrink-0 items-center justify-center rounded-rail text-muted-foreground",
               "outline-none hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring",
               // Selected: a 2px near-white inset ring (no layout shift) over the subtle row fill.
               active &&

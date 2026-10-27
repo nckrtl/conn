@@ -304,8 +304,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-sidebar-row-active: var(--sidebar-row-active);
   --color-sidebar-row-selected: var(--sidebar-row-selected);
   --color-sidebar-border: var(--contrast-sidebar-border);
-  /* Workspace tile inside a rail button: concentric with its 10px radius at a 5px inset. */
-  --radius-tile: calc(var(--radius) - 5px);
+  /* Workspace tile: the app-icon curve (about 22% of 28px), so drawn tiles match image ones. */
+  --radius-tile: 6px;
+  /* Rail button around a tile: concentric with it at the 5px inset. */
+  --radius-rail: calc(var(--radius-tile) + 5px);
   /* The user's chat message bubble. */
   --radius-bubble: calc(var(--radius) + 6px);
   /* Panel toolbar rows (Files search, Diff toolbar, file breadcrumbs): vertical padding,

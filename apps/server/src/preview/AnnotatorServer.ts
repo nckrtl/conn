@@ -22,7 +22,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 // start/stop/status CLI, which detaches the server and tracks it in a state file.
 
 /** Pinned so every environment runs the same server; npx caches it after the first run. */
-export const ANNOTATOR_PACKAGE = "@nckrtl/annotator@0.2.0";
+export const ANNOTATOR_PACKAGE = "@nckrtl/annotator@0.3.0";
 
 export interface AnnotatorHost {
   /** IP for `--host`, or null to listen on every address. */

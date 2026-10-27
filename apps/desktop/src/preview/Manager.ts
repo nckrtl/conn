@@ -57,6 +57,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -93,6 +94,8 @@ import {
   START_PICK_CHANNEL,
 } from "./GuestProtocol.ts";
 import { isPreviewAnnotationPayload } from "./PickedElementPayload.ts";
+import { makeResponseHeaderRelay } from "./ResponseHeaderRelay.ts";
+import { type DictationUrls, makeDictationRelay } from "./AnnotatorDictation.ts";
 import { captureFavicon, safeHttpOrigin, selectFaviconCandidates } from "./FaviconCapture.ts";
 import { DEFAULT_RECORDING_INPUT_OPTIONS, type RecordingInputOptions } from "./RecordingInput.ts";
 
@@ -569,6 +572,28 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   let forwardedShortcuts: ReadonlyArray<PreviewForwardedShortcut> = [];
   const annotationThemeRef = yield* Ref.make(DEFAULT_ANNOTATION_THEME);
   const annotationSendEnabled = new Map<string, boolean>();
+  /** The @nckrtl/annotator origin each tab's page CSP must allow. */
+  const annotatorOrigins = new Map<string, string>();
+  /** Where each tab's annotation dictation requests go; main sends them, not the page. */
+  const annotatorDictation = new Map<string, DictationUrls>();
+  const httpClient = yield* HttpClient.HttpClient;
+  const dictation = makeDictationRelay({
+    fetch: (url, init) =>
+      runPromise(
+        httpClient
+          .post(url, { headers: (init.headers as Record<string, string> | undefined) ?? {} })
+          .pipe(
+            Effect.map((response) => ({ ok: response.status >= 200 && response.status < 300 })),
+          ),
+        init.signal ? { signal: init.signal } : undefined,
+      ),
+  });
+  const responseHeaders = makeResponseHeaderRelay({
+    sendToGuest: (webContentsId, channel, payload) => {
+      const guest = webContents.fromId(webContentsId);
+      if (guest && !guest.isDestroyed()) guest.send(channel, payload);
+    },
+  });
   const tabRunners = new Map<string, DesktopTabRunner>();
   const tabsRef = yield* SynchronizedRef.make<ReadonlyMap<string, PreviewTabState>>(new Map());
   const attachedRef = yield* Ref.make<ReadonlyMap<number, ManagedListeners>>(new Map());
@@ -1750,6 +1775,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     clearPendingRecording(tabId);
     annotationSendEnabled.delete(tabId);
     tabHostWebContents.delete(tabId);
+    annotatorOrigins.delete(tabId);
+    annotatorDictation.delete(tabId);
     yield* Effect.all(
       [
         cancelPickElement(tabId),
@@ -1951,6 +1978,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       wc.send(ANNOTATION_THEME_CHANNEL, annotationTheme);
       wc.send(ANNOTATION_SEND_ENABLED_CHANNEL, annotationSendEnabled.get(tabId) === true);
     });
+    // A replacement guest keeps the tab's annotator origin; its answer concerns no document yet.
+    responseHeaders.setAnnotatorOrigin(webContentsId, annotatorOrigins.get(tabId) ?? null, "");
+    dictation.setUrls(webContentsId, annotatorDictation.get(tabId) ?? null);
     const latestNavStatus = (yield* SynchronizedRef.get(tabsRef)).get(tabId)?.navStatus;
     if (
       pendingUrl &&
@@ -1983,7 +2013,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   ) {
     yield* rendererHistory.register(wc, { surface: "preview" });
     const webContentsId = wc.id;
+    responseHeaders.attachGuest(wc);
+    dictation.attachGuest(wc);
+    wc.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+      if (isMainFrame) responseHeaders.navigatedInPage(webContentsId, url);
+    });
     wc.once("destroyed", () => {
+      responseHeaders.forget(webContentsId);
+      dictation.forget(webContentsId);
       runFork(detachControlSession(webContentsId));
     });
     yield* ensureControlSession(wc).pipe(
@@ -2161,6 +2198,22 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       annotationSendEnabled.set(tabId, enabled);
       wc.send(ANNOTATION_SEND_ENABLED_CHANNEL, enabled);
     });
+  });
+
+  const setAnnotatorOrigin = Effect.fn("PreviewManager.setAnnotatorOrigin")(function* (
+    tabId: string,
+    origin: string | null,
+    dictationUrls: DictationUrls,
+  ) {
+    const tab = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
+    if (!tab) return yield* new PreviewTabNotFoundError({ tabId });
+    if (origin === null) annotatorOrigins.delete(tabId);
+    else annotatorOrigins.set(tabId, origin);
+    annotatorDictation.set(tabId, dictationUrls);
+    const wc = tab.webContentsId == null ? null : webContents.fromId(tab.webContentsId);
+    if (!wc || wc.isDestroyed()) return true;
+    dictation.setUrls(wc.id, dictationUrls);
+    return responseHeaders.setAnnotatorOrigin(wc.id, origin, wc.getURL());
   });
 
   const pickElement = Effect.fn("PreviewManager.pickElement")(function* (tabId: string) {
@@ -3616,6 +3669,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     saveRecording,
     setAnnotationTheme,
     setAnnotationSendEnabled,
+    setAnnotatorOrigin,
+    installSessionHeaders: responseHeaders.installSession,
     setAudioMuted,
     setColorScheme,
     addWindow,
@@ -3857,6 +3912,16 @@ export class PreviewManager extends Context.Service<
       tabId: string,
       enabled: boolean,
     ) => Effect.Effect<void, PreviewManagerError>;
+    /**
+     * Lets the tab's page CSP allow `origin` (its annotator), or no extra origin with null,
+     * and sets where its dictation requests go. Answers whether the current document already
+     * loaded with the origin allowed; the dictation URLs never change the CSP.
+     */
+    readonly setAnnotatorOrigin: (
+      tabId: string,
+      origin: string | null,
+      dictationUrls: DictationUrls,
+    ) => Effect.Effect<boolean, PreviewManagerError>;
     readonly pickElement: (
       tabId: string,
     ) => Effect.Effect<PreviewAnnotationSubmissionResult | null, PreviewManagerError>;
@@ -3961,6 +4026,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           );
         placeServerDownloads(session);
         passkeys.installSessionHandlers(session);
+        operations.installSessionHeaders(session);
         return session;
       },
     ),
@@ -4019,6 +4085,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     ),
     setAnnotationTheme: operations.setAnnotationTheme,
     setAnnotationSendEnabled: operations.setAnnotationSendEnabled,
+    setAnnotatorOrigin: operations.setAnnotatorOrigin,
     pickElement: operations.pickElement,
     cancelPickElement: operations.cancelPickElement,
     captureScreenshot: operations.captureScreenshot,

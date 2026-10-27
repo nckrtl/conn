@@ -1,0 +1,126 @@
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import { makeAnnotatorHost, makeDictationRelay } from "./AnnotatorDictation.ts";
+import { ANNOTATOR_DICTATION_CHANNEL } from "./GuestProtocol.ts";
+
+const URLS = {
+  startUrl: "http://127.0.0.1:12321/dictate",
+  stopUrl: "http://127.0.0.1:12321/dictate-stop",
+};
+
+describe("makeAnnotatorHost", () => {
+  it("asks main for exactly start or stop and answers true only for true", async () => {
+    const invoke = vi.fn(async (action: string) => (action === "start" ? true : "yes"));
+    const host = makeAnnotatorHost(invoke);
+    expect(await host.dictation("start")).toBe(true);
+    expect(await host.dictation("stop")).toBe(false);
+    expect(await host.dictation("http://127.0.0.1:9/x")).toBe(false);
+    expect(await host.dictation("START")).toBe(false);
+    expect(invoke.mock.calls).toEqual([["start"], ["stop"]]);
+  });
+
+  it("answers false when main fails", async () => {
+    const host = makeAnnotatorHost(() => Promise.reject(new Error("gone")));
+    expect(await host.dictation("start")).toBe(false);
+  });
+
+  it("stops waiting when the signal aborts, and never asks with an aborted signal", async () => {
+    const invoke = vi.fn(() => new Promise<unknown>(() => {}));
+    const host = makeAnnotatorHost(invoke);
+    const controller = new AbortController();
+    const pending = host.dictation("start", { signal: controller.signal });
+    controller.abort();
+    expect(await pending).toBe(false);
+    expect(await host.dictation("stop", { signal: controller.signal })).toBe(false);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("makeDictationRelay", () => {
+  const setup = (ok = true) => {
+    const fetch = vi.fn(async (_url: string, _init: RequestInit) => ({ ok }));
+    return { fetch, relay: makeDictationRelay({ fetch }) };
+  };
+
+  it("POSTs only to the guest's registered URL for the action", async () => {
+    const { fetch, relay } = setup();
+    relay.setUrls(7, URLS);
+    expect(await relay.send(7, "start", null)).toBe(true);
+    expect(await relay.send(7, "stop", null)).toBe(true);
+    expect(await relay.send(7, "http://127.0.0.1:9/other", null)).toBe(false);
+    expect(fetch.mock.calls.map(([url, init]) => [url, init.method, init.credentials])).toEqual([
+      [URLS.startUrl, "POST", "omit"],
+      [URLS.stopUrl, "POST", "omit"],
+    ]);
+  });
+
+  it("answers false for an unknown guest, a missing URL, a non-2xx answer or an error", async () => {
+    const { fetch, relay } = setup();
+    expect(await relay.send(8, "start", null)).toBe(false);
+    relay.setUrls(7, { startUrl: URLS.startUrl, stopUrl: null });
+    expect(await relay.send(7, "stop", null)).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(0);
+
+    const failing = setup(false);
+    failing.relay.setUrls(7, URLS);
+    expect(await failing.relay.send(7, "start", null)).toBe(false);
+
+    const throwing = makeDictationRelay({ fetch: () => Promise.reject(new Error("refused")) });
+    throwing.setUrls(7, URLS);
+    expect(await throwing.send(7, "start", null)).toBe(false);
+  });
+
+  it("ignores URLs that are not http(s) and forgets a guest", async () => {
+    const { fetch, relay } = setup();
+    relay.setUrls(7, { startUrl: "file:///etc/passwd", stopUrl: null });
+    expect(await relay.send(7, "start", null)).toBe(false);
+    relay.setUrls(7, URLS);
+    relay.forget(7);
+    expect(await relay.send(7, "start", null)).toBe(false);
+    relay.setUrls(7, URLS);
+    relay.setUrls(7, null);
+    expect(await relay.send(7, "start", null)).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(0);
+  });
+
+  it("answers the guest's own channel with its own URLs", async () => {
+    const { relay } = setup();
+    relay.setUrls(7, URLS);
+    let listener:
+      | ((event: { senderFrame?: { url: string } | null }, action: unknown) => unknown)
+      | undefined;
+    relay.attachGuest({
+      id: 7,
+      ipc: {
+        handle: (channel, handler) => {
+          if (channel === ANNOTATOR_DICTATION_CHANNEL) listener = handler;
+        },
+        removeHandler: () => {},
+      },
+    });
+    expect(await listener?.({}, "start")).toBe(true);
+  });
+
+  it("sends the requesting page's origin, so the dictation app applies its website approval", async () => {
+    const { fetch, relay } = setup();
+    relay.setUrls(7, URLS);
+    let listener:
+      | ((event: { senderFrame?: { url: string } | null }, action: unknown) => unknown)
+      | undefined;
+    relay.attachGuest({
+      id: 7,
+      ipc: {
+        handle: (channel, handler) => {
+          if (channel === ANNOTATOR_DICTATION_CHANNEL) listener = handler;
+        },
+        removeHandler: () => {},
+      },
+    });
+    await listener?.({ senderFrame: { url: "https://nckrtl.test/articles?x=1#top" } }, "start");
+    await listener?.({ senderFrame: { url: "file:///etc/hosts" } }, "stop");
+    expect(fetch.mock.calls.map(([, init]) => init.headers ?? null)).toEqual([
+      { Origin: "https://nckrtl.test" },
+      null,
+    ]);
+  });
+});

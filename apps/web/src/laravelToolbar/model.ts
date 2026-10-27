@@ -1,5 +1,11 @@
 // Pure mapping from the toolbar payload to what the bar and panels show.
-import type { SourceLocation, ToolbarData, ToolbarHistoryRow, ToolbarQuery } from "./types";
+import type {
+  SourceLocation,
+  ToolbarData,
+  ToolbarHistoryRow,
+  ToolbarModel,
+  ToolbarQuery,
+} from "./types";
 
 export type RequestKind = "page" | "inertia" | "xhr";
 
@@ -217,8 +223,33 @@ export function hasQueryIssues(data: ToolbarData): boolean {
   return (data.queries?.queries ?? []).some((query) => query.is_duplicate || query.is_slow);
 }
 
+const MODEL_ACTIONS = ["retrieved", "created", "updated", "deleted"] as const;
+
+// Array.isArray does not narrow a readonly array out of a union.
+function isModelList(
+  models: NonNullable<ToolbarData["models"]>,
+): models is readonly ToolbarModel[] {
+  return Array.isArray(models);
+}
+
+/** One row per model class, from either payload shape (see `ToolbarData.models`). */
+export function toolbarModels(data: ToolbarData): readonly ToolbarModel[] {
+  const models = data.models;
+  if (!models) return [];
+  if (isModelList(models)) return models;
+  const rows = new Map<string, { -readonly [K in keyof ToolbarModel]: ToolbarModel[K] }>();
+  for (const [key, entry] of Object.entries(models)) {
+    const name = entry.model ?? key;
+    const action = MODEL_ACTIONS.find((candidate) => candidate === entry.action);
+    const row = rows.get(name) ?? { model: name };
+    if (action) row[action] = (row[action] ?? 0) + (entry.count ?? 0);
+    rows.set(name, row);
+  }
+  return [...rows.values()];
+}
+
 export function modelCount(data: ToolbarData): number {
-  return (data.models ?? []).reduce((total, model) => total + (model.retrieved ?? 0), 0);
+  return toolbarModels(data).reduce((total, model) => total + (model.retrieved ?? 0), 0);
 }
 
 export function formatMs(value: number): string {
@@ -270,7 +301,9 @@ export interface PropRow {
 
 /** The page's top-level props with what Inertia knows about them; deferred props come last. */
 export function propRows(data: ToolbarData | null): PropRow[] {
-  const values = data?.request?.view_data ?? {};
+  const viewData = data?.request?.view_data;
+  // php-data-bridge sends the string "[redacted]" unless view data collection is enabled.
+  const values = typeof viewData === "object" && viewData !== null ? viewData : {};
   const meta = data?.inertia?.props ?? {};
   const row = (name: string, loaded: boolean): PropRow => {
     const info = meta[name];

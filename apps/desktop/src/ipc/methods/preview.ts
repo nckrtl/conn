@@ -4,6 +4,7 @@ import {
   PreviewAutomationResponse,
   DesktopPreviewAnnotationSendEnabledInputSchema,
   DesktopPreviewAnnotationThemeInputSchema,
+  DesktopPreviewAnnotatorOriginInputSchema,
   DesktopPreviewArtifactInputSchema,
   DesktopPreviewConfigInputSchema,
   DesktopPreviewNavigateInputSchema,
@@ -380,6 +381,20 @@ const setAnnotationSendEnabled = DesktopIpc.makeIpcMethod({
   }),
 });
 
+const setAnnotatorOrigin = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_SET_ANNOTATOR_ORIGIN_CHANNEL,
+  payload: DesktopPreviewAnnotatorOriginInputSchema,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.preview.setAnnotatorOrigin")(function* ({
+    tabId,
+    origin,
+    dictation,
+  }) {
+    const manager = yield* PreviewManager.PreviewManager;
+    return yield* manager.setAnnotatorOrigin(tabId, origin, dictation);
+  }),
+});
+
 export const captureScreenshot = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_CAPTURE_SCREENSHOT_CHANNEL,
   payload: DesktopPreviewTabInputSchema,
@@ -485,6 +500,7 @@ export const methods = [
   getPreviewConfig,
   setAnnotationTheme,
   setAnnotationSendEnabled,
+  setAnnotatorOrigin,
   pickElement,
   cancelPickElement,
   captureScreenshot,

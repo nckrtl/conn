@@ -1,5 +1,6 @@
 import { it as effectIt } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import type {
   DesktopPreviewRecordingInputEvent,
   PreviewAnnotationPayload,
@@ -214,6 +215,7 @@ const managerLayer = (platform: NodeJS.Platform = "darwin") =>
       }),
     ),
     Layer.provideMerge(DesktopBrowserHost.layer),
+    Layer.provideMerge(NodeHttpClient.layerUndici),
     Layer.provideMerge(layerBrowserSession),
     Layer.provideMerge(
       Layer.mock(PreviewPasskeys.PreviewPasskeys)({
@@ -1207,7 +1209,7 @@ describe("PreviewManager", () => {
       once: (event: string, listener: () => void) => {
         listeners.set(event, listener);
       },
-      ipc: { on: vi.fn(), off: vi.fn() },
+      ipc: { on: vi.fn(), off: vi.fn(), handle: vi.fn(), removeHandler: vi.fn() },
       send: webviewSend,
       navigationHistory: { canGoBack: () => false, canGoForward: () => false },
       setIgnoreMenuShortcuts: vi.fn(),

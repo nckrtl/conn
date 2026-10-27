@@ -503,6 +503,10 @@
       "types": "./src/PtyAdapter.ts",
       "import": "./src/PtyAdapter.ts"
     },
+    "./laravelToolbarHeaders": {
+      "types": "./src/laravelToolbarHeaders.ts",
+      "import": "./src/laravelToolbarHeaders.ts"
+    },
     "./previewAnnotation": {
       "types": "./src/previewAnnotation.ts",
       "import": "./src/previewAnnotation.ts"

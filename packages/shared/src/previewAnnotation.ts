@@ -5,8 +5,18 @@ export interface AnnotationDictation {
   readonly stopUrl: string;
 }
 
+/**
+ * Who sends the dictation requests: `host` for the desktop browser, whose guest preload defines
+ * `window.__ANNOTATOR_HOST__` so a page CSP cannot block them; `post` lets the page fetch the
+ * URLs itself (server browser tabs have no preload).
+ */
+export type AnnotationDictationSender = "host" | "post";
+
 /** Overlay options for T3: no floating control (the toolbar owns the mode) and T3's dictation. */
-export function overlayOptions(dictation: AnnotationDictation) {
+export function overlayOptions(
+  dictation: AnnotationDictation,
+  sender: AnnotationDictationSender = "post",
+) {
   const startUrl = dictation.startUrl.trim();
   const stopUrl = dictation.stopUrl.trim();
   return {
@@ -14,7 +24,14 @@ export function overlayOptions(dictation: AnnotationDictation) {
     dictation:
       startUrl === ""
         ? { provider: "none" }
-        : { provider: "post", postUrl: startUrl, ...(stopUrl ? { stopUrl } : {}), autoStart: true },
+        : sender === "host"
+          ? { provider: "host", autoStart: true, stopOnNextElement: stopUrl !== "" }
+          : {
+              provider: "post",
+              postUrl: startUrl,
+              ...(stopUrl ? { stopUrl } : {}),
+              autoStart: true,
+            },
   };
 }
 
@@ -27,9 +44,10 @@ export function overlayOptions(dictation: AnnotationDictation) {
 export function overlayBootstrapScript(
   endpoint: { readonly annotationsUrl: string; readonly injectUrl: string },
   dictation: AnnotationDictation,
+  sender: AnnotationDictationSender = "post",
 ): string {
   const settings = JSON.stringify({ mode: "server", serviceUrl: endpoint.annotationsUrl });
-  const options = JSON.stringify(overlayOptions(dictation));
+  const options = JSON.stringify(overlayOptions(dictation, sender));
   return `(() => {
   try { sessionStorage.setItem("annotate:service", ${JSON.stringify(settings)}); } catch {}
   const options = ${options};
@@ -46,8 +64,11 @@ export function overlayBootstrapScript(
 }
 
 /** Script that applies changed T3 settings to a running overlay. */
-export function overlayConfigureScript(dictation: AnnotationDictation): string {
-  const options = JSON.stringify(overlayOptions(dictation));
+export function overlayConfigureScript(
+  dictation: AnnotationDictation,
+  sender: AnnotationDictationSender = "post",
+): string {
+  const options = JSON.stringify(overlayOptions(dictation, sender));
   return `(() => {
   const options = ${options};
   window.__AGENT_ANNOTATION__ = options;

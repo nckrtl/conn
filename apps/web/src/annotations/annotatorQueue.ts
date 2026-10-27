@@ -5,6 +5,7 @@ export {
   overlaySetModeScript,
   type AnnotationDictation,
 } from "@t3tools/shared/previewAnnotation";
+import type { AnnotationDictation } from "@t3tools/shared/previewAnnotation";
 
 // Fork patch: browser annotations backed by an @nckrtl/annotator server.
 //
@@ -90,6 +91,51 @@ export function annotatorEndpointForPage(
     injectUrl: `${base}/inject.js`,
     origin: page.host,
   };
+}
+
+/**
+ * The origin a page's Content-Security-Policy must allow so the overlay loads and talks to
+ * its annotator; null when the page serves the annotator itself.
+ */
+export function annotatorCspOrigin(endpoint: AnnotatorEndpoint, pageUrl: string): string | null {
+  const annotator = parseHttpUrl(endpoint.injectUrl);
+  const page = parseHttpUrl(pageUrl);
+  if (annotator === null || annotator.origin === page?.origin) return null;
+  return annotator.origin;
+}
+
+/**
+ * Whether to reload a tab whose document loaded before its CSP allowed the annotator. Each
+ * document and origin gets one reload at most, recorded in `reloaded`, so a page whose policy
+ * still blocks the overlay (a `<meta>` CSP) never loops.
+ */
+export function claimAnnotatorReload(
+  reloaded: Set<string>,
+  input: {
+    readonly tabId: string;
+    readonly pageUrl: string;
+    readonly origin: string | null;
+    readonly allowed: boolean;
+  },
+): boolean {
+  if (input.allowed || input.origin === null) return false;
+  const key = [input.tabId, input.pageUrl.split("#")[0], input.origin].join("\n");
+  if (reloaded.has(key)) return false;
+  reloaded.add(key);
+  return true;
+}
+
+/**
+ * The dictation URLs the desktop POSTs for a tab's overlay: trimmed http(s) URLs, null when
+ * empty or invalid. Without a start URL dictation is off, so neither is sent.
+ */
+export function hostDictationUrls(dictation: AnnotationDictation): {
+  readonly startUrl: string | null;
+  readonly stopUrl: string | null;
+} {
+  const url = (value: string) => parseHttpUrl(value.trim())?.toString() ?? null;
+  const startUrl = url(dictation.startUrl);
+  return { startUrl, stopUrl: startUrl === null ? null : url(dictation.stopUrl) };
 }
 
 export function annotationState(annotation: AnnotatorRecord): AnnotationQueueState {

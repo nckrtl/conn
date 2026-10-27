@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   annotationState,
+  annotatorCspOrigin,
   annotatorEndpointForPage,
+  claimAnnotatorReload,
+  hostDictationUrls,
   type AnnotatorRecord,
   buildAnnotationPrompt,
   clearDoneAnnotations,
@@ -25,6 +28,70 @@ const record = (
   comment: `Comment ${number}`,
   status: "todo",
   ...extra,
+});
+
+describe("annotatorCspOrigin", () => {
+  it("names the annotator server's origin for pages on another origin", () => {
+    const endpoint = annotatorEndpointForPage(
+      "https://nckrtl.test/",
+      "http://10.44.0.7:40953/annotations",
+    )!;
+    expect(annotatorCspOrigin(endpoint, "https://nckrtl.test/")).toBe("http://10.44.0.7:40953");
+  });
+
+  it("needs no extra origin when the page serves its own annotator", () => {
+    const endpoint = annotatorEndpointForPage("https://shop.test/pricing")!;
+    expect(annotatorCspOrigin(endpoint, "https://shop.test/pricing")).toBeNull();
+  });
+});
+
+describe("hostDictationUrls", () => {
+  it("registers trimmed http(s) URLs and nothing without a start URL", () => {
+    expect(
+      hostDictationUrls({
+        startUrl: " http://127.0.0.1:12321/dictate ",
+        stopUrl: "http://127.0.0.1:12321/dictate-stop",
+      }),
+    ).toEqual({
+      startUrl: "http://127.0.0.1:12321/dictate",
+      stopUrl: "http://127.0.0.1:12321/dictate-stop",
+    });
+    expect(hostDictationUrls({ startUrl: "", stopUrl: "http://127.0.0.1:1/x" })).toEqual({
+      startUrl: null,
+      stopUrl: null,
+    });
+    expect(
+      hostDictationUrls({ startUrl: "http://127.0.0.1:1/x", stopUrl: "file:///etc/passwd" }),
+    ).toEqual({ startUrl: "http://127.0.0.1:1/x", stopUrl: null });
+  });
+});
+
+describe("claimAnnotatorReload", () => {
+  const input = {
+    tabId: "tab",
+    pageUrl: "https://nckrtl.test/a#top",
+    origin: "http://10.44.0.7:40953",
+    allowed: false,
+  };
+
+  it("reloads a blocked document once per origin", () => {
+    const reloaded = new Set<string>();
+    expect(claimAnnotatorReload(reloaded, input)).toBe(true);
+    expect(claimAnnotatorReload(reloaded, { ...input, pageUrl: "https://nckrtl.test/a" })).toBe(
+      false,
+    );
+    expect(claimAnnotatorReload(reloaded, { ...input, origin: "http://10.44.0.7:1" })).toBe(true);
+    expect(claimAnnotatorReload(reloaded, { ...input, pageUrl: "https://nckrtl.test/b" })).toBe(
+      true,
+    );
+  });
+
+  it("never reloads an allowed document or one that needs no extra origin", () => {
+    const reloaded = new Set<string>();
+    expect(claimAnnotatorReload(reloaded, { ...input, allowed: true })).toBe(false);
+    expect(claimAnnotatorReload(reloaded, { ...input, origin: null })).toBe(false);
+    expect(reloaded.size).toBe(0);
+  });
 });
 
 describe("annotatorEndpointForPage", () => {
@@ -200,8 +267,30 @@ describe("overlay options", () => {
     });
   });
 
+  it("lets the desktop send dictation, so the page never gets the URLs", () => {
+    const dictation = {
+      startUrl: "http://127.0.0.1:12321/dictate",
+      stopUrl: "http://127.0.0.1:12321/dictate-stop",
+    };
+    expect(overlayOptions(dictation, "host")).toEqual({
+      floatingControl: false,
+      dictation: { provider: "host", autoStart: true, stopOnNextElement: true },
+    });
+    expect(overlayOptions({ ...dictation, stopUrl: " " }, "host").dictation).toEqual({
+      provider: "host",
+      autoStart: true,
+      stopOnNextElement: false,
+    });
+    expect(
+      overlayBootstrapScript(annotatorEndpointForPage("https://shop.test/")!, dictation, "host"),
+    ).not.toContain("12321");
+  });
+
   it("turns dictation off without a start URL", () => {
     expect(overlayOptions({ startUrl: "", stopUrl: "x" }).dictation).toEqual({ provider: "none" });
+    expect(overlayOptions({ startUrl: "", stopUrl: "x" }, "host").dictation).toEqual({
+      provider: "none",
+    });
   });
 
   it("reuses an overlay the page already runs instead of loading a second copy", () => {

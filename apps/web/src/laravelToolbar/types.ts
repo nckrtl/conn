@@ -83,6 +83,13 @@ export interface ToolbarModel {
   readonly deleted?: number;
 }
 
+/** laravel-toolbar's per-class models entry; php-data-bridge sends `ToolbarModel` rows. */
+export interface ToolbarModelEntry {
+  readonly model?: string;
+  readonly action?: string;
+  readonly count?: number;
+}
+
 export interface ToolbarDependency {
   readonly id?: string;
   readonly name: string;
@@ -114,7 +121,7 @@ export interface ToolbarData {
     readonly is_inertia?: boolean;
     readonly headers?: Readonly<Record<string, readonly string[]>>;
     readonly view_name?: string | null;
-    readonly view_data?: Readonly<Record<string, unknown>> | null;
+    readonly view_data?: Readonly<Record<string, unknown>> | string | null;
   };
   readonly response?: {
     readonly status_code?: number;
@@ -133,7 +140,7 @@ export interface ToolbarData {
     }[];
     readonly queries?: readonly ToolbarQuery[];
   };
-  readonly models?: readonly ToolbarModel[] | null;
+  readonly models?: readonly ToolbarModel[] | Readonly<Record<string, ToolbarModelEntry>> | null;
   readonly laravel?: {
     readonly version?: string;
     readonly environment?: string;

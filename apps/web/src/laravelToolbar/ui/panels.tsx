@@ -20,6 +20,7 @@ import {
   queries as toQueries,
   shortLocation,
   stages as toStages,
+  toolbarModels,
   wallTimeMs,
 } from "../model";
 import type { ToolbarData } from "../types";
@@ -444,13 +445,17 @@ export function DatabasePanel() {
 export function ModelsPanel() {
   const { selected } = useToolbarTab();
   const sorting = useTableSort();
-  const models = sortTableRows(selected?.models ?? [], sorting.sort, (model, column) => {
-    if (column === "model") return model.model?.split("\\").pop();
-    if (column === "retrieved") return model.retrieved ?? 0;
-    if (column === "created") return model.created ?? 0;
-    if (column === "updated") return model.updated ?? 0;
-    return model.deleted ?? 0;
-  });
+  const models = sortTableRows(
+    selected ? toolbarModels(selected) : [],
+    sorting.sort,
+    (model, column) => {
+      if (column === "model") return model.model?.split("\\").pop();
+      if (column === "retrieved") return model.retrieved ?? 0;
+      if (column === "created") return model.created ?? 0;
+      if (column === "updated") return model.updated ?? 0;
+      return model.deleted ?? 0;
+    },
+  );
   const total = models.reduce((sum, model) => sum + (model.retrieved ?? 0), 0);
   const max = Math.max(1, ...models.map((model) => model.retrieved ?? 0));
   return (

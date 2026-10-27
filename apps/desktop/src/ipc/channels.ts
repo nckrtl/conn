@@ -111,6 +111,7 @@ export const PREVIEW_IMPORT_COOKIES_CHANNEL = "desktop:preview-import-cookies";
 export const PREVIEW_SET_ANNOTATION_THEME_CHANNEL = "desktop:preview-set-annotation-theme";
 export const PREVIEW_SET_ANNOTATION_SEND_ENABLED_CHANNEL =
   "desktop:preview-set-annotation-send-enabled";
+export const PREVIEW_SET_ANNOTATOR_ORIGIN_CHANNEL = "desktop:preview-set-annotator-origin";
 export const PREVIEW_PICK_ELEMENT_CHANNEL = "desktop:preview-pick-element";
 export const PREVIEW_CANCEL_PICK_ELEMENT_CHANNEL = "desktop:preview-cancel-pick-element";
 export const PREVIEW_CAPTURE_SCREENSHOT_CHANNEL = "desktop:preview-capture-screenshot";

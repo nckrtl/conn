@@ -1,9 +1,14 @@
-// Relays the Laravel Toolbar's data from a browser page to T3, which draws the toolbar under
-// the page. The page's own toolbar (nckrtl/laravel-toolbar) puts the document's payload in
-// `window.__LARAVEL_TOOLBAR_DATA__` and fires `laravel-toolbar:update` for later requests;
-// this preload shares `window` with the page (contextIsolation is off) and forwards both to
-// the hosting renderer. Channel and message shape: apps/web/src/laravelToolbar/bridge.ts.
+// Relays the Laravel Toolbar's data to T3, which draws the bar under the page: the page's own
+// `__LARAVEL_TOOLBAR_DATA__` and `laravel-toolbar:update` events (shared `window`), or, for
+// pages with a CSP, the response-header payloads from main (ResponseHeaderRelay.ts).
+// Channel and message shape: apps/web/src/laravelToolbar/bridge.ts.
+import type { ToolbarHeaderPayload } from "@t3tools/shared/laravelToolbarHeaders";
 import { ipcRenderer } from "electron";
+
+import {
+  LARAVEL_TOOLBAR_DOCUMENT_CHANNEL,
+  LARAVEL_TOOLBAR_RESPONSE_CHANNEL,
+} from "./GuestProtocol.ts";
 
 const CHANNEL = "laravel-toolbar";
 
@@ -16,19 +21,51 @@ function plain(value: unknown): unknown {
   }
 }
 
-function send(kind: "page" | "update" | "none", data?: unknown) {
+function send(kind: "page" | "page-summary" | "update" | "none", data?: unknown) {
   ipcRenderer.sendToHost(CHANNEL, { kind, data: data === undefined ? undefined : plain(data) });
 }
+
+const summary = (payload: Extract<ToolbarHeaderPayload, { kind: "summary" }>) => ({
+  request_id: payload.id,
+  history_row: payload.row,
+});
 
 // Hosted mode (laravel-toolbar 0.3.7+): the page's toolbar keeps reporting requests but
 // draws no bar of its own. The preload runs before page scripts and shares their window.
 // Older versions still draw it; the host hides it with CSS (see apps/web laravelToolbar/bridge.ts).
 (window as { __LARAVEL_TOOLBAR_HOST__?: string }).__LARAVEL_TOOLBAR_HOST__ = "T3 Code";
 
+// Header payloads of fetches made before DOMContentLoaded wait until the document's source
+// is known. A page with its own toolbar reports those requests itself.
+let headerUpdates: "pending" | "relay" | "ignore" = "pending";
+const pendingUpdates: ToolbarHeaderPayload[] = [];
+
+const relayUpdate = (payload: ToolbarHeaderPayload) =>
+  send("update", payload.kind === "full" ? payload.data : summary(payload));
+
+ipcRenderer.on(LARAVEL_TOOLBAR_RESPONSE_CHANNEL, (_event, payload: ToolbarHeaderPayload) => {
+  if (headerUpdates === "relay") relayUpdate(payload);
+  else if (headerUpdates === "pending") pendingUpdates.push(payload);
+});
+
 window.addEventListener("DOMContentLoaded", () => {
   const data = (window as { __LARAVEL_TOOLBAR_DATA__?: unknown }).__LARAVEL_TOOLBAR_DATA__;
-  if (data && typeof data === "object") send("page", data);
-  else send("none");
+  if (data && typeof data === "object") {
+    headerUpdates = "ignore";
+    pendingUpdates.length = 0;
+    send("page", data);
+    return;
+  }
+  void ipcRenderer
+    .invoke(LARAVEL_TOOLBAR_DOCUMENT_CHANNEL)
+    .catch(() => null)
+    .then((payload: ToolbarHeaderPayload | null) => {
+      if (payload?.kind === "full") send("page", payload.data);
+      else if (payload?.kind === "summary") send("page-summary", summary(payload));
+      else send("none");
+      headerUpdates = "relay";
+      for (const update of pendingUpdates.splice(0)) relayUpdate(update);
+    });
 });
 
 window.addEventListener("laravel-toolbar:update", (event) => {

@@ -208,11 +208,16 @@ Sources:
 A Laravel debug bar sits under the browser page. It shows requests, timings,
 queries, models, PHP, Orbit processes and logs, and dependencies. Its flyout is
 a floating sheet portaled to `body`. Apps using php-data-bridge's Symfony
-adapter show Symfony's icon, version and environment.
+adapter show Symfony's icon, version and environment. Pages with a
+Content-Security-Policy get no inline toolbar data; the desktop main process
+reads the `x-toolbar` response headers instead.
 
 Sources:
 
 - `apps/web/src/laravelToolbar/*`.
+- Desktop (`apps/desktop/src/preview/`): `LaravelToolbarPreload.ts`,
+  `ResponseHeaderRelay.ts`.
+- `packages/shared/src/laravelToolbarHeaders.ts`.
 
 ### API panel
 
@@ -290,11 +295,14 @@ Sources:
 
 "Annotate preview" in the browser panel and simulator annotations in the Device
 panel use an `@nckrtl/annotator` server, Drift dictation and an annotation
-watch. Both features ship.
+watch. Both features ship. On desktop, each tab's page CSP is amended to allow
+its annotator origin for scripts and connections.
 
 Sources:
 
 - Web (`apps/web/src/`): `annotations/*`, `components/device/*`.
+- Desktop (`apps/desktop/src/preview/`): `ContentSecurityPolicy.ts`,
+  `ResponseHeaderRelay.ts`.
 - `packages/contracts/src/settings.ts`.
 
 ### Desktop tab automation

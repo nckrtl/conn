@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   inlineBindings,
+  modelCount,
   errorReportingLabel,
   formatBytes,
   formatUptime,
@@ -13,6 +14,7 @@ import {
   rowFromData,
   stages,
   summarize,
+  toolbarModels,
 } from "./model";
 import type { ToolbarData } from "./types";
 
@@ -78,6 +80,14 @@ describe("laravel toolbar model", () => {
     expect(rows[0]?.source).toEqual({ file: "/app/Share.php", line: 21 });
   });
 
+  it("lists no prop values when the bridge redacts view data", () => {
+    const rows = propRows({
+      request: { view_data: "[redacted]" },
+      inertia: { props: { stats: { type: "defer", loaded: false } } },
+    });
+    expect(rows.map((row) => [row.name, row.loaded])).toEqual([["stats", false]]);
+  });
+
   it("reads the response size as text or as a measurement", () => {
     const measured = { ...page, response: { size: { formattedValue: "9.97 KB", value: 10209 } } };
     expect(summarize(rowFromData(measured)!, measured).size).toBe("9.97 KB");
@@ -108,6 +118,22 @@ describe("laravel toolbar model", () => {
 
   it("formats freed memory with a sign", () => {
     expect(formatBytes(-14162)).toBe("-13.83 KB");
+  });
+
+  it("reads models as the bridge's rows or the package's per-class entries", () => {
+    const rows = { models: [{ model: "App\\Models\\Page", retrieved: 2, created: 1 }] };
+    expect(toolbarModels(rows)).toEqual(rows.models);
+    const entries: ToolbarData = {
+      models: {
+        "App\\Models\\Page": { model: "App\\Models\\Page", action: "retrieved", count: 1 },
+        "App\\Models\\Article": { model: "App\\Models\\Article", action: "retrieved", count: 4 },
+      },
+    };
+    expect(toolbarModels(entries)).toEqual([
+      { model: "App\\Models\\Page", retrieved: 1 },
+      { model: "App\\Models\\Article", retrieved: 4 },
+    ]);
+    expect(modelCount(entries)).toBe(5);
   });
 
   it("names the framework from the bridge's section, else from the package's", () => {

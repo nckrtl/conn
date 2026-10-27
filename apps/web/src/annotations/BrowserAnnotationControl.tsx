@@ -10,7 +10,7 @@ import {
   ServerIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useCallback, useEffect, useEffectEvent, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useId, useMemo, useRef, useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -29,12 +29,17 @@ import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
 import { isPreviewFocused } from "~/lib/previewFocus";
+import { previewBridge } from "~/components/preview/previewBridge";
 
 import {
   type AnnotationDictation,
+  type AnnotatorEndpoint,
   type AnnotationQueueState,
   annotationState,
+  annotatorCspOrigin,
   annotatorEndpointForPage,
+  claimAnnotatorReload,
+  hostDictationUrls,
   clearDoneAnnotations,
   normalizeAnnotatorServerUrl,
   countAnnotations,
@@ -56,6 +61,32 @@ type PreviewWebview = HTMLElement & {
 // Floating glass surface shared with the app's popovers and menus.
 const PANEL_CLASS_NAME =
   "dropdown-glass w-96 max-w-(--available-width) origin-(--transform-origin) rounded-xl text-foreground shadow-lg outline-none transition-[scale,opacity] data-starting-style:scale-98 data-starting-style:opacity-0 data-ending-style:opacity-0";
+
+/**
+ * Lets the tab's page CSP allow the annotator (applied by the desktop to each document it
+ * loads). Resolves false when the current document predates that and the tab reloads instead.
+ */
+async function allowAnnotatorInPage(
+  runtimeTabId: string,
+  endpoint: AnnotatorEndpoint,
+  pageUrl: string,
+  dictation: AnnotationDictation,
+  reloaded: Set<string>,
+): Promise<boolean> {
+  const setAnnotatorOrigin = previewBridge?.setAnnotatorOrigin;
+  if (!previewBridge || !setAnnotatorOrigin) return true;
+  const origin = annotatorCspOrigin(endpoint, pageUrl);
+  const allowed = await setAnnotatorOrigin(
+    runtimeTabId,
+    origin,
+    hostDictationUrls(dictation),
+  ).catch(() => true);
+  if (!claimAnnotatorReload(reloaded, { tabId: runtimeTabId, pageUrl, origin, allowed })) {
+    return true;
+  }
+  void previewBridge.refresh(runtimeTabId).catch(() => undefined);
+  return false;
+}
 
 function runInPage(runtimeTabId: string, code: string): void {
   // The element is replaced after a crash, so look it up on every call.
@@ -124,8 +155,9 @@ export function BrowserAnnotationControl({
     [dictationStartUrl, dictationStopUrl],
   );
 
+  const annotatorReloads = useRef(new Set<string>());
   const bootstrap = useEffectEvent((tabId: string, target: NonNullable<typeof endpoint>) =>
-    runInPage(tabId, overlayBootstrapScript(target, dictation)),
+    runInPage(tabId, overlayBootstrapScript(target, dictation, "host")),
   );
   const configureServerMode = useEffectEvent(() => {
     if (!inputDisabled) runServerAnnotation?.(annotating, dictation);
@@ -156,19 +188,43 @@ export function BrowserAnnotationControl({
     return () => window.removeEventListener("keydown", handleKey, true);
   }, [annotating, inputDisabled, available, applyMode]);
 
-  // Navigation starts with annotation off. Never restore a stale toolbar state after
-  // the page has handled Escape, or when a viewer takes control again.
+  // Navigation starts with annotation off. Never restore a stale toolbar state after the page
+  // has handled Escape, or when a viewer takes control again. Changed dictation URLs register
+  // again without a reload: the desktop sends dictation, so the page CSP never needs them.
   useEffect(() => {
     if (!available || loading || endpoint === null || runtimeTabId === null) return;
     if (runServerAnnotation) {
       resetMode();
       return;
     }
-    bootstrap(runtimeTabId, endpoint);
-    // The overlay mounts once its script has run; give it a moment.
-    const timer = setTimeout(() => resetMode(), 400);
-    return () => clearTimeout(timer);
-  }, [available, endpoint, loading, runtimeTabId, inputDisabled, runServerAnnotation]);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    void allowAnnotatorInPage(
+      runtimeTabId,
+      endpoint,
+      pageUrl ?? "",
+      dictation,
+      annotatorReloads.current,
+    ).then((ready) => {
+      if (cancelled || !ready) return;
+      bootstrap(runtimeTabId, endpoint);
+      // The overlay mounts once its script has run; give it a moment.
+      timer = setTimeout(() => resetMode(), 400);
+    });
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    available,
+    dictation,
+    endpoint,
+    loading,
+    pageUrl,
+    runtimeTabId,
+    inputDisabled,
+    runServerAnnotation,
+  ]);
 
   // Changed dictation settings apply to the running overlay without a reload.
   useEffect(() => {
@@ -176,7 +232,7 @@ export function BrowserAnnotationControl({
   }, [dictation, runServerAnnotation]);
   useEffect(() => {
     if (!runServerAnnotation && runtimeTabId !== null)
-      runInPage(runtimeTabId, overlayConfigureScript(dictation));
+      runInPage(runtimeTabId, overlayConfigureScript(dictation, "host"));
   }, [dictation, runtimeTabId, runServerAnnotation]);
 
   const toggleAnnotating = useCallback(() => {

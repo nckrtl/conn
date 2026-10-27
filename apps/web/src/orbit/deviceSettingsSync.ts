@@ -21,8 +21,8 @@ import * as Schema from "effect/Schema";
  * motion, diffs, timestamps, environment identification). Appearance contrast travels with the
  * appearance section instead.
  *
- * Machine-bound settings stay out on purpose: browser defaults and profiles, the annotation and
- * device-annotation URLs (they name services on one machine), snapshot shortcuts and sounds,
+ * Machine-bound settings stay out on purpose: browser defaults and profiles, the annotation
+ * dictation URLs (they name services on one machine), snapshot shortcuts and sounds,
  * quit and notification behavior, onboarding state, model favorites, sidebar layout, and
  * anything that holds an id or path of one install.
  */

@@ -425,10 +425,9 @@ contextBridge.exposeInMainWorld("desktopBridge", {
         tabId,
         enabled,
       }),
-    setAnnotatorOrigin: (tabId, origin, dictation) =>
-      ipcRenderer.invoke(IpcChannels.PREVIEW_SET_ANNOTATOR_ORIGIN_CHANNEL, {
+    setAnnotationDictation: (tabId, dictation) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_SET_ANNOTATION_DICTATION_CHANNEL, {
         tabId,
-        origin,
         dictation,
       }),
     pickElement: (tabId) => ipcRenderer.invoke(IpcChannels.PREVIEW_PICK_ELEMENT_CHANNEL, { tabId }),

@@ -1,14 +1,14 @@
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
-import { useEffect, useEffectEvent, useMemo } from "react";
+import { useEffect, useEffectEvent } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useThreadShell } from "../state/entities";
 import { useEnvironment } from "../state/environments";
-import { waitingIdsToSend } from "./annotatorQueue";
-import { useAnnotationWatchStore } from "./annotationWatchStore";
+import { waitingIdsToSend } from "./annotationQueue";
+import { useAnnotationWatch, useAnnotationWatchStore } from "./annotationWatchStore";
 import { sendAnnotationPrompt } from "./sendAnnotationPrompt";
-import { useAnnotatorQueue } from "./useAnnotatorQueue";
+import { useAnnotationQueue } from "./useAnnotationQueue";
 
 /**
  * Watch mode: prompts each watched thread when it is idle and annotations it has not
@@ -25,32 +25,26 @@ export function AnnotationWatchCoordinator() {
 }
 
 function ThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
-  const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
-  const annotationsUrl = useAnnotationWatchStore(
-    (state) => state.watchingByThreadKey[threadKey]?.annotationsUrl ?? null,
-  );
+  const threadRef = parseScopedThreadKey(threadKey);
+  const watch = useAnnotationWatch(threadKey);
   const lastSentIds = useAnnotationWatchStore(
     (state) => state.lastSentIdsByThreadKey[threadKey] ?? EMPTY_IDS,
   );
-  const endpoint = useMemo(
-    () => (annotationsUrl === null ? null : { annotationsUrl, injectUrl: "", origin: "" }),
-    [annotationsUrl],
-  );
-  const annotations = useAnnotatorQueue(endpoint);
+  const { annotations } = useAnnotationQueue(watch);
   const threadIdle = useThreadIdle(threadKey);
 
   const toSend = waitingIdsToSend({
-    watching: annotationsUrl !== null,
+    watching: watch !== null,
     threadIdle,
     annotations: annotations ?? [],
     lastSentIds,
   });
   const sendKey = toSend.join(",");
   const send = useEffectEvent(() => {
-    if (threadRef === null || annotationsUrl === null || annotations === null) return;
-    sendAnnotationPrompt({ threadRef, annotationsUrl, annotations });
+    if (threadRef === null || annotations === null) return;
+    sendAnnotationPrompt({ threadRef, annotations });
   });
-  // Keyed on the ids to send; the annotations array changes identity on every fetch.
+  // oxlint-disable-next-line t3code/react-effect-budget -- Watch prompts the thread when the queue or the thread's state changes, not on a user action.
   useEffect(() => {
     if (sendKey !== "") send();
   }, [sendKey]);
@@ -61,7 +55,7 @@ const EMPTY_IDS: string[] = [];
 
 /** The thread is connected and has no run, queued message or pending request. */
 function useThreadIdle(threadKey: string): boolean {
-  const threadRef = useMemo(() => parseScopedThreadKey(threadKey), [threadKey]);
+  const threadRef = parseScopedThreadKey(threadKey);
   const shell = useThreadShell(threadRef);
   const environment = useEnvironment(threadRef?.environmentId ?? null);
   if (threadRef === null || shell === null) return false;

@@ -35,11 +35,17 @@ import {
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
 import {
-  AnnotatorProjectNotFoundError,
-  AnnotatorServerError,
-  AnnotatorServerInput,
-  AnnotatorServerStatus,
-} from "./annotator.ts";
+  AnnotationCreateInput,
+  AnnotationCreateResult,
+  AnnotationInvalidError,
+  AnnotationList,
+  AnnotationProjectInput,
+  AnnotationProjectNotFoundError,
+  AnnotationRemoveInput,
+  AnnotationRemoveResult,
+  AnnotationRemovedError,
+  AnnotationStoreError,
+} from "./annotations.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -523,7 +529,9 @@ export const WS_METHODS = {
   testLoginsUpdate: "testLogins.update",
   testLoginsRemove: "testLogins.remove",
   testLoginsReveal: "testLogins.reveal",
-  annotatorServer: "annotator.server",
+  annotationsSubscribe: "annotations.subscribe",
+  annotationsCreate: "annotations.create",
+  annotationsRemove: "annotations.remove",
 
   // Device methods
   deviceConfigure: "device.configure",
@@ -1746,12 +1754,37 @@ const WsTestLoginsRevealRpc = Rpc.make(WS_METHODS.testLoginsReveal, {
   error: TestLoginRpcError,
 });
 
-const WsAnnotatorServerRpc = Rpc.make(WS_METHODS.annotatorServer, {
-  payload: AnnotatorServerInput,
-  success: AnnotatorServerStatus,
+/** Streams a project's full annotation list: one snapshot on subscribe, then a fresh list after every change. */
+const WsAnnotationsSubscribeRpc = Rpc.make(WS_METHODS.annotationsSubscribe, {
+  payload: AnnotationProjectInput,
+  success: AnnotationList,
   error: Schema.Union([
-    AnnotatorServerError,
-    AnnotatorProjectNotFoundError,
+    AnnotationProjectNotFoundError,
+    AnnotationStoreError,
+    EnvironmentAuthorizationError,
+  ]),
+  stream: true,
+});
+
+/** Creates an annotation, or applies an edit to one with the same id. */
+const WsAnnotationsCreateRpc = Rpc.make(WS_METHODS.annotationsCreate, {
+  payload: AnnotationCreateInput,
+  success: AnnotationCreateResult,
+  error: Schema.Union([
+    AnnotationProjectNotFoundError,
+    AnnotationStoreError,
+    AnnotationRemovedError,
+    AnnotationInvalidError,
+    EnvironmentAuthorizationError,
+  ]),
+});
+
+const WsAnnotationsRemoveRpc = Rpc.make(WS_METHODS.annotationsRemove, {
+  payload: AnnotationRemoveInput,
+  success: AnnotationRemoveResult,
+  error: Schema.Union([
+    AnnotationProjectNotFoundError,
+    AnnotationStoreError,
     EnvironmentAuthorizationError,
   ]),
 });
@@ -2146,7 +2179,9 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsTestLoginsUpdateRpc,
   WsTestLoginsRemoveRpc,
   WsTestLoginsRevealRpc,
-  WsAnnotatorServerRpc,
+  WsAnnotationsSubscribeRpc,
+  WsAnnotationsCreateRpc,
+  WsAnnotationsRemoveRpc,
 );
 
 export const WsRpcGroup = RpcGroup.make(

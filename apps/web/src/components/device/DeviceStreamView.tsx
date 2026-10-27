@@ -1,4 +1,4 @@
-import type { DevicePlatform, EnvironmentId } from "@t3tools/contracts";
+import type { AnnotationRecord, DevicePlatform, EnvironmentId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -15,7 +15,7 @@ import { DeviceDuoControls } from "./DeviceDuoControls";
 import { DeviceAndroidFoldControls } from "./DeviceAndroidFoldControls";
 import { DevicePhoneViewport } from "./DevicePhoneViewport";
 import { DeviceLoadingView } from "./DeviceLoadingView";
-import type { AnnotatorRecord } from "~/annotations/annotatorQueue";
+import type { AnnotationTarget } from "~/annotations/useAnnotationQueue";
 import { DeviceAnnotationOverlay } from "./DeviceAnnotationOverlay";
 import { deviceAnnotationRect } from "./deviceAnnotations";
 import type { DeviceAxElement } from "./deviceHubApi";
@@ -106,8 +106,8 @@ export function DeviceStreamView(props: {
   readonly axOverlay?: boolean;
   /** Click elements to comment instead of tapping the device. Flat screen only. */
   readonly annotating?: boolean;
-  readonly annotations?: ReadonlyArray<AnnotatorRecord>;
-  readonly annotationsUrl?: string | null;
+  readonly annotations?: ReadonlyArray<AnnotationRecord>;
+  readonly annotationTarget?: AnnotationTarget | null;
   /** Cmd/Ctrl+Shift+A on the focused screen toggles annotation mode. */
   readonly onToggleAnnotating?: () => void;
   /** Lets a parent read this view's own stream state, such as its screen size. */
@@ -466,7 +466,7 @@ export function DeviceStreamView(props: {
             active={!!props.annotating}
             elements={axElements}
             annotations={props.annotations ?? []}
-            annotationsUrl={props.annotationsUrl ?? null}
+            target={props.annotationTarget ?? null}
             hostId={props.hostId}
             deviceId={props.deviceId}
           />

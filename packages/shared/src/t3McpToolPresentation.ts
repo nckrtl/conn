@@ -68,6 +68,7 @@ export type T3McpToolSummaryAction =
   | "browser"
   | "device"
   | "credential"
+  | "annotation"
   | "html-preview"
   | "html-render";
 
@@ -280,6 +281,22 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   ),
   fill_credential: tool(["Fill", "Filling", "Filled", "a saved login"], "credential", "credential"),
   save_test_login: tool(["Save", "Saving", "Saved", "a test login"], "credential", "credential"),
+  annotations_list: tool(["List", "Listing", "Listed", "annotations"], "annotation", "browser"),
+  annotations_claim: tool(
+    ["Claim", "Claiming", "Claimed", "an annotation"],
+    "annotation",
+    "browser",
+  ),
+  annotations_complete: tool(
+    ["Complete", "Completing", "Completed", "an annotation"],
+    "annotation",
+    "browser",
+  ),
+  annotations_release: tool(
+    ["Release", "Releasing", "Released", "an annotation"],
+    "annotation",
+    "browser",
+  ),
   run_scheduled_task_now: tool(
     ["Run", "Running", "Requested a run of", "a scheduled task"],
     "schedule-run",

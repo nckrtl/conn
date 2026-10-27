@@ -1,6 +1,10 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { AuthOrchestrationOperateScope, type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  type AnnotationRecord,
+  AuthOrchestrationOperateScope,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 
 import { toastManager } from "../components/ui/toast";
 import { newMessageId } from "../lib/utils";
@@ -8,21 +12,17 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readThreadShell } from "../state/entities";
 import { readEnvironmentScope } from "../state/session";
 import { threadEnvironment } from "../state/threads";
-import { type AnnotatorRecord, annotationState, buildAnnotationPrompt } from "./annotatorQueue";
+import { annotationState, buildAnnotationPrompt } from "./annotationQueue";
 import { useAnnotationWatchStore } from "./annotationWatchStore";
 
 /**
- * Sends the annotation prompt as a normal user message with the thread's own model and
- * modes. The message is dispatched as "queue", so the server holds it behind a running
- * turn and starts it as soon as the thread can take it. The annotations count as sent at
- * once; a failed dispatch restores the previous list so a retry can send them again.
- * Returns false when there is nothing to send, the thread is unknown or the connection
- * may not operate threads.
+ * Queues the annotation prompt as a user message with the thread's model and modes. The
+ * annotations count as sent at once; a failed dispatch restores the previous list so a
+ * retry sends them again. False when nothing waits or the thread cannot take it.
  */
 export function sendAnnotationPrompt(input: {
   readonly threadRef: ScopedThreadRef;
-  readonly annotationsUrl: string;
-  readonly annotations: ReadonlyArray<AnnotatorRecord>;
+  readonly annotations: ReadonlyArray<AnnotationRecord>;
 }): boolean {
   const waiting = input.annotations.filter(
     (annotation) => annotationState(annotation) === "waiting",
@@ -49,7 +49,7 @@ export function sendAnnotationPrompt(input: {
         message: {
           messageId: newMessageId(),
           role: "user",
-          text: buildAnnotationPrompt(input),
+          text: buildAnnotationPrompt(input.annotations),
           attachments: [],
         },
         modelSelection: shell.modelSelection,

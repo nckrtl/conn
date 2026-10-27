@@ -67,6 +67,8 @@ import * as WorktreeHandlers from "./toolkits/worktree/handlers.ts";
 import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 import * as PullRequestsHandlers from "./toolkits/pullRequests/handlers.ts";
+import * as AnnotationsHandlers from "./toolkits/annotations/handlers.ts";
+import { AnnotationsToolkit } from "./toolkits/annotations/tools.ts";
 import * as CredentialsHandlers from "./toolkits/credentials/handlers.ts";
 import { CredentialsToolkit } from "./toolkits/credentials/tools.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
@@ -1119,6 +1121,11 @@ export const layerCredentialsToolkit = toolkitRegistration(
   CredentialsHandlers.layer,
 );
 
+export const layerAnnotationsToolkit = toolkitRegistration(
+  AnnotationsToolkit,
+  AnnotationsHandlers.layer,
+);
+
 export const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentToolkit,
   EnvironmentHandlers.layer,
@@ -1162,6 +1169,7 @@ export const layerMcpTransport = McpServer.layerHttp({
 export const layer = Layer.mergeAll(
   layerPreviewToolkit,
   layerCredentialsToolkit,
+  layerAnnotationsToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
   layerAttachmentToolkit,

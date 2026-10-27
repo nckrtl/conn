@@ -10,6 +10,7 @@ import {
   type BrowserRecordingFrameRate,
   EnvironmentId,
   PreviewTabId,
+  ProjectId,
   ProviderInstanceId,
   ThreadId,
   type PreviewAutomationSnapshot,
@@ -27,9 +28,12 @@ import * as Stream from "effect/Stream";
 import type { BrowserContext, Page } from "playwright-core";
 import { beforeEach, expect, vi } from "vite-plus/test";
 
+import * as AnnotationStore from "../annotations/AnnotationStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Broker from "../mcp/PreviewAutomationBroker.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
@@ -191,6 +195,12 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
     emulateMedia: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
     waitForFunction: vi.fn(async () => {}),
+    exposeBinding: vi.fn(
+      async (
+        _name: string,
+        _binding: (source: unknown, op: unknown, payload?: unknown) => Promise<unknown>,
+      ) => {},
+    ),
     evaluate: vi.fn(async (_expression?: unknown) =>
       _expression === SENSITIVE_INPUT_VALUES_EXPRESSION
         ? []
@@ -320,7 +330,18 @@ const asSession = (providerSessionId: string) => ({
   ...scope,
   thread: { ...testThread, providerSessionId },
 });
+const annotationProjectId = ProjectId.make("browser-test-project");
 const dependencies = Layer.mergeAll(
+  AnnotationStore.layer.pipe(
+    Layer.provide(
+      Layer.mock(ProjectService.ProjectService)({
+        getById: (id) => Effect.succeedSome({ id } as never),
+      }),
+    ),
+  ),
+  Layer.mock(ThreadManagementService.ThreadManagementService)({
+    getThreadShell: () => Effect.succeed({ projectId: annotationProjectId } as never),
+  }),
   Broker.layer,
   Manager.layer,
   Layer.succeed(ServerEnvironment.ServerEnvironment, {
@@ -1388,23 +1409,70 @@ it.live("only the controlling viewer can activate annotations on the streamed pa
       page.evaluate.mockClear();
       yield* viewer.input(annotation);
       expect(page.evaluate).not.toHaveBeenCalled();
+      expect(page.exposeBinding).not.toHaveBeenCalled();
       yield* viewer.input({ type: "takeControl" });
       yield* viewer.input(annotation);
-      expect(page.waitForFunction).toHaveBeenCalledExactlyOnceWith(
-        "!!window.AgentAnnotation",
-        undefined,
-        { timeout: 10_000 },
-      );
-      expect(page.evaluate.mock.calls[0]?.[0]).toContain(
-        "https://gateway-feedback.orbit.test/__orbit/annotator/inject.js",
-      );
-      expect(page.evaluate.mock.calls[1]?.[0]).toContain("if (isOn === true)");
+      expect(page.exposeBinding).toHaveBeenCalledOnce();
+      // The change feed notifies the page in between; only the overlay steps matter here.
+      const overlayScripts = () =>
+        page.evaluate.mock.calls
+          .map(([script]) => String(script))
+          .filter((script) => !script.includes("__connAnnotationsChanged?.()"));
+      const scripts = overlayScripts();
+      expect(scripts[0]).toContain("window.__connAnnotationsCall(op, payload)");
+      expect(scripts[1]).toContain("__CONN_ANNOTATION_OPTIONS__");
+      expect(scripts[2]).toContain("ConnAnnotationOverlay");
+      expect(scripts[3]).toContain("overlay.setMode(true)");
       yield* viewer.input({ ...annotation, active: false });
-      expect(page.evaluate.mock.calls[3]?.[0]).toContain("if (isOn === false)");
+      expect(page.exposeBinding).toHaveBeenCalledOnce();
+      expect(overlayScripts().at(-1)).toContain("overlay.setMode(false)");
       yield* viewer.input({ type: "releaseControl" });
       page.evaluate.mockClear();
       yield* viewer.input(annotation);
       expect(page.evaluate).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("the annotation binding reads and writes only the page's own site", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      const store = yield* AnnotationStore.AnnotationStore;
+      yield* Effect.promise(() => page.goto("https://app.orbit.test/projects"));
+      const viewer = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* viewer.input({ type: "takeControl" });
+      yield* viewer.input({ type: "annotation", active: true, startUrl: "", stopUrl: "" });
+      const binding = page.exposeBinding.mock.calls[0]![1];
+      const call = (op: string, payload?: unknown) =>
+        Effect.promise(() => binding({}, op, payload));
+      yield* store.create(annotationProjectId, {
+        id: "elsewhere",
+        comment: "Other site",
+        url: "https://other.orbit.test/",
+      });
+
+      const created = yield* call("submit", {
+        id: "mine",
+        comment: "Make it blue",
+        url: "https://app.orbit.test/projects",
+        pathname: "/projects",
+      });
+      expect(created).toMatchObject({ id: "mine", projectId: annotationProjectId, status: "todo" });
+      const listed = (yield* call("list")) as ReadonlyArray<{ readonly id: string }>;
+      expect(listed.map((record) => record.id)).toEqual(["mine"]);
+
+      yield* call("remove", { ids: ["mine", "elsewhere"] });
+      const { annotations } = yield* store.list(annotationProjectId);
+      expect(annotations.map((record) => record.id)).toEqual(["elsewhere"]);
+      const rejected = yield* Effect.promise(() =>
+        binding({}, "submit", { comment: 1 }).then(
+          () => false,
+          () => true,
+        ),
+      );
+      expect(rejected).toBe(true);
     }),
   ).pipe(Effect.provide(layer)),
 );

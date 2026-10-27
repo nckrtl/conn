@@ -1116,10 +1116,8 @@ const DesktopPreviewDictationUrlSchema = Schema.NullOr(
   Schema.String.check(Schema.isPattern(/^https?:\/\/[^\s"'<>\\]+$/)),
 );
 
-export const DesktopPreviewAnnotatorOriginInputSchema = Schema.Struct({
+export const DesktopPreviewAnnotationDictationInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
-  /** An http(s) origin such as `http://10.44.0.7:40953`, or null for none. */
-  origin: Schema.NullOr(Schema.String.check(Schema.isPattern(/^https?:\/\/[^/\s;,'"]+$/))),
   /** The http(s) URLs the desktop POSTs to start and stop dictation; null for none. */
   dictation: Schema.Struct({
     startUrl: DesktopPreviewDictationUrlSchema,
@@ -1603,16 +1601,11 @@ export interface DesktopPreviewBridge {
   setAnnotationTheme: (theme: DesktopPreviewAnnotationTheme) => Promise<void>;
   /** Keep an open annotation picker's send shortcut in sync with its thread grant. */
   setAnnotationSendEnabled: (tabId: string, enabled: boolean) => Promise<void>;
-  /**
-   * Lets the tab's page CSP allow its annotator origin (null for none) from the next document
-   * on, and sets the dictation URLs the desktop POSTs for its overlay (never the page).
-   * Resolves whether the current document already loaded with that origin allowed.
-   */
-  setAnnotatorOrigin?: (
+  /** Sets the dictation URLs the desktop POSTs for the tab's overlay (never the page). */
+  setAnnotationDictation?: (
     tabId: string,
-    origin: string | null,
     dictation: { readonly startUrl: string | null; readonly stopUrl: string | null },
-  ) => Promise<boolean>;
+  ) => Promise<void>;
   /** Resolves with the annotation and attach/send intent, or null on cancellation. Rejects if activation fails. */
   pickElement: (tabId: string) => Promise<PreviewAnnotationSubmissionResult | null>;
   /** Cancel an in-flight preview annotation session. */

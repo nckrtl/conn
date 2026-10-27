@@ -1,5 +1,6 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { AnnotationRecord, ScopedThreadRef } from "@t3tools/contracts";
+import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import {
   BrushCleaningIcon,
   CheckIcon,
@@ -7,20 +8,9 @@ import {
   MessageCircleQuestionIcon,
   MessageSquareTextIcon,
   SendIcon,
+  Trash2Icon,
 } from "lucide-react";
-import { useId } from "react";
-
-import {
-  type AnnotationQueueState,
-  type AnnotatorRecord,
-  annotationState,
-  clearDoneAnnotations,
-  countAnnotations,
-  openAnnotationCount,
-} from "~/annotations/annotatorQueue";
-import { useAnnotationWatch, useAnnotationWatchStore } from "~/annotations/annotationWatchStore";
-import { sendAnnotationPrompt } from "~/annotations/sendAnnotationPrompt";
-import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
+import { useId, useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -30,38 +20,64 @@ import { Spinner } from "~/components/ui/spinner";
 import { Switch } from "~/components/ui/switch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
+import { previewEnvironment } from "~/state/preview";
+import { useAtomCommand } from "~/state/use-atom-command";
+
+import { type AnnotationQueueState, annotationState, countAnnotations } from "./annotationQueue";
+import { useAnnotationWatch, useAnnotationWatchStore } from "./annotationWatchStore";
+import { sendAnnotationPrompt } from "./sendAnnotationPrompt";
+import type { AnnotationTarget } from "./useAnnotationQueue";
 
 // Floating glass surface shared with the app's popovers and menus.
 const PANEL_CLASS_NAME =
   "dropdown-glass w-96 max-w-(--available-width) origin-(--transform-origin) rounded-xl text-foreground shadow-lg outline-none transition-[scale,opacity] data-starting-style:scale-98 data-starting-style:opacity-0 data-ending-style:opacity-0";
 
-export function DeviceAnnotationControl(props: {
+/**
+ * The annotation toolbar button and its hover queue. A click toggles annotation mode;
+ * hover shows the queue with Send, Watch, Clear done and Remove idle.
+ */
+export function AnnotationQueuePopover(props: {
   readonly threadRef: ScopedThreadRef;
-  readonly hostId: string;
-  readonly deviceId: string;
+  /** The project queue; null until the thread's project is known. */
+  readonly target: AnnotationTarget | null;
+  readonly annotations: ReadonlyArray<AnnotationRecord> | null;
+  readonly error: string | null;
   readonly annotating: boolean;
   readonly onToggle: () => void;
-  readonly annotationsUrl: string | null;
-  readonly annotations: ReadonlyArray<AnnotatorRecord> | null;
-  readonly error: string | null;
-  /** True while the annotation server is being checked. */
-  readonly starting: boolean;
-  /** The annotations URL did not answer. Distinct from a queue that has not loaded. */
-  readonly unreachable: boolean;
+  readonly disabled?: boolean;
+  /** What a click annotates. */
+  readonly subject: "page" | "device";
+  readonly side: "bottom" | "left";
+  readonly size: "icon-xs" | "icon-sm";
 }) {
+  const { target } = props;
   const threadKey = scopedThreadKey(props.threadRef);
   const watch = useAnnotationWatch(threadKey);
   const setWatching = useAnnotationWatchStore((state) => state.setWatching);
+  const removeAnnotations = useAtomCommand(previewEnvironment.removeAnnotations);
   const watchSwitchId = useId();
-  const annotations = props.annotations ?? [];
-  const counts = countAnnotations(annotations);
-  const open = openAnnotationCount(counts);
-  const watching = props.annotationsUrl !== null && watch?.annotationsUrl === props.annotationsUrl;
-  const ready = props.annotationsUrl !== null && props.error === null;
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const queue = props.annotations ?? [];
+  const counts = countAnnotations(queue);
+  const idle = queue.filter((annotation) => annotation.status !== "in_progress");
+  const done = queue.filter((annotation) => annotation.status === "done");
+  const watching =
+    target !== null &&
+    watch?.environmentId === target.environmentId &&
+    watch.projectId === target.projectId;
+  const remove = (records: ReadonlyArray<AnnotationRecord>) => {
+    if (target === null || records.length === 0) return;
+    void removeAnnotations({
+      environmentId: target.environmentId,
+      input: { projectId: target.projectId, ids: records.map((record) => record.id) },
+    });
+  };
+  const action = props.annotating ? "Stop annotating" : `Annotate ${props.subject}`;
 
   return (
     <Popover
       onOpenChange={(_open, details) => {
+        // Hover shows the queue; a click toggles annotation mode instead.
         if (details.reason === "trigger-press") details.cancel();
       }}
     >
@@ -72,28 +88,30 @@ export function DeviceAnnotationControl(props: {
         render={
           <Button
             variant={props.annotating ? "secondary" : "ghost"}
-            size="icon-sm"
-            aria-label={`${props.annotating ? "Stop annotating" : "Annotate device"}, ${open} open`}
+            size={props.size}
+            aria-label={`${action}, ${counts.waiting} waiting`}
             aria-pressed={props.annotating ? "true" : "false"}
             type="button"
-            onClick={() => {
-              props.onToggle();
-            }}
+            className="relative"
+            onClick={props.onToggle}
+            disabled={props.disabled === true}
           />
         }
       >
         <MessageSquareTextIcon className={cn(props.annotating && "text-primary")} />
-        {open > 0 ? (
-          <span
-            aria-hidden
-            className="absolute -top-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-3xs font-semibold tabular-nums text-primary-foreground"
-          >
-            {open}
+        {counts.waiting > 0 ? (
+          <span aria-hidden className="pointer-events-none absolute -top-1.5 -right-1.5">
+            <Badge size="sm">{counts.waiting}</Badge>
           </span>
         ) : null}
       </PopoverTrigger>
       <PopoverPrimitive.Portal>
-        <PopoverPrimitive.Positioner align="end" side="left" sideOffset={6} className="z-[130]">
+        <PopoverPrimitive.Positioner
+          align="end"
+          side={props.side}
+          sideOffset={6}
+          className="z-[130]"
+        >
           <PopoverPrimitive.Popup className={PANEL_CLASS_NAME}>
             <div className="flex items-start justify-between gap-3 px-3 pt-3 pb-2">
               <div className="min-w-0">
@@ -109,63 +127,87 @@ export function DeviceAnnotationControl(props: {
                     Watching
                   </Badge>
                 ) : null}
-                {props.annotationsUrl !== null && counts.done > 0 ? (
+                {done.length > 0 ? (
                   <Tooltip>
                     <TooltipTrigger
                       render={
                         <Button
                           variant="ghost"
                           size="icon-xs"
-                          aria-label={`Clear ${counts.done} done`}
+                          aria-label={`Clear ${done.length} done`}
                           type="button"
-                          onClick={() =>
-                            void clearDoneAnnotations(props.annotationsUrl!, annotations)
-                          }
+                          onClick={() => remove(done)}
                         />
                       }
                     >
                       <BrushCleaningIcon />
                     </TooltipTrigger>
-                    <TooltipPopup>{`Clear ${counts.done} done`}</TooltipPopup>
+                    <TooltipPopup>{`Clear ${done.length} done`}</TooltipPopup>
+                  </Tooltip>
+                ) : null}
+                {idle.length > 0 ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Remove ${idle.length} not in progress`}
+                          type="button"
+                          onClick={() => setConfirmingRemove(true)}
+                        />
+                      }
+                    >
+                      <Trash2Icon />
+                    </TooltipTrigger>
+                    <TooltipPopup>{`Remove ${idle.length} not in progress`}</TooltipPopup>
                   </Tooltip>
                 ) : null}
               </div>
             </div>
-            {props.error ? (
+            {confirmingRemove && idle.length > 0 ? (
+              <div className="flex items-center justify-between gap-3 border-t border-(--glass-divider)! px-3 py-2 text-ui">
+                <span className="text-muted-foreground">
+                  {`Remove ${idle.length} ${idle.length === 1 ? "annotation" : "annotations"} for everyone? Work in progress stays.`}
+                </span>
+                <span className="flex shrink-0 items-center gap-1">
+                  <Button size="xs" variant="ghost" onClick={() => setConfirmingRemove(false)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="destructive"
+                    onClick={() => {
+                      setConfirmingRemove(false);
+                      remove(idle);
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </span>
+              </div>
+            ) : null}
+            {props.error !== null ? (
               <p
                 role="alert"
                 className="border-t border-(--glass-divider)! px-3 py-3 text-ui text-destructive"
               >
                 {props.error}
               </p>
-            ) : props.unreachable ? (
-              <p
-                role="alert"
-                className="border-t border-(--glass-divider)! px-3 py-3 text-ui text-destructive"
-              >
-                The annotation server did not answer.
-              </p>
-            ) : null}
-            {props.annotations === null && !props.error && !props.unreachable ? (
+            ) : props.annotations === null ? (
               <p className="border-t border-(--glass-divider)! px-3 py-3 text-ui text-muted-foreground">
-                {props.starting
-                  ? "Starting the annotation server…"
-                  : props.annotationsUrl
-                    ? "Loading annotations…"
-                    : "No annotations yet. Click the button, then click an element on the screen."}
+                Loading annotations…
               </p>
-            ) : null}
-            {props.annotations !== null && annotations.length === 0 ? (
+            ) : queue.length === 0 ? (
               <p className="border-t border-(--glass-divider)! px-3 py-3 text-ui text-muted-foreground">
-                No annotations yet. Click the button, then click an element on the screen.
+                {`No annotations yet. Click the button, then click an element on the ${props.subject === "page" ? "page" : "screen"}.`}
               </p>
-            ) : null}
-            {props.annotations !== null && annotations.length > 0 ? (
+            ) : (
               <ol
                 role="list"
                 className="max-h-80 overflow-y-auto border-t border-(--glass-divider)! p-1.5 text-ui"
               >
-                {annotations.map((annotation) => {
+                {queue.map((annotation) => {
                   const state = annotationState(annotation);
                   return (
                     <li
@@ -193,6 +235,9 @@ export function DeviceAnnotationControl(props: {
                         </div>
                         <div className="mt-0.5 truncate text-ui text-muted-foreground">
                           {annotation.summary ?? annotation.element ?? annotation.pathname}
+                          {props.subject === "page" && annotation.source === "device"
+                            ? " · device"
+                            : ""}
                         </div>
                       </div>
                       <span className="mt-0.5 text-ui">
@@ -202,7 +247,7 @@ export function DeviceAnnotationControl(props: {
                   );
                 })}
               </ol>
-            ) : null}
+            )}
             <div className="border-t border-(--glass-divider)! px-3 py-2.5">
               {watching ? (
                 <p className="text-ui text-muted-foreground">
@@ -213,15 +258,10 @@ export function DeviceAnnotationControl(props: {
                 <Button
                   size="xs"
                   className="w-full justify-center"
-                  disabled={!ready || counts.waiting === 0}
-                  onClick={() => {
-                    if (props.annotationsUrl === null) return;
-                    sendAnnotationPrompt({
-                      threadRef: props.threadRef,
-                      annotationsUrl: props.annotationsUrl,
-                      annotations,
-                    });
-                  }}
+                  disabled={counts.waiting === 0}
+                  onClick={() =>
+                    sendAnnotationPrompt({ threadRef: props.threadRef, annotations: queue })
+                  }
                 >
                   <SendIcon />
                   {counts.waiting === 0
@@ -244,14 +284,8 @@ export function DeviceAnnotationControl(props: {
                 id={watchSwitchId}
                 size="sm"
                 checked={watching}
-                disabled={props.annotationsUrl === null}
-                onCheckedChange={(checked) => {
-                  if (!checked || props.annotationsUrl === null) {
-                    setWatching(threadKey, null);
-                    return;
-                  }
-                  setWatching(threadKey, props.annotationsUrl);
-                }}
+                disabled={target === null}
+                onCheckedChange={(checked) => setWatching(threadKey, checked ? target : null)}
               />
             </label>
           </PopoverPrimitive.Popup>

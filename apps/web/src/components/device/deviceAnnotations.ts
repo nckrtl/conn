@@ -1,9 +1,10 @@
-import type { AnnotatorRecord } from "~/annotations/annotatorQueue";
+import type { AnnotationCapture, AnnotationRecord } from "@t3tools/contracts";
+
 import { randomUUID } from "~/lib/utils";
 
 import type { DeviceAxElement } from "./deviceHubApi";
 
-/** Same rule the annotator enforces for `id`. */
+/** Same rule the server enforces for `id` (`AnnotationId`). */
 export const DEVICE_ANNOTATION_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$/;
 
 export function deviceAnnotationPathname(hostId: string, deviceId: string): string {
@@ -11,9 +12,9 @@ export function deviceAnnotationPathname(hostId: string, deviceId: string): stri
 }
 
 export function annotationsForPathname(
-  annotations: ReadonlyArray<AnnotatorRecord>,
+  annotations: ReadonlyArray<AnnotationRecord>,
   pathname: string,
-): AnnotatorRecord[] {
+): AnnotationRecord[] {
   return annotations.filter((annotation) => annotation.pathname === pathname);
 }
 
@@ -32,7 +33,9 @@ export interface DeviceAnnotationRect {
   readonly height: number;
 }
 
-export function deviceAnnotationRect(annotation: AnnotatorRecord): DeviceAnnotationRect | null {
+export function deviceAnnotationRect(
+  annotation: Pick<AnnotationRecord, "x" | "y" | "width" | "height">,
+): DeviceAnnotationRect | null {
   const { x, y, width, height } = annotation;
   if (
     typeof x !== "number" ||
@@ -51,12 +54,8 @@ export function deviceAnnotationRect(annotation: AnnotatorRecord): DeviceAnnotat
   return { x, y, width, height };
 }
 
-export interface DeviceAnnotationPayload extends DeviceAnnotationRect {
-  readonly id: string;
-  readonly comment: string;
-  readonly element: string;
-  readonly pathname: string;
-}
+export type DeviceAnnotationPayload = AnnotationCapture &
+  DeviceAnnotationRect & { readonly source: "device"; readonly pathname: string };
 
 /** `null` when the comment is empty or the id would be rejected. Nothing is created then. */
 export function buildDeviceAnnotationPayload(input: {
@@ -73,6 +72,7 @@ export function buildDeviceAnnotationPayload(input: {
   return {
     id,
     comment,
+    source: "device",
     element: describeDeviceElement(input.element),
     pathname: deviceAnnotationPathname(input.hostId, input.deviceId),
     x: input.element.x,

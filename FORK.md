@@ -293,17 +293,32 @@ Sources:
 
 ### Browser and device annotations
 
-"Annotate preview" in the browser panel and simulator annotations in the Device
-panel use an `@nckrtl/annotator` server, Drift dictation and an annotation
-watch. Both features ship. On desktop, each tab's page CSP is amended to allow
-its annotator origin for scripts and connections.
+Browser and Device panel annotations are Conn-native. The Conn server stores
+them per project as plain files under `<stateDir>/annotations/<projectId>`. A
+thread works through its project's queue. Tap the annotation icon in the
+browser toolbar to load the overlay and start annotating; no annotator server
+runs. The overlay is ported from `@nckrtl/annotator` into
+`packages/annotation-overlay`. Desktop tabs reach the queue through a guest
+preload and the hosting renderer; server tabs through a Playwright binding.
+Agents use the `annotations_list`, `annotations_claim`,
+`annotations_complete` and `annotations_release` MCP tools. Send and Watch
+prompt the thread with those tools.
+
+Drift dictation starts from the overlay. On desktop tabs the overlay asks the
+guest preload (`window.__ANNOTATOR_HOST__`), and the main process POSTs the
+dictation URLs the renderer registered for the tab, so the page never gets
+them and its CSP cannot block them. Server tabs POST from the page.
 
 Sources:
 
-- Web (`apps/web/src/`): `annotations/*`, `components/device/*`.
-- Desktop (`apps/desktop/src/preview/`): `ContentSecurityPolicy.ts`,
-  `ResponseHeaderRelay.ts`.
-- `packages/contracts/src/settings.ts`.
+- Server (`apps/server/src/`): `annotations/AnnotationStore.ts`,
+  `mcp/toolkits/annotations/*`, `preview/ServerBrowser.ts`, `ws.ts`.
+- `packages/contracts/src/annotations.ts`,
+  `packages/shared/src/annotationBridge.ts`, `packages/annotation-overlay`.
+- Desktop (`apps/desktop/src/preview/`): `ConnAnnotationsPreload.ts`,
+  `AnnotatorHostPreload.ts`, `AnnotatorDictation.ts`.
+- Web (`apps/web/src/`): `annotations/*`, `components/device/*`,
+  `browser/HostedBrowserWebview.tsx`.
 
 ### Desktop tab automation
 
@@ -651,6 +666,13 @@ Sources:
    - If upstream adds desktop-tab automation, compare both implementations
      against the behavior above. Keep Conn's behavior unless Nick decides
      otherwise.
+   - Annotations: keep `layerAnnotationsToolkit` in
+     `apps/server/src/mcp/McpHttpServer.ts`, the `ConnAnnotationsPreload.ts`
+     import in `apps/desktop/src/preview-pick-preload.ts`, the overlay
+     injection and binding in `apps/server/src/preview/ServerBrowser.ts`, the
+     `annotations.*` RPCs in `packages/contracts/src/rpc.ts` and `ws.ts`, and
+     the `attachOverlayBridge` effect in
+     `apps/web/src/browser/HostedBrowserWebview.tsx`.
    - `pnpm-lock.yaml`: take upstream's, then let `vp i` rewrite it.
 2. Run the regression scan in the shell skill's "Upstream sync procedure" on
    upstream's diff. New upstream UI must follow the fork's shell rules (glass

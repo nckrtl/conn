@@ -511,6 +511,10 @@
       "types": "./src/previewAnnotation.ts",
       "import": "./src/previewAnnotation.ts"
     },
+    "./annotationBridge": {
+      "types": "./src/annotationBridge.ts",
+      "import": "./src/annotationBridge.ts"
+    },
     "./previewSessionControl": {
       "types": "./src/previewSessionControl.ts",
       "import": "./src/previewSessionControl.ts"

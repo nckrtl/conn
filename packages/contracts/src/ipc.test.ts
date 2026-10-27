@@ -1,21 +1,20 @@
 import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
-import { DesktopPreviewAnnotatorOriginInputSchema } from "./ipc.ts";
+import { DesktopPreviewAnnotationDictationInputSchema } from "./ipc.ts";
 
-const decode = Schema.decodeUnknownSync(DesktopPreviewAnnotatorOriginInputSchema);
+const decode = Schema.decodeUnknownSync(DesktopPreviewAnnotationDictationInputSchema);
 
-describe("DesktopPreviewAnnotatorOriginInputSchema", () => {
+describe("DesktopPreviewAnnotationDictationInputSchema", () => {
   const input = {
     tabId: "tab-1",
-    origin: "http://10.44.0.7:40953",
     dictation: {
       startUrl: "http://127.0.0.1:12321/dictate",
       stopUrl: "http://127.0.0.1:12321/dictate-stop",
     },
   };
 
-  it("carries the annotator origin and the dictation URLs", () => {
+  it("carries the dictation URLs", () => {
     expect(decode(input)).toEqual(input);
     expect(decode({ ...input, dictation: { startUrl: null, stopUrl: null } }).dictation).toEqual({
       startUrl: null,

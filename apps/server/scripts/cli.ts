@@ -96,6 +96,15 @@ const buildCmd = Command.make(
       } else {
         yield* Effect.logWarning("[cli] Web dist not found. Skipping client bundle.");
       }
+
+      // ServerBrowser injects this into server browser tabs (annotationOverlayCandidates).
+      const overlayBundle = path.join(repoRoot, "packages/annotation-overlay/dist/inject.js");
+      if (yield* fs.exists(overlayBundle)) {
+        yield* fs.makeDirectory(clientTarget, { recursive: true });
+        yield* fs.copyFile(overlayBundle, path.join(clientTarget, "annotation-overlay.js"));
+      } else {
+        yield* Effect.logWarning("[cli] Annotation overlay not built. Skipping its bundle.");
+      }
     }),
 ).pipe(Command.withDescription("Build the server package (tsdown + bundle web client)."));
 

@@ -417,6 +417,29 @@ it.effect("desktop relay commands require the destination preview grant", () =>
   ),
 );
 
+it.effect("annotation writes require the destination preview grant", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      for (const tag of [WS_METHODS.annotationsCreate, WS_METHODS.annotationsRemove]) {
+        const command = createEnvironmentRpcCommand(runtime, { label: "annotations", tag });
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthPreviewOperateScope],
+            permissions: [AuthPreviewOperateScope],
+          }),
+        );
+        expect(registry.get(command.permissionAtom(env))).toBe(true);
+        expect(registry.get(command.permissionAtom(other))).toBe(false);
+      }
+    }),
+  ),
+);
+
 it.effect(
   "desktop request commands check grants, cancel the lease, and do not follow another session",
   () =>

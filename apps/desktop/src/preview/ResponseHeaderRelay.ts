@@ -1,7 +1,6 @@
 // Reads browser-tab responses in main. Pages with a CSP get no inline toolbar data, but every
 // response carries it in `x-toolbar` headers: the document's payload waits for the guest
-// preload, fetch/XHR payloads go straight to it. Each document's CSP also gets the tab's
-// @nckrtl/annotator origin, so the overlay loads.
+// preload, fetch/XHR payloads go straight to it.
 import {
   decodeToolbarHeaders,
   minimalToolbarRow,
@@ -9,7 +8,6 @@ import {
 } from "@t3tools/shared/laravelToolbarHeaders";
 import type { OnHeadersReceivedListenerDetails, Session } from "electron";
 
-import { allowOriginInPolicyHeaders, hasEnforcedPolicy } from "./ContentSecurityPolicy.ts";
 import {
   LARAVEL_TOOLBAR_DOCUMENT_CHANNEL,
   LARAVEL_TOOLBAR_RESPONSE_CHANNEL,
@@ -20,9 +18,6 @@ interface DocumentResponse {
   url: string;
   /** Taken by the guest preload once, for this document only. */
   payload: ToolbarHeaderPayload | null;
-  /** The annotator origin the response's CSP was amended for. */
-  readonly annotatorOrigin: string | null;
-  readonly enforcedPolicy: boolean;
 }
 
 /** Two URLs of the same document: only the fragment may differ. */
@@ -75,23 +70,13 @@ export interface ResponseHeaderRelay {
   readonly forget: (webContentsId: number) => void;
   /** The guest's main frame moved to `url` without loading a new document. */
   readonly navigatedInPage: (webContentsId: number, url: string) => void;
-  /**
-   * Sets (or, with null, clears) the annotator origin of a guest's next documents. Returns
-   * whether the current document already loaded with it allowed; unknown documents count as
-   * allowed, so a caller never reloads on a guess.
-   */
-  readonly setAnnotatorOrigin: (
-    webContentsId: number,
-    origin: string | null,
-    documentUrl: string,
-  ) => boolean;
   /** Exposed for tests; the session listener calls it. */
   readonly onHeadersReceived: (
     details: Pick<
       OnHeadersReceivedListenerDetails,
       "method" | "url" | "resourceType" | "webContentsId" | "responseHeaders"
     >,
-  ) => Record<string, string[]> | undefined;
+  ) => void;
 }
 
 export function makeResponseHeaderRelay(options: {
@@ -100,29 +85,19 @@ export function makeResponseHeaderRelay(options: {
 }): ResponseHeaderRelay {
   const sessions = new WeakSet<Session>();
   const documents = new Map<number, DocumentResponse>();
-  const annotatorOrigins = new Map<number, string>();
 
   const onHeadersReceived: ResponseHeaderRelay["onHeadersReceived"] = (details) => {
     const id = details.webContentsId;
-    if (id === undefined) return undefined;
-    const headers = details.responseHeaders ?? {};
+    if (id === undefined) return;
     if (details.resourceType === "xhr") {
       // Electron reports fetch() as xhr too.
       const payload = toolbarPayloadFromResponse(details);
       if (payload) options.sendToGuest(id, LARAVEL_TOOLBAR_RESPONSE_CHANNEL, payload);
-      return undefined;
+      return;
     }
-    if (details.resourceType !== "mainFrame") return undefined;
-    const origin = annotatorOrigins.get(id) ?? null;
-    const amended = origin === null ? null : allowOriginInPolicyHeaders(headers, origin);
     // Redirects pass through here too; the last response is the document's.
-    documents.set(id, {
-      url: details.url,
-      payload: toolbarPayloadFromResponse(details),
-      annotatorOrigin: origin,
-      enforcedPolicy: amended?.enforced ?? hasEnforcedPolicy(headers),
-    });
-    return amended?.changed ? amended.headers : undefined;
+    if (details.resourceType === "mainFrame")
+      documents.set(id, { url: details.url, payload: toolbarPayloadFromResponse(details) });
   };
 
   return {
@@ -130,14 +105,11 @@ export function makeResponseHeaderRelay(options: {
       if (sessions.has(session)) return;
       sessions.add(session);
       session.webRequest.onHeadersReceived((details, callback) => {
-        let responseHeaders: Record<string, string[]> | undefined;
         try {
-          responseHeaders = onHeadersReceived(details);
-        } catch {
-          responseHeaders = undefined;
-        }
+          onHeadersReceived(details);
+        } catch {}
         // The request stays blocked until the callback runs.
-        callback(responseHeaders ? { responseHeaders } : {});
+        callback({});
       });
     },
     attachGuest: (guest) => {
@@ -153,18 +125,10 @@ export function makeResponseHeaderRelay(options: {
     },
     forget: (webContentsId) => {
       documents.delete(webContentsId);
-      annotatorOrigins.delete(webContentsId);
     },
     navigatedInPage: (webContentsId, url) => {
       const document = documents.get(webContentsId);
       if (document) document.url = url;
-    },
-    setAnnotatorOrigin: (webContentsId, origin, documentUrl) => {
-      if (origin === null) annotatorOrigins.delete(webContentsId);
-      else annotatorOrigins.set(webContentsId, origin);
-      const document = documents.get(webContentsId);
-      if (origin === null || !document || !sameDocumentUrl(document.url, documentUrl)) return true;
-      return !document.enforcedPolicy || document.annotatorOrigin === origin;
     },
     onHeadersReceived,
   };

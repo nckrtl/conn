@@ -1,6 +1,6 @@
 import { expect, it } from "vite-plus/test";
 
-import type { AnnotatorRecord } from "~/annotations/annotatorQueue";
+import { type AnnotationRecord, ProjectId } from "@t3tools/contracts";
 
 import type { DeviceAxElement } from "./deviceHubApi";
 import {
@@ -28,11 +28,15 @@ const element = (
   height,
 });
 
-const record = (id: string, pathname: string | undefined): AnnotatorRecord => ({
+const record = (id: string, pathname: string | undefined): AnnotationRecord => ({
   id,
+  projectId: ProjectId.make("project"),
   number: 1,
+  revision: 1,
   comment: "Fix it",
   status: "todo",
+  hasScreenshot: false,
+  createdAt: "2026-10-27T00:00:00.000Z",
   ...(pathname === undefined ? {} : { pathname }),
 });
 
@@ -75,6 +79,7 @@ it("builds a device annotation and skips an empty comment", () => {
   expect(payload).toEqual({
     id: "pin-1",
     comment: "Make this clearer",
+    source: "device",
     element: 'Button "Sign in"',
     pathname: "device/local/UDID",
     x: 0.1,
@@ -93,7 +98,7 @@ it("builds a device annotation and skips an empty comment", () => {
   expect(DEVICE_ANNOTATION_ID.test(payload!.id)).toBe(true);
 });
 
-it("rejects an id the annotator would refuse and generates a valid one", () => {
+it("rejects an id the server would refuse and generates a valid one", () => {
   const target = element("Go", 0, 0, 0.2, 0.2);
   expect(
     buildDeviceAnnotationPayload({

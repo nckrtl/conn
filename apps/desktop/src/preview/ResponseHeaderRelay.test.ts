@@ -11,9 +11,7 @@ import {
 } from "./ResponseHeaderRelay.ts";
 
 const base64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64");
-const ANNOTATOR = "http://10.44.0.7:40953";
 const PAGE = "https://nckrtl.test/";
-const CSP = "script-src 'self'; default-src 'self'";
 
 const mainFrame = (headers: Record<string, string[]>, url = PAGE) => ({
   method: "GET",
@@ -127,70 +125,22 @@ describe("makeResponseHeaderRelay", () => {
     ]);
   });
 
-  it("amends the document CSP for the guest's annotator origin only", () => {
-    const { relay } = setup();
-    expect(relay.onHeadersReceived(mainFrame({ "content-security-policy": [CSP] }))).toBe(
-      undefined,
-    );
-    relay.setAnnotatorOrigin(7, ANNOTATOR, PAGE);
-    expect(relay.onHeadersReceived(mainFrame({ "content-security-policy": [CSP] }))).toEqual({
-      "content-security-policy": [
-        `script-src 'self' ${ANNOTATOR}; default-src 'self'; connect-src 'self' ${ANNOTATOR} ws://10.44.0.7:40953`,
-      ],
-    });
-    expect(
-      relay.onHeadersReceived({
-        ...mainFrame({ "content-security-policy": [CSP] }),
-        webContentsId: 8,
-      }),
-    ).toBe(undefined);
-    expect(
-      relay.onHeadersReceived({
-        ...mainFrame({ "content-security-policy": [CSP] }),
-        resourceType: "subFrame",
-      }),
-    ).toBe(undefined);
-  });
-
-  it("reports whether the current document loaded with the annotator allowed", () => {
-    const { relay } = setup();
-    // No document seen yet: never ask for a reload on a guess.
-    expect(relay.setAnnotatorOrigin(7, ANNOTATOR, PAGE)).toBe(true);
-    relay.setAnnotatorOrigin(7, null, PAGE);
-
-    relay.onHeadersReceived(mainFrame({ "content-security-policy": [CSP] }));
-    expect(relay.setAnnotatorOrigin(7, ANNOTATOR, PAGE)).toBe(false);
-    // Another document than the one that loaded counts as unknown.
-    expect(relay.setAnnotatorOrigin(7, ANNOTATOR, "https://nckrtl.test/next")).toBe(true);
-
-    relay.onHeadersReceived(mainFrame({ "content-security-policy": [CSP] }));
-    expect(relay.setAnnotatorOrigin(7, ANNOTATOR, PAGE)).toBe(true);
-    expect(relay.setAnnotatorOrigin(7, "http://10.44.0.7:1", PAGE)).toBe(false);
-  });
-
   it("follows the document through in-page navigations", () => {
-    const { relay } = setup();
-    relay.onHeadersReceived(mainFrame({ "content-security-policy": [CSP] }));
-    // An Inertia visit or another pushState keeps the document that loaded with this policy.
+    const { relay, takeDocument } = setup();
+    relay.onHeadersReceived(mainFrame({ "x-toolbar": [base64({ request_id: "r1" })] }));
+    // An Inertia visit or another pushState keeps the document that loaded.
     relay.navigatedInPage(7, "https://nckrtl.test/articles");
-    expect(relay.setAnnotatorOrigin(7, ANNOTATOR, "https://nckrtl.test/articles")).toBe(false);
-  });
-
-  it("counts a document without an enforced policy as allowed", () => {
-    const { relay } = setup();
-    relay.onHeadersReceived(mainFrame({ "content-security-policy-report-only": [CSP] }));
-    expect(relay.setAnnotatorOrigin(7, ANNOTATOR, PAGE)).toBe(true);
+    expect(takeDocument("https://nckrtl.test/articles")).toEqual({
+      kind: "full",
+      data: { request_id: "r1" },
+    });
   });
 
   it("forgets a guest's state", () => {
     const { relay, takeDocument } = setup();
-    relay.setAnnotatorOrigin(7, ANNOTATOR, PAGE);
     relay.onHeadersReceived(mainFrame({ "x-toolbar": [base64({ request_id: "r1" })] }));
     relay.forget(7);
     expect(takeDocument(PAGE)).toBeNull();
-    expect(relay.onHeadersReceived(mainFrame({ "content-security-policy": [CSP] }))).toBe(
-      undefined,
-    );
   });
 
   it("installs one listener per session and always answers the request", () => {

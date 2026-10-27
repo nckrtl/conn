@@ -174,6 +174,19 @@ describe("ClientSettings line heights", () => {
   });
 });
 
+describe("ClientSettings removed annotation server keys", () => {
+  it("still decodes settings saved with the annotator URLs and drops them", () => {
+    const settings = decodeClientSettings({
+      annotationServerUrl: "http://127.0.0.1:47821/annotations",
+      deviceAnnotationsUrl: "http://10.44.0.9:4791/annotations",
+      annotationDictationUrl: "http://127.0.0.1:12321/dictate",
+    });
+    expect(settings.annotationDictationUrl).toBe("http://127.0.0.1:12321/dictate");
+    expect(Object.hasOwn(settings, "annotationServerUrl")).toBe(false);
+    expect(Object.hasOwn(settings, "deviceAnnotationsUrl")).toBe(false);
+  });
+});
+
 describe("ServerSettings default permissions", () => {
   it("keeps full access for settings saved before a default was configured", () => {
     expect(decodeServerSettings({}).defaultRuntimeMode).toBe("full-access");

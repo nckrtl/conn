@@ -16,7 +16,6 @@ import {
   BROWSER_PROFILE_NAME_MAX_LENGTH,
   BROWSER_RECORDING_FRAME_RATES,
   DEFAULT_ANNOTATION_DICTATION_STOP_URL,
-  DEFAULT_DEVICE_ANNOTATIONS_URL,
   DEFAULT_ANNOTATION_DICTATION_URL,
   DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW,
   DEFAULT_BROWSER_PROFILE_ID,
@@ -44,7 +43,6 @@ import { PREVIEW_VIEWPORT_PRESETS } from "@t3tools/shared/previewViewport";
 import { MoreVertical, Plus as PlusIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
-import { normalizeAnnotatorServerUrl } from "~/annotations/annotatorQueue";
 import { ScreenRotationIcon } from "~/browser/ScreenRotationIcon";
 import { AnimatedHeight } from "~/components/AnimatedHeight";
 import { resolveEnvironmentOptionLabel } from "~/components/BranchToolbar.logic";
@@ -1142,45 +1140,14 @@ function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled
   );
 }
 
-// rooms-patches: the annotator server browser annotations go to, and the desktop dictation
-// app they start and stop.
+// rooms-patches: the desktop dictation app that browser annotations start and stop.
 function AnnotationDictationSettings({ disabled }: { readonly disabled: boolean }) {
   const startUrl = useClientSettings((settings) => settings.annotationDictationUrl);
   const stopUrl = useClientSettings((settings) => settings.annotationDictationStopUrl);
-  const deviceUrl = useClientSettings((settings) => settings.deviceAnnotationsUrl);
-  const serverUrl = useClientSettings((settings) => settings.annotationServerUrl);
   const updateSettings = useUpdatePrimarySettings();
 
   return (
     <>
-      <SettingsRow
-        {...searchableSetting("annotation-server-url")}
-        description="The annotator queue that browser annotations on every page go to, such as the URL annotator start prints. Leave empty to use each page's own Orbit annotator."
-        resetAction={
-          !disabled && serverUrl !== "" ? (
-            <SettingResetButton
-              label="annotator server URL"
-              onClick={() => updateSettings({ annotationServerUrl: "" })}
-            />
-          ) : null
-        }
-        control={
-          <DraftInput
-            size="sm"
-            className="w-full sm:w-72"
-            disabled={disabled}
-            value={serverUrl}
-            onCommit={(next) =>
-              updateSettings({
-                annotationServerUrl: normalizeAnnotatorServerUrl(next) ?? next.trim(),
-              })
-            }
-            placeholder="http://127.0.0.1:47821/annotations"
-            spellCheck={false}
-            aria-label="Annotator server URL"
-          />
-        }
-      />
       <SettingsRow
         {...searchableSetting("annotation-dictation-url")}
         description="Annotations POST here when a comment opens, to start your dictation app. Leave empty to turn dictation off."
@@ -1232,32 +1199,6 @@ function AnnotationDictationSettings({ disabled }: { readonly disabled: boolean 
             placeholder={DEFAULT_ANNOTATION_DICTATION_STOP_URL}
             spellCheck={false}
             aria-label="Annotation dictation stop URL"
-          />
-        }
-      />
-      <SettingsRow
-        {...searchableSetting("device-annotations-url")}
-        description="The annotator queue that annotations on a simulator in the Device panel go to."
-        resetAction={
-          !disabled && deviceUrl !== DEFAULT_DEVICE_ANNOTATIONS_URL ? (
-            <SettingResetButton
-              label="device annotations URL"
-              onClick={() =>
-                updateSettings({ deviceAnnotationsUrl: DEFAULT_DEVICE_ANNOTATIONS_URL })
-              }
-            />
-          ) : null
-        }
-        control={
-          <DraftInput
-            size="sm"
-            className="w-full sm:w-72"
-            disabled={disabled}
-            value={deviceUrl}
-            onCommit={(next) => updateSettings({ deviceAnnotationsUrl: next.trim() })}
-            placeholder={DEFAULT_DEVICE_ANNOTATIONS_URL}
-            spellCheck={false}
-            aria-label="Device annotations URL"
           />
         }
       />

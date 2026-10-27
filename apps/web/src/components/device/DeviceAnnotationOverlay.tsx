@@ -1,8 +1,13 @@
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { AnnotationRecord } from "@t3tools/contracts";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 
-import { annotationState, type AnnotatorRecord } from "~/annotations/annotatorQueue";
+import { annotationState } from "~/annotations/annotationQueue";
+import type { AnnotationTarget } from "~/annotations/useAnnotationQueue";
 import { cn } from "~/lib/utils";
 import { Input } from "~/components/ui/input";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { previewEnvironment } from "~/state/preview";
 
 import {
   buildDeviceAnnotationPayload,
@@ -18,7 +23,7 @@ const rectStyle = (rect: { x: number; y: number; width: number; height: number }
   height: `${rect.height * 100}%`,
 });
 
-const pinTone = (annotation: AnnotatorRecord) => {
+const pinTone = (annotation: AnnotationRecord) => {
   switch (annotationState(annotation)) {
     case "done":
       return {
@@ -44,8 +49,9 @@ const pinTone = (annotation: AnnotatorRecord) => {
 export function DeviceAnnotationOverlay(props: {
   readonly active: boolean;
   readonly elements: ReadonlyArray<DeviceAxElement>;
-  readonly annotations: ReadonlyArray<AnnotatorRecord>;
-  readonly annotationsUrl: string | null;
+  readonly annotations: ReadonlyArray<AnnotationRecord>;
+  /** The thread's project queue; null until the project is known. */
+  readonly target: AnnotationTarget | null;
   readonly hostId: string;
   readonly deviceId: string;
 }) {
@@ -66,6 +72,7 @@ export function DeviceAnnotationOverlay(props: {
     }
   }
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Leaving annotation mode drops a save that is still in flight.
   useEffect(() => {
     if (!props.active) {
       saveAbort.current?.abort();
@@ -73,6 +80,7 @@ export function DeviceAnnotationOverlay(props: {
     }
   }, [props.active]);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- The polled accessibility tree moves under a still pointer.
   useEffect(() => {
     const last = point.current;
     if (!props.active || !last || draft) return;
@@ -106,8 +114,8 @@ export function DeviceAnnotationOverlay(props: {
       setError(null);
       return;
     }
-    if (props.annotationsUrl === null) {
-      setError("Annotation server is unavailable.");
+    if (props.target === null) {
+      setError("This thread has no project to annotate.");
       return;
     }
     const controller = new AbortController();
@@ -115,34 +123,24 @@ export function DeviceAnnotationOverlay(props: {
     saveAbort.current = controller;
     setSaving(true);
     setError(null);
-    void fetch(props.annotationsUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      cache: "no-store",
-      credentials: "omit",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (controller.signal.aborted) return;
-        if (response.ok) {
-          setDraft(null);
-          return;
-        }
-        const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
-        setError(
-          typeof body?.error === "string"
-            ? body.error
-            : `Could not save the annotation (${response.status}).`,
-        );
-      })
-      .catch(() => {
-        if (controller.signal.aborted) return;
-        setError("Could not reach the annotation server.");
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setSaving(false);
-      });
+    void runAtomCommand(
+      appAtomRegistry,
+      previewEnvironment.createAnnotation,
+      {
+        environmentId: props.target.environmentId,
+        input: { projectId: props.target.projectId, annotation: payload },
+      },
+      { reportFailure: false },
+    ).then((result) => {
+      if (controller.signal.aborted) return;
+      setSaving(false);
+      if (result._tag === "Success") {
+        setDraft(null);
+        return;
+      }
+      const cause = squashAtomCommandFailure(result);
+      setError(cause instanceof Error ? cause.message : "Could not save the annotation.");
+    });
   };
 
   return (

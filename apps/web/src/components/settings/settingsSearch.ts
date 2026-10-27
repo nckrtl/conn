@@ -1002,12 +1002,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["agent opens browser device simulator pop into view hide"],
   },
   {
-    id: "annotation-server-url",
-    title: "Annotator server URL",
-    to: "/settings/browser",
-    searchTerms: ["annotate annotator browser page queue server nckrtl"],
-  },
-  {
     id: "annotation-dictation-url",
     title: "Annotation dictation URL",
     to: "/settings/browser",
@@ -1018,12 +1012,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Annotation dictation stop URL",
     to: "/settings/browser",
     searchTerms: ["annotate dictate drift voice speech microphone post stop"],
-  },
-  {
-    id: "device-annotations-url",
-    title: "Device annotations URL",
-    to: "/settings/browser",
-    searchTerms: ["annotate annotator simulator device iphone ios queue"],
   },
   {
     id: "automatic-pull",

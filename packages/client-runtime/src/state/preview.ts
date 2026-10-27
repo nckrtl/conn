@@ -31,10 +31,17 @@ export function createPreviewEnvironmentAtoms<R, E>(
       label: "preview:desktop-respond",
       tag: WS_METHODS.desktopTabRespond,
     }),
-    /** rooms-patches: starts, stops or reads the project's @nckrtl/annotator server. */
-    annotatorServer: createEnvironmentRpcCommand(runtime, {
-      label: "preview:annotator-server",
-      tag: WS_METHODS.annotatorServer,
+    annotationsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:preview:annotations:live",
+      tag: WS_METHODS.annotationsSubscribe,
+    }),
+    createAnnotation: createEnvironmentRpcCommand(runtime, {
+      label: "preview:annotation-create",
+      tag: WS_METHODS.annotationsCreate,
+    }),
+    removeAnnotations: createEnvironmentRpcCommand(runtime, {
+      label: "preview:annotations-remove",
+      tag: WS_METHODS.annotationsRemove,
     }),
     // Each stream belongs to one connection generation. The desktop host
     // re-registers its surviving tab when the environment reconnects.

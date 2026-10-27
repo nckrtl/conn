@@ -5,6 +5,7 @@ import { installPasskeyBridge } from "./preview/PasskeyBridge.ts";
 import "./preview/PickPreload.ts";
 import "./preview/LaravelToolbarPreload.ts";
 import "./preview/AnnotatorHostPreload.ts";
+import "./preview/ConnAnnotationsPreload.ts";
 
 // Electron hands webPreferences.additionalArguments to sandboxed preloads in process.argv.
 if (process.argv.includes(PASSKEY_BRIDGE_ARGUMENT)) {

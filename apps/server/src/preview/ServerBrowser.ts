@@ -1,4 +1,3 @@
-import { overlayBootstrapScript, overlaySetModeScript } from "@t3tools/shared/previewAnnotation";
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off - Playwright callbacks run outside the Effect runtime.
 // Screencasts ignore emulated device scale; real 2x keeps captures sharp.
 // --disable-gpu uses cheaper software compositing while preserving SwiftShader WebGL.
@@ -42,10 +41,22 @@ import {
   PreviewTabId,
   type PreviewViewportSetting,
   ThreadId,
+  AnnotationCapture,
+  type AnnotationRecord,
+  type ProjectId,
   SERVER_BROWSER_AUTOMATION_CLIENT_ID,
   type PreviewAppearancePreference,
 } from "@t3tools/contracts";
+import {
+  ANNOTATIONS_BINDING,
+  ANNOTATIONS_CHANGED_HOOK,
+  annotationBelongsToOrigin,
+  annotationOverlayConfigureScript,
+  annotationOverlaySetModeScript,
+  CONN_ANNOTATIONS_BINDING_SCRIPT,
+} from "@t3tools/shared/annotationBridge";
 import { redactSensitiveValues } from "@t3tools/shared/credentialFill";
+import { overlayOptions } from "@t3tools/shared/previewAnnotation";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
@@ -61,6 +72,7 @@ import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -74,11 +86,13 @@ import type {
   Page,
 } from "playwright-core";
 
+import * as AnnotationStore from "../annotations/AnnotationStore.ts";
 import { PENDING_ATTACHMENT_THREAD_SEGMENT } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import { resolveRootCliCommand } from "../cli/invocation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as PreviewManager from "./Manager.ts";
@@ -449,6 +463,36 @@ const CLIPBOARD_SCRIPT = `(() => {
   };
 })();`;
 
+const decodeAnnotationCapture = Schema.decodeUnknownEffect(AnnotationCapture);
+
+// The overlay bundle sits in the packaged server's client folder, and in a checkout under
+// packages/annotation-overlay/dist after `vp i` or its build.
+const annotationOverlayCandidates = () => {
+  const candidates = [NodePath.join(import.meta.dirname, "client", "annotation-overlay.js")];
+  let directory = import.meta.dirname;
+  while (true) {
+    candidates.push(NodePath.join(directory, "packages/annotation-overlay/dist/inject.js"));
+    const parent = NodePath.dirname(directory);
+    if (parent === directory) return candidates;
+    directory = parent;
+  }
+};
+let annotationOverlayBundle: Promise<string> | null = null;
+const readAnnotationOverlay = () => {
+  annotationOverlayBundle ??= (async () => {
+    for (const candidate of annotationOverlayCandidates()) {
+      const content = await NodeFSP.readFile(candidate, "utf8").catch(() => null);
+      if (content !== null) return content;
+    }
+    throw new Error("The annotation overlay bundle is missing. Build @t3tools/annotation-overlay.");
+  })();
+  // A missing bundle may be built later in a checkout; only a found one is kept.
+  annotationOverlayBundle.catch(() => {
+    annotationOverlayBundle = null;
+  });
+  return annotationOverlayBundle;
+};
+
 const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const host = { platform: yield* HostProcess.Platform, arch: yield* HostProcess.Architecture };
@@ -456,6 +500,8 @@ const make = Effect.gen(function* () {
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const previewBrowser = yield* PreviewBrowser.PreviewBrowser;
+  const annotationStore = yield* AnnotationStore.AnnotationStore;
+  const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const desktopChannel = yield* DesktopBrowserChannel.DesktopBrowserChannel;
   const agentTurns = yield* (yield* PreviewAgentActivity.PreviewAgentActivity).changes;
   const runFork = Effect.runForkWith(yield* Effect.context<never>());
@@ -682,12 +728,75 @@ const make = Effect.gen(function* () {
 
   const sessionOpen = (tab: ServerTab) => !closedSessions.has(tabKey(tab.threadId, tab.tabId));
 
+  /** Pages that expose the annotation binding, each with its change feed's stop. */
+  const annotationFeeds = new WeakMap<Page, () => void>();
+  const stopAnnotationFeed = (page: Page) => {
+    annotationFeeds.get(page)?.();
+    annotationFeeds.delete(page);
+  };
+
+  // The page reaches the tab's project annotations through one binding; it sees and removes
+  // only the browser annotations of its own site.
+  const exposeAnnotations = async (tab: ServerTab) => {
+    const page = tab.page;
+    if (annotationFeeds.has(page)) return true;
+    const shell = await runPromise(
+      threadManagement.getThreadShell(tab.threadId).pipe(Effect.orElseSucceed(() => null)),
+    );
+    if (shell === null || annotationFeeds.has(page)) return shell !== null;
+    const projectId: ProjectId = shell.projectId;
+    const visible = async (): Promise<ReadonlyArray<AnnotationRecord>> => {
+      const origin = new URL(page.url()).origin;
+      const { annotations } = await runPromise(annotationStore.list(projectId));
+      return annotations.filter((record) => annotationBelongsToOrigin(record, origin));
+    };
+    const call = async (op: unknown, payload: unknown) => {
+      if (op === "list") return visible();
+      if (op === "submit")
+        return runPromise(
+          decodeAnnotationCapture(payload).pipe(
+            Effect.flatMap((capture) => annotationStore.create(projectId, capture)),
+          ),
+        );
+      if (op === "remove") {
+        const requested = asRecord(payload)?.ids;
+        const allowed = new Set((await visible()).map((record) => record.id));
+        const ids = Array.isArray(requested)
+          ? requested.filter((id): id is string => typeof id === "string" && allowed.has(id))
+          : [];
+        if (ids.length > 0) await runPromise(annotationStore.remove({ projectId, ids }));
+        return null;
+      }
+      throw new Error("Unknown annotation operation.");
+    };
+    annotationFeeds.set(page, constVoid);
+    await page.exposeBinding(ANNOTATIONS_BINDING, (_source, op: unknown, payload: unknown) =>
+      call(op, payload).catch((cause: unknown) => {
+        throw new Error(cause instanceof Error ? cause.message : "Annotations are unavailable.");
+      }),
+    );
+    const feed = runFork(
+      annotationStore.subscribe(projectId).pipe(
+        Stream.runForEach(() =>
+          Effect.promise(() =>
+            page.evaluate(`window.${ANNOTATIONS_CHANGED_HOOK}?.()`).catch(constVoid),
+          ),
+        ),
+        Effect.ignore,
+      ),
+    );
+    annotationFeeds.set(page, () => void runFork(Fiber.interrupt(feed)));
+    page.once("close", () => stopAnnotationFeed(page));
+    return true;
+  };
+
   const dropTab = (tab: ServerTab, closeSession: boolean) => {
     const key = tabKey(tab.threadId, tab.tabId);
     if (tabs.get(key) !== tab) return;
     tabs.delete(key);
     tab.closing = true;
     clearAbortedNavigation(tab);
+    stopAnnotationFeed(tab.page);
     // A desktop page outlives the connection unless its session closed with it.
     const end = tab.desktop && !closeSession && sessionOpen(tab) ? "reconnect" : "gone";
     for (const viewer of tab.viewers) viewer.push({ _tag: end });
@@ -2294,20 +2403,14 @@ const make = Effect.gen(function* () {
           typeof message.stopUrl !== "string"
         )
           return;
-        const origin = new URL(tab.page.url()).origin;
-        if (!/^https?:\/\//.test(origin)) return;
-        const base = `${origin}/__orbit/annotator`;
-        await tab.page.evaluate(
-          overlayBootstrapScript(
-            {
-              annotationsUrl: `${base}/annotations`,
-              injectUrl: `${base}/inject.js`,
-            },
-            { startUrl: message.startUrl, stopUrl: message.stopUrl },
-          ),
-        );
-        await tab.page.waitForFunction("!!window.AgentAnnotation", undefined, { timeout: 10_000 });
-        await tab.page.evaluate(overlaySetModeScript(message.active));
+        if (!/^https?:\/\//.test(tab.page.url())) return;
+        if (!(await exposeAnnotations(tab))) return;
+        await tab.page.evaluate(CONN_ANNOTATIONS_BINDING_SCRIPT);
+        const options = overlayOptions({ startUrl: message.startUrl, stopUrl: message.stopUrl });
+        // Evaluated, not a script tag, so the page's Content-Security-Policy cannot block it.
+        if ((await tab.page.evaluate(annotationOverlayConfigureScript(options))) !== true)
+          await tab.page.evaluate(await readAnnotationOverlay());
+        await tab.page.evaluate(annotationOverlaySetModeScript(message.active));
         return;
       }
       case "probe": {

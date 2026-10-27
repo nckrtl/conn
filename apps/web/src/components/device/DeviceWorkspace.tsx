@@ -1,14 +1,12 @@
 import type { DeviceSummary, EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   captureDeviceScreenshot,
   DeviceScreenshotError,
 } from "@t3tools/client-runtime/device/screenshot";
 import { refreshDeviceHubAccess, useDeviceHubAccess } from "~/state/device";
-import { useClientSettings } from "~/hooks/useSettings";
-import { useAnnotatorQueue } from "~/annotations/useAnnotatorQueue";
-import { fetchAnnotations } from "~/annotations/annotatorQueue";
-import { DeviceAnnotationControl } from "./DeviceAnnotationControl";
+import { useAnnotationQueue, useThreadAnnotationTarget } from "~/annotations/useAnnotationQueue";
+import { AnnotationQueuePopover } from "~/annotations/AnnotationQueuePopover";
 import { annotationsForPathname, deviceAnnotationPathname } from "./deviceAnnotations";
 import { DeviceControlsRail } from "./DeviceControlsRail";
 import { DeviceStreamView } from "./DeviceStreamView";
@@ -31,58 +29,18 @@ export function DeviceWorkspace(props: {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [axOverlay, setAxOverlay] = useState(false);
   const [annotating, setAnnotating] = useState(false);
-  const [starting, setStarting] = useState(false);
-  const [annotator, setAnnotator] = useState<{ url: string | null; error: string | null }>({
-    url: null,
-    error: null,
-  });
-  const startingRef = useRef(false);
   const [screenshotPending, setScreenshotPending] = useState(false);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   // A capture always finishes, even if the panel hides or closes meanwhile; the user asked for it.
   const capturing = useRef(false);
   const access = useDeviceHubAccess(props.environmentId, props.device.hostId);
   const controls = useDeviceControls({ ...props, access });
-  const deviceAnnotationsUrl = useClientSettings((settings) => settings.deviceAnnotationsUrl);
+  const annotationTarget = useThreadAnnotationTarget(props.threadRef);
+  const queue = useAnnotationQueue(annotationTarget);
   const pathname = deviceAnnotationPathname(props.device.hostId, props.device.id);
-  const annotatorEndpoint = useMemo(
-    () =>
-      annotator.url === null
-        ? null
-        : { annotationsUrl: annotator.url, injectUrl: "", origin: pathname },
-    [annotator.url, pathname],
-  );
-  const queue = useAnnotatorQueue(annotatorEndpoint);
-  const annotations = useMemo(
-    () => (queue === null ? null : annotationsForPathname(queue, pathname)),
-    [pathname, queue],
-  );
-  const toggleAnnotating = () => {
-    if (annotating) {
-      setAnnotating(false);
-      return;
-    }
-    // The queue is one standing @nckrtl/annotator (Settings → Integrations). Check it answers first.
-    if (startingRef.current) return;
-    const url = deviceAnnotationsUrl.trim();
-    if (url === "") {
-      setAnnotator({ url: null, error: "Set a device annotations URL in Settings." });
-      return;
-    }
-    startingRef.current = true;
-    setStarting(true);
-    setAnnotator((current) => ({ url: current.url, error: null }));
-    void fetchAnnotations(url).then((records) => {
-      startingRef.current = false;
-      setStarting(false);
-      if (records === null) {
-        setAnnotator({ url: null, error: `No annotation server answers at ${url}.` });
-        return;
-      }
-      setAnnotator({ url, error: null });
-      setAnnotating(true);
-    });
-  };
+  const annotations =
+    queue.annotations === null ? null : annotationsForPathname(queue.annotations, pathname);
+  const toggleAnnotating = () => setAnnotating(!annotating && annotationTarget !== null);
   const saveScreenshot = () => {
     if (!access || capturing.current || !props.visible) return;
     capturing.current = true;
@@ -136,7 +94,7 @@ export function DeviceWorkspace(props: {
             axOverlay={axOverlay}
             annotating={annotating}
             annotations={annotations ?? []}
-            annotationsUrl={annotator.url}
+            annotationTarget={annotationTarget}
             onToggleAnnotating={toggleAnnotating}
             allowPhoneView
             renderControls={(view) => (
@@ -148,17 +106,16 @@ export function DeviceWorkspace(props: {
                 screenshotPending={screenshotPending}
                 onScreenshot={() => void saveScreenshot()}
                 annotation={
-                  <DeviceAnnotationControl
+                  <AnnotationQueuePopover
                     threadRef={props.threadRef}
-                    hostId={props.device.hostId}
-                    deviceId={props.device.id}
+                    target={annotationTarget}
+                    annotations={annotations}
+                    error={queue.error}
                     annotating={annotating}
                     onToggle={toggleAnnotating}
-                    annotationsUrl={annotator.url}
-                    annotations={annotations}
-                    error={annotator.error}
-                    starting={starting}
-                    unreachable={annotator.url !== null && queue === null}
+                    subject="device"
+                    side="left"
+                    size="icon-sm"
                   />
                 }
                 toolsOpen={toolsOpen}

@@ -450,6 +450,9 @@ export function summarizeT3ToolCalls(
     case "credential":
       label = phrase("Used", "use", `saved logins ${times}`);
       break;
+    case "annotation":
+      label = phrase("Worked on", "work on", `annotations ${times}`);
+      break;
     case "html-preview":
       label = phrase("Previewed", "preview", quantity(selected.length, "HTML page"));
       break;

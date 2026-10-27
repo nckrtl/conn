@@ -1,0 +1,28 @@
+{
+  "name": "@t3tools/annotation-overlay",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./inject": "./dist/inject.js"
+  },
+  "scripts": {
+    "build": "vp build",
+    "prepare": "vp build",
+    "typecheck": "tsc --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir ."
+  },
+  "dependencies": {
+    "@t3tools/contracts": "workspace:*",
+    "@t3tools/shared": "workspace:*",
+    "html-to-image": "1.11.13",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "tailwindcss": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

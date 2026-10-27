@@ -489,6 +489,19 @@ export default defineConfig({
         rules: { "t3code/no-outset-state-indicators": "error" },
       },
       {
+        // The overlay renders in other sites' pages: it cannot use Conn's tooltips, and its
+        // popup was ported from @nckrtl/annotator as is.
+        files: ["packages/annotation-overlay/src/**"],
+        rules: {
+          "t3code/no-native-title-tooltip": "off",
+          "react/exhaustive-effect-dependencies": "off",
+          "react/refs": "off",
+          "react/immutability": "off",
+          "react/no-array-index-key": "off",
+          "react/set-state-in-effect": "off",
+        },
+      },
+      {
         files: ["apps/*/src/**", "packages/*/src/**"],
         excludeFiles: [
           "**/*.{test,spec}.{ts,tsx,js,jsx,mts,cts,mjs,cjs}",

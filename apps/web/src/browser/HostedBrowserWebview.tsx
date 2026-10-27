@@ -12,6 +12,8 @@ import { previewBridge } from "~/components/preview/previewBridge";
 import { usePreviewBridge } from "~/components/preview/usePreviewBridge";
 import { useClientSettingsHydrated } from "~/hooks/useSettings";
 import { relayLaravelToolbarMessage } from "~/laravelToolbar/bridge";
+import { attachOverlayBridge } from "~/annotations/overlayBridge";
+import { useThreadAnnotationTarget } from "~/annotations/useAnnotationQueue";
 import { cn, isMacPlatform } from "~/lib/utils";
 
 import { resolveBrowserSurfacePanelRect, useBrowserSurfaceStore } from "./browserSurfaceStore";
@@ -243,6 +245,27 @@ export function HostedBrowserWebview(props: {
     tabId,
     threadRef.environmentId,
     threadRef.threadId,
+  ]);
+
+  // Server-driven tabs get their annotations binding from the server instead.
+  const annotationProjectId =
+    useThreadAnnotationTarget(serverDriven ? null : threadRef)?.projectId ?? null;
+  // oxlint-disable-next-line t3code/react-effect-budget -- Answers the page overlay's annotation calls for this webview's lifetime.
+  useEffect(() => {
+    const webview = webviewRef.current;
+    if (!clientSettingsHydrated || !config || !webview || annotationProjectId === null) return;
+    return attachOverlayBridge({
+      webview,
+      environmentId: threadRef.environmentId,
+      projectId: annotationProjectId,
+    });
+  }, [
+    annotationProjectId,
+    clientSettingsHydrated,
+    config,
+    threadRef.environmentId,
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A crash recovery remounts the webview under a new key, so the bridge attaches to the new element.
+    webviewGeneration,
   ]);
 
   const active = presentation.visible && presentation.rect !== null;

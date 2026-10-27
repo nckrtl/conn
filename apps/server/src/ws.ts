@@ -194,7 +194,7 @@ import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/Outpu
 import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
-import * as AnnotatorServer from "./preview/AnnotatorServer.ts";
+import * as AnnotationStore from "./annotations/AnnotationStore.ts";
 import * as TestLoginStore from "./credentials/TestLoginStore.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -580,7 +580,9 @@ const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.testLoginsUpdate,
   WS_METHODS.testLoginsRemove,
   WS_METHODS.testLoginsReveal,
-  WS_METHODS.annotatorServer,
+  WS_METHODS.annotationsSubscribe,
+  WS_METHODS.annotationsCreate,
+  WS_METHODS.annotationsRemove,
 );
 const ServerWsForkRpcGroup =
   ForkWsRpcGroup.middleware(RpcScopeAuthorization).middleware(RpcInstrumentation);
@@ -3334,8 +3336,7 @@ export const layerWsRpc = (
 const layerWsForkRpc = (
   credentialAutofill: CredentialAutofill.CredentialAutofill["Service"],
   testLoginStore: TestLoginStore.TestLoginStore["Service"],
-  annotatorServer: AnnotatorServer.AnnotatorServer["Service"],
-  clientHost: string | undefined,
+  annotationStore: AnnotationStore.AnnotationStore["Service"],
 ) =>
   ServerWsForkRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -3363,7 +3364,12 @@ const layerWsForkRpc = (
         [WS_METHODS.testLoginsUpdate]: (input) => testLoginStore.update(input),
         [WS_METHODS.testLoginsRemove]: (input) => testLoginStore.remove(input.id),
         [WS_METHODS.testLoginsReveal]: (input) => testLoginStore.reveal(input.id),
-        [WS_METHODS.annotatorServer]: (input) => annotatorServer.run({ ...input, clientHost }),
+        [WS_METHODS.annotationsSubscribe]: ({ projectId }) => annotationStore.subscribe(projectId),
+        [WS_METHODS.annotationsCreate]: ({ projectId, annotation }) =>
+          annotationStore
+            .create(projectId, annotation)
+            .pipe(Effect.map((record) => ({ annotation: record }))),
+        [WS_METHODS.annotationsRemove]: (input) => annotationStore.remove(input),
       });
     }),
   );
@@ -3382,7 +3388,7 @@ export const layer = Layer.unwrap(
     const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
     const credentialAutofill = yield* CredentialAutofill.CredentialAutofill;
     const testLoginStore = yield* TestLoginStore.TestLoginStore;
-    const annotatorServer = yield* AnnotatorServer.AnnotatorServer;
+    const annotationStore = yield* AnnotationStore.AnnotationStore;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
@@ -3462,12 +3468,7 @@ export const layer = Layer.unwrap(
                 serverBrowser,
                 desktopTabRelay,
               ),
-              layerWsForkRpc(
-                credentialAutofill,
-                testLoginStore,
-                annotatorServer,
-                requestUrl.value.hostname,
-              ),
+              layerWsForkRpc(credentialAutofill, testLoginStore, annotationStore),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.

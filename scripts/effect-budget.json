@@ -433,5 +433,8 @@
   "apps/web/src/state/olderSettledShelf.ts": 2,
   "apps/web/src/state/pullRequests.ts": 2,
   "apps/web/src/state/queries.ts": 2,
-  "apps/web/src/state/threads.ts": 1
+  "apps/web/src/state/threads.ts": 1,
+  "packages/annotation-overlay/src/components/AnnotationOverlay.tsx": 1,
+  "packages/annotation-overlay/src/components/AnnotationPopup.tsx": 9,
+  "packages/annotation-overlay/src/useDictation.ts": 1
 }

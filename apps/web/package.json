@@ -33,6 +33,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@pierre/diffs": "catalog:",
     "@pierre/trees": "1.0.0-beta.6",
+    "@t3tools/annotation-overlay": "workspace:*",
     "@t3tools/client-runtime": "workspace:*",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/provider-acp-registry": "workspace:*",

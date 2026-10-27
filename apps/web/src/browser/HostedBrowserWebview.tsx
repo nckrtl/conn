@@ -247,9 +247,8 @@ export function HostedBrowserWebview(props: {
     threadRef.threadId,
   ]);
 
-  // Server-driven tabs get their annotations binding from the server instead.
-  const annotationProjectId =
-    useThreadAnnotationTarget(serverDriven ? null : threadRef)?.projectId ?? null;
+  // Every webview's guest preload sends its overlay calls here, server-driven tabs included.
+  const annotationProjectId = useThreadAnnotationTarget(threadRef)?.projectId ?? null;
   // oxlint-disable-next-line t3code/react-effect-budget -- Answers the page overlay's annotation calls for this webview's lifetime.
   useEffect(() => {
     const webview = webviewRef.current;

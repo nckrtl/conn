@@ -95,6 +95,7 @@ describe("buildAnnotationPrompt", () => {
     for (const tool of ["annotations_claim", "annotations_complete", "annotations_release"])
       expect(prompt).toContain(tool);
     expect(prompt).toContain("end your turn");
+    expect(prompt).toContain("orchestrator");
     expect(prompt).toContain("never by id");
     expect(prompt).not.toMatch(/https?:\/\//);
   });

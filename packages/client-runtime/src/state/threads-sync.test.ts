@@ -674,6 +674,35 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect(
+    "asks the server again after a snapshot miss, since a draft's thread arrives later",
+    () =>
+      Effect.gen(function* () {
+        const resumeCache: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]> = {
+          snapshot: undefined,
+          owner: undefined,
+        };
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const early = yield* makeHarness({ httpSnapshot: { _tag: "missing" }, resumeCache });
+            yield* awaitThreadState(early.observed, (value) => value.status === "deleted");
+          }),
+        );
+        const resumed = yield* makeHarness({
+          httpSnapshot: {
+            _tag: "present",
+            snapshot: { snapshotSequence: 7, projection: BASE_PROJECTION },
+          },
+          resumeCache,
+        });
+        const state = yield* awaitThreadState(resumed.observed, (value) =>
+          Option.isSome(value.data),
+        );
+        expect(state.status).not.toBe("deleted");
+        expect(yield* Ref.get(resumed.loaderCalls)).toBe(1);
+      }),
+  );
+
   it.effect("resumes a warm cache via afterSequence without an HTTP fetch", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_PROJECTION });

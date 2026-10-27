@@ -54,6 +54,7 @@ const SNAPSHOT: OrchestrationV2ThreadDetailSnapshot = { snapshotSequence: 7, pro
 const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?: {
   readonly snapshot?: OrchestrationV2ThreadDetailSnapshot;
   readonly snapshotUnavailable?: boolean;
+  readonly listed?: Atom.Writable<boolean>;
 }) {
   const subscriptions = yield* Queue.unbounded<{
     readonly afterSequence: number | undefined;
@@ -193,6 +194,9 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
               if (options?.snapshotUnavailable === true) {
                 return { _tag: "unavailable" as const };
               }
+              if (options?.listed !== undefined && !registry.get(options.listed)) {
+                return { _tag: "missing" as const };
+              }
               return {
                 _tag: "present" as const,
                 snapshot,
@@ -211,7 +215,11 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
       ),
     ),
   );
-  const raw = createEnvironmentThreadStateAtoms(runtime);
+  const listed = options?.listed;
+  const raw = createEnvironmentThreadStateAtoms(
+    runtime,
+    listed === undefined ? undefined : { threadListedAtom: () => listed },
+  );
   const details = createEnvironmentThreadDetailAtoms(raw.stateAtom);
   const ref = { environmentId: TARGET.environmentId, threadId: THREAD_ID };
   const stateAtom = details.stateAtom(ref);
@@ -288,6 +296,26 @@ describe("createEnvironmentThreadStateAtoms", () => {
       expect(h.counts()).toEqual({ httpLoads: 1, diskLoads: 1, opened: 2, active: 1 });
       remount();
       yield* Deferred.await(next.closed);
+    }),
+  );
+
+  it.effect("loads a thread that was missing once the server lists it, while still mounted", () =>
+    Effect.gen(function* () {
+      const listed = Atom.make(false);
+      const h = yield* makeHarness({ listed });
+      const unmount = h.registry.mount(h.stateAtom);
+      yield* observeState(h.registry, h.stateAtom, (state) => state.status === "deleted");
+
+      h.registry.set(listed, true);
+      const subscription = yield* Queue.take(h.subscriptions);
+      yield* Queue.offer(subscription.events, { kind: "synchronized" });
+      const state = yield* observeState(h.registry, h.stateAtom, (value) =>
+        Option.isSome(value.data),
+      );
+      expect(state.status).not.toBe("deleted");
+      expect(h.counts().httpLoads).toBe(2);
+      unmount();
+      yield* Deferred.await(subscription.closed);
     }),
   );
 

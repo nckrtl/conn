@@ -264,6 +264,13 @@ export function createEnvironmentThreadShellAtoms(input: {
     }).pipe(Atom.withLabel(`environment-thread-shell:${key}`));
   });
 
+  const threadListedAtomFamily = Atom.family((key: string) => {
+    const ref = parseThreadKey(key);
+    return Atom.make((get) =>
+      get(environmentThreadIndexAtom(ref.environmentId)).has(ref.threadId),
+    ).pipe(Atom.withLabel(`environment-thread-listed:${key}`));
+  });
+
   // Keeps the previous shell while only streaming ticks changed. During a run,
   // its timestamps, item counts and latest message are as of the last kept
   // change; anything that needs them current reads threadShellAtom.
@@ -430,6 +437,8 @@ export function createEnvironmentThreadShellAtoms(input: {
     threadShellsForProjectRefsAtom: (refs: ReadonlyArray<ScopedProjectRef>) =>
       threadShellsForProjectRefsAtomFamily(projectRefCollectionKey(refs)),
     threadShellAtom: (ref: ScopedThreadRef) => threadShellAtomFamily(threadKey(ref)),
+    threadListedAtom: (environmentId: EnvironmentId, threadId: ThreadId) =>
+      threadListedAtomFamily(threadKey({ environmentId, threadId })),
     quietThreadShellAtom: (ref: ScopedThreadRef) => quietThreadShellAtomFamily(threadKey(ref)),
     childThreadInputsAtom: (ref: ScopedThreadRef) => childThreadInputsAtomFamily(threadKey(ref)),
   };

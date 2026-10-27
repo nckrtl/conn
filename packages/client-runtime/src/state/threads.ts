@@ -946,6 +946,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
             }
             case "missing": {
               yield* setDeleted();
+              // A miss can predate the thread (a draft's reserved id), so the next scope asks again.
+              if (resumeCache?.owner === owner) resumeCache.snapshot = undefined;
               return yield* Effect.never;
             }
             case "unavailable": {
@@ -1012,6 +1014,13 @@ export function createEnvironmentThreadStateAtoms<R, E>(
     | R,
     E
   >,
+  options?: {
+    /** Whether the server lists the thread; a thread that was missing loads once it is. */
+    readonly threadListedAtom?: (
+      environmentId: EnvironmentIdType,
+      threadId: ThreadIdType,
+    ) => Atom.Atom<boolean>;
+  },
 ) {
   // Cache definitions must outlive collectible live-atom definitions. The
   // registry retains these nodes without retaining environment or RPC scopes.
@@ -1030,6 +1039,7 @@ export function createEnvironmentThreadStateAtoms<R, E>(
     return runtime
       .atom(
         (get) => {
+          if (options?.threadListedAtom) get(options.threadListedAtom(environmentId, threadId));
           get.mount(resumeAtom);
           const resume = get.once(resumeAtom);
           const live = threadStateChanges(environmentId, threadId, resume);

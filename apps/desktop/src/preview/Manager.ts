@@ -2200,10 +2200,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     dictationUrls: DictationUrls,
   ) {
-    const tab = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
-    if (!tab) return yield* new PreviewTabNotFoundError({ tabId });
+    // The renderer sends this when the tab mounts, often before its guest registers;
+    // registerWebview applies the stored URLs then.
     annotatorDictation.set(tabId, dictationUrls);
-    const wc = tab.webContentsId == null ? null : webContents.fromId(tab.webContentsId);
+    const tab = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
+    const wc = tab?.webContentsId == null ? null : webContents.fromId(tab.webContentsId);
     if (wc && !wc.isDestroyed()) dictation.setUrls(wc.id, dictationUrls);
   });
 

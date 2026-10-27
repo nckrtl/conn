@@ -20,6 +20,9 @@ export interface EnvironmentQueryView<A, E = unknown> {
 
 export function formatEnvironmentQueryError(cause: Cause.Cause<unknown>): string {
   const error = Cause.squash(cause);
+  // effect/rpc servers answer a method they lack with this defect.
+  if (typeof error === "string" && error.startsWith("Unknown request tag:"))
+    return "This environment's Conn server is too old for this. Update it to use it here.";
   return error instanceof Error && error.message.trim().length > 0
     ? error.message
     : "The environment request failed.";

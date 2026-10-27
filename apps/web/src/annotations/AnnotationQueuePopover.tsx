@@ -248,28 +248,25 @@ export function AnnotationQueuePopover(props: {
                 })}
               </ol>
             )}
-            <div className="border-t border-(--glass-divider)! px-3 py-2.5">
-              {watching ? (
-                <p className="text-ui text-muted-foreground">
-                  New annotations go to this thread when it is idle.
-                  {counts.question > 0 ? " Questions wait for your answer in the thread." : ""}
-                </p>
-              ) : (
+            {watching ? (
+              <p className="border-t border-(--glass-divider)! px-3 py-2.5 text-ui text-muted-foreground">
+                New annotations go to this thread when it is idle.
+                {counts.question > 0 ? " Questions wait for your answer in the thread." : ""}
+              </p>
+            ) : counts.waiting > 0 ? (
+              <div className="border-t border-(--glass-divider)! px-3 py-2.5">
                 <Button
                   size="xs"
                   className="w-full justify-center"
-                  disabled={counts.waiting === 0}
                   onClick={() =>
                     sendAnnotationPrompt({ threadRef: props.threadRef, annotations: queue })
                   }
                 >
                   <SendIcon />
-                  {counts.waiting === 0
-                    ? "Nothing waiting"
-                    : `Send ${counts.waiting} to this thread`}
+                  {`Send ${counts.waiting} to this thread`}
                 </Button>
-              )}
-            </div>
+              </div>
+            ) : null}
             <label
               htmlFor={watchSwitchId}
               className="flex cursor-pointer items-center justify-between gap-3 border-t border-(--glass-divider)! px-3 py-2 text-ui"

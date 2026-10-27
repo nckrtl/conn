@@ -295,7 +295,7 @@ export function AppearanceSettingsPanel() {
                 <PanelAnimationsPreview durationMs={settings.panelAnimationDurationMs} />
                 <div className="flex w-full items-center gap-3">
                   <output
-                    className="min-w-16 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                    className="min-w-16 rounded-(--control-radius) bg-(--shell-field) px-2 py-1 text-center text-ui font-medium tabular-nums text-foreground"
                     htmlFor="panel-animation-duration"
                   >
                     {settings.panelAnimationDurationMs} ms

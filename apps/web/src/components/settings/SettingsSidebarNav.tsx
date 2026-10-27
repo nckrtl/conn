@@ -376,7 +376,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     {group.heading ? (
                       <h3
                         className={cn(
-                          "px-2 text-xs font-medium text-sidebar-muted-foreground/80",
+                          "px-2 text-ui font-medium text-sidebar-muted-foreground/80",
                           !compactSearchOpen && "max-md:hidden",
                         )}
                       >

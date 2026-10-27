@@ -18,5 +18,8 @@ export const PASSKEY_BRIDGE_ARGUMENT = "--t3code-preview-passkey-bridge";
 export const LARAVEL_TOOLBAR_DOCUMENT_CHANNEL = "preview:laravel-toolbar-document";
 /** Main → guest: the toolbar payload of a later fetch or XHR response. */
 export const LARAVEL_TOOLBAR_RESPONSE_CHANNEL = "preview:laravel-toolbar-response";
-/** Guest → main (invoke): POST the tab's registered dictation URL for "start" or "stop". */
+/**
+ * Guest → main (invoke): POST the tab's registered dictation URL for "start" or "stop", or,
+ * with a session id, `{ session }` to its `/dictate/start|stop|cancel`.
+ */
 export const ANNOTATOR_DICTATION_CHANNEL = "preview:annotator-dictation";

@@ -57,6 +57,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as HttpBody from "effect/http/HttpBody";
 import * as HttpClient from "effect/http/HttpClient";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -579,9 +580,22 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     fetch: (url, init) =>
       runPromise(
         httpClient
-          .post(url, { headers: (init.headers as Record<string, string> | undefined) ?? {} })
+          .post(url, {
+            headers: (init.headers as Record<string, string> | undefined) ?? {},
+            ...(init.body === undefined
+              ? {}
+              : { body: HttpBody.text(init.body, "application/json") }),
+          })
           .pipe(
-            Effect.map((response) => ({ ok: response.status >= 200 && response.status < 300 })),
+            Effect.flatMap((response) =>
+              response.text.pipe(
+                Effect.orElseSucceed(() => ""),
+                Effect.map((body) => ({
+                  ok: response.status >= 200 && response.status < 300,
+                  body,
+                })),
+              ),
+            ),
           ),
         init.signal ? { signal: init.signal } : undefined,
       ),

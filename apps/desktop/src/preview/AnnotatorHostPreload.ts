@@ -5,6 +5,9 @@ import { ipcRenderer } from "electron";
 import { makeAnnotatorHost } from "./AnnotatorDictation.ts";
 import { ANNOTATOR_DICTATION_CHANNEL } from "./GuestProtocol.ts";
 
-(window as { __ANNOTATOR_HOST__?: unknown }).__ANNOTATOR_HOST__ = makeAnnotatorHost((action) =>
-  ipcRenderer.invoke(ANNOTATOR_DICTATION_CHANNEL, action),
+(window as { __ANNOTATOR_HOST__?: unknown }).__ANNOTATOR_HOST__ = makeAnnotatorHost(
+  (action, session) =>
+    session === undefined
+      ? ipcRenderer.invoke(ANNOTATOR_DICTATION_CHANNEL, action)
+      : ipcRenderer.invoke(ANNOTATOR_DICTATION_CHANNEL, action, session),
 );

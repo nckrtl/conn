@@ -589,8 +589,9 @@ export const make = Effect.gen(function* () {
     );
     if (additional === undefined) {
       flushMainWindowBounds = flushBoundsPersist;
-      yield* previewManager.setMainWindow(window);
     }
+    // Workspace windows host in-app browser tabs too.
+    yield* previewManager.addWindow(window);
     if (yield* Ref.get(desktopState.quitting)) {
       yield* electronWindow.destroyAll;
       return Option.none();

@@ -158,11 +158,18 @@ export function HostedBrowserWebview(props: {
     if (!clientSettingsHydrated || !webview || !config || !bridge) return;
     let disposed = false;
     let registrationPending = false;
+    // A dom-ready during a pending attempt must not be lost: if that attempt
+    // fails, no later dom-ready comes and the tab stays blank.
+    let registrationRequested = false;
     let stopHost: (() => void) | undefined;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
     const register = () => {
       const lease = tabLeaseRef.current;
-      if (!lease || disposed || registrationPending || !isWebviewDomReady(webview)) return;
+      if (registrationPending) {
+        registrationRequested = true;
+        return;
+      }
+      if (!lease || disposed || !isWebviewDomReady(webview)) return;
       registrationPending = true;
       // The React Compiler cannot compile try/finally, so the pending flag
       // is cleared from the promise instead.
@@ -186,15 +193,13 @@ export function HostedBrowserWebview(props: {
             );
         }
       };
-      void attempt().then(
-        () => {
-          registrationPending = false;
-        },
-        () => {
-          // dom-ready will retry if the guest was not ready yet.
-          registrationPending = false;
-        },
-      );
+      const settle = () => {
+        registrationPending = false;
+        if (!registrationRequested) return;
+        registrationRequested = false;
+        register();
+      };
+      void attempt().then(settle, settle);
     };
     const recoverGuest = () => {
       if (disposed || recoveryTimeout !== null) return;

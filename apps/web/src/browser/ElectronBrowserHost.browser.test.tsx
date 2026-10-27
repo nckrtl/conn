@@ -160,4 +160,34 @@ describe("ElectronBrowserHost", () => {
     expect(after).toHaveLength(2);
     expect(after.every((node, index) => node.isSameNode(before[index]!))).toBe(true);
   });
+
+  it("retries registration when dom-ready arrives while a failing attempt is pending", async () => {
+    using _state = setup();
+    reconcilePreviewServerSessions(threadRef, {
+      sessions: [snapshot("tab_9", "2026-01-01T00:00:01.000Z")],
+      serverEpoch: "server-a",
+      revision: 1,
+    });
+    await using screen = await renderHost();
+    const webview = screen.container.querySelector("webview")!;
+    Object.assign(webview, { getWebContentsId: () => 7 });
+
+    let rejectFirst!: (error: Error) => void;
+    mocks.registerWebview.mockImplementationOnce(
+      () => new Promise<void>((_resolve, reject) => (rejectFirst = reject)),
+    );
+    await act(async () => {
+      webview.dispatchEvent(new Event("dom-ready"));
+    });
+    await vi.waitFor(() => expect(mocks.registerWebview).toHaveBeenCalledTimes(1));
+
+    // The guest's dom-ready lands while the first attempt is still in flight.
+    webview.dispatchEvent(new Event("dom-ready"));
+    await act(async () => {
+      rejectFirst(new Error("WebContents 7 not found"));
+    });
+
+    await vi.waitFor(() => expect(mocks.registerWebview).toHaveBeenCalledTimes(2));
+    expect(mocks.registerWebview.mock.calls[1]).toEqual(mocks.registerWebview.mock.calls[0]);
+  });
 });

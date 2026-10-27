@@ -100,7 +100,6 @@ export default function AnnotationPopup({
   currentDraft.current = draft;
   const pendingMove = useRef<AbortController | null>(null);
   const [moving, setMoving] = useState(false);
-  const [moveError, setMoveError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const shakeTimer = useRef(0);
   const previousShake = useRef(shakeToken);
@@ -133,16 +132,16 @@ export default function AnnotationPopup({
       const controller = new AbortController();
       pendingMove.current = controller;
       setMoving(true);
-      setMoveError(null);
       void stopAndWaitForPaste(field, settings, controller.signal)
         .then((text) => {
           if (controller.signal.aborted) return;
           commentRef.value = text;
           submitDraftAndMove(text, currentDraft.current, next);
         })
-        .catch((error: unknown) => {
+        // Stopping fails when nothing is recording; keep what the field holds instead.
+        .catch(() => {
           if (!controller.signal.aborted)
-            setMoveError(error instanceof Error ? error.message : "Could not stop dictation.");
+            submitDraftAndMove(field.value, currentDraft.current, next);
         })
         .finally(() => {
           if (pendingMove.current === controller) {
@@ -534,12 +533,12 @@ export default function AnnotationPopup({
           </button>
         </div>
       ) : null}
-      {moveError || dictationError ? (
+      {dictationError ? (
         <div
           role="alert"
           className="mt-2 rounded-xl border border-white/10 bg-[#111111]/95 px-2 py-2 text-xs text-white"
         >
-          {moveError ?? dictationError}
+          {dictationError}
         </div>
       ) : null}
       {detailsOpen ? <AnnotationMetadata draft={draft} /> : null}

@@ -472,8 +472,9 @@ export function submitDraftAndMove(
   source: AnnotationDraft,
   next: AnnotationDraft,
 ): void {
-  if (draft.value !== source || !annotationMode.value || !comment.trim()) return;
-  submitDraft(comment, source);
+  if (draft.value !== source || !annotationMode.value) return;
+  // An empty draft is discarded rather than saved.
+  if (comment.trim()) submitDraft(comment, source);
   draft.value = next;
   hover.value = null;
   scheduleDraftScreenshot(next);

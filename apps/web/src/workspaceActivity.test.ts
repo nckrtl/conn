@@ -129,8 +129,8 @@ describe("workspace attention", () => {
     // Subagents always hold; commands and monitors only when the agent waits on them.
     for (const task of [
       { taskId: "bg-1", kind: "subagent" as const },
-      { taskId: "bg-1", kind: "monitor" as const, awaited: true },
-      { taskId: "bg-1", kind: "command" as const, awaited: true },
+      { taskId: "bg-1", kind: "monitor" as const, awaited: true as const },
+      { taskId: "bg-1", kind: "command" as const, awaited: true as const },
     ]) {
       expect(
         workspaceAttention([{ ...completed, pendingBackgroundTasks: [task] }], visited()).unread,

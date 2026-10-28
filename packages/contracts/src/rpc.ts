@@ -543,10 +543,6 @@ export const WS_METHODS = {
   serverRestart: "server.restart",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
-  peerLinksList: "peerLinks.list",
-  peerLinksLink: "peerLinks.link",
-  peerLinksUnlink: "peerLinks.unlink",
-  peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverRunStorageCleanup: "server.runStorageCleanup",
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
   serverGetDatabaseStorage: "server.getDatabaseStorage",
@@ -822,29 +818,6 @@ const WsServerRestartRpc = Rpc.make(WS_METHODS.serverRestart, {
   payload: Schema.Struct({}),
   success: ServerRestartResult,
   error: Schema.Union([ServerRestartError, EnvironmentAuthorizationError]),
-});
-
-const WsPeerLinksListRpc = Rpc.make(WS_METHODS.peerLinksList, {
-  payload: Schema.Struct({}),
-  success: Schema.Struct({ links: Schema.Array(PeerLinkSummary) }),
-  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
-});
-
-const WsPeerLinksLinkRpc = Rpc.make(WS_METHODS.peerLinksLink, {
-  payload: PeerLinkCreateInput,
-  success: PeerLink,
-  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
-});
-
-const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
-  payload: PeerLinkRemoveInput,
-  success: PeerLinkRemoveResult,
-  error: Schema.Union([PeerLinkError, EnvironmentAuthorizationError]),
-});
-
-const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
-  payload: PeerLinkRequestAnswerInput,
-  error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
 });
 
 const WsServerRunStorageCleanupRpc = Rpc.make(WS_METHODS.serverRunStorageCleanup, {
@@ -2118,10 +2091,6 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
  */
 export const ForkWsRpcGroup = RpcGroup.make(
   WsServerRestartRpc,
-  WsPeerLinksListRpc,
-  WsPeerLinksLinkRpc,
-  WsPeerLinksUnlinkRpc,
-  WsPeerLinksAnswerRequestRpc,
   WsCredentialsListForSiteRpc,
   WsCredentialsFillForSiteRpc,
   WsTestLoginsListRpc,

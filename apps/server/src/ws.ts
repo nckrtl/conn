@@ -564,10 +564,6 @@ const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 // every RPC passes TypeScript's type instantiation limit.
 const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.serverRestart,
-  WS_METHODS.peerLinksList,
-  WS_METHODS.peerLinksLink,
-  WS_METHODS.peerLinksUnlink,
-  WS_METHODS.peerLinksAnswerRequest,
   WS_METHODS.credentialsListForSite,
   WS_METHODS.credentialsFillForSite,
   WS_METHODS.testLoginsList,
@@ -3274,19 +3270,8 @@ const layerWsForkRpc = (
   ServerWsForkRpcGroup.toLayer(
     Effect.gen(function* () {
       const serverRestart = yield* ServerRestart.ServerRestart;
-      const peerLinks = yield* PeerLinks.PeerLinks;
-      const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       return ServerWsForkRpcGroup.of({
         [WS_METHODS.serverRestart]: () => serverRestart.restart,
-        [WS_METHODS.peerLinksList]: (_input) =>
-          peerLinks.list.pipe(Effect.map((links) => ({ links }))),
-        [WS_METHODS.peerLinksLink]: (input) => peerLinks.link(input),
-        [WS_METHODS.peerLinksUnlink]: ({ environmentId }) =>
-          peerLinks.unlink(environmentId).pipe(Effect.map((removed) => ({ removed }))),
-        [WS_METHODS.peerLinksAnswerRequest]: (input) =>
-          Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-            Effect.andThen(peerLinkRequests.answer(input)),
-          ),
         [WS_METHODS.credentialsListForSite]: (input) => credentialAutofill.listForSite(input),
         [WS_METHODS.credentialsFillForSite]: (input) => credentialAutofill.fillForSite(input),
         [WS_METHODS.testLoginsList]: (_input) =>
@@ -3327,8 +3312,6 @@ export const layer = Layer.unwrap(
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
-    const peerLinks = yield* PeerLinks.PeerLinks;
-    const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
       "GET",
@@ -3404,8 +3387,6 @@ export const layer = Layer.unwrap(
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               // Share server-lifetime PR caches so WS mutations invalidate every client's HTTP diffs.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
-              Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
-              Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
               Layer.provide(OtlpEndpointCheck.layer),
               Layer.provide(
                 Layer.succeed(

@@ -4,12 +4,12 @@ import { describe, expect, it } from "vite-plus/test";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import type { HomeProjectScope } from "../home/homeThreadList";
 import {
+  filterProjectScopes,
   getProjectScopeSelectionTarget,
   newTaskDestination,
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
 } from "./new-task-project-selection";
-import { filterProjectScopes, getProjectScopeSelectionTarget } from "./new-task-project-selection";
 
 function makeProject(
   id: string,

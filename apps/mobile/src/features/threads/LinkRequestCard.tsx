@@ -159,8 +159,6 @@ function PendingLinkRequest(props: {
         <>
           <Button
             label={picksMachine(item) ? "Choose machine…" : "Review link…"}
-            tone="primary"
-            fullWidth
             disabled={declining}
             onPress={() => setOpen(true)}
             tone="primary"

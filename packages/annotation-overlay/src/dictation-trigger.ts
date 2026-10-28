@@ -2,7 +2,8 @@ import type { DictationSettings } from "./dictation";
 import { postDictation, recordDictationTiming } from "./post-dictation";
 
 export type HostDictationAction = "start" | "stop";
-export type HostSessionAction = "start" | "stop" | "cancel";
+export type HostSessionAction = "start" | "stop" | "cancel" | "wait";
+type HostSessionResult = { text?: string; unsupported?: boolean; waiting?: boolean } | boolean;
 
 /**
  * An embedding app defines this on `window.__ANNOTATOR_HOST__` to start and stop
@@ -14,15 +15,15 @@ export interface AnnotatorHost {
   /** Resolve `true` when dictation started or stopped, `false` when it did not. */
   dictation(action: HostDictationAction, options: { signal: AbortSignal }): Promise<boolean>;
   /**
-   * Dictation keyed by the annotation's session id: the host keeps the transcript instead of
-   * pasting it, and a stop resolves with `{ text }` once it is final. `false` means it failed;
-   * `{ unsupported: true }` means the dictation app predates sessions.
+   * Dictation keyed by the annotation's id, never pasted. A stop, or a wait (which never stops
+   * it), resolves `{ text }` once final; a timed-out wait `{ waiting: true }`. `false` means it
+   * failed; `{ unsupported: true }` means the dictation app predates sessions (or waits).
    */
   dictationSession?(
     action: HostSessionAction,
     session: string,
     options: { signal: AbortSignal },
-  ): Promise<{ text?: string; unsupported?: boolean } | boolean>;
+  ): Promise<HostSessionResult>;
 }
 
 declare global {
@@ -129,7 +130,7 @@ async function callSession(
     throw new Error("The host has no dictation sessions.");
   }
   const result = await untilAborted(
-    new Promise<{ text?: string; unsupported?: boolean } | boolean>((resolve) =>
+    new Promise<HostSessionResult>((resolve) =>
       resolve(host.dictationSession!(action, session, { signal })),
     ),
     signal,
@@ -184,6 +185,41 @@ export function stopHostSession(session: string): Promise<string> {
   };
   stop.then(forget, forget);
   return stop;
+}
+
+/**
+ * Resolves `true` once the session has ended without this page stopping it: the dictation app
+ * owns the recording, so its shortcut may stop it. `false` when the signal aborts first or the
+ * dictation app cannot wait. Never stops the session.
+ */
+export async function untilHostSessionEnds(session: string, signal: AbortSignal): Promise<boolean> {
+  const host = window.__ANNOTATOR_HOST__;
+  if (typeof host?.dictationSession !== "function") return false;
+  while (!signal.aborted) {
+    let result: HostSessionResult;
+    try {
+      result = await untilAborted(
+        new Promise<HostSessionResult>((resolve) =>
+          resolve(
+            host.dictationSession!("wait", session, {
+              signal: AbortSignal.any([signal, AbortSignal.timeout(SESSION_STOP_LIMIT_MS)]),
+            }),
+          ),
+        ),
+        signal,
+      );
+    } catch {
+      return false;
+    }
+    if (signal.aborted) return false;
+    if (typeof result === "object" && result !== null) {
+      if (result.unsupported === true) return false;
+      if (result.waiting === true) continue;
+    }
+    // A transcript, or `false`: the session was cancelled or failed, or the app is gone.
+    return true;
+  }
+  return false;
 }
 
 export function cancelHostSession(session: string): void {

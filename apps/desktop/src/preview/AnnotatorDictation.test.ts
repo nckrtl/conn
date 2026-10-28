@@ -229,6 +229,31 @@ describe("makeDictationRelay", () => {
     expect(await answer(409).send(7, "stop", null, "s1")).toBe(false);
   });
 
+  it("waits for a session's text at /dictate/wait: again on 504, unsupported before the route", async () => {
+    const answer = (status: number, body = "") => {
+      const fetch = vi.fn(async (_url: string, _init: RequestInit) => ({
+        ok: status < 300,
+        status,
+        body,
+      }));
+      const relay = makeDictationRelay({ fetch });
+      relay.setUrls(7, URLS);
+      return { fetch, relay };
+    };
+    const done = answer(200, JSON.stringify({ status: "complete", text: "From Operator" }));
+    expect(await done.relay.send(7, "wait", null, "s1")).toEqual({ text: "From Operator" });
+    expect(done.fetch.mock.calls[0]?.slice(0, 1)).toEqual(["http://127.0.0.1:12321/dictate/wait"]);
+    expect(done.fetch.mock.calls[0]?.[1].body).toBe('{"session":"s1"}');
+    expect(await answer(504).relay.send(7, "wait", null, "s1")).toEqual({ waiting: true });
+    expect(await answer(404).relay.send(7, "wait", null, "s1")).toEqual({ unsupported: true });
+    expect(await answer(400).relay.send(7, "wait", null, "s1")).toEqual({ unsupported: true });
+    expect(await answer(409).relay.send(7, "wait", null, "s1")).toBe(false);
+    const host = makeAnnotatorHost(async (action) =>
+      action === "wait" ? { waiting: true } : true,
+    );
+    expect(await host.dictationSession("wait", "s1")).toEqual({ waiting: true });
+  });
+
   it("passes an unsupported answer through the page host", async () => {
     const host = makeAnnotatorHost(async () => ({ unsupported: true }));
     expect(await host.dictationSession("start", "s1")).toEqual({ unsupported: true });

@@ -114,6 +114,7 @@ export default function AnnotationPopup({
 
   const {
     enabled: dictationEnabled,
+    hostSessions,
     state: dictationState,
     error: dictationError,
     elapsedMs,
@@ -200,7 +201,9 @@ export default function AnnotationPopup({
   const placeholder = moving ? "Waiting for paste…" : "Listening";
   const total = Math.floor(elapsedMs / 1000);
   const elapsedLabel = `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
-  const canSubmit = Boolean(comment.trim());
+  // The dictation app records and shows it; the box only waits for its text.
+  const hostRecording = hostSessions && dictationState === "recording";
+  const canSubmit = Boolean(comment.trim()) || hostRecording;
 
   const readControlSize = () => {
     const node = box.current;
@@ -474,9 +477,10 @@ export default function AnnotationPopup({
       </Button>
     ) : null;
 
-  // Always visible, disabled until there is text, so the action never jumps into view.
+  // Always visible, disabled until there is text (or a host recording to finish), so the action
+  // never jumps into view.
   const sendButton =
-    dictationState !== "recording" ? (
+    dictationState !== "recording" || hostRecording ? (
       <IconButton
         label={isEditing ? "Save annotation" : "Add annotation"}
         onClick={submit}
@@ -517,7 +521,7 @@ export default function AnnotationPopup({
             {deleteButton}
           </div>
           <div className="pointer-events-auto ml-auto flex items-center gap-1.5">
-            {recorder}
+            {hostRecording ? null : recorder}
             {sendButton}
           </div>
         </div>

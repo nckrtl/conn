@@ -6,6 +6,7 @@ import {
   startHostDictation,
   stopHostSession,
   triggerDictation,
+  untilHostSessionEnds,
   usesHostSessions,
   type AnnotatorHost,
 } from "./dictation-trigger";
@@ -189,4 +190,33 @@ it("keeps sessions after a start that fails for another reason", async () => {
   );
   expect(dictation).not.toHaveBeenCalled();
   expect(usesHostSessions({ provider: "host" })).toBe(true);
+});
+
+it("learns when the dictation app ends a session itself, waiting again while it records", async () => {
+  const answers: Array<{ waiting?: true; text?: string } | boolean> = [
+    { waiting: true },
+    { text: "Stopped with the shortcut" },
+  ];
+  const dictationSession = sessionHost(async () => answers.shift() ?? false);
+  expect(await untilHostSessionEnds("s1", new AbortController().signal)).toBe(true);
+  expect(dictationSession.mock.calls.map(([action, session]) => [action, session])).toEqual([
+    ["wait", "s1"],
+    ["wait", "s1"],
+  ]);
+
+  // A cancelled or failed session ended too; only the stop learns why.
+  sessionHost(async () => false);
+  expect(await untilHostSessionEnds("s2", new AbortController().signal)).toBe(true);
+});
+
+it("stops waiting when the dictation app has no wait, or the box lets go of the session", async () => {
+  sessionHost(async () => ({ unsupported: true }));
+  expect(await untilHostSessionEnds("s1", new AbortController().signal)).toBe(false);
+
+  const dictationSession = sessionHost(() => new Promise(() => {}));
+  const controller = new AbortController();
+  const ended = untilHostSessionEnds("s2", controller.signal);
+  controller.abort();
+  expect(await ended).toBe(false);
+  expect(dictationSession).toHaveBeenCalledOnce();
 });

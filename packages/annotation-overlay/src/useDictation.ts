@@ -2,8 +2,8 @@ import { holdCapture } from "./capture-gate";
 import {
   cancelHostSession,
   startHostDictation,
-  stopHostSession,
   triggerDictation,
+  untilHostSessionEnds,
   usesHostSessions,
 } from "./dictation-trigger";
 import { useEffect, useRef, useState } from "react";
@@ -22,7 +22,10 @@ type Options = {
   sessionId: string;
   onBeforeTrigger: () => void;
   onSubmit: () => void;
-  /** Enter on a host session that is still recording: hand it to the finishing list. */
+  /**
+   * A host session's recording ended (Enter, the send button, or the dictation app's own
+   * shortcut): hand it to the finishing list, which fills and saves the box.
+   */
   onFinish: () => void;
 };
 
@@ -38,6 +41,8 @@ export function useDictation(options: Options) {
   const session = useRef<{
     stop: AbortController | null;
     abort: AbortController | null;
+    /** Watches the live host session for an end the dictation app decided. */
+    watch: AbortController | null;
     elapsedTimer: number;
     elapsedStarted: number;
     state: DictationState;
@@ -53,6 +58,7 @@ export function useDictation(options: Options) {
   }>({
     stop: null,
     abort: null,
+    watch: null,
     elapsedTimer: 0,
     elapsedStarted: 0,
     state: "idle",
@@ -75,9 +81,8 @@ export function useDictation(options: Options) {
   session.current.hostSessions = hostSessions;
   session.current.sessionId = options.sessionId;
 
-  const sessionLive = () =>
-    session.current.hostSessions &&
-    (session.current.state === "recording" || session.current.state === "transcribing");
+  // A host session is never "transcribing" here: its stop always goes to the finishing list.
+  const sessionLive = () => session.current.hostSessions && session.current.state === "recording";
 
   const startElapsed = () => {
     session.current.elapsedStarted = Date.now();
@@ -93,28 +98,9 @@ export function useDictation(options: Options) {
     session.current.elapsedTimer = 0;
   };
 
-  const stopHostRecording = () => {
-    stopElapsed();
-    session.current.state = "transcribing";
-    setState("transcribing");
-    void stopHostSession(session.current.sessionId)
-      .then(
-        (text) => {
-          if (session.current.disposed) return;
-          session.current.comment.value = mergeTranscript(session.current.comment.value, text);
-        },
-        () => undefined,
-      )
-      .finally(() => {
-        if (session.current.disposed) return;
-        session.current.state = "idle";
-        setState("idle");
-      });
-  };
-
   const beginStop = (): boolean => {
-    if (session.current.hostSessions && session.current.state === "recording") {
-      stopHostRecording();
+    if (sessionLive()) {
+      session.current.onFinish();
       return true;
     }
 
@@ -134,6 +120,7 @@ export function useDictation(options: Options) {
     if (sessionLive() && !session.current.handedOff) {
       cancelHostSession(session.current.sessionId);
     }
+    session.current.watch?.abort();
     stopElapsed();
     session.current.abort?.abort();
     session.current.stop = null;
@@ -175,16 +162,21 @@ export function useDictation(options: Options) {
       return;
     }
     if (session.current.disposed) return cancelHostSession(id);
+    // The dictation app shows the recording; this box shows no recorder or timer.
     session.current.state = "recording";
     setState("recording");
-    startElapsed();
+    const watch = new AbortController();
+    session.current.watch = watch;
+    void untilHostSessionEnds(id, watch.signal).then((ended) => {
+      if (ended && !watch.signal.aborted && sessionLive()) session.current.onFinish();
+    });
   };
 
   /** Releases a live host session to the caller, who stops it; null when none is live. */
   const handOff = (): string | null => {
     if (!sessionLive()) return null;
     session.current.handedOff = true;
-    stopElapsed();
+    session.current.watch?.abort();
     return session.current.sessionId;
   };
 
@@ -343,6 +335,8 @@ export function useDictation(options: Options) {
 
   return {
     enabled,
+    /** The dictation app records and shows it: no recorder in the box. */
+    hostSessions,
     state,
     emptySpeech,
     error,

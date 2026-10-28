@@ -309,6 +309,17 @@ guest preload (`window.__ANNOTATOR_HOST__`), and the main process POSTs the
 dictation URLs the renderer registered for the tab, so the page never gets
 them and its CSP cannot block them. Server tabs POST from the page.
 
+On desktop tabs each box is an Operator caller session named by its draft ID
+(`/dictate/start`, `/dictate/stop`, `/dictate/wait` and `/dictate/cancel` with
+`{"session"}`). Operator shows the recording, so the box shows no recorder or
+timer. Right after the start the box sends `/dictate/wait`, which answers
+when the session ends without stopping it: Operator's shortcut, or the next
+box's start. Then, or on Enter, the send button or a click on the next
+element, the box closes, and its stop's text fills and saves it; empty text
+discards it. An Operator without `/dictate/wait` (before 2026-10-28) answers
+404, and the box then waits for Enter or a click. An Operator without sessions
+records and pastes as before.
+
 Sources:
 
 - Server (`apps/server/src/`): `annotations/AnnotationStore.ts`,

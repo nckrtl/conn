@@ -5,12 +5,17 @@
 import { ANNOTATOR_DICTATION_CHANNEL } from "./GuestProtocol.ts";
 
 export type DictationAction = "start" | "stop";
-export type SessionAction = "start" | "stop" | "cancel";
+export type SessionAction = "start" | "stop" | "cancel" | "wait";
 /**
- * `{ text }` answers a session stop: the session's final transcript. `{ unsupported }` answers
- * a session start the dictation app refuses because it predates sessions.
+ * `{ text }` answers a session stop or wait: the session's final transcript. `{ waiting }`
+ * answers a wait that timed out before the session ended. `{ unsupported }` answers a session
+ * start, or a wait, that the dictation app refuses because it predates them.
  */
-export type DictationResult = boolean | { readonly text: string } | { readonly unsupported: true };
+export type DictationResult =
+  | boolean
+  | { readonly text: string }
+  | { readonly waiting: true }
+  | { readonly unsupported: true };
 
 export interface DictationUrls {
   readonly startUrl: string | null;
@@ -20,7 +25,7 @@ export interface DictationUrls {
 const isAction = (value: unknown): value is DictationAction =>
   value === "start" || value === "stop";
 const isSessionAction = (value: unknown): value is SessionAction =>
-  isAction(value) || value === "cancel";
+  isAction(value) || value === "cancel" || value === "wait";
 const isSessionId = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 
@@ -28,6 +33,7 @@ const toResult = (value: unknown): DictationResult => {
   if (value === true) return true;
   if (typeof value !== "object" || value === null) return false;
   if ("unsupported" in value && value.unsupported === true) return { unsupported: true };
+  if ("waiting" in value && value.waiting === true) return { waiting: true };
   if ("text" in value && typeof value.text === "string") return { text: value.text };
   return false;
 };
@@ -74,7 +80,7 @@ export function makeAnnotatorHost(
 }
 
 const TIMEOUT_MS = 10_000;
-// A session stop waits for the transcript; Operator gives up after about 120 s.
+// A session stop or wait waits for the transcript; Operator gives up after about 120 s (504).
 const STOP_TIMEOUT_MS = 130_000;
 
 const httpUrl = (value: string | null): string | null => {
@@ -183,19 +189,23 @@ export function makeDictationRelay(options: {
     if (!isSessionAction(action) || !isSessionId(session)) return false;
     const url = sessionUrl(registered, action);
     if (url === null) return false;
-    const stop = action === "stop";
+    const answersText = action === "stop" || action === "wait";
     const response = await post(
       url,
       origin,
-      stop ? STOP_TIMEOUT_MS : TIMEOUT_MS,
+      answersText ? STOP_TIMEOUT_MS : TIMEOUT_MS,
       JSON.stringify({ session }),
     );
-    // An Operator from before sessions rejects the session body (400) or the route (404).
-    if (action === "start" && (response.status === 400 || response.status === 404)) {
+    // An Operator from before sessions (or waits) rejects the session body (400) or the route (404).
+    if (
+      (action === "start" || action === "wait") &&
+      (response.status === 400 || response.status === 404)
+    ) {
       return { unsupported: true };
     }
+    if (action === "wait" && response.status === 504) return { waiting: true };
     if (!response.ok) return false;
-    return stop ? transcript(response.body ?? "") : true;
+    return answersText ? transcript(response.body ?? "") : true;
   };
 
   const send: DictationRelay["send"] = async (webContentsId, action, origin, session) => {

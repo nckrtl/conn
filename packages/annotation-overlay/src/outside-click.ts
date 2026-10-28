@@ -12,6 +12,11 @@ export function onOutsideAnnotationClick(callback: (next: AnnotationDraft) => vo
   };
 }
 
+/** An open box moves to the next element on click, so hovering may pick that element. */
+export function annotationCanMove(): boolean {
+  return handler !== null;
+}
+
 export function requestAnnotationMove(next: AnnotationDraft): boolean {
   if (!handler) return false;
   handler(next);

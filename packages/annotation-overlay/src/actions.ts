@@ -1,5 +1,5 @@
 import { annotationMetadata } from "./hooks";
-import { finishActiveDraft, requestAnnotationMove } from "./outside-click";
+import { annotationCanMove, finishActiveDraft, requestAnnotationMove } from "./outside-click";
 import { deepElementFromPoint, isAnnotationUi, isElementFixed } from "./dom";
 import { identifyElement } from "./identify";
 import { readInertiaPage } from "./inertia-page";
@@ -742,7 +742,7 @@ export function handleDocumentClick(event: MouseEvent): void {
 }
 
 export function handleMouseMove(event: MouseEvent): void {
-  if (!annotationMode.value || draft.value) {
+  if (!annotationMode.value || (draft.value && !annotationCanMove())) {
     hover.value = null;
     return;
   }

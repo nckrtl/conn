@@ -65,14 +65,13 @@ export default function AnnotationOverlay() {
     };
   })();
 
-  const hoverLabelStyle =
-    currentHover && !currentDraft
-      ? hoverLabelPosition(
-          currentHover.cursorX,
-          currentHover.cursorY,
-          currentHover.reactComponents ? 48 : 32,
-        )
-      : null;
+  const hoverLabelStyle = currentHover
+    ? hoverLabelPosition(
+        currentHover.cursorX,
+        currentHover.cursorY,
+        currentHover.reactComponents ? 48 : 32,
+      )
+    : null;
 
   const pendingMarkerStyle =
     currentDraft && !currentDraft.annotationId
@@ -90,10 +89,10 @@ export default function AnnotationOverlay() {
       ))}
       {!isActive ? null : (
         <>
-          {currentHover && !currentDraft ? <AnnotationHighlight rect={currentHover.rect} /> : null}
+          {currentHover ? <AnnotationHighlight rect={currentHover.rect} /> : null}
           {selectedRect ? <AnnotationHighlight rect={selectedRect} strong /> : null}
 
-          {currentHover && !currentDraft && hoverLabelStyle ? (
+          {currentHover && hoverLabelStyle ? (
             <div
               data-annotation-hover-label
               className="pointer-events-none absolute z-2 max-w-[280px] overflow-hidden rounded-[6px] border border-white/8 bg-[#101010]/95 px-2.5 py-[0.35rem] font-medium text-white shadow-none backdrop-blur-sm"

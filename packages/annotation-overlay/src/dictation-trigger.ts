@@ -41,7 +41,6 @@ export function hostDictationAvailable(): boolean {
 export function usesHostSessions(settings?: DictationSettings | null): boolean {
   return (
     settings?.provider === "host" &&
-    !sessionsUnsupported &&
     typeof window !== "undefined" &&
     typeof window.__ANNOTATOR_HOST__?.dictationSession === "function"
   );
@@ -118,15 +117,7 @@ const SESSION_START_LIMIT_MS = 10_000;
 // Operator waits up to 120 s for a transcript to become final.
 const SESSION_STOP_LIMIT_MS = 130_000;
 const stops = new Map<string, Promise<string>>();
-// Set once the dictation app refuses a session start; the page then uses `dictation()`.
-let sessionsUnsupported = false;
-
 class HostSessionsUnsupported extends Error {}
-
-/** Test seam: forget that the dictation app refused sessions. */
-export function resetHostSessionSupport(): void {
-  sessionsUnsupported = false;
-}
 
 async function callSession(
   action: HostSessionAction,
@@ -166,20 +157,17 @@ export async function startHostSession(session: string, signal: AbortSignal): Pr
 
 /**
  * Starts a session, or, when the dictation app predates sessions, a pasting `dictation()`
- * start; every later box on the page then starts that way too.
+ * start. Each box asks again, so updating the dictation app takes effect without a reload.
  */
 export async function startHostDictation(
   session: string,
   signal: AbortSignal,
 ): Promise<"session" | "paste"> {
-  if (!sessionsUnsupported) {
-    try {
-      await startHostSession(session, signal);
-      return "session";
-    } catch (cause) {
-      if (!(cause instanceof HostSessionsUnsupported)) throw cause;
-      sessionsUnsupported = true;
-    }
+  try {
+    await startHostSession(session, signal);
+    return "session";
+  } catch (cause) {
+    if (!(cause instanceof HostSessionsUnsupported)) throw cause;
   }
   await callHost("start", AbortSignal.any([signal, AbortSignal.timeout(SESSION_START_LIMIT_MS)]));
   return "paste";

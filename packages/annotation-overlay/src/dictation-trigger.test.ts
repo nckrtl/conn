@@ -3,7 +3,6 @@ import { dictationEnabled, stopsOnNextElement, triggersDesktopDictation } from "
 import { resolveDictationSettings } from "./dictation-settings";
 import {
   cancelHostSession,
-  resetHostSessionSupport,
   startHostDictation,
   stopHostSession,
   triggerDictation,
@@ -18,7 +17,6 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetch);
 });
 afterEach(() => {
-  resetHostSessionSupport();
   vi.unstubAllGlobals();
   fetch.mockReset();
 });
@@ -157,7 +155,7 @@ it("fails a stop the host refuses, and cancels by id without failing", async () 
   ]);
 });
 
-it("falls back to the pasting host start when sessions are unsupported, and remembers it", async () => {
+it("falls back to the pasting host start when sessions are unsupported, and asks again next box", async () => {
   let refuse!: (result: { unsupported: true }) => void;
   const dictationSession = vi.fn<NonNullable<AnnotatorHost["dictationSession"]>>(
     () =>
@@ -174,11 +172,13 @@ it("falls back to the pasting host start when sessions are unsupported, and reme
   refuse({ unsupported: true });
   expect(await first).toBe("paste");
   expect(dictation.mock.calls.map(([action]) => action)).toEqual(["start"]);
-  expect(usesHostSessions({ provider: "host" })).toBe(false);
+  expect(usesHostSessions({ provider: "host" })).toBe(true);
 
-  expect(await startHostDictation("s2", signal)).toBe("paste");
-  expect(dictationSession).toHaveBeenCalledOnce();
-  expect(dictation.mock.calls.map(([action]) => action)).toEqual(["start", "start"]);
+  // The dictation app was updated in between: the next box gets a session.
+  dictationSession.mockImplementation(async () => true);
+  expect(await startHostDictation("s2", signal)).toBe("session");
+  expect(dictationSession).toHaveBeenCalledTimes(2);
+  expect(dictation).toHaveBeenCalledOnce();
 });
 
 it("keeps sessions after a start that fails for another reason", async () => {

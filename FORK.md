@@ -336,6 +336,17 @@ Personal Vault logins remain private, as described under
 [Password-manager autofill](#password-manager-autofill). Agents only get Conn's
 test logins.
 
+This also holds when the server runs on another machine (Beast, mini, nick-vm).
+Only `preview_cdp_endpoint` stays on the tab's host, because it listens on
+loopback. Upstream does not have the relay, and its agent copy says desktop
+tabs cannot be reached from another machine. On 2026-10-28, a sync brought in
+such a `t3_preview_list` description (upstream #24850), and agents on Beast
+refused to drive Nick's tabs. In every sync, read upstream's changes to the
+preview tool descriptions and agent instructions, and keep or rewrite any line
+that limits agents to server tabs. The guard
+`apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts` fails on the known
+phrases. Extend it when upstream finds new words.
+
 Sources:
 
 - Desktop (`apps/desktop/src/preview/`): `DesktopTabRunner.ts`, `CdpRelay.ts`,
@@ -696,8 +707,9 @@ Sources:
    `apps/web/src/rpc/desktopTabRelay.test.ts` and
    `apps/web/src/browser/ElectronBrowserHost.test.tsx`. These focused relay
    tests need a Playwright headless shell. Always run the fork guards
-   `apps/mobile/src/native/connForkPatches.test.ts` and
-   `apps/web/src/icons/connIcons.test.ts`. Run `vp i` first: merges change
+   `apps/mobile/src/native/connForkPatches.test.ts`,
+   `apps/web/src/icons/connIcons.test.ts` and
+   `apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts`. Run `vp i` first: merges change
    dependencies. When the web typecheck reports a Lucide name missing from
    `apps/web/src/icons/lucide-react.ts`, add a line for it (the Lucide icon and
    the closest Phosphor icon). New SF Symbol names in the mobile thread feed

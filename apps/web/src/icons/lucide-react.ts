@@ -197,6 +197,7 @@ import { SquareSplitVerticalIcon as PhSquareSplitVertical } from "@phosphor-icon
 import { SquaresFourIcon as PhSquaresFour } from "@phosphor-icons/react/dist/csr/SquaresFour";
 import { StackIcon as PhStack } from "@phosphor-icons/react/dist/csr/Stack";
 import { StarIcon as PhStar } from "@phosphor-icons/react/dist/csr/Star";
+import { StopCircleIcon as PhStopCircle } from "@phosphor-icons/react/dist/csr/StopCircle";
 import { SunIcon as PhSun } from "@phosphor-icons/react/dist/csr/Sun";
 import { TableIcon as PhTable } from "@phosphor-icons/react/dist/csr/Table";
 import { TagIcon as PhTag } from "@phosphor-icons/react/dist/csr/Tag";
@@ -281,6 +282,7 @@ import {
   CircleDotIcon as LuCircleDot,
   CircleHelpIcon as LuCircleHelp,
   CircleSlashIcon as LuCircleSlash,
+  CircleStopIcon as LuCircleStop,
   CircleXIcon as LuCircleX,
   ClockIcon as LuClock,
   Clock3Icon as LuClock3,
@@ -619,6 +621,8 @@ export const CircleHelpIcon = connIcon(PhQuestion, LuCircleHelp, "circle-help"),
   CircleHelp = CircleHelpIcon;
 export const CircleSlashIcon = connIcon(PhProhibit, LuCircleSlash, "circle-slash"),
   CircleSlash = CircleSlashIcon;
+export const CircleStopIcon = connIcon(PhStopCircle, LuCircleStop, "circle-stop"),
+  CircleStop = CircleStopIcon;
 export const CircleXIcon = connIcon(PhXCircle, LuCircleX, "circle-x"),
   CircleX = CircleXIcon;
 export const ClockIcon = connIcon(PhClock, LuClock, "clock"),

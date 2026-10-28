@@ -678,7 +678,7 @@ export function ThemeLibrary({
             aria-pressed={isActive}
             className={cn(
               // The accent ring marks the picked tile; focus is a neutral ring set inside it with a gap.
-              "flex cursor-pointer flex-col items-stretch gap-1.5 rounded-lg border p-2 outline-none transition-colors focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring redesign:focus-visible:-outline-offset-7 redesign:focus-visible:outline-foreground/60",
+              "flex cursor-pointer flex-col items-stretch gap-1.5 rounded-lg border p-2 outline-none transition-colors focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-7 focus-visible:outline-foreground/60",
               isActive
                 ? "border-transparent bg-accent/30 ring-2 ring-inset ring-ring"
                 : "border-(--shell-divider-header)! bg-(--shell-highlight) hover:bg-accent/10",

@@ -25,7 +25,7 @@ const shared = {
 const PreviewListTool = Tool.make("t3_preview_list", {
   ...shared,
   description:
-    "List this thread's preview tabs. Only `runtime:'server'` entries can be automated here. Others are in the user's local desktop app. Never pass a non-server `tabId` to a `preview_*` tool. Tell the user that tab is on their local desktop and this environment cannot reach it.",
+    "List this thread's preview tabs, on this server and in the user's desktop app. `preview_*` tools drive both kinds from here, also when the desktop app is on another machine.",
   parameters: Schema.Struct({
     cursor: Schema.optional(NonNegativeInt),
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }))),

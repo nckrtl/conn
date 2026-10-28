@@ -39,7 +39,7 @@ import {
   type Workspace,
 } from "../../workspaces.logic";
 import { useWorkspaceThreadNavigation } from "../../hooks/useWorkspaceThreadNavigation";
-import { useThreadShells } from "../../state/entities";
+import { useDelegatedUnderParent, useThreadShells } from "../../state/entities";
 import { useUiStateStore } from "../../uiStateStore";
 import { workspaceAttention, workspaceThreads } from "../../workspaceActivity.logic";
 import { getProviderUpdateSidebarPillView } from "../ProviderUpdateLaunchNotification.logic";
@@ -171,6 +171,7 @@ function SortableWorkspaceButton({
 export function WorkspaceRail({ isElectron }: { isElectron: boolean }) {
   useWorkspaceThreadNavigation();
   const threads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const visited = useUiStateStore((state) => state.threadLastVisitedAtById);
   const projects = useWorkspaceStore((state) => state.availableProjects);
   const workspaces = useWorkspaceStore((state) => state.workspaces);
@@ -187,12 +188,16 @@ export function WorkspaceRail({ isElectron }: { isElectron: boolean }) {
         workspaces.map((workspace) => [
           workspace.id,
           workspaceAttention(
-            workspaceThreads(threads, workspaceProjectRefs(workspace, projects)),
+            workspaceThreads(
+              threads,
+              workspaceProjectRefs(workspace, projects),
+              delegatedUnderParent,
+            ),
             visited,
           ),
         ]),
       ),
-    [projects, threads, visited, workspaces],
+    [delegatedUnderParent, projects, threads, visited, workspaces],
   );
   // The dialog keeps its target while it animates closed; `session` remounts
   // its form each time it opens.

@@ -2,7 +2,11 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
-import { useAllEnvironmentShellsBootstrapped, useThreadShells } from "../state/entities";
+import {
+  useAllEnvironmentShellsBootstrapped,
+  useDelegatedUnderParent,
+  useThreadShells,
+} from "../state/entities";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import { lastWorkspaceThread, workspaceThreads } from "../workspaceActivity.logic";
@@ -13,6 +17,7 @@ export function useWorkspaceThreadNavigation() {
   const workspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const projectRefs = useActiveWorkspaceProjectRefs();
   const threads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const ready = useAllEnvironmentShellsBootstrapped();
   const route = useParams({ strict: false, select: resolveThreadRouteRef });
   const navigate = useNavigate();
@@ -23,7 +28,7 @@ export function useWorkspaceThreadNavigation() {
   useEffect(() => {
     const changed = previousWorkspace.current !== workspaceId;
     if (changed && !ready) return;
-    const candidates = workspaceThreads(threads, projectRefs);
+    const candidates = workspaceThreads(threads, projectRefs, delegatedUnderParent);
     if (changed) {
       previousWorkspace.current = workspaceId;
       useUiStateStore.getState().setSidebarProjectScopeKeys([]);
@@ -50,5 +55,5 @@ export function useWorkspaceThreadNavigation() {
       useWorkspaceStore
         .getState()
         .rememberThread(workspaceId, scopeThreadRef(current.environmentId, current.id));
-  }, [navigate, projectRefs, ready, route, routeKey, threads, workspaceId]);
+  }, [delegatedUnderParent, navigate, projectRefs, ready, route, routeKey, threads, workspaceId]);
 }

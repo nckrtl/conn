@@ -29,11 +29,15 @@ type WorkspaceThread = Pick<
   | "lastVisitedAt"
 >;
 
+const EMPTY_KEYS: ReadonlySet<string> = new Set();
+
 export function workspaceThreads<T extends WorkspaceThread>(
   threads: readonly T[],
   projectRefs: ReadonlySet<string> | null,
+  /** Tasks linked environments run for a listed thread; they count under that thread. */
+  delegatedUnderParent: ReadonlySet<string> = EMPTY_KEYS,
 ) {
-  return filterSidebarV2VisibleThreads(threads, projectRefs);
+  return filterSidebarV2VisibleThreads(threads, projectRefs, delegatedUnderParent);
 }
 
 export function lastWorkspaceThread(

@@ -126,20 +126,24 @@ describe("workspace attention", () => {
     }
   });
   it("suppresses done while background work continues", () => {
-    for (const kind of ["subagent", "monitor"] as const) {
+    // Subagents always hold; commands and monitors only when the agent waits on them.
+    for (const task of [
+      { taskId: "bg-1", kind: "subagent" as const },
+      { taskId: "bg-1", kind: "monitor" as const, awaited: true },
+      { taskId: "bg-1", kind: "command" as const, awaited: true },
+    ]) {
+      expect(
+        workspaceAttention([{ ...completed, pendingBackgroundTasks: [task] }], visited()).unread,
+      ).toBe(0);
+    }
+    for (const kind of ["command", "monitor"] as const) {
       expect(
         workspaceAttention(
           [{ ...completed, pendingBackgroundTasks: [{ taskId: "bg-1", kind }] }],
           visited(),
         ).unread,
-      ).toBe(0);
+      ).toBe(1);
     }
-    expect(
-      workspaceAttention(
-        [{ ...completed, pendingBackgroundTasks: [{ taskId: "bg-1", kind: "command" }] }],
-        visited(),
-      ).unread,
-    ).toBe(1);
   });
   it("prefers the server's visited watermark over this device's", () => {
     expect(

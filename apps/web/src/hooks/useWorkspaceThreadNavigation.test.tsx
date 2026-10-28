@@ -13,9 +13,12 @@ vi.mock("@tanstack/react-router", () => ({
   useParams: ({ select }: { select: (params: Record<string, string>) => unknown }) =>
     select(state.params),
 }));
+const NO_DELEGATED_TASKS: ReadonlySet<string> = new Set();
+
 vi.mock("../state/entities", () => ({
   useThreadShells: () => state.threads,
   useAllEnvironmentShellsBootstrapped: () => true,
+  useDelegatedUnderParent: () => NO_DELEGATED_TASKS,
 }));
 
 import { useUiStateStore } from "../uiStateStore";

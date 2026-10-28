@@ -55,9 +55,12 @@ vi.mock("@tanstack/react-router", () => ({
   useParams: ({ select }: { select: (params: Record<string, string>) => unknown }) =>
     select(routerState.params),
 }));
+const NO_DELEGATED_TASKS: ReadonlySet<string> = new Set();
+
 vi.mock("../state/entities", () => ({
   useThreadShells: () => routerState.threads,
   useAllEnvironmentShellsBootstrapped: () => true,
+  useDelegatedUnderParent: () => NO_DELEGATED_TASKS,
 }));
 
 import { useWorkspaceStore, WORKSPACE_STORAGE_KEY } from "../workspaceStore";

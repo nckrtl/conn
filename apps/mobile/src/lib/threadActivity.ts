@@ -111,6 +111,7 @@ export interface ThreadFeedActivity {
     | "eye"
     | "globe"
     | "search"
+    | "stop"
     | "hammer"
     | "lock"
     | "message"
@@ -249,19 +250,6 @@ export interface ThreadFeedLatestRun {
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly turnEnded?: boolean;
-}
-
-export interface AgentSpawnSummary {
-  readonly title: string;
-  readonly status: string;
-  readonly tone: "working" | "completed" | "failed" | "stopped";
-  readonly members: ReadonlyArray<{
-    readonly title: string;
-    readonly status: string;
-    readonly tone: "working" | "completed" | "failed" | "stopped";
-    readonly detail: string | undefined;
-    readonly updatedAt: string;
-  }>;
 }
 
 /** Long Android headers can ANR despite one-line display; cap labels only, preserving expanded and copied text. */
@@ -625,6 +613,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
       return "hammer";
     case "run_interrupt_request":
     case "run_interrupt_result":
+      return "stop";
     case "system_notice":
       return "warning";
     case "error":
@@ -1080,7 +1069,7 @@ export function threadFeedRunIsUnsettled(
   );
 }
 
-export function threadFeedActivityIsVisible(
+function threadFeedActivityIsVisible(
   activity: Pick<ThreadFeedActivity, "prominent" | "status" | "toolLike"> &
     Partial<Pick<ThreadFeedActivity, "lifecycleStatus">>,
 ): boolean {
@@ -1687,7 +1676,7 @@ function isWorkLogFeedRow(row: ThreadFeedEntry | undefined): boolean {
   );
 }
 
-export const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
+const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 
 function thinkingRow(createdAt: string, runId: RunId | null) {
   if (cachedThinkingRow?.createdAt !== createdAt || cachedThinkingRow.runId !== runId) {
@@ -2186,13 +2175,31 @@ export function buildThreadFeed(
 
   const entries: RawThreadFeedEntry[] = [];
   const entryRows: number[] = [];
+  // A stopped compaction's own row already says it stopped. A `/compact` run stopped
+  // before its provider started has no such row, so it keeps the interrupted one.
+  const compactPromptRunIds = new Set<RunId>();
+  const compactedRunIds = new Set<RunId>();
+  for (const { item } of visibleTurnItems) {
+    if (item.runId === null) continue;
+    if (item.type === "user_message" && isCompactionCommandMessage({ role: "user", ...item })) {
+      compactPromptRunIds.add(item.runId);
+    } else if (item.type === "compaction") {
+      compactedRunIds.add(item.runId);
+    }
+  }
   for (let index = restart?.row ?? 0; index < visibleTurnItems.length; index += 1) {
     const row = visibleTurnItems[index]!;
     const item = row.item;
     if (turnItemIsWorkspacePreparation(item)) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
-    if (item.type === "run_interrupt_request") {
+    if (
+      item.type === "run_interrupt_request" ||
+      (item.type === "run_interrupt_result" &&
+        item.runId !== null &&
+        compactPromptRunIds.has(item.runId) &&
+        compactedRunIds.has(item.runId))
+    ) {
       continue;
     }
     const attemptId = resolveAttemptId(item);

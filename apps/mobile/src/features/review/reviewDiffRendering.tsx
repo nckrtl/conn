@@ -7,7 +7,7 @@ import { MOBILE_CODE_SURFACE } from "../../lib/typography";
 import type { ReviewRenderableLineRow } from "./reviewModel";
 import type { ReviewHighlightedToken } from "./reviewHighlightedToken.types";
 
-export const REVIEW_DIFF_LINE_HEIGHT = MOBILE_CODE_SURFACE.rowHeight;
+const REVIEW_DIFF_LINE_HEIGHT = MOBILE_CODE_SURFACE.rowHeight;
 
 export function renderVisibleWhitespace(value: string): string {
   const expandedTabs = value.replace(/\t/g, "    ");
@@ -20,7 +20,7 @@ export function changeTone(change: ReviewRenderableLineRow["change"]): string {
   return "bg-card";
 }
 
-export function changeBarTone(change: ReviewRenderableLineRow["change"]): string {
+function changeBarTone(change: ReviewRenderableLineRow["change"]): string {
   if (change === "add") return "bg-emerald-400";
   if (change === "delete") return "bg-rose-400";
   return "bg-border/50";

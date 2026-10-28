@@ -53,7 +53,7 @@ beforeEach(() => {
     lastThreadByWorkspace: { b: ref("b1") },
     availableProjects: [],
   });
-  useUiStateStore.getState().setSidebarProjectScopeKey("old-project-filter");
+  useUiStateStore.getState().setSidebarProjectScopeKeys(["old-project-filter"]);
 });
 afterEach(async () => {
   await act(() => renderer?.unmount());
@@ -73,7 +73,7 @@ describe("workspace navigation", () => {
       params: { environmentId: "local", threadId: "b1" },
     });
     expect(useWorkspaceStore.getState().lastThreadByWorkspace.b).toEqual(ref("b1"));
-    expect(useUiStateStore.getState().sidebarProjectScopeKey).toBeNull();
+    expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([]);
     state.params = { environmentId: "local", threadId: "b1" };
     await act(() => {
       renderer?.update(<Probe />);

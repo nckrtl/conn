@@ -1,12 +1,15 @@
 import { EnvironmentId, type ServerConfig, ThreadId, TurnItemId } from "@t3tools/contracts";
+import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
 import * as Option from "effect/Option";
 import { describe, expect, it } from "vite-plus/test";
 
 import { BearerConnectionProfile } from "./connection/catalog.ts";
 import { BearerConnectionTarget, RelayConnectionTarget } from "./connection/model.ts";
 import type { EnvironmentPresentation } from "./connection/presentation.ts";
+import type { RelayDiscoveredEnvironment } from "./relay/discovery.ts";
 import {
   linkableMachines,
+  linkedEnvironmentNames,
   linkRequestAnswerInput,
   linkRequestDisplay,
   linkRequestFailureMessage,
@@ -142,6 +145,45 @@ const presentation = (
   };
 };
 
+const discovered = (
+  id: string,
+  label: string,
+  machine?: "mac-mini",
+): RelayDiscoveredEnvironment => ({
+  environment: {
+    environmentId: EnvironmentId.make(id),
+    label,
+    endpoint: {
+      httpBaseUrl: `https://${id}.t3.example`,
+      wsBaseUrl: `wss://${id}.t3.example`,
+      providerKind: "cloudflare_tunnel",
+    },
+    linkedAt: "2026-10-01T00:00:00.000Z",
+  },
+  availability: "online",
+  status:
+    machine === undefined
+      ? Option.none()
+      : Option.some({
+          environmentId: EnvironmentId.make(id),
+          endpoint: {
+            httpBaseUrl: `https://${id}.t3.example`,
+            wsBaseUrl: `wss://${id}.t3.example`,
+            providerKind: "cloudflare_tunnel",
+          },
+          status: "online",
+          checkedAt: "2026-10-01T00:00:00.000Z",
+          descriptor: {
+            environmentId: EnvironmentId.make(id),
+            label,
+            platform: { os: "darwin", arch: "arm64", machine },
+            serverVersion: "1.0.0",
+            capabilities: {},
+          },
+        } as unknown as RelayEnvironmentStatusResponse),
+  error: Option.none(),
+});
+
 describe("linkableMachines", () => {
   it("lists the other machines with reported addresses before saved ones, once each", () => {
     const here = presentation("environment-here", "Here", { saved: ["http://localhost:3773"] });
@@ -154,8 +196,8 @@ describe("linkableMachines", () => {
       linkableMachines({
         environments: [here, vps, mini],
         threadEnvironmentId: here.environmentId,
-        linkedIds: new Set([mini.environmentId]),
-        connectAddresses: new Map(),
+        links: [{ environmentId: mini.environmentId, status: "unreachable" }],
+        connect: new Map(),
       }),
     ).toEqual([
       {
@@ -163,6 +205,7 @@ describe("linkableMachines", () => {
         label: "VPS",
         machine: "laptop",
         connected: true,
+        connectOnly: false,
         linked: false,
         urls: ["https://vps.ts.net", "https://vps.example.com"],
       },
@@ -171,6 +214,7 @@ describe("linkableMachines", () => {
         label: "Mini",
         machine: "server",
         connected: false,
+        connectOnly: false,
         linked: true,
         urls: [],
       },
@@ -183,19 +227,117 @@ describe("linkableMachines", () => {
     const [listed] = linkableMachines({
       environments: [here, box],
       threadEnvironmentId: here.environmentId,
-      linkedIds: new Set(),
-      connectAddresses: new Map([[box.environmentId, "https://box.t3.example"]]),
+      links: [],
+      connect: new Map([[box.environmentId, discovered(box.environmentId, "Box")]]),
     });
-    expect(listed?.urls).toEqual(["https://box.t3.example"]);
+    expect(listed?.urls).toEqual(["https://environment-box.t3.example"]);
     // Until discovery has found it, there is no address to offer.
     expect(
       linkableMachines({
         environments: [here, box],
         threadEnvironmentId: here.environmentId,
-        linkedIds: new Set(),
-        connectAddresses: new Map(),
+        links: [],
+        connect: new Map(),
       })[0]?.urls,
     ).toEqual([]);
+  });
+
+  it("also offers the Connect address of a machine saved by direct address, last", () => {
+    const here = presentation("environment-here", "Here", { saved: ["http://localhost:3773"] });
+    const vps = presentation("environment-vps", "VPS", {
+      saved: ["http://192.168.1.20:3773"],
+      reported: ["https://vps.ts.net"],
+    });
+    const [listed] = linkableMachines({
+      environments: [here, vps],
+      threadEnvironmentId: here.environmentId,
+      links: [],
+      connect: new Map([[vps.environmentId, discovered(vps.environmentId, "VPS")]]),
+    });
+    expect(listed?.urls).toEqual([
+      "https://vps.ts.net",
+      "http://192.168.1.20:3773",
+      "https://environment-vps.t3.example",
+    ]);
+  });
+
+  it("no longer counts a machine as linked once its link expired", () => {
+    const here = presentation("environment-here", "Here", { saved: ["http://localhost:3773"] });
+    const vps = presentation("environment-vps", "VPS", { saved: ["https://vps.ts.net"] });
+    const mini = presentation("environment-mini", "Mini", { saved: ["http://mini.local:3773"] });
+    const listed = linkableMachines({
+      environments: [here, vps, mini],
+      threadEnvironmentId: here.environmentId,
+      links: [
+        { environmentId: vps.environmentId, status: "expired" },
+        { environmentId: mini.environmentId, status: "unreachable" },
+        { environmentId: EnvironmentId.make("environment-old"), status: "expired" },
+      ],
+      connect: new Map([["environment-old", discovered("environment-old", "Old box")]]),
+    });
+    expect(listed.map((machine) => [machine.label, machine.linked])).toEqual([
+      ["VPS", false],
+      ["Mini", true],
+      ["Old box", false],
+    ]);
+  });
+
+  it("offers machines only on T3 Connect after the saved ones, at their Connect address", () => {
+    const here = presentation("environment-here", "Here", { saved: ["http://localhost:3773"] });
+    const vps = presentation("environment-vps", "VPS", { saved: ["https://vps.ts.net"] });
+    const listed = linkableMachines({
+      environments: [here, vps],
+      threadEnvironmentId: here.environmentId,
+      links: [{ environmentId: EnvironmentId.make("environment-old"), status: "reachable" }],
+      connect: new Map([
+        // This environment and saved machines are listed once, as saved.
+        [here.environmentId, discovered(here.environmentId, "Here")],
+        [vps.environmentId, discovered(vps.environmentId, "VPS")],
+        ["environment-mini", discovered("environment-mini", "Mac mini", "mac-mini")],
+        ["environment-old", discovered("environment-old", "Old box")],
+      ]),
+    });
+    expect(listed.map((machine) => [machine.label, machine.connectOnly])).toEqual([
+      ["VPS", false],
+      ["Mac mini", true],
+      ["Old box", true],
+    ]);
+    expect(listed[1]).toEqual({
+      environmentId: EnvironmentId.make("environment-mini"),
+      label: "Mac mini",
+      machine: "mac-mini",
+      connected: false,
+      connectOnly: true,
+      linked: false,
+      urls: ["https://environment-mini.t3.example"],
+    });
+    expect(listed[2]).toMatchObject({ machine: "server", linked: true });
+  });
+});
+
+describe("linkedEnvironmentNames", () => {
+  it("names the unexpired links as this client does, else as the link does", () => {
+    const vps = EnvironmentId.make("environment-vps");
+    const mini = EnvironmentId.make("environment-mini");
+    const unsaved = EnvironmentId.make("environment-unsaved");
+    expect(
+      linkedEnvironmentNames({
+        links: [
+          { environmentId: vps, label: "vps-01", status: "unreachable" },
+          { environmentId: mini, label: "mini", status: "expired" },
+          { environmentId: unsaved, label: "Office box", status: "reachable" },
+        ],
+        environments: [
+          { environmentId: vps, label: "Hetzner VPS" },
+          { environmentId: mini, label: "Mac mini" },
+        ],
+      }),
+    ).toEqual(
+      new Map([
+        [vps, "Hetzner VPS"],
+        [unsaved, "Office box"],
+      ]),
+    );
   });
 });
 
@@ -223,7 +365,14 @@ describe("rankMachinesByHint", () => {
       { environmentId: EnvironmentId.make("environment-vps"), label: "Hetzner VPS" },
     ].map(
       (machine) =>
-        ({ ...machine, machine: "server", connected: true, linked: false, urls: [] }) as const,
+        ({
+          ...machine,
+          machine: "server",
+          connected: true,
+          connectOnly: false,
+          linked: false,
+          urls: [],
+        }) as const,
     );
     expect(linkRequestInitialMachine({ hint: "vps" }, listed)).toBe("environment-vps");
     // Agents pass the user's words, which name the machine among others.

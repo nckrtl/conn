@@ -21,21 +21,22 @@ import {
   type OrchestrationV2ProjectedTurnItem,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import { useMemo, useRef, useState } from "react";
 import { Modal, Platform, Pressable, ScrollView, View, type ColorValue } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
-import { Button } from "../../components/ui/Button";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { useLinkableMachines } from "../../state/peerLinks";
 import { mintPairingCodeOn } from "../../state/peerPairingCode";
 import { serverEnvironment } from "../../state/server";
 import { useEnvironmentScope, usePreparedConnection } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { SettingsChoiceRow } from "../settings/components/SettingsChoiceRow";
+import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoiceRow";
 import { SettingsSection } from "../settings/components/SettingsSection";
+import { Button } from "../../components/ui/Button";
 import { RUNTIME_MODE_CHOICES } from "./thread-settings-options";
 
 /** The same five levels as web's access picker: read-only, then the runtime modes. */
@@ -162,6 +163,8 @@ function PendingLinkRequest(props: {
             fullWidth
             disabled={declining}
             onPress={() => setOpen(true)}
+            tone="primary"
+            fullWidth
           />
           <View className="flex-row justify-end">
             <Pressable
@@ -266,52 +269,51 @@ function LinkRequestSheet(props: {
     (useExisting ||
       ((!needsAddress || address.trim().length > 0) && (canMint || pairingCode.trim().length > 0)));
 
+  const prepareAnswer = async () => {
+    if (target.kind === "none") return null;
+    if (target.kind === "machine" && target.linked) {
+      return linkRequestAnswerInput(item, {
+        type: "use-existing",
+        environmentId: target.environmentId,
+      });
+    }
+    let code = pairingCode;
+    if (canMint && targetId !== null) {
+      const minted = await mintPairingCodeOn(targetId, access);
+      if (Result.isFailure(minted)) {
+        setMintFailed((failed) => new Set(failed).add(targetId));
+        setError(linkRequestFailureMessage(minted.failure));
+        return null;
+      }
+      code = minted.success;
+    }
+    return linkRequestAnswerInput(item, {
+      type: "link",
+      target:
+        target.kind === "address"
+          ? { url: address }
+          : { ...target, urls: needsAddress ? [address.trim()] : target.urls },
+      access,
+      pairingCode: code,
+    });
+  };
+
   const submit = async () => {
     if (inFlight.current || target.kind === "none") return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
-    try {
-      let input;
-      if (target.kind === "machine" && target.linked) {
-        input = linkRequestAnswerInput(item, {
-          type: "use-existing",
-          environmentId: target.environmentId,
-        });
-      } else {
-        let code = pairingCode;
-        if (canMint && targetId !== null) {
-          try {
-            code = await mintPairingCodeOn(targetId);
-          } catch (cause) {
-            setMintFailed((failed) => new Set(failed).add(targetId));
-            setError(linkRequestFailureMessage(cause));
-            return;
-          }
-        }
-        input = linkRequestAnswerInput(item, {
-          type: "link",
-          target:
-            target.kind === "address"
-              ? { url: address }
-              : { ...target, urls: needsAddress ? [address.trim()] : target.urls },
-          access,
-          pairingCode: code,
-        });
-      }
-      if (input === null) return;
-      const result = await answer({ environmentId: props.environmentId, input });
-      if (result._tag === "Success") {
-        setPairingCode("");
-        props.onClose();
-        return;
-      }
-      if (!isAtomCommandInterrupted(result)) {
-        setError(linkRequestFailureMessage(squashAtomCommandFailure(result)));
-      }
-    } finally {
-      inFlight.current = false;
-      setBusy(false);
+    const input = await prepareAnswer();
+    const result =
+      input === null ? null : await answer({ environmentId: props.environmentId, input });
+    inFlight.current = false;
+    setBusy(false);
+    if (result === null) return;
+    if (result._tag === "Success") {
+      setPairingCode("");
+      props.onClose();
+    } else if (!isAtomCommandInterrupted(result)) {
+      setError(linkRequestFailureMessage(squashAtomCommandFailure(result)));
     }
   };
 
@@ -319,7 +321,10 @@ function LinkRequestSheet(props: {
     <Modal
       animationType="slide"
       presentationStyle={Platform.OS === "ios" ? "pageSheet" : "fullScreen"}
-      onRequestClose={props.onClose}
+      // An answer that lands after a close would still link, and would close a reopened sheet.
+      onRequestClose={() => {
+        if (!busy) props.onClose();
+      }}
     >
       <ScrollView
         className="flex-1 bg-sheet-solid"
@@ -447,12 +452,12 @@ function LinkRequestSheet(props: {
         ) : null}
         <Button
           label={busy ? "Linking…" : useExisting ? "Use this link" : "Link"}
-          tone="primary"
-          fullWidth
           disabled={busy || !ready}
           onPress={() => void submit()}
+          tone="primary"
+          fullWidth
         />
-        <Button label="Cancel" tone="secondary" fullWidth disabled={busy} onPress={props.onClose} />
+        <Button label="Cancel" tone="secondary" disabled={busy} onPress={props.onClose} fullWidth />
       </ScrollView>
     </Modal>
   );
@@ -467,7 +472,13 @@ function MachineRow(props: {
   readonly onPress: () => void;
 }) {
   const { machine } = props;
-  const status = machine.linked ? "Linked" : machine.connected ? null : "Not connected";
+  const status = machine.linked
+    ? "Linked"
+    : machine.connected
+      ? null
+      : machine.connectOnly
+        ? "T3 Connect"
+        : "Not connected";
   return (
     <Pressable
       accessibilityRole="radio"

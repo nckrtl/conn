@@ -4,7 +4,7 @@ import { WorkspaceExtraTab } from "./WorkspaceExtraTab";
 import { SettingsRouteScreen } from "../settings/SettingsRouteScreen";
 import { WorkspaceSectionToolbar } from "./WorkspaceSectionToolbar";
 import { useNavigation } from "@react-navigation/native";
-import { use, useCallback, useMemo } from "react";
+import { use } from "react";
 import { Platform, View, useWindowDimensions } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import { SafeAreaInsetsContext, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -18,7 +18,6 @@ import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { useWorkspaceSurface } from "./useWorkspaceSurface";
 import {
   useDeviceType,
-  useDuoBottomBarInset,
   useNativeColumnLayoutMetrics,
   useNativeLayoutMetrics,
 } from "../../native/native-layout-metrics";
@@ -37,7 +36,6 @@ import {
 import { WorkspaceToolbar } from "./WorkspaceToolbar";
 import {
   WORKSPACE_DOCK,
-  workspaceSearchBottomClearance,
   workspaceDockBottomClearance,
   workspaceToolbarHeight,
 } from "./workspace-tabs-state";
@@ -98,18 +96,14 @@ function WorkspaceRootContent() {
       (nativeMetrics !== null && nativeMetrics.verticalBarEdge !== "none"));
   const width = columnMetrics?.width ?? windowWidth;
   const insets = useSafeAreaInsets();
-  const bottomBarInset = useDuoBottomBarInset();
   const keyboardHeight = useKeyboardState((keyboard) => keyboard.height);
   const workspace = useWorkspaceTabs()!;
   const { state } = workspace;
-  const renderHeaderTitle = useCallback(
-    () => (
-      <WorkspaceRootTitle
-        maxWidth={Math.max(0, width - 160)}
-        onOpenEnvironments={() => openSettings(navigation, "SettingsEnvironments")}
-      />
-    ),
-    [width, navigation],
+  const renderHeaderTitle = () => (
+    <WorkspaceRootTitle
+      maxWidth={Math.max(0, width - 160)}
+      onOpenEnvironments={() => openSettings(navigation, "SettingsEnvironments")}
+    />
   );
   // Settings is a workspace tab too; its list takes the place of the selected tab's.
   const settingsOpen = workspace.settingsOpen;
@@ -118,11 +112,8 @@ function WorkspaceRootContent() {
     layout.primarySidebarOverlaysContent && state.selectedTab === "usage"
       ? workspaceDockBottomClearance({ bottomInset: insets.bottom, keyboardHeight })
       : Platform.OS === "ios" && isDuoDevice(deviceType)
-        ? workspaceSearchBottomClearance({
-            bottomInset: insets.bottom,
-            bottomBarInset,
-            keyboardHeight,
-          })
+        ? // The column's safe area already holds the Duo's search toolbar and keyboard.
+          Math.max(insets.bottom, keyboardHeight) + 16
         : compactTabs || deviceType === "pad"
           ? workspaceDockBottomClearance({ bottomInset: insets.bottom, keyboardHeight })
           : Platform.OS === "ios"
@@ -135,7 +126,7 @@ function WorkspaceRootContent() {
             : keyboardHeight > 0 && tab.searchMode !== "resting"
               ? keyboardHeight + 64
               : Math.max(insets.bottom, 12) + workspaceToolbarHeight(tab.searchMode) + 16;
-  const context = useMemo(() => ({ ...workspace, bottomClearance }), [workspace, bottomClearance]);
+  const context = { ...workspace, bottomClearance };
 
   return (
     <WorkspaceTabsContext value={context}>

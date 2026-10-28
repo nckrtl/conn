@@ -4,13 +4,46 @@ import {
   type EnvironmentMachineKind,
   type OrchestrationV2TurnItem,
   type PeerLinkRequestAnswerInput,
+  type PeerLinkSummary,
   resolveEnvironmentMachineKind,
+  type ServerConfig,
 } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 
 import type { EnvironmentPresentation } from "./connection/presentation.ts";
 import { connectionRoutes, routeHttpBaseUrl } from "./connection/routes.ts";
+import type { RelayDiscoveredEnvironment } from "./relay/discovery.ts";
 
 export type LinkRequestItem = Extract<OrchestrationV2TurnItem, { readonly type: "link_request" }>;
+
+/** Whether an environment offers links: it supports them and its Linked environments beta is on. */
+export const offersLinkedEnvironments = (
+  config: Pick<ServerConfig, "environment" | "settings"> | null | undefined,
+): boolean =>
+  config?.environment.capabilities.peerLinks === true && config.settings.linkedEnvironmentsEnabled;
+
+/**
+ * The machines an environment's agents can work on, by name: its links that have not
+ * expired, named as this client names them, else as the link does.
+ */
+export function linkedEnvironmentNames(input: {
+  readonly links: ReadonlyArray<Pick<PeerLinkSummary, "environmentId" | "label" | "status">>;
+  readonly environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  }>;
+}): ReadonlyMap<EnvironmentId, string> {
+  const names = new Map(
+    input.environments.map((environment) => [environment.environmentId, environment.label]),
+  );
+  return new Map(
+    input.links.flatMap((link) =>
+      link.status === "expired"
+        ? []
+        : [[link.environmentId, names.get(link.environmentId) ?? link.label] as const],
+    ),
+  );
+}
 
 /** The access a request opens with: the agent's suggestion, else supervised. */
 export const linkRequestDefaultAccess = (
@@ -27,53 +60,85 @@ export interface LinkableMachine {
   readonly label: string;
   readonly machine: EnvironmentMachineKind;
   readonly connected: boolean;
+  /** Found on the user's T3 Connect account rather than saved in this client. */
+  readonly connectOnly: boolean;
   /** Whether the thread's environment already has a link to it. */
   readonly linked: boolean;
   /**
    * Where the client knows it answers, most preferred first: the addresses it
-   * reports, then its saved routes, a T3 Connect route by its Connect address.
-   * The server keeps only those that answer as this machine. Empty for a
-   * machine reached only over SSH, whose forward lives in this client.
+   * reports, then its saved routes, then its T3 Connect address. The server
+   * keeps only those that answer as this machine. Empty for a machine reached
+   * only over SSH, whose forward lives in this client.
    */
   readonly urls: ReadonlyArray<string>;
 }
 
 /**
- * The machines in the client's catalog other than the thread's own
- * environment, in catalog order. `linkedIds` are the environments the thread's
- * environment links to already. `connectAddresses` are the T3 Connect
- * addresses relay discovery found, by environment id: a server reaches a
- * machine there as a browser does, so a Connect route is a usable address.
+ * The catalog's machines other than the thread's own, in catalog order, then those only T3
+ * Connect knows. `links` are the thread environment's; an expired one no longer counts as
+ * linked. `connect` is what relay discovery found, and a server reaches a machine there as a
+ * browser does, so its Connect address is usable.
  */
 export function linkableMachines(input: {
   readonly environments: ReadonlyArray<
     EnvironmentPresentation & { readonly environmentId: EnvironmentId }
   >;
   readonly threadEnvironmentId: EnvironmentId;
-  readonly linkedIds: ReadonlySet<EnvironmentId>;
-  readonly connectAddresses: ReadonlyMap<string, string>;
+  readonly links: ReadonlyArray<Pick<PeerLinkSummary, "environmentId" | "status">>;
+  readonly connect: ReadonlyMap<string, RelayDiscoveredEnvironment>;
 }): ReadonlyArray<LinkableMachine> {
-  return input.environments
+  const linkedIds = new Set(
+    input.links.flatMap((link) => (link.status === "expired" ? [] : [link.environmentId])),
+  );
+  const saved = input.environments
     .filter((environment) => environment.environmentId !== input.threadEnvironmentId)
     .map((environment) => {
       const reported = (environment.serverConfig?.directEndpoints ?? []).map(
         (endpoint) => endpoint.httpBaseUrl,
       );
-      const connect = input.connectAddresses.get(environment.environmentId);
-      const saved = connectionRoutes(environment.entry).flatMap((route) => {
-        const url =
-          route.target._tag === "RelayConnectionTarget" ? connect : routeHttpBaseUrl(route);
-        return url === null || url === undefined ? [] : [url];
+      const routes = connectionRoutes(environment.entry).flatMap((route) => {
+        const url = route.target._tag === "RelayConnectionTarget" ? null : routeHttpBaseUrl(route);
+        return url === null ? [] : [url];
       });
+      const connect = input.connect.get(environment.environmentId)?.environment.endpoint;
       return {
         environmentId: environment.environmentId,
         label: environment.entry.target.label,
         machine: resolveEnvironmentMachineKind(environment.serverConfig),
         connected: environment.connection.phase === "connected",
-        linked: input.linkedIds.has(environment.environmentId),
-        urls: [...new Set([...reported, ...saved])],
+        connectOnly: false,
+        linked: linkedIds.has(environment.environmentId),
+        urls: [
+          ...new Set([
+            ...reported,
+            ...routes,
+            ...(connect === undefined ? [] : [connect.httpBaseUrl]),
+          ]),
+        ],
       };
     });
+  const savedIds = new Set<string>(saved.map((machine) => machine.environmentId));
+  const connectOnly = [...input.connect.values()]
+    .filter(
+      ({ environment }) =>
+        environment.environmentId !== input.threadEnvironmentId &&
+        !savedIds.has(environment.environmentId),
+    )
+    .map(({ environment, status }) => {
+      const descriptor = Option.getOrUndefined(status)?.descriptor;
+      return {
+        environmentId: environment.environmentId,
+        label: environment.label,
+        machine: resolveEnvironmentMachineKind(
+          descriptor === undefined ? null : { environment: descriptor },
+        ),
+        connected: false,
+        connectOnly: true,
+        linked: linkedIds.has(environment.environmentId),
+        urls: [environment.endpoint.httpBaseUrl],
+      };
+    });
+  return [...saved, ...connectOnly];
 }
 
 const words = (text: string) =>

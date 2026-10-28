@@ -16,13 +16,13 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 
 const EMPTY_THREAD_SHELLS: ReadonlyArray<EnvironmentThreadShell> = [];
 const EMPTY_ENVIRONMENTS: ReadonlyArray<ComposerEnvironmentCandidate> = [];
+const NO_LINKED_ENVIRONMENTS: ReadonlyMap<EnvironmentId, string> = new Map();
 import { COMPOSER_CONTEXT_MAX_RECORDS } from "@t3tools/contracts";
-import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
 import {
-  environmentComposerContext,
-  pullRequestComposerContext,
-  threadComposerContext,
-} from "../../lib/composerContext";
+  formatComposerContextReference,
+  threadContextRecord,
+} from "@t3tools/shared/composerContextReferences";
+import { environmentComposerContext, pullRequestComposerContext } from "../../lib/composerContext";
 import { uuidv4 } from "../../lib/uuid";
 import {
   getComposerDraftSnapshot,
@@ -215,6 +215,7 @@ export function useComposerCommandMenu({
   environmentId,
   threadShells = EMPTY_THREAD_SHELLS,
   environments = EMPTY_ENVIRONMENTS,
+  linkedEnvironments = NO_LINKED_ENVIRONMENTS,
   currentThreadId = null,
   projectCwd,
   pullRequestProjectId = null,
@@ -236,6 +237,8 @@ export function useComposerCommandMenu({
   readonly threadShells?: ReadonlyArray<EnvironmentThreadShell>;
   /** Candidates for `@` machine suggestions: the user's environments. */
   readonly environments?: ReadonlyArray<ComposerEnvironmentCandidate>;
+  /** The machines `environmentId` links to, by name, whose threads the picker also offers. */
+  readonly linkedEnvironments?: ReadonlyMap<EnvironmentId, string>;
   /** Left out of `@` thread suggestions: a thread is never context for itself. */
   readonly currentThreadId?: ThreadId | null;
   readonly projectCwd: string | null;
@@ -285,6 +288,7 @@ export function useComposerCommandMenu({
   );
   // Every draft change rechecks a stale snapshot, including drafts written by
   // another surface (a prompt link) that never move the editor selection.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshes the provider workspace snapshot atom whenever the draft text changes from any surface
   useEffect(() => {
     refreshWorkspaceSnapshot();
   }, [
@@ -468,6 +472,7 @@ export function useComposerCommandMenu({
         ? matchComposerThreadItems({
             shells: threadShells,
             environmentId,
+            linkedEnvironments,
             excludeThreadId: currentThreadId,
             query: trigger.query,
             now,
@@ -498,6 +503,32 @@ export function useComposerCommandMenu({
 
   const onSelect = (item: ComposerCommandItem) => {
     if (!trigger) return;
+    if (item.type === "environment") {
+      if (!ownerKey || trigger.kind !== "path") return;
+      const record = environmentComposerContext(item.environmentId, item.label);
+      const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
+      const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
+      if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {
+        Dialog.alert("Too many context items", "Remove some context from the draft and try again.");
+        return;
+      }
+      const result = replaceTextRange(
+        draftMessage,
+        trigger.rangeStart,
+        trigger.rangeEnd,
+        `${formatComposerContextReference(record)} `,
+      );
+      onChangeDraftMessage(result.text);
+      if (!alreadyAttached) {
+        const draft = getComposerDraftSnapshot(ownerKey);
+        setComposerDraftContext(ownerKey, {
+          version: 1,
+          records: [...(draft.context?.records ?? []), record],
+        });
+      }
+      setSelection({ start: result.cursor, end: result.cursor });
+      return;
+    }
     if (item.type === "thread") {
       if (!ownerKey || trigger.kind !== "path") return;
       const shell = threadShells.find(
@@ -506,7 +537,7 @@ export function useComposerCommandMenu({
           candidate.id === item.thread.threadId,
       );
       if (!shell) return;
-      const record = threadComposerContext(item.thread, shell.title);
+      const record = threadContextRecord(item.thread, shell.title);
       const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
       const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
       if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {

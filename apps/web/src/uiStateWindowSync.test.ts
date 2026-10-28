@@ -5,7 +5,7 @@ import { mergeOtherWindowUiState, type UiState } from "./uiStateStore";
 const base: UiState = {
   projectExpandedById: { p1: true, p2: true },
   projectOrder: ["p1", "p2"],
-  sidebarProjectScopeKey: "local-scope",
+  sidebarProjectScopeKeys: ["local-scope"],
   threadLastVisitedAtById: { t1: "2026-09-29T10:00:00.000Z" },
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
@@ -18,11 +18,11 @@ describe("mergeOtherWindowUiState", () => {
       ...base,
       projectExpandedById: { p1: false, p2: true },
       projectOrder: ["p2", "p1"],
-      sidebarProjectScopeKey: "other-scope",
+      sidebarProjectScopeKeys: ["other-scope"],
       threadLastVisitedAtById: { t1: "2026-09-29T10:00:00.000Z", t2: "2026-09-29T11:00:00.000Z" },
     };
     const merged = mergeOtherWindowUiState(base, incoming, () => false);
-    expect(merged.state).toEqual({ ...incoming, sidebarProjectScopeKey: "local-scope" });
+    expect(merged.state).toEqual({ ...incoming, sidebarProjectScopeKeys: ["local-scope"] });
     expect(merged.localAhead).toBe(false);
   });
 
@@ -37,7 +37,7 @@ describe("mergeOtherWindowUiState", () => {
   it("changes nothing when only the project scope differs", () => {
     const merged = mergeOtherWindowUiState(
       base,
-      { ...base, sidebarProjectScopeKey: "other" },
+      { ...base, sidebarProjectScopeKeys: ["other"] },
       () => false,
     );
     expect(merged).toEqual({ state: null, localAhead: false });

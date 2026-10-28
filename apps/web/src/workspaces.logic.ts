@@ -173,7 +173,7 @@ export function nextWorkspaceColor(workspaces: readonly Workspace[]): WorkspaceC
 /**
  * The environment-scoped project refs ("<environmentId>:<projectId>") the
  * sidebar shows, given the active workspace and the sidebar's own
- * single-project filter. Null means every project.
+ * project filter (empty means no filter). Null means every project.
  */
 export function resolveScopedProjectKeys<
   G extends {
@@ -186,13 +186,13 @@ export function resolveScopedProjectKeys<
 >(input: {
   readonly projectGroups: readonly G[];
   readonly workspace: Workspace | null;
-  readonly scopedProjectGroup: G | null;
+  readonly scopedProjectGroups: readonly G[];
 }): ReadonlySet<string> | null {
-  const { projectGroups, workspace, scopedProjectGroup } = input;
-  if (workspace === null && scopedProjectGroup === null) return null;
+  const { projectGroups, workspace, scopedProjectGroups } = input;
+  if (workspace === null && scopedProjectGroups.length === 0) return null;
   const inWorkspace = workspace === null ? null : new Set<string>(workspace.projectKeys);
   const refs = new Set(workspace?.projectRefs ?? []);
-  const groups = scopedProjectGroup === null ? projectGroups : [scopedProjectGroup];
+  const groups = scopedProjectGroups.length === 0 ? projectGroups : scopedProjectGroups;
   return new Set(
     groups.flatMap((group) =>
       group.memberProjectRefs

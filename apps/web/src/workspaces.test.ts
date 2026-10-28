@@ -65,21 +65,21 @@ describe("workspaces.logic", () => {
       resolveScopedProjectKeys({
         projectGroups: groups,
         workspace: null,
-        scopedProjectGroup: null,
+        scopedProjectGroups: [],
       }),
     ).toBeNull();
     expect(
       resolveScopedProjectKeys({
         projectGroups: groups,
         workspace: workspace("Desktop", ["repo:drift", "repo:rooms", "repo:gone"]),
-        scopedProjectGroup: null,
+        scopedProjectGroups: [],
       }),
     ).toEqual(new Set(["local:p2", "local:p3"]));
     expect(
       resolveScopedProjectKeys({
         projectGroups: groups,
         workspace: null,
-        scopedProjectGroup: orbit,
+        scopedProjectGroups: [orbit],
       }),
     ).toEqual(new Set(["local:p1", "beast:p9"]));
   });
@@ -90,21 +90,21 @@ describe("workspaces.logic", () => {
       resolveScopedProjectKeys({
         projectGroups: [orbit, drift, rooms],
         workspace: desktop,
-        scopedProjectGroup: drift,
+        scopedProjectGroups: [drift],
       }),
     ).toEqual(new Set(["local:p2"]));
     expect(
       resolveScopedProjectKeys({
         projectGroups: [orbit, drift, rooms],
         workspace: desktop,
-        scopedProjectGroup: orbit,
+        scopedProjectGroups: [orbit],
       }),
     ).toEqual(new Set());
     expect(
       resolveScopedProjectKeys({
         projectGroups: [orbit],
         workspace: workspace("Empty", []),
-        scopedProjectGroup: null,
+        scopedProjectGroups: [],
       }),
     ).toEqual(new Set());
   });
@@ -115,21 +115,21 @@ describe("workspaces.logic", () => {
       resolveScopedProjectKeys({
         projectGroups: [orbit, drift],
         workspace: localOnly,
-        scopedProjectGroup: null,
+        scopedProjectGroups: [],
       }),
     ).toEqual(new Set(["local:p1"]));
     expect(
       resolveScopedProjectKeys({
         projectGroups: [orbit],
         workspace: { ...localOnly, projectRefs: ["beast:p9"] },
-        scopedProjectGroup: orbit,
+        scopedProjectGroups: [orbit],
       }),
     ).toEqual(new Set(["beast:p9"]));
     expect(
       resolveScopedProjectKeys({
         projectGroups: [orbit],
         workspace: { ...localOnly, projectRefs: [] },
-        scopedProjectGroup: null,
+        scopedProjectGroups: [],
       }),
     ).toEqual(new Set());
     const catalog = [

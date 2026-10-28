@@ -69,7 +69,7 @@ const queuedRunEdits = makeQueuedRunEditStore<EditingQueuedRun>({
   label: "web-queued-run-edits",
 });
 
-export interface QueuedRunEditContent {
+interface QueuedRunEditContent {
   readonly prompt: string;
   readonly images: ReadonlyArray<ComposerImageAttachment>;
   readonly files: ReadonlyArray<ComposerFileAttachment>;
@@ -77,7 +77,6 @@ export interface QueuedRunEditContent {
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
-  /** Conn: machine @-mentions. */
   readonly environmentContexts: ReadonlyArray<EnvironmentContextRecord>;
 }
 
@@ -101,7 +100,7 @@ async function submitQueuedRunEdit(input: {
       const reason = fileAttachmentCapabilityBlockReason({
         files,
         attachmentUploadsCapabilityKnown: config !== null,
-        supportsAttachmentUploads: config?.environment.capabilities.attachmentUploads === true,
+        supportsAttachmentUploads: config !== null,
         maxFileAttachmentBytes:
           config?.environment.capabilities.fileAttachments?.maxUploadBytes ?? null,
       });

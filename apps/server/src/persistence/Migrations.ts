@@ -88,6 +88,8 @@ import Migration0069 from "./Migrations/069_ThreadMessageSearch.ts";
 // Conn: upstream's preview shipped PeerLinks at 61; Conn then kept it at 62 through 69,
 // which upstream main gives to its own migrations. See reconcileConnPeerLinksMigration.
 import Migration0070 from "./Migrations/070_PeerLinks.ts";
+import Migration0071 from "./Migrations/071_PeerLinkFence.ts";
+import Migration0072 from "./Migrations/072_WaitingLinkRequestIndex.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -172,6 +174,8 @@ export const migrationEntries = [
   [68, "ShellStopRequestIndex", Migration0068],
   [69, "ThreadMessageSearch", Migration0069],
   [70, "PeerLinks", Migration0070],
+  [71, "PeerLinkFence", Migration0071],
+  [72, "WaitingLinkRequestIndex", Migration0072],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

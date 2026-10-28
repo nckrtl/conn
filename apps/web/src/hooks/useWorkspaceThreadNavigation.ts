@@ -26,7 +26,7 @@ export function useWorkspaceThreadNavigation() {
     const candidates = workspaceThreads(threads, projectRefs);
     if (changed) {
       previousWorkspace.current = workspaceId;
-      useUiStateStore.getState().setSidebarProjectScopeKey(null);
+      useUiStateStore.getState().setSidebarProjectScopeKeys([]);
       const target = lastWorkspaceThread(
         candidates,
         useWorkspaceStore.getState().lastThreadByWorkspace[workspaceId ?? "all"],

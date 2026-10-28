@@ -130,6 +130,7 @@ export const ChatHeader = memo(function ChatHeader({
       : null;
   // Leaving rename swaps the input back for the title, which needs a fresh fit.
   const isRenamingTitle = renamingTitle !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the breadcrumb list DOM via ResizeObserver, a frame and font loads to collapse the parent title
   useEffect(() => {
     const list = breadcrumbContainerRef.current?.querySelector("ol");
     if (!list || !parentThreadLink) return;
@@ -222,8 +223,7 @@ export const ChatHeader = memo(function ChatHeader({
     clearTimeout(titleMenuTimerRef.current);
     titleMenuTimerRef.current = null;
   };
-  // Drop a pending menu-open when the thread changes or the header unmounts,
-  // so it can never fire for a thread the user already left.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the pending title-menu timer when the thread switches or the header unmounts
   useEffect(
     () => () => {
       if (titleMenuTimerRef.current === null) return;
@@ -446,8 +446,7 @@ export const ChatHeader = memo(function ChatHeader({
                 From {activeThreadLinkOrigin}
               </TooltipTrigger>
               <TooltipPopup side="top">
-                Started by an agent on {activeThreadLinkOrigin} through a linked environment. It can
-                change only threads that link started here.
+                Started by an agent on {activeThreadLinkOrigin} through a linked environment.
               </TooltipPopup>
             </Tooltip>
           ) : null}

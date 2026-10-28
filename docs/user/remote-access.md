@@ -58,6 +58,10 @@ in the receiving app. Connection settings are under **Settings → Environments*
 on web and desktop and **Settings → Environments** on mobile. A loopback address
 such as `127.0.0.1` reaches only the device opening the link.
 
+On a computer with the desktop app, you can open the printed `t3code://pair`
+app link instead. The desktop app asks you to confirm the server address, then
+adds it.
+
 Pairing authorizes that device for future connections. Use a fresh one-time link
 for each new device; you do not need the original token to reconnect. Links
 created in Settings can only be copied from the client that created them while
@@ -249,24 +253,35 @@ threads on an environment through its MCP server. See
 
 ## Link another environment
 
-Link two machines, such as your laptop and a VPS, and agents on one can launch,
-message, wait on and stop threads on the other. On the machine you will work
-from, open **Settings → Connections → Linked environments**, choose **Link**,
-and enter the other machine's address and a pairing code from it. From a
-terminal, use `t3 environment link <address> --pairing-code <code> --access <mode>`.
+Link two machines, such as your laptop and a VPS, and agents on one can work on
+the other: launch, message, wait on and stop its threads, answer their
+questions, and manage its queues, projects and scheduled tasks.
+
+Linked environments is a beta. Turn it on for both machines in **Settings →
+Labs**; on mobile, **Settings → Labs** lists each connected machine. While it is
+off on either machine, agents start nothing over a link between them. A task
+already running on the other machine still finishes, and if that machine has it
+off, its result arrives once it is back on.
+
+On the machine you will work from, open **Settings → Connections → Linked environments**,
+choose **Link**, and pick the other machine or enter its address. The list
+holds the machines this app knows and those on your T3 Connect account. If this
+app is connected to that machine with a session that manages access there, it
+makes the pairing code itself; otherwise paste one from that machine's
+**Settings → Connections**. From a terminal, use
+`t3 environment link <address> --pairing-code <code> --access <mode>`.
 
 You can also ask an agent to link a machine by name, such as "delegate this to
-my vps". It shows a card in the thread where you pick the machine from the ones
-this app knows (or enter an address) and the access, then approve. If this app
-is connected to that machine with a session that manages access there, it uses
-that session; otherwise paste a pairing code from that machine's
-**Settings → Connections**.
+my vps". It shows a card in the thread where you pick the machine the same way
+and the access, then approve.
 
 - The access you pick is the most agents from this machine may do there. An
   agent also never gets more there than its own mode here.
 - Threads a link starts are marked **From** and this machine's name there.
-  They can change only other threads the same link started, not that machine's
-  own threads, projects or settings, and they skip its project setup scripts.
+- A full-access link works there like that machine's own agents. Below full
+  access, the link's agents can change only threads it started, not that
+  machine's own threads, projects or settings, and they skip its project setup
+  scripts.
 - The link shows up in that machine's **Settings → Connections** like any
   outside agent. Revoke it there to end it. **Forget** on this machine only
   removes it here.

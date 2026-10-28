@@ -21,7 +21,7 @@ import type {
   BrowserImportSource,
   BrowserImportSourceId,
 } from "./browserImport.ts";
-import { AuthAccessTokenResult, AuthSessionState, AuthWebSocketTicketResult } from "./auth.ts";
+import { AuthAccessTokenResult, AuthSessionState } from "./auth.ts";
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { type ClientSettings, type QuitConfirmationMode, SnapShotShortcut } from "./settings.ts";
@@ -1333,62 +1333,59 @@ export interface DesktopMcpEvent {
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
-  getRelayTelemetryEnabled?: () => boolean;
-  /** Absolute path of a dropped or picked file; absent on desktop builds predating it. */
-  getPathForFile?: (file: File) => string;
-  /** The desktop client's OS platform, read from Electron's preload process. */
-  getClientPlatform?: () => string;
-  setNotificationBadge?: (badge: { count: number; image: string | null }) => Promise<void>;
-  onNotificationBadgeClear?: (listener: () => void) => () => void;
-  onTrackpadScrollEnd?: (listener: () => void) => () => void;
+  getRelayTelemetryEnabled: () => boolean;
+  getPathForFile: (file: File) => string;
+  getClientPlatform: () => string;
+  setNotificationBadge: (badge: { count: number; image: string | null }) => Promise<void>;
+  onNotificationBadgeClear: (listener: () => void) => () => void;
+  onTrackpadScrollEnd: (listener: () => void) => () => void;
   /**
    * Renderer `window.focus()` cannot raise an Electron window, and on Wayland
    * only the main process can spend a notification click's activation token.
    */
-  revealWindow?: () => Promise<void>;
+  revealWindow: () => Promise<void>;
   /**
    * The OS locale as a BCP-47 tag, which the renderer cannot read for itself:
    * the packaged app ships only the `en-US` Chromium locale pak, so
    * `navigator.language` and the default `Intl` locale are pinned to `en-US`
    * regardless of OS settings.
    */
-  getSystemLocale?: () => string | null;
+  getSystemLocale: () => string | null;
   // One bootstrap per pool instance currently registered with bootstrap
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
-  getLocalEnvironmentEnabled?: () => boolean;
-  setLocalEnvironmentEnabled?: (enabled: boolean) => Promise<void>;
+  getLocalEnvironmentEnabled: () => boolean;
+  setLocalEnvironmentEnabled: (enabled: boolean) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   /** Themes from this machine's themes folder, read without a local server. */
   getLocalThemes?: () => Promise<readonly EnvironmentTheme[]>;
   onLocalThemesChanged?: (listener: (themes: readonly EnvironmentTheme[]) => void) => () => void;
-  getConnectionCatalog?: () => Promise<string | null>;
-  setConnectionCatalog?: (catalog: string) => Promise<boolean>;
-  clearConnectionCatalog?: () => Promise<void>;
+  getConnectionCatalog: () => Promise<string | null>;
+  setConnectionCatalog: (catalog: string) => Promise<boolean>;
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
   /** Resolves a suggested SSH alias before populating the connection form. */
   resolveSshHost: (alias: string) => Promise<DesktopSshEnvironmentTarget>;
-  requestSnapShotPermissions?: (includeAccessibility: boolean) => Promise<void>;
-  getSnapShotState?: () => Promise<DesktopSnapShotState>;
-  setupSnapShot?: (action: DesktopSnapShotSetupAction) => Promise<void>;
-  previewSnapShotConfig?: (
+  requestSnapShotPermissions: (includeAccessibility: boolean) => Promise<void>;
+  getSnapShotState: () => Promise<DesktopSnapShotState>;
+  setupSnapShot: (action: DesktopSnapShotSetupAction) => Promise<void>;
+  previewSnapShotConfig: (
     request: DesktopCaptureConfigRequest,
   ) => Promise<DesktopCaptureConfigPreview | null>;
-  applySnapShotConfig?: (previewId: string) => Promise<DesktopCaptureConfigApplied>;
-  checkSnapShotShortcut?: (
+  applySnapShotConfig: (previewId: string) => Promise<DesktopCaptureConfigApplied>;
+  checkSnapShotShortcut: (
     shortcut: SnapShotShortcut,
   ) => Promise<DesktopSnapShotShortcutAvailability>;
-  setSnapShotShortcutSuppressed?: (suppressed: boolean) => Promise<void>;
-  listPendingSnapShots?: () => Promise<readonly DesktopPendingSnapShot[]>;
-  readSnapShot?: (id: string) => Promise<DesktopSnapShot>;
-  setSnapShotAnimationDestination?: (
+  setSnapShotShortcutSuppressed: (suppressed: boolean) => Promise<void>;
+  listPendingSnapShots: () => Promise<readonly DesktopPendingSnapShot[]>;
+  readSnapShot: (id: string) => Promise<DesktopSnapShot>;
+  setSnapShotAnimationDestination: (
     destination: DesktopSnapShotAnimationDestination,
   ) => Promise<void>;
-  dismissSnapShotAnimation?: (id: DesktopSnapShotId) => Promise<void>;
-  acknowledgeSnapShot?: (id: string) => Promise<void>;
+  dismissSnapShotAnimation: (id: DesktopSnapShotId) => Promise<void>;
+  acknowledgeSnapShot: (id: string) => Promise<void>;
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
     options?: { issuePairingToken?: boolean },
@@ -1400,10 +1397,6 @@ export interface DesktopBridge {
     credential: string,
   ) => Promise<AuthAccessTokenResult>;
   fetchSshSessionState: (httpBaseUrl: string, bearerToken: string) => Promise<AuthSessionState>;
-  issueSshWebSocketTicket: (
-    httpBaseUrl: string,
-    bearerToken: string,
-  ) => Promise<AuthWebSocketTicketResult>;
   onSshPasswordPrompt: (listener: (request: DesktopSshPasswordPromptRequest) => void) => () => void;
   resolveSshPasswordPrompt: (requestId: string, password: string | null) => Promise<void>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
@@ -1418,34 +1411,24 @@ export interface DesktopBridge {
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
-  pickProjectFavicon?: (initialPath?: string) => Promise<string | null>;
-  /**
-   * Multi-select JSON file picker that opens in the VS Code extensions
-   * directory when one exists. Optional: older desktop builds lack it, and
-   * web callers fall back to a plain file input.
-   */
-  pickThemeFiles?: () => Promise<readonly PickedThemeFile[] | null>;
+  pickProjectFavicon: (initialPath?: string) => Promise<string | null>;
+  pickThemeFiles: () => Promise<readonly PickedThemeFile[] | null>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },
   ) => Promise<T | null>;
-  /** Receives a local OAuth code for a sign-in owned by a remote environment. */
-  receiveProviderAuthCallback?: (authorizationUrl: string) => Promise<string>;
-  cancelProviderAuthCallback?: (authorizationUrl: string) => Promise<void>;
+  receiveProviderAuthCallback: (authorizationUrl: string) => Promise<string>;
+  cancelProviderAuthCallback: (authorizationUrl: string) => Promise<void>;
   openExternal: (url: string) => Promise<boolean>;
-  /**
-   * Open a System Settings pane by identifier. Optional: older desktop builds
-   * lack it, and callers no-op when it is missing.
-   */
-  openSystemSettings?: (pane: SystemSettingsPane) => Promise<boolean>;
-  checkSystemPermission?: (pane: SystemSettingsPane) => Promise<boolean>;
+  /** Open a System Settings pane by identifier. */
+  openSystemSettings: (pane: SystemSettingsPane) => Promise<boolean>;
+  checkSystemPermission: (pane: SystemSettingsPane) => Promise<boolean>;
   /**
    * Probe this desktop machine for installed remote-capable editor CLIs
-   * (used for remote open-in-editor deep links). Optional: older desktop
-   * builds lack it; callers fall back to VS Code only.
+   * (used for remote open-in-editor deep links).
    */
-  probeRemoteEditors?: () => Promise<readonly EditorId[]>;
+  probeRemoteEditors: () => Promise<readonly EditorId[]>;
   /**
    * nckrtl fork: sends one API panel request from the main process (no CORS, all headers,
    * the integrated browser's certificate trust). Optional: other desktop builds lack it.
@@ -1478,8 +1461,8 @@ export interface DesktopBridge {
   mcpRequest?: (request: DesktopMcpRequest) => Promise<DesktopMcpResponse>;
   mcpDisconnect?: (sessionId: string) => Promise<void>;
   onMcpEvent?: (listener: (event: DesktopMcpEvent) => void) => () => void;
-  /** Present when the desktop shell can perform an ordered plain-text paste. */
-  pasteAsText?: () => Promise<void>;
+  /** Performs an ordered plain-text paste. */
+  pasteAsText: () => Promise<void>;
   /** Opens an extra desktop window showing a workspace (id or name; null = all projects). */
   openWorkspaceWindow?: (workspace: string | null) => Promise<void>;
   /**
@@ -1493,47 +1476,37 @@ export interface DesktopBridge {
   /** Which window this is: extra windows carry their starting workspace. Absent in older shells. */
   windowContext?: { readonly additional: boolean; readonly workspace: string | null };
   onMenuAction: (listener: (action: string) => void) => () => void;
-  onSnapShotEvent?: (listener: (event: DesktopSnapShotEvent) => void) => () => void;
-  /**
-   * Quit-confirmation hint pushes. Optional: older desktop builds never emit
-   * them.
-   */
-  onQuitShortcut?: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
+  onSnapShotEvent: (listener: (event: DesktopSnapShotEvent) => void) => () => void;
+  onQuitShortcut: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
-  /** App window zoom; older desktop shells omit this method. */
-  getWindowZoomFactor?: () => number;
+  getWindowZoomFactor: () => number;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
-  /** Settings → `t3` command. Optional: older desktop builds lack it. */
-  cliCommand?: {
+  /** Settings → `t3` command. */
+  cliCommand: {
     getState: () => Promise<DesktopCliCommandState>;
     install: () => Promise<DesktopCliCommandState>;
     uninstall: () => Promise<DesktopCliCommandState>;
   };
-  /** Present when the desktop shell accepts `t3 app` activation requests. */
   /**
-   * Web links the OS opens with T3 Code as the default browser (macOS). The
+   * Web links the OS opens with Conn as the default browser (macOS). The
    * renderer reports when it listens; links queue in the main process until then.
    */
-  webLinks?: {
+  webLinks: {
     setReady: (ready: boolean) => Promise<void>;
     onOpen: (listener: (url: string) => void) => () => void;
   };
-  appActivation?: {
+  appActivation: {
     setReady: (ready: boolean) => Promise<void>;
     complete: (response: DesktopAppActivationResponse) => Promise<void>;
     onRequest: (listener: (request: DesktopAppActivationRequest) => void) => () => void;
   };
-  /**
-   * Desktop-only preview surface. Present iff the renderer is hosted by the
-   * Electron desktop build; web builds have `preview === undefined`.
-   */
-  preview?: DesktopPreviewBridge;
+  preview: DesktopPreviewBridge;
 }
 
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */
@@ -1548,7 +1521,7 @@ export interface DesktopPreviewBridge {
     request: PreviewAutomationRequest,
   ) => Promise<PreviewAutomationResponse>;
   disconnectTabHost?: (runtimeTabId: string) => Promise<void>;
-  setForwardedShortcuts?: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;
+  setForwardedShortcuts: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   registerWebview: (tabId: string, webContentsId: number) => Promise<void>;
@@ -1628,7 +1601,6 @@ export interface DesktopPreviewBridge {
       mimeType: string,
       data: Uint8Array,
     ) => Promise<DesktopPreviewRecordingArtifact>;
-    onFrame: (listener: (frame: DesktopPreviewRecordingFrame) => void) => () => void;
   };
   onStateChange: (listener: (tabId: string, state: DesktopPreviewTabState) => void) => () => void;
   onPointerEvent: (listener: (event: DesktopPreviewPointerEvent) => void) => () => void;

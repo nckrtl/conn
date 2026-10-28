@@ -9,7 +9,7 @@ const kbdVariants = cva(
     defaultVariants: { variant: "default" },
     variants: {
       variant: {
-        default: "bg-muted text-muted-foreground redesign:bg-foreground/[0.07]",
+        default: "bg-foreground/[0.07] text-muted-foreground",
         // A cap one step lighter than the surface it sits on, with a light glyph.
         raised: "bg-(--shell-highlight) text-foreground/90",
       },

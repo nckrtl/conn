@@ -15,6 +15,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ServerRestart from "../serverRestart.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
@@ -23,7 +24,7 @@ import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } fr
  * Links live in this environment's database and secret store, so these
  * commands work whether or not its server is running.
  */
-const runWithPeerLinks = Effect.fn("cli.environment.runWithPeerLinks")(function* <A, E>(
+const runWithPeerLinks = Effect.fn("environment.runWithPeerLinks")(function* <A, E>(
   flags: CliAuthLocationFlags,
   run: (links: PeerLinks.PeerLinks["Service"]) => Effect.Effect<A, E>,
   options?: { readonly quietLogs?: boolean },
@@ -45,6 +46,11 @@ const runWithPeerLinks = Effect.fn("cli.environment.runWithPeerLinks")(function*
           ServerEnvironment.layer.pipe(
             Layer.provide(ServerRestart.layer),
             Layer.provide(ServerSecretStore.layer),
+          ),
+        ),
+        Layer.provide(
+          ServerSettings.layer.pipe(
+            Layer.provide(Layer.mergeAll(ServerSecretStore.layer, SqlitePersistence.layerConfig)),
           ),
         ),
         Layer.provide(ServerConfig.layer(config)),

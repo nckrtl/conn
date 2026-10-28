@@ -107,15 +107,25 @@ const OrchestrationV2CreationFields = {
 
 /**
  * The linked environment whose agent started this work here: the MCP client
- * session it signed in with, and that session's label. Set when the thread is
- * created and never changed; work derived from it carries the same origin.
- * Stamped work may change only work from the same link.
+ * session it signed in with, that session's label, and the access it was
+ * paired with. Set when the thread is created and never changed; work derived
+ * from it carries the same origin.
  */
 export const OrchestrationV2LinkOrigin = Schema.Struct({
   sessionId: TrimmedNonEmptyString,
   label: Schema.String,
+  access: Schema.optional(AuthMcpClientAccess),
 });
 export type OrchestrationV2LinkOrigin = typeof OrchestrationV2LinkOrigin.Type;
+
+/**
+ * Work from a link paired below full access may change only work from the same
+ * link. A full-access link's agents already run as this environment's user,
+ * so fencing T3's own tools would stop nothing they could not do anyway. An
+ * origin stamped before access was recorded stays fenced.
+ */
+export const linkOriginIsFenced = (origin: OrchestrationV2LinkOrigin) =>
+  origin.access !== "full-access";
 
 /**
  * The thread in a linked environment that delegated this one, when it did:
@@ -760,34 +770,7 @@ export const OrchestrationV2ExecutionNode = Schema.Struct({
 });
 export type OrchestrationV2ExecutionNode = typeof OrchestrationV2ExecutionNode.Type;
 
-/**
- * Where an app-owned task runs when it runs in a linked environment instead
- * of in a child thread here: that environment and the ordinary thread it runs
- * as there. Such a task has no `childThreadId`.
- */
-export const OrchestrationV2RemoteTaskChild = Schema.Struct({
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-  label: Schema.String,
-  /** The run there that carries the task; absent on tasks recorded before it was kept. */
-  runId: Schema.optional(RunId),
-  /**
-   * Nothing is left to stop there: a stop from here reached the thread there,
-   * the other side refused it for good, or the thread or its link is gone. A
-   * task's run that ended there by itself also sets it, unless the task here
-   * was cancelled or stopped, which still owes a stop for whatever runs on the
-   * thread there now. Its follower keeps sending that stop, across restarts.
-   */
-  stoppedThere: Schema.optional(Schema.Boolean),
-});
-export type OrchestrationV2RemoteTaskChild = typeof OrchestrationV2RemoteTaskChild.Type;
-
-/**
- * One entry of a dynamic workflow's phase plan. The plan grows while the run
- * executes: a phase a script only reaches at runtime joins the list when it
- * starts, so a client must treat the list as append-only rather than as a
- * fixed arc declared up front.
- */
+/** Append-only: phases discovered at runtime join when they start. */
 export const OrchestrationV2WorkflowPhase = Schema.Struct({
   index: NonNegativeInt,
   title: TrimmedNonEmptyString,
@@ -841,6 +824,32 @@ export type OrchestrationV2SubagentWorkflow = typeof OrchestrationV2SubagentWork
  * value. Clients restore only these fields, so blanking another field needs a new opt-in.
  */
 const DedupedBodyMarker = Schema.optionalKey(Schema.Literal(true));
+
+/**
+ * Where an app-owned task runs when it runs in a linked environment instead
+ * of in a child thread here: that environment and the ordinary thread it runs
+ * as there. Such a task has no `childThreadId`.
+ */
+export const OrchestrationV2RemoteTaskChild = Schema.Struct({
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  label: Schema.String,
+  /** The run there that carries the task; absent on tasks recorded before it was kept. */
+  runId: Schema.optional(RunId),
+  /**
+   * Nothing is left to stop there: a stop reached it, was refused for good, or the thread
+   * or link is gone. A run ending there by itself sets it too, unless the task here was
+   * cancelled or stopped and still owes a stop, which its follower keeps sending across
+   * restarts. `false`: a Stop here owes one to a task that already had its result.
+   */
+  stoppedThere: Schema.optional(Schema.Boolean),
+  /**
+   * Stops asked for here once the task had its result. The count names the
+   * one owed, so each reaches the thread there once however often it is sent.
+   */
+  stopCount: Schema.optional(NonNegativeInt),
+});
+export type OrchestrationV2RemoteTaskChild = typeof OrchestrationV2RemoteTaskChild.Type;
 
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
@@ -1428,10 +1437,6 @@ export const OrchestrationV2ProviderRetry = Schema.Struct({
 });
 export type OrchestrationV2ProviderRetry = typeof OrchestrationV2ProviderRetry.Type;
 
-export const OrchestrationV2ProviderThreadDisposition = Schema.Literals(["reusable", "broken"]);
-export type OrchestrationV2ProviderThreadDisposition =
-  typeof OrchestrationV2ProviderThreadDisposition.Type;
-
 export const OrchestrationV2UserMessageInputIntent = Schema.Literals([
   "turn_start",
   "queued_turn",
@@ -1786,21 +1791,6 @@ export const OrchestrationV2ProjectedTurnItem = Schema.Struct({
   item: OrchestrationV2TurnItem,
 });
 export type OrchestrationV2ProjectedTurnItem = typeof OrchestrationV2ProjectedTurnItem.Type;
-
-export const OrchestrationV2RawProviderEvent = Schema.Struct({
-  id: RawEventId,
-  driver: ProviderDriverKind,
-  providerInstanceId: ProviderInstanceId,
-  providerSessionId: ProviderSessionId,
-  sequence: PositiveInt,
-  direction: Schema.Literals(["incoming", "outgoing"]),
-  messageKind: Schema.Literals(["request", "response", "notification", "error"]),
-  method: Schema.NullOr(TrimmedNonEmptyString),
-  jsonRpcId: Schema.NullOr(Schema.Union([Schema.String, Schema.Number])),
-  payload: Schema.Unknown,
-  observedAt: Schema.DateTimeUtc,
-});
-export type OrchestrationV2RawProviderEvent = typeof OrchestrationV2RawProviderEvent.Type;
 
 const OrchestrationV2EventBase = Schema.Struct({
   id: EventId,
@@ -2692,14 +2682,6 @@ const OrchestrationV2JsonEventBaseFields = {
   occurredAt: Schema.DateTimeUtcFromString,
 } as const;
 
-export const OrchestrationV2RawProviderEventJson = OrchestrationV2RawProviderEvent.mapFields(
-  (fields) => ({
-    ...fields,
-    observedAt: Schema.DateTimeUtcFromString,
-  }),
-);
-export type OrchestrationV2RawProviderEventJson = typeof OrchestrationV2RawProviderEventJson.Type;
-
 export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -2845,13 +2827,6 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
 ]);
 export type OrchestrationV2DomainEventJson = typeof OrchestrationV2DomainEventJson.Type;
-
-export const OrchestrationV2StoredEventJson = Schema.Struct({
-  sequence: NonNegativeInt,
-  commandId: Schema.NullOr(CommandId),
-  event: OrchestrationV2DomainEventJson,
-});
-export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
 
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
@@ -3389,7 +3364,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
   /**
    * Completes a delegated task that ran in a linked environment, with what its
    * thread there ended as. The parent wakes exactly as for a child here. A
-   * task that already has a result keeps it; `stoppedThere` is still recorded.
+   * task that already has a result keeps it; `stoppedThere` is still recorded,
+   * and without it (a Stop or cancel here) the task owes a stop there instead.
    */
   Schema.Struct({
     type: Schema.Literal("delegated_task.remote.complete"),
@@ -3399,15 +3375,26 @@ const OrchestrationV2InternalCommand = Schema.Union([
     status: Schema.Literals(["completed", "failed", "cancelled", "interrupted"]),
     result: Schema.String,
     /**
-     * What this report says about stopping there: `ran-out` when the task's
-     * run ended there by itself, `stopped` when a stop from here reached it.
-     * Either sets `remoteChild.stoppedThere` on a task this report completes;
-     * on a task already cancelled or stopped here, only `stopped` does, since
-     * a run that ended by itself leaves the stop owed for what may follow it.
+     * `ran-out`: the run there ended by itself; `stopped`: a stop from here reached it. Either
+     * sets `remoteChild.stoppedThere` on a task this report completes. On a task already
+     * cancelled or stopped here only `stopped` does, since a run that ended by itself leaves
+     * the stop owed for whatever follows it.
      */
     stoppedThere: Schema.optional(Schema.Literals(["ran-out", "stopped"])),
+    /** The stop generation this report acknowledges; absent for the original unnumbered stop. */
+    stopCount: Schema.optional(NonNegativeInt),
   }),
-  /** Records that the provider rollback `requestId` failed for good. */
+  /**
+   * Owes a stop to the thread there of a remote task that already has its result, as Stop on
+   * a parent stops a finished child here. The task keeps its status, result and completion
+   * delivery; its follower sends the stop and reports it with `delegated_task.remote.complete`.
+   */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.stop"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+  }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback.fail"),
     commandId: CommandId,
@@ -3509,7 +3496,6 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   stopWorkflow: "orchestration.stopWorkflow",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
-  subscribeArchivedShell: "orchestration.subscribeArchivedShell",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
   subscribeCommandOutput: "orchestration.subscribeCommandOutput",
@@ -3549,25 +3535,6 @@ export const OrchestrationV2ArchivedShellSnapshot = Schema.Struct({
   threads: Schema.Array(OrchestrationV2ThreadShell),
 });
 export type OrchestrationV2ArchivedShellSnapshot = typeof OrchestrationV2ArchivedShellSnapshot.Type;
-
-export const OrchestrationV2ArchivedShellStreamItem = Schema.Union([
-  Schema.Struct({
-    kind: Schema.Literal("snapshot"),
-    snapshot: OrchestrationV2ArchivedShellSnapshot,
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("thread.updated"),
-    sequence: NonNegativeInt,
-    thread: OrchestrationV2ThreadShell,
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("thread.removed"),
-    sequence: NonNegativeInt,
-    threadId: ThreadId,
-  }),
-]);
-export type OrchestrationV2ArchivedShellStreamItem =
-  typeof OrchestrationV2ArchivedShellStreamItem.Type;
 
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   commandId: CommandId,
@@ -3911,15 +3878,6 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
   }
 }
 
-export const OrchestrationV2RpcError = Schema.Union([
-  OrchestrationV2DispatchCommandError,
-  OrchestrationV2GetThreadProjectionError,
-  OrchestrationV2GetShellSnapshotError,
-  OrchestrationV2ThreadLaunchError,
-  OrchestrationV2StopWorkflowError,
-]);
-export type OrchestrationV2RpcError = typeof OrchestrationV2RpcError.Type;
-
 export const OrchestrationV2GetWorkflowScriptInput = Schema.Struct({
   threadId: ThreadId,
   scriptPath: TrimmedNonEmptyString,
@@ -4117,10 +4075,6 @@ export const OrchestrationV2RpcSchemas = {
   launchThread: {
     input: OrchestrationV2ThreadLaunchInput,
     output: OrchestrationV2ThreadLaunchResult,
-  },
-  subscribeArchivedShell: {
-    input: Schema.Struct({}),
-    output: OrchestrationV2ArchivedShellStreamItem,
   },
   subscribeShell: {
     input: OrchestrationV2SubscribeShellInput,

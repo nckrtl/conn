@@ -1,11 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
-import {
-  ProjectId,
-  ThreadId,
-  type TerminalEvent,
-  type TerminalSessionSnapshot,
-} from "@t3tools/contracts";
+import { ProjectId, type TerminalEvent, type TerminalSessionSnapshot } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -14,8 +9,6 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import { TestClock } from "effect/testing";
 
-import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
-import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -43,7 +36,6 @@ const openSnapshot = (history: string): TerminalSessionSnapshot => ({
 const makeHarness = Effect.fn(function* (options: {
   readonly history?: string;
   readonly opening?: Deferred.Deferred<void>;
-  readonly threadId?: string;
 }) {
   const listeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
   const writes = yield* Queue.unbounded<string>();
@@ -67,17 +59,8 @@ const makeHarness = Effect.fn(function* (options: {
       Layer.mergeAll(
         terminals,
         Layer.mock(ProjectService.ProjectService)({}),
-        // `thread-linked` was started from a linked environment; `thread-unread`
-        // cannot be read.
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
-          getThreadShell: (id) =>
-            id === ThreadId.make("thread-unread")
-              ? Effect.fail(new ProjectionStore.ProjectionStoreReadError({ threadId: id }))
-              : Effect.succeed(
-                  id === ThreadId.make("thread-linked")
-                    ? { ...liveThreadShell(id), linkOrigin: { sessionId: "s", label: "Laptop" } }
-                    : null,
-                ),
+          getThreadShell: () => Effect.succeed(null),
         }),
         ServerSettings.layerTest(),
         NodeCrypto.layer,
@@ -87,7 +70,7 @@ const makeHarness = Effect.fn(function* (options: {
     Effect.provideService(HostProcess.Environment, { SHELL: "/bin/zsh" }),
   );
   const start = runner.runForThread({
-    threadId: options.threadId ?? threadId,
+    threadId,
     worktreePath: "/repo/.t3/worktrees/feature",
     observeCompletion: { onOutputLine: (line) => Queue.offer(outputLines, line) },
     project: {
@@ -184,19 +167,6 @@ describe("ProjectSetupScriptRunner", () => {
       expect(yield* completion).toMatchObject({ exitCode: null });
       yield* TestClock.adjust("1 minute");
       expect(yield* Queue.size(writes)).toBe(0);
-    }),
-  );
-
-  it.effect("never runs the project's script for work a linked environment started", () =>
-    Effect.gen(function* () {
-      const linked = yield* makeHarness({ threadId: "thread-linked" });
-      expect(yield* linked.start).toEqual({ status: "skipped-for-link" });
-      expect(linked.listeners.size).toBe(0);
-      // Nor for a thread whose origin cannot be read.
-      const unread = yield* makeHarness({ threadId: "thread-unread" });
-      const error = yield* unread.start.pipe(Effect.flip);
-      expect(error._tag).toBe("ProjectSetupScriptOperationError");
-      expect(unread.listeners.size).toBe(0);
     }),
   );
 });

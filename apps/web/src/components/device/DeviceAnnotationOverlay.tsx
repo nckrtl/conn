@@ -72,7 +72,7 @@ export function DeviceAnnotationOverlay(props: {
     }
   }
 
-  // oxlint-disable-next-line t3code/react-effect-budget -- Leaving annotation mode drops a save that is still in flight.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Leaving annotation mode drops a save that is still in flight.
   useEffect(() => {
     if (!props.active) {
       saveAbort.current?.abort();
@@ -80,7 +80,7 @@ export function DeviceAnnotationOverlay(props: {
     }
   }, [props.active]);
 
-  // oxlint-disable-next-line t3code/react-effect-budget -- The polled accessibility tree moves under a still pointer.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The polled accessibility tree moves under a still pointer.
   useEffect(() => {
     const last = point.current;
     if (!props.active || !last || draft) return;

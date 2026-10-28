@@ -253,7 +253,7 @@ export function HostedBrowserWebview(props: {
 
   // Every webview's guest preload sends its overlay calls here, server-driven tabs included.
   const annotationProjectId = useThreadAnnotationTarget(threadRef)?.projectId ?? null;
-  // oxlint-disable-next-line t3code/react-effect-budget -- Answers the page overlay's annotation calls for this webview's lifetime.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Answers the page overlay's annotation calls for this webview's lifetime.
   useEffect(() => {
     const webview = webviewRef.current;
     if (!clientSettingsHydrated || !config || !webview || annotationProjectId === null) return;

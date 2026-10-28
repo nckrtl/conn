@@ -47,7 +47,7 @@ function ThreadAnnotationWatch({ threadKey }: { threadKey: string }) {
     if (threadRef === null || annotations === null) return;
     sendAnnotationPrompt({ threadRef, annotations });
   });
-  // oxlint-disable-next-line t3code/react-effect-budget -- Watch prompts the thread when the queue or the thread's state changes, not on a user action.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Watch prompts the thread when the queue or the thread's state changes, not on a user action.
   useEffect(() => {
     if (sendKey !== "") send();
   }, [sendKey]);

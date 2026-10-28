@@ -15,7 +15,6 @@ import {
   type SnapShotModifier,
   type SnapShotShortcut,
 } from "@t3tools/contracts";
-import { appBrand } from "../branding/appBrand.ts";
 
 interface AccessibilityTreeNode {
   readonly name?: string;

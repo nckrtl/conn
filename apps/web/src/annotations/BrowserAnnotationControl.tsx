@@ -125,7 +125,7 @@ export function BrowserAnnotationControl({
       );
   });
 
-  // oxlint-disable-next-line t3code/react-effect-budget -- The shortcut must win over the shell's and the focused page's key handling.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The shortcut must win over the shell's and the focused page's key handling.
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) =>
       handleBrowserAnnotationKey(
@@ -137,12 +137,12 @@ export function BrowserAnnotationControl({
     return () => window.removeEventListener("keydown", handleKey, true);
   }, [annotating, available, applyMode]);
 
-  // oxlint-disable-next-line t3code/react-effect-budget -- Each loaded document that has annotations gets the overlay, so its pins show.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Each loaded document that has annotations gets the overlay, so its pins show.
   useEffect(() => {
     if (!loading && pagePins && runtimeTabId !== null) showPins(runtimeTabId);
   }, [loading, pagePins, runtimeTabId]);
 
-  // oxlint-disable-next-line t3code/react-effect-budget -- The tab's dictation URLs reach the desktop, and changed settings the running overlay, without a reload.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The tab's dictation URLs reach the desktop, and changed settings the running overlay, without a reload.
   useEffect(() => {
     if (runtimeTabId !== null)
       configureOverlay(runtimeTabId, { startUrl: dictationStartUrl, stopUrl: dictationStopUrl });

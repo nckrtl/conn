@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -199,13 +200,46 @@ const makeThreadTools = (session: McpToolSession, origin: string) => {
 export type ThreadTools = ReturnType<typeof makeThreadTools>;
 
 /**
+ * Sends every call to a linked environment. The running server forwards it
+ * over its link, so ids in and out are that environment's.
+ */
+export const inEnvironment = (
+  tools: ThreadTools,
+  environmentId: EnvironmentId | undefined,
+): ThreadTools =>
+  environmentId === undefined
+    ? tools
+    : {
+        call: <S extends Schema.Decoder<unknown>>(
+          tool: string,
+          args: Readonly<Record<string, unknown>>,
+          schema: S,
+        ) => tools.call(tool, { ...args, environmentId }, schema),
+      };
+
+const decodeEnvironmentIdValue = Schema.decodeUnknownEffect(EnvironmentId);
+const decodeEnvironment = Effect.fn("cli.thread.decodeEnvironment")(function* (
+  value: Option.Option<string>,
+) {
+  if (Option.isNone(value)) return undefined;
+  const raw = value.value;
+  return yield* decodeEnvironmentIdValue(raw.trim()).pipe(
+    Effect.mapError(() => new ThreadUsageError({ detail: `'${raw}' is not an environment id.` })),
+  );
+});
+
+/**
  * Signs in as a short-lived MCP client of the running server, the same way an
  * outside agent does, and revokes that session when the command ends.
  */
 const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
-  flags: { readonly baseDir: Option.Option<string> },
+  flags: {
+    readonly baseDir: Option.Option<string>;
+    readonly environment: Option.Option<string>;
+  },
   run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
 ) {
+  const environmentId = yield* decodeEnvironment(flags.environment);
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel);
   return yield* Effect.gen(function* () {
@@ -232,7 +266,7 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
       authorization: `Bearer ${issued.token}`,
       clientName: "t3-thread-cli",
     }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
-    return yield* run(makeThreadTools(session, origin));
+    return yield* run(inEnvironment(makeThreadTools(session, origin), environmentId));
   }).pipe(
     Effect.scoped,
     Effect.provide(
@@ -272,14 +306,29 @@ const listAllProjects = Effect.fn("cli.thread.listAllProjects")(function* (tools
   return projects;
 });
 
-/** A project id, or a path inside a project's folder (deepest project wins). */
-const resolveProject = Effect.fn("cli.thread.resolveProject")(function* (
+/**
+ * A project id, or a path inside a project's folder (deepest project wins).
+ * In a linked environment its folders are not this machine's, so an id or an
+ * exact title names the project there.
+ */
+export const resolveProject = Effect.fn("cli.thread.resolveProject")(function* (
   tools: ThreadTools,
   identifier: string,
+  environment: Option.Option<string> = Option.none(),
 ) {
   const projects = yield* listAllProjects(tools);
   const byId = projects.find((project) => project.id === identifier);
   if (byId !== undefined) return byId;
+  if (Option.isSome(environment)) {
+    const byTitle = projects.filter((project) => project.title === identifier);
+    if (byTitle.length === 1) return byTitle[0]!;
+    return yield* new ThreadUsageError({
+      detail:
+        byTitle.length === 0
+          ? `No project in environment ${environment.value} has the id or title '${identifier}'.`
+          : `Several projects in environment ${environment.value} are titled '${identifier}'. Pass its id.`,
+    });
+  }
 
   const path = yield* Path.Path;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -489,6 +538,12 @@ const messageArgument = Argument.String("message").pipe(
   Argument.withDescription("Message for the agent, or - to read it from stdin."),
 );
 const threadArgument = Argument.String("thread").pipe(Argument.withDescription("Thread id."));
+const environmentFlag = Flag.String("environment").pipe(
+  Flag.withDescription(
+    "Act in this linked environment, by its id from `t3 environment list`. Ids are then that environment's.",
+  ),
+  Flag.optional,
+);
 
 const decodeThreadIdValue = Schema.decodeUnknownEffect(ThreadId);
 const decodeTitle = Schema.decodeUnknownEffect(TrimmedNonEmptyString);
@@ -499,9 +554,12 @@ const decodeThreadId = (value: string) =>
 
 const threadListCommand = Command.make("list", {
   ...projectLocationFlags,
+  environment: environmentFlag,
   project: Flag.String("project").pipe(
-    Flag.withDescription("Project id or a path inside the project. Defaults to this directory."),
-    Flag.withDefault("."),
+    Flag.withDescription(
+      "Project id or a path inside the project. Defaults to this directory, or with --environment to every project there.",
+    ),
+    Flag.optional,
   ),
   json: jsonFlag,
 }).pipe(
@@ -510,17 +568,28 @@ const threadListCommand = Command.make("list", {
     withThreadTools(
       flags,
       Effect.fn("cli.thread.list")(function* (tools) {
-        const project = yield* resolveProject(tools, flags.project);
+        const projects =
+          Option.isNone(flags.project) && Option.isSome(flags.environment)
+            ? yield* listAllProjects(tools)
+            : [
+                yield* resolveProject(
+                  tools,
+                  Option.getOrElse(flags.project, () => "."),
+                  flags.environment,
+                ),
+              ];
         const threads: Array<OrchestratorMcpThreadListItem> = [];
-        let cursor: number | null = 0;
-        while (cursor !== null) {
-          const page: OrchestratorMcpThreadListResult = yield* tools.call(
-            "t3_thread_list",
-            { projectId: project.id, includeSubagents: false, limit: 100, cursor },
-            OrchestratorMcpThreadListResult,
-          );
-          threads.push(...page.threads);
-          cursor = page.nextCursor;
+        for (const project of projects) {
+          let cursor: number | null = 0;
+          while (cursor !== null) {
+            const page: OrchestratorMcpThreadListResult = yield* tools.call(
+              "t3_thread_list",
+              { projectId: project.id, includeSubagents: false, limit: 100, cursor },
+              OrchestratorMcpThreadListResult,
+            );
+            threads.push(...page.threads);
+            cursor = page.nextCursor;
+          }
         }
         if (flags.json) {
           return yield* printJson(threads);
@@ -535,6 +604,7 @@ const threadListCommand = Command.make("list", {
 
 const threadStartCommand = Command.make("start", {
   ...projectLocationFlags,
+  environment: environmentFlag,
   project: Argument.String("project").pipe(
     Argument.withDescription("Project id or a path inside the project, such as ."),
   ),
@@ -578,7 +648,7 @@ const threadStartCommand = Command.make("start", {
       yield* withThreadTools(
         flags,
         Effect.fn("cli.thread.start")(function* (tools) {
-          const project = yield* resolveProject(tools, flags.project);
+          const project = yield* resolveProject(tools, flags.project, flags.environment);
           const launched = yield* tools.call(
             "t3_thread_launch",
             {
@@ -614,6 +684,7 @@ const threadStartCommand = Command.make("start", {
 
 const threadSendCommand = Command.make("send", {
   ...projectLocationFlags,
+  environment: environmentFlag,
   thread: threadArgument,
   message: messageArgument,
   wait: waitFlag,
@@ -648,6 +719,7 @@ const threadSendCommand = Command.make("send", {
 
 const threadShowCommand = Command.make("show", {
   ...projectLocationFlags,
+  environment: environmentFlag,
   thread: threadArgument,
   messages: Flag.Int("messages").pipe(
     Flag.withDescription("How many of the latest messages to print."),

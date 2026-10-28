@@ -1,8 +1,10 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { RunId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
-import { type ThreadTools, waitForRun } from "./thread.ts";
+import { inEnvironment, resolveProject, type ThreadTools, waitForRun } from "./thread.ts";
 
 const threadId = ThreadId.make("thread-1");
 const runId = RunId.make("run-1");
@@ -72,4 +74,30 @@ it.effect("--wait reports its run's result when a later run is the one waiting",
       status: "completed",
     });
   }),
+);
+
+it.effect("--environment sends calls there and names its projects by id or title, not a path", () =>
+  Effect.gen(function* () {
+    const environmentId = EnvironmentId.make("env-beast");
+    const page = {
+      projects: [{ id: "project-1", title: "conn", workspaceRoot: process.cwd() }],
+      nextCursor: null,
+    };
+    const { tools, calls } = scriptedTools({ t3_project_list: [page, page] });
+    const there = inEnvironment(tools, environmentId);
+    const environment = Option.some(environmentId);
+
+    const byTitle = yield* resolveProject(there, "conn", environment);
+    const byPath = yield* Effect.flip(resolveProject(there, ".", environment));
+
+    assert.strictEqual(byTitle.id, "project-1");
+    assert.strictEqual(byPath._tag, "ThreadUsageError");
+    assert.deepStrictEqual(
+      calls.map((entry) => entry.args),
+      [
+        { cursor: 0, limit: 100, environmentId },
+        { cursor: 0, limit: 100, environmentId },
+      ],
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

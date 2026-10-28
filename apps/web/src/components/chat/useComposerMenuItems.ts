@@ -46,9 +46,6 @@ import {
   searchSlashCommandItems,
   slashCommandItemsForPromptPosition,
 } from "./composerSlashCommandSearch";
-import { matchComposerEnvironmentItems } from "@t3tools/client-runtime/composerThreadItems";
-import { useEnvironmentIdentities } from "~/state/environments";
-import { useEnvironmentMachines } from "~/state/environments";
 
 const COMPOSER_PULL_REQUEST_LIST_LIMIT = 99;
 const COMPOSER_PULL_REQUEST_RESULT_LIMIT = 12;
@@ -106,13 +103,6 @@ export function useComposerMenuItems({
     pullRequestTextQuery === debouncedPullRequestTextQuery ? pullRequestTextQuery : null;
   const isPathTrigger = composerTriggerKind === "path";
   const environmentThreadShells = useThreadShells(isPathTrigger);
-  // The user's machines feed `@` machine matches; the catalog summary is cheap and stable.
-  const environmentIdentities = useEnvironmentIdentities();
-  const environmentMachines = useEnvironmentMachines();
-  const mentionableEnvironments = environmentIdentities.map((identity) => ({
-    ...identity,
-    machine: environmentMachines.get(identity.environmentId) ?? ("server" as const),
-  }));
   // Mounts older settled threads matching the mention, which shells may leave out.
   useThreadSearch(isPathTrigger ? [environmentId] : [], pathTriggerQuery, { titlesOnly: true });
   // The user's machines feed `@` machine matches; the catalog summary is cheap and stable.

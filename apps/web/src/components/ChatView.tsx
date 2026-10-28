@@ -378,7 +378,6 @@ const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import { ConnIconScope } from "../icons/connIcon";
-import { buildThreadRouteParams } from "../threadRoutes";
 import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];

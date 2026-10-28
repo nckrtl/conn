@@ -810,7 +810,6 @@ export function useComposerSend(input: ComposerSendInput) {
       environmentContexts: composerEnvironmentContextsSnapshot,
       messageText: messageTextForSend,
     } = sendSnapshot;
-    const composerEnvironmentContextsSnapshot = [...composerEnvironmentContexts];
     const {
       missingWorktreeBaseBranch,
       baseBranchForWorktree,

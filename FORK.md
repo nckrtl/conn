@@ -539,13 +539,19 @@ Install the script in `~/.local/bin`, next to `t3-orbit-register`, and its
 runs daily and logs to `~/Library/Logs/t3-orbit-relink.log`. The recorded mini
 setup links nick, beast and shark with full access.
 
+It also renews links whose status is already `expired`. On Linux hosts install
+`scripts/orbit/t3-orbit-relink.service` and `.timer` in `~/.config/systemd/user`,
+enable the timer, and enable lingering (`loginctl enable-linger`) so it runs
+without a login session.
+
 Gateway codes carry administrative scopes. Renewed sessions therefore have more
 scopes than the app's orchestration-only request.
 
 Sources:
 
 - `scripts/orbit/t3-orbit-relink`,
-  `scripts/orbit/com.nckrtl.t3-orbit-relink.plist`.
+  `scripts/orbit/com.nckrtl.t3-orbit-relink.plist`,
+  `scripts/orbit/t3-orbit-relink.service`, `scripts/orbit/t3-orbit-relink.timer`.
 
 ### Machine @-mentions
 

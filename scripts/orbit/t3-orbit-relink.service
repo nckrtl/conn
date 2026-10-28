@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew T3 linked environments via Orbit Gateway (t3-orbit-relink)
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/t3-orbit-relink %h/.local/bin/t3

@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily t3-orbit-relink (like nick's launchd RunAtLoad + 86400 s)
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1d
+Persistent=true
+[Install]
+WantedBy=timers.target

@@ -17,7 +17,7 @@ renew_days=${RENEW_DAYS:-10}
 due=$("$@" environment list --json | jq -c --argjson days "$renew_days" '
   (now + $days * 86400) as $deadline
   | .[]
-  | select((.expiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) <= $deadline)')
+  | select(.status == "expired" or (.expiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) <= $deadline)')
 
 [ -n "$due" ] || { echo "t3-orbit-relink: no link expires within $renew_days days."; exit 0; }
 

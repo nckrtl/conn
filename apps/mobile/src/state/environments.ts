@@ -6,7 +6,6 @@ import {
 } from "@t3tools/client-runtime/connection";
 import type { ComposerEnvironmentCandidate } from "@t3tools/client-runtime/composerThreadItems";
 import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
-import { useMemo } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
 import { environmentPresentations } from "./presentation";
@@ -56,18 +55,4 @@ export function useMentionableEnvironments(): ReadonlyArray<ComposerEnvironmentC
     label: environment.label,
     machine: resolveEnvironmentMachineKind(environment.serverConfig),
   }));
-}
-
-/** The user's machines as `@` mention candidates, drawn with their machine kind. */
-export function useMentionableEnvironments(): ReadonlyArray<ComposerEnvironmentCandidate> {
-  const { environments } = useEnvironments();
-  return useMemo(
-    () =>
-      environments.map((environment) => ({
-        environmentId: environment.environmentId,
-        label: environment.label,
-        machine: resolveEnvironmentMachineKind(environment.serverConfig),
-      })),
-    [environments],
-  );
 }

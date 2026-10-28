@@ -103,7 +103,6 @@ export function buildComposerSlashCommandItems(input: {
   readonly atMessageStart: boolean;
   readonly hasThread: boolean;
   readonly hasCompactableConversation?: boolean;
-  /** Whether T3 itself offers /usage-limits for the selected provider. */
   readonly offersUsageLimits?: boolean;
   readonly allowInteractionMode: boolean;
   readonly selectedProviderStatus: Pick<
@@ -147,8 +146,6 @@ export function buildComposerSlashCommandItems(input: {
   for (const command of input.selectedProviderStatus?.slashCommands ?? []) {
     if (!command.name.toLowerCase().includes(query)) continue;
     if (command.name === "compact" && !input.hasCompactableConversation) continue;
-    // T3's own limits command is answered by the thread composer; New Task has
-    // nowhere to show it. A provider's same-named command is left alone.
     if (command.name === USAGE_LIMITS_COMMAND.name && input.offersUsageLimits && !input.hasThread) {
       continue;
     }
@@ -208,7 +205,6 @@ export function resolveComposerCommandSelection(input: {
   };
 }
 
-/** Shared autocomplete for thread composers and unsent new-task drafts. */
 export function useComposerCommandMenu({
   draftMessage,
   ownerKey,
@@ -233,28 +229,22 @@ export function useComposerCommandMenu({
   readonly draftMessage: string;
   readonly ownerKey: string | null;
   readonly environmentId: EnvironmentId | null;
-  /** Candidates for `@` thread suggestions; the caller reads them from the entity store. */
   readonly threadShells?: ReadonlyArray<EnvironmentThreadShell>;
-  /** Candidates for `@` machine suggestions: the user's environments. */
   readonly environments?: ReadonlyArray<ComposerEnvironmentCandidate>;
   /** The machines `environmentId` links to, by name, whose threads the picker also offers. */
   readonly linkedEnvironments?: ReadonlyMap<EnvironmentId, string>;
-  /** Left out of `@` thread suggestions: a thread is never context for itself. */
   readonly currentThreadId?: ThreadId | null;
   readonly projectCwd: string | null;
   readonly pullRequestProjectId?: ProjectId | null;
   readonly pullRequestRepository?: string | null;
-  /** The thread's linked pull requests, offered in `#` suggestions from any repository. */
   readonly threadPullRequests?: ReadonlyArray<ThreadPullRequestLink>;
   readonly selectedProviderStatus: ServerProvider | null;
   readonly hasThread: boolean;
   readonly hasCompactableConversation: boolean;
-  /** Whether T3 itself offers /usage-limits for the selected provider. */
   readonly offersUsageLimits?: boolean;
   readonly enabled?: boolean;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onUpdateInteractionMode?: (mode: ProviderInteractionMode) => void;
-  /** Picking /usage-limits is the action itself; the draft keeps nothing of it. */
   readonly onUsageLimits?: () => void;
 }) {
   const [localSelection, setLocalSelection] = useState(() => ({
@@ -538,32 +528,6 @@ export function useComposerCommandMenu({
       );
       if (!shell) return;
       const record = threadContextRecord(item.thread, shell.title);
-      const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
-      const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
-      if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {
-        Dialog.alert("Too many context items", "Remove some context from the draft and try again.");
-        return;
-      }
-      const result = replaceTextRange(
-        draftMessage,
-        trigger.rangeStart,
-        trigger.rangeEnd,
-        `${formatComposerContextReference(record)} `,
-      );
-      onChangeDraftMessage(result.text);
-      if (!alreadyAttached) {
-        const draft = getComposerDraftSnapshot(ownerKey);
-        setComposerDraftContext(ownerKey, {
-          version: 1,
-          records: [...(draft.context?.records ?? []), record],
-        });
-      }
-      setSelection({ start: result.cursor, end: result.cursor });
-      return;
-    }
-    if (item.type === "environment") {
-      if (!ownerKey || trigger.kind !== "path") return;
-      const record = environmentComposerContext(item.environmentId, item.label);
       const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
       const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
       if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {

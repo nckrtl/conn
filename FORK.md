@@ -769,3 +769,7 @@ commit.
 
 [build]: .agents/skills/nckrtl-shell-design/references/build.md
 [shell]: .agents/skills/nckrtl-shell-design/SKILL.md
+
+## Pull request runners
+
+Public forks use GitHub-hosted Ubuntu and macOS runners for the main CI and native fingerprint checks. Upstream keeps its Blacksmith labels. The fork does not register runners or require a Blacksmith installation; server shards run at most four at a time.

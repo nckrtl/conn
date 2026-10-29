@@ -11,6 +11,7 @@ import { SafeAreaInsetsContext, useSafeAreaInsets } from "react-native-safe-area
 
 import { CompactBrandTitle } from "../../components/CompactBrandTitle";
 import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
+import { HeaderItemsWidthContext } from "../../native/header-items-width";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
 import { isDuoDevice } from "../../lib/device-type";
@@ -52,10 +53,11 @@ import { useWorkspacePhoneBar } from "./useWorkspacePhoneBar";
 const TAB_TITLES = WORKSPACE_TAB_LABELS;
 
 function WorkspaceRootTitle(props: {
-  readonly maxWidth: number;
+  readonly columnWidth: number;
   readonly onOpenEnvironments: () => void;
 }) {
   const { state, settingsOpen } = useWorkspaceTabs()!;
+  const maxWidth = Math.max(0, props.columnWidth - (use(HeaderItemsWidthContext) ?? 160));
   const enabled = useEnabledNavigationTabs();
   const tabTitle = settingsOpen
     ? "Settings"
@@ -63,10 +65,10 @@ function WorkspaceRootTitle(props: {
       ? TAB_TITLES[state.selectedTab]
       : "Navigation";
   return (
-    <View style={{ width: props.maxWidth, minHeight: 32, justifyContent: "center" }}>
+    <View style={{ width: maxWidth, minHeight: 32, justifyContent: "center" }}>
       <WorkspaceConnectionTitle
-        brand={<CompactBrandTitle accessibilityLabel={`T3 Code, ${tabTitle}`} />}
-        maxWidth={props.maxWidth}
+        brand={<CompactBrandTitle accessibilityLabel={`T3 Code, ${tabTitle}`} fit />}
+        maxWidth={maxWidth}
         onPress={props.onOpenEnvironments}
       />
     </View>
@@ -99,14 +101,14 @@ function WorkspaceRootContent() {
   const keyboardHeight = useKeyboardState((keyboard) => keyboard.height);
   const workspace = useWorkspaceTabs()!;
   const { state } = workspace;
+  // Settings is a workspace tab too; its list takes the place of the selected tab's.
+  const settingsOpen = workspace.settingsOpen;
   const renderHeaderTitle = () => (
     <WorkspaceRootTitle
-      maxWidth={Math.max(0, width - 160)}
+      columnWidth={width}
       onOpenEnvironments={() => openSettings(navigation, "SettingsEnvironments")}
     />
   );
-  // Settings is a workspace tab too; its list takes the place of the selected tab's.
-  const settingsOpen = workspace.settingsOpen;
   const tab = state.tabs[settingsOpen ? "settings" : state.selectedTab];
   const bottomClearance =
     layout.primarySidebarOverlaysContent && state.selectedTab === "usage"

@@ -12,7 +12,7 @@ import {
   markdownWithTableBreaks,
 } from "../lib/markdownDocument";
 import { isValidElement, useMemo, useState, type ReactNode } from "react";
-import { Platform, Share, StyleSheet, View } from "react-native";
+import { Platform, Share, StyleSheet, useWindowDimensions, View } from "react-native";
 import {
   EnrichedMarkdownText,
   type MarkdownImageBlock,
@@ -36,6 +36,7 @@ import {
 function enrichedStyle(
   style: SelectableMarkdownTextProps["textStyle"],
   dark: boolean,
+  fontScale: number,
 ): MarkdownStyle {
   // nckrtl fork: JetBrains Mono for code, and the system font with weights for headings and bold.
   const monospace = MONO_FONT_FAMILY;
@@ -138,11 +139,12 @@ function enrichedStyle(
     },
     // Conn: markers start at the list's edge and sit 8pt from the item text (the
     // marker column comes from patches/react-native-enriched-markdown-conn.patch).
+    // The gap scales with the system text size, like upstream's.
     list: {
       ...body,
       bulletColor: style.mutedColor,
       markerColor: style.mutedColor,
-      gapWidth: 8,
+      gapWidth: 8 * fontScale,
       itemSpacing: 6,
     },
     thematicBreak: { color: style.dividerColor, height: 1, marginTop: 8, marginBottom: 8 },
@@ -268,9 +270,13 @@ export function MobileEnrichedMarkdownText(props: SelectableMarkdownTextProps) {
       mimeTypes: { "app.t3.context-fragment": props.contextClipboardFragment! },
     };
   }, [props.contextClipboardFragment, props.markdown]);
+  const { fontScale } = useWindowDimensions();
   const markdownStyle = useMemo(
-    () => ({ ...enrichedStyle(props.textStyle, themeAppearance === "dark"), linkVariants }),
-    [props.textStyle, themeAppearance, linkVariants],
+    () => ({
+      ...enrichedStyle(props.textStyle, themeAppearance === "dark", fontScale),
+      linkVariants,
+    }),
+    [props.textStyle, themeAppearance, fontScale, linkVariants],
   );
   const renderers = renderImage
     ? {

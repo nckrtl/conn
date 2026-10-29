@@ -19,7 +19,7 @@ export function annotationsForPathname(
 }
 
 /** Role and label, short enough to read in the queue and in the agent's claim. */
-function describeDeviceElement(element: Pick<DeviceAxElement, "role" | "label">): string {
+export function describeDeviceElement(element: Pick<DeviceAxElement, "role" | "label">): string {
   const role = element.role.trim();
   const label = element.label.trim();
   if (role && label) return `${role} "${label}"`;

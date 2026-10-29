@@ -19,7 +19,7 @@ export function parseDebugPort(value) {
 }
 
 /** True when this process can bind `host:port`, which is the check Chromium's DevTools server fails. */
-function isTcpPortFree({ host, port }) {
+export function isTcpPortFree({ host, port }) {
   return new Promise((resolve) => {
     const server = NodeNet.createServer();
     server.once("error", () => resolve(false));

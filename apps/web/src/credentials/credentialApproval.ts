@@ -91,9 +91,20 @@ export function respondToCredentialApproval(
   settle(id, { approved, reason: "user", ...(fields ? { fields } : {}) });
 }
 
+export function subscribeCredentialApprovals(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 export function readCurrentCredentialApproval(): PendingCredentialApproval | null {
   return queue[0]?.approval ?? null;
 }
+
+export const CREDENTIAL_FIELD_LABELS: Record<CredentialField, string> = {
+  username: "username",
+  password: "password",
+  otp: "one-time code",
+};
 
 /** The origin of a URL, or null when it has none. */
 export function originOf(url: string | null | undefined): string | null {

@@ -13,7 +13,7 @@ import { VAULT_DATABASES_CHANNEL } from "../channels.ts";
 // forwards one framed request to the running Vault app, which owns the unlocked vault. A listing
 // never carries a password; a password reaches this process for one database call only.
 
-const VAULT_BINARY = "/Applications/Vault.app/Contents/MacOS/Vault";
+export const VAULT_BINARY = "/Applications/Vault.app/Contents/MacOS/Vault";
 const TIMEOUT_MS = 120_000;
 const MAX_FRAME = 64 * 1024;
 
@@ -176,7 +176,7 @@ export function vaultBridgeRequest(
   });
 }
 
-function vaultRequest(
+export function vaultRequest(
   mode: "list-database" | "database-credential",
   options: { readonly itemID?: string; readonly allowUnlock: boolean },
   binary?: string,

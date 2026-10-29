@@ -5,9 +5,15 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 /**
- * macOS safeStorage keys follow the Electron startup app name (package name in
- * release, Electron in development). If a rename changes that key, read the old
- * keychain key, decrypt in Node and re-encrypt with the new key.
+ * Safe storage across a rename.
+ *
+ * macOS keeps the key behind Electron's `safeStorage` in a keychain item named
+ * "<app name> Safe Storage", where the name is the one Electron has at startup:
+ * the `name` in the app's package.json when packaged ("t3code"), and Electron's
+ * own default in development ("Electron"). A rename that leaves those alone keeps
+ * the key, and nothing here runs. If the key does change, secrets the old key
+ * encrypted no longer decrypt. This module reads the old key from the keychain,
+ * decrypts them in Node and encrypts them again with the new key.
  */
 
 const V10_PREFIX = Buffer.from("v10");
@@ -108,7 +114,7 @@ function secretFieldsOf(fileName: string, document: unknown): SecretField[] {
   return [];
 }
 
-const SECRET_STATE_FILES = ["connection-catalog.json", "saved-environments.json"] as const;
+export const SECRET_STATE_FILES = ["connection-catalog.json", "saved-environments.json"] as const;
 export const PRE_RENAME_BACKUP_SUFFIX = ".before-rename";
 
 /**

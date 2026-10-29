@@ -9,12 +9,14 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { terminalEnvironment } from "../state/terminal";
 
 /**
- * WireGuard identifies the caller Node. Run Orbit and worktree commands through
- * a hidden terminal on the environment host; upstream has no command RPC.
- * Results return between markers in the terminal output.
+ * Orbit identifies callers by their WireGuard address, so every Orbit call
+ * must run on the Node that hosts the T3 environment. The upstream T3 server
+ * has no command RPC, so calls (and the git commands that prepare a worktree)
+ * run as short scripts in a hidden terminal on that machine; the result comes
+ * back between markers in the terminal output.
  */
 
-const DEFAULT_ORBIT_GATEWAY_URL = "https://gateway.orbit";
+export const DEFAULT_ORBIT_GATEWAY_URL = "https://gateway.orbit";
 const GATEWAY_URL_STORAGE_KEY = "t3code:orbit-gateway-url";
 const ORBIT_CONTROL_THREAD_ID = ThreadId.make("orbit-control");
 
@@ -37,7 +39,7 @@ export class OrbitTransportError extends Error {
   override readonly name = "OrbitTransportError";
 }
 
-function readOrbitGatewayUrl(): string {
+export function readOrbitGatewayUrl(): string {
   try {
     const stored = globalThis.localStorage?.getItem(GATEWAY_URL_STORAGE_KEY)?.trim();
     if (stored) return stored.replace(/\/+$/, "");
@@ -74,9 +76,11 @@ export function shellQuote(value: string): string {
 }
 
 /**
- * Runs a base64-encoded script through sh; returns base64 exit code and output
- * between markers assembled at runtime so shell echo cannot mimic a result.
- * The leading space excludes this line from shells configured to ignore such history.
+ * One line for an interactive shell that runs `script` with `sh` and prints
+ * `<exit code>\n<combined output>` as base64 between two markers. The script
+ * travels base64-encoded, so no quoting can break the line, and the markers
+ * are assembled at run time, so the echoed line never contains a complete
+ * marker. The leading space keeps the line out of shells that ignore such history.
  */
 export function buildHiddenShellLine(input: {
   readonly requestId: string;

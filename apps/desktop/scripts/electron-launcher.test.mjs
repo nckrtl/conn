@@ -8,21 +8,13 @@ import * as NodeVM from "node:vm";
 import { assert, describe, it } from "vite-plus/test";
 
 import {
+  APP_BRAND_NAME,
   makeDevelopmentEnvironmentScript,
   makeDevelopmentLauncherScript,
   resolveElectronBinaryPath,
   resolveMacLauncherPaths,
-  resolveMacLauncherIconPaths,
-  pickDevSigningIdentity,
-  withDevRendererAllowedOrigin,
   writeDevelopmentLauncherScript,
 } from "./electron-launcher.mjs";
-
-import {
-  buildElectronLaunchArgs,
-  isParentGone,
-  parseDebugPort,
-} from "./dev-electron-lifecycle.mjs";
 
 describe("electron development launcher", () => {
   it("uses captured values only as fallbacks for a live runner environment", () => {
@@ -177,11 +169,6 @@ async function startupCleanupPattern(desktopDir) {
       NodeOS: { platform: () => "linux" },
       NodePath,
       desktopDir,
-      parseDebugPort,
-      buildElectronLaunchArgs,
-      isParentGone,
-      withDevRendererAllowedOrigin,
-      setInterval: () => ({ unref: () => undefined }),
       resolveDevProtocolClient: () => null,
       resolveElectronLaunchCommand: (args) => ({ electronPath: "electron", args }),
       waitForResources: async () => undefined,

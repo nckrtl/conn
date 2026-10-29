@@ -43,12 +43,14 @@ export function usePanelAnimationSettings(): {
 }
 
 /** Duration of a one-shot control transition while panel motion is set to 0 ms. */
-const ONE_SHOT_MOTION_FALLBACK_DURATION_MS = 280;
+export const ONE_SHOT_MOTION_FALLBACK_DURATION_MS = 280;
 
 /**
- * One-element transitions do not reflow siblings, so a zero panel duration uses
- * a short fixed duration here. Reduced motion and navigation suppression disable
- * them; nonzero panel duration keeps them in step with panels.
+ * Settings for small one-shot transitions on a single element, such as the
+ * composer resting. Unlike panels they do not reflow siblings every frame, so
+ * a panel duration of 0 ms (the default) does not switch them off; they then
+ * use a short fixed duration. Reduced motion and navigation suppression still
+ * disable them, and a nonzero panel duration keeps them in step with panels.
  */
 export function useOneShotMotionSettings(): {
   active: boolean;

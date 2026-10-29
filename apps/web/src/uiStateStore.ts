@@ -512,7 +512,7 @@ function sharedUiRecord(state: UiState): Record<string, unknown> {
   return record;
 }
 
-function trackLocalUiStateChanges(
+export function trackLocalUiStateChanges(
   changes: RecentKeyChanges,
 ): (next: UiState, previous: UiState) => void {
   return (next, previous) => {

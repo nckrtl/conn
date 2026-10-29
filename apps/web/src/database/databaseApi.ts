@@ -36,7 +36,7 @@ export interface DatabaseQueryResult {
   readonly durationMs: number;
 }
 
-const ENV_CONNECTION_ID = "env";
+export const ENV_CONNECTION_ID = "env";
 
 export const DRIVER_LABELS: Record<DatabaseDriver, string> = {
   mysql: "MySQL / MariaDB",

@@ -85,7 +85,7 @@ export function saveSectionState(state: ProfileSyncState): void {
 }
 
 /** Forgets one section's sync state, so turning it on again is a first sync. */
-function forgetSectionState(name: ProfileSectionName): void {
+export function forgetSectionState(name: ProfileSectionName): void {
   const state = loadSectionState();
   if (state) saveSectionState(withoutSection(state, name));
 }

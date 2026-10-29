@@ -192,9 +192,15 @@ export type TerminalFontSize = typeof TerminalFontSize.Type;
 const DEFAULT_TERMINAL_FONT_SIZE: TerminalFontSize = 12;
 
 /**
- * Unitless heights advance in steps of 0.05. Defaults preserve existing rendering:
- * interface 1.5, prompt/code 1.625, terminal 1.35. Diffs retain their fixed 20px
- * until the code height differs from its default.
+ * Line heights are unitless multipliers of the font size, one per font size
+ * above, in steps of 0.05. Each default is what its surface used before the
+ * setting existed, so nothing changes until the user adjusts one:
+ * - interface 1.5: the root `line-height` (Tailwind's preflight); the other
+ *   text sizes scale in proportion (see `--line-height-interface-scale`).
+ * - prompt 1.625: the composer's `leading-relaxed`.
+ * - code 1.625: chat code blocks' `leading-relaxed`. Diffs and file previews
+ *   keep @pierre/diffs' own 20px until the value moves off this default.
+ * - terminal 1.35: the cell height the terminal renderer always used.
  */
 export const LINE_HEIGHT_STEP = 0.05;
 const lineHeightBetween = (minimum: number, maximum: number) =>
@@ -230,7 +236,7 @@ export const TerminalLineHeight = lineHeightBetween(
   MAX_TERMINAL_LINE_HEIGHT,
 );
 export type TerminalLineHeight = typeof TerminalLineHeight.Type;
-const DEFAULT_TERMINAL_LINE_HEIGHT: TerminalLineHeight = 1.35;
+export const DEFAULT_TERMINAL_LINE_HEIGHT: TerminalLineHeight = 1.35;
 
 // "artwork" follows the running channel and shows nothing on Latest. The fixed artwork
 // modes let any channel opt into a specific channel's art.
@@ -341,8 +347,11 @@ export const DefaultThemePreference = Schema.String.check(Schema.isMaxLength(64)
 export type DefaultThemePreference = typeof DefaultThemePreference.Type;
 
 /**
- * Defaults apply to user and agent preview tabs without explicit viewport options.
- * Recording quality stays local because the desktop owns the Chromium guest.
+ * Defaults for the in-app preview browser, applied whenever a tab is opened
+ * without an explicit viewport/zoom/appearance — by the user opening a browser
+ * tab, or by an agent calling `preview_open` with no size. Recording quality is
+ * client-local for the same reason: the Chromium guest being captured belongs
+ * to the desktop app.
  */
 export const DEFAULT_BROWSER_VIEWPORT: PreviewViewportSetting = FILL_PREVIEW_VIEWPORT;
 export const DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW = true;
@@ -983,9 +992,11 @@ export const UsageLimitSourceConfig = Schema.Struct({
 export type UsageLimitSourceConfig = typeof UsageLimitSourceConfig.Type;
 
 /**
- * Each host decodes its own fields; the environment preserves unknown hosts unchanged.
- * Secret fields hold strings or per-host strings in the server secret store.
- * Settings and clients receive only redaction markers.
+ * One source control host's saved settings. Each host package declares the fields it reads in
+ * its client definition's settings schema and decodes this blob with it; the environment stores
+ * it whole, so a host this build does not ship keeps its settings. A field annotated as a secret
+ * holds a string, or a string per server host, whose value lives in the server's secret store:
+ * settings and clients only see a redaction marker for a saved one.
  */
 export const SourceControlHostSettings = Schema.Record(Schema.String, Schema.Unknown);
 export type SourceControlHostSettings = typeof SourceControlHostSettings.Type;
@@ -1172,9 +1183,18 @@ export const ProjectProviderInstanceOverride = Schema.Struct({
 export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOverride.Type;
 
 /**
- * Absent keys inherit environment values; null remains a value for nullable fields.
- * Most fields replace the environment field whole. `providerInstances` instead merges
- * `enabled` by ProviderInstanceId; absent ids or fields inherit machine settings.
+ * One project's overrides. An absent key inherits the environment value;
+ * `null` is a real value where the environment type is nullable (no default
+ * model, no dedicated writer model, never auto-settle).
+ *
+ * `providerInstances` sits outside `PROJECT_SCOPED_SERVER_SETTING_KEYS`:
+ * every other key replaces its `ServerSettings` field whole, while this one
+ * keeps the settings.json shape but overrides field by field, per
+ * `ProviderInstanceId`. Only `enabled` is overridable today. An instance id
+ * or field absent here inherits the machine value, and a present `enabled`
+ * wins in either direction, so a project can turn on an instance the machine
+ * disabled, or turn off one the machine enabled. See
+ * `resolveProjectProviderInstanceEnabled` for the combined resolution.
  */
 export const ProjectSettingsOverrides = Schema.Struct({
   worktreeCleanup: Schema.optionalKey(WorktreeCleanup),
@@ -1316,9 +1336,15 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   /**
-   * Server-authoritative agent access only; the user browser panel stays available.
-   * Disabling it withholds the MCP credential and removes tool prompts, so no
-   * `preview_*` tools attach to provider sessions on any client.
+   * Whether agents may drive the in-app preview browser. Turning this off
+   * withholds the MCP credential, so the `t3-code` server (and with it every
+   * `preview_*` tool) is never attached to a provider session, and the prompt
+   * text describing those tools is dropped along with them. The user's own
+   * browser panel is unaffected — this gates agent access only.
+   *
+   * Server-authoritative rather than client-local: tool injection and prompt
+   * construction both happen on the server, and the answer must not differ
+   * between a desktop window and a phone attached to the same server.
    */
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
@@ -1345,9 +1371,11 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
   ),
   /**
-   * Project settings source of truth: scoped keys plus providerInstances.
-   * Older projectAgentBrowserAccessOverrides, projectAutoPullOverrides and
-   * projectScriptOverrides views remain derived for one release.
+   * Per-project overrides of the keys in `PROJECT_SCOPED_SERVER_SETTING_KEYS`,
+   * plus `providerInstances`. The source of truth for project
+   * settings; `projectAgentBrowserAccessOverrides`, `projectAutoPullOverrides`
+   * and `projectScriptOverrides` are derived views kept for one release so
+   * older clients keep reading them.
    */
   projectSettingsOverrides: Schema.Record(ProjectId, ProjectSettingsOverrides).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1359,8 +1387,11 @@ export const ServerSettings = Schema.Struct({
    */
   projectSettingsFolded: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
-   * Server-authoritative access to simulator/emulator tools and agent-device,
-   * applied when preparing provider sessions. The user Device panel stays available.
+   * Whether agents may drive simulators and emulators. Gates the `device_*`
+   * MCP tools and the preconfigured `agent-device` CLI the same way
+   * `enableAgentBrowserAccess` gates the browser: server-authoritative, applied
+   * when the provider session is prepared. The user's own Device panel is
+   * unaffected.
    */
   enableAgentDeviceAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
@@ -1414,24 +1445,31 @@ export const ServerSettings = Schema.Struct({
   ),
   defaultTheme: DefaultThemePreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /**
-   * Distinguishes repeated theme assignments so `t3 theme set` reapplies the same value.
-   * Older environments leave this empty; clients then apply once per value.
+   * When the environment's theme was last set, so clients can tell a re-set
+   * of the same value from one they already applied: `t3 theme set` must act
+   * even when it names the theme it named before. Empty on environments
+   * provisioned by builds that predate it, where clients fall back to
+   * applying once per value.
    */
   defaultThemeSetAt: Schema.String.check(Schema.isMaxLength(64)).pipe(
     Schema.withDecodingDefault(Effect.succeed("")),
   ),
   /**
-   * Null uses detected environment.platform.machine, then a generic server icon.
-   * Stored on the server for all devices. Unknown newer kinds decode to null
-   * instead of invalidating older clients’ settings snapshots.
+   * The icon clients draw for this environment. Null means "use what the
+   * server detected" (`environment.platform.machine`), falling back to a
+   * generic server. Lives on the server, not the client, so every device
+   * sees the same machine. A kind picked on a newer server decodes as null
+   * here rather than failing the whole settings snapshot for an older client.
    */
   environmentIcon: ForwardCompatibleNullable(EnvironmentMachineKind).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   /**
-   * Null inherits t3.json, then local. The old local default was never persisted
-   * and followed the same precedence. Null stays off the wire for older clients
-   * that require a literal value.
+   * Null means inherit: the repository's t3.json, then "local". The old
+   * default "local" was never persisted (defaults are stripped on write), so
+   * it now decodes as inherit, which resolves the same way because the old
+   * chain also let t3.json outrank the environment. Null stays off the wire
+   * so older clients, which require a literal here, keep decoding.
    */
   defaultThreadEnvMode: OmittedWhenNull(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.Boolean.pipe(
@@ -1496,8 +1534,11 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
 
-  // ProviderInstanceId maps to ProviderInstanceConfig envelopes. Keep driver config
-  // as Schema.Unknown so unknown drivers round-trip without loss; see providerInstance.ts.
+  // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
+  // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
+  // is `Schema.Unknown` at this layer so envelopes with unknown drivers
+  // (forks, downgrades, in-flight PR branches) round-trip without loss.
+  // See providerInstance.ts for the forward/backward compatibility invariant.
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1788,10 +1829,16 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   /**
-   * Entries replace a project’s whole override set; null removes it. Clear a key
-   * by resending the entry without it, since some values are themselves nullable.
-   * Omitted providerInstances alone preserves its stored value for older clients;
-   * send providerInstances: {} to clear all provider overrides.
+   * Per-project entry replacement: each entry replaces that project's whole
+   * override set and `null` removes it. Clearing one override means resending
+   * the entry without that key. Per-key null cannot express "clear" for the
+   * keys whose value type is itself nullable, and clients always hold the
+   * current entry from the last settings snapshot.
+   *
+   * `providerInstances` is the one exception: an entry that omits the key
+   * keeps the stored value instead of clearing it, so a client built before
+   * that field existed cannot wipe it by editing another key. Clearing every
+   * provider override for a project means sending `providerInstances: {}`.
    */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(

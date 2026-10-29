@@ -1,4 +1,5 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
+import { useMemo } from "react";
 import { create } from "zustand";
 import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
 
@@ -61,7 +62,7 @@ export const WORKSPACE_STORAGE_KEY = "t3code:workspaces:v1";
  * unchanged workspaces would re-run every effect that depends on them, and
  * those effects write the store back, which rehydrates the other window.
  */
-function keepUnchangedWorkspaces(current: Workspace[], stored: Workspace[]): Workspace[] {
+export function keepUnchangedWorkspaces(current: Workspace[], stored: Workspace[]): Workspace[] {
   const byId = new Map(current.map((workspace) => [workspace.id, workspace]));
   const next = stored.map((workspace) => {
     const existing = byId.get(workspace.id);
@@ -288,5 +289,5 @@ export function useActiveWorkspace(): Workspace | null {
 export function useActiveWorkspaceProjectRefs(): ReadonlySet<string> | null {
   const workspace = useActiveWorkspace();
   const projects = useWorkspaceStore((state) => state.availableProjects);
-  return workspaceProjectRefs(workspace, projects);
+  return useMemo(() => workspaceProjectRefs(workspace, projects), [workspace, projects]);
 }

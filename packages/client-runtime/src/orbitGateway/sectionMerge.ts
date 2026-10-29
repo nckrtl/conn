@@ -6,9 +6,17 @@ import {
 } from "./profileDocument.ts";
 
 /**
- * Three-way merge for settings conflicts and preserving keys unknown to this build.
- * Unchanged sides accept the other edit; concurrent edits to one key favor local intent.
- * A key absent locally survives from remote or base because this client does not own it.
+ * Three-way merge of profile sections, used when another device wrote a section while this one
+ * had unsent edits (`conn.settings_version_conflict`), and to build a push that keeps the keys
+ * this client does not know.
+ *
+ * `base` is the value both sides started from (null when this device never synced the section),
+ * `local` holds this device's edits and `remote` is the profile's current value. Per key, a side
+ * that did not change it since `base` takes the other side's value. When both changed the same
+ * key, the local edit wins: it is the newer intent of the person in front of this device.
+ *
+ * A key `local` lacks is never deleted: this client only writes keys it understands, so a key it
+ * cannot see belongs to another build and survives from `remote` (or `base`).
  */
 
 /** Order-independent deep equality for JSON values. */
@@ -40,7 +48,7 @@ type KeyMerge = (
 ) => JsonValue;
 
 /** Merges two JSON objects key by key; `special` handles keys that need more than the scalar rule. */
-function mergeKeyed(
+export function mergeKeyed(
   base: JsonObject | null,
   local: JsonObject,
   remote: JsonObject,
@@ -67,7 +75,7 @@ function mergeKeyed(
 }
 
 /** Merges two lists of `{ id }` entries by id, with the workspace rules: an edit beats a delete. */
-function mergeById(
+export function mergeById(
   base: readonly JsonValue[] | undefined,
   local: readonly JsonValue[],
   remote: readonly JsonValue[] | undefined,

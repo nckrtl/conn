@@ -11,10 +11,22 @@ import { isJsonObject, type JsonObject, type ProfileSectionName } from "./profil
 import { jsonEqual, toGatewayForm } from "./sectionMerge.ts";
 
 /**
- * One channel per profile section; workspaces sync separately. Remember base and raw
- * remote values to preserve unknown keys. Conflicts merge and retry up to MAX_ATTEMPTS.
- * Pulls set base from device readback to avoid echoes; first pulls adopt or seed.
- * beginNonUserChange treats the recorded value as clean until the user changes it.
+ * Keeps sections of this device's Orbit profile in step with the device, one channel per section
+ * (appearance, this device type's settings). The workspace list has its own sync.
+ *
+ * Each channel reads and writes the device through two callbacks. The engine remembers, per
+ * section, the profile's version, the value it last agreed on (`base`, in the device's own form)
+ * and the profile's raw value (`remote`, kept so keys this build does not know are sent back):
+ *
+ * - A device value that differs from `base` holds unsent edits; a profile version that differs
+ *   from the remembered one holds another device's edits. Both is a conflict, merged by the
+ *   channel and retried (at most `MAX_ATTEMPTS` times) because the PATCH is all-or-nothing.
+ * - Applying the profile's value to the device sets `base` to what the device reads back, so the
+ *   write never echoes: after a pull the next run sends nothing.
+ * - The first sync of a section adopts the profile's value (the device's previous value goes to
+ *   `onAdopt` first) or, when the profile has none, seeds it from the device.
+ * - A change that is not the user's own (a server-pushed default theme) is recorded with
+ *   `beginNonUserChange`; while the device still holds exactly that value it counts as clean.
  */
 
 export interface ProfileSyncChannel {
@@ -91,7 +103,7 @@ const MAX_ATTEMPTS = 3;
 /** How long an old Gateway is left alone before the next probe. */
 const UNSUPPORTED_RETRY_MS = 10 * 60_000;
 
-function emptyProfileSyncState(profileId = -1): ProfileSyncState {
+export function emptyProfileSyncState(profileId = -1): ProfileSyncState {
   return { profileId, profileVersion: -1, sections: {}, ignored: {} };
 }
 

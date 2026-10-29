@@ -28,10 +28,6 @@
         // These fixture scripts are injected into a browser page by path.
         "fixtures/*/*.js",
         "knip-schemas.ts",
-        // Fork asset builders and local signing are standalone commands documented in FORK.md.
-        "build-conn-symbols.ts",
-        "build-conn-vendored-tarball.ts",
-        "sign-macos-local.ts",
         "mobile-behavior/run.ts",
         "mobile-native-client.ts",
         "setup-worktree.ts",
@@ -91,11 +87,7 @@
     "apps/web": {
       // Worktree setup (scripts/setup-worktree.ts) runs this directly, and evidence
       // fixtures run under node.
-      "entry": [
-        "scripts/warm-dep-cache.ts",
-        "test/fixtures/**/*.mjs",
-        "src/laravelToolbarPreview/main.tsx",
-      ],
+      "entry": ["scripts/warm-dep-cache.ts", "test/fixtures/**/*.mjs"],
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.

@@ -167,9 +167,12 @@ describe("V2 preview upgrade", () => {
   );
 });
 
-// Earlier Conn builds placed PeerLinks at 61–65, 68 or 69. Upstream now owns
-// those ids; reconcile them to PeerLinks at 70 without losing stored links.
-
+// Conn shipped upstream's preview with PeerLinks at 61, then kept it at 62, 63,
+// 64, 65, 68 and 69; upstream main gives 61 to PullRequestReviewGuides, 62 to
+// ThreadFailureLookupIndex, 63 to DropUnusedV1Projections, 64 to
+// CanonicalizeThreadPullRequestLinks, 65 to CodexUsageNativeTurnIndex, 66 to
+// RepairClientSettlementTimestamps, 67 to WebhookDedupe, 68 to
+// ShellStopRequestIndex and 69 to ThreadMessageSearch, and Conn keeps PeerLinks at 70.
 const seedPeerLink = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
@@ -224,8 +227,6 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -246,8 +247,6 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -267,8 +266,6 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -287,8 +284,6 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -306,8 +301,6 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -322,8 +315,6 @@ describe("Conn PeerLinks upgrade", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -335,11 +326,7 @@ describe("Conn PeerLinks upgrade", () => {
         loader: Migrator.fromRecord({ "69_PeerLinks": PeerLinks }),
       });
       yield* seedPeerLink;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), [[69, "ThreadMessageSearch"]]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

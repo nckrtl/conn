@@ -149,6 +149,36 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(restrictedCookies).toHaveLength(1);
           expect(restrictedCookies[0]).toMatch(/^t3_session_/);
           expect(restrictedCookies[0]).not.toContain("t3_dev_session_");
+
+          const clientsUrl = "http://127.0.0.1/api/auth/clients";
+          const clients = await environmentA.handler(
+            new Request(clientsUrl, { headers: { cookie: devCookieHeader } }),
+            requestContext,
+          );
+          expect(clients.status).toBe(200);
+          expect(clients.headers.get("content-type")).toContain("application/json");
+          const clientsBody = await clients.text();
+          expect(JSON.parse(clientsBody)).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ sessionId: expect.any(String), current: false }),
+            ]),
+          );
+          expect(clientsBody).not.toContain(DEV_TOKEN);
+          expect(clientsBody).not.toContain(pairing.credential);
+
+          const anonymousClients = await environmentA.handler(
+            new Request(clientsUrl),
+            requestContext,
+          );
+          expect(anonymousClients.status).toBe(401);
+          const restrictedClients = await environmentA.handler(
+            new Request(clientsUrl, {
+              headers: { cookie: restrictedCookies[0]!.split(";", 1)[0]! },
+            }),
+            requestContext,
+          );
+          expect(restrictedClients.status).toBe(403);
+          expect(await restrictedClients.json()).toMatchObject({ requiredScope: "access:read" });
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),

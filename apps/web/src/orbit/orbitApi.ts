@@ -74,7 +74,7 @@ function malformed(what: string): OrbitApiError {
   return new OrbitApiError("orbit.response_invalid", `Orbit sent an invalid ${what}.`, 200);
 }
 
-export function parseOrbitInstance(value: unknown): OrbitInstance {
+function parseOrbitInstance(value: unknown): OrbitInstance {
   const data = record(value);
   const id = int(data?.id);
   const projectId = int(data?.project_id);

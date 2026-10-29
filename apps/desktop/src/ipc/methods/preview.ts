@@ -433,7 +433,7 @@ const saveRecording = DesktopIpc.makeIpcMethod({
   }),
 });
 
-export const getHostDeviceName = DesktopIpc.makeIpcMethod({
+const getHostDeviceName = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_HOST_DEVICE_NAME_CHANNEL,
   payload: Schema.Void,
   result: Schema.String,
@@ -441,7 +441,7 @@ export const getHostDeviceName = DesktopIpc.makeIpcMethod({
     return yield* (yield* PreviewManager.PreviewManager).getHostDeviceName();
   }),
 });
-export const connectTabHost = DesktopIpc.makeIpcMethod({
+const connectTabHost = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_TAB_HOST_CONNECT_CHANNEL,
   payload: DesktopTabHost,
   result: Schema.Void,
@@ -449,7 +449,7 @@ export const connectTabHost = DesktopIpc.makeIpcMethod({
     return yield* (yield* PreviewManager.PreviewManager).connectTabHost(input);
   }),
 });
-export const executeTabRequest = DesktopIpc.makeIpcMethod({
+const executeTabRequest = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_TAB_EXECUTE_CHANNEL,
   payload: DesktopTabExecute,
   result: PreviewAutomationResponse,
@@ -461,7 +461,7 @@ export const executeTabRequest = DesktopIpc.makeIpcMethod({
     );
   }),
 });
-export const disconnectTabHost = DesktopIpc.makeIpcMethod({
+const disconnectTabHost = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_TAB_HOST_DISCONNECT_CHANNEL,
   payload: DesktopPreviewTabInputSchema,
   result: Schema.Void,

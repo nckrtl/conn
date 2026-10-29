@@ -250,17 +250,9 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   reviewComments: Schema.optionalKey(Schema.Array(ReviewCommentContextSchema)),
   threadContexts: Schema.optionalKey(Schema.Array(ThreadContextRecord)),
   environmentContexts: Schema.optionalKey(Schema.Array(EnvironmentContextRecord)),
-  // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
-  // instances (e.g. `codex_personal`) round-trip alongside the built-in
-  // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
-  // literal satisfies the `ProviderInstanceId` slug pattern, so existing
-  // persisted drafts decode unchanged.
-  //
-  // The record's value schema is NOT wrapped in `Schema.optionalKey`:
-  // that helper is only meaningful on property signatures with a known
-  // key set, and `Schema.Record(<branded string>, …)` produces an index
-  // signature at runtime (Schema rejects the combination). Absence of
-  // an entry already encodes "no selection for this instance".
+  // Open ProviderInstanceId slugs preserve custom and historical driver keys.
+  // Do not wrap record values in Schema.optionalKey: it only applies to known
+  // property signatures. Missing entries already mean no selection.
   modelSelectionByProvider: Schema.optionalKey(Schema.Record(ProviderInstanceId, ModelSelection)),
   activeProvider: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
   modelSelectionExplicit: Schema.optionalKey(Schema.Boolean),
@@ -386,12 +378,8 @@ export interface ComposerThreadDraftState {
   threadContexts: ThreadContextRecord[];
   environmentContexts: EnvironmentContextRecord[];
   /**
-   * Per-instance model selection. Keyed by `ProviderInstanceId` (open
-   * branded slug) so a default `codex` instance and a user-authored
-   * `codex_personal` instance each persist their own selected model. Every
-   * historical `ProviderDriverKind` literal (`codex` / `claudeAgent` / `cursor` /
-   * `opencode`) also satisfies the `ProviderInstanceId` slug pattern, so
-   * legacy kind-keyed drafts round-trip unchanged.
+   * Open ProviderInstanceId keys keep custom instances and historical driver keys
+   * round-trippable, with a separate selected model per instance.
    */
   modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   activeProvider: ProviderInstanceId | null;
@@ -4332,9 +4320,6 @@ if (typeof window !== "undefined" && window.desktopBridge?.windowContext !== und
     applyOtherWindowComposerDrafts(raw),
   );
 }
-
-/** Test hook: the local change tracker for a store subscription. */
-export const trackLocalComposerDraftChangesForTest = trackLocalComposerDraftChanges;
 
 export function subscribeComposerDraftModelReconciliation(input: {
   readonly registry: AtomRegistry.AtomRegistry;

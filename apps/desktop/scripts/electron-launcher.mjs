@@ -27,7 +27,6 @@ const APP_BUNDLE_ID = isDevelopment
 // Only the app's own scheme: the development launcher makes this bundle the default handler
 // for it, which must not take upstream's scheme away from a T3 Code app that still uses it.
 const APP_PROTOCOL_SCHEMES = [isDevelopment ? brand.devScheme : brand.scheme];
-export const APP_BRAND_NAME = brand.name;
 
 /**
  * Upstream's server (unchanged) lets only upstream's desktop origins through CORS in
@@ -125,7 +124,7 @@ function resolveMacCodeSignArguments(appBundlePath) {
  * nckrtl fork: the identifier the development runtime's Electron binary is signed under. Vault's
  * Conn relay trusts it from the fork's Apple team, so the dev build can read Vault Database entries.
  */
-export const DEV_RUNTIME_IDENTIFIER = "com.nckrtl.conn.dev";
+const DEV_RUNTIME_IDENTIFIER = "com.nckrtl.conn.dev";
 
 /**
  * The Developer ID of the fork's team in a `security find-identity` listing, or null.
@@ -276,7 +275,7 @@ function registerMacLauncherBundle(appBundlePath) {
 }
 
 // Bundle-internal paths are macOS paths whatever host builds them.
-function resolveMacLauncherIconPaths(runtimeDir, development = isDevelopment) {
+export function resolveMacLauncherIconPaths(runtimeDir, development = isDevelopment) {
   return {
     sourceIconPath: development ? developmentMacIconPngPath : productionMacIconPngPath,
     generatedIconPath: NodePath.posix.join(
@@ -469,11 +468,8 @@ function buildMacLauncher(electronBinaryPath) {
   );
   patchHelperBundleInfoPlists(targetAppBundlePath);
   if (isDevelopment) {
-    // Keep Electron's native executable inside the branded bundle. Launching the
-    // node_modules copy makes macOS associate the process (and Dock label) with
-    // Electron.app even though this bundle's Info.plist has the app's name.
-    // Its conventional executable name also keeps Electron's default-app runtime
-    // in development mode instead of making app.isPackaged report true.
+    // Keep the native Electron executable and its conventional name inside the branded
+    // bundle: macOS then uses its Dock identity and Electron remains in development mode.
     writeDevelopmentEnvironmentScript();
     writeDevelopmentLauncherScript(launcherBinaryPath, runtimeElectronBinaryPath);
   }

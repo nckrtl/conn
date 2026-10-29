@@ -62,7 +62,7 @@ interface ChatHeaderProps {
  * Rename commit rule shared with the sidebar's inline rename: trim, reject
  * empty (the caller toasts), and skip the mutation when nothing changed.
  */
-export function resolveRenameCommit(input: {
+function resolveRenameCommit(input: {
   readonly title: string;
   readonly originalTitle: string;
 }): { action: "commit"; title: string } | { action: "reject-empty" } | { action: "noop" } {
@@ -72,12 +72,9 @@ export function resolveRenameCommit(input: {
   return { action: "commit", title: trimmed };
 }
 
-// How long a click on the thread title waits before opening the action menu,
-// so a double-click-to-rename can cancel it first. Only the native desktop
-// menu needs this: it swallows input while open, so the wait must cover the
-// OS double-click interval. The browser fallback menu keeps seeing DOM
-// events (the second click dismisses it and dblclick still fires), so it
-// opens immediately.
+// Delay the native action menu through the OS double-click interval so rename can
+// cancel it before it swallows input. Browser menus keep receiving DOM events
+// and can open immediately.
 const TITLE_MENU_OPEN_DELAY_MS = 500;
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,

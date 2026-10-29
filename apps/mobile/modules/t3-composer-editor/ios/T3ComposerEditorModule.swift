@@ -181,6 +181,20 @@ final class T3EdgeBlurView: ExpoView {
     return nil
   }
 
+  private func registerScrollView(in root: UIView) {
+    var ancestor = superview
+    while let view = ancestor {
+      if let scroll = view as? UIScrollView, !(scroll is UITextView) {
+        Self.scrollViews.setObject(scroll, forKey: root)
+        for overlay in Self.edges.allObjects where overlay.edge != "content" && overlay.screenRoot() === root {
+          overlay.connect()
+        }
+        return
+      }
+      ancestor = view.superview
+    }
+  }
+
   private func connect() {
     guard #available(iOS 26, *), let interaction = edgeInteraction as? UIScrollEdgeElementContainerInteraction else { return }
     guard window != nil, let root = screenRoot() else {
@@ -189,17 +203,7 @@ final class T3EdgeBlurView: ExpoView {
       return
     }
     if edge == "content" {
-      var ancestor = superview
-      while let view = ancestor {
-        if let scroll = view as? UIScrollView, !(scroll is UITextView) {
-          Self.scrollViews.setObject(scroll, forKey: root)
-          for overlay in Self.edges.allObjects where overlay.edge != "content" && overlay.screenRoot() === root {
-            overlay.connect()
-          }
-          return
-        }
-        ancestor = view.superview
-      }
+      registerScrollView(in: root)
       return
     }
     guard let scroll = Self.scrollViews.object(forKey: root) else { return }

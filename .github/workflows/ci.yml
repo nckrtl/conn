@@ -256,6 +256,30 @@ jobs:
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
+      # Desktop tab runner tests use the same Chromium build as web and server.
+      - name: Resolve Playwright version
+        id: playwright_version
+        run: echo "version=$(node -p "require('./apps/web/node_modules/playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Chromium
+        id: chromium_cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-shell-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright_version.outputs.version }}
+
+      - name: Install Chromium for desktop browser integration tests
+        if: steps.chromium_cache.outputs.cache-hit != 'true'
+        run: node apps/web/node_modules/playwright/cli.js install --only-shell chromium
+
+      - name: Install missing Chromium system dependencies
+        run: |
+          browser=$(find "$HOME/.cache/ms-playwright" -name chrome-headless-shell -type f -print -quit)
+          test -n "$browser"
+          if ldd "$browser" | grep '=> not found'; then
+            node apps/web/node_modules/playwright/cli.js install-deps chromium
+          fi
+
       - name: Test preview artifact validation
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
 

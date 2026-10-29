@@ -258,13 +258,9 @@ const layerMcpAuthMiddleware = HttpRouter.middleware<{
 }>()(makeMcpAuthMiddleware).layer;
 
 /**
- * Claude Code moves an MCP result above its output limit to a file and hands
- * the agent a notice instead, so a snapshot that carries the full
- * accessibility tree and page text loses its locators too. Claude Code also
- * shows the model `structuredContent` in place of the text blocks when a
- * result has both, so both carry the same bounded snapshot. Keep it near
- * 20 KB and tell the agent what was cut. The short `omitted` notes may go a
- * little over; the provider limit is far above this.
+ * Claude Code replaces oversized results with file notices, losing snapshot locators.
+ * Keep both text and structuredContent near 20 KB because Claude prefers the latter.
+ * Short omitted notes may exceed the target; the provider limit is much higher.
  */
 export const MAX_SNAPSHOT_TEXT_BYTES = 20_000;
 const MAX_SNAPSHOT_VISIBLE_TEXT_CHARS = 8_000;
@@ -309,11 +305,9 @@ type SnapshotMetadata = {
 };
 
 /**
- * Keeps server ARIA refs, drops legacy object trees, shortens page text, names, identifiers,
- * and log strings, keeps only the newest log entries, and finally sheds
- * interactive elements until the JSON fits. Returns the bounded value, its
- * text, and notes on what is missing so the agent can reach for
- * preview_evaluate.
+ * Preserve server ARIA refs while trimming legacy trees, text and older logs.
+ * Shed interactive elements last. Return notes so agents can use preview_evaluate
+ * for omitted content.
  */
 const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
   const omitted: Array<string> = [];
@@ -1095,13 +1089,9 @@ const withAdvertisedSchemas = Effect.fn("McpHttpServer.withAdvertisedSchemas")(f
 });
 
 /**
- * `McpServer.toolkit` for handlers that declared their access (see
- * `McpToolAccess`). Every toolkit on `/mcp` registers through this.
- *
- * `McpServer.toolkit` asks for every service its tools declare when it
- * registers them, but the auth middleware provides `McpInvocationContext` to
- * each request instead. Registration must not get one: the services it
- * captures would replace the request's.
+ * Every /mcp toolkit declares access through McpToolAccess. Registration must not
+ * capture McpInvocationContext: auth middleware supplies each request’s context,
+ * which captured services would replace.
  */
 export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
   toolkit: Toolkit.Toolkit<Tools>,
@@ -1177,7 +1167,7 @@ export const layerAnnotationsToolkit = toolkitRegistration(
   AnnotationsHandlers.layer,
 );
 
-export const layerEnvironmentToolkit = toolkitRegistration(
+const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentToolkit,
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));

@@ -23,7 +23,7 @@ function isPayload(value: unknown): value is ToolbarData {
 }
 
 /** The page request's row from a `page-summary` message, or null when it has no id. */
-export function summaryRow(data: unknown): ToolbarHistoryRow | null {
+function summaryRow(data: unknown): ToolbarHistoryRow | null {
   if (!isPayload(data) || typeof data.request_id !== "string") return null;
   const row: unknown = data.history_row;
   return isPayload(row) && typeof (row as { id?: unknown }).id === "string"

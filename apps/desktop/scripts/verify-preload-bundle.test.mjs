@@ -8,6 +8,7 @@ const validPreload = `
   electron.contextBridge.exposeInMainWorld("__clerk_internal_electron_passkeys", {});
   electron.contextBridge.exposeInMainWorld("desktopBridge", {
     getClientPlatform: () => process.platform,
+    windowContext: { additional: process.argv.includes("--t3code-window=additional") },
     getLocalEnvironmentBootstraps: () => [],
     getPathForFile: () => "",
     pickFolder: (options) => electron.ipcRenderer.invoke(PICK_FOLDER_CHANNEL, options),

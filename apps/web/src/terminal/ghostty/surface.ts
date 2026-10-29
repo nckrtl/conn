@@ -126,7 +126,7 @@ function terminalFontSize(size?: number): number {
   return Math.max(MIN_TERMINAL_FONT_SIZE, Math.min(MAX_TERMINAL_FONT_SIZE, Math.round(size)));
 }
 
-export function terminalLineHeight(lineHeight?: number): number {
+function terminalLineHeight(lineHeight?: number): number {
   if (lineHeight === undefined || !Number.isFinite(lineHeight)) return DEFAULT_GHOSTTY_LINE_HEIGHT;
   return Math.max(MIN_TERMINAL_LINE_HEIGHT, Math.min(MAX_TERMINAL_LINE_HEIGHT, lineHeight));
 }
@@ -136,7 +136,7 @@ export function terminalLineHeight(lineHeight?: number): number {
  * hollow cursor instead of blinking, and a reduced-motion reader gets a steady
  * cursor too rather than a permanently animating element.
  */
-export function shouldBlinkTerminalCursor(state: {
+function shouldBlinkTerminalCursor(state: {
   readonly focused: boolean;
   readonly cursorBlinking: boolean;
   readonly cursorVisible: boolean;

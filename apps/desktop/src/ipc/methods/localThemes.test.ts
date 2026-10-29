@@ -54,6 +54,7 @@ describe("readLocalThemes", () => {
       const baseDir = yield* fs.makeTempDirectoryScoped({
         prefix: "t3-desktop-local-themes-watch-test-",
       });
+      const watching = yield* Deferred.make<void>();
       const sent = yield* Deferred.make<{ channel: string; themes: unknown }>();
       const electronWindowLayer = Layer.succeed(ElectronWindow.ElectronWindow, {
         create: () => Effect.die("unexpected window creation"),
@@ -87,7 +88,19 @@ describe("readLocalThemes", () => {
 
       yield* Effect.gen(function* () {
         const environment = yield* DesktopEnvironment.DesktopEnvironment;
-        yield* installLocalThemesWatcher();
+        yield* installLocalThemesWatcher().pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            watch: (path, options) =>
+              fs.watch(path, {
+                ...options,
+                onReady: () => {
+                  Deferred.doneUnsafe(watching, Effect.void);
+                },
+              }),
+          }),
+        );
+        yield* Deferred.await(watching);
         yield* fs.writeFileString(
           `${environment.stateDir}/themes/nightfall.json`,
           themeFile("Nightfall"),

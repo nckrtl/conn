@@ -8,6 +8,7 @@ import {
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
+import * as ServerConfig from "../../../config.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as Manager from "../../../preview/Manager.ts";
 import * as AgentPanelBroker from "../../../panels/AgentPanelBroker.ts";
@@ -26,6 +27,7 @@ const PanelOpenTool = Tool.make("panel_open", {
   dependencies: [
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
+    ServerConfig.ServerConfig,
     AgentPanelBroker.AgentPanelBroker,
     Manager.PreviewManager,
     PreviewAutomationBroker.PreviewAutomationBroker,

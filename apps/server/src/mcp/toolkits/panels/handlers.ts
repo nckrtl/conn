@@ -2,6 +2,7 @@ import { AgentPanelUnavailableError, type PreviewTabId } from "@t3tools/contract
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 
+import * as ServerConfig from "../../../config.ts";
 import * as AgentPanelBroker from "../../../panels/AgentPanelBroker.ts";
 import * as Manager from "../../../preview/Manager.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -70,6 +71,36 @@ export const layer = McpToolAccess.toLayer(PanelsToolkit, {
             "No Conn desktop app is connected to this server, so nothing can show the browser. Ask the user to open Conn on their Mac.",
         });
       let tabId = input.tabId;
+      const desktopHostsThisServer =
+        (yield* ServerConfig.ServerConfig).desktopBrowserControlFd !== undefined;
+      if (input.url && desktopHostsThisServer) {
+        // The desktop bundling this server renders server tabs natively, and only those are
+        // drivable here. The open pins this thread's current tab.
+        const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
+        const opened = yield* (yield* PreviewAutomationBroker.PreviewAutomationBroker).invoke<{
+          readonly tabId?: PreviewTabId;
+        }>({
+          scope,
+          operation: "open",
+          input: {
+            url: input.url,
+            open: false,
+            reuseExistingTab: false,
+            ...(input.profileId === undefined ? {} : { profileId: input.profileId }),
+          },
+        });
+        const { deviceName } = yield* panels.show({
+          threadId,
+          panel: "browser",
+          focusWindow,
+          ...(opened.tabId === undefined ? {} : { tabId: opened.tabId }),
+        });
+        return {
+          panel: input.panel,
+          shownOn: deviceName,
+          ...(opened.tabId === undefined ? {} : { tabId: opened.tabId }),
+        };
+      }
       if (input.url) {
         const manager = yield* Manager.PreviewManager;
         const snapshot = yield* manager

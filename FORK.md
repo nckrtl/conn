@@ -369,6 +369,42 @@ Sources:
 - Shared (`packages/shared/src/`): `previewPage.ts`, `previewSessionControl.ts`.
 - `docs/user/default-browser.md`.
 
+### Agent-opened panels
+
+A thread's agent can show a panel in the Conn desktop with the `panel_open` MCP
+tool, so it can show the user its work running. Conn comes to the front, selects
+the agent's thread and opens the panel: `browser`, `database`, `mcp`, `diff` or
+`files`. Only Conn threads can do this; the tool needs a thread scope.
+
+- `browser` with `url` opens a new desktop tab, and later `preview_*` calls
+  without a `tabId` drive it. `tabId` shows an existing tab instead.
+- `database` with `sql` puts the query in the editor.
+- `focusWindow: false` opens the panel without bringing Conn forward.
+
+The server sends each request to every desktop connected to it
+(`panels.requests` stream); the first desktop that shows the panel answers
+(`panels.respond`). With no desktop connected, or when none answers in 15 s, the
+tool fails with a clear reason. It never falls back to the headless browser.
+
+The browser opens differently per server. On the server the desktop bundles,
+desktop-runtime tabs are not relayed, so the tool opens a native server tab
+through the broker's `open` operation. On a remote server (Beast, mini,
+nick-vm) it opens a desktop-runtime tab and waits up to 20 s for the desktop to
+register as its host. Remote servers need this build too.
+
+Known issue: the first remote browser open after adding an environment once
+failed with `tab_not_hosted`; after a renderer reload it worked every time.
+
+To add a panel, add its kind to `AgentPanelKind` and an opener to
+`PANEL_OPENERS`. Panel-specific arguments go on `AgentPanelRequest`.
+
+Sources:
+
+- `packages/contracts/src/agentPanels.ts`.
+- `apps/server/src/panels/AgentPanelBroker.ts`.
+- `apps/server/src/mcp/toolkits/panels/`.
+- `apps/web/src/panels/agentPanelRequests.ts`.
+
 ### Password-manager autofill
 
 Agents use test logins through the browser panel. `request_credentials` lists
@@ -601,7 +637,7 @@ Sources:
 
 ### Fork RPC group
 
-Conn's `serverRestart`, `peerLinks*`, `credentials*` and `testLogins*` RPCs live
+Conn's `serverRestart`, `peerLinks*`, `credentials*`, `testLogins*` and `panels.*` RPCs live
 in `ForkWsRpcGroup`, merged into `WsRpcGroup`. They have a separate handler
 layer because one group with every RPC exceeds TypeScript's instantiation limit.
 Add new fork RPCs there.

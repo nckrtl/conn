@@ -111,6 +111,8 @@ export function DeviceStreamView(props: {
   readonly onToggleAnnotating?: () => void;
   /** Lets a parent read this view's own stream state, such as its screen size. */
   readonly viewId?: string;
+  /** The host serves only serve-sim's stream and input socket (Simlock). */
+  readonly serveSimOnly?: boolean;
 }) {
   const model = deviceModel(props.platform, props.deviceName ?? "");
   const isDuo = model?.id === "iphone-duo";
@@ -136,6 +138,7 @@ export function DeviceStreamView(props: {
           platform: props.platform,
           deviceId: props.deviceId,
           access,
+          serveSimOnly: props.serveSimOnly === true,
           viewId,
         })
       : NO_SESSION_ATOM,
@@ -234,6 +237,7 @@ export function DeviceStreamView(props: {
   const pointerCapture = useRef<{ id: number; target: HTMLElement } | null>(null);
   const pointerPoint = useRef({ x: 0, y: 0 });
   // Annotation mode ignores pointerup, so a press that is still down would stick.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- ends the stream client's touch and releases DOM pointer capture
   useEffect(() => {
     if (!props.annotating || !pointerActive.current) return;
     const point = pointerPoint.current;

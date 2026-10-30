@@ -116,12 +116,8 @@ export interface AppearanceFontPreferences {
 }
 
 /**
- * Apply the preferences to the root element. Unset families remove the
- * override so the stylesheet defaults (and theme changes) stay in charge.
- *
- * Sizes are always written: the interface size drives the root font size (and
- * with it every rem-based dimension), while the prompt and code sizes stay in
- * absolute pixels so they do not scale twice.
+ * Apply the preferences to the root. Unset families drop the override. Sizes are always
+ * written: the interface size sets the root font size, prompt and code sizes stay in px.
  */
 export function applyAppearanceFontVariables(
   root: HTMLElement,
@@ -166,16 +162,9 @@ export function applyAppearanceFontVariables(
 }
 
 /**
- * The line-height custom properties for the preferences; null removes one.
- *
- * - `--line-height-interface-scale` multiplies Tailwind's text and leading
- *   tokens and the root line height (see index.css), so the interface value is
- *   the body line height and 1.5 leaves every token as it was.
- * - `--line-height-prompt` and `--line-height-code` replace the
- *   `leading-relaxed` the composer and chat code blocks used.
- * - `--diffs-line-height` routes the code value to diffs and file previews. They
- *   used @pierre/diffs' fixed 20px, which no unitless value matches at every
- *   code size, so the hook is only set once the value moves off its default.
+ * Line-height custom properties (null removes one): the interface scale for text tokens, the
+ * prompt and code values replacing `leading-relaxed`, and `--diffs-line-height`, set only off
+ * the default because @pierre/diffs uses a fixed 20px.
  */
 export function appearanceLineHeightVariables(
   preferences: Pick<
@@ -225,7 +214,7 @@ export function clampInterfaceLineHeight(value: number): number {
   );
 }
 
-export function clampPromptLineHeight(value: number): number {
+function clampPromptLineHeight(value: number): number {
   return clampLineHeight(
     value,
     MIN_PROMPT_LINE_HEIGHT,
@@ -317,13 +306,8 @@ export function areFontAdvancesMonospace(advances: readonly number[]): boolean {
 }
 
 /**
- * Whether a family renders every character on the same advance. Cell-grid
- * surfaces (the terminal) require this: a proportional face draws its text
- * narrower than the lattice the cursor and selection are placed on, which
- * reads as ragged gaps and a cursor stranded to the right of the text.
- *
- * Unmeasurable environments answer true, so a missing canvas never blocks a
- * legitimate font.
+ * Whether a family is monospaced, which cell-grid surfaces (the terminal) require.
+ * Unmeasurable environments answer true so a missing canvas never blocks a font.
  */
 export function isMonospaceFamily(family: string): boolean {
   const families = cssFontFamilies(family);

@@ -1,14 +1,7 @@
-// Conn: wait for Orbit MCP hosts before the first Codex app-server spawn.
-//
-// Codex starts a thread's MCP servers once, when the thread starts, and never
-// retries one that failed. After a reboot the Orbit network (WireGuard,
-// `*.orbit` hosts) can come up after the T3 server has already spawned
-// `codex app-server` and resumed threads, which then run without Recall or
-// executor tools. This gate holds the spawn until every enabled `*.orbit` MCP
-// URL in the Codex config accepts a TCP connection, bounded by
-// T3CODE_CODEX_MCP_WAIT_SECONDS (default 120, 0 disables). On timeout the
-// spawn goes ahead. The result is cached per config file, so only the first
-// spawn per server process can wait.
+// Conn: Codex starts MCP servers once per thread, so after a reboot it can spawn before
+// the Orbit network is up. Hold the first spawn until enabled `*.orbit` MCP URLs accept
+// TCP, up to T3CODE_CODEX_MCP_WAIT_SECONDS (default 120, 0 disables), then go ahead.
+// Cached per config file, so only a process's first spawn waits.
 import * as NodeNet from "node:net";
 
 import * as Clock from "effect/Clock";
@@ -17,7 +10,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-export const CODEX_MCP_WAIT_ENV = "T3CODE_CODEX_MCP_WAIT_SECONDS";
+const CODEX_MCP_WAIT_ENV = "T3CODE_CODEX_MCP_WAIT_SECONDS";
 const DEFAULT_WAIT_SECONDS = 120;
 const PROBE_TIMEOUT_MS = 3_000;
 const RETRY_INTERVAL_MS = 2_000;
@@ -70,7 +63,7 @@ export const orbitMcpHosts = (configToml: string): ReadonlyArray<McpHost> => {
 };
 
 /** Succeeds with true when `host` resolves and accepts a TCP connection on `port`. */
-export const probeTcp = (host: McpHost, timeoutMs = PROBE_TIMEOUT_MS) =>
+const probeTcp = (host: McpHost, timeoutMs = PROBE_TIMEOUT_MS) =>
   Effect.callback<boolean>((resume) => {
     const socket = NodeNet.connect({ host: host.host, port: host.port });
     const done = (ok: boolean) => {

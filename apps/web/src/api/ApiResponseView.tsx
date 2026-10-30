@@ -1,6 +1,6 @@
 import type { DesktopApiResponse } from "@t3tools/contracts";
 import { CircleAlert } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Spinner } from "~/components/ui/spinner";
 import { StatusBadge } from "~/laravelToolbar/ui/parts";
@@ -11,7 +11,7 @@ import { ApiTabs } from "./ApiTabs";
 type ResponseTab = "body" | "headers";
 
 /** Pretty-printed JSON when the body parses as JSON, the text as sent otherwise. */
-export function formatResponseBody(response: DesktopApiResponse): string {
+function formatResponseBody(response: DesktopApiResponse): string {
   if (response.bodyEncoding === "base64") {
     return `Binary response (${formatBytes(response.size)}). The panel shows text bodies only.`;
   }
@@ -43,7 +43,7 @@ export function ApiResponseView({
   sending: boolean;
 }) {
   const [tab, setTab] = useState<ResponseTab>("body");
-  const body = useMemo(() => (response ? formatResponseBody(response) : ""), [response]);
+  const body = response ? formatResponseBody(response) : "";
 
   if (!response) {
     return (

@@ -7,7 +7,6 @@
     "test": "vp test run --config ../vite.config.ts --dir ."
   },
   "dependencies": {
-    "@effect/platform-node": "catalog:",
     "@oxlint/plugins": "^1.87.0",
     "effect": "catalog:"
   },

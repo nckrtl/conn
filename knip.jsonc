@@ -27,6 +27,10 @@
       "entry": [
         // These fixture scripts are injected into a browser page by path.
         "fixtures/*/*.js",
+        // Conn fork tools run by hand (symbols, vendored tarballs, local signing).
+        "build-conn-symbols.ts",
+        "build-conn-vendored-tarball.ts",
+        "sign-macos-local.ts",
         "knip-schemas.ts",
         "mobile-behavior/run.ts",
         "mobile-native-client.ts",
@@ -87,7 +91,12 @@
     "apps/web": {
       // Worktree setup (scripts/setup-worktree.ts) runs this directly, and evidence
       // fixtures run under node.
-      "entry": ["scripts/warm-dep-cache.ts", "test/fixtures/**/*.mjs"],
+      // toolbar-mockup.html loads the Conn toolbar preview, which knip does not read.
+      "entry": [
+        "scripts/warm-dep-cache.ts",
+        "test/fixtures/**/*.mjs",
+        "src/laravelToolbarPreview/main.tsx",
+      ],
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.

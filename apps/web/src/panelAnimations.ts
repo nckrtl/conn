@@ -42,29 +42,6 @@ export function usePanelAnimationSettings(): {
   return { active: durationMs > 0 && !prefersReducedMotion && !suppressed, durationMs };
 }
 
-/** Duration of a one-shot control transition while panel motion is set to 0 ms. */
-export const ONE_SHOT_MOTION_FALLBACK_DURATION_MS = 280;
-
-/**
- * Settings for small one-shot transitions on a single element, such as the
- * composer resting. Unlike panels they do not reflow siblings every frame, so
- * a panel duration of 0 ms (the default) does not switch them off; they then
- * use a short fixed duration. Reduced motion and navigation suppression still
- * disable them, and a nonzero panel duration keeps them in step with panels.
- */
-export function useOneShotMotionSettings(): {
-  active: boolean;
-  durationMs: number;
-} {
-  const panelDurationMs = useClientSettings((settings) => settings.panelAnimationDurationMs);
-  const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
-  const suppressed = useContext(PanelAnimationSuppressionContext);
-  return {
-    active: !prefersReducedMotion && !suppressed,
-    durationMs: panelDurationMs > 0 ? panelDurationMs : ONE_SHOT_MOTION_FALLBACK_DURATION_MS,
-  };
-}
-
 /** Keeps closing panel content mounted until its opt-in transition ends. */
 export function usePanelPresence<T>(
   open: boolean,

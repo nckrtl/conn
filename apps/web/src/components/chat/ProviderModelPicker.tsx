@@ -17,7 +17,6 @@ import { ModelEsque, getDisplayModelName, getTriggerDisplayModelName } from "./p
 import { shouldShowInstanceBadge, type ProviderInstanceEntry } from "../../providerInstances";
 import {
   ComposerControl,
-  ComposerControlChevron,
   type ComposerControlAppearance,
   type ComposerControlSize,
 } from "./ComposerControl";
@@ -215,7 +214,11 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           className={cn("flex min-w-0 flex-1 items-center", size === "xs" ? "gap-1" : "gap-1.5")}
         >
           {selectedEntries && props.triggerLabel === undefined ? (
-            <span className="flex shrink-0 items-center -space-x-1" aria-hidden="true">
+            <span
+              data-chat-provider-model-picker-icon
+              className="flex shrink-0 items-center -space-x-1"
+              aria-hidden="true"
+            >
               {selectedEntries
                 .slice(0, 3)
                 .map((selection) =>
@@ -237,21 +240,24 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
               ) : null}
             </span>
           ) : activeEntry && props.triggerLabel === undefined ? (
-            <ProviderInstanceIcon
-              driverKind={activeEntry.driverKind}
-              displayName={activeEntry.displayName}
-              accentColor={activeEntry.accentColor}
-              acpRegistryAgentId={activeEntry.acpRegistryAgentId}
-              acpRegistryIconUrl={activeEntry.acpRegistryIconUrl}
-              showBadge={showInstanceBadge}
-              className="size-4"
-              iconClassName={cn("size-4", props.activeProviderIconClassName)}
-              indicatorBackground={props.instanceIndicatorBackground ?? "var(--contrast-input)"}
-              badgeClassName={cn(
-                "right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3 px-0.5 text-5xs",
-                size === "xs" && "shadow-none",
-              )}
-            />
+            // Narrow compacted composers hide the provider icon before truncating the name.
+            <span data-chat-provider-model-picker-icon className="contents">
+              <ProviderInstanceIcon
+                driverKind={activeEntry.driverKind}
+                displayName={activeEntry.displayName}
+                accentColor={activeEntry.accentColor}
+                acpRegistryAgentId={activeEntry.acpRegistryAgentId}
+                acpRegistryIconUrl={activeEntry.acpRegistryIconUrl}
+                showBadge={showInstanceBadge}
+                className="size-4"
+                iconClassName={cn("size-4", props.activeProviderIconClassName)}
+                indicatorBackground={props.instanceIndicatorBackground ?? "var(--contrast-input)"}
+                badgeClassName={cn(
+                  "right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3 px-0.5 text-5xs",
+                  size === "xs" && "shadow-none",
+                )}
+              />
+            </span>
           ) : null}
           <Tooltip>
             <TooltipTrigger
@@ -271,9 +277,6 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
               Unavailable
             </Badge>
           ) : null}
-        </span>
-        <span aria-hidden="true" className="flex items-center">
-          <ComposerControlChevron size={size} appearance={props.appearance ?? "composer"} />
         </span>
       </PopoverTrigger>
       <PopoverPopup

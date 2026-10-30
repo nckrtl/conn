@@ -1,11 +1,6 @@
 /**
- * Migration runner with an inline loader.
- *
- * Uses Migrator.make with fromRecord to define migrations inline.
- * All migrations are statically imported - no dynamic file system loading.
- *
- * `runMigrations` is called by the SQLite persistence layer at startup, so the
- * schema is always up to date before the application starts.
+ * Migration runner with statically imported, inline migrations. The SQLite persistence
+ * layer calls `runMigrations` at startup.
  */
 
 import * as Migrator from "effect/sql/Migrator";
@@ -90,16 +85,10 @@ import Migration0069 from "./Migrations/069_ThreadMessageSearch.ts";
 import Migration0070 from "./Migrations/070_PeerLinks.ts";
 import Migration0071 from "./Migrations/071_PeerLinkFence.ts";
 import Migration0072 from "./Migrations/072_WaitingLinkRequestIndex.ts";
+import Migration0073 from "./Migrations/073_ActiveTurnItemIndexes.ts";
 
 /**
- * Migration loader with all migrations defined inline.
- *
- * Key format: "{id}_{name}" where:
- * - id: numeric migration ID (determines execution order)
- * - name: descriptive name for the migration
- *
- * Uses Migrator.fromRecord which parses the key format and
- * returns migrations sorted by ID.
+ * All migrations, keyed "{id}_{name}"; Migrator.fromRecord sorts them by id.
  */
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -176,6 +165,7 @@ export const migrationEntries = [
   [70, "PeerLinks", Migration0070],
   [71, "PeerLinkFence", Migration0071],
   [72, "WaitingLinkRequestIndex", Migration0072],
+  [73, "ActiveTurnItemIndexes", Migration0073],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -193,11 +183,9 @@ const makeMigrationLoader = (throughId?: number) =>
 const FIRST_V2_MIGRATION_ID = 55;
 
 /**
- * Fail before migrating when the migrator would skip one of V2's own
- * migrations. It skips every id up to the highest recorded one, whatever name
- * was recorded, so a database that took a V2 id for another migration would
- * start without V2's schema and fail on first use. Earlier ids keep the
- * warning below: databases with a site-local migration there still work.
+ * Fail before migrating when the migrator would skip one of V2's own migrations (it
+ * skips every id up to the highest recorded one, whatever its name). Earlier ids keep the
+ * warning below, since site-local migrations there still work.
  */
 const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function* (
   throughId?: number,
@@ -232,20 +220,9 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
 });
 
 /**
- * Conn builds recorded PeerLinks at 61 (upstream's preview), later at 62, 63,
- * 64, 65, 68 and then at 69. Upstream main gives 61 to PullRequestReviewGuides,
- * 62 to ThreadFailureLookupIndex, 63 to DropUnusedV1Projections, 64 to
- * CanonicalizeThreadPullRequestLinks, 65 to CodexUsageNativeTurnIndex, 66 to
- * RepairClientSettlementTimestamps, 67 to WebhookDedupe, 68 to
- * ShellStopRequestIndex and 69 to ThreadMessageSearch, which the migrator would
- * skip on those databases. Move PeerLinks to 70, then run the upstream
- * migrations it displaced and record them at their ids. PeerLinks and
- * PullRequestReviewGuides only create their table if it is missing,
- * DropUnusedV1Projections only drops tables that exist, and
- * CanonicalizeThreadPullRequestLinks only rewrites rows without pull request
- * links; the index, settlement-repair, webhook and message-search migrations
- * have not run on such a database, because PeerLinks held an id at or below
- * theirs.
+ * Conn recorded PeerLinks at 61-65, 68 and 69, ids upstream main uses, so the migrator
+ * would skip upstream's migrations there. Move PeerLinks to 70, then run the displaced
+ * upstream migrations at their ids; each is safe to run on such a database.
  */
 const CONN_PEER_LINKS_MIGRATION_ID = 70;
 const CONN_DISPLACED_MIGRATIONS: ReadonlyArray<
@@ -335,14 +312,8 @@ export interface RunMigrationsOptions {
 }
 
 /**
- * Run all pending migrations.
- *
- * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
- * then runs any migrations with ID greater than the latest recorded migration.
- *
- * Returns array of [id, name] tuples for migrations that were run.
- *
- * @returns Effect containing array of executed migrations
+ * Run every migration with an id above the latest recorded one, creating
+ * effect_sql_migrations if needed. Returns the [id, name] pairs that ran.
  */
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,

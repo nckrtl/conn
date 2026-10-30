@@ -125,13 +125,13 @@ function resolveMacCodeSignArguments(appBundlePath) {
  * nckrtl fork: the identifier the development runtime's Electron binary is signed under. Vault's
  * Conn relay trusts it from the fork's Apple team, so the dev build can read Vault Database entries.
  */
-export const DEV_RUNTIME_IDENTIFIER = "com.nckrtl.conn.dev";
+const DEV_RUNTIME_IDENTIFIER = "com.nckrtl.conn.dev";
 
 /**
  * The Developer ID of the fork's team in a `security find-identity` listing, or null.
  * `CONN_DEV_SIGNING_IDENTITY` overrides it; `-` keeps the runtime ad-hoc.
  */
-export function pickDevSigningIdentity(listing, teamId, override) {
+function pickDevSigningIdentity(listing, teamId, override) {
   if (override) return override === "-" ? null : override;
   if (!teamId) return null;
   for (const match of listing.matchAll(/^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"/gm)) {
@@ -469,11 +469,8 @@ function buildMacLauncher(electronBinaryPath) {
   );
   patchHelperBundleInfoPlists(targetAppBundlePath);
   if (isDevelopment) {
-    // Keep Electron's native executable inside the branded bundle. Launching the
-    // node_modules copy makes macOS associate the process (and Dock label) with
-    // Electron.app even though this bundle's Info.plist has the app's name.
-    // Its conventional executable name also keeps Electron's default-app runtime
-    // in development mode instead of making app.isPackaged report true.
+    // Keep Electron's executable inside the branded bundle so macOS labels the process
+    // with the app, and keep its conventional name so dev stays unpackaged.
     writeDevelopmentEnvironmentScript();
     writeDevelopmentLauncherScript(launcherBinaryPath, runtimeElectronBinaryPath);
   }

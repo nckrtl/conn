@@ -1,12 +1,10 @@
 import { mergeProps } from "@base-ui/react/merge-props";
 import { Select as SelectPrimitive } from "@base-ui/react/select";
 import { useRender } from "@base-ui/react/use-render";
-import type { ComponentProps, ComponentType, SVGProps } from "react";
-import { ChevronDownIcon } from "lucide-react";
+import type { ComponentType, SVGProps } from "react";
 
 import { cn } from "~/lib/utils";
 import { SelectButton } from "../ui/select";
-import { Separator } from "../ui/separator";
 
 export type ComposerControlSize = "sm" | "xs";
 
@@ -53,6 +51,15 @@ export function ComposerControl({
     // Callers' className only tunes the composer bar's layout, so it does not apply here.
     return <SelectButton size="sm" className="w-auto min-w-0" render={render} {...props} />;
   }
+  return <ComposerControlButton size={size} className={className} render={render} {...props} />;
+}
+
+function ComposerControlButton({
+  className,
+  size = "sm",
+  render,
+  ...props
+}: Omit<ComposerControlProps, "appearance">) {
   const defaultProps = {
     className: composerControlClassName(size, className),
     type: render ? undefined : ("button" as const),
@@ -88,47 +95,6 @@ export function ComposerControlIcon({
   );
 }
 
-export function ComposerControlChevron({
-  className,
-  size = "sm",
-  appearance = "composer",
-}: {
-  className?: string;
-  size?: ComposerControlSize;
-  appearance?: ComposerControlAppearance;
-} = {}) {
-  // The field appearance is a SelectButton, which draws its own chevron.
-  if (appearance === "field") return null;
-  return (
-    <ChevronDownIcon
-      aria-hidden="true"
-      className={cn(
-        "shrink-0",
-        size === "xs" ? "size-3 text-current" : "size-3.5 text-icon-muted",
-        className,
-      )}
-      data-composer-control-chevron
-      strokeWidth={2.25}
-    />
-  );
-}
-
-export function ComposerControlSeparator({
-  className,
-  size = "sm",
-  ...props
-}: Omit<ComponentProps<typeof Separator>, "orientation"> & {
-  size?: ComposerControlSize;
-}) {
-  return (
-    <Separator
-      orientation="vertical"
-      className={cn("mx-0.5 hidden sm:block", size === "xs" ? "h-3.5!" : "h-4", className)}
-      {...props}
-    />
-  );
-}
-
 export function ComposerSelectControl({
   className,
   children,
@@ -141,9 +107,6 @@ export function ComposerSelectControl({
   return (
     <SelectPrimitive.Trigger className={composerControlClassName(size, className)} {...props}>
       {children}
-      <SelectPrimitive.Icon>
-        <ComposerControlChevron size={size} />
-      </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   );
 }

@@ -4,12 +4,9 @@ import { EnvironmentId, ThreadId } from "./baseSchemas.ts";
 import { PreviewTabId } from "./preview.ts";
 
 /**
- * Password-manager autofill for the collaborative browser.
- *
- * Agents only ever see item metadata (id, title, saved URLs) and fill
- * statuses. Test-login values travel from the server store to the
- * desktop's CDP session inside trusted app code and never appear in these
- * agent-facing schemas. Personal Vault logins stay on the desktop.
+ * Password-manager autofill for the collaborative browser. Agents see only item metadata
+ * and fill statuses; test-login values go from the server store to the desktop's CDP
+ * session in trusted code. Personal Vault logins stay on the desktop.
  */
 
 export const CredentialField = Schema.Literals(["username", "password", "otp"]);
@@ -142,7 +139,7 @@ export const DesktopCredentialFillResult = Schema.Struct({
 });
 export type DesktopCredentialFillResult = typeof DesktopCredentialFillResult.Type;
 
-export const CREDENTIAL_APPROVAL_TIMEOUT_SECONDS = [30, 90, 180] as const;
+const CREDENTIAL_APPROVAL_TIMEOUT_SECONDS = [30, 90, 180] as const;
 
 export const CredentialAutofillSettings = Schema.Struct({
   /** One prompt covers every field of one login on one site and tab, briefly. */

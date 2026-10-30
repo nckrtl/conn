@@ -34,11 +34,9 @@ export interface OrbitCopySource {
 }
 
 /**
- * `hidden`: the repository has nothing to do with Orbit, so the option is not
- * shown. `available: false` with a reason: Orbit manages the repository but
- * cannot make an Instance for it on this machine. `projectFolder`: the project
- * is Orbit's folder for a Project (e.g. `/fast/apps/orbit`), not a checkout,
- * so its threads can only start in a new Orbit Instance.
+ * `hidden`: not an Orbit repository. `available: false` + reason: Orbit manages it but
+ * cannot make an Instance here. `projectFolder`: the project is Orbit's Project folder
+ * (e.g. `/fast/apps/orbit`), so its threads only start in a new Orbit Instance.
  */
 export type OrbitAvailability =
   | {
@@ -55,7 +53,7 @@ export type OrbitAvailability =
     }
   | { readonly available: false; readonly hidden: true };
 
-export const ORBIT_APP_DEV_ROLE = "app-dev";
+const ORBIT_APP_DEV_ROLE = "app-dev";
 const ORBIT_SOURCE_INSTANCE = "default";
 
 const HIDDEN: OrbitAvailability = { available: false, hidden: true };
@@ -115,11 +113,9 @@ function trimTrailingSlash(path: string): string {
 }
 
 /**
- * The option is offered when the project's repository is an Orbit Project,
- * this machine is an app-dev Node, and the Project has an active `default`
- * Instance on it. A project rooted at Orbit's folder for a Project (the
- * `default` Instance's parent, no repository itself) counts as that Project.
- * Repositories and folders Orbit does not manage hide the option.
+ * Offered when the repository is an Orbit Project, this machine is an app-dev Node and
+ * the Project has an active `default` Instance here. A project rooted at the Project
+ * folder counts as that Project; anything Orbit does not manage hides the option.
  */
 export async function checkOrbitAvailability(
   transport: OrbitTransport,
@@ -311,7 +307,7 @@ export function orbitRouteSlug(input: {
   return fromBranch ?? input.instanceName;
 }
 
-export function orbitRouteDomain(input: {
+function orbitRouteDomain(input: {
   readonly slug: string;
   readonly projectSlug: string;
   readonly tld: string;

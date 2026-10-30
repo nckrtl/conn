@@ -310,12 +310,21 @@ export interface DesktopUpdateReleaseNote {
   version: string;
   items: ReadonlyArray<string>;
   totalItems: number;
+  /** ISO time from the update feed for the offered version, else `YYYY-MM-DD` from a prerelease version. */
+  releasedAt?: string;
+  /** Generated summaries only: the highlights paragraph. `items` then holds the fixes. */
+  intro?: string;
+  /** Generated summaries only, for example "275 changes from 22 contributors". */
+  stats?: string;
 }
 
 export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
   version: Schema.String,
   items: Schema.Array(Schema.String),
   totalItems: Schema.Number,
+  releasedAt: Schema.optionalKey(Schema.String),
+  intro: Schema.optionalKey(Schema.String),
+  stats: Schema.optionalKey(Schema.String),
 });
 
 export const DesktopUpdateStateSchema = Schema.Struct({
@@ -536,11 +545,8 @@ export const DesktopServerExposureStateSchema = Schema.Struct({
 
 export interface PickFolderOptions {
   initialPath?: string | null;
-  // When set, the desktop dialog opens against the named backend's
-  // filesystem instead of the primary's. Used by callers that already
-  // know which local environment they're targeting (e.g. opening a
-  // project that lives inside WSL). Omitting it keeps the historical
-  // behavior so non-WSL users never see a different picker.
+  // Opens the dialog against this backend's filesystem (e.g. a WSL project); omit it
+  // for the primary's.
   targetEnvironmentId?: string;
 }
 
@@ -1039,11 +1045,8 @@ export const DesktopPreviewTabInputSchema = Schema.Struct({
 });
 
 /**
- * Tab creation carries the client's configured browser defaults so the guest
- * is born already zoomed and color-scheme-emulated. Applying them after
- * creation instead would paint one frame at 100%/system first, which reads as
- * a flash on every tab open. Both fields are optional so an older renderer
- * still gets the historical defaults.
+ * Tab creation carries the browser defaults so the guest starts zoomed and
+ * color-scheme-emulated (no 100% flash). Optional so older renderers get the old defaults.
  */
 export const DesktopPreviewCreateTabInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
@@ -1338,6 +1341,7 @@ export interface DesktopBridge {
   getClientPlatform: () => string;
   setNotificationBadge: (badge: { count: number; image: string | null }) => Promise<void>;
   onNotificationBadgeClear: (listener: () => void) => () => void;
+  onTrackpadScrollBegin: (listener: () => void) => () => void;
   onTrackpadScrollEnd: (listener: () => void) => () => void;
   /**
    * Renderer `window.focus()` cannot raise an Electron window, and on Wayland
@@ -1482,10 +1486,15 @@ export interface DesktopBridge {
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getWindowZoomFactor: () => number;
   getUpdateState: () => Promise<DesktopUpdateState>;
-  setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
+  /** `minimumVersion` is a track switch's checked release; nothing older is offered after. */
+  setUpdateChannel: (
+    channel: DesktopUpdateChannel,
+    minimumVersion?: string,
+  ) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
-  installUpdate: () => Promise<DesktopUpdateActionResult>;
+  /** With a version, installs only that downloaded build. */
+  installUpdate: (expectedVersion?: string) => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
   /** Settings → `t3` command. */
   cliCommand: {
@@ -1614,14 +1623,8 @@ export interface ConfirmDialogOptions {
 }
 
 /**
- * APIs bound to the local app shell, not to any particular backend environment.
- *
- * These capabilities describe the desktop/browser host that the user is
- * currently running: dialogs, external-link opening, context menus, and
- * app-level settings/config access. They must not be used as a proxy for
- * "whatever environment the user is targeting", because in a multi-environment
- * world the local shell and a selected backend environment are distinct
- * concepts.
+ * APIs of the local app shell (dialogs, external links, context menus, app config), not of
+ * any backend environment. Never use them as a proxy for the targeted environment.
  */
 export interface LocalApi {
   dialogs: {

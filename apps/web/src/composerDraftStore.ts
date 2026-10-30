@@ -250,17 +250,9 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   reviewComments: Schema.optionalKey(Schema.Array(ReviewCommentContextSchema)),
   threadContexts: Schema.optionalKey(Schema.Array(ThreadContextRecord)),
   environmentContexts: Schema.optionalKey(Schema.Array(EnvironmentContextRecord)),
-  // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
-  // instances (e.g. `codex_personal`) round-trip alongside the built-in
-  // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
-  // literal satisfies the `ProviderInstanceId` slug pattern, so existing
-  // persisted drafts decode unchanged.
-  //
-  // The record's value schema is NOT wrapped in `Schema.optionalKey`:
-  // that helper is only meaningful on property signatures with a known
-  // key set, and `Schema.Record(<branded string>, …)` produces an index
-  // signature at runtime (Schema rejects the combination). Absence of
-  // an entry already encodes "no selection for this instance".
+  // Keyed by `ProviderInstanceId` so custom instances round-trip; old kind keys still
+  // match the slug pattern. Not `Schema.optionalKey`: a branded-key Record is an index
+  // signature, and a missing entry already means "no selection".
   modelSelectionByProvider: Schema.optionalKey(Schema.Record(ProviderInstanceId, ModelSelection)),
   activeProvider: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
   modelSelectionExplicit: Schema.optionalKey(Schema.Boolean),
@@ -386,12 +378,8 @@ export interface ComposerThreadDraftState {
   threadContexts: ThreadContextRecord[];
   environmentContexts: EnvironmentContextRecord[];
   /**
-   * Per-instance model selection. Keyed by `ProviderInstanceId` (open
-   * branded slug) so a default `codex` instance and a user-authored
-   * `codex_personal` instance each persist their own selected model. Every
-   * historical `ProviderDriverKind` literal (`codex` / `claudeAgent` / `cursor` /
-   * `opencode`) also satisfies the `ProviderInstanceId` slug pattern, so
-   * legacy kind-keyed drafts round-trip unchanged.
+   * Per-instance model selection, keyed by `ProviderInstanceId` so `codex` and a custom
+   * `codex_personal` each keep a model; legacy kind-keyed drafts still decode.
    */
   modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   activeProvider: ProviderInstanceId | null;
@@ -4334,8 +4322,6 @@ if (typeof window !== "undefined" && window.desktopBridge?.windowContext !== und
 }
 
 /** Test hook: the local change tracker for a store subscription. */
-export const trackLocalComposerDraftChangesForTest = trackLocalComposerDraftChanges;
-
 export function subscribeComposerDraftModelReconciliation(input: {
   readonly registry: AtomRegistry.AtomRegistry;
   readonly threadRefsAtom: Atom.Atom<ReadonlyArray<ScopedThreadRef>>;

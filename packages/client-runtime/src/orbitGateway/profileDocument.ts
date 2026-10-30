@@ -18,9 +18,9 @@ export const PROFILE_SCHEMA_VERSION = 1;
 /** Sections the Gateway accepts in a PATCH, besides `workspaces` (which keeps its own sync). */
 export const APPEARANCE_SECTION = "appearance";
 export const DESKTOP_DEVICE_SECTION = "devices.desktop";
-export const IPHONE_DEVICE_SECTION = "devices.iphone";
+const IPHONE_DEVICE_SECTION = "devices.iphone";
 
-export const PROFILE_SECTION_NAMES = [
+const PROFILE_SECTION_NAMES = [
   "workspaces",
   APPEARANCE_SECTION,
   DESKTOP_DEVICE_SECTION,
@@ -89,7 +89,7 @@ function isColors(value: unknown): value is ProfileThemeColors {
   return isJsonObject(value) && Object.values(value).every((color) => typeof color === "string");
 }
 
-export function isProfileThemeSlot(value: unknown): value is ProfileThemeSlot {
+function isProfileThemeSlot(value: unknown): value is ProfileThemeSlot {
   if (!isJsonObject(value) || typeof value.id !== "string") return false;
   if (value.source === "stock" || value.source === "builtin") return true;
   return (
@@ -100,7 +100,7 @@ export function isProfileThemeSlot(value: unknown): value is ProfileThemeSlot {
   );
 }
 
-export function isProfileCustomTheme(value: unknown): value is ProfileCustomTheme {
+function isProfileCustomTheme(value: unknown): value is ProfileCustomTheme {
   if (!isJsonObject(value)) return false;
   if (typeof value.id !== "string" || typeof value.name !== "string") return false;
   if (!isThemeAppearance(value.appearance) || !isColors(value.colors)) return false;

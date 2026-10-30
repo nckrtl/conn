@@ -53,7 +53,7 @@ function shouldUseSidebarUpdateReleaseNotesPopover(
   showUpdateDetails: boolean,
   state: DesktopUpdateState | null,
 ): boolean {
-  return showUpdateDetails && state?.channel === "nightly" && state.releaseNotes.length > 0;
+  return showUpdateDetails && (state?.releaseNotes.length ?? 0) > 0;
 }
 
 function handleSidebarUpdateReleaseNotesPopoverOpenChange(
@@ -134,7 +134,7 @@ const toastUpdateError: ReportLocalUpdateError = (title, description) => {
   toastManager.add(stackedThreadToast({ type: "error", title, description }));
 };
 
-async function downloadLocalUpdate(
+export async function downloadLocalUpdate(
   bridge: DesktopBridge,
   {
     notifyDownloaded,
@@ -160,12 +160,13 @@ async function downloadLocalUpdate(
   }
 }
 
-async function installLocalUpdate(
+export async function installLocalUpdate(
   bridge: DesktopBridge,
   reportError: ReportLocalUpdateError = toastUpdateError,
+  expectedVersion?: string,
 ): Promise<boolean> {
   try {
-    const result = await bridge.installUpdate();
+    const result = await bridge.installUpdate(expectedVersion);
     if (!result.accepted) {
       showDesktopUpdateDownloadedToast(bridge, result.state);
       return false;
@@ -186,11 +187,9 @@ async function installLocalUpdate(
 }
 
 /**
- * The sidebar update button. With only a local app update it downloads, then
- * installs. When other machines' servers or any providers are behind, one
- * click updates everything: providers, then servers, then this app last. On
- * web there is no local app, so the button shows only for remote updates.
- * `rail` renders it as a workspace rail button (rooms-patches).
+ * Sidebar update button: a local-only update downloads then installs; otherwise one click
+ * updates providers, then servers, then this app. `rail` renders it as a workspace rail
+ * button (rooms-patches).
  */
 export function SidebarUpdatePill({ variant = "footer" }: { variant?: "footer" | "rail" } = {}) {
   return <SidebarUpdateControl variant={variant} />;
@@ -552,7 +551,7 @@ function SidebarUpdateControl({ variant }: { variant: "footer" | "rail" }) {
         {showReleaseNotesPopover && state ? (
           <PopoverPopup
             align="center"
-            aria-label="Nightly update release notes"
+            aria-label="Update release notes"
             initialFocus={false}
             onKeyDownCapture={(event) => {
               if (

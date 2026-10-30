@@ -1,4 +1,4 @@
-import { EasDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
+import { EasDeviceHostConfigs, SimlockDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
@@ -20,6 +20,7 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+import { SecretProviderId, SecretProviderSlug } from "./secretReference.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
@@ -192,15 +193,9 @@ export type TerminalFontSize = typeof TerminalFontSize.Type;
 const DEFAULT_TERMINAL_FONT_SIZE: TerminalFontSize = 12;
 
 /**
- * Line heights are unitless multipliers of the font size, one per font size
- * above, in steps of 0.05. Each default is what its surface used before the
- * setting existed, so nothing changes until the user adjusts one:
- * - interface 1.5: the root `line-height` (Tailwind's preflight); the other
- *   text sizes scale in proportion (see `--line-height-interface-scale`).
- * - prompt 1.625: the composer's `leading-relaxed`.
- * - code 1.625: chat code blocks' `leading-relaxed`. Diffs and file previews
- *   keep @pierre/diffs' own 20px until the value moves off this default.
- * - terminal 1.35: the cell height the terminal renderer always used.
+ * Unitless line-height multipliers in 0.05 steps. Each default is what its surface used
+ * before the setting existed: interface 1.5 (root), prompt and code 1.625
+ * (`leading-relaxed`), terminal 1.35. Diffs keep @pierre/diffs' 20px until code moves.
  */
 export const LINE_HEIGHT_STEP = 0.05;
 const lineHeightBetween = (minimum: number, maximum: number) =>
@@ -236,7 +231,7 @@ export const TerminalLineHeight = lineHeightBetween(
   MAX_TERMINAL_LINE_HEIGHT,
 );
 export type TerminalLineHeight = typeof TerminalLineHeight.Type;
-export const DEFAULT_TERMINAL_LINE_HEIGHT: TerminalLineHeight = 1.35;
+const DEFAULT_TERMINAL_LINE_HEIGHT: TerminalLineHeight = 1.35;
 
 // "artwork" follows the running channel and shows nothing on Latest. The fixed artwork
 // modes let any channel opt into a specific channel's art.
@@ -347,11 +342,9 @@ export const DefaultThemePreference = Schema.String.check(Schema.isMaxLength(64)
 export type DefaultThemePreference = typeof DefaultThemePreference.Type;
 
 /**
- * Defaults for the in-app preview browser, applied whenever a tab is opened
- * without an explicit viewport/zoom/appearance — by the user opening a browser
- * tab, or by an agent calling `preview_open` with no size. Recording quality is
- * client-local for the same reason: the Chromium guest being captured belongs
- * to the desktop app.
+ * Defaults for preview tabs opened without an explicit viewport/zoom/appearance, by the
+ * user or by an agent's `preview_open`. Recording quality is client-local: the captured
+ * Chromium guest belongs to the desktop app.
  */
 export const DEFAULT_BROWSER_VIEWPORT: PreviewViewportSetting = FILL_PREVIEW_VIEWPORT;
 export const DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW = true;
@@ -403,6 +396,10 @@ export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
 export type ChatWidth = typeof ChatWidth.Type;
 
+/** How the composer shows reasoning effort: the level's name, or rising bars. */
+export const EffortDisplay = Schema.Literals(["label", "bars"]);
+export type EffortDisplay = typeof EffortDisplay.Type;
+
 /** Preferences shared by clients connected to the same environment. */
 export const ModelFavorite = Schema.Struct({
   // The historical field name is retained; default instance ids also decode old provider-kind favorites.
@@ -431,6 +428,7 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("red-green" as const)),
   ),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed("comfortable" as const))),
+  effortDisplay: EffortDisplay.pipe(Schema.withDecodingDefault(Effect.succeed("label" as const))),
   loadBalancingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   loadBalancingWeights: LoadBalancingWeights.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   appearanceContrast: AppearanceContrast.pipe(
@@ -582,9 +580,6 @@ export const ClientSettingsSchema = Schema.Struct({
   // Legacy context window meter. The composer hides it by default; users who
   // still want the old usage indicator can restore it from Settings.
   contextWindowMeterEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  // Desktop resting composer: scrolling an existing thread's conversation
-  // settles the composer into its single-line layout. Losing focus never does.
-  composerCollapseOnScroll: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Rich text is the default; users can opt out for literal Markdown editing.
   composerRichTextEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   sendShortcut: Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]).pipe(
@@ -596,6 +591,16 @@ export const ClientSettingsSchema = Schema.Struct({
   proactivePanelsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   showSkillsInSlashMenu: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   boringSidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  boringSidebarMultilineRows: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  // Retired Labs toggle. Still read as the default for the Usage item in threadDetailsItems.
+  threadDetailsUsageEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Sparse show/hide overrides for thread details card items. Missing ids use the client's
+  // default, so new items appear for everyone and unknown ids survive a downgrade.
+  threadDetailsItems: Schema.Record(Schema.String, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   // Opt-in for the removed legacy sidebar. Still read so those users land in
   // the boring sidebar; the boring sidebar toggle clears it.
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -991,12 +996,30 @@ export const UsageLimitSourceConfig = Schema.Struct({
 });
 export type UsageLimitSourceConfig = typeof UsageLimitSourceConfig.Type;
 
+export const SecretProviderKind = SecretProviderSlug.pipe(Schema.brand("SecretProviderKind"));
+export type SecretProviderKind = typeof SecretProviderKind.Type;
+
+export const SecretProviderLabel = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
+
+/** Kinds decode their own config; unknown-kind envelopes round-trip verbatim across versions. */
+export const SecretProviderConfig = Schema.Struct({
+  kind: SecretProviderKind,
+  label: TrimmedNonEmptyString,
+  config: Schema.optionalKey(Schema.Unknown),
+});
+export type SecretProviderConfig = typeof SecretProviderConfig.Type;
+
+// Limits that may change later are enforced on writes only, never on the stored envelope. The
+// server also checks the kind and its config against the secret providers it has loaded.
+const SecretProviderConfigWrite = Schema.Struct({
+  ...SecretProviderConfig.fields,
+  label: SecretProviderLabel,
+});
+
 /**
- * One source control host's saved settings. Each host package declares the fields it reads in
- * its client definition's settings schema and decodes this blob with it; the environment stores
- * it whole, so a host this build does not ship keeps its settings. A field annotated as a secret
- * holds a string, or a string per server host, whose value lives in the server's secret store:
- * settings and clients only see a redaction marker for a saved one.
+ * One source control host's saved settings, decoded by the host's own schema and stored
+ * whole so an unknown host keeps its settings. Secret fields live in the server's secret
+ * store; settings and clients only see a redaction marker.
  */
 export const SourceControlHostSettings = Schema.Record(Schema.String, Schema.Unknown);
 export type SourceControlHostSettings = typeof SourceControlHostSettings.Type;
@@ -1183,18 +1206,9 @@ export const ProjectProviderInstanceOverride = Schema.Struct({
 export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOverride.Type;
 
 /**
- * One project's overrides. An absent key inherits the environment value;
- * `null` is a real value where the environment type is nullable (no default
- * model, no dedicated writer model, never auto-settle).
- *
- * `providerInstances` sits outside `PROJECT_SCOPED_SERVER_SETTING_KEYS`:
- * every other key replaces its `ServerSettings` field whole, while this one
- * keeps the settings.json shape but overrides field by field, per
- * `ProviderInstanceId`. Only `enabled` is overridable today. An instance id
- * or field absent here inherits the machine value, and a present `enabled`
- * wins in either direction, so a project can turn on an instance the machine
- * disabled, or turn off one the machine enabled. See
- * `resolveProjectProviderInstanceEnabled` for the combined resolution.
+ * One project's overrides: an absent key inherits, `null` is a real value where nullable.
+ * `providerInstances` overrides field by field per `ProviderInstanceId` (only `enabled`),
+ * winning in either direction; see `resolveProjectProviderInstanceEnabled`.
  */
 export const ProjectSettingsOverrides = Schema.Struct({
   worktreeCleanup: Schema.optionalKey(WorktreeCleanup),
@@ -1228,6 +1242,16 @@ export const ProjectSettingsOverrides = Schema.Struct({
   ),
 } satisfies Record<ProjectScopedServerSettingKey | "providerInstances", unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
+
+// Whole-entry writers must round-trip unknown keys; keep the type closed to catch misspellings.
+export const keepUnknownOverrideKeys = <Entry extends Schema.Struct<Schema.Struct.Fields>>(
+  entry: Entry,
+): Schema.Codec<
+  Entry["Type"],
+  Entry["Encoded"],
+  Entry["DecodingServices"],
+  Entry["EncodingServices"]
+> => Schema.StructWithRest(entry, [Schema.Record(Schema.String, Schema.Unknown)]);
 
 /** True if null stores an override; otherwise null removes it. */
 export function isNullableProjectSettingsOverride(key: ProjectScopedServerSettingKey): boolean {
@@ -1336,15 +1360,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   /**
-   * Whether agents may drive the in-app preview browser. Turning this off
-   * withholds the MCP credential, so the `t3-code` server (and with it every
-   * `preview_*` tool) is never attached to a provider session, and the prompt
-   * text describing those tools is dropped along with them. The user's own
-   * browser panel is unaffected — this gates agent access only.
-   *
-   * Server-authoritative rather than client-local: tool injection and prompt
-   * construction both happen on the server, and the answer must not differ
-   * between a desktop window and a phone attached to the same server.
+   * Whether agents may drive the preview browser. Off withholds the MCP credential, so no
+   * `preview_*` tool or its prompt text reaches a provider session. Server-side because tool
+   * injection happens there and must match across every client.
    */
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
@@ -1367,19 +1385,21 @@ export const ServerSettings = Schema.Struct({
   defaultModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  fallbackModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
   ),
   /**
-   * Per-project overrides of the keys in `PROJECT_SCOPED_SERVER_SETTING_KEYS`,
-   * plus `providerInstances`. The source of truth for project
-   * settings; `projectAgentBrowserAccessOverrides`, `projectAutoPullOverrides`
-   * and `projectScriptOverrides` are derived views kept for one release so
-   * older clients keep reading them.
+   * Per-project overrides of `PROJECT_SCOPED_SERVER_SETTING_KEYS` plus `providerInstances`;
+   * the source of truth. The older per-feature override maps are derived views kept for one
+   * release so older clients keep reading them.
    */
-  projectSettingsOverrides: Schema.Record(ProjectId, ProjectSettingsOverrides).pipe(
-    Schema.withDecodingDefault(Effect.succeed({})),
-  ),
+  projectSettingsOverrides: Schema.Record(
+    ProjectId,
+    keepUnknownOverrideKeys(ProjectSettingsOverrides),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   /**
    * Whether the legacy per-project fields have been folded into
    * `projectSettingsOverrides`. The fold runs once so a later reset in the
@@ -1387,11 +1407,9 @@ export const ServerSettings = Schema.Struct({
    */
   projectSettingsFolded: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
-   * Whether agents may drive simulators and emulators. Gates the `device_*`
-   * MCP tools and the preconfigured `agent-device` CLI the same way
-   * `enableAgentBrowserAccess` gates the browser: server-authoritative, applied
-   * when the provider session is prepared. The user's own Device panel is
-   * unaffected.
+   * Whether agents may drive simulators and emulators (`device_*` MCP tools and the
+   * `agent-device` CLI). Server-authoritative like `enableAgentBrowserAccess`; the user's
+   * own Device panel is unaffected.
    */
   enableAgentDeviceAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
@@ -1404,6 +1422,9 @@ export const ServerSettings = Schema.Struct({
   deviceOnboardingCompleted: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   deviceHosts: SshDeviceHostConfigs.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   easDeviceHosts: EasDeviceHostConfigs.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  simlockDeviceHosts: SimlockDeviceHostConfigs.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** Alpha: Simlock device hosts. Off, the server ignores `simlockDeviceHosts`. */
+  simlockDeviceHostsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -1445,31 +1466,23 @@ export const ServerSettings = Schema.Struct({
   ),
   defaultTheme: DefaultThemePreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /**
-   * When the environment's theme was last set, so clients can tell a re-set
-   * of the same value from one they already applied: `t3 theme set` must act
-   * even when it names the theme it named before. Empty on environments
-   * provisioned by builds that predate it, where clients fall back to
-   * applying once per value.
+   * When the theme was last set, so `t3 theme set` acts even when it repeats the value.
+   * Empty on older environments, where clients apply once per value.
    */
   defaultThemeSetAt: Schema.String.check(Schema.isMaxLength(64)).pipe(
     Schema.withDecodingDefault(Effect.succeed("")),
   ),
   /**
-   * The icon clients draw for this environment. Null means "use what the
-   * server detected" (`environment.platform.machine`), falling back to a
-   * generic server. Lives on the server, not the client, so every device
-   * sees the same machine. A kind picked on a newer server decodes as null
-   * here rather than failing the whole settings snapshot for an older client.
+   * The icon every client draws for this environment. Null means the detected machine
+   * kind, falling back to a generic server; an unknown newer kind decodes as null.
    */
   environmentIcon: ForwardCompatibleNullable(EnvironmentMachineKind).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   /**
-   * Null means inherit: the repository's t3.json, then "local". The old
-   * default "local" was never persisted (defaults are stripped on write), so
-   * it now decodes as inherit, which resolves the same way because the old
-   * chain also let t3.json outrank the environment. Null stays off the wire
-   * so older clients, which require a literal here, keep decoding.
+   * Null inherits: the repository's t3.json, then "local". The old unpersisted "local"
+   * default decodes as inherit and resolves the same way. Null stays off the wire so
+   * older clients, which require a literal, keep decoding.
    */
   defaultThreadEnvMode: OmittedWhenNull(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.Boolean.pipe(
@@ -1534,11 +1547,8 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
 
-  // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
-  // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
-  // is `Schema.Unknown` at this layer so envelopes with unknown drivers
-  // (forks, downgrades, in-flight PR branches) round-trip without loss.
-  // See providerInstance.ts for the forward/backward compatibility invariant.
+  // Keyed by `ProviderInstanceId`. Driver config is `Schema.Unknown` here so envelopes
+  // with unknown drivers round-trip without loss; see providerInstance.ts.
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1549,6 +1559,9 @@ export const ServerSettings = Schema.Struct({
   ),
   // User-chosen ids preserve rows across edits; undecodable entries round-trip untouched.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  secretProviders: Schema.Record(SecretProviderId, SecretProviderConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   /** Allows this server to read the Cursor CLI's macOS Keychain login for account usage. */
@@ -1715,6 +1728,7 @@ export const ServerSettingsOperation = Schema.Literals([
   "remove-secret",
   "remove-stale-secret",
   "write-secret",
+  "write-secret-provider",
   "write-file",
   "prepare-directory",
 ]);
@@ -1828,26 +1842,23 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
+  fallbackModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  /** Replaces each project's override set; null removes it. Omitted providerInstances retains its stored value. */
   /**
-   * Per-project entry replacement: each entry replaces that project's whole
-   * override set and `null` removes it. Clearing one override means resending
-   * the entry without that key. Per-key null cannot express "clear" for the
-   * keys whose value type is itself nullable, and clients always hold the
-   * current entry from the last settings snapshot.
-   *
-   * `providerInstances` is the one exception: an entry that omits the key
-   * keeps the stored value instead of clearing it, so a client built before
-   * that field existed cannot wipe it by editing another key. Clearing every
-   * provider override for a project means sending `providerInstances: {}`.
+   * Each entry replaces that project's whole override set; `null` removes it. Exception:
+   * an entry omitting `providerInstances` keeps the stored value, so older clients cannot
+   * wipe it; send `providerInstances: {}` to clear.
    */
   projectSettingsOverrides: Schema.optionalKey(
     Schema.Record(
       ProjectId,
       Schema.NullOr(
-        Schema.Struct({
-          ...ProjectSettingsOverrides.fields,
-          sourceControlWritingStyle: Schema.optionalKey(SourceControlWritingStyleSettings),
-        }),
+        keepUnknownOverrideKeys(
+          Schema.Struct({
+            ...ProjectSettingsOverrides.fields,
+            sourceControlWritingStyle: Schema.optionalKey(SourceControlWritingStyleSettings),
+          }),
+        ),
       ),
     ),
   ),
@@ -1856,6 +1867,8 @@ export const ServerSettingsPatch = Schema.Struct({
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),
   easDeviceHosts: Schema.optionalKey(EasDeviceHostConfigs),
+  simlockDeviceHosts: Schema.optionalKey(SimlockDeviceHostConfigs),
+  simlockDeviceHostsEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   compactIdleThreads: Schema.optionalKey(LegacyCompactIdleThreads),
   idleCompaction: Schema.optionalKey(IdleCompactionMode),
@@ -1918,6 +1931,9 @@ export const ServerSettingsPatch = Schema.Struct({
   usageLimitSources: Schema.optionalKey(
     Schema.Record(UsageLimitSourceId, Schema.NullOr(UsageLimitSourceConfig)),
   ),
+  secretProviders: Schema.optionalKey(
+    Schema.Record(SecretProviderId, Schema.NullOr(SecretProviderConfigWrite)),
+  ),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
   /** Each entry replaces one model's rates; `null` restores automatic pricing. */
   usagePriceOverrides: Schema.optionalKey(
@@ -1938,7 +1954,12 @@ export function requiredScopesForServerSettingsPatch(
   let changesSettings = false;
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    if (key === "providers" || key === "providerInstances" || key === "usageLimitSources") {
+    if (
+      key === "providers" ||
+      key === "providerInstances" ||
+      key === "usageLimitSources" ||
+      key === "secretProviders"
+    ) {
       changesProviders = true;
     } else {
       changesSettings = true;
@@ -1968,6 +1989,7 @@ export const ClientSettingsPatch = Schema.Struct({
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
+  effortDisplay: Schema.optionalKey(EffortDisplay),
   loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),
   loadBalancingWeights: Schema.optionalKey(LoadBalancingWeights),
   appearanceContrast: Schema.optionalKey(AppearanceContrast),
@@ -2018,13 +2040,15 @@ export const ClientSettingsPatch = Schema.Struct({
   pullRequestLinksOpenInApp: Schema.optionalKey(Schema.Boolean),
   planModeEnabled: Schema.optionalKey(Schema.Boolean),
   contextWindowMeterEnabled: Schema.optionalKey(Schema.Boolean),
-  composerCollapseOnScroll: Schema.optionalKey(Schema.Boolean),
   composerRichTextEnabled: Schema.optionalKey(Schema.Boolean),
   sendShortcut: Schema.optionalKey(Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"])),
   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   boringSidebarEnabled: Schema.optionalKey(Schema.Boolean),
+  boringSidebarMultilineRows: Schema.optionalKey(Schema.Boolean),
+  threadDetailsUsageEnabled: Schema.optionalKey(Schema.Boolean),
+  threadDetailsItems: Schema.optionalKey(Schema.Record(Schema.String, Schema.Boolean)),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),

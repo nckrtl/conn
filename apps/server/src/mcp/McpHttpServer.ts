@@ -14,6 +14,7 @@ import type * as Types from "effect/Types";
 import { AiError, McpProtocol, McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
+  DeviceToolError,
   OrchestratorMcpFailure,
   PreviewAutomationError,
   ProviderInteractionMode,
@@ -258,13 +259,9 @@ const layerMcpAuthMiddleware = HttpRouter.middleware<{
 }>()(makeMcpAuthMiddleware).layer;
 
 /**
- * Claude Code moves an MCP result above its output limit to a file and hands
- * the agent a notice instead, so a snapshot that carries the full
- * accessibility tree and page text loses its locators too. Claude Code also
- * shows the model `structuredContent` in place of the text blocks when a
- * result has both, so both carry the same bounded snapshot. Keep it near
- * 20 KB and tell the agent what was cut. The short `omitted` notes may go a
- * little over; the provider limit is far above this.
+ * Claude Code moves an over-limit MCP result to a file (losing locators) and shows
+ * `structuredContent` instead of text when both exist, so both carry this bounded
+ * snapshot. Keep near 20 KB and say what was cut.
  */
 export const MAX_SNAPSHOT_TEXT_BYTES = 20_000;
 const MAX_SNAPSHOT_VISIBLE_TEXT_CHARS = 8_000;
@@ -309,11 +306,8 @@ type SnapshotMetadata = {
 };
 
 /**
- * Keeps server ARIA refs, drops legacy object trees, shortens page text, names, identifiers,
- * and log strings, keeps only the newest log entries, and finally sheds
- * interactive elements until the JSON fits. Returns the bounded value, its
- * text, and notes on what is missing so the agent can reach for
- * preview_evaluate.
+ * Shrinks snapshot metadata until the JSON fits: keeps ARIA refs, shortens text and logs,
+ * then sheds interactive elements. Returns the value, its text and what was omitted.
  */
 const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
   const omitted: Array<string> = [];
@@ -829,11 +823,15 @@ const registerDeviceScreenshot = Effect.fn("McpHttpServer.registerDeviceScreensh
         Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
       ),
     "screenshot",
-    "Device screenshot failed.",
+    (error) =>
+      isDeviceToolError(error) || isOrchestratorMcpFailure(error)
+        ? error.message
+        : "Device screenshot failed.",
   );
 });
 
 const isOrchestratorMcpFailure = Schema.is(OrchestratorMcpFailure);
+const isDeviceToolError = Schema.is(DeviceToolError);
 
 const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(function* () {
   const htmlRender = yield* HtmlRender.HtmlRender;
@@ -1095,13 +1093,9 @@ const withAdvertisedSchemas = Effect.fn("McpHttpServer.withAdvertisedSchemas")(f
 });
 
 /**
- * `McpServer.toolkit` for handlers that declared their access (see
- * `McpToolAccess`). Every toolkit on `/mcp` registers through this.
- *
- * `McpServer.toolkit` asks for every service its tools declare when it
- * registers them, but the auth middleware provides `McpInvocationContext` to
- * each request instead. Registration must not get one: the services it
- * captures would replace the request's.
+ * `McpServer.toolkit` for handlers that declared their access; every `/mcp` toolkit
+ * registers through this. Registration must not get `McpInvocationContext` (the auth
+ * middleware provides it per request), or its services would replace the request's.
  */
 export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
   toolkit: Toolkit.Toolkit<Tools>,
@@ -1177,7 +1171,7 @@ export const layerAnnotationsToolkit = toolkitRegistration(
   AnnotationsHandlers.layer,
 );
 
-export const layerEnvironmentToolkit = toolkitRegistration(
+const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentToolkit,
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));

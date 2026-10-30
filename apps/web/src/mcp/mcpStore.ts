@@ -1,4 +1,6 @@
 import type {
+  AgentPanelMcpCall,
+  AgentPanelMcpCallResult,
   AgentPanelMcpResult,
   AgentPanelMcpServer,
   DesktopMcpEvent,
@@ -13,6 +15,9 @@ import { createJSONStorage, persist } from "zustand/middleware";
 import { resolveStorage } from "../lib/storage";
 import {
   agentServerDraft,
+  agentToolCallResult,
+  fieldsFromSchema,
+  formFromArguments,
   mcpServerLabel,
   type McpServerDraft,
   toDesktopMcpServer,
@@ -184,6 +189,8 @@ export interface McpSession {
   readonly calls: Readonly<Record<string, McpCall>>;
   /** Form text per call key, so arguments survive switching tools and tabs. */
   readonly forms: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** The tool the Tools tab shows; null for the first. */
+  readonly selectedTool: string | null;
 }
 
 export const EMPTY_MCP_SESSION: McpSession = {
@@ -198,6 +205,7 @@ export const EMPTY_MCP_SESSION: McpSession = {
   log: [],
   calls: {},
   forms: {},
+  selectedTool: null,
 };
 
 const MAX_LOG_ENTRIES = 1_000;
@@ -343,11 +351,12 @@ export async function connectMcp(key: string, server: DesktopMcpServer): Promise
   const mcpConnect = bridge()?.mcpConnect;
   if (!mcpConnect) return;
   listen();
-  // Keep typed arguments across reconnects; everything else starts over.
+  // Keep typed arguments and the picked tool across reconnects; everything else starts over.
   updateSession(key, (session) => ({
     ...EMPTY_MCP_SESSION,
     status: "connecting",
     forms: session.forms,
+    selectedTool: session.selectedTool,
   }));
   pendingMethods.delete(key);
   const response = await mcpConnect({ sessionId: key, server }).catch((error: unknown) => ({
@@ -407,28 +416,39 @@ export function setMcpForm(
   updateSession(key, (session) => ({ forms: { ...session.forms, [callKey]: values } }));
 }
 
+export function selectMcpTool(key: string, name: string): void {
+  updateSession(key, () => ({ selectedTool: name }));
+}
+
 export function clearMcpLog(key: string): void {
   updateSession(key, () => ({ log: [] }));
 }
 
 // ─── Agent requests ─────────────────────────────────────────────────────────
 
-export type McpAgentOutcome = { readonly result: AgentPanelMcpResult } | { readonly error: string };
+export type McpAgentOutcome =
+  | { readonly mcp: AgentPanelMcpResult }
+  | { readonly mcpCall: AgentPanelMcpCallResult }
+  | { readonly error: string };
+
+export type McpAgentAction =
+  | { readonly kind: "connect"; readonly server: AgentPanelMcpServer }
+  | { readonly kind: "call"; readonly call: AgentPanelMcpCall };
 
 export interface McpAgentRequest {
-  readonly server: AgentPanelMcpServer;
+  readonly action: McpAgentAction;
   readonly nonce: number;
   readonly onDone: (outcome: McpAgentOutcome) => void;
 }
 
-/** An agent's server to set up, per thread, until that thread's MCP panel takes it. */
+/** An agent's server to set up or tool to call, per thread, until that thread's MCP panel takes it. */
 export const useMcpAgentRequestStore = create<{
   readonly byThreadKey: Readonly<Record<string, McpAgentRequest>>;
 }>()(() => ({ byThreadKey: {} }));
 
-export function requestAgentMcpServer(
+export function requestAgentMcpAction(
   threadKey: string,
-  server: AgentPanelMcpServer,
+  action: McpAgentAction,
   timeoutMs: number,
 ): Promise<McpAgentOutcome> {
   return new Promise((resolve) => {
@@ -436,7 +456,7 @@ export function requestAgentMcpServer(
     const timer = setTimeout(() => {
       takeAgentMcpRequest(threadKey, nonce);
       resolve({
-        error: "The MCP panel did not connect in time. It needs a thread in a project folder.",
+        error: "The MCP panel did not finish in time. It needs a thread in a project folder.",
       });
     }, timeoutMs);
     const onDone = (outcome: McpAgentOutcome) => {
@@ -445,7 +465,7 @@ export function requestAgentMcpServer(
     };
     useMcpAgentRequestStore.setState((state) => {
       state.byThreadKey[threadKey]?.onDone({ error: "Another request replaced this one." });
-      return { byThreadKey: { ...state.byThreadKey, [threadKey]: { server, nonce, onDone } } };
+      return { byThreadKey: { ...state.byThreadKey, [threadKey]: { action, nonce, onDone } } };
     });
   });
 }
@@ -462,6 +482,28 @@ export function takeAgentMcpRequest(threadKey: string, nonce: number): boolean {
 
 const AGENT_DESCRIPTION_CHARS = 200;
 
+/** Selects the saved server and connects it unless it is connected; the session key or an error. */
+async function ensureConnected(
+  projectKey: string,
+  projectCwd: string | null,
+  draft: McpServerDraft,
+  reconnect: boolean,
+): Promise<{ readonly key: string } | { readonly error: string }> {
+  useMcpServerStore.getState().select(projectKey, draft.id);
+  const key = mcpSessionKey(projectKey, draft.id);
+  const status = useMcpSessionStore.getState().sessions[key]?.status;
+  if (status === "connected" && !reconnect) return { key };
+  const server = toDesktopMcpServer(draft, projectCwd);
+  if ("error" in server) return { error: server.error };
+  if (status === "connected" || status === "connecting") await disconnectMcp(key);
+  await connectMcp(key, server);
+  const session = useMcpSessionStore.getState().sessions[key] ?? EMPTY_MCP_SESSION;
+  if (session.status !== "connected") {
+    return { error: session.error ?? "The MCP server did not connect." };
+  }
+  return { key };
+}
+
 /** Adds or updates the agent's server in the project, selects it, connects, and lists its tools. */
 export async function connectAgentMcpServer(
   projectKey: string,
@@ -475,23 +517,13 @@ export async function connectAgentMcpServer(
     request,
   );
   if (isNew) servers.add(projectKey, draft);
-  else {
-    servers.change(projectKey, draft.id, draft);
-    servers.select(projectKey, draft.id);
-  }
-  const server = toDesktopMcpServer(draft, projectCwd);
-  if ("error" in server) return { error: server.error };
-  const key = mcpSessionKey(projectKey, draft.id);
-  const status = useMcpSessionStore.getState().sessions[key]?.status;
-  if (status === "connected" || status === "connecting") await disconnectMcp(key);
-  await connectMcp(key, server);
-  const session = useMcpSessionStore.getState().sessions[key] ?? EMPTY_MCP_SESSION;
-  if (session.status !== "connected") {
-    return { error: session.error ?? "The MCP server did not connect." };
-  }
+  else servers.change(projectKey, draft.id, draft);
+  const connected = await ensureConnected(projectKey, projectCwd, draft, true);
+  if ("error" in connected) return connected;
+  const session = useMcpSessionStore.getState().sessions[connected.key] ?? EMPTY_MCP_SESSION;
   const info = session.info;
   return {
-    result: {
+    mcp: {
       server: mcpServerLabel(draft),
       ...(info ? { serverInfo: `${info.title ?? info.name} ${info.version}` } : {}),
       tools: (session.tools ?? []).map((tool) => ({
@@ -504,4 +536,52 @@ export async function connectAgentMcpServer(
       ...(session.prompts ? { promptCount: session.prompts.length } : {}),
     },
   };
+}
+
+/**
+ * Calls a tool the way a user does in the panel: picks the server, selects the tool, fills its
+ * form with the arguments, and runs it. The result shows in the panel and goes to the agent.
+ */
+export async function callAgentMcpTool(
+  projectKey: string,
+  projectCwd: string | null,
+  request: AgentPanelMcpCall,
+): Promise<McpAgentOutcome> {
+  if (!bridge()?.mcpConnect) return { error: "This Conn has no MCP panel." };
+  const project = useMcpServerStore.getState().byProjectKey[projectKey];
+  const servers = project?.servers ?? [];
+  const wanted = request.server?.trim().toLowerCase();
+  const draft = wanted
+    ? servers.find(
+        (server) =>
+          server.name.trim().toLowerCase() === wanted || server.url.trim().toLowerCase() === wanted,
+      )
+    : (servers.find((server) => server.id === project?.selectedId) ?? servers[0]);
+  if (!draft) {
+    const names = servers.map(mcpServerLabel).join(", ") || "none";
+    return {
+      error: `No saved MCP server${request.server ? ` named "${request.server}"` : ""}. Servers: ${names}. Add one with mcp_connect.`,
+    };
+  }
+  const connected = await ensureConnected(projectKey, projectCwd, draft, false);
+  if ("error" in connected) return connected;
+  const { key } = connected;
+  const tools = useMcpSessionStore.getState().sessions[key]?.tools ?? [];
+  const tool = tools.find((candidate) => candidate.name === request.tool);
+  if (!tool) {
+    const names = tools.map((candidate) => candidate.name).join(", ") || "none";
+    return { error: `${mcpServerLabel(draft)} has no tool "${request.tool}". Tools: ${names}.` };
+  }
+  const callKey = `tool:${tool.name}`;
+  setMcpForm(
+    key,
+    callKey,
+    formFromArguments(fieldsFromSchema(tool.inputSchema), request.arguments),
+  );
+  selectMcpTool(key, tool.name);
+  await runMcpCall(key, callKey, "tools/call", { name: tool.name, arguments: request.arguments });
+  const response = useMcpSessionStore.getState().sessions[key]?.calls[callKey]?.response;
+  if (!response) return { error: "The MCP panel lost the call." };
+  if (response.error) return { error: response.error };
+  return { mcpCall: agentToolCallResult(mcpServerLabel(draft), tool.name, response) };
 }

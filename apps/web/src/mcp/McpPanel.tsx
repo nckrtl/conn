@@ -30,6 +30,7 @@ import {
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import { cn } from "~/lib/utils";
 
 import { HeaderRows } from "../api/ApiRequestEditor";
@@ -55,6 +56,7 @@ import {
   toDesktopMcpServer,
 } from "./mcpServers";
 import {
+  callAgentMcpTool,
   clearMcpLog,
   connectAgentMcpServer,
   connectMcp,
@@ -63,6 +65,7 @@ import {
   loadMcpLists,
   type McpLogEntry,
   type McpSession,
+  type McpAgentRequest,
   mcpSessionKey,
   takeAgentMcpRequest,
   useMcpAgentRequestStore,
@@ -434,11 +437,20 @@ export function McpPanel({
   }, [baseUrl, projectKey, servers.length]);
 
   const agentRequest = useMcpAgentRequestStore((state) => state.byThreadKey[threadKey] ?? null);
+  const takeAgentRequest = useStableCallback((request: McpAgentRequest) => {
+    if (!takeAgentMcpRequest(threadKey, request.nonce)) return;
+    setTab("tools");
+    const { action } = request;
+    const done =
+      action.kind === "connect"
+        ? connectAgentMcpServer(projectKey, cwd, action.server)
+        : callAgentMcpTool(projectKey, cwd, action.call);
+    void done.then(request.onDone);
+  });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- takes an agent's request from outside the panel
   useEffect(() => {
-    if (!agentRequest || !takeAgentMcpRequest(threadKey, agentRequest.nonce)) return;
-    void connectAgentMcpServer(projectKey, cwd, agentRequest.server).then(agentRequest.onDone);
-  }, [agentRequest, cwd, projectKey, threadKey]);
+    if (agentRequest) takeAgentRequest(agentRequest);
+  }, [agentRequest, takeAgentRequest]);
 
   const change = useCallback(
     (patch: Partial<McpServerDraft>) => {

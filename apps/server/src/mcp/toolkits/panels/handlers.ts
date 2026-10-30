@@ -69,6 +69,26 @@ export const layer = McpToolAccess.toLayer(PanelsToolkit, {
       return { ...shown.database, shownOn: shown.deviceName };
     }),
   ),
+  mcp_call: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const threadId = yield* threadIdFor("mcp_call");
+      const shown = yield* (yield* AgentPanelBroker.AgentPanelBroker).show(
+        {
+          threadId,
+          panel: "mcp",
+          mcpCall: {
+            tool: input.tool,
+            arguments: input.arguments ?? {},
+            ...(input.server === undefined ? {} : { server: input.server }),
+          },
+          focusWindow: input.focusWindow ?? true,
+        },
+        PANEL_ACTION_TIMEOUT_MS,
+      );
+      if (!shown.mcpCall) return yield* missingResult("MCP");
+      return { ...shown.mcpCall, shownOn: shown.deviceName };
+    }),
+  ),
   mcp_connect: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const threadId = yield* threadIdFor("mcp_connect");

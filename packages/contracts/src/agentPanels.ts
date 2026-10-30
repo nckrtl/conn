@@ -45,6 +45,16 @@ export const AgentPanelMcpServer = Schema.Struct({
 });
 export type AgentPanelMcpServer = typeof AgentPanelMcpServer.Type;
 
+const McpToolArguments = Schema.Record(Schema.String, Schema.Unknown);
+
+/** MCP: the tool to open in the panel and call, on the panel's server or a saved one by name. */
+export const AgentPanelMcpCall = Schema.Struct({
+  tool: PanelName,
+  arguments: McpToolArguments,
+  server: Schema.optional(PanelName),
+});
+export type AgentPanelMcpCall = typeof AgentPanelMcpCall.Type;
+
 /** What a desktop receives: show `panel` for `threadId`, with the panel's own arguments. */
 export const AgentPanelRequest = Schema.Struct({
   requestId: AgentPanelRequestId,
@@ -60,6 +70,8 @@ export const AgentPanelRequest = Schema.Struct({
   run: Schema.optional(Schema.Boolean),
   /** MCP: add or update this server, connect, and answer with its tools. */
   mcpServer: Schema.optional(AgentPanelMcpServer),
+  /** MCP: open this tool with its arguments in the form, call it, and answer with the result. */
+  mcpCall: Schema.optional(AgentPanelMcpCall),
   /** Bring the Conn window to the front. */
   focusWindow: Schema.Boolean,
 });
@@ -86,6 +98,19 @@ export const AgentPanelMcpResult = Schema.Struct({
 });
 export type AgentPanelMcpResult = typeof AgentPanelMcpResult.Type;
 
+export const AgentPanelMcpCallResult = Schema.Struct({
+  server: Schema.String,
+  tool: Schema.String,
+  /** The tool reported an error; its content says what. */
+  isError: Schema.Boolean,
+  content: Schema.Array(Schema.Unknown),
+  structuredContent: Schema.optional(Schema.Unknown),
+  /** Long text was cut and images left out; the panel shows all of it. */
+  truncated: Schema.Boolean,
+  durationMs: Schema.Number,
+});
+export type AgentPanelMcpCallResult = typeof AgentPanelMcpCallResult.Type;
+
 /** A desktop's answer. The first `ok` answer wins. */
 export const AgentPanelResponse = Schema.Struct({
   requestId: AgentPanelRequestId,
@@ -95,6 +120,7 @@ export const AgentPanelResponse = Schema.Struct({
   error: Schema.optional(Schema.String),
   database: Schema.optional(AgentPanelDatabaseResult),
   mcp: Schema.optional(AgentPanelMcpResult),
+  mcpCall: Schema.optional(AgentPanelMcpCallResult),
 });
 export type AgentPanelResponse = typeof AgentPanelResponse.Type;
 
@@ -167,6 +193,25 @@ export const McpConnectToolResult = Schema.Struct({
   shownOn: Schema.String,
 });
 export type McpConnectToolResult = typeof McpConnectToolResult.Type;
+
+export const McpCallToolInput = Schema.Struct({
+  tool: PanelName.annotate({ description: "The tool's name, as tools/list gives it." }),
+  arguments: Schema.optional(McpToolArguments).annotate({
+    description: "The tool's arguments. Default {}.",
+  }),
+  server: Schema.optional(PanelName).annotate({
+    description:
+      "Saved MCP panel server, by name or URL. Default: the panel's current one. mcp_connect adds one.",
+  }),
+  focusWindow: FocusWindow,
+});
+export type McpCallToolInput = typeof McpCallToolInput.Type;
+
+export const McpCallToolResult = Schema.Struct({
+  ...AgentPanelMcpCallResult.fields,
+  shownOn: Schema.String,
+});
+export type McpCallToolResult = typeof McpCallToolResult.Type;
 
 export class AgentPanelUnavailableError extends Schema.TaggedError<AgentPanelUnavailableError>()(
   "AgentPanelUnavailableError",

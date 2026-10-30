@@ -1,6 +1,7 @@
 import type {
   AgentPanelDatabaseResult,
   AgentPanelKind,
+  AgentPanelMcpCallResult,
   AgentPanelMcpResult,
   AgentPanelRequest,
   EnvironmentId,
@@ -11,7 +12,7 @@ import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 
 import { previewBridge } from "~/components/preview/previewBridge";
 import { openDatabaseQuery, runAgentDatabaseQuery } from "~/database/databaseStore";
-import { requestAgentMcpServer } from "~/mcp/mcpStore";
+import { type McpAgentAction, requestAgentMcpAction } from "~/mcp/mcpStore";
 import type { AppRouter } from "~/router";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
@@ -26,6 +27,7 @@ interface PanelOutcome {
   readonly error?: string;
   readonly database?: AgentPanelDatabaseResult;
   readonly mcp?: AgentPanelMcpResult;
+  readonly mcpCall?: AgentPanelMcpCallResult;
 }
 
 const opened: PanelOutcome = {};
@@ -65,18 +67,22 @@ const PANEL_OPENERS: Record<
   },
   mcp: async (threadRef, request) => {
     if (!window.desktopBridge?.mcpConnect) return { error: "This Conn has no MCP panel." };
-    if (request.mcpServer === undefined) {
+    const action: McpAgentAction | null = request.mcpCall
+      ? { kind: "call", call: request.mcpCall }
+      : request.mcpServer
+        ? { kind: "connect", server: request.mcpServer }
+        : null;
+    if (!action) {
       useRightPanelStore.getState().open(threadRef, "mcp");
       return opened;
     }
-    const outcome = requestAgentMcpServer(
+    const outcome = requestAgentMcpAction(
       scopedThreadKey(threadRef),
-      request.mcpServer,
+      action,
       PANEL_ACTION_TIMEOUT_MS,
     );
     useRightPanelStore.getState().open(threadRef, "mcp");
-    const settled = await outcome;
-    return "error" in settled ? { error: settled.error } : { mcp: settled.result };
+    return await outcome;
   },
   diff: (threadRef) => {
     useRightPanelStore.getState().open(threadRef, "diff");

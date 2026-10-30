@@ -28,6 +28,7 @@ import {
   type McpSession,
   type McpTool,
   runMcpCall,
+  selectMcpTool,
   setMcpForm,
 } from "./mcpStore";
 
@@ -526,8 +527,8 @@ function ToolBadges({ tool }: { tool: McpTool }) {
 
 export function McpToolsView({ session, sessionKey }: { session: McpSession; sessionKey: string }) {
   const tools = session.tools ?? [];
-  const [selectedName, setSelectedName] = useState<string | null>(null);
-  const tool = tools.find((candidate) => candidate.name === selectedName) ?? tools[0] ?? null;
+  const tool =
+    tools.find((candidate) => candidate.name === session.selectedTool) ?? tools[0] ?? null;
   const callKey = tool ? `tool:${tool.name}` : null;
   const { call, values, setValues, run, fail } = useCall(session, sessionKey, callKey);
   const fields = useMemo(() => fieldsFromSchema(tool?.inputSchema), [tool]);
@@ -542,7 +543,7 @@ export function McpToolsView({ session, sessionKey }: { session: McpSession; ses
           detail: candidate.description,
         }))}
         selectedId={tool?.name ?? null}
-        onSelect={setSelectedName}
+        onSelect={(name) => selectMcpTool(sessionKey, name)}
         error={session.listErrors.tools}
         loading={session.tools === null}
       />

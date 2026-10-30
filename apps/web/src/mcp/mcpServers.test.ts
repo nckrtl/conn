@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   agentServerDraft,
+  agentToolCallResult,
+  formFromArguments,
   argumentsFromFields,
   expandTemplate,
   fieldsFromSchema,
@@ -11,6 +13,48 @@ import {
   templateVariables,
   toDesktopMcpServer,
 } from "./mcpServers";
+
+describe("agent tool calls", () => {
+  it("fills the form so the panel's own parsing gives back the same arguments", () => {
+    const fields = fieldsFromSchema({
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        limit: { type: "integer" },
+        exact: { type: "boolean" },
+        filters: { type: "object" },
+      },
+      required: ["query"],
+    });
+    const args = { query: "orders", limit: 5, exact: true, filters: { status: ["paid"] } };
+    expect(argumentsFromFields(fields, formFromArguments(fields, args))).toEqual({
+      arguments: args,
+    });
+  });
+
+  it("gives an agent the result with long text cut and images left out", () => {
+    const result = agentToolCallResult("app", "search", {
+      error: null,
+      durationMs: 12,
+      result: {
+        isError: false,
+        content: [
+          { type: "text", text: "x".repeat(9_000) },
+          { type: "image", mimeType: "image/png", data: "AAAA" },
+        ],
+        structuredContent: { count: 2 },
+      },
+    });
+    expect(result.truncated).toBe(true);
+    expect((result.content[0] as { text: string }).text).toHaveLength(8_001);
+    expect(result.content[1]).toEqual({
+      type: "image",
+      mimeType: "image/png",
+      omitted: "Shown in the panel.",
+    });
+    expect(result.structuredContent).toEqual({ count: 2 });
+  });
+});
 
 describe("agentServerDraft", () => {
   const saved = serversFromMcpJson(

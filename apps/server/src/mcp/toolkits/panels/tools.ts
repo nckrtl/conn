@@ -2,6 +2,8 @@ import {
   AgentPanelUnavailableError,
   DatabaseQueryToolInput,
   DatabaseQueryToolResult,
+  McpCallToolInput,
+  McpCallToolResult,
   McpConnectToolInput,
   McpConnectToolResult,
   OrchestratorMcpFailure,
@@ -77,4 +79,22 @@ const McpConnectTool = Tool.make("mcp_connect", {
   .annotate(Tool.Title, "Connect MCP server in panel")
   .annotate(Tool.Destructive, false);
 
-export const PanelsToolkit = Toolkit.make(PanelOpenTool, DatabaseQueryTool, McpConnectTool);
+const McpCallTool = Tool.make("mcp_call", {
+  description: [
+    "Call a tool of an MCP server in the Conn desktop's MCP panel on the user's Mac, for this thread: the panel selects the tool, fills its form with the arguments and shows the result.",
+    "Use it to show the user an MCP tool working, for example while you build one. Reconnect with mcp_connect after you change the server, so the panel lists your changes.",
+  ].join(" "),
+  parameters: McpCallToolInput,
+  success: McpCallToolResult,
+  failure: Schema.Union([AgentPanelUnavailableError, OrchestratorMcpFailure]),
+  dependencies: actionDependencies(),
+})
+  .annotate(Tool.Title, "Call MCP tool in panel")
+  .annotate(Tool.Destructive, false);
+
+export const PanelsToolkit = Toolkit.make(
+  PanelOpenTool,
+  DatabaseQueryTool,
+  McpConnectTool,
+  McpCallTool,
+);

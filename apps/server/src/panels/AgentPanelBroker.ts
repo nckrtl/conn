@@ -1,6 +1,7 @@
 import {
   AgentPanelUnavailableError,
   type AgentPanelDatabaseResult,
+  type AgentPanelMcpCallResult,
   type AgentPanelMcpResult,
   type AgentPanelRequest,
   type AgentPanelResponse,
@@ -31,6 +32,7 @@ export interface AgentPanelShown {
   readonly deviceName: string;
   readonly database?: AgentPanelDatabaseResult;
   readonly mcp?: AgentPanelMcpResult;
+  readonly mcpCall?: AgentPanelMcpCallResult;
 }
 
 /**
@@ -112,11 +114,12 @@ const make = Effect.gen(function* () {
         reason: "rejected",
         message: answer.value.error ?? `Conn could not show the ${request.panel} panel.`,
       });
-    const { database, mcp } = answer.value;
+    const { database, mcp, mcpCall } = answer.value;
     return {
       deviceName: answer.value.deviceName ?? "Conn desktop",
       ...(database === undefined ? {} : { database }),
       ...(mcp === undefined ? {} : { mcp }),
+      ...(mcpCall === undefined ? {} : { mcpCall }),
     };
   });
 

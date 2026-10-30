@@ -1,4 +1,9 @@
-import type { AgentPanelMcpServer, DesktopMcpServer } from "@t3tools/contracts";
+import type {
+  AgentPanelMcpCallResult,
+  AgentPanelMcpServer,
+  DesktopMcpResponse,
+  DesktopMcpServer,
+} from "@t3tools/contracts";
 
 import { type ApiHeaderRow, newRowId } from "../api/apiRequestStore";
 
@@ -305,6 +310,73 @@ export function argumentsFromFields(
     }
   }
   return { arguments: args };
+}
+
+/** The form's text for a call's arguments, as a user would type them. */
+export function formFromArguments(
+  fields: readonly McpField[],
+  args: Readonly<Record<string, unknown>>,
+): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const field of fields) {
+    if (!(field.name in args)) continue;
+    const value = args[field.name];
+    values[field.name] =
+      field.type === "json" || typeof value === "object"
+        ? JSON.stringify(value, null, 2)
+        : String(value);
+  }
+  return values;
+}
+
+const AGENT_TEXT_CHARS = 8_000;
+const AGENT_RESULT_CHARS = 40_000;
+
+/** What an agent gets back from a tool it called in the panel: text cut, media left out. */
+export function agentToolCallResult(
+  server: string,
+  tool: string,
+  response: DesktopMcpResponse,
+): AgentPanelMcpCallResult {
+  const result = (typeof response.result === "object" && response.result) || {};
+  const { content, structuredContent, isError } = result as Record<string, unknown>;
+  let truncated = false;
+  let budget = AGENT_RESULT_CHARS;
+  const blocks: unknown[] = [];
+  for (const block of Array.isArray(content) ? content : []) {
+    const type = (block as { type?: unknown } | null)?.type;
+    let kept: unknown = block;
+    if (type === "image" || type === "audio") {
+      const mimeType = (block as { mimeType?: unknown }).mimeType;
+      kept = { type, mimeType, omitted: "Shown in the panel." };
+      truncated = true;
+    } else if (type === "text") {
+      const text = String((block as { text?: unknown }).text ?? "");
+      if (text.length > AGENT_TEXT_CHARS) {
+        kept = { ...(block as object), text: `${text.slice(0, AGENT_TEXT_CHARS)}…` };
+        truncated = true;
+      }
+    }
+    const size = JSON.stringify(kept)?.length ?? 0;
+    if (size > budget) {
+      truncated = true;
+      break;
+    }
+    budget -= size;
+    blocks.push(kept);
+  }
+  const structuredSize = JSON.stringify(structuredContent ?? null).length;
+  const keepStructured = structuredContent !== undefined && structuredSize <= budget;
+  if (structuredContent !== undefined && !keepStructured) truncated = true;
+  return {
+    server,
+    tool,
+    isError: isError === true,
+    content: blocks,
+    ...(keepStructured ? { structuredContent } : {}),
+    truncated,
+    durationMs: response.durationMs,
+  };
 }
 
 /** `{name}` placeholders of an RFC 6570 URI template (operators like `{+path}` keep the name). */

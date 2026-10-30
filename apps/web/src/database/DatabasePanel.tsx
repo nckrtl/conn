@@ -30,6 +30,7 @@ import {
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import { cn } from "~/lib/utils";
 
 import { ApiTabs } from "../api/ApiTabs";
@@ -38,6 +39,7 @@ import {
   browseTableSql,
   connectionFromEnv,
   connectionTarget,
+  agentQueryResult,
   type DatabaseColumn,
   type DatabaseConnection,
   type DatabaseDriver,
@@ -47,10 +49,15 @@ import {
   defaultConnection,
   describeDatabaseTable,
   DRIVER_LABELS,
+  findConnection,
   listDatabaseTables,
   runReadOnlyQuery,
 } from "./databaseApi";
-import { useDatabaseStore } from "./databaseStore";
+import {
+  type AgentQueryOutcome,
+  type PendingDatabaseQuery,
+  useDatabaseStore,
+} from "./databaseStore";
 import { SqlEditor } from "./SqlEditor";
 import vaultIcon from "./vault-icon.png";
 import { type VaultDatabases, useVaultDatabases } from "./useVaultDatabases";
@@ -557,8 +564,8 @@ export function DatabasePanel({
   const result = current?.result ?? null;
   const running = current?.running ?? false;
 
-  const run = async (statement: string) => {
-    if (!connection || !key || statement.trim() === "") return;
+  const run = async (statement: string): Promise<AgentQueryOutcome | null> => {
+    if (!connection || !key || statement.trim() === "") return null;
     acted.current = true;
     const id = ++runId.current;
     setTab("rows");
@@ -571,20 +578,54 @@ export function DatabasePanel({
     try {
       const next = await runReadOnlyQuery(connection, statement, options());
       if (id === runId.current) setQuery({ key, running: false, result: next, error: null });
+      return { result: agentQueryResult(connection, next) };
     } catch (error) {
       if (id === runId.current) {
         setQuery({ key, running: false, result: null, error: message(error) });
       }
+      return { error: message(error) };
     }
   };
 
-  // A query handed over from the Laravel Toolbar goes into the editor once a connection is
-  // known. It does not run: the SQL comes from a web page, so the user reads it and runs it.
+  // A handed-over query goes into the editor once the connections have loaded. One from the
+  // Laravel Toolbar does not run: the SQL comes from a web page, so the user reads it first.
+  // An agent's runs at once (read-only) and reports its rows.
+  const connectionsLoaded = !envFile.isPending && vault.status !== "loading";
+  const takePending = useStableCallback((handed: PendingDatabaseQuery, picked: string | null) => {
+    const finish = (outcome: AgentQueryOutcome) => {
+      useDatabaseStore.getState().clearPending(threadKey, handed.nonce);
+      handed.onRun?.(outcome);
+    };
+    if (handed.connection !== undefined) {
+      const all = [...connections, ...vault.connections];
+      const target = findConnection(all, handed.connection);
+      if (!target) {
+        const names = all.map((candidate) => candidate.name).join(", ") || "none";
+        finish({ error: `No connection named "${handed.connection}". Connections: ${names}.` });
+        return;
+      }
+      // Picking it renders the panel again with that connection, which takes the query.
+      if (target.id !== picked) {
+        useDatabaseStore.getState().setConnection(projectKey, target.id);
+        return;
+      }
+    }
+    if (!picked) {
+      finish({ error: "The Database panel has no connection for this project." });
+      return;
+    }
+    useDatabaseStore.getState().clearPending(threadKey, handed.nonce);
+    useDatabaseStore.getState().setSql(projectKey, picked, handed.sql);
+    const onRun = handed.onRun;
+    if (!onRun) return;
+    void run(handed.sql).then((outcome) =>
+      onRun(outcome ?? { error: "The Database panel could not run the query." }),
+    );
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- takes a query handed over from outside the panel
   useEffect(() => {
-    if (!pending || !connectionId) return;
-    useDatabaseStore.getState().clearPending(threadKey, pending.nonce);
-    useDatabaseStore.getState().setSql(projectKey, connectionId, pending.sql);
-  }, [connectionId, pending, projectKey, threadKey]);
+    if (pending && connectionsLoaded) takePending(pending, connectionId);
+  }, [connectionId, connectionsLoaded, pending, takePending]);
 
   const openTable = (name: string) => {
     if (!connection || !key) return;

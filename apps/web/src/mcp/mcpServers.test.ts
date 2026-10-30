@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  agentServerDraft,
   argumentsFromFields,
   expandTemplate,
   fieldsFromSchema,
@@ -10,6 +11,41 @@ import {
   templateVariables,
   toDesktopMcpServer,
 } from "./mcpServers";
+
+describe("agentServerDraft", () => {
+  const saved = serversFromMcpJson(
+    JSON.stringify({
+      mcpServers: {
+        app: { url: "https://app.test/mcp", headers: { Authorization: "old" } },
+        boost: { command: "php", args: ["artisan", "boost:mcp"] },
+      },
+    }),
+  );
+
+  it("updates the saved server with the same name, else the same URL or command", () => {
+    const byName = agentServerDraft(saved, { name: "APP", url: "https://other.test/mcp" });
+    expect(byName.isNew).toBe(false);
+    expect(byName.draft.id).toBe(saved[0]!.id);
+    expect(byName.draft.url).toBe("https://other.test/mcp");
+    const byCommand = agentServerDraft(saved, { command: "php artisan boost:mcp" });
+    expect(byCommand.draft.id).toBe(saved[1]!.id);
+    expect(byCommand.draft.transport).toBe("stdio");
+  });
+
+  it("adds a new server and replaces headers when given", () => {
+    const { draft, isNew } = agentServerDraft(saved, {
+      url: "https://new.test/mcp",
+      transport: "sse",
+      headers: { Authorization: "Bearer t" },
+    });
+    expect(isNew).toBe(true);
+    expect(toDesktopMcpServer(draft, null)).toEqual({
+      transport: "sse",
+      url: "https://new.test/mcp",
+      headers: [{ name: "Authorization", value: "Bearer t" }],
+    });
+  });
+});
 
 describe("splitCommandLine", () => {
   it("splits words and keeps quoted spaces", () => {

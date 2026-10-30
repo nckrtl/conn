@@ -56,6 +56,7 @@ import {
 } from "./mcpServers";
 import {
   clearMcpLog,
+  connectAgentMcpServer,
   connectMcp,
   disconnectMcp,
   EMPTY_MCP_SESSION,
@@ -63,6 +64,8 @@ import {
   type McpLogEntry,
   type McpSession,
   mcpSessionKey,
+  takeAgentMcpRequest,
+  useMcpAgentRequestStore,
   useMcpServerStore,
   useMcpSessionStore,
 } from "./mcpStore";
@@ -399,11 +402,14 @@ function LogTab({ log }: { log: readonly McpLogEntry[] }) {
  * its resources, get its prompts, and watch the JSON-RPC traffic, like the MCP Inspector.
  */
 export function McpPanel({
+  threadKey,
   projectKey,
   environmentId,
   cwd,
   baseUrl,
 }: {
+  /** The thread whose agent requests this panel takes. */
+  threadKey: string;
   projectKey: string;
   environmentId: EnvironmentId;
   /** The project folder; stdio servers run there unless a server sets its own. */
@@ -426,6 +432,13 @@ export function McpPanel({
   useEffect(() => {
     if (servers.length === 0) useMcpServerStore.getState().add(projectKey, newMcpServer(baseUrl));
   }, [baseUrl, projectKey, servers.length]);
+
+  const agentRequest = useMcpAgentRequestStore((state) => state.byThreadKey[threadKey] ?? null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- takes an agent's request from outside the panel
+  useEffect(() => {
+    if (!agentRequest || !takeAgentMcpRequest(threadKey, agentRequest.nonce)) return;
+    void connectAgentMcpServer(projectKey, cwd, agentRequest.server).then(agentRequest.onDone);
+  }, [agentRequest, cwd, projectKey, threadKey]);
 
   const change = useCallback(
     (patch: Partial<McpServerDraft>) => {

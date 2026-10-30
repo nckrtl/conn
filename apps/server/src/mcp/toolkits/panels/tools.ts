@@ -1,5 +1,9 @@
 import {
   AgentPanelUnavailableError,
+  DatabaseQueryToolInput,
+  DatabaseQueryToolResult,
+  McpConnectToolInput,
+  McpConnectToolResult,
   OrchestratorMcpFailure,
   PanelOpenToolInput,
   PanelOpenToolResult,
@@ -40,4 +44,37 @@ const PanelOpenTool = Tool.make("panel_open", {
   .annotate(Tool.Title, "Open panel")
   .annotate(Tool.Destructive, false);
 
-export const PanelsToolkit = Toolkit.make(PanelOpenTool);
+const actionDependencies = () => [
+  McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
+  AgentPanelBroker.AgentPanelBroker,
+];
+
+const DatabaseQueryTool = Tool.make("database_query", {
+  description: [
+    "Run a read-only SQL query in the Conn desktop's Database panel on the user's Mac, for this thread, and show the user the rows there.",
+    "Returns the columns, the row count and the first 20 rows. Use it when the user asks to see data.",
+  ].join(" "),
+  parameters: DatabaseQueryToolInput,
+  success: DatabaseQueryToolResult,
+  failure: Schema.Union([AgentPanelUnavailableError, OrchestratorMcpFailure]),
+  dependencies: actionDependencies(),
+})
+  .annotate(Tool.Title, "Query database in panel")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
+const McpConnectTool = Tool.make("mcp_connect", {
+  description: [
+    "Set up an MCP server in the Conn desktop's MCP panel on the user's Mac, for this thread, and connect to it, so the user sees its tools.",
+    "Pass url (HTTP or SSE) or command (stdio), plus headers for auth. A server with the same name, or else the same url or command, is updated. Returns the server's tools.",
+  ].join(" "),
+  parameters: McpConnectToolInput,
+  success: McpConnectToolResult,
+  failure: Schema.Union([AgentPanelUnavailableError, OrchestratorMcpFailure]),
+  dependencies: actionDependencies(),
+})
+  .annotate(Tool.Title, "Connect MCP server in panel")
+  .annotate(Tool.Destructive, false);
+
+export const PanelsToolkit = Toolkit.make(PanelOpenTool, DatabaseQueryTool, McpConnectTool);

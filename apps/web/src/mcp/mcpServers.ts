@@ -1,4 +1,4 @@
-import type { DesktopMcpServer } from "@t3tools/contracts";
+import type { AgentPanelMcpServer, DesktopMcpServer } from "@t3tools/contracts";
 
 import { type ApiHeaderRow, newRowId } from "../api/apiRequestStore";
 
@@ -47,6 +47,46 @@ export function mcpServerLabel(server: McpServerDraft): string {
   if (server.name.trim()) return server.name.trim();
   const target = server.transport === "stdio" ? server.commandLine.trim() : server.url.trim();
   return target || "New server";
+}
+
+function rowsFromPairs(pairs: Readonly<Record<string, string>>): ApiHeaderRow[] {
+  return Object.entries(pairs).map(([name, value]) => ({
+    id: newRowId(),
+    name,
+    value,
+    enabled: true,
+  }));
+}
+
+/**
+ * The saved server an agent's request updates (same name, else same URL or command), or a new
+ * one. Headers and env replace the saved rows when given.
+ */
+export function agentServerDraft(
+  servers: readonly McpServerDraft[],
+  request: AgentPanelMcpServer,
+): { readonly draft: McpServerDraft; readonly isNew: boolean } {
+  const name = request.name?.trim().toLowerCase();
+  const url = request.url?.trim();
+  const commandLine = request.command?.trim();
+  const existing =
+    (name ? servers.find((server) => server.name.trim().toLowerCase() === name) : undefined) ??
+    servers.find((server) =>
+      url !== undefined
+        ? server.transport !== "stdio" && server.url.trim() === url
+        : server.transport === "stdio" && server.commandLine.trim() === commandLine,
+    );
+  const base = existing ?? newMcpServer(null);
+  const draft: McpServerDraft = {
+    ...base,
+    name: request.name?.trim() ?? base.name,
+    ...(url !== undefined
+      ? { transport: request.transport ?? "http", url }
+      : { transport: "stdio" as const, commandLine: commandLine ?? base.commandLine }),
+    ...(request.headers ? { headers: rowsFromPairs(request.headers) } : {}),
+    ...(request.env ? { env: rowsFromPairs(request.env) } : {}),
+  };
+  return { draft, isNew: existing === undefined };
 }
 
 /** Splits a command line like a POSIX shell does for words and quotes (no expansion). */

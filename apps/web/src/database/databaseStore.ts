@@ -1,5 +1,5 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { AgentPanelDatabaseResult, ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -9,7 +9,7 @@ import type { DatabaseConnection } from "./databaseApi";
 
 // The Database panel's saved connections, picked connection and SQL per project (persisted
 // in this app's local storage, passwords included), and queries handed over from the
-// Laravel Toolbar (per thread, until the panel shows them in the editor).
+// Laravel Toolbar or an agent (per thread, until the panel shows them in the editor).
 
 export interface DatabaseProjectState {
   readonly connection: string | null;
@@ -17,8 +17,19 @@ export interface DatabaseProjectState {
   readonly sqlByConnection: Readonly<Record<string, string>>;
 }
 
-export interface PendingDatabaseQuery {
+export type AgentQueryOutcome =
+  | { readonly result: AgentPanelDatabaseResult }
+  | { readonly error: string };
+
+export interface DatabaseQueryRequest {
   readonly sql: string;
+  /** A connection's name or id to pick first. */
+  readonly connection?: string;
+  /** Run the query and report the outcome; only agents ask, and the panel runs read-only. */
+  readonly onRun?: (outcome: AgentQueryOutcome) => void;
+}
+
+export interface PendingDatabaseQuery extends DatabaseQueryRequest {
   readonly nonce: number;
 }
 
@@ -30,7 +41,7 @@ interface DatabaseState {
   readonly saveConnection: (projectKey: string, connection: DatabaseConnection) => void;
   readonly removeConnection: (projectKey: string, id: string) => void;
   readonly setSql: (projectKey: string, connectionId: string, sql: string) => void;
-  readonly setPending: (threadKey: string, sql: string) => void;
+  readonly setPending: (threadKey: string, request: DatabaseQueryRequest) => void;
   readonly clearPending: (threadKey: string, nonce: number) => void;
 }
 
@@ -88,13 +99,18 @@ export const useDatabaseStore = create<DatabaseState>()(
             sqlByConnection: { ...project.sqlByConnection, [connectionId]: sql },
           })),
         ),
-      setPending: (threadKey, sql) =>
-        set((state) => ({
-          pendingByThreadKey: {
-            ...state.pendingByThreadKey,
-            [threadKey]: { sql, nonce: Date.now() },
-          },
-        })),
+      setPending: (threadKey, request) =>
+        set((state) => {
+          state.pendingByThreadKey[threadKey]?.onRun?.({
+            error: "Another query replaced this one before it ran.",
+          });
+          return {
+            pendingByThreadKey: {
+              ...state.pendingByThreadKey,
+              [threadKey]: { ...request, nonce: Date.now() },
+            },
+          };
+        }),
       clearPending: (threadKey, nonce) =>
         set((state) => {
           if (state.pendingByThreadKey[threadKey]?.nonce !== nonce) return state;
@@ -118,6 +134,33 @@ export const useDatabaseStore = create<DatabaseState>()(
  * never runs: the SQL comes from a web page, so the user reads it and presses Run.
  */
 export function openDatabaseQuery(threadRef: ScopedThreadRef, sql: string): void {
-  useDatabaseStore.getState().setPending(scopedThreadKey(threadRef), sql);
+  useDatabaseStore.getState().setPending(scopedThreadKey(threadRef), { sql });
   useRightPanelStore.getState().open(threadRef, "database");
+}
+
+/**
+ * Opens the thread's Database panel, picks `connection`, and runs `sql` there for an agent,
+ * so the user sees the rows. Settles with the result, or an error after `timeoutMs`.
+ */
+export function runAgentDatabaseQuery(
+  threadRef: ScopedThreadRef,
+  request: { readonly sql: string; readonly connection?: string },
+  timeoutMs: number,
+): Promise<AgentQueryOutcome> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(
+      () =>
+        resolve({
+          error:
+            "The Database panel did not run the query in time. It needs a thread in a project folder.",
+        }),
+      timeoutMs,
+    );
+    const onRun = (outcome: AgentQueryOutcome) => {
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    useDatabaseStore.getState().setPending(scopedThreadKey(threadRef), { ...request, onRun });
+    useRightPanelStore.getState().open(threadRef, "database");
+  });
 }

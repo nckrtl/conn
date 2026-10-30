@@ -2,6 +2,7 @@
 // (`databaseRun` IPC); connections come from the project's `.env`, are added by hand, or are
 // Database entries in the Vault Mac app, whose credentials the desktop app fetches per call.
 import type {
+  AgentPanelDatabaseResult,
   DesktopDatabaseColumn,
   DesktopDatabaseConnection,
   DesktopDatabaseResponse,
@@ -166,6 +167,44 @@ export function defaultConnection(
     connections[0] ??
     null
   );
+}
+
+/** A connection by its id or its name as the panel lists it, ignoring case. */
+export function findConnection(
+  connections: readonly DatabaseConnection[],
+  name: string,
+): DatabaseConnection | null {
+  const needle = name.trim().toLowerCase();
+  return (
+    connections.find((connection) => connection.id === name) ??
+    connections.find((connection) => connection.name.trim().toLowerCase() === needle) ??
+    null
+  );
+}
+
+const AGENT_ROWS = 20;
+const AGENT_VALUE_CHARS = 500;
+
+/** What an agent gets back from a query it ran in the panel: the first rows, long values cut. */
+export function agentQueryResult(
+  connection: DatabaseConnection,
+  result: DatabaseQueryResult,
+): AgentPanelDatabaseResult {
+  const cut = (value: DatabaseValue) =>
+    typeof value === "string" && value.length > AGENT_VALUE_CHARS
+      ? `${value.slice(0, AGENT_VALUE_CHARS)}…`
+      : value;
+  return {
+    connection: connection.name,
+    columns: [...result.columns],
+    rowCount: result.rowCount,
+    rows: result.rows
+      .slice(0, AGENT_ROWS)
+      .map((row) =>
+        Object.fromEntries(Object.entries(row).map(([key, value]) => [key, cut(value)])),
+      ),
+    truncated: result.truncated || result.rows.length > AGENT_ROWS,
+  };
 }
 
 const UNREACHABLE = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|connect timeout|timed out/i;

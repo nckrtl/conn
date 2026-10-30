@@ -1,14 +1,17 @@
 import type {
+  AgentPanelDatabaseResult,
   AgentPanelKind,
+  AgentPanelMcpResult,
   AgentPanelRequest,
   EnvironmentId,
   ScopedThreadRef,
 } from "@t3tools/contracts";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 
 import { previewBridge } from "~/components/preview/previewBridge";
-import { openDatabaseQuery } from "~/database/databaseStore";
+import { openDatabaseQuery, runAgentDatabaseQuery } from "~/database/databaseStore";
+import { requestAgentMcpServer } from "~/mcp/mcpStore";
 import type { AppRouter } from "~/router";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
@@ -16,44 +19,87 @@ import { environmentSummaries } from "~/state/presentation";
 import { previewEnvironment } from "~/state/preview";
 
 const RESUBSCRIBE_DELAY_MS = 2_000;
+// Under the server's own wait, so the agent hears the panel's reason rather than a timeout.
+const PANEL_ACTION_TIMEOUT_MS = 80_000;
+
+interface PanelOutcome {
+  readonly error?: string;
+  readonly database?: AgentPanelDatabaseResult;
+  readonly mcp?: AgentPanelMcpResult;
+}
+
+const opened: PanelOutcome = {};
 
 /**
  * How each panel kind opens for an agent. Panel-specific actions grow here: a panel reads its
- * own fields from the request. Return an error message when this client cannot show it.
+ * own fields from the request, and may answer with a result or an error.
  */
 const PANEL_OPENERS: Record<
   AgentPanelKind,
-  (threadRef: ScopedThreadRef, request: AgentPanelRequest) => string | void
+  (threadRef: ScopedThreadRef, request: AgentPanelRequest) => PanelOutcome | Promise<PanelOutcome>
 > = {
   browser: (threadRef, request) => {
     if (request.tabId === undefined) useRightPanelStore.getState().open(threadRef, "preview");
     else useRightPanelStore.getState().openBrowser(threadRef, request.tabId);
+    return opened;
   },
-  database: (threadRef, request) => {
-    if (!window.desktopBridge?.databaseRun) return "This Conn has no Database panel.";
-    if (request.sql === undefined) useRightPanelStore.getState().open(threadRef, "database");
-    else openDatabaseQuery(threadRef, request.sql);
+  database: async (threadRef, request) => {
+    if (!window.desktopBridge?.databaseRun) return { error: "This Conn has no Database panel." };
+    if (request.sql === undefined) {
+      useRightPanelStore.getState().open(threadRef, "database");
+      return opened;
+    }
+    if (!request.run) {
+      openDatabaseQuery(threadRef, request.sql);
+      return opened;
+    }
+    const outcome = await runAgentDatabaseQuery(
+      threadRef,
+      {
+        sql: request.sql,
+        ...(request.connection === undefined ? {} : { connection: request.connection }),
+      },
+      PANEL_ACTION_TIMEOUT_MS,
+    );
+    return "error" in outcome ? { error: outcome.error } : { database: outcome.result };
   },
-  mcp: (threadRef) => {
-    if (!window.desktopBridge?.mcpConnect) return "This Conn has no MCP panel.";
+  mcp: async (threadRef, request) => {
+    if (!window.desktopBridge?.mcpConnect) return { error: "This Conn has no MCP panel." };
+    if (request.mcpServer === undefined) {
+      useRightPanelStore.getState().open(threadRef, "mcp");
+      return opened;
+    }
+    const outcome = requestAgentMcpServer(
+      scopedThreadKey(threadRef),
+      request.mcpServer,
+      PANEL_ACTION_TIMEOUT_MS,
+    );
     useRightPanelStore.getState().open(threadRef, "mcp");
+    const settled = await outcome;
+    return "error" in settled ? { error: settled.error } : { mcp: settled.result };
   },
-  diff: (threadRef) => useRightPanelStore.getState().open(threadRef, "diff"),
-  files: (threadRef) => useRightPanelStore.getState().open(threadRef, "files"),
+  diff: (threadRef) => {
+    useRightPanelStore.getState().open(threadRef, "diff");
+    return opened;
+  },
+  files: (threadRef) => {
+    useRightPanelStore.getState().open(threadRef, "files");
+    return opened;
+  },
 };
 
 async function showPanel(
   router: AppRouter,
   environmentId: EnvironmentId,
   request: AgentPanelRequest,
-): Promise<string | undefined> {
+): Promise<PanelOutcome> {
   const threadRef = scopeThreadRef(environmentId, request.threadId);
   if (request.focusWindow) await window.desktopBridge?.revealWindow().catch(() => undefined);
   await router.navigate({
     to: "/$environmentId/$threadId",
     params: { environmentId, threadId: request.threadId },
   });
-  return PANEL_OPENERS[request.panel](threadRef, request) ?? undefined;
+  return PANEL_OPENERS[request.panel](threadRef, request);
 }
 
 function followEnvironment(router: AppRouter, environmentId: EnvironmentId): () => void {
@@ -69,19 +115,21 @@ function followEnvironment(router: AppRouter, environmentId: EnvironmentId): () 
         ...(deviceName === undefined ? {} : { deviceName }),
         signal: abort.signal,
         onRequest: async (request) => {
-          let error: string | undefined;
+          let outcome: PanelOutcome;
           try {
-            error = await showPanel(router, environmentId, request);
+            outcome = await showPanel(router, environmentId, request);
           } catch (cause) {
-            error = cause instanceof Error ? cause.message : "Conn could not show the panel.";
+            outcome = {
+              error: cause instanceof Error ? cause.message : "Conn could not show the panel.",
+            };
           }
           await runAtomCommand(appAtomRegistry, previewEnvironment.agentPanelRespond, {
             environmentId,
             input: {
               requestId: request.requestId,
-              ok: error === undefined,
+              ok: outcome.error === undefined,
               ...(deviceName === undefined ? {} : { deviceName }),
-              ...(error === undefined ? {} : { error }),
+              ...outcome,
             },
           });
         },

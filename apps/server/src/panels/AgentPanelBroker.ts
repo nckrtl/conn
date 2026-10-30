@@ -1,5 +1,7 @@
 import {
   AgentPanelUnavailableError,
+  type AgentPanelDatabaseResult,
+  type AgentPanelMcpResult,
   type AgentPanelRequest,
   type AgentPanelResponse,
   type AgentPanelSubscribeInput,
@@ -25,6 +27,12 @@ interface Pending {
   remaining: number;
 }
 
+export interface AgentPanelShown {
+  readonly deviceName: string;
+  readonly database?: AgentPanelDatabaseResult;
+  readonly mcp?: AgentPanelMcpResult;
+}
+
 /**
  * Delivers agent requests to show a panel to every Conn desktop connected to this
  * server. The first desktop that shows it answers the agent.
@@ -38,7 +46,7 @@ export class AgentPanelBroker extends Context.Service<
     readonly show: (
       request: Omit<AgentPanelRequest, "requestId">,
       timeoutMs?: number,
-    ) => Effect.Effect<{ readonly deviceName: string }, AgentPanelUnavailableError>;
+    ) => Effect.Effect<AgentPanelShown, AgentPanelUnavailableError>;
   }
 >()("t3/panels/AgentPanelBroker") {}
 
@@ -77,7 +85,7 @@ const make = Effect.gen(function* () {
   const show = Effect.fn("AgentPanelBroker.show")(function* (
     request: Omit<AgentPanelRequest, "requestId">,
     timeoutMs: number = DEFAULT_SHOW_TIMEOUT_MS,
-  ) {
+  ): Effect.fn.Return<AgentPanelShown, AgentPanelUnavailableError> {
     const targets = [...subscribers.values()];
     if (targets.length === 0)
       return yield* new AgentPanelUnavailableError({
@@ -104,7 +112,12 @@ const make = Effect.gen(function* () {
         reason: "rejected",
         message: answer.value.error ?? `Conn could not show the ${request.panel} panel.`,
       });
-    return { deviceName: answer.value.deviceName ?? "Conn desktop" };
+    const { database, mcp } = answer.value;
+    return {
+      deviceName: answer.value.deviceName ?? "Conn desktop",
+      ...(database === undefined ? {} : { database }),
+      ...(mcp === undefined ? {} : { mcp }),
+    };
   });
 
   return AgentPanelBroker.of({

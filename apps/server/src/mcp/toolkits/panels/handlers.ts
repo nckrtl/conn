@@ -11,6 +11,8 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { PanelsToolkit } from "./tools.ts";
 
 const HOSTED_TAB_TIMEOUT_MS = 20_000;
+// Covers a slow query, an SSH tunnel, a Touch ID prompt for a Vault login, or a slow server.
+const PANEL_ACTION_TIMEOUT_MS = 90_000;
 const HOSTED_TAB_POLL_MS = 250;
 
 const invalid = (message: string) => new AgentPanelUnavailableError({ reason: "invalid", message });
@@ -37,7 +39,54 @@ const awaitHostedTab = Effect.fn("PanelsToolkit.awaitHostedTab")(function* (
   yield* broker.invoke({ scope, operation: "status", input: {}, tabId, timeoutMs: 5_000 });
 });
 
+const threadIdFor = Effect.fn("PanelsToolkit.threadIdFor")(function* (tool: string) {
+  const invocation = yield* McpInvocationContext.McpInvocationContext;
+  return (yield* McpInvocationContext.requireThreadScope(invocation, tool)).thread.threadId;
+});
+
+const missingResult = (panel: string) =>
+  new AgentPanelUnavailableError({
+    reason: "rejected",
+    message: `The Conn desktop showed the ${panel} panel but sent no result. It may run an older Conn.`,
+  });
+
 export const layer = McpToolAccess.toLayer(PanelsToolkit, {
+  database_query: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const threadId = yield* threadIdFor("database_query");
+      const shown = yield* (yield* AgentPanelBroker.AgentPanelBroker).show(
+        {
+          threadId,
+          panel: "database",
+          sql: input.sql,
+          run: true,
+          focusWindow: input.focusWindow ?? true,
+          ...(input.connection === undefined ? {} : { connection: input.connection }),
+        },
+        PANEL_ACTION_TIMEOUT_MS,
+      );
+      if (!shown.database) return yield* missingResult("database");
+      return { ...shown.database, shownOn: shown.deviceName };
+    }),
+  ),
+  mcp_connect: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const threadId = yield* threadIdFor("mcp_connect");
+      const { focusWindow, ...mcpServer } = input;
+      if ((mcpServer.url === undefined) === (mcpServer.command === undefined))
+        return yield* invalid("Pass url or command, not both.");
+      if (mcpServer.command !== undefined && (mcpServer.headers || mcpServer.transport))
+        return yield* invalid("headers and transport apply to url servers only.");
+      if (mcpServer.url !== undefined && mcpServer.env)
+        return yield* invalid("env applies to command servers only.");
+      const shown = yield* (yield* AgentPanelBroker.AgentPanelBroker).show(
+        { threadId, panel: "mcp", mcpServer, focusWindow: focusWindow ?? true },
+        PANEL_ACTION_TIMEOUT_MS,
+      );
+      if (!shown.mcp) return yield* missingResult("MCP");
+      return { ...shown.mcp, shownOn: shown.deviceName };
+    }),
+  ),
   panel_open: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const invocation = yield* McpInvocationContext.McpInvocationContext;

@@ -17,6 +17,34 @@ const AgentPanelRequestId = TrimmedNonEmptyString.check(Schema.isMaxLength(128))
 const PanelSql = Schema.String.check(Schema.isMaxLength(64_000));
 const PanelUrl = TrimmedNonEmptyString.check(Schema.isMaxLength(8192));
 
+const PanelName = TrimmedNonEmptyString.check(Schema.isMaxLength(200));
+const PanelText = Schema.String.check(Schema.isMaxLength(8192));
+const PanelPairs = Schema.Record(Schema.String, PanelText);
+
+/** MCP: the server to add or update in the panel, then connect to. */
+export const AgentPanelMcpServer = Schema.Struct({
+  /** Finds a saved server with this name to update, or names the new one. */
+  name: Schema.optional(PanelName).annotate({
+    description: "Server name in the panel; an existing server with this name is updated.",
+  }),
+  url: Schema.optional(PanelUrl).annotate({
+    description: "HTTP or SSE server URL. Pass url or command.",
+  }),
+  transport: Schema.optional(Schema.Literals(["http", "sse"])).annotate({
+    description: "For url: http (default) or sse.",
+  }),
+  command: Schema.optional(PanelUrl).annotate({
+    description: "stdio server: the command line that starts it, run in the project folder.",
+  }),
+  headers: Schema.optional(PanelPairs).annotate({
+    description: "HTTP headers, such as Authorization. Saved in the panel.",
+  }),
+  env: Schema.optional(PanelPairs).annotate({
+    description: "stdio environment variables. Saved in the panel.",
+  }),
+});
+export type AgentPanelMcpServer = typeof AgentPanelMcpServer.Type;
+
 /** What a desktop receives: show `panel` for `threadId`, with the panel's own arguments. */
 export const AgentPanelRequest = Schema.Struct({
   requestId: AgentPanelRequestId,
@@ -26,10 +54,37 @@ export const AgentPanelRequest = Schema.Struct({
   tabId: Schema.optional(PreviewTabId),
   /** Database: a query to put in the editor. */
   sql: Schema.optional(PanelSql),
+  /** Database: the connection to pick, by name. */
+  connection: Schema.optional(PanelName),
+  /** Database: run `sql` and answer with the result. */
+  run: Schema.optional(Schema.Boolean),
+  /** MCP: add or update this server, connect, and answer with its tools. */
+  mcpServer: Schema.optional(AgentPanelMcpServer),
   /** Bring the Conn window to the front. */
   focusWindow: Schema.Boolean,
 });
 export type AgentPanelRequest = typeof AgentPanelRequest.Type;
+
+export const AgentPanelDatabaseResult = Schema.Struct({
+  connection: Schema.String,
+  columns: Schema.Array(Schema.String),
+  rowCount: Schema.Number,
+  /** The first rows only; long values are cut. */
+  rows: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  truncated: Schema.Boolean,
+});
+export type AgentPanelDatabaseResult = typeof AgentPanelDatabaseResult.Type;
+
+export const AgentPanelMcpResult = Schema.Struct({
+  server: Schema.String,
+  serverInfo: Schema.optional(Schema.String),
+  tools: Schema.Array(
+    Schema.Struct({ name: Schema.String, description: Schema.optional(Schema.String) }),
+  ),
+  resourceCount: Schema.optional(Schema.Number),
+  promptCount: Schema.optional(Schema.Number),
+});
+export type AgentPanelMcpResult = typeof AgentPanelMcpResult.Type;
 
 /** A desktop's answer. The first `ok` answer wins. */
 export const AgentPanelResponse = Schema.Struct({
@@ -38,6 +93,8 @@ export const AgentPanelResponse = Schema.Struct({
   /** The desktop's name, for the agent's result. */
   deviceName: Schema.optional(Schema.String),
   error: Schema.optional(Schema.String),
+  database: Schema.optional(AgentPanelDatabaseResult),
+  mcp: Schema.optional(AgentPanelMcpResult),
 });
 export type AgentPanelResponse = typeof AgentPanelResponse.Type;
 
@@ -76,6 +133,40 @@ export const PanelOpenToolResult = Schema.Struct({
   tabId: Schema.optional(PreviewTabId),
 });
 export type PanelOpenToolResult = typeof PanelOpenToolResult.Type;
+
+const FocusWindow = Schema.optional(Schema.Boolean).annotate({
+  description: "Bring Conn to the front. Default true.",
+});
+
+export const DatabaseQueryToolInput = Schema.Struct({
+  sql: TrimmedNonEmptyString.check(Schema.isMaxLength(64_000)).annotate({
+    description: "One read-only statement. The panel runs queries read-only.",
+  }),
+  connection: Schema.optional(PanelName).annotate({
+    description:
+      "Connection name as the Database panel lists it. Default: the panel's current one. An unknown name fails with the names it has.",
+  }),
+  focusWindow: FocusWindow,
+});
+export type DatabaseQueryToolInput = typeof DatabaseQueryToolInput.Type;
+
+export const DatabaseQueryToolResult = Schema.Struct({
+  ...AgentPanelDatabaseResult.fields,
+  shownOn: Schema.String,
+});
+export type DatabaseQueryToolResult = typeof DatabaseQueryToolResult.Type;
+
+export const McpConnectToolInput = Schema.Struct({
+  ...AgentPanelMcpServer.fields,
+  focusWindow: FocusWindow,
+});
+export type McpConnectToolInput = typeof McpConnectToolInput.Type;
+
+export const McpConnectToolResult = Schema.Struct({
+  ...AgentPanelMcpResult.fields,
+  shownOn: Schema.String,
+});
+export type McpConnectToolResult = typeof McpConnectToolResult.Type;
 
 export class AgentPanelUnavailableError extends Schema.TaggedError<AgentPanelUnavailableError>()(
   "AgentPanelUnavailableError",

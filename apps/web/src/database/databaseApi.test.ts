@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  agentQueryResult,
   browseTableSql,
   connectionFromEnv,
   connectionFromVault,
   connectionTarget,
   type DatabaseConnection,
   defaultConnection,
+  findConnection,
   parseDotEnv,
   VAULT_CONNECTION_PREFIX,
   vaultGroups,
@@ -45,6 +47,25 @@ describe("database connections", () => {
     expect(defaultConnection([env, saved], "a1")?.id).toBe("a1");
     expect(defaultConnection([saved, env], null)?.id).toBe(env.id);
     expect(defaultConnection([], null)).toBeNull();
+    expect(findConnection([env, saved], " Staging ")?.id).toBe("a1");
+    expect(findConnection([env, saved], "a1")?.id).toBe("a1");
+    expect(findConnection([env, saved], "prod")).toBeNull();
+  });
+
+  it("gives an agent the first rows with long values cut", () => {
+    const env = connectionFromEnv("DB_CONNECTION=sqlite\nDB_DATABASE=db.sqlite", "/srv")!;
+    const rows = Array.from({ length: 25 }, (_, index) => ({ id: index, body: "x".repeat(600) }));
+    const result = agentQueryResult(env, {
+      columns: ["id", "body"],
+      rows,
+      rowCount: 25,
+      truncated: false,
+      durationMs: 3,
+    });
+    expect(result.rows).toHaveLength(20);
+    expect(result.truncated).toBe(true);
+    expect(String(result.rows[0]!.body)).toHaveLength(501);
+    expect(result.rowCount).toBe(25);
   });
 
   it("quotes table names the way the driver expects", () => {

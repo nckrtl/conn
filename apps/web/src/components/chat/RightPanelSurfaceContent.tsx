@@ -207,6 +207,7 @@ export function RightPanelSurfaceContent(props: {
       }
       return (
         <McpPanel
+          threadKey={scopedThreadKey(threadRef)}
           projectKey={project.projectKey}
           environmentId={project.environmentId}
           cwd={project.workspaceRoot}

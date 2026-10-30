@@ -1,4 +1,6 @@
 import type {
+  AgentPanelMcpResult,
+  AgentPanelMcpServer,
   DesktopMcpEvent,
   DesktopMcpMethod,
   DesktopMcpResponse,
@@ -9,7 +11,12 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "../lib/storage";
-import type { McpServerDraft } from "./mcpServers";
+import {
+  agentServerDraft,
+  mcpServerLabel,
+  type McpServerDraft,
+  toDesktopMcpServer,
+} from "./mcpServers";
 
 // The MCP panel's saved servers, per project (persisted), and its live sessions (this window
 // only). A session belongs to one saved server of one project; the desktop main process holds
@@ -402,4 +409,99 @@ export function setMcpForm(
 
 export function clearMcpLog(key: string): void {
   updateSession(key, () => ({ log: [] }));
+}
+
+// ─── Agent requests ─────────────────────────────────────────────────────────
+
+export type McpAgentOutcome = { readonly result: AgentPanelMcpResult } | { readonly error: string };
+
+export interface McpAgentRequest {
+  readonly server: AgentPanelMcpServer;
+  readonly nonce: number;
+  readonly onDone: (outcome: McpAgentOutcome) => void;
+}
+
+/** An agent's server to set up, per thread, until that thread's MCP panel takes it. */
+export const useMcpAgentRequestStore = create<{
+  readonly byThreadKey: Readonly<Record<string, McpAgentRequest>>;
+}>()(() => ({ byThreadKey: {} }));
+
+export function requestAgentMcpServer(
+  threadKey: string,
+  server: AgentPanelMcpServer,
+  timeoutMs: number,
+): Promise<McpAgentOutcome> {
+  return new Promise((resolve) => {
+    const nonce = Date.now();
+    const timer = setTimeout(() => {
+      takeAgentMcpRequest(threadKey, nonce);
+      resolve({
+        error: "The MCP panel did not connect in time. It needs a thread in a project folder.",
+      });
+    }, timeoutMs);
+    const onDone = (outcome: McpAgentOutcome) => {
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    useMcpAgentRequestStore.setState((state) => {
+      state.byThreadKey[threadKey]?.onDone({ error: "Another request replaced this one." });
+      return { byThreadKey: { ...state.byThreadKey, [threadKey]: { server, nonce, onDone } } };
+    });
+  });
+}
+
+/** Removes the thread's request if it is still `nonce`; true when it was. */
+export function takeAgentMcpRequest(threadKey: string, nonce: number): boolean {
+  if (useMcpAgentRequestStore.getState().byThreadKey[threadKey]?.nonce !== nonce) return false;
+  useMcpAgentRequestStore.setState((state) => {
+    const { [threadKey]: _taken, ...rest } = state.byThreadKey;
+    return { byThreadKey: rest };
+  });
+  return true;
+}
+
+const AGENT_DESCRIPTION_CHARS = 200;
+
+/** Adds or updates the agent's server in the project, selects it, connects, and lists its tools. */
+export async function connectAgentMcpServer(
+  projectKey: string,
+  projectCwd: string | null,
+  request: AgentPanelMcpServer,
+): Promise<McpAgentOutcome> {
+  if (!bridge()?.mcpConnect) return { error: "This Conn has no MCP panel." };
+  const servers = useMcpServerStore.getState();
+  const { draft, isNew } = agentServerDraft(
+    servers.byProjectKey[projectKey]?.servers ?? [],
+    request,
+  );
+  if (isNew) servers.add(projectKey, draft);
+  else {
+    servers.change(projectKey, draft.id, draft);
+    servers.select(projectKey, draft.id);
+  }
+  const server = toDesktopMcpServer(draft, projectCwd);
+  if ("error" in server) return { error: server.error };
+  const key = mcpSessionKey(projectKey, draft.id);
+  const status = useMcpSessionStore.getState().sessions[key]?.status;
+  if (status === "connected" || status === "connecting") await disconnectMcp(key);
+  await connectMcp(key, server);
+  const session = useMcpSessionStore.getState().sessions[key] ?? EMPTY_MCP_SESSION;
+  if (session.status !== "connected") {
+    return { error: session.error ?? "The MCP server did not connect." };
+  }
+  const info = session.info;
+  return {
+    result: {
+      server: mcpServerLabel(draft),
+      ...(info ? { serverInfo: `${info.title ?? info.name} ${info.version}` } : {}),
+      tools: (session.tools ?? []).map((tool) => ({
+        name: tool.name,
+        ...(tool.description
+          ? { description: tool.description.slice(0, AGENT_DESCRIPTION_CHARS) }
+          : {}),
+      })),
+      ...(session.resources ? { resourceCount: session.resources.length } : {}),
+      ...(session.prompts ? { promptCount: session.prompts.length } : {}),
+    },
+  };
 }

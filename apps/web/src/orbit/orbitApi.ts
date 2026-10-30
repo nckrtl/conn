@@ -184,10 +184,54 @@ export async function listOrbitInstances(
   });
 }
 
+interface RegistrationOperation {
+  readonly id: number;
+  readonly targetId: number;
+  readonly status: string;
+  readonly sequence: number;
+  readonly pollAfterSeconds: number | null;
+  readonly errorCode: string | null;
+  readonly failedStep: string | null;
+}
+
+function registrationOperation(value: unknown): RegistrationOperation {
+  const data = record(value);
+  const id = int(data?.id);
+  const targetId = int(data?.target_id);
+  const sequence = int(data?.sequence);
+  const status = text(data?.status);
+  const pollAfterSeconds = int(data?.poll_after_seconds);
+  if (
+    id === null ||
+    id < 1 ||
+    targetId === null ||
+    targetId < 1 ||
+    sequence === null ||
+    sequence < 1 ||
+    data?.kind !== "instance.register" ||
+    data?.target_type !== "instance" ||
+    !status ||
+    !["queued", "running", "waiting", "succeeded", "failed", "cancelled"].includes(status) ||
+    (["queued", "running", "waiting"].includes(status) &&
+      (pollAfterSeconds === null || pollAfterSeconds < 1))
+  ) {
+    throw malformed("registration Operation");
+  }
+  return {
+    id,
+    targetId,
+    status,
+    sequence,
+    pollAfterSeconds,
+    errorCode: text(data?.error_code),
+    failedStep: text(data?.failed_step),
+  };
+}
+
 /**
- * `instance:register`: adopt a checkout or linked worktree that already sits in
- * Orbit's managed path (`<apps-root>/<project-slug>/<name>`), so Orbit does not
- * move it. With `setup`, Orbit runs the Project setup steps before it answers.
+ * Register the existing worktree once. The documented 202 reply is an Operation;
+ * follow it through setup, then read its Instance. Stop waiting after 30 minutes
+ * without cancelling or repeating the admitted registration.
  */
 export async function registerOrbitInstance(
   transport: OrbitTransport,
@@ -198,7 +242,8 @@ export async function registerOrbitInstance(
     readonly domain: string;
   },
 ): Promise<OrbitInstance> {
-  const data = record(
+  const deadline = Date.now() + 30 * 60 * 1000;
+  const admitted = registrationOperation(
     await callOrbit(transport, {
       method: "POST",
       path: "/api/v1/instances/register",
@@ -209,9 +254,48 @@ export async function registerOrbitInstance(
         domain: input.domain,
         setup: true,
       },
-      // Adoption, dependency copy and the Project setup steps; Orbit's own deadline applies too.
       timeoutSeconds: 30 * 60,
     }),
   );
-  return parseOrbitInstance(data?.instance);
+  let operation = admitted;
+  const pending = () =>
+    new OrbitApiError(
+      "orbit.operation_pending",
+      `Orbit registration Operation ${admitted.id} is still pending. Inspect that Operation before registering again.`,
+      504,
+    );
+  while (["queued", "running", "waiting"].includes(operation.status)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw pending();
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.min(operation.pollAfterSeconds! * 1000, remaining)),
+    );
+    if (Date.now() >= deadline) throw pending();
+    operation = registrationOperation(
+      await callOrbit(transport, {
+        method: "GET",
+        path: `/api/v1/operations/${admitted.id}`,
+        query: { after_sequence: String(operation.sequence) },
+        timeoutSeconds: Math.max(1, Math.ceil((deadline - Date.now()) / 1000)),
+      }),
+    );
+    if (operation.id !== admitted.id || operation.targetId !== admitted.targetId) {
+      throw malformed("registration Operation");
+    }
+  }
+  if (operation.status !== "succeeded") {
+    throw new OrbitApiError(
+      operation.errorCode ?? `operation.${operation.status}`,
+      `Orbit registration Operation ${operation.id} ${operation.status}${operation.failedStep ? ` at ${operation.failedStep}` : ""}.`,
+      200,
+    );
+  }
+  const instance = parseOrbitInstance(
+    await callOrbit(transport, {
+      method: "GET",
+      path: `/api/v1/instances/${admitted.targetId}`,
+    }),
+  );
+  if (instance.id !== admitted.targetId) throw malformed("Instance");
+  return instance;
 }

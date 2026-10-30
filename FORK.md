@@ -648,6 +648,11 @@ Sources:
      upstream's IDs (move it past any new upstream ID and extend the reconcile).
    - `apps/web/src/components/chat/ChatComposer.tsx`: take upstream's draft
      changes, but keep `composerEnvironmentContexts` from `composerDraft`.
+   - Composer: upstream's composer redesign (#25869) is adopted as of
+     2026-10-30 (Nick); Conn's own composer animation is retired. On conflicts
+     in composer files take upstream's composer and re-apply only the listed
+     fork features (environment contexts: `composerEnvironmentContexts`, the
+     `@` environment chips, `EnvironmentContextChip.tsx`).
    - `apps/web/src/components/ChatView.tsx`: keep `<ConnIconScope>` around
      `<MessagesTimeline>`;
      `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: keep

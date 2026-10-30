@@ -278,7 +278,11 @@ stdio commands, Streamable HTTP or SSE URLs. New entries default to the app URL
 plus `/mcp`; servers from a project's `.mcp.json` can be added.
 
 The panel offers tools with forms from their input schemas, resources and
-templates, prompts, server info, and a JSON-RPC log with stderr. The desktop
+templates, prompts, server info, and a JSON-RPC log with stderr. A selected
+tool, resource or prompt opens on Overview (description and inputs, so long
+descriptions fit) or Playground (inputs beside their labels, the run button on
+top, the result below). Results render Markdown and highlight JSON; copy and
+raw/formatted actions float over the result, like the terminal's. The desktop
 main process holds sessions through `@modelcontextprotocol/client`, using
 `mcpConnect`, `mcpRequest` and `mcpDisconnect` IPC with `mcp-event` pushes.
 Stdio servers run on this machine with the login shell's PATH.

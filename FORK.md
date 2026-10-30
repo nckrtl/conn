@@ -614,6 +614,49 @@ Sources:
   `mcp/toolkits/orchestrator/*`.
 - `packages/contracts/src/rpc.ts` (`peerLinks*`).
 
+### Orbit registration
+
+`scripts/orbit/t3-orbit-register URL` registers the host's T3 server with the
+Orbit Gateway. It issues a fresh admin session labeled "Orbit Gateway" and
+sends it to `POST /api/v1/conn/environments`. A scheduled job runs it daily,
+because the Gateway's admin session expires.
+
+The script needs the T3 CLI of the server that is running now. On macOS, give
+it the server's launchd job with `--service-label LABEL`. At every run it reads
+`ProgramArguments:0` of `~/Library/LaunchAgents/LABEL.plist`, skipping an
+`env VAR=value` wrapper. The label differs per host:
+
+- mini: `com.t3tools.t3code.service`.
+- nick-vm: `com.nckrtl.conn-server`.
+- nick headless: `com.nckrtl.t3-headless`.
+
+Install the script in `~/.local/bin`. Fill in the placeholders of
+`scripts/orbit/com.nckrtl.t3-orbit-register.plist` and put it in
+`~/Library/LaunchAgents`. It logs to `~/Library/Logs/t3-orbit-register.log`.
+`RunAtLoad` registers as soon as the job loads, so load it only when you mean
+to register. On Linux, install `scripts/orbit/t3-orbit-register.service` and
+`.timer` in `~/.config/systemd/user`. Put `T3_ORBIT_REGISTER_URL=<url>` in
+`~/.config/t3-orbit-register.env`, then enable the timer and lingering. The
+unit runs the `~/.local/bin/t3` launcher symlink, which updates repoint.
+
+> [!WARNING]
+> Never put a versioned runtime path (`…/runtime/versions/<version>/t3`) in a
+> register or relink job. Runtimes are pruned after updates, and `t3 update`
+> repoints only launcher symlinks, not job files. On 2026-10-30 nick-vm's job
+> still pointed at the pruned 0.0.46 runtime and failed with "No such file or
+> directory". It had not registered since 2026-10-27. The script warns when
+> it gets a versioned path. `--print-cli` shows the binary it resolves
+> without contacting anything. `sh scripts/orbit/t3-orbit-register.test.sh`
+> checks the lookup offline.
+
+Sources:
+
+- `scripts/orbit/t3-orbit-register`,
+  `scripts/orbit/com.nckrtl.t3-orbit-register.plist`,
+  `scripts/orbit/t3-orbit-register.service`,
+  `scripts/orbit/t3-orbit-register.timer`,
+  `scripts/orbit/t3-orbit-register.test.sh`.
+
 ### Linked environment renewal
 
 Linked sessions expire after 30 days without automatic renewal in T3.
@@ -621,7 +664,8 @@ Linked sessions expire after 30 days without automatic renewal in T3.
 requests a pairing link with `POST /api/v1/conn/environments/<id>/pairings`,
 then links again with the same addresses and access.
 
-Install the script in `~/.local/bin`, next to `t3-orbit-register`, and its
+Install the script in `~/.local/bin`, next to `t3-orbit-register` (see Orbit
+registration), and its
 `scripts/orbit/com.nckrtl.t3-orbit-relink.plist` in `~/Library/LaunchAgents`. It
 runs daily and logs to `~/Library/Logs/t3-orbit-relink.log`. The recorded mini
 setup links nick, beast and shark with full access.

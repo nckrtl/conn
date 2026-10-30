@@ -6,7 +6,7 @@ import type * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import { OrbitApiError } from "./orbitApi";
 import {
@@ -352,24 +352,38 @@ describe("registerOrbitThreadWorktree", () => {
     projectSlug: "orbit-website",
     tld: "test",
   };
-  const registered = (domain: string) =>
-    ok({
-      status: "active",
-      instance: {
-        ...SOURCE_INSTANCE,
-        id: 300,
-        name: "t3code-1a2b3c4d",
-        checkout_path: input.worktreePath,
-        selected_branch: "t3code/login-redirect",
-        domain,
-        url: `https://${domain}`,
-      },
+  const instanceData = (domain: string) => ({
+    ...SOURCE_INSTANCE,
+    id: 300,
+    name: "t3code-1a2b3c4d",
+    checkout_path: input.worktreePath,
+    selected_branch: "t3code/login-redirect",
+    domain,
+    url: `https://${domain}`,
+  });
+  const operation = {
+    id: 4340,
+    kind: "instance.register",
+    target_type: "instance",
+    target_id: 300,
+    status: "succeeded",
+    sequence: 1,
+    poll_after_seconds: null,
+  };
+  const registered = (refusal?: (domain: string) => ReturnType<typeof fail> | null) => {
+    let domain = "";
+    return fakeTransport((request) => {
+      if (request.method === "POST") {
+        domain = (request.body as { domain: string }).domain;
+        return refusal?.(domain) ?? { status: 202, body: { data: operation } };
+      }
+      if (request.path === "/api/v1/instances/300") return ok(instanceData(domain));
+      throw new Error(`unexpected ${request.path}`);
     });
+  };
 
   it("registers the worktree with setup and the readable route", async () => {
-    const transport = fakeTransport((request) =>
-      registered((request.body as { domain: string }).domain),
-    );
+    const transport = registered();
     const instance = await registerOrbitThreadWorktree(transport, {
       ...input,
       branch: "t3code/login-redirect",
@@ -391,9 +405,7 @@ describe("registerOrbitThreadWorktree", () => {
   });
 
   it("routes under the Instance name while the branch is still temporary", async () => {
-    const transport = fakeTransport((request) =>
-      registered((request.body as { domain: string }).domain),
-    );
+    const transport = registered();
     await registerOrbitThreadWorktree(transport, {
       ...input,
       branch: "t3code/1a2b3c4d",
@@ -405,18 +417,164 @@ describe("registerOrbitThreadWorktree", () => {
   });
 
   it("adds a suffix when the route domain is taken", async () => {
-    const transport = fakeTransport((request) => {
-      const domain = (request.body as { domain: string }).domain;
-      return domain === "login-redirect.orbit-website.test"
-        ? fail(422, "route.domain_conflict")
-        : registered(domain);
-    });
+    const transport = registered((domain) =>
+      domain === "login-redirect.orbit-website.test" ? fail(422, "route.domain_conflict") : null,
+    );
     const instance = await registerOrbitThreadWorktree(transport, {
       ...input,
       branch: "t3code/login-redirect",
       title: null,
     });
     expect(instance.url).toBe("https://login-redirect-2.orbit-website.test");
+  });
+
+  it("follows the admitted Operation before fetching the Instance without registering twice", async () => {
+    vi.useFakeTimers();
+    try {
+      let reads = 0;
+      const transport = fakeTransport((request) => {
+        if (request.method === "POST")
+          return {
+            status: 202,
+            body: { data: { ...operation, status: "queued", poll_after_seconds: 2 } },
+          };
+        if (request.path === "/api/v1/operations/4340") {
+          reads++;
+          return ok({
+            ...operation,
+            status: reads === 1 ? "waiting" : "succeeded",
+            sequence: reads + 1,
+            poll_after_seconds: reads === 1 ? 3 : null,
+          });
+        }
+        if (request.path === "/api/v1/instances/300")
+          return ok(instanceData("login-redirect.orbit-website.test"));
+        throw new Error(`unexpected ${request.path}`);
+      });
+      const result = registerOrbitThreadWorktree(transport, {
+        ...input,
+        branch: "t3code/login-redirect",
+        title: null,
+      });
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(transport.requests).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(transport.requests[1]).toMatchObject({
+        method: "GET",
+        path: "/api/v1/operations/4340",
+        query: { after_sequence: "1" },
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      await expect(result).resolves.toMatchObject({ id: 300, checkoutPath: input.worktreePath });
+      expect(transport.requests.map((request) => request.path)).toEqual([
+        "/api/v1/instances/register",
+        "/api/v1/operations/4340",
+        "/api/v1/operations/4340",
+        "/api/v1/instances/300",
+      ]);
+      expect(transport.requests[2]?.query).toEqual({ after_sequence: "2" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["failed", "cancelled"])(
+    "reports a %s Operation without fetching or re-registering the Instance",
+    async (status) => {
+      const transport = fakeTransport(() => ({
+        status: 202,
+        body: {
+          data: {
+            ...operation,
+            status,
+            error_code: status === "failed" ? "instance.setup_failed" : null,
+            failed_step: "setup",
+          },
+        },
+      }));
+      await expect(
+        registerOrbitThreadWorktree(transport, {
+          ...input,
+          branch: "t3code/login-redirect",
+          title: null,
+        }),
+      ).rejects.toMatchObject({
+        code: status === "failed" ? "instance.setup_failed" : "operation.cancelled",
+        message: expect.stringContaining("4340"),
+      });
+      expect(transport.requests).toHaveLength(1);
+    },
+  );
+
+  it("rejects a poll response for a different Operation target", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = fakeTransport((request) =>
+        request.method === "POST"
+          ? {
+              status: 202,
+              body: { data: { ...operation, status: "queued", poll_after_seconds: 2 } },
+            }
+          : ok({ ...operation, target_id: 999 }),
+      );
+      const result = registerOrbitThreadWorktree(transport, {
+        ...input,
+        branch: "t3code/login-redirect",
+        title: null,
+      });
+      const rejected = expect(result).rejects.toMatchObject({ code: "orbit.response_invalid" });
+      await vi.advanceTimersByTimeAsync(2000);
+      await rejected;
+      expect(transport.requests).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds setup waiting and reports the Operation id without registering again", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = fakeTransport(() => ({
+        status: 202,
+        body: { data: { ...operation, status: "waiting", poll_after_seconds: 15 } },
+      }));
+      const result = registerOrbitThreadWorktree(transport, {
+        ...input,
+        branch: "t3code/login-redirect",
+        title: null,
+      });
+      const rejected = expect(result).rejects.toMatchObject({
+        code: "orbit.operation_pending",
+        status: 504,
+        message: expect.stringContaining("4340"),
+      });
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+      await rejected;
+      expect(transport.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+      expect(transport.requests.some((request) => request.path === "/api/v1/instances/300")).toBe(
+        false,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not register again when an admitted Operation fails with a domain conflict", async () => {
+    const transport = fakeTransport(() => ({
+      status: 202,
+      body: { data: { ...operation, status: "failed", error_code: "route.domain_conflict" } },
+    }));
+    await expect(
+      registerOrbitThreadWorktree(transport, {
+        ...input,
+        branch: "t3code/login-redirect",
+        title: null,
+      }),
+    ).rejects.toMatchObject({
+      code: "route.domain_conflict",
+      message: expect.stringContaining("4340"),
+    });
+    expect(transport.requests).toHaveLength(1);
   });
 
   it("does not retry other refusals", async () => {
@@ -432,8 +590,7 @@ describe("registerOrbitThreadWorktree", () => {
   });
 });
 
-// Creating a branch takes about 5 s on some macOS machines; the worktree tests need room.
-describe("createOrbitWorktree", { timeout: 60_000 }, () => {
+describe("createOrbitWorktree", () => {
   let root: string;
   let origin: string;
   let source: string;

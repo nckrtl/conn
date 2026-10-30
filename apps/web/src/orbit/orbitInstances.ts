@@ -349,7 +349,10 @@ export async function registerOrbitThreadWorktree(
         }),
       });
     } catch (error) {
-      const taken = error instanceof OrbitApiError && error.code === "route.domain_conflict";
+      const taken =
+        error instanceof OrbitApiError &&
+        error.status === 422 &&
+        error.code === "route.domain_conflict";
       if (!taken || attempt === ROUTE_SUFFIX_ATTEMPTS) throw error;
     }
   }

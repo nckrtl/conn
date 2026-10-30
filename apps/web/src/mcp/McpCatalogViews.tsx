@@ -272,14 +272,21 @@ function FieldsForm({
       {fields.map((field) => (
         <label key={field.name} className="contents">
           <span className="flex min-w-0 flex-col gap-0.5 pt-1.5">
-            <span className="flex items-baseline gap-1.5 text-ui">
-              <span className="truncate font-mono text-foreground">{field.name}</span>
+            <span className="flex items-baseline gap-1 text-ui">
+              {/* Descriptions are on the Overview tab; here they show on hover. */}
+              {field.description ? (
+                <Tooltip>
+                  <TooltipTrigger render={<span className="break-all font-mono text-foreground" />}>
+                    {field.name}
+                  </TooltipTrigger>
+                  <TooltipPopup className="max-w-80">{field.description}</TooltipPopup>
+                </Tooltip>
+              ) : (
+                <span className="break-all font-mono text-foreground">{field.name}</span>
+              )}
               {field.required ? <span className="text-destructive">*</span> : null}
-              <span className="text-muted-foreground text-xs">{field.type}</span>
             </span>
-            {field.description ? (
-              <span className="text-muted-foreground text-xs">{field.description}</span>
-            ) : null}
+            <span className="text-muted-foreground text-xs">{field.type}</span>
           </span>
           <FieldInput
             field={field}

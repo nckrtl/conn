@@ -1,13 +1,18 @@
 import type { DesktopMcpMethod, DesktopMcpResponse } from "@t3tools/contracts";
-import { ChevronDown, CircleAlert, Play, Search } from "lucide-react";
-import { type FormEvent, type ReactNode, useMemo, useState } from "react";
+import { Check, ChevronDown, CircleAlert, Code2, Copy, Eye, Play, Search } from "lucide-react";
+import { type FormEvent, type ReactNode, Suspense, useMemo, useState } from "react";
 
+import ChatMarkdown from "~/components/ChatMarkdown";
+import { HighlightedTokens } from "~/components/chat/HighlightedTokens";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "~/components/ui/menu";
 import { Spinner } from "~/components/ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
+import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { useTheme } from "~/hooks/useTheme";
 import { formatBytes, formatMs } from "~/laravelToolbar/model";
 import { cn } from "~/lib/utils";
 
@@ -57,22 +62,38 @@ export function EmptyState({ children }: { children: ReactNode }) {
   );
 }
 
-/** Pretty-printed when the text is JSON. */
-function prettyText(text: string): string {
-  if (!/^\s*[[{]/.test(text)) return text;
+/** The text pretty-printed when it is JSON, else null. */
+function prettyJson(text: string): string | null {
+  if (!/^\s*[[{]/.test(text)) return null;
   try {
     return JSON.stringify(JSON.parse(text), null, 2);
   } catch {
-    return text;
+    return null;
   }
 }
 
-function Code({ children }: { children: string }) {
+function Code({ children, json = false }: { children: string; json?: boolean }) {
+  const { resolvedTheme } = useTheme();
   return (
     <pre className="whitespace-pre-wrap break-all font-mono text-xs text-foreground">
-      {children}
+      {json ? (
+        <Suspense fallback={children}>
+          <HighlightedTokens code={children} language="json" theme={resolvedTheme} />
+        </Suspense>
+      ) : (
+        children
+      )}
     </pre>
   );
+}
+
+/** A text result: JSON highlighted, anything else rendered as Markdown unless `raw`. */
+function ResultText({ text, raw }: { text: string; raw: boolean }) {
+  const json = prettyJson(text);
+  if (json !== null) return <Code json>{json}</Code>;
+  if (raw) return <Code>{text}</Code>;
+  // Tool output is untrusted: no raw HTML.
+  return <ChatMarkdown text={text} cwd={undefined} parseRawHtml={false} />;
 }
 
 // ─── The list beside each tab ───────────────────────────────────────────────
@@ -340,7 +361,7 @@ function str(value: unknown): string | null {
 }
 
 /** One content block, or one resource's contents. */
-function ContentBlock({ block }: { block: unknown }) {
+function ContentBlock({ block, raw }: { block: unknown; raw: boolean }) {
   const type = str(field(block, "type"));
   const mimeType = str(field(block, "mimeType"));
   const data = str(field(block, "data"));
@@ -379,7 +400,7 @@ function ContentBlock({ block }: { block: unknown }) {
         </p>
       ) : null}
       {text !== null ? (
-        <Code>{prettyText(text)}</Code>
+        <ResultText text={text} raw={raw} />
       ) : blob !== null ? (
         resourceMime?.startsWith("image/") ? (
           <img
@@ -393,13 +414,94 @@ function ContentBlock({ block }: { block: unknown }) {
           </p>
         )
       ) : (
-        <Code>{JSON.stringify(block, null, 2)}</Code>
+        <Code json>{JSON.stringify(block, null, 2)}</Code>
       )}
     </div>
   );
 }
 
-function ResultContent({ result }: { result: unknown }) {
+/** The blocks a result lists: content, a resource's contents, or prompt messages' content. */
+function resultBlocks(result: unknown): unknown[] {
+  const content = field(result, "content");
+  const contents = field(result, "contents");
+  const messages = field(result, "messages");
+  if (Array.isArray(content)) return content;
+  if (Array.isArray(contents)) return contents;
+  if (Array.isArray(messages)) return messages.map((message) => field(message, "content"));
+  return [];
+}
+
+/** The result's text as the server sent it, for copying. */
+function rawResultText(result: unknown): string {
+  const texts = resultBlocks(result).flatMap((block) => {
+    const text = str(field(block, "text")) ?? str(field(field(block, "resource"), "text"));
+    return text === null ? [] : [text];
+  });
+  return texts.length > 0 ? texts.join("\n\n") : JSON.stringify(result, null, 2);
+}
+
+/** True when a text block would render as Markdown, so raw and formatted differ. */
+function hasMarkdown(result: unknown): boolean {
+  return resultBlocks(result).some((block) => {
+    const text = str(field(block, "text")) ?? str(field(field(block, "resource"), "text"));
+    return text !== null && prettyJson(text) === null;
+  });
+}
+
+function ResultActions({
+  copyText,
+  raw,
+  onRawChange,
+}: {
+  copyText: string;
+  raw: boolean | null;
+  onRawChange: (raw: boolean) => void;
+}) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard({ timeout: 1200 });
+  const copyLabel = isCopied ? "Copied" : raw === null ? "Copy JSON" : "Copy raw text";
+  const rawLabel = raw ? "Show formatted" : "Show raw Markdown";
+  return (
+    <ToolbarGroup>
+      {raw === null ? null : (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={rawLabel}
+                aria-pressed={raw}
+                onClick={() => onRawChange(!raw)}
+              />
+            }
+          >
+            {raw ? <Eye /> : <Code2 />}
+          </TooltipTrigger>
+          <TooltipPopup>{rawLabel}</TooltipPopup>
+        </Tooltip>
+      )}
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={copyLabel}
+              onClick={() => copyToClipboard(copyText)}
+            />
+          }
+        >
+          {isCopied ? <Check /> : <Copy />}
+        </TooltipTrigger>
+        <TooltipPopup>{copyLabel}</TooltipPopup>
+      </Tooltip>
+    </ToolbarGroup>
+  );
+}
+
+function ResultContent({ result, raw }: { result: unknown; raw: boolean }) {
   const content = field(result, "content");
   const contents = field(result, "contents");
   const messages = field(result, "messages");
@@ -415,22 +517,22 @@ function ResultContent({ result }: { result: unknown }) {
               <Badge variant="outline" className="self-start">
                 {str(field(message, "role")) ?? "message"}
               </Badge>
-              <ContentBlock block={field(message, "content")} />
+              <ContentBlock block={field(message, "content")} raw={raw} />
             </div>
           ))
         : null}
       {blocks?.map((block, index) => (
         // eslint-disable-next-line react/no-array-index-key
-        <ContentBlock key={index} block={block} />
+        <ContentBlock key={index} block={block} raw={raw} />
       ))}
       {structured !== undefined ? (
         <div className="flex flex-col gap-1">
           <p className="text-muted-foreground text-xs">Structured content</p>
-          <Code>{JSON.stringify(structured, null, 2)}</Code>
+          <Code json>{JSON.stringify(structured, null, 2)}</Code>
         </div>
       ) : null}
       {!blocks && !Array.isArray(messages) && structured === undefined ? (
-        <Code>{JSON.stringify(result, null, 2)}</Code>
+        <Code json>{JSON.stringify(result, null, 2)}</Code>
       ) : null}
     </div>
   );
@@ -446,6 +548,7 @@ function ResultView({
   idle: string;
 }) {
   const [tab, setTab] = useState<ResultTab>("content");
+  const [raw, setRaw] = useState(false);
   if (!response) {
     return (
       <EmptyState>
@@ -473,19 +576,30 @@ function ResultView({
             <span className="flex items-center gap-2 text-muted-foreground text-ui tabular-nums">
               {response.error || isError ? <Badge variant="error">Error</Badge> : null}
               <span>{formatMs(response.durationMs)}</span>
+              {response.error ? null : (
+                <ResultActions
+                  copyText={
+                    tab === "json"
+                      ? JSON.stringify(response.result, null, 2)
+                      : rawResultText(response.result)
+                  }
+                  raw={tab === "content" && hasMarkdown(response.result) ? raw : null}
+                  onRawChange={setRaw}
+                />
+              )}
             </span>
           )
         }
       />
-      <div className="scrollbar-gutter-both scrollbar-inset min-h-0 flex-1 overflow-auto">
+      <div className="scrollbar-inset min-h-0 flex-1 overflow-auto">
         {response.error ? (
           <Notice>{response.error}</Notice>
         ) : tab === "json" ? (
           <div className="px-4 py-3">
-            <Code>{JSON.stringify(response.result, null, 2)}</Code>
+            <Code json>{JSON.stringify(response.result, null, 2)}</Code>
           </div>
         ) : (
-          <ResultContent result={response.result} />
+          <ResultContent result={response.result} raw={raw} />
         )}
       </div>
     </div>

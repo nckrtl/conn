@@ -1,13 +1,7 @@
 /**
- * Conn's web icon set. The web tsconfig maps `lucide-react` to this module, so
- * upstream files keep their imports. Each line pairs the Lucide icon with a
- * Phosphor one: inside a `ConnIconScope` (the thread timeline) icons draw
- * Phosphor, everywhere else the original Lucide icon. To change an icon, edit its line. A Lucide name upstream
- * starts using fails the typecheck until it gets a line here.
- *
- * Icons are Phosphor's solid (fill) weight. Carets, and line glyphs whose solid
- * form adds a box behind them (Check, X, Plus), use the bold weight instead.
- * Project and workspace icons stay Lucide: they import `lucide-react-original`.
+ * The web tsconfig maps `lucide-react` here. Inside a `ConnIconScope` icons draw
+ * Phosphor (fill, or bold for carets and Check/X/Plus), elsewhere Lucide. A new
+ * upstream Lucide name fails the typecheck until it gets a line here.
  */
 import { AlarmIcon as PhAlarm } from "@phosphor-icons/react/dist/csr/Alarm";
 import { ArchiveIcon as PhArchive } from "@phosphor-icons/react/dist/csr/Archive";
@@ -180,6 +174,7 @@ import { RowsIcon as PhRows } from "@phosphor-icons/react/dist/csr/Rows";
 import { ScalesIcon as PhScales } from "@phosphor-icons/react/dist/csr/Scales";
 import { ShieldIcon as PhShield } from "@phosphor-icons/react/dist/csr/Shield";
 import { ShieldCheckIcon as PhShieldCheck } from "@phosphor-icons/react/dist/csr/ShieldCheck";
+import { ShieldSlashIcon as PhShieldSlash } from "@phosphor-icons/react/dist/csr/ShieldSlash";
 import { ShieldWarningIcon as PhShieldWarning } from "@phosphor-icons/react/dist/csr/ShieldWarning";
 import { SidebarSimpleIcon as PhSidebarSimple } from "@phosphor-icons/react/dist/csr/SidebarSimple";
 import { SignInIcon as PhSignIn } from "@phosphor-icons/react/dist/csr/SignIn";
@@ -314,6 +309,7 @@ import {
   FilesIcon as LuFiles,
   FilmIcon as LuFilm,
   FlaskConicalIcon as LuFlaskConical,
+  FlaskConicalOffIcon as LuFlaskConicalOff,
   FolderIcon as LuFolder,
   FolderClosedIcon as LuFolderClosed,
   FolderCodeIcon as LuFolderCode,
@@ -428,6 +424,7 @@ import {
   Settings2Icon as LuSettings2,
   ShieldIcon as LuShield,
   ShieldCheckIcon as LuShieldCheck,
+  ShieldOffIcon as LuShieldOff,
   ShieldQuestionIcon as LuShieldQuestion,
   SlidersHorizontalIcon as LuSlidersHorizontal,
   SmartphoneIcon as LuSmartphone,
@@ -689,6 +686,8 @@ export const FilmIcon = connIcon(PhFilmStrip, LuFilm, "film"),
   Film = FilmIcon;
 export const FlaskConicalIcon = connIcon(PhFlask, LuFlaskConical, "flask-conical"),
   FlaskConical = FlaskConicalIcon;
+export const FlaskConicalOffIcon = connIcon(PhFlask, LuFlaskConicalOff, "flask-conical-off"),
+  FlaskConicalOff = FlaskConicalOffIcon;
 export const FolderIcon = connIcon(PhFolder, LuFolder, "folder"),
   Folder = FolderIcon;
 export const FolderClosedIcon = connIcon(PhFolder, LuFolderClosed, "folder-closed"),
@@ -959,6 +958,8 @@ export const ShieldIcon = connIcon(PhShield, LuShield, "shield"),
   Shield = ShieldIcon;
 export const ShieldCheckIcon = connIcon(PhShieldCheck, LuShieldCheck, "shield-check"),
   ShieldCheck = ShieldCheckIcon;
+export const ShieldOffIcon = connIcon(PhShieldSlash, LuShieldOff, "shield-off"),
+  ShieldOff = ShieldOffIcon;
 export const ShieldQuestionIcon = connIcon(PhShieldWarning, LuShieldQuestion, "shield-question"),
   ShieldQuestion = ShieldQuestionIcon;
 export const SlidersHorizontalIcon = connIcon(

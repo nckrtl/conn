@@ -40,7 +40,7 @@ export function FileExplorerPane({
       aria-label="File explorer"
       className={cn(
         "relative flex min-h-0 min-w-0 shrink-0 bg-background",
-        resizable ? "border-l border-border/60" : "flex-1",
+        resizable ? "border-l border-(--shell-divider)!" : "flex-1",
       )}
       style={
         resizable

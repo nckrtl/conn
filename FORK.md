@@ -381,6 +381,23 @@ the agent's thread and opens the panel: `browser`, `database`, `mcp`, `diff` or
 - `database` with `sql` puts the query in the editor.
 - `focusWindow: false` opens the panel without bringing Conn forward.
 
+Two tools act inside a panel and answer with its result, so the user and the
+agent see the same thing:
+
+- `database_query` picks a Database panel connection by name, puts the query in
+  the editor and runs it. The panel runs queries read-only, so it runs without
+  asking. The agent gets the columns, the row count and the first 20 rows, with
+  values cut at 500 characters. An unknown name fails with the names the panel
+  has. A Vault connection may ask for Touch ID.
+- `mcp_connect` adds or updates an MCP panel server (by name, else by URL or
+  command), selects it and connects. Headers or env carry auth and are saved
+  with the server, as typed ones are. The agent gets the server's tools. OAuth
+  servers are not supported, as in the panel itself.
+
+The panel carries out the request where it already knows the project's
+connections and servers (`pendingByThreadKey` in `databaseStore.ts`,
+`useMcpAgentRequestStore` in `mcpStore.ts`). The server waits up to 90 s.
+
 The server sends each request to every desktop connected to it
 (`panels.requests` stream); the first desktop that shows the panel answers
 (`panels.respond`). With no desktop connected, or when none answers in 15 s, the
@@ -396,7 +413,8 @@ Known issue: the first remote browser open after adding an environment once
 failed with `tab_not_hosted`; after a renderer reload it worked every time.
 
 To add a panel, add its kind to `AgentPanelKind` and an opener to
-`PANEL_OPENERS`. Panel-specific arguments go on `AgentPanelRequest`.
+`PANEL_OPENERS`. Panel-specific arguments go on `AgentPanelRequest`, and
+results on `AgentPanelResponse`.
 
 Sources:
 
@@ -404,6 +422,7 @@ Sources:
 - `apps/server/src/panels/AgentPanelBroker.ts`.
 - `apps/server/src/mcp/toolkits/panels/`.
 - `apps/web/src/panels/agentPanelRequests.ts`.
+- `apps/web/src/database/databaseStore.ts`, `apps/web/src/mcp/mcpStore.ts`.
 
 ### Password-manager autofill
 

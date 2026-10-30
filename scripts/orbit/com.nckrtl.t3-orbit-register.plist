@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. Replace before installing:
+    @HOME@          the user's home, e.g. /Users/nckrtl
+    @URL@           the server's WireGuard URL, e.g. http://10.44.0.9:3773
+    @SERVER_LABEL@  the server's launchd job: com.t3tools.t3code.service (mini),
+                    com.nckrtl.conn-server (nick-vm), com.nckrtl.t3-headless (nick headless)
+    @T3CODE_HOME@   the server's base dir, e.g. @HOME@/.t3 or @HOME@/.t3/headless
+  Never put a versioned runtime path (…/runtime/versions/<version>/t3) here; the script reads the
+  live binary from the server job at every run. RunAtLoad registers as soon as the job is loaded.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nckrtl.t3-orbit-register</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>T3CODE_HOME</key>
+    <string>@T3CODE_HOME@</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/t3-orbit-register</string>
+    <string>--service-label</string>
+    <string>@SERVER_LABEL@</string>
+    <string>@URL@</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>86400</integer>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/t3-orbit-register.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/t3-orbit-register.log</string>
+</dict>
+</plist>

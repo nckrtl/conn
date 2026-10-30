@@ -1,0 +1,9 @@
+[Unit]
+Description=Register this T3 server with the Orbit Gateway (t3-orbit-register)
+After=network-online.target
+[Service]
+Type=oneshot
+# T3_ORBIT_REGISTER_URL=http://<wireguard address>:<port>, one line, in this file.
+EnvironmentFile=%h/.config/t3-orbit-register.env
+# ~/.local/bin/t3 is the launcher symlink the updater repoints; never a …/runtime/versions/<version>/t3 path.
+ExecStart=%h/.local/bin/t3-orbit-register ${T3_ORBIT_REGISTER_URL} %h/.local/bin/t3

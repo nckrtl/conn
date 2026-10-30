@@ -11,6 +11,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
 import {
   AuthAccessTokenResult,
+  AuthClientSession,
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
   AuthCreatePairingCredentialInput,
@@ -582,6 +583,14 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       payload: AuthRevokePairingLinkInput,
       success: AuthPairingLinkRevokeResult,
+      error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // Orbit's Gateway is an external caller; its owner-checked revocations need this snapshot.
+  .add(
+    HttpApiEndpoint.get("clients", "/api/auth/clients", {
+      headers: OptionalBearerHeaders,
+      success: Schema.Array(AuthClientSession),
       error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

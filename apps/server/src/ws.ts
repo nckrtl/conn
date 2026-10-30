@@ -191,6 +191,7 @@ import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/Outpu
 import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
 import * as AnnotationStore from "./annotations/AnnotationStore.ts";
+import * as AgentPanelBroker from "./panels/AgentPanelBroker.ts";
 import * as TestLoginStore from "./credentials/TestLoginStore.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -578,6 +579,8 @@ const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.annotationsSubscribe,
   WS_METHODS.annotationsCreate,
   WS_METHODS.annotationsRemove,
+  WS_METHODS.agentPanelRequests,
+  WS_METHODS.agentPanelRespond,
 );
 const ServerWsForkRpcGroup =
   ForkWsRpcGroup.middleware(RpcScopeAuthorization).middleware(RpcInstrumentation);
@@ -3295,6 +3298,7 @@ const layerWsForkRpc = (
   credentialAutofill: CredentialAutofill.CredentialAutofill["Service"],
   testLoginStore: TestLoginStore.TestLoginStore["Service"],
   annotationStore: AnnotationStore.AnnotationStore["Service"],
+  agentPanelBroker: AgentPanelBroker.AgentPanelBroker["Service"],
 ) =>
   ServerWsForkRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -3317,6 +3321,8 @@ const layerWsForkRpc = (
             .create(projectId, annotation)
             .pipe(Effect.map((record) => ({ annotation: record }))),
         [WS_METHODS.annotationsRemove]: (input) => annotationStore.remove(input),
+        [WS_METHODS.agentPanelRequests]: (input) => agentPanelBroker.requests(input),
+        [WS_METHODS.agentPanelRespond]: (input) => agentPanelBroker.respond(input),
       });
     }),
   );
@@ -3335,6 +3341,7 @@ export const layer = Layer.unwrap(
     const credentialAutofill = yield* CredentialAutofill.CredentialAutofill;
     const testLoginStore = yield* TestLoginStore.TestLoginStore;
     const annotationStore = yield* AnnotationStore.AnnotationStore;
+    const agentPanelBroker = yield* AgentPanelBroker.AgentPanelBroker;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
@@ -3405,7 +3412,7 @@ export const layer = Layer.unwrap(
           Effect.provide(
             Layer.merge(
               layerWsRpc(session, clientAnalyticsProps, serverBrowser, desktopTabRelay),
-              layerWsForkRpc(credentialAutofill, testLoginStore, annotationStore),
+              layerWsForkRpc(credentialAutofill, testLoginStore, annotationStore, agentPanelBroker),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.

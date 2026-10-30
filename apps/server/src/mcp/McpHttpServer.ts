@@ -71,6 +71,8 @@ import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 import * as PullRequestsHandlers from "./toolkits/pullRequests/handlers.ts";
 import * as AnnotationsHandlers from "./toolkits/annotations/handlers.ts";
 import { AnnotationsToolkit } from "./toolkits/annotations/tools.ts";
+import * as PanelsHandlers from "./toolkits/panels/handlers.ts";
+import { PanelsToolkit } from "./toolkits/panels/tools.ts";
 import * as CredentialsHandlers from "./toolkits/credentials/handlers.ts";
 import { CredentialsToolkit } from "./toolkits/credentials/tools.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
@@ -1171,6 +1173,8 @@ export const layerAnnotationsToolkit = toolkitRegistration(
   AnnotationsHandlers.layer,
 );
 
+const layerPanelsToolkit = toolkitRegistration(PanelsToolkit, PanelsHandlers.layer);
+
 const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentToolkit,
   EnvironmentHandlers.layer,
@@ -1216,6 +1220,7 @@ export const layerTools = Layer.mergeAll(
   layerPreviewToolkit,
   layerCredentialsToolkit,
   layerAnnotationsToolkit,
+  layerPanelsToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
   layerAttachmentToolkit,

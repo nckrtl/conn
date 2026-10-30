@@ -7,6 +7,7 @@ import * as Layer from "effect/Layer";
 import { McpServer } from "effect/ai";
 
 import { AnnotationStore } from "../annotations/AnnotationStore.ts";
+import { AgentPanelBroker } from "../panels/AgentPanelBroker.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { ServerConfig } from "../config.ts";
 import { CredentialAutofill } from "../credentials/CredentialAutofill.ts";
@@ -49,6 +50,7 @@ import budget from "./agentContextBudget.json" with { type: "json" };
 const toolHandlerServices = Layer.mergeAll(
   // Conn: the annotation and credential tools.
   Layer.mock(AnnotationStore)({}),
+  Layer.mock(AgentPanelBroker)({}),
   Layer.mock(CredentialAutofill)({}),
   Layer.mock(DeviceService)({}),
   Layer.mock(DocumentText)({}),

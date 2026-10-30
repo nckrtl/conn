@@ -61,6 +61,7 @@ export * from "./preview.ts";
 export * from "./previewAutomation.ts";
 export * from "./credentials.ts";
 export * from "./annotations.ts";
+export * from "./agentPanels.ts";
 export * from "./previewCapture.ts";
 export * from "./usage.ts";
 export * from "./scheduledTask.ts";

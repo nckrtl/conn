@@ -46,6 +46,7 @@ import {
   AnnotationRemovedError,
   AnnotationStoreError,
 } from "./annotations.ts";
+import { AgentPanelRequest, AgentPanelResponse, AgentPanelSubscribeInput } from "./agentPanels.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -536,6 +537,8 @@ export const WS_METHODS = {
   annotationsSubscribe: "annotations.subscribe",
   annotationsCreate: "annotations.create",
   annotationsRemove: "annotations.remove",
+  agentPanelRequests: "panels.requests",
+  agentPanelRespond: "panels.respond",
 
   // Device methods
   deviceConfigure: "device.configure",
@@ -1789,6 +1792,19 @@ const WsAnnotationsCreateRpc = Rpc.make(WS_METHODS.annotationsCreate, {
   ]),
 });
 
+/** A desktop's feed of agent requests to show a panel. Every request must be answered. */
+const WsAgentPanelRequestsRpc = Rpc.make(WS_METHODS.agentPanelRequests, {
+  payload: AgentPanelSubscribeInput,
+  success: AgentPanelRequest,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsAgentPanelRespondRpc = Rpc.make(WS_METHODS.agentPanelRespond, {
+  payload: AgentPanelResponse,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsAnnotationsRemoveRpc = Rpc.make(WS_METHODS.annotationsRemove, {
   payload: AnnotationRemoveInput,
   success: AnnotationRemoveResult,
@@ -2172,6 +2188,8 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsAnnotationsSubscribeRpc,
   WsAnnotationsCreateRpc,
   WsAnnotationsRemoveRpc,
+  WsAgentPanelRequestsRpc,
+  WsAgentPanelRespondRpc,
 );
 
 export const WsRpcGroup = RpcGroup.make(

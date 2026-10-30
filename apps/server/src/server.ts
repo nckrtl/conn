@@ -88,6 +88,7 @@ import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
 import * as AnnotationStore from "./annotations/AnnotationStore.ts";
+import * as AgentPanelBroker from "./panels/AgentPanelBroker.ts";
 import * as TestLoginStore from "./credentials/TestLoginStore.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
@@ -841,6 +842,7 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(DesktopTabRelay.layer),
   // Browser and device annotations, shared by WebSocket clients and agents (/mcp).
   Layer.provide(AnnotationStore.layer),
+  Layer.provide(AgentPanelBroker.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),

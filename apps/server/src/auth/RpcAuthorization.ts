@@ -204,6 +204,9 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.annotationsSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.annotationsCreate]: AuthPreviewOperateScope,
   [WS_METHODS.annotationsRemove]: AuthPreviewOperateScope,
+  // Desktops that show the panels agents open; showing one drives the browser panel.
+  [WS_METHODS.agentPanelRequests]: AuthPreviewOperateScope,
+  [WS_METHODS.agentPanelRespond]: AuthPreviewOperateScope,
   [WS_METHODS.previewStopLocalServer]: AuthTerminalOperateScope,
   [WS_METHODS.subscribePreviewEvents]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,

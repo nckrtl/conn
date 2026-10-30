@@ -1,6 +1,10 @@
 import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
-import { type PreviewAutomationStreamEvent, WS_METHODS } from "@t3tools/contracts";
+import {
+  type AgentPanelRequest,
+  type PreviewAutomationStreamEvent,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -65,6 +69,32 @@ export function createPreviewEnvironmentAtoms<R, E>(
           Stream.runForEach((event) => Effect.promise(() => input.onEvent(event))),
         );
       },
+    }),
+    // A desktop's feed of agent requests to show a panel; see AgentPanelBroker.
+    agentPanelRequests: createEnvironmentRpcStreamCommand(runtime, {
+      label: "panels:requests",
+      tag: WS_METHODS.agentPanelRequests,
+      payload: (input: {
+        deviceName?: string;
+        onRequest: (request: AgentPanelRequest) => Promise<void>;
+        signal: AbortSignal;
+      }) => (input.deviceName === undefined ? {} : { deviceName: input.deviceName }),
+      consume: (stream, input) => {
+        const stopped = Effect.callback<void>((resume) => {
+          if (input.signal.aborted) return resume(Effect.void);
+          const abort = () => resume(Effect.void);
+          input.signal.addEventListener("abort", abort, { once: true });
+          return Effect.sync(() => input.signal.removeEventListener("abort", abort));
+        });
+        return stream.pipe(
+          Stream.interruptWhen(stopped),
+          Stream.runForEach((request) => Effect.sync(() => void input.onRequest(request))),
+        );
+      },
+    }),
+    agentPanelRespond: createEnvironmentRpcCommand(runtime, {
+      label: "panels:respond",
+      tag: WS_METHODS.agentPanelRespond,
     }),
     list: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:preview:list",

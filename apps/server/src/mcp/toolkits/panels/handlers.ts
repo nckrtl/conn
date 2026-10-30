@@ -13,8 +13,7 @@ import { PanelsToolkit } from "./tools.ts";
 const HOSTED_TAB_TIMEOUT_MS = 20_000;
 const HOSTED_TAB_POLL_MS = 250;
 
-const invalid = (message: string) =>
-  new AgentPanelUnavailableError({ reason: "invalid", message });
+const invalid = (message: string) => new AgentPanelUnavailableError({ reason: "invalid", message });
 
 /** A desktop tab is drivable once the desktop that renders it registers as its host. */
 const awaitHostedTab = Effect.fn("PanelsToolkit.awaitHostedTab")(function* (

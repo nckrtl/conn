@@ -23,7 +23,11 @@ const PanelOpenTool = Tool.make("panel_open", {
   ].join(" "),
   parameters: PanelOpenToolInput,
   success: PanelOpenToolResult,
-  failure: Schema.Union([AgentPanelUnavailableError, OrchestratorMcpFailure, PreviewAutomationError]),
+  failure: Schema.Union([
+    AgentPanelUnavailableError,
+    OrchestratorMcpFailure,
+    PreviewAutomationError,
+  ]),
   dependencies: [
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,

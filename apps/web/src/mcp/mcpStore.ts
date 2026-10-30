@@ -191,7 +191,11 @@ export interface McpSession {
   readonly forms: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** The tool the Tools tab shows; null for the first. */
   readonly selectedTool: string | null;
+  /** The selected item's tab, kept across items so a picked tab stays. */
+  readonly detailTab: McpDetailTab;
 }
+
+export type McpDetailTab = "overview" | "playground";
 
 export const EMPTY_MCP_SESSION: McpSession = {
   status: "disconnected",
@@ -206,6 +210,7 @@ export const EMPTY_MCP_SESSION: McpSession = {
   calls: {},
   forms: {},
   selectedTool: null,
+  detailTab: "overview",
 };
 
 const MAX_LOG_ENTRIES = 1_000;
@@ -357,6 +362,7 @@ export async function connectMcp(key: string, server: DesktopMcpServer): Promise
     status: "connecting",
     forms: session.forms,
     selectedTool: session.selectedTool,
+    detailTab: session.detailTab,
   }));
   pendingMethods.delete(key);
   const response = await mcpConnect({ sessionId: key, server }).catch((error: unknown) => ({
@@ -414,6 +420,10 @@ export function setMcpForm(
   values: Readonly<Record<string, string>>,
 ): void {
   updateSession(key, (session) => ({ forms: { ...session.forms, [callKey]: values } }));
+}
+
+export function setMcpDetailTab(key: string, tab: McpDetailTab): void {
+  updateSession(key, () => ({ detailTab: tab }));
 }
 
 export function selectMcpTool(key: string, name: string): void {
@@ -579,6 +589,7 @@ export async function callAgentMcpTool(
     formFromArguments(fieldsFromSchema(tool.inputSchema), request.arguments),
   );
   selectMcpTool(key, tool.name);
+  setMcpDetailTab(key, "playground");
   await runMcpCall(key, callKey, "tools/call", { name: tool.name, arguments: request.arguments });
   const response = useMcpSessionStore.getState().sessions[key]?.calls[callKey]?.response;
   if (!response) return { error: "The MCP panel lost the call." };

@@ -659,7 +659,7 @@ export function DatabasePanel({
       }}
     >
       <div
-        className="flex shrink-0 items-center gap-2 border-b border-(--shell-divider)! bg-background py-toolbar ps-2 pe-toolbar-end in-data-[preview-panel-mode=inline]:h-auto in-data-[preview-panel-mode=inline]:min-h-0"
+        className="flex shrink-0 items-center gap-2 border-b border-(--shell-divider)! bg-background py-toolbar ps-2 pe-toolbar-end in-data-[preview-panel-mode=inline]:mb-0 in-data-[preview-panel-mode=inline]:h-auto in-data-[preview-panel-mode=inline]:min-h-0"
         data-surface-subheader
       >
         <ToolbarGroup role="group" aria-label="Connection" className="min-w-0">

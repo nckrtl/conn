@@ -32,8 +32,10 @@ import {
   type McpResourceTemplate,
   type McpSession,
   type McpTool,
+  type McpDetailTab,
   runMcpCall,
   selectMcpTool,
+  setMcpDetailTab,
   setMcpForm,
 } from "./mcpStore";
 
@@ -266,17 +268,19 @@ function FieldsForm({
   onChange: (values: Readonly<Record<string, string>>) => void;
 }) {
   return (
-    <div className="flex flex-col gap-3">
+    <div className="grid grid-cols-[minmax(6rem,30%)_minmax(0,1fr)] items-start gap-x-4 gap-y-3">
       {fields.map((field) => (
-        <label key={field.name} className="flex flex-col gap-1">
-          <span className="flex items-baseline gap-1.5 text-ui">
-            <span className="font-mono text-foreground">{field.name}</span>
-            {field.required ? <span className="text-destructive">*</span> : null}
-            <span className="text-muted-foreground text-xs">{field.type}</span>
+        <label key={field.name} className="contents">
+          <span className="flex min-w-0 flex-col gap-0.5 pt-1.5">
+            <span className="flex items-baseline gap-1.5 text-ui">
+              <span className="truncate font-mono text-foreground">{field.name}</span>
+              {field.required ? <span className="text-destructive">*</span> : null}
+              <span className="text-muted-foreground text-xs">{field.type}</span>
+            </span>
+            {field.description ? (
+              <span className="text-muted-foreground text-xs">{field.description}</span>
+            ) : null}
           </span>
-          {field.description ? (
-            <span className="text-muted-foreground text-xs">{field.description}</span>
-          ) : null}
           <FieldInput
             field={field}
             value={values[field.name] ?? field.defaultText}
@@ -288,61 +292,128 @@ function FieldsForm({
   );
 }
 
-/** The selected item's header, its form, and the run button, above the result. */
-function DetailForm({
+/** The inputs an item takes, for its Overview tab. */
+function FieldsList({ fields }: { fields: readonly McpField[] }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-muted-foreground text-xs">Input</p>
+      <div className="flex flex-col divide-y divide-(--shell-divider) rounded-lg border border-(--shell-divider)!">
+        {fields.map((field) => (
+          <div key={field.name} className="flex flex-col gap-0.5 px-3 py-2">
+            <span className="flex items-baseline gap-1.5 text-ui">
+              <span className="font-mono text-foreground">{field.name}</span>
+              <span className="text-muted-foreground text-xs">{field.type}</span>
+              {field.required ? (
+                <span className="text-muted-foreground text-xs">required</span>
+              ) : null}
+            </span>
+            {field.description ? (
+              <span className="text-muted-foreground text-xs">{field.description}</span>
+            ) : null}
+            {field.options.length > 0 ? (
+              <span className="font-mono text-muted-foreground text-xs">
+                {field.options.join(" | ")}
+              </span>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The selected item in two tabs: Overview reads like documentation, Playground holds the inputs
+ * with the run button on top and the result below.
+ */
+function ItemDetail({
+  tab,
+  onTabChange,
   title,
   name,
   description,
   badges,
-  children,
+  details,
+  fields,
+  noFields,
   runLabel,
   running,
   onRun,
+  result,
 }: {
+  tab: McpDetailTab;
+  onTabChange: (tab: McpDetailTab) => void;
   title: string;
   name: string | null;
   description: string | undefined;
   badges?: ReactNode;
-  children: ReactNode;
+  /** More of the Overview, under the description. */
+  details?: ReactNode;
+  /** The Playground's inputs, or null when the item takes none. */
+  fields: ReactNode;
+  noFields: string;
   runLabel: string;
   running: boolean;
   onRun: () => void;
+  result: ReactNode;
 }) {
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!running) onRun();
   };
   return (
-    <form
-      data-mcp-call
-      onSubmit={submit}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) submit(event);
-      }}
-      className="scrollbar-inset flex max-h-[55%] min-h-0 shrink-0 flex-col gap-3 overflow-y-auto border-b border-(--shell-divider)! px-4 py-3"
-    >
-      <div className="flex flex-col gap-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium text-foreground text-ui">{title}</span>
-          {name && name !== title ? (
-            <span className="font-mono text-muted-foreground text-xs">{name}</span>
-          ) : null}
-          {badges}
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ApiTabs
+        value={tab}
+        onChange={onTabChange}
+        tabs={[
+          { id: "overview", label: "Overview" },
+          { id: "playground", label: "Playground" },
+        ]}
+      />
+      {tab === "overview" ? (
+        <div className="scrollbar-inset flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-3">
+          <div className="flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-foreground text-ui">{title}</span>
+              {name && name !== title ? (
+                <span className="font-mono text-muted-foreground text-xs">{name}</span>
+              ) : null}
+              {badges}
+            </div>
+            {description ? (
+              <p className="whitespace-pre-wrap text-muted-foreground text-ui">{description}</p>
+            ) : null}
+          </div>
+          {details}
         </div>
-        {description ? (
-          <p className="whitespace-pre-wrap text-muted-foreground text-ui">{description}</p>
-        ) : null}
-      </div>
-      {children}
-      <div className="flex justify-end">
-        <ToolbarGroup>
-          <Button variant="ghost" size="xs" type="submit" disabled={running}>
-            {running ? <Spinner className="size-3.5" /> : <Play />}
-            {runLabel}
-          </Button>
-        </ToolbarGroup>
-      </div>
-    </form>
+      ) : (
+        <>
+          <form
+            data-mcp-call
+            onSubmit={submit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) submit(event);
+            }}
+            className="scrollbar-inset flex max-h-[50%] min-h-0 shrink-0 flex-col gap-3 overflow-y-auto border-b border-(--shell-divider)! px-4 py-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate font-mono text-muted-foreground text-xs">
+                {name ?? title}
+              </span>
+              <ToolbarGroup>
+                <Button variant="ghost" size="xs" type="submit" disabled={running}>
+                  {running ? <Spinner className="size-3.5" /> : <Play />}
+                  {runLabel}
+                </Button>
+              </ToolbarGroup>
+            </div>
+            {fields ?? <p className="text-muted-foreground text-ui">{noFields}</p>}
+          </form>
+          {result}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -461,7 +532,7 @@ function ResultActions({
   const copyLabel = isCopied ? "Copied" : raw === null ? "Copy JSON" : "Copy raw text";
   const rawLabel = raw ? "Show formatted" : "Show raw Markdown";
   return (
-    <ToolbarGroup>
+    <ToolbarGroup className="pointer-events-auto">
       {raw === null ? null : (
         <Tooltip>
           <TooltipTrigger
@@ -576,31 +647,35 @@ function ResultView({
             <span className="flex items-center gap-2 text-muted-foreground text-ui tabular-nums">
               {response.error || isError ? <Badge variant="error">Error</Badge> : null}
               <span>{formatMs(response.durationMs)}</span>
-              {response.error ? null : (
-                <ResultActions
-                  copyText={
-                    tab === "json"
-                      ? JSON.stringify(response.result, null, 2)
-                      : rawResultText(response.result)
-                  }
-                  raw={tab === "content" && hasMarkdown(response.result) ? raw : null}
-                  onRawChange={setRaw}
-                />
-              )}
             </span>
           )
         }
       />
-      <div className="scrollbar-inset min-h-0 flex-1 overflow-auto">
-        {response.error ? (
-          <Notice>{response.error}</Notice>
-        ) : tab === "json" ? (
-          <div className="px-4 py-3">
-            <Code json>{JSON.stringify(response.result, null, 2)}</Code>
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {response.error ? null : (
+          <div className="pointer-events-none absolute end-2 top-2 z-20">
+            <ResultActions
+              copyText={
+                tab === "json"
+                  ? JSON.stringify(response.result, null, 2)
+                  : rawResultText(response.result)
+              }
+              raw={tab === "content" && hasMarkdown(response.result) ? raw : null}
+              onRawChange={setRaw}
+            />
           </div>
-        ) : (
-          <ResultContent result={response.result} raw={raw} />
         )}
+        <div className="scrollbar-inset min-h-0 flex-1 overflow-auto">
+          {response.error ? (
+            <Notice>{response.error}</Notice>
+          ) : tab === "json" ? (
+            <div className="px-4 py-3">
+              <Code json>{JSON.stringify(response.result, null, 2)}</Code>
+            </div>
+          ) : (
+            <ResultContent result={response.result} raw={raw} />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -663,33 +738,36 @@ export function McpToolsView({ session, sessionKey }: { session: McpSession; ses
       />
       <div className="flex min-w-0 flex-1 flex-col">
         {tool ? (
-          <>
-            <DetailForm
-              title={tool.title ?? tool.annotations?.title ?? tool.name}
-              name={tool.name}
-              description={tool.description}
-              badges={<ToolBadges tool={tool} />}
-              runLabel="Call"
-              running={call?.running ?? false}
-              onRun={() => {
-                const parsed = argumentsFromFields(fields, values);
-                if ("error" in parsed) fail(parsed.error);
-                else run("tools/call", { name: tool.name, arguments: parsed.arguments });
-              }}
-            >
-              {fields.length > 0 ? (
+          <ItemDetail
+            tab={session.detailTab}
+            onTabChange={(tab) => setMcpDetailTab(sessionKey, tab)}
+            title={tool.title ?? tool.annotations?.title ?? tool.name}
+            name={tool.name}
+            description={tool.description}
+            badges={<ToolBadges tool={tool} />}
+            details={fields.length > 0 ? <FieldsList fields={fields} /> : null}
+            fields={
+              fields.length > 0 ? (
                 <FieldsForm fields={fields} values={values} onChange={setValues} />
-              ) : (
-                <p className="text-muted-foreground text-ui">This tool takes no arguments.</p>
-              )}
-            </DetailForm>
-            <ResultView
-              key={callKey}
-              response={call?.response ?? null}
-              running={call?.running ?? false}
-              idle="Call the tool to see its result."
-            />
-          </>
+              ) : null
+            }
+            noFields="This tool takes no arguments."
+            runLabel="Call"
+            running={call?.running ?? false}
+            onRun={() => {
+              const parsed = argumentsFromFields(fields, values);
+              if ("error" in parsed) fail(parsed.error);
+              else run("tools/call", { name: tool.name, arguments: parsed.arguments });
+            }}
+            result={
+              <ResultView
+                key={callKey}
+                response={call?.response ?? null}
+                running={call?.running ?? false}
+                idle="Call the tool to see its result."
+              />
+            }
+          />
         ) : (
           <EmptyState>{session.tools === null ? null : "This server has no tools."}</EmptyState>
         )}
@@ -758,31 +836,20 @@ export function McpResourcesView({
       />
       <div className="flex min-w-0 flex-1 flex-col">
         {entry && item ? (
-          <>
-            <DetailForm
-              title={item.title ?? item.name}
-              name={null}
-              description={item.description}
-              badges={item.mimeType ? <Badge variant="outline">{item.mimeType}</Badge> : null}
-              runLabel="Read"
-              running={call?.running ?? false}
-              onRun={() => {
-                if (entry.kind === "resource") {
-                  run("resources/read", { uri: entry.resource.uri });
-                  return;
-                }
-                const missing = variables.find((name) => !(values[name] ?? "").trim());
-                if (missing) fail(`${missing} is required.`);
-                else
-                  run("resources/read", {
-                    uri: expandTemplate(entry.template.uriTemplate, values),
-                  });
-              }}
-            >
+          <ItemDetail
+            tab={session.detailTab}
+            onTabChange={(tab) => setMcpDetailTab(sessionKey, tab)}
+            title={item.title ?? item.name}
+            name={null}
+            description={item.description}
+            badges={item.mimeType ? <Badge variant="outline">{item.mimeType}</Badge> : null}
+            details={
               <p className="break-all font-mono text-muted-foreground text-xs">
                 {entry.kind === "resource" ? entry.resource.uri : entry.template.uriTemplate}
               </p>
-              {variables.length > 0 ? (
+            }
+            fields={
+              variables.length > 0 ? (
                 <FieldsForm
                   fields={variables.map((name) => ({
                     name,
@@ -795,15 +862,32 @@ export function McpResourcesView({
                   values={values}
                   onChange={setValues}
                 />
-              ) : null}
-            </DetailForm>
-            <ResultView
-              key={entry.id}
-              response={call?.response ?? null}
-              running={call?.running ?? false}
-              idle="Read the resource to see its contents."
-            />
-          </>
+              ) : null
+            }
+            noFields="This resource takes no arguments."
+            runLabel="Read"
+            running={call?.running ?? false}
+            onRun={() => {
+              if (entry.kind === "resource") {
+                run("resources/read", { uri: entry.resource.uri });
+                return;
+              }
+              const missing = variables.find((name) => !(values[name] ?? "").trim());
+              if (missing) fail(`${missing} is required.`);
+              else
+                run("resources/read", {
+                  uri: expandTemplate(entry.template.uriTemplate, values),
+                });
+            }}
+            result={
+              <ResultView
+                key={entry.id}
+                response={call?.response ?? null}
+                running={call?.running ?? false}
+                idle="Read the resource to see its contents."
+              />
+            }
+          />
         ) : (
           <EmptyState>
             {session.resources === null ? null : "This server has no resources."}
@@ -854,41 +938,44 @@ export function McpPromptsView({
       />
       <div className="flex min-w-0 flex-1 flex-col">
         {prompt ? (
-          <>
-            <DetailForm
-              title={prompt.title ?? prompt.name}
-              name={prompt.name}
-              description={prompt.description}
-              runLabel="Get"
-              running={call?.running ?? false}
-              onRun={() => {
-                const missing = fields.find(
-                  (candidate) => candidate.required && !(values[candidate.name] ?? "").trim(),
-                );
-                if (missing) {
-                  fail(`${missing.name} is required.`);
-                  return;
-                }
-                // Prompt arguments are strings; empty optional ones are left out.
-                const args = Object.fromEntries(
-                  Object.entries(values).filter(([, value]) => value !== ""),
-                );
-                run("prompts/get", { name: prompt.name, arguments: args });
-              }}
-            >
-              {fields.length > 0 ? (
+          <ItemDetail
+            tab={session.detailTab}
+            onTabChange={(tab) => setMcpDetailTab(sessionKey, tab)}
+            title={prompt.title ?? prompt.name}
+            name={prompt.name}
+            description={prompt.description}
+            details={fields.length > 0 ? <FieldsList fields={fields} /> : null}
+            fields={
+              fields.length > 0 ? (
                 <FieldsForm fields={fields} values={values} onChange={setValues} />
-              ) : (
-                <p className="text-muted-foreground text-ui">This prompt takes no arguments.</p>
-              )}
-            </DetailForm>
-            <ResultView
-              key={callKey}
-              response={call?.response ?? null}
-              running={call?.running ?? false}
-              idle="Get the prompt to see its messages."
-            />
-          </>
+              ) : null
+            }
+            noFields="This prompt takes no arguments."
+            runLabel="Get"
+            running={call?.running ?? false}
+            onRun={() => {
+              const missing = fields.find(
+                (candidate) => candidate.required && !(values[candidate.name] ?? "").trim(),
+              );
+              if (missing) {
+                fail(`${missing.name} is required.`);
+                return;
+              }
+              // Prompt arguments are strings; empty optional ones are left out.
+              const args = Object.fromEntries(
+                Object.entries(values).filter(([, value]) => value !== ""),
+              );
+              run("prompts/get", { name: prompt.name, arguments: args });
+            }}
+            result={
+              <ResultView
+                key={callKey}
+                response={call?.response ?? null}
+                running={call?.running ?? false}
+                idle="Get the prompt to see its messages."
+              />
+            }
+          />
         ) : (
           <EmptyState>{session.prompts === null ? null : "This server has no prompts."}</EmptyState>
         )}

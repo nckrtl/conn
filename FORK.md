@@ -393,6 +393,12 @@ agent see the same thing:
   command), selects it and connects. Headers or env carry auth and are saved
   with the server, as typed ones are. The agent gets the server's tools. OAuth
   servers are not supported, as in the panel itself.
+- `mcp_call` calls a tool on a saved MCP panel server: the panel selects the
+  tool, fills its form with the agent's arguments and shows the result. The
+  agent gets the content, with text cut at 8,000 characters and images left
+  out, and any structured content. It is meant for building MCP servers: the
+  user watches each change work. After the agent changes its server, it
+  reconnects with `mcp_connect` so the panel lists the new tools.
 
 The panel carries out the request where it already knows the project's
 connections and servers (`pendingByThreadKey` in `databaseStore.ts`,

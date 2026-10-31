@@ -37,6 +37,9 @@ describe("applyAppearanceFontVariables", () => {
       sizePrompt: 14,
       sizeCode: 13,
       smoothing: true,
+      lineHeightInterface: 1.5,
+      lineHeightPrompt: 1.625,
+      lineHeightCode: 1.625,
     };
     try {
       applyAppearanceFontVariables(root, { ...preferences, separate: false });
@@ -51,5 +54,27 @@ describe("applyAppearanceFontVariables", () => {
       if (style === null) root.removeAttribute("style");
       else root.setAttribute("style", style);
     }
+  });
+
+  it("sets and removes the properties on the root", () => {
+    const root = document.createElement("div");
+    const preferences = {
+      sans: "",
+      code: "",
+      composer: "",
+      sizeInterface: 16,
+      sizePrompt: 14,
+      sizeCode: 13,
+      smoothing: true,
+      separate: false,
+      lineHeightInterface: 1.5,
+      lineHeightPrompt: 1.625,
+      lineHeightCode: 1.625,
+    };
+    applyAppearanceFontVariables(root, { ...preferences, lineHeightCode: 1.9 });
+    expect(root.style.getPropertyValue("--diffs-line-height")).toBe("1.9");
+    applyAppearanceFontVariables(root, preferences);
+    expect(root.style.getPropertyValue("--diffs-line-height")).toBe("");
+    expect(root.style.getPropertyValue("--line-height-code")).toBe("1.625");
   });
 });

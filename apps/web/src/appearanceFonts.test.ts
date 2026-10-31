@@ -1,10 +1,7 @@
-// @vitest-environment jsdom
-
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   appearanceLineHeightVariables,
-  applyAppearanceFontVariables,
   areFontAdvancesMonospace,
   clampCodeFontSize,
   clampCodeLineHeight,
@@ -174,25 +171,6 @@ describe("line heights", () => {
     expect(options.at(-1)).toBe(2);
     expect(options).toHaveLength(16);
     expect(options).toContain(1.35);
-  });
-
-  it("sets and removes the properties on the root", () => {
-    const root = document.createElement("div");
-    const preferences = {
-      sans: "",
-      code: "",
-      composer: "",
-      sizeInterface: 16,
-      sizePrompt: 14,
-      sizeCode: 13,
-      smoothing: true,
-      ...defaults,
-    };
-    applyAppearanceFontVariables(root, { ...preferences, lineHeightCode: 1.9 });
-    expect(root.style.getPropertyValue("--diffs-line-height")).toBe("1.9");
-    applyAppearanceFontVariables(root, preferences);
-    expect(root.style.getPropertyValue("--diffs-line-height")).toBe("");
-    expect(root.style.getPropertyValue("--line-height-code")).toBe("1.625");
   });
 
   it("makes the terminal follow the code value only once it was moved, in simple mode", () => {

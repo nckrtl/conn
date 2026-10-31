@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Reads the tool copy sources as plain files.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 

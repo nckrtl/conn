@@ -58,7 +58,6 @@ import {
   threadJumpCommandForIndex,
   threadJumpIndexFromCommand,
 } from "../../keybindings";
-import { APP_BASE_NAME } from "../../branding";
 import {
   parseManualDesktopSshTarget,
   parsePairingUrlFields,

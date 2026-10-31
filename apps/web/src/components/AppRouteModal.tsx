@@ -9,13 +9,9 @@ import { DialogBackdrop } from "./ui/dialog";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 /**
- * Large modal for the Settings and Usage routes. Esc, the close button, or a press on the
- * backdrop returns to the page that opened it. Keyboard guards that skip dialogs exempt
- * `[data-app-modal]`, because these pages own their shortcuts.
- *
- * Conn: the popup is the frosted shell frame. Pages compose `AppRouteModalHeader` (the
- * transparent 44px header) over `AppRouteModalCard` (the inset content card), with an optional
- * nav panel (`APP_ROUTE_MODAL_NAV_CLASS`) beside the card, like the thread panel beside the chat.
+ * Large modal for Settings and Usage; Esc, close or a backdrop press returns to the opener.
+ * Keyboard guards that skip dialogs exempt `[data-app-modal]`. Conn: frosted shell frame with
+ * `AppRouteModalHeader` over `AppRouteModalCard`, optional `APP_ROUTE_MODAL_NAV_CLASS` beside it.
  */
 export function AppRouteModal({ label, children }: { label: string; children: ReactNode }) {
   const closeAppModal = useCloseAppModal();

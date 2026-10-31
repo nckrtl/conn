@@ -232,6 +232,8 @@ describe("Conn PeerLinks upgrade", () => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -255,6 +257,8 @@ describe("Conn PeerLinks upgrade", () => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -277,6 +281,8 @@ describe("Conn PeerLinks upgrade", () => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -298,6 +304,8 @@ describe("Conn PeerLinks upgrade", () => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -318,6 +326,8 @@ describe("Conn PeerLinks upgrade", () => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -335,6 +345,8 @@ describe("Conn PeerLinks upgrade", () => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -351,6 +363,8 @@ describe("Conn PeerLinks upgrade", () => {
         [71, "PeerLinkFence"],
         [72, "WaitingLinkRequestIndex"],
         [73, "ActiveTurnItemIndexes"],
+        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [75, "SubagentDeliveryState"],
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),

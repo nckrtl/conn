@@ -264,7 +264,7 @@ function makeContext(onClose?: (context: BrowserContext) => void) {
       const session = makeSession(
         target === page ? undefined : (target as ReturnType<typeof makeFrame>),
         cssViewport,
-        () => viewport,
+        () => viewport ?? { width: 1280, height: 800 },
       );
       sessions.push(session);
       return session;
@@ -2015,12 +2015,16 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
       yield* Effect.yieldNow;
       desktopRendersNext = true;
       const opened = yield* manager.open({ threadId: scope.thread.threadId, runtime: "server" });
-      while (desktopConnections.length === 0) yield* Effect.yieldNow;
-      while (desktopDetaches.listenerCount("detach") === 0) yield* Effect.yieldNow;
+      yield* Effect.promise(() => expect.poll(() => desktopConnections.length).toBeGreaterThan(0));
+      yield* Effect.promise(() =>
+        expect.poll(() => desktopDetaches.listenerCount("detach")).toBeGreaterThan(0),
+      );
       desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId: opened.tabId });
-      while (releasedDesktopTabs.length === 0) yield* Effect.yieldNow;
+      yield* Effect.promise(() => expect.poll(() => releasedDesktopTabs.length).toBeGreaterThan(0));
       desktopDetaches.emit("attach", { threadId: scope.thread.threadId, tabId: opened.tabId });
-      while (desktopConnections.length < 2) yield* Effect.yieldNow;
+      yield* Effect.promise(() =>
+        expect.poll(() => desktopConnections.length).toBeGreaterThanOrEqual(2),
+      );
       expect(desktopConnections).toHaveLength(2);
     }),
   ).pipe(Effect.provide(layer)),

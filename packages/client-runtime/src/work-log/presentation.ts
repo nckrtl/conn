@@ -397,9 +397,9 @@ function workEntryIndicatesToolFailureFromOutput(
   }
   const item = entry.structuredPayload;
   if (item?.type === "command_execution") {
-    if (item.outputIndicatesFailure || (item.exitCode !== undefined && item.exitCode !== 0)) {
-      return true;
-    }
+    // The exit code outranks text in the output or the command itself.
+    if (item.exitCode !== undefined) return item.exitCode !== 0;
+    if (item.outputIndicatesFailure) return true;
     // Older servers/caches can still carry output. Read only the previous
     // preview-sized prefix for status, without exposing it in the row detail.
     if (item.output && toolOutputIndicatesFailure(item.output.slice(0, 32_768))) {

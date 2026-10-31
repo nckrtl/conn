@@ -381,7 +381,7 @@ export const make = Effect.gen(function* () {
           const forward = (current?: () => boolean) => {
             const change = tab.focusChange;
             const run = () =>
-              current === undefined || current()
+              tab.relay === relay && (current === undefined || current())
                 ? send(method, params, sessionId)
                 : Promise.reject(new Error("The page this screenshot was for has moved on."));
             return change === null ? run() : change.then(run);
@@ -429,6 +429,24 @@ export const make = Effect.gen(function* () {
             message: secrets ? redactCdpMessage(message, [...secrets]) : message,
           });
         }
+      },
+      // Announcing the tab again would reconnect Playwright, and the page could
+      // replay the same oversized event, so the tab stays detached.
+      () => {
+        if (tab.relay !== relay || tabs.get(keyOf(tab.key)) !== tab) return;
+        // Disabling auto-attach detaches child sessions and releases their debugger pauses.
+        void debuggee
+          .sendCommand("Target.setAutoAttach", {
+            autoAttach: false,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+          })
+          .catch(() => {});
+        if (tab.screencasts.size > 0) {
+          void debuggee.sendCommand("Page.stopScreencast").catch(() => {});
+        }
+        setFocusEmulation(tab, false);
+        detach(tab.key);
       },
     );
     tab.relay = relay;

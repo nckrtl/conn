@@ -113,11 +113,13 @@ export interface AppearanceFontPreferences {
   readonly lineHeightCode: number;
   /** Grayscale `antialiased` rendering; false keeps the heavier platform default. */
   readonly smoothing: boolean;
+  readonly separate: boolean;
 }
 
 /**
  * Apply the preferences to the root. Unset families drop the override. Sizes are always
- * written: the interface size sets the root font size, prompt and code sizes stay in px.
+ * written: the interface size sets the root font size, prompt and code sizes stay in px
+ * (the prompt follows the interface text size unless separate fonts are on).
  */
 export function applyAppearanceFontVariables(
   root: HTMLElement,
@@ -127,7 +129,7 @@ export function applyAppearanceFontVariables(
     ["--font-sans", preferences.sans, DEFAULT_SANS_FONT_STACK],
     ["--font-mono", preferences.code, DEFAULT_CODE_FONT_STACK],
     // The composer falls back to whatever the sans preference resolves to.
-    ["--font-composer", preferences.composer, "var(--font-sans)"],
+    ["--font-composer", preferences.separate ? preferences.composer : "", "var(--font-sans)"],
   ];
   for (const [variable, custom, fallback] of families) {
     const list = cssFontFamilies(custom);
@@ -139,7 +141,10 @@ export function applyAppearanceFontVariables(
   }
 
   root.style.fontSize = `${clampInterfaceFontSize(preferences.sizeInterface)}px`;
-  root.style.setProperty("--font-size-prompt", `${clampPromptFontSize(preferences.sizePrompt)}px`);
+  root.style.setProperty(
+    "--font-size-prompt",
+    preferences.separate ? `${clampPromptFontSize(preferences.sizePrompt)}px` : "var(--text-sm)",
+  );
   const code = clampCodeFontSize(preferences.sizeCode);
   root.style.setProperty("--font-size-code", `${code}px`);
   // The @pierre/diffs surfaces read their own hook for code text.

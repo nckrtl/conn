@@ -71,6 +71,7 @@ export * from "./rpc.ts";
 export * from "./worktreeSetup.ts";
 export * from "./secretRequest.ts";
 export * from "./secretReference.ts";
+export * from "./settingsSecretValue.ts";
 export * from "./clientRpcPermissions.ts";
 export * from "./vaultwarden.ts";
 export * from "./vaultLogins.ts";

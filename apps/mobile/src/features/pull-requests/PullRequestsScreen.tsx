@@ -18,6 +18,7 @@ import {
   type ScrollViewProps,
 } from "react-native";
 import { NativeScrollViewMarker as ScrollViewMarker } from "../../native/NativeScrollViewMarker";
+import { nativeWorkspaceListScrollEdgeEffects } from "../../native/scrollEdgeEffects";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -56,7 +57,10 @@ import { useWorkspacePhoneBar } from "../workspace/useWorkspacePhoneBar";
 
 function PullRequestScrollView(props: ScrollViewProps) {
   return (
-    <ScrollViewMarker style={{ flex: 1 }}>
+    <ScrollViewMarker
+      style={{ flex: 1 }}
+      scrollEdgeEffects={nativeWorkspaceListScrollEdgeEffects(Platform.OS, Platform.Version)}
+    >
       <ScrollView {...props} />
     </ScrollViewMarker>
   );

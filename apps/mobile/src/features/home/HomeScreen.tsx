@@ -40,7 +40,7 @@ import type { WorkspaceEnvironment, WorkspaceState } from "../../state/workspace
 import type { SavedRemoteConnection } from "../../lib/connection";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
-import { nativeHeaderScrollEdgeEffects } from "../../native/scrollEdgeEffects";
+import { nativeWorkspaceListScrollEdgeEffects } from "../../native/scrollEdgeEffects";
 import {
   useNativeColumnLayoutMetrics,
   useNativeLayoutMetrics,
@@ -258,10 +258,7 @@ function HomeScrollView(props: ComponentProps<typeof ScrollView>) {
   return (
     <ScrollViewMarker
       style={{ flex: 1 }}
-      scrollEdgeEffects={{
-        ...nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version),
-        top: Number.parseInt(String(Platform.Version), 10) >= 27 ? "automatic" : "soft",
-      }}
+      scrollEdgeEffects={nativeWorkspaceListScrollEdgeEffects(Platform.OS, Platform.Version)}
     >
       <ScrollView
         {...props}

@@ -31,3 +31,11 @@ export function nativeHeaderScrollEdgeEffects(
     right: "hidden",
   };
 }
+
+// nckrtl shell: the iPhone workspace lists (Threads, Pulls) scroll under the bottom toolbar too,
+// so they blur at the bottom edge the same way as under the header.
+export function nativeWorkspaceListScrollEdgeEffects(os: string, version: number | string) {
+  const edge: NativeTopScrollEdgeEffect =
+    os === "ios" && Number.parseInt(String(version), 10) < 27 ? "soft" : "automatic";
+  return { top: edge, bottom: edge, left: "hidden", right: "hidden" } as const;
+}

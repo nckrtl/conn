@@ -55,12 +55,9 @@ export class DesktopEnvironment extends Context.Service<
     readonly browserArtifactsDir: string;
     readonly rootDir: string;
     readonly appRoot: string;
-    // Root of the tree containing apps/server/dist and node_modules for the
-    // backend. Equals appRoot everywhere except packaged Windows, where the
-    // server tree ships as the resources/server.asar sidecar (see
-    // scripts/build-desktop-artifact.ts) that the asar-aware
-    // ELECTRON_RUN_AS_NODE primary reads in place and the WSL backend
-    // extracts on demand (see DesktopWslServerTree).
+    // Root of the backend tree (apps/server/dist and node_modules). Equals appRoot
+    // except on packaged Windows, where it is the resources/server.asar sidecar
+    // (see scripts/build-desktop-artifact.ts and DesktopWslServerTree).
     readonly serverRoot: string;
     readonly backendEntryPath: string;
     // Built web client the packaged renderer is served from over <scheme>://app (t3code by default).
@@ -84,7 +81,6 @@ export class DesktopEnvironment extends Context.Service<
     readonly displayName: string;
     readonly appUserModelId: string;
     readonly linuxDesktopEntryName: string;
-    readonly linuxWmClass: string;
     readonly linuxApplicationsDir: string;
     readonly desktopLauncherPath: Option.Option<string>;
     readonly appImagePath: Option.Option<string>;
@@ -241,7 +237,6 @@ const make = Effect.fn("desktop.environment.make")(function* (
       isDevelopment ? appBrand.devAppId : appBrand.appId,
     ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
-    linuxWmClass: isDevelopment ? appBrand.devScheme : appBrand.scheme,
     linuxApplicationsDir,
     desktopLauncherPath: config.desktopLauncherPath,
     appImagePath: config.appImagePath,

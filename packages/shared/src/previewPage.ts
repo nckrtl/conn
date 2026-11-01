@@ -377,7 +377,8 @@ const dottedPattern = (values: ReadonlyArray<string>) => {
       return [...new Set(forms)].map((form) => ({ form, word: value.length < 4 }));
     })
     // Longest first, so a form inside another never leaves the rest showing.
-    .toSorted((a, b) => b.form.length - a.form.length)
+    .slice()
+    .sort((a, b) => b.form.length - a.form.length)
     .map(({ form, word }) => {
       const literal = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return word ? `(?<![\\p{L}\\p{N}_])${literal}(?![\\p{L}\\p{N}_])` : literal;
@@ -604,6 +605,7 @@ const capture = async (
     });
   return {
     ...page,
+    url: withoutDataPayload(page.url),
     // Mask text before truncating so a value crossing the cut cannot leak its prefix.
     visibleText: mask(page.visibleText).slice(0, MAX_VISIBLE_TEXT_LENGTH),
     accessibilityTree,

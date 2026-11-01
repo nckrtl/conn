@@ -10,7 +10,10 @@ import { useMemo, useState } from "react";
 import { Platform, useWindowDimensions } from "react-native";
 
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { resolveScratchProjectScopeKey } from "@t3tools/client-runtime/state/project-grouping";
+import {
+  pickableProjectGroups,
+  resolveScratchProjectScopeKey,
+} from "@t3tools/client-runtime/state/project-grouping";
 
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useProjects } from "../../state/entities";
@@ -19,7 +22,7 @@ import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
-import { useDeviceType, useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
+import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
 import { WorkspaceEmptyDetail } from "../layout/WorkspaceEmptyDetail";
 import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { AndroidHomeFabLayout } from "./AndroidHomeFab";
@@ -41,7 +44,6 @@ export function HomeRouteScreen() {
   const { width: windowWidth } = useWindowDimensions();
   const nativePrimaryColumn = use(NativePrimaryColumnContext);
   const columnMetrics = useNativeColumnLayoutMetrics();
-  const deviceType = useDeviceType();
   const headerWidth = nativePrimaryColumn ? (columnMetrics?.width ?? windowWidth) : windowWidth;
   const { layout, panes, primarySidebarSearchQuery, setPrimarySidebarSearchQuery, startNewTask } =
     useAdaptiveWorkspaceLayout();
@@ -139,11 +141,13 @@ export function HomeRouteScreen() {
   );
   const projectFilterOptions = useMemo(
     () =>
-      buildHomeProjectScopes({
-        projects,
-        environmentId: selectedEnvironmentId,
-        projectGroupingMode: listOptions.projectGroupingMode,
-      }).map((scope) => ({
+      pickableProjectGroups(
+        buildHomeProjectScopes({
+          projects,
+          environmentId: selectedEnvironmentId,
+          projectGroupingMode: listOptions.projectGroupingMode,
+        }),
+      ).map((scope) => ({
         key: scope.key,
         label: scope.title,
         // Same-named projects on different machines are only distinguishable

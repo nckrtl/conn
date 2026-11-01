@@ -52,10 +52,13 @@ function IndexDraftLanding() {
   const projectsPublished = useWorkspaceStore((state) => state.availableProjects.length > 0);
   const mostRecentProject = (() => {
     if (workspaceRefs !== null && !projectsPublished && projects.length > 0) return null;
+    const unarchived = projects.filter((project) => project.archivedAt == null);
     const scoped =
       workspaceRefs === null
-        ? projects
-        : projects.filter((project) => workspaceRefs.has(`${project.environmentId}:${project.id}`));
+        ? unarchived
+        : unarchived.filter((project) =>
+            workspaceRefs.has(`${project.environmentId}:${project.id}`),
+          );
     return sortScopedProjectsForSidebar(scoped, threads, "updated_at")[0] ?? null;
   })();
   const attempt = startState.retryRequest;

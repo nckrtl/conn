@@ -34,7 +34,14 @@ import {
 import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { ReactNode } from "react";
 import { useEffect, useEffectEvent, useRef, useState, type RefObject } from "react";
-import { I18nManager, Keyboard, Platform, View, type ViewStyle } from "react-native";
+import {
+  I18nManager,
+  Keyboard,
+  Platform,
+  View,
+  useWindowDimensions,
+  type ViewStyle,
+} from "react-native";
 import { composerImageGallery } from "../../lib/composerImageGallery";
 import { filePreviewGallery } from "../../lib/filePreviewGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
@@ -139,7 +146,15 @@ function collapsedEditorInset(text: ScaledTextRole): number {
   return Math.max(0, Math.round(COLLAPSED_EDITOR_DEFAULT_INSET - shift));
 }
 
-function useCompactComposerEditor(text: ScaledTextRole, value: string) {
+function useCompactComposerEditor(appText: ScaledTextRole, value: string) {
+  // The iOS editor draws at the system text size, so its measured content height is in those
+  // units. Size the box and the 4-line scroll threshold in the same units, or a smaller system
+  // text size caps the box at 4 lines with scrolling never switched on.
+  const { fontScale } = useWindowDimensions();
+  const text =
+    Platform.OS === "ios"
+      ? { fontSize: appText.fontSize * fontScale, lineHeight: appText.lineHeight * fontScale }
+      : appText;
   const [contentSize, setContentSize] = useState({ width: 0, height: 0 });
   const [compactWidth, setCompactWidth] = useState(0);
   const contentHeight = contentSize.height;
@@ -194,7 +209,8 @@ function useCompactComposerEditor(text: ScaledTextRole, value: string) {
     },
     editorProps: {
       singleLineCentered: !isExpanded,
-      scrollEnabled: Platform.OS === "android" || contentHeight >= text.lineHeight * 4,
+      // The editor reports a height rounded up and capped at 4 lines; allow for rounding.
+      scrollEnabled: Platform.OS === "android" || contentHeight >= text.lineHeight * 4 - 1,
       contentInsetVertical: inset,
       onContentSizeChange: (size: { width: number; height: number }) => {
         setContentSize(size);

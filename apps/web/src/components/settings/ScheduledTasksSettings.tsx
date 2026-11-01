@@ -1642,7 +1642,7 @@ function ScheduledTaskEditorForm({
                     }
                   />
                 </Field>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-ui text-muted-foreground">
                   Requests with the same key run only once within 7 days.
                 </p>
                 <Field

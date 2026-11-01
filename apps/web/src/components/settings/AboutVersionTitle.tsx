@@ -26,7 +26,7 @@ export function AboutVersionTitle() {
   return (
     <span className="inline-flex items-baseline gap-2">
       <span>Version</span>
-      <code className="text-2xs font-medium">
+      <code className="text-ui font-medium">
         <Tooltip>
           <TooltipTrigger
             render={

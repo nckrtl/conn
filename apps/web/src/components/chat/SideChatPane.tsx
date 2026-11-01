@@ -125,7 +125,7 @@ export default function SideChatPane(props: {
   return (
     <div data-side-chat-pane className="flex h-full min-h-0 flex-col">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border pr-1 pl-3">
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">
+        <span className="min-w-0 flex-1 truncate text-ui font-medium">
           {shell?.title ?? "Side chat"}
         </span>
         <Tooltip>
@@ -160,7 +160,7 @@ export default function SideChatPane(props: {
       </div>
       {shell === null ? (
         snapshotLoaded ? (
-          <p className="p-3 text-xs text-muted-foreground">This side chat was deleted.</p>
+          <p className="p-3 text-ui text-muted-foreground">This side chat was deleted.</p>
         ) : null
       ) : (
         <BackgroundThreadContext value>

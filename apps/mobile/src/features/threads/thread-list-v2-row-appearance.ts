@@ -1,12 +1,15 @@
 import type { ViewStyle } from "react-native";
 import type { MobileThemeVariables } from "../../lib/mobileTheme";
 
-export const THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME = "px-3 py-2.5";
+// nckrtl shell: the card already pads its sides, so phone row content adds none.
+export const THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME = "py-2.5";
 // nckrtl shell: rows are rounded pills on the pane, like the desktop sidebar,
 // so no hairlines between them.
 export const THREAD_LIST_V2_ROW_DIVIDERS = false;
 /** Phone rows inset from the screen edge so their rounded surface reads. */
 export const THREAD_LIST_V2_ROW_INSET = 8;
+/** Phone card side padding: with the inset, row text sits 16pt from the screen edge. */
+const THREAD_LIST_V2_PHONE_ROW_PADDING_HORIZONTAL = 8;
 export const THREAD_LIST_V2_SIDEBAR_ROW_STYLE = {
   borderRadius: 12,
   paddingHorizontal: 12,
@@ -64,7 +67,13 @@ export function getThreadListV2RowAppearance(
       ? "accent-drawer-foreground-muted"
       : "accent-foreground-tertiary",
     style,
-    cardStyle: { ...style, ...THREAD_LIST_V2_SIDEBAR_ROW_STYLE },
+    cardStyle: sidebarPane
+      ? { ...style, ...THREAD_LIST_V2_SIDEBAR_ROW_STYLE }
+      : {
+          ...style,
+          ...THREAD_LIST_V2_SIDEBAR_ROW_STYLE,
+          paddingHorizontal: THREAD_LIST_V2_PHONE_ROW_PADDING_HORIZONTAL,
+        },
     swipeContainerStyle,
     swipeBackgroundColor: paneColor,
     // Provider badges blend into the surface beneath them.

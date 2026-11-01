@@ -25,6 +25,7 @@ import {
   type NativeSyntheticEvent,
 } from "react-native";
 import { NativeScrollViewMarker as ScrollViewMarker } from "../../native/NativeScrollViewMarker";
+import { WorkspaceListEdgeBlur } from "../../native/WorkspaceListEdgeBlur";
 import { GestureDetector, useNativeGesture } from "react-native-gesture-handler";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -264,7 +265,10 @@ function HomeScrollView(props: ComponentProps<typeof ScrollView>) {
         {...props}
         // UIKit's scroll-edge material needs the scroll view's own surface color.
         className={cn(props.className, primaryColumn ? "bg-drawer" : "bg-screen")}
-      />
+      >
+        {primaryColumn ? null : <WorkspaceListEdgeBlur />}
+        {props.children}
+      </ScrollView>
     </ScrollViewMarker>
   );
 }

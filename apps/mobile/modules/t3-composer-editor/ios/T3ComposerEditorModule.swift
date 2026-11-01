@@ -146,6 +146,7 @@ final class T3EdgeBlurView: ExpoView {
   private static let scrollViews = NSMapTable<UIView, UIScrollView>.weakToWeakObjects()
   private static let edges = NSHashTable<T3EdgeBlurView>.weakObjects()
   private var edgeInteraction: AnyObject?
+  private var toolbarRetries = 0
   var edge = "top" { didSet { connect() } }
 
   required init(appContext: AppContext? = nil) {
@@ -204,7 +205,27 @@ final class T3EdgeBlurView: ExpoView {
     }
     guard let scroll = Self.scrollViews.object(forKey: root) else { return }
     let container: UIView?
-    if edge == "top" {
+    if edge == "toolbar" {
+      // nckrtl shell: the iPhone workspace lists scroll under the navigation controller's bottom
+      // toolbar, which a nested screen's scroll view is not linked to.
+      var responder: UIResponder? = root
+      var toolbar: UIToolbar?
+      while let current = responder {
+        if let controller = current as? UIViewController,
+          let navigation = controller.navigationController, !navigation.isToolbarHidden
+        {
+          toolbar = navigation.toolbar
+          break
+        }
+        responder = current.next
+      }
+      container = toolbar
+      // The header shows the toolbar after this view lands in the window; look again shortly.
+      if toolbar == nil, toolbarRetries < 20 {
+        toolbarRetries += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.connect() }
+      }
+    } else if edge == "top" {
       var responder: UIResponder? = root
       var navigationBar: UINavigationBar?
       while let current = responder {

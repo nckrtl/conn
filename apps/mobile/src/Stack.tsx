@@ -132,6 +132,7 @@ import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsLabsRouteScreen } from "./features/settings/ThreadSettingsSections";
 import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
 import { openSettings, settingsOpenIn } from "./features/settings/settings-navigation";
+import { SETTINGS_OPENS_AS_SHEET } from "./features/settings/settings-sheet";
 import { DEFAULT_SETTINGS_PAGE } from "./features/workspace/workspace-tab-navigation";
 import {
   isWorkspaceOverlayRoute,
@@ -241,6 +242,7 @@ const SETTINGS_SCREENS = {
       // showed for the first frame of the Settings tab and pushed the page down.
       headerShown: Platform.OS !== "android",
       headerBackVisible: false,
+      ...(SETTINGS_OPENS_AS_SHEET ? { presentation: "pageSheet" as const } : {}),
     },
   }),
   SettingsEnvironments: createNativeStackScreen({

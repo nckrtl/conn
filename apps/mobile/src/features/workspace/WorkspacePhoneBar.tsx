@@ -32,7 +32,6 @@ const SWITCHER_ITEMS = [
     accessibilityLabel: "Pull requests",
     icon: "arrow.triangle.pull",
   },
-  { key: "usage", label: "Usage", accessibilityLabel: "Usage", icon: "chart.bar.xaxis" },
   { key: "search", label: "Search", accessibilityLabel: "Search", icon: "magnifyingglass" },
 ] as const;
 
@@ -40,7 +39,7 @@ function switcherWidth(windowWidth: number) {
   return Math.min(SWITCHER_ITEM_WIDTH * SWITCHER_ITEMS.length, windowWidth - TOOLBAR_RESERVED);
 }
 
-/** Threads, Pulls, Usage and Search share one glass group in the toolbar. */
+/** Threads, Pulls and Search share one glass group in the toolbar. Usage is in Settings. */
 function WorkspacePhoneSwitcher(props: {
   readonly width: number;
   readonly selectedTab: WorkspaceTab;
@@ -106,7 +105,7 @@ function WorkspacePhoneSwitcher(props: {
 }
 
 /**
- * Conn's iPhone bottom bar: settings, the Threads / Pulls / Usage / Search group, and New chat.
+ * Conn's iPhone bottom bar: settings, the Threads / Pulls / Search group, and New chat.
  * Search swaps the group for the toolbar search field, with the filter menu inside it,
  * and searches the selected tab. Cancelling, or leaving the field empty, brings the group back.
  */

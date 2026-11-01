@@ -15,7 +15,7 @@ import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { useAuth, useUser } from "@clerk/expo";
-import { useNavigation, useNavigationState } from "@react-navigation/native";
+import { StackActions, useNavigation, useNavigationState } from "@react-navigation/native";
 import { use, type ComponentProps } from "react";
 import { Platform, View } from "react-native";
 import { useWorkspaceSurface } from "../workspace/useWorkspaceSurface";
@@ -38,6 +38,9 @@ import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import { filterSettingsSections } from "./settings-search";
 import { NativePrimaryColumnContext } from "../../native/v5-workspace-context";
 import { OrbitLogo } from "../orbit/OrbitLogo";
+import { NativeStackScreenOptions } from "../../native/StackHeader";
+import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
+import { SETTINGS_OPENS_AS_SHEET } from "./settings-sheet";
 import { useOrbitGateway } from "../orbit/orbitGatewayStore";
 
 export function SettingsRouteScreen() {
@@ -52,7 +55,33 @@ export function SettingsRouteScreen() {
       ? rememberedSettingsPage(currentWorkspaceSelections())
       : (state.routes[list + 1]?.name ?? null);
   });
-  return <SettingsListScreen sidebar={inSidebar} selected={selected} />;
+  return (
+    <>
+      {SETTINGS_OPENS_AS_SHEET ? <SettingsSheetCloseButton /> : null}
+      <SettingsListScreen sidebar={inSidebar} selected={selected} />
+    </>
+  );
+}
+
+/** Closes the Settings sheet, with any page open in it, back to the workspace. */
+function SettingsSheetCloseButton() {
+  const navigation = useNavigation();
+  return (
+    <NativeStackScreenOptions
+      options={{
+        unstable_headerLeftItems: () => [
+          withNativeGlassHeaderItem({
+            type: "button",
+            label: "",
+            accessibilityLabel: "Close settings",
+            icon: { type: "sfSymbol", name: "xmark" },
+            identifier: "settings-close",
+            onPress: () => navigation.dispatch(StackActions.popTo("Home")),
+          }),
+        ],
+      }}
+    />
+  );
 }
 
 export function SettingsListScreen(props: {
@@ -272,6 +301,8 @@ function useSettingsIndexSections(): SettingsListSection[] {
         serverPage("SettingsProviderAccounts", "person.crop.circle", "Providers"),
         serverPage("SettingsThreads", "text.bubble", "Threads"),
         page("SettingsScheduledTasks", "clock", "Scheduled tasks"),
+        // nckrtl shell: Usage lives here, not in the iPhone toolbar.
+        page("SettingsUsage", "chart.bar.xaxis", "Usage"),
       ],
     },
     {

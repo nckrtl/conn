@@ -2815,6 +2815,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ]),
   ];
   const buildConfig: Record<string, unknown> = {
+    afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId: brand.appId,
     productName: resolveDesktopProductName(version, brand),
     artifactName: `${brand.name.replaceAll(/\s+/g, "-")}-\${version}-\${arch}.\${ext}`,

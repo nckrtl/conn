@@ -2,8 +2,13 @@ import { SettingsGroup } from "./SettingsGroup";
 import { AuthSettingsWriteScope } from "@t3tools/contracts";
 import { usePrimaryEnvironmentId, usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
+import { useServerConfigs } from "../../state/entities";
 import { InfoIcon, Undo2Icon } from "lucide-react";
-import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  isManagedSettingPath,
+  type ServerSettings,
+} from "@t3tools/contracts";
 import * as Equal from "effect/Equal";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { createContext, type ComponentPropsWithoutRef, type ReactNode, useContext } from "react";
@@ -33,6 +38,7 @@ import {
 } from "./SettingInheritance";
 
 const EMPTY_SETTING_KEYS: readonly (keyof ServerSettings)[] = [];
+const EMPTY_MANAGED_PATHS: readonly string[] = [];
 
 declare module "@tanstack/react-router" {
   interface HistoryState {
@@ -304,25 +310,9 @@ function projectOverrides(
 }
 
 /**
- * One setting. `serverScoped` marks rows whose value lives in the primary
- * environment's settings.json; where there is no primary (the hosted app)
- * the control goes inert with a tooltip instead of showing an editable
- * default that would never save.
- *
- * Keep descriptions short enough for one line where possible. Allow wrapping
- * for clarity or narrow screens instead of truncating or forcing no-wrap.
- *
- * On wide rows with a description, the control slot spans the title line plus
- * the first description line and centers its children there, so a picker sits
- * between title and description. Without a description it starts at the title
- * line's top. Switches always sit on the title line, centered on its line box
- * (`1lh` follows the interface line height setting).
- *
- * Control sizing across settings follows three tiers so rows share a baseline:
- * - `control` slot: `size="sm"` (Button, Select, Input, NumberField) or `icon-sm`.
- * - Section `headerAction`s and buttons inside list items, cards, toolbars: `xs` / `icon-xs`.
- * - Inline affordances (reset arrows, info tooltips, table-cell buttons): `icon-micro`.
- * Dialog footers keep the app-wide default button size.
+ * One setting. Without a primary environment, server-scoped rows go inert.
+ * Control sizes: `sm`/`icon-sm` in the row slot, `xs`/`icon-xs` in headers,
+ * lists and toolbars, `icon-micro` for inline affordances.
  */
 export function SettingsRow({
   title,
@@ -333,7 +323,9 @@ export function SettingsRow({
   control,
   serverScoped = false,
   settingKeys = EMPTY_SETTING_KEYS,
+  managedPaths = EMPTY_MANAGED_PATHS,
   mixed: mixedOverride,
+  managed,
   children,
   className,
   ...rowProps
@@ -347,7 +339,11 @@ export function SettingsRow({
   control?: ReactNode;
   serverScoped?: boolean;
   settingKeys?: readonly (keyof ServerSettings)[];
+  /** Dot paths inside a setting, such as `storageCleanup.logsAfterDays`, an administrator can lock. */
+  managedPaths?: readonly string[];
   mixed?: boolean;
+  /** Why an administrator's policy turns this row's control off, from the contract's denial helpers. */
+  managed?: string | undefined;
   children?: ReactNode;
 }) {
   const targetRef = useSettingsSearchTarget<HTMLDivElement>(rowProps.id);
@@ -364,6 +360,22 @@ export function SettingsRow({
     ? context.connectedEnvironments.length > 0 &&
       context.connectedEnvironments.every((target) => writableIds.has(target.environmentId))
     : primaryCanWrite;
+  const serverConfigs = useServerConfigs();
+  // An administrator's lock on any target wins over every other reason a control is inert.
+  const lockablePaths = [...settingKeys, ...managedPaths];
+  const managedBy =
+    lockablePaths.length === 0
+      ? undefined
+      : (context
+          ? context.connectedEnvironments.map((environment) => environment.serverConfig)
+          : [primaryEnvironmentId === null ? undefined : serverConfigs.get(primaryEnvironmentId)]
+        )
+          .map((config) => config?.managedPolicy)
+          .find(
+            (policy) =>
+              policy !== undefined &&
+              lockablePaths.some((path) => isManagedSettingPath(policy, path)),
+          )?.organization;
   const clearOverrides = useClearScopedSettings();
   const clearProjectOverrides = useClearProjectOverrides();
   const isProjectScope =
@@ -396,17 +408,19 @@ export function SettingsRow({
   // At environment scope, projects with their own value keep it when the
   // environment default changes; the chain names them and can reset them.
   const overridingProjects = isProjectScope ? [] : projectOverrides(context, scopedKeys);
-  const renderedReset = unavailable ? null : isProjectScope && scopedKeys.length > 0 ? (
-    source === "project" || source === "mixed" ? (
-      <SettingResetButton
-        label={typeof title === "string" ? title : "override"}
-        tooltip="Reset to inherited value"
-        onClick={() => (onResetOverride ? onResetOverride() : clearOverrides(scopedKeys))}
-      />
-    ) : null
-  ) : (
-    resetAction
-  );
+  const renderedReset =
+    unavailable || managedBy !== undefined || managed !== undefined ? null : isProjectScope &&
+      scopedKeys.length > 0 ? (
+      source === "project" || source === "mixed" ? (
+        <SettingResetButton
+          label={typeof title === "string" ? title : "override"}
+          tooltip="Reset to inherited value"
+          onClick={() => (onResetOverride ? onResetOverride() : clearOverrides(scopedKeys))}
+        />
+      ) : null
+    ) : (
+      resetAction
+    );
   const inertControl = (message: string) => (
     <Tooltip>
       <TooltipTrigger
@@ -432,24 +446,28 @@ export function SettingsRow({
   // (the multi-selection inspector convention): the popover shows who has
   // what, and picking a value applies it to every target.
   const renderedControl =
-    unavailable && control
-      ? inertControl(
-          !canWriteSettings
-            ? `This connection lacks permission to change settings on ${
-                context
-                  ? context.connectedEnvironments
-                      .filter((target) => !writableIds.has(target.environmentId))
-                      .map((target) => target.label)
-                      .join(", ") || "the selected environment"
-                  : (primaryEnvironment?.label ?? "the primary environment")
-              }.`
-            : context
-              ? "Reconnect the selected environment to change this setting."
-              : PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
-        )
-      : environmentWide && control
-        ? inertControl("Environment-wide setting. Select an environment to change it.")
-        : control;
+    managed !== undefined && control
+      ? inertControl(managed)
+      : managedBy !== undefined && control
+        ? inertControl(`Managed by ${managedBy}.`)
+        : unavailable && control
+          ? inertControl(
+              !canWriteSettings
+                ? `This connection lacks permission to change settings on ${
+                    context
+                      ? context.connectedEnvironments
+                          .filter((target) => !writableIds.has(target.environmentId))
+                          .map((target) => target.label)
+                          .join(", ") || "the selected environment"
+                      : (primaryEnvironment?.label ?? "the primary environment")
+                  }.`
+                : context
+                  ? "Reconnect the selected environment to change this setting."
+                  : PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
+            )
+          : environmentWide && control
+            ? inertControl("Environment-wide setting. Select an environment to change it.")
+            : control;
   // Server rows get an indicator beside the title that opens the resolution
   // chain per target at every scope; client rows keep a plain status only.
   const customized =

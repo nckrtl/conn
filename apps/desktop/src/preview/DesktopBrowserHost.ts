@@ -1,13 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Names download files on the shared disk.
 /**
- * The desktop end of the desktop browser channel (see `DesktopBrowserEvent` in
- * contracts). The primary backend gets two file descriptors at spawn: this
- * service writes events for the desktop's tabs to one and reads commands from
- * the other. Each attached tab is reachable only through its `CdpRelay`.
- *
- * A tab is attached once its `<webview>` registers with a key the web app
- * gave it. The preview manager owns the tab's single debugger session and hands
- * it here; the relay shares it.
+ * The desktop end of the desktop browser channel (`DesktopBrowserEvent`). Each
+ * attached tab is reachable only through its `CdpRelay`; the preview manager
+ * owns the tab's debugger session and the relay shares it.
  */
 import {
   DesktopBrowserCommand,
@@ -354,9 +349,7 @@ export const make = Effect.gen(function* () {
     if (tab.relay) return tab.relay;
     const { webContents, debugger: debuggee } = tab.debuggee;
     const send = (method: string, params: Record<string, unknown>, sessionId?: string) =>
-      sessionId === undefined
-        ? sendPageCommand(webContents, debuggee, method, params)
-        : debuggee.sendCommand(method, params, sessionId);
+      sendPageCommand(webContents, debuggee, method, params, sessionId);
     const detachedOwners = new Set<string>();
     /** Viewers and recordings stream; the agent's own sessions never do. */
     const streamingOwners = new Set<string>();
@@ -502,7 +495,7 @@ export const make = Effect.gen(function* () {
       focusReleasing: false,
       screencasts: new Set(),
       onMessage: (_event, method, params, sessionId) => {
-        if (method === "Browser.downloadWillBegin") {
+        if (method === "Page.downloadWillBegin") {
           const guid = (params as { guid?: unknown } | undefined)?.guid;
           tab.pendingDownloadGuid = typeof guid === "string" ? guid : null;
         }

@@ -99,6 +99,8 @@ import * as ServerOwnership from "./serverOwnership.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as ManagedLimits from "./policy/managedLimits.ts";
+import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as AntigravityInstallation from "./provider/AntigravityInstallation.ts";
@@ -155,6 +157,7 @@ import {
   RELAY_URL_SECRET,
 } from "./cloud/config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as GuestHttp from "./guest/http.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
@@ -208,7 +211,12 @@ import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
-import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
+import {
+  disableTailscaleServe,
+  ensureTailscaleServe,
+  readTailscaleServeRoutesTo,
+  readTailscaleStatus,
+} from "@t3tools/tailscale";
 import * as ServerActivation from "./serverActivation.ts";
 
 // Escaped MCP handoff provenance can exceed find-my-way's 100-character segment default.
@@ -255,6 +263,7 @@ const layerPtyAdapter = NodePtyAdapter.layer;
 
 const layerServerSettings = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
+  Layer.provideMerge(ManagedPolicy.layer),
   Layer.provideMerge(SqlitePersistence.layerConfig),
 );
 
@@ -309,13 +318,42 @@ const layerResourceDiagnostics = Layer.mergeAll(
 const layerRelayClient = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
-    return RelayClient.layerCloudflared({ baseDir: config.baseDir });
+    const policy = yield* ManagedPolicy.ManagedPolicy;
+    const layerCloudflared = RelayClient.layerCloudflared({ baseDir: config.baseDir });
+    if (ManagedLimits.allowsConnect(policy)) return layerCloudflared;
+    // The connector only carries T3 Connect, so a policy without Connect never installs one.
+    const refused = Effect.fn("RelayClient.installRefusedByPolicy")(function* () {
+      return yield* new RelayClient.RelayClientInstallError({
+        reason: "managed_by_policy",
+        message: ManagedLimits.refuseConnect(policy).message,
+      });
+    });
+    return Layer.effect(
+      RelayClient.RelayClient,
+      Effect.gen(function* () {
+        const relayClient = yield* RelayClient.RelayClient;
+        return RelayClient.RelayClient.of({
+          ...relayClient,
+          install: refused(),
+          installWithProgress: refused,
+        });
+      }),
+    ).pipe(Layer.provide(layerCloudflared));
   }),
-);
+).pipe(Layer.provide(ManagedPolicy.layer));
 
 const layerHttpServer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    // Before binding: a host the policy does not allow must never listen, not even briefly.
+    const policy = yield* ManagedPolicy.ManagedPolicy;
+    const bindHost = yield* ManagedLimits.checkServerReachability(policy, {
+      authPolicy: EnvironmentAuthPolicy.resolveServerAuthPolicy(config),
+      host: config.host,
+      tailscaleServeEnabled: config.tailscaleServeEnabled,
+      privateNetworkOnly: config.privateNetworkOnly,
+    });
+    yield* ManagedLimits.closeTailscaleServeTo(policy, { host: bindHost, port: config.port });
     return NodeHttpServer.layer(
       () => {
         const server = rejectRequestsUntilServing(
@@ -331,20 +369,17 @@ const layerHttpServer = Layer.unwrap(
         return server;
       },
       {
-        host: config.host ?? "127.0.0.1",
+        host: bindHost,
         port: config.port,
         gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
-        // Negotiate permessage-deflate with clients that offer it; clients
-        // that don't still get uncompressed frames on their connection.
-        // Context takeover stays enabled (ws default) so the compression
-        // window is shared across frames — that also makes small frames cheap
-        // to compress, so no size threshold is set (ws only honors
-        // `threshold` when context takeover is disabled).
+        // Negotiate permessage-deflate with clients that offer it. Context takeover
+        // stays on (ws default), so no size threshold is set: ws only honors
+        // `threshold` when context takeover is disabled.
         websocket: { perMessageDeflate: true },
       },
     );
   }),
-);
+).pipe(Layer.provide(ManagedPolicy.layer));
 
 const layerPlatformServices = DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
@@ -561,9 +596,9 @@ const layerOrchestrationApplication = CheckpointDiffQuery.layer.pipe(
   Layer.provideMerge(layerOrchestrationV2Runtime),
 );
 
-// Automatic thread settlement (#8600): a server-owned sweep evaluates
-// inactivity and merged pull requests, then settles through the orchestrator
-// so every client sees the same shelf.
+// Automatic thread settlement: a server-owned sweep evaluates inactivity and
+// merged pull requests, then settles through the orchestrator so every client
+// sees the same shelf.
 const layerThreadSettlementWorker = Layer.effectDiscard(
   ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(layerPullRequestService), Layer.provide(ProjectionStoreV2.layer));
@@ -700,10 +735,8 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   // cache so every client and provider instance sees the same prepared agents.
   Layer.provideMerge(AcpRegistrySupport.layerFromHost.pipe(Layer.provide(ProviderHostLive.layer))),
   // Provider event loggers are shared by every driver instance and the
-  // orchestration runtime, so they are provided once here.
-  // `ModelManifest.layer` is the model manifest, refreshed from the repo's
-  // `model-manifest.json` on `main`. Drivers read their entry through the
-  // `ModelCatalog` port it provides.
+  // orchestration runtime, so they are provided once here. Drivers read the
+  // model manifest through the `ModelCatalog` port of `ModelManifest.layer`.
   Layer.provideMerge(
     Layer.mergeAll(
       layerProviderEventLoggers,
@@ -713,11 +746,8 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
       McpProviderSessions.layer,
     ),
   ),
-  // `OpenCodeDriver.create()` yields `OpenCodeRuntime`; previously the old
-  // `ProviderRegistry.layer` pulled `OpenCodeRuntimeLive` in for itself, but
-  // the rewritten registry reads snapshots off the instance registry and
-  // no longer transitively provides it. Exposing it at the runtime level
-  // keeps a single Live for all opencode consumers.
+  // `OpenCodeDriver.create()` yields `OpenCodeRuntime`, and the registry no longer
+  // provides it, so it is exposed here as the single Live for opencode consumers.
   Layer.provideMerge(
     OpenCodeRuntime.layer.pipe(
       Layer.provide(
@@ -758,7 +788,8 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(layerResourceDiagnostics),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(TriageService.layer.pipe(Layer.provide(GitVcsDriver.layer))),
-  Layer.provideMerge(AnalyticsService.layer),
+  // Layers memoize by reference, so this is the same policy the settings layer reads.
+  Layer.provideMerge(AnalyticsService.layer.pipe(Layer.provide(ManagedPolicy.layer))),
   Layer.provideMerge(ExternalLauncher.layer),
   Layer.provideMerge(RemoteOpenTargets.layer),
   Layer.provideMerge(DirectEndpoints.layer),
@@ -796,11 +827,9 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
   ),
-  // The MCP session registry is provided globally (shared with V2 provider
-  // sessions) rather than inline here. The orchestrator toolkit resolves
-  // delegation targets through the same live adapter facade the V2
-  // orchestrator uses, so MCP capability reporting can never drift from
-  // what dispatch can actually serve.
+  // The MCP session registry is provided globally. The toolkit resolves
+  // delegation targets through the V2 orchestrator's adapter facade, so MCP
+  // capability reporting cannot drift from what dispatch serves.
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
@@ -890,6 +919,7 @@ const layerMakeServer = Layer.unwrap(
           config,
           port: address.port,
           serviceManaged: launcher.managed,
+          managedPolicy: yield* ManagedPolicy.loadedPolicy(yield* ManagedPolicy.ManagedPolicy),
         });
         // Ownership release removes this record.
         yield* ownership
@@ -914,12 +944,17 @@ const layerMakeServer = Layer.unwrap(
               }
 
               const localPort = address.port;
+              const localHost = loopbackUrlHostForAddress(address);
               return yield* ensureTailscaleServe({
                 localPort,
                 servePort: config.tailscaleServePort,
-                localHost: loopbackUrlHostForAddress(address),
+                localHost,
               }).pipe(
-                Effect.as({ localPort, servePort: config.tailscaleServePort }),
+                Effect.as({
+                  localPort,
+                  localHost: localHost.replace(/^\[|\]$/gu, ""),
+                  servePort: config.tailscaleServePort,
+                }),
                 Effect.tap(() =>
                   Effect.logInfo("Tailscale Serve configured", {
                     localPort,
@@ -937,11 +972,44 @@ const layerMakeServer = Layer.unwrap(
             }),
             (configured) =>
               configured
-                ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
-                    Effect.tap(() =>
-                      Effect.logInfo("Tailscale Serve disabled", {
-                        servePort: configured.servePort,
+                ? Effect.all(
+                    [
+                      readTailscaleServeRoutesTo({
+                        host: configured.localHost,
+                        port: configured.localPort,
                       }),
+                      readTailscaleStatus,
+                    ],
+                    { concurrency: 2 },
+                  ).pipe(
+                    // Another service may hold the root route by now, or it may sit under a
+                    // former name, where `off` would act on the current one; only ours goes.
+                    Effect.map(([routes, status]) =>
+                      routes.some(
+                        (route) =>
+                          route.servePort === configured.servePort &&
+                          route.mount === "/" &&
+                          route.owner === undefined &&
+                          route.ambiguous === undefined &&
+                          route.host?.toLowerCase() === status.magicDnsName?.toLowerCase(),
+                      ),
+                    ),
+                    Effect.orElseSucceed(() => false),
+                    Effect.flatMap((ours) =>
+                      ours
+                        ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
+                            Effect.tap(() =>
+                              Effect.logInfo("Tailscale Serve disabled", {
+                                servePort: configured.servePort,
+                              }),
+                            ),
+                          )
+                        : Effect.logInfo(
+                            "Tailscale Serve left on; its root route is not known to be ours",
+                            {
+                              servePort: configured.servePort,
+                            },
+                          ),
                     ),
                     Effect.catch((cause) =>
                       Effect.logWarning("Failed to disable Tailscale Serve", {
@@ -957,6 +1025,11 @@ const layerMakeServer = Layer.unwrap(
     const layerCloudDesiredLinkReconcile = Layer.effectDiscard(
       Effect.gen(function* () {
         const cloudLink = yield* CloudLink.CloudLink;
+        // CloudLink unlinks on startup when the policy turns Connect off; nothing to restore.
+        if (!ManagedLimits.allowsConnect(yield* ManagedPolicy.ManagedPolicy)) {
+          yield* Deferred.succeed(cloudLinkParked, undefined).pipe(Effect.orDie);
+          return;
+        }
         const releaseManagedTunnel = cloudLink.releaseManagedTunnelOnShutdown().pipe(
           Effect.timeout("10 seconds"),
           Effect.tap((released) =>
@@ -970,12 +1043,9 @@ const layerMakeServer = Layer.unwrap(
           ),
           Effect.asVoid,
         );
-        // A launcher trial can be stopped before activation. The previous
-        // server is already gone, so the trial owns cleanup immediately; the
-        // pending-state check keeps the tunnel for normal commit or rollback,
-        // while the launcher's explicit-stop marker allows it to be released.
-        // Other runtimes wait for activation so a failed standby cannot tear
-        // down the active runtime's tunnel.
+        // A launcher trial stopped before activation owns tunnel cleanup at once (its
+        // explicit-stop marker releases it). Other runtimes wait for activation so a
+        // failed standby cannot tear down the active runtime's tunnel.
         const cleanupBeforeActivation = yield* pendingServiceUpdateExists;
         if (cleanupBeforeActivation) {
           yield* Effect.addFinalizer(() => releaseManagedTunnel);
@@ -1016,12 +1086,8 @@ const layerMakeServer = Layer.unwrap(
               Stream.runForEach(recoverManagedTunnel),
               Effect.forkScoped,
             );
-            // No settling delay before the first attempt: routes are already
-            // serving by the time activation opens this gate (the startup
-            // sequence awaits routesReady), and the retry schedule below
-            // covers anything this sleep used to hedge against. Every
-            // millisecond here is dead time on the path to remote
-            // reachability after a restart.
+            // No settling delay before the first attempt: routes already serve when
+            // activation opens this gate, and the retry schedule below covers the rest.
             const wantsCliLink = hasCloudPublicConfig
               ? yield* CloudCliState.readCliDesiredCloudLink.pipe(
                   Effect.catch((cause) =>
@@ -1188,7 +1254,9 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerRuntimeServices),
       Layer.provideMerge(McpSessionRegistry.layer.pipe(Layer.provide(layerServerEnvironment))),
       Layer.provide(layerActivation),
-      Layer.provideMerge(RelayTracing.layerServerRelayBroker),
+      Layer.provideMerge(
+        RelayTracing.layerServerRelayBroker.pipe(Layer.provide(ManagedPolicy.layer)),
+      ),
       Layer.provideMerge(layerHttpServer),
       Layer.provide(layerApplicationObservability),
       Layer.provideMerge(FetchHttpClient.layer),

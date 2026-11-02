@@ -998,7 +998,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
             }
             case "missing": {
               yield* setDeleted();
-              // A miss can predate the thread (a draft's reserved id), so the next scope asks again.
+              // A 404 also means "not created yet". Only a delete event may outlive this mount.
               if (resumeCache?.owner === owner) resumeCache.snapshot = undefined;
               return yield* Effect.never;
             }

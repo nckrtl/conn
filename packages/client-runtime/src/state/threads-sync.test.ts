@@ -673,33 +673,29 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect(
-    "asks the server again after a snapshot miss, since a draft's thread arrives later",
-    () =>
-      Effect.gen(function* () {
-        const resumeCache: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]> = {
-          snapshot: undefined,
-          owner: undefined,
-        };
-        yield* Effect.scoped(
-          Effect.gen(function* () {
-            const early = yield* makeHarness({ httpSnapshot: { _tag: "missing" }, resumeCache });
-            yield* awaitThreadState(early.observed, (value) => value.status === "deleted");
-          }),
-        );
-        const resumed = yield* makeHarness({
-          httpSnapshot: {
-            _tag: "present",
-            snapshot: { snapshotSequence: 7, projection: BASE_PROJECTION },
-          },
-          resumeCache,
-        });
-        const state = yield* awaitThreadState(resumed.observed, (value) =>
-          Option.isSome(value.data),
-        );
-        expect(state.status).not.toBe("deleted");
-        expect(yield* Ref.get(resumed.loaderCalls)).toBe(1);
-      }),
+  it.effect("asks the server again after an HTTP miss, since the thread may not exist yet", () =>
+    Effect.gen(function* () {
+      const resumeCache: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]> = {
+        snapshot: undefined,
+        owner: undefined,
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const first = yield* makeHarness({ httpSnapshot: { _tag: "missing" }, resumeCache });
+          yield* awaitThreadState(first.observed, (value) => value.status === "deleted");
+        }),
+      );
+      const resumed = yield* makeHarness({
+        resumeCache,
+        httpSnapshot: {
+          _tag: "present",
+          snapshot: { snapshotSequence: CACHED_SNAPSHOT_SEQUENCE, projection: BASE_PROJECTION },
+        },
+      });
+      const state = yield* awaitThreadState(resumed.observed, (value) => value.status === "live");
+      expect(Option.getOrThrow(state.data)).toEqual(BASE_PROJECTION);
+      expect(yield* Ref.get(resumed.loaderCalls)).toBe(1);
+    }),
   );
 
   it.effect("resumes a warm cache via afterSequence without an HTTP fetch", () =>

@@ -27,6 +27,7 @@ import * as DesktopBackendConfiguration from "../../backend/DesktopBackendConfig
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as DesktopLocalEnvironmentAuth from "../../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
+import * as DesktopManagedPolicy from "../../app/DesktopManagedPolicy.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
 import * as DesktopWslBackend from "../../wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "../../wsl/DesktopWslEnvironment.ts";
@@ -73,13 +74,28 @@ export const getAppBranding = DesktopIpc.makeSyncIpcMethod({
   }),
 });
 
-export const getRelayTelemetryEnabled = DesktopIpc.makeSyncIpcMethod({
-  channel: IpcChannels.GET_RELAY_TELEMETRY_ENABLED_CHANNEL,
-  result: Schema.Boolean,
-  handler: Effect.fn("desktop.ipc.window.getRelayTelemetryEnabled")(function* () {
-    return isRelayTracingEnabled(yield* HostProcess.Environment);
-  }),
-});
+/**
+ * Relay traces leave the machine, so a policy with `telemetry: false`, or one that cannot be read,
+ * stops them. Read once here: a sync IPC handler cannot wait on the filesystem.
+ */
+export const installRelayTelemetryEnabled = Effect.fn("desktop.ipc.window.installRelayTelemetry")(
+  function* () {
+    const ipc = yield* DesktopIpc.DesktopIpc;
+    const enabled =
+      isRelayTracingEnabled(yield* HostProcess.Environment) &&
+      (yield* (yield* DesktopManagedPolicy.DesktopManagedPolicy).read.pipe(
+        Effect.map((found) => found?.document.limits?.telemetry !== false),
+        Effect.orElseSucceed(() => false),
+      ));
+    yield* ipc.handleSync(
+      DesktopIpc.makeSyncIpcMethod({
+        channel: IpcChannels.GET_RELAY_TELEMETRY_ENABLED_CHANNEL,
+        result: Schema.Boolean,
+        handler: () => Effect.succeed(enabled),
+      }),
+    );
+  },
+);
 
 export const getSystemLocale = DesktopIpc.makeSyncIpcMethod({
   channel: IpcChannels.GET_SYSTEM_LOCALE_CHANNEL,
@@ -112,21 +128,12 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
       const isPrimary = instance.id === PRIMARY_LOCAL_ENVIRONMENT_ID;
       const config = yield* instance.currentConfig;
       const snapshot = yield* instance.snapshot;
-      // A secondary backend (e.g. a parallel WSL backend) that hasn't produced
-      // a config yet (mid-registration, before its first start cycle) or that
-      // is retrying a *transient* preflight failure (WSL VM still booting, a
-      // not-yet-built linux server entry) is not listening on a port. We
-      // surface it as a *pending* bootstrap (null endpoints, no token) so the
-      // renderer can show a "Connecting…" indicator while it retries — null
-      // endpoints keep the renderer from dialing the dead port, avoiding the
-      // needless /api/auth/bootstrap/bearer error cycles a real endpoint would
-      // trigger.
+      // A secondary backend without a config yet, or retrying a transient preflight
+      // failure, is not listening. Report it as pending (null endpoints, no token) so
+      // the renderer shows "Connecting…" without dialing the dead port.
       if (Option.isNone(config) || Option.isSome(config.value.preflightFailure)) {
-        // Skip the primary (same-origin, no "connecting" affordance) and skip a
-        // secondary whose preflight failed *fatally* (no node, wrong version,
-        // missing build tools): it has stopped retrying, so an indefinite
-        // "Connecting…" would be misleading — its error is surfaced by the
-        // WSL-state UI instead.
+        // Skip the primary and any secondary whose preflight failed fatally: it has
+        // stopped retrying, and the WSL-state UI reports its error.
         const fatalPreflight =
           Option.isSome(config) &&
           Option.isSome(config.value.preflightFailure) &&
@@ -153,11 +160,8 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
         runningDistro,
         httpBaseUrl: httpBaseUrl.href,
         wsBaseUrl: toWebSocketBaseUrl(httpBaseUrl),
-        // A backend launched with the desktop secret accepts whichever token
-        // the secret derives for the current window, so hand out that one
-        // rather than the token frozen into its launch config. Every backend
-        // the desktop launches (primary, staged or mounted WSL runtime) is the
-        // server build bundled with this desktop, so it understands the secret.
+        // Every backend the desktop launches understands the desktop secret, so hand
+        // out the token the secret derives for this window, not the launch-config one.
         ...(bootstrap.desktopBootstrapSecret
           ? { bootstrapToken: yield* configuration.currentBootstrapToken }
           : bootstrap.desktopBootstrapToken
@@ -206,15 +210,9 @@ export const pickFolder = DesktopIpc.makeIpcMethod({
     if (!settings.localEnvironmentEnabled) {
       return null;
     }
-    // Three picker modes:
-    //   - targetEnvironmentId omitted: default to the primary picker. Keeps
-    //     the historical behavior unchanged for users who never enabled the
-    //     WSL backend, and is what unfamiliar callers should get out of the
-    //     box.
-    //   - targetEnvironmentId starts with "wsl:": route to the WSL picker
-    //     using the distro encoded in the id (or the user's selected
-    //     wslDistro when the id is the "wsl:default" sentinel).
-    //   - anything else (incl. PRIMARY_LOCAL_ENVIRONMENT_ID): primary picker.
+    // Picker: omitted id means the primary picker; a "wsl:" id routes to the WSL
+    // picker for that distro ("wsl:default" uses the selected wslDistro); any
+    // other id, including PRIMARY_LOCAL_ENVIRONMENT_ID, uses the primary picker.
     const targetId = options?.targetEnvironmentId;
     const wslDistroFromTarget =
       targetId !== undefined && targetId.startsWith(DesktopWslBackend.WSL_INSTANCE_ID_PREFIX)

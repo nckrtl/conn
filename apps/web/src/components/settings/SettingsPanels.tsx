@@ -563,6 +563,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? ["Delete confirmation"]
       : []),
     ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? ["Quit shortcut"] : []),
+    ...(settings.historySwipeNavigation !== DEFAULT_UNIFIED_SETTINGS.historySwipeNavigation
+      ? ["Swipe between threads"]
+      : []),
     ...(isTextGenerationModelDirty ? ["Text generation model"] : []),
     ...(settings.threadTitleInstructions !== DEFAULT_UNIFIED_SETTINGS.threadTitleInstructions
       ? ["Thread title instructions"]
@@ -670,6 +673,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
       confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
       confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit,
+      historySwipeNavigation: DEFAULT_UNIFIED_SETTINGS.historySwipeNavigation,
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
       threadTitleInstructions: DEFAULT_UNIFIED_SETTINGS.threadTitleInstructions,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
@@ -1025,6 +1029,34 @@ export function GeneralSettingsPanel() {
                   ))}
                 </SelectPopup>
               </Select>
+            }
+          />
+        ) : null}
+        {isElectron ? (
+          <SettingsRow
+            {...searchableSetting("swipe-navigation")}
+            description="Swipe left or right with two fingers on the trackpad to go back or forward."
+            resetAction={
+              settings.historySwipeNavigation !==
+              DEFAULT_UNIFIED_SETTINGS.historySwipeNavigation ? (
+                <SettingResetButton
+                  label="swipe navigation"
+                  onClick={() =>
+                    updateSettings({
+                      historySwipeNavigation: DEFAULT_UNIFIED_SETTINGS.historySwipeNavigation,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.historySwipeNavigation}
+                onCheckedChange={(checked) =>
+                  updateSettings({ historySwipeNavigation: Boolean(checked) })
+                }
+                aria-label="Swipe between threads"
+              />
             }
           />
         ) : null}

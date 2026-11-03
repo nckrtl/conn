@@ -727,6 +727,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     desktopOnly: true,
   },
   {
+    id: "swipe-navigation",
+    title: "Swipe between threads",
+    to: "/settings/general",
+    searchTerms: ["trackpad gesture two finger back forward history navigation"],
+    desktopOnly: true,
+  },
+  {
     id: "text-generation-model",
     title: "Text generation model",
     to: "/settings/threads",

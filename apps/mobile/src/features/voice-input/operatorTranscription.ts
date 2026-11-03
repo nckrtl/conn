@@ -4,6 +4,7 @@ import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import { Platform } from "react-native";
 
+import { randomHex } from "../../lib/uuid";
 import {
   VoiceTranscriptionError,
   throwIfVoiceTranscriptionAborted,
@@ -116,15 +117,13 @@ export function operatorSpeechBase(server: URL, openai: unknown): string {
 async function deviceKey(): Promise<string> {
   const saved = await SecureStore.getItemAsync(DEVICE_KEY);
   if (saved && saved.length >= 16) return saved;
-  const made = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  const made = randomHex(16);
   await SecureStore.setItemAsync(DEVICE_KEY, made);
   return made;
 }
 
 async function postJson(
-  url: URL,
+  url: string,
   body: Record<string, unknown> | null,
   token?: string,
 ): Promise<{ readonly status: number; readonly json: Record<string, unknown> }> {
@@ -141,7 +140,7 @@ async function postJson(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch {
-    throw new Error(`The Operator server does not answer at ${url.host}.`);
+    throw new Error(`The Operator server does not answer at ${hostOf(url)}.`);
   }
   const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: response.status, json };
@@ -165,14 +164,14 @@ export async function signInToOperator(entered: string): Promise<boolean> {
   const abort = new AbortController();
   signInAbort = abort;
   const server = operatorServerUrl(entered);
-  const started = await postJson(new URL("/api/devices/authorize", server), {
+  const started = await postJson(`${server.origin}/api/devices/authorize`, {
     name: Device.deviceName?.trim() || "Conn",
     platform: Platform.OS === "ios" ? "ios" : "other",
     device_key: await deviceKey(),
   });
   const deviceCode = text(started.json.device_code);
   const page = text(started.json.verification_uri_complete);
-  if (deviceCode.length === 0 || page.length === 0 || new URL(page).host !== server.host) {
+  if (deviceCode.length === 0 || page.length === 0 || hostOf(page) !== server.host) {
     throw new Error(
       started.status >= 400
         ? `The Operator server answered ${started.status}.`
@@ -201,7 +200,7 @@ export async function signInToOperator(entered: string): Promise<boolean> {
         );
       });
       if (abort.signal.aborted) return false;
-      const answer = await postJson(new URL("/api/devices/token", server), {
+      const answer = await postJson(`${server.origin}/api/devices/token`, {
         device_code: deviceCode,
       });
       const token = text(answer.json.token);
@@ -233,7 +232,7 @@ export async function signOutOfOperator(): Promise<void> {
   const { server, token } = settings;
   await saveOperatorTranscriptionSettings({ token: "", account: "", speech: "" });
   if (server && token) {
-    await postJson(new URL("/api/devices/sign-out", server), null, token).catch(() => {});
+    await postJson(`${server}/api/devices/sign-out`, null, token).catch(() => {});
   }
 }
 

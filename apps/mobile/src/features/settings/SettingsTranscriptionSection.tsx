@@ -69,7 +69,9 @@ export function SettingsTranscriptionSection() {
               <View className="min-w-0 flex-1 gap-0.5">
                 <Text className="text-base font-t3-medium text-foreground">Signed in</Text>
                 <Text className="text-sm text-foreground-muted" numberOfLines={2}>
-                  {[settings.account, new URL(settings.server).host].filter(Boolean).join(" · ")}
+                  {[settings.account, settings.server.replace(/^https?:\/\//, "")]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </Text>
               </View>
               <Button label="Sign out" tone="secondary" onPress={() => void signOutOfOperator()} />

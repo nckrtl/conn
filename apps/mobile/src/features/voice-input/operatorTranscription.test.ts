@@ -21,6 +21,7 @@ vi.mock("expo-file-system", () => ({
   },
 }));
 
+vi.mock("expo-crypto", () => ({ getRandomBytes: (length: number) => new Uint8Array(length) }));
 vi.mock("expo-device", () => ({ deviceName: "Polar" }));
 vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
 

@@ -8,7 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -77,7 +77,7 @@ export class TestLoginStore extends Context.Service<
 
 const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const writes = yield* Semaphore.make(1);
 
   const read = secrets.get(SECRET_NAME).pipe(

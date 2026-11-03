@@ -8,7 +8,7 @@ import {
   type AgentPanelSubscribeInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -53,7 +53,7 @@ export class AgentPanelBroker extends Context.Service<
 >()("t3/panels/AgentPanelBroker") {}
 
 const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const subscribers = new Map<number, Subscriber>();
   const pending = new Map<string, Pending>();
   let nextSubscriberId = 0;
@@ -95,7 +95,7 @@ const make = Effect.gen(function* () {
         message:
           "No Conn desktop app is connected to this server, so nothing can show the panel. Ask the user to open Conn on their Mac.",
       });
-    const requestId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+    const requestId = yield* crypto.uuidV4().pipe(Effect.orDie);
     const deferred = yield* Deferred.make<AgentPanelResponse>();
     pending.set(requestId, { deferred, remaining: targets.length });
     const answer = yield* Effect.gen(function* () {

@@ -1142,10 +1142,18 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
   data: Schema.Uint8Array,
 });
 
+export const DesktopMediaReadSchema = Schema.Struct({
+  status: Schema.Number,
+  mimeType: Schema.String,
+  data: Schema.Uint8Array,
+});
+export type DesktopMediaRead = typeof DesktopMediaReadSchema.Type;
+
 /**
  * A System Settings pane the app can deep-link to. The identifier crosses IPC
  * rather than a URL, so the renderer can only reach these known destinations.
  */
+
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
@@ -1429,7 +1437,10 @@ export interface DesktopBridge {
   receiveProviderAuthCallback: (authorizationUrl: string) => Promise<string>;
   cancelProviderAuthCallback: (authorizationUrl: string) => Promise<void>;
   openExternal: (url: string) => Promise<boolean>;
+  /** Reads http(s) media in the main process, outside renderer CORS and CSP; null on network failure. */
+  readMedia: (url: string) => Promise<DesktopMediaRead | null>;
   /** Open a System Settings pane by identifier. */
+
   openSystemSettings: (pane: SystemSettingsPane) => Promise<boolean>;
   checkSystemPermission: (pane: SystemSettingsPane) => Promise<boolean>;
   /**

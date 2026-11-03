@@ -1,4 +1,6 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Layer from "effect/Layer";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -25,7 +27,9 @@ import * as Exit from "effect/Exit";
 import * as Scheduler from "effect/Scheduler";
 import * as TestClock from "effect/testing/TestClock";
 
-const makeBroker = PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
+const makeBroker = PreviewAutomationBroker.make.pipe(
+  Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+);
 
 const scope = {
   environmentId: EnvironmentId.make("environment-1"),

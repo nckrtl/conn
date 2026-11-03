@@ -1,13 +1,3 @@
-/**
- * Preview - Schemas for the in-app browser preview surface.
- *
- * The preview is desktop-only (Chromium <webview>); the server tracks per-thread
- * tab metadata so it survives client reconnects and multi-window. The desktop
- * renderer mediates: it owns the actual <webview> and reports navigation back to
- * the server via these RPCs, the server fans events to all subscribers.
- *
- * @module Preview
- */
 import { Schema } from "effect";
 import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { BROWSER_PROFILE_MAX_COUNT, BrowserProfile, BrowserProfileId } from "./browserProfile.ts";
@@ -450,7 +440,7 @@ export class PreviewInvalidUrlError extends Schema.TaggedError<PreviewInvalidUrl
 ) {
   override get message() {
     const protocol = this.protocol === undefined ? "" : `: ${this.protocol}`;
-    return `Invalid preview URL (${this.reason}${protocol}; input length ${this.inputLength}).`;
+    return `Invalid preview URL (${this.reason}${protocol}; input length ${this.inputLength}). Use an http(s) URL or a schemeless host such as localhost:5173. With preview_open, omit url when creating a new tab to open a blank tab.`;
   }
 }
 

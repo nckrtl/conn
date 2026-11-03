@@ -164,6 +164,7 @@ function preparationErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === "voice-operation-busy") {
     return "Voice transcription is still finishing. Try again shortly.";
   }
+  if (errorCode(error) === "server-failed" && error instanceof Error) return error.message;
   if (errorCode(error) === "unsupported-locale") {
     return "Voice transcription is not available for this language.";
   }
@@ -174,6 +175,7 @@ function transcriptionErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === "voice-operation-busy") {
     return "Voice transcription is still finishing. Try again shortly.";
   }
+  if (errorCode(error) === "server-failed" && error instanceof Error) return error.message;
   return "Could not transcribe this recording.";
 }
 

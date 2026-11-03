@@ -25,6 +25,7 @@ import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { ListActionRow as SettingsActionRow } from "../../components/ui/ListActionRow";
 import { SettingsDragHandle } from "./components/SettingsDragHandle";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsTranscriptionSection } from "./SettingsTranscriptionSection";
 
 type MicrophonePermission = "checking" | "granted" | "ask" | "denied";
 
@@ -192,6 +193,7 @@ function MicrophoneSettings() {
             </Text>
           </>
         ) : null}
+        <SettingsTranscriptionSection />
         <SettingsSection title="Preferred order">
           {entries.map((entry, index) => {
             const key = microphoneEntryKey(entry);

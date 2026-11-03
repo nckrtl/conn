@@ -22,6 +22,12 @@ import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/
 import { getNativeShowcaseScene } from "../showcase/nativeShowcaseScene";
 import { voiceInputBlocksSubmission } from "@t3tools/client-runtime/voice-input";
 import { createLazyVoiceRecorder } from "./lazyVoiceRecorder";
+import {
+  getOperatorTranscriptionSettings,
+  getOperatorVoiceTranscriber,
+  loadOperatorTranscriptionSettings,
+  subscribeOperatorTranscriptionSettings,
+} from "./operatorTranscription";
 import { VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
 import { VoiceInputSession } from "./voiceInputSession";
 import {
@@ -42,6 +48,14 @@ const VOICE_RECORDING_OPTIONS = {
   ...(Platform.OS === "ios" ? IOS_RECORDING_OPTIONS : ANDROID_RECORDING_OPTIONS),
 };
 
+/** Operator when it is chosen in Settings › Microphone, else the on-device recognizer. */
+function getVoiceTranscriber() {
+  if (getOperatorTranscriptionSettings().engine === "operator") {
+    return getOperatorVoiceTranscriber(Intl.DateTimeFormat().resolvedOptions().locale);
+  }
+  return getLocalVoiceTranscriber();
+}
+
 function keepScreenAwake(tag: string): () => void {
   const activation = activateKeepAwakeAsync(tag);
   void activation.catch(() => {});
@@ -55,6 +69,7 @@ function keepScreenAwake(tag: string): () => void {
  */
 const voiceInputAtom = Atom.make((get) => {
   const registry = get.registry;
+  void loadOperatorTranscriptionSettings();
   // Mounted so the recorder can read and remember microphones synchronously.
   get.mount(mobilePreferencesAtom);
   get.mount(updateMobilePreferencesAtom);
@@ -91,7 +106,7 @@ const voiceInputAtom = Atom.make((get) => {
   });
   const session: VoiceInputSession = new VoiceInputSession({
     recorder,
-    getTranscriber: getLocalVoiceTranscriber,
+    getTranscriber: getVoiceTranscriber,
     requestPermission: async () => {
       const permission = await requestRecordingPermissionsAsync();
       return { granted: permission.granted, canAskAgain: permission.canAskAgain };
@@ -137,9 +152,15 @@ const voiceInputAtom = Atom.make((get) => {
 export function useGlobalVoiceInput() {
   const { session, audioLevels } = useAtomValue(voiceInputAtom);
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  // Re-render the mic when the engine changes; an unset Operator server still shows it, so the
+  // tap explains what is missing.
+  useSyncExternalStore(subscribeOperatorTranscriptionSettings, getOperatorTranscriptionSettings);
   return {
     ...snapshot,
-    isAvailable: getLocalVoiceTranscriber() !== null || getNativeShowcaseScene() !== null,
+    isAvailable:
+      getOperatorTranscriptionSettings().engine === "operator" ||
+      getLocalVoiceTranscriber() !== null ||
+      getNativeShowcaseScene() !== null,
     audioLevels,
     isBusy: voiceInputBlocksSubmission(snapshot.state),
     session,

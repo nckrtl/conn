@@ -147,7 +147,8 @@ export const PanelOpenToolInput = Schema.Struct({
     description: "database only: put this query in the editor.",
   }),
   focusWindow: Schema.optional(Schema.Boolean).annotate({
-    description: "Bring Conn to the front. Default true.",
+    description:
+      "Bring Conn to the front if the user is on this thread. Default true. Conn never switches threads.",
   }),
 });
 export type PanelOpenToolInput = typeof PanelOpenToolInput.Type;
@@ -161,7 +162,8 @@ export const PanelOpenToolResult = Schema.Struct({
 export type PanelOpenToolResult = typeof PanelOpenToolResult.Type;
 
 const FocusWindow = Schema.optional(Schema.Boolean).annotate({
-  description: "Bring Conn to the front. Default true.",
+  description:
+    "Bring Conn to the front if the user is on this thread. Default true. Conn never switches threads.",
 });
 
 export const DatabaseQueryToolInput = Schema.Struct({

@@ -15,6 +15,7 @@ import { openDatabaseQuery, runAgentDatabaseQuery } from "~/database/databaseSto
 import { type McpAgentAction, requestAgentMcpAction } from "~/mcp/mcpStore";
 import type { AppRouter } from "~/router";
 import { useRightPanelStore } from "~/rightPanelStore";
+import { resolveThreadRouteRef } from "~/threadRoutes";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { environmentSummaries } from "~/state/presentation";
 import { previewEnvironment } from "~/state/preview";
@@ -94,17 +95,38 @@ const PANEL_OPENERS: Record<
   },
 };
 
+const NOT_ON_THREAD =
+  "The user is looking at another thread, so Conn did not run this. Ask them to open your thread, then try again.";
+
+/**
+ * Prepares a panel on a thread the user is not looking at. Conn never switches threads or comes
+ * forward for it: the panel shows when the user opens the thread. Panel actions need the panel
+ * on screen, so they do not run.
+ */
+function preparePanel(
+  threadRef: ScopedThreadRef,
+  request: AgentPanelRequest,
+): PanelOutcome | Promise<PanelOutcome> {
+  if (request.panel === "database" && request.sql !== undefined) {
+    if (!window.desktopBridge?.databaseRun) return { error: "This Conn has no Database panel." };
+    openDatabaseQuery(threadRef, request.sql);
+    return request.run ? { error: `${NOT_ON_THREAD} The query is in its Database panel.` } : opened;
+  }
+  if (request.panel === "mcp" && (request.mcpCall || request.mcpServer))
+    return { error: NOT_ON_THREAD };
+  return PANEL_OPENERS[request.panel](threadRef, request);
+}
+
 async function showPanel(
   router: AppRouter,
   environmentId: EnvironmentId,
   request: AgentPanelRequest,
 ): Promise<PanelOutcome> {
   const threadRef = scopeThreadRef(environmentId, request.threadId);
+  const shownThread = resolveThreadRouteRef(router.state.matches.at(-1)?.params ?? {});
+  if (!shownThread || scopedThreadKey(shownThread) !== scopedThreadKey(threadRef))
+    return preparePanel(threadRef, request);
   if (request.focusWindow) await window.desktopBridge?.revealWindow().catch(() => undefined);
-  await router.navigate({
-    to: "/$environmentId/$threadId",
-    params: { environmentId, threadId: request.threadId },
-  });
   return PANEL_OPENERS[request.panel](threadRef, request);
 }
 
@@ -152,8 +174,9 @@ function followEnvironment(router: AppRouter, environmentId: EnvironmentId): () 
 }
 
 /**
- * Lets agents in any connected environment show a panel on this desktop: Conn comes to the
- * front, selects the agent's thread and opens the panel. Desktop only.
+ * Lets agents in any connected environment show a panel on this desktop. On the thread the user
+ * is viewing, Conn may come to the front and opens the panel; it never switches threads for an
+ * agent. Desktop only.
  */
 export function startAgentPanelRequests(router: AppRouter): () => void {
   if (window.desktopBridge === undefined) return () => {};

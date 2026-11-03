@@ -120,7 +120,7 @@ const make = Effect.gen(function* () {
     change((logins) =>
       Effect.gen(function* () {
         const id = yield* crypto
-          .randomUUIDv4()
+          .uuidV4()
           .pipe(Effect.mapError((cause) => new TestLoginStoreError({ cause })));
         const now = DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis));
         const login: StoredTestLogin = {

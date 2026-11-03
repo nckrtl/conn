@@ -206,6 +206,7 @@ import { TimerIcon as PhTimer } from "@phosphor-icons/react/dist/csr/Timer";
 import { TrashIcon as PhTrash } from "@phosphor-icons/react/dist/csr/Trash";
 import { TrayIcon as PhTray } from "@phosphor-icons/react/dist/csr/Tray";
 import { TreeStructureIcon as PhTreeStructure } from "@phosphor-icons/react/dist/csr/TreeStructure";
+import { TreeViewIcon as PhTreeView } from "@phosphor-icons/react/dist/csr/TreeView";
 import { TrendDownIcon as PhTrendDown } from "@phosphor-icons/react/dist/csr/TrendDown";
 import { TrendUpIcon as PhTrendUp } from "@phosphor-icons/react/dist/csr/TrendUp";
 import { UploadSimpleIcon as PhUploadSimple } from "@phosphor-icons/react/dist/csr/UploadSimple";
@@ -352,6 +353,7 @@ import {
   ListFilterIcon as LuListFilter,
   ListOrderedIcon as LuListOrdered,
   ListPlusIcon as LuListPlus,
+  ListTreeIcon as LuListTree,
   ListTodoIcon as LuListTodo,
   LoaderCircleIcon as LuLoaderCircle,
   LockIcon as LuLock,
@@ -788,6 +790,8 @@ export const ListOrderedIcon = connIcon(PhListNumbers, LuListOrdered, "list-orde
   ListOrdered = ListOrderedIcon;
 export const ListPlusIcon = connIcon(PhListPlus, LuListPlus, "list-plus", "bold"),
   ListPlus = ListPlusIcon;
+export const ListTreeIcon = connIcon(PhTreeView, LuListTree, "list-tree", "bold"),
+  ListTree = ListTreeIcon;
 export const ListTodoIcon = connIcon(PhListChecks, LuListTodo, "list-todo", "bold"),
   ListTodo = ListTodoIcon;
 export const LoaderCircleIcon = connIcon(PhCircleNotch, LuLoaderCircle, "loader-circle"),

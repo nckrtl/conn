@@ -1,5 +1,7 @@
 const ROW = "[data-sidebar-row]";
 
+export const SIDEBAR_TREE_PROPS = { role: "tree", "aria-label": "Threads" } as const;
+
 /** Ref callback for a sidebar list; installs its keyboard navigation and returns its cleanup. */
 export function attachSidebarTree(element: HTMLElement | null) {
   return element ? installSidebarTree(element) : undefined;

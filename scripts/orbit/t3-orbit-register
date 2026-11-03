@@ -1,0 +1,106 @@
+#!/bin/sh
+# Registers this host's T3 server with the Orbit Gateway (see docs/reference/t3-code.md in Orbit).
+#
+#   t3-orbit-register [--service-label LABEL | --service-plist PATH] [--print-cli] URL [T3 CLI COMMAND...]
+#
+# URL is the address devices use to reach the server over WireGuard. The T3 CLI command defaults to `t3`.
+# It issues a fresh admin session labeled "Orbit Gateway" and sends it to the Gateway, which revokes the
+# Gateway's earlier sessions on the server. When the Gateway refuses it, the new session is revoked again.
+#
+# Never point a scheduled job at a versioned runtime path (…/runtime/versions/<version>/t3): runtimes
+# are pruned after every update and the job then fails with "No such file or directory". Instead name
+# the server's launchd job and this script reads the binary the server runs right now from that job's
+# ProgramArguments:0 (the same lookup t3-orbit-relink's plist does):
+#   --service-label LABEL  ~/Library/LaunchAgents/LABEL.plist, e.g. com.t3tools.t3code.service (mini),
+#                          com.nckrtl.conn-server (nick-vm) or com.nckrtl.t3-headless (nick headless).
+#   --service-plist PATH   any launchd plist.
+#   T3_SERVER_LABEL / T3_SERVER_PLIST in the environment work the same way.
+# On Linux pass a stable launcher instead, e.g. ~/.local/bin/t3 (a symlink the updater repoints).
+# --print-cli prints the resolved T3 CLI command and exits without contacting anything.
+set -eu
+
+usage() { echo "usage: t3-orbit-register [--service-label LABEL | --service-plist PATH] [--print-cli] URL [T3 CLI COMMAND...]" >&2; exit 64; }
+
+service_plist=${T3_SERVER_PLIST:-}
+[ -n "$service_plist" ] || [ -z "${T3_SERVER_LABEL:-}" ] || service_plist="$HOME/Library/LaunchAgents/$T3_SERVER_LABEL.plist"
+print_cli=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --service-label) [ $# -ge 2 ] || usage; service_plist="$HOME/Library/LaunchAgents/$2.plist"; shift 2 ;;
+        --service-plist) [ $# -ge 2 ] || usage; service_plist=$2; shift 2 ;;
+        --print-cli) print_cli=1; shift ;;
+        --) shift; break ;;
+        -*) usage ;;
+        *) break ;;
+    esac
+done
+
+[ $# -ge 1 ] || usage
+url=${1%/}
+shift
+
+# Prints ProgramArguments:<index> of a launchd plist, or nothing.
+plist_arg() {
+    if [ -x /usr/libexec/PlistBuddy ]; then
+        /usr/libexec/PlistBuddy -c "Print :ProgramArguments:$2" "$1" 2>/dev/null || true
+    else
+        python3 -c 'import plistlib,sys
+a = plistlib.load(open(sys.argv[1], "rb")).get("ProgramArguments") or []
+i = int(sys.argv[2])
+print(a[i] if i < len(a) else "")' "$1" "$2" 2>/dev/null || true
+    fi
+}
+
+if [ -n "$service_plist" ]; then
+    [ $# -eq 0 ] || { echo "t3-orbit-register: give either a server job or a T3 CLI command, not both." >&2; exit 64; }
+    [ -r "$service_plist" ] || { echo "t3-orbit-register: cannot read the server's launchd job $service_plist." >&2; exit 66; }
+    # Skip an `env [VAR=value…]` wrapper so the binary itself is found.
+    i=0
+    cli=$(plist_arg "$service_plist" 0)
+    case "$cli" in env|*/env)
+        while :; do
+            i=$((i + 1))
+            cli=$(plist_arg "$service_plist" "$i")
+            case "$cli" in *=*) continue ;; *) break ;; esac
+        done ;;
+    esac
+    [ -n "$cli" ] || { echo "t3-orbit-register: $service_plist has no ProgramArguments." >&2; exit 65; }
+    [ -x "$cli" ] || { echo "t3-orbit-register: the server job runs $cli, which is not an executable file." >&2; exit 69; }
+    set -- "$cli"
+else
+    [ $# -ge 1 ] || set -- t3
+    case "$1" in */runtime/versions/*)
+        echo "t3-orbit-register: warning: $1 is a versioned runtime path and breaks after the next update; use --service-label or a stable launcher." >&2 ;;
+    esac
+fi
+
+if [ "$print_cli" = 1 ]; then
+    printf '%s\n' "$*"
+    exit 0
+fi
+
+gateway=${ORBIT_GATEWAY_URL:-https://gateway.orbit}
+
+descriptor=$(curl -fsS -m 10 "$url/.well-known/t3/environment")
+environment_id=$(printf '%s' "$descriptor" | jq -er .environmentId)
+label=$(printf '%s' "$descriptor" | jq -er .label)
+
+issued=$("$@" auth session issue --label "Orbit Gateway" --json)
+session_id=$(printf '%s' "$issued" | jq -er .sessionId)
+
+response=$(mktemp)
+trap 'rm -f "$response"' EXIT
+status=$(printf '%s' "$issued" | jq -c --arg environment_id "$environment_id" --arg label "$label" --arg url "$url" \
+    '{environment_id: $environment_id, label: $label, url: $url, admin_session: .token}' \
+    | curl -sS -m 30 -o "$response" -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json' \
+        --data-binary @- "$gateway/api/v1/conn/environments") || status=000
+
+if [ "$status" != 200 ]; then
+    echo "t3-orbit-register: the Gateway answered $status for $environment_id ($label):" >&2
+    cat "$response" >&2 || true
+    echo >&2
+    "$@" auth session revoke "$session_id" >/dev/null || echo "t3-orbit-register: could not revoke session $session_id" >&2
+    exit 1
+fi
+
+echo "Registered $label ($environment_id) at $url; admin session expires $(jq -r .data.admin_session_expires_at "$response")."

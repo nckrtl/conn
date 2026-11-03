@@ -233,7 +233,7 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import { useOrbitThreadStore } from "../orbit/orbitThreadStore";
+import { useOrbitThreadUrl } from "../orbit/orbitWorkspaces";
 import { useOrbitAvailability } from "../orbit/useOrbitAvailability";
 import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
@@ -2423,9 +2423,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !apiAvailable) return;
     useRightPanelStore.getState().open(activeThreadRef, "api");
   };
-  const orbitInstanceUrl = useOrbitThreadStore((state) =>
-    activeThreadRef ? (state.byThreadKey[scopedThreadKey(activeThreadRef)]?.url ?? null) : null,
-  );
+  const orbitInstanceUrl = useOrbitThreadUrl(activeThreadRef);
   const apiBaseUrl = orbitInstanceUrl ?? configuredPreviewUrls[0] ?? null;
   // nckrtl fork: the Database panel connects from the desktop shell.
   const databaseAvailable =

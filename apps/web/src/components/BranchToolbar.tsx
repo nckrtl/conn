@@ -40,7 +40,7 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
-import { isOrbitCheckout, useOrbitCheckout } from "../orbit/orbitThreadStore";
+import { isOrbitCheckout, useOrbitCheckout } from "../orbit/orbitWorkspaces";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
 import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
@@ -659,9 +659,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   const previousWorktreeSeed = canUsePreviousWorktree
     ? resolvePreviousWorktreeSeed({
         // Orbit checkouts are not T3 worktrees; they come back through Orbit.
-        threads: projectThreads.filter(
-          (thread) => !isOrbitCheckout(thread.environmentId, thread.worktreePath),
-        ),
+        threads: projectThreads.filter((thread) => !isOrbitCheckout(thread.worktreePath)),
         currentWorktreePath: activeWorktreePath,
       })
     : null;

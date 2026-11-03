@@ -67,6 +67,10 @@
       "types": "./src/git.ts",
       "import": "./src/git.ts"
     },
+    "./orbit": {
+      "types": "./src/orbit.ts",
+      "import": "./src/orbit.ts"
+    },
     "./sourceControl": {
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"

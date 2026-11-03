@@ -4,19 +4,6 @@ import type { OrbitHttpRequest, OrbitHttpResponse, OrbitTransport } from "./orbi
  * The few Orbit Gateway calls T3 makes. Shapes follow the live API.
  */
 
-export interface OrbitInstance {
-  readonly id: number;
-  readonly name: string;
-  readonly projectId: number;
-  readonly projectSlug: string | null;
-  readonly nodeId: number;
-  readonly checkoutPath: string;
-  readonly branch: string | null;
-  readonly domain: string | null;
-  readonly url: string | null;
-  readonly status: string;
-}
-
 export interface OrbitNode {
   readonly id: number;
   readonly name: string;
@@ -72,31 +59,6 @@ export async function callOrbit(
 
 function malformed(what: string): OrbitApiError {
   return new OrbitApiError("orbit.response_invalid", `Orbit sent an invalid ${what}.`, 200);
-}
-
-function parseOrbitInstance(value: unknown): OrbitInstance {
-  const data = record(value);
-  const id = int(data?.id);
-  const projectId = int(data?.project_id);
-  const nodeId = int(data?.node_id);
-  const checkoutPath = text(data?.checkout_path);
-  const name = text(data?.name);
-  if (id === null || projectId === null || nodeId === null || !checkoutPath || !name) {
-    throw malformed("Instance");
-  }
-  const route = record(data?.route);
-  return {
-    id,
-    name,
-    projectId,
-    projectSlug: text(record(data?.project)?.slug),
-    nodeId,
-    checkoutPath,
-    branch: text(data?.branch_override) ?? text(data?.selected_branch),
-    domain: text(data?.domain) ?? text(route?.domain),
-    url: text(data?.url),
-    status: text(data?.status) ?? "unknown",
-  };
 }
 
 export interface OrbitProject {
@@ -182,120 +144,4 @@ export async function listOrbitInstances(
       },
     ];
   });
-}
-
-interface RegistrationOperation {
-  readonly id: number;
-  readonly targetId: number;
-  readonly status: string;
-  readonly sequence: number;
-  readonly pollAfterSeconds: number | null;
-  readonly errorCode: string | null;
-  readonly failedStep: string | null;
-}
-
-function registrationOperation(value: unknown): RegistrationOperation {
-  const data = record(value);
-  const id = int(data?.id);
-  const targetId = int(data?.target_id);
-  const sequence = int(data?.sequence);
-  const status = text(data?.status);
-  const pollAfterSeconds = int(data?.poll_after_seconds);
-  if (
-    id === null ||
-    id < 1 ||
-    targetId === null ||
-    targetId < 1 ||
-    sequence === null ||
-    sequence < 1 ||
-    data?.kind !== "instance.register" ||
-    data?.target_type !== "instance" ||
-    !status ||
-    !["queued", "running", "waiting", "succeeded", "failed", "cancelled"].includes(status) ||
-    (["queued", "running", "waiting"].includes(status) &&
-      (pollAfterSeconds === null || pollAfterSeconds < 1))
-  ) {
-    throw malformed("registration Operation");
-  }
-  return {
-    id,
-    targetId,
-    status,
-    sequence,
-    pollAfterSeconds,
-    errorCode: text(data?.error_code),
-    failedStep: text(data?.failed_step),
-  };
-}
-
-/**
- * Register the existing worktree once. The documented 202 reply is an Operation;
- * follow it through setup, then read its Instance. Stop waiting after 30 minutes
- * without cancelling or repeating the admitted registration.
- */
-export async function registerOrbitInstance(
-  transport: OrbitTransport,
-  input: {
-    readonly sourcePath: string;
-    readonly projectId: number;
-    readonly instanceName: string;
-    readonly domain: string;
-  },
-): Promise<OrbitInstance> {
-  const deadline = Date.now() + 30 * 60 * 1000;
-  const admitted = registrationOperation(
-    await callOrbit(transport, {
-      method: "POST",
-      path: "/api/v1/instances/register",
-      body: {
-        source_path: input.sourcePath,
-        project_id: input.projectId,
-        instance_name: input.instanceName,
-        domain: input.domain,
-        setup: true,
-      },
-      timeoutSeconds: 30 * 60,
-    }),
-  );
-  let operation = admitted;
-  const pending = () =>
-    new OrbitApiError(
-      "orbit.operation_pending",
-      `Orbit registration Operation ${admitted.id} is still pending. Inspect that Operation before registering again.`,
-      504,
-    );
-  while (["queued", "running", "waiting"].includes(operation.status)) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw pending();
-    await new Promise<void>((resolve) =>
-      setTimeout(resolve, Math.min(operation.pollAfterSeconds! * 1000, remaining)),
-    );
-    if (Date.now() >= deadline) throw pending();
-    operation = registrationOperation(
-      await callOrbit(transport, {
-        method: "GET",
-        path: `/api/v1/operations/${admitted.id}`,
-        query: { after_sequence: String(operation.sequence) },
-        timeoutSeconds: Math.max(1, Math.ceil((deadline - Date.now()) / 1000)),
-      }),
-    );
-    if (operation.id !== admitted.id || operation.targetId !== admitted.targetId) {
-      throw malformed("registration Operation");
-    }
-  }
-  if (operation.status !== "succeeded") {
-    throw new OrbitApiError(
-      operation.errorCode ?? `operation.${operation.status}`,
-      `Orbit registration Operation ${operation.id} ${operation.status}${operation.failedStep ? ` at ${operation.failedStep}` : ""}.`,
-      200,
-    );
-  }
-  const instance = parseOrbitInstance(
-    await callOrbit(transport, {
-      method: "GET",
-      path: `/api/v1/instances/${admitted.targetId}`,
-    }),
-  );
-  if (instance.id !== admitted.targetId) throw malformed("Instance");
-  return instance;
 }

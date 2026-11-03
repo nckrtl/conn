@@ -37,7 +37,7 @@ export class OrbitTransportError extends Error {
   override readonly name = "OrbitTransportError";
 }
 
-function readOrbitGatewayUrl(): string {
+export function readOrbitGatewayUrl(): string {
   try {
     const stored = globalThis.localStorage?.getItem(GATEWAY_URL_STORAGE_KEY)?.trim();
     if (stored) return stored.replace(/\/+$/, "");

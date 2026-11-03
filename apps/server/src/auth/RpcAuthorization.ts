@@ -207,6 +207,10 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.annotationsSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.annotationsCreate]: AuthPreviewOperateScope,
   [WS_METHODS.annotationsRemove]: AuthPreviewOperateScope,
+  // Registering makes Orbit set up an Instance, as starting a thread starts work.
+  [WS_METHODS.orbitWorkspacesSubscribe]: AuthOrchestrationReadScope,
+  [WS_METHODS.orbitWorkspacesRegister]: AuthOrchestrationOperateScope,
+  [WS_METHODS.orbitWorkspacesRemove]: AuthOrchestrationOperateScope,
   // Desktops that show the panels agents open; showing one drives the browser panel.
   [WS_METHODS.agentPanelRequests]: AuthPreviewOperateScope,
   [WS_METHODS.agentPanelRespond]: AuthPreviewOperateScope,

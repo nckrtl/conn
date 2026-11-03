@@ -11,7 +11,9 @@ import {
   type EnvMode,
 } from "./BranchToolbar.logic";
 import { useOpenLink } from "../browser/useOpenLink";
-import type { OrbitThreadInstance } from "../orbit/orbitThreadStore";
+import { type OrbitWorkspaceView, registerOrbitWorkspace } from "../orbit/orbitWorkspaces";
+import { Button } from "./ui/button";
+import { toastManager } from "./ui/toast";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
 import { Badge } from "./ui/badge";
@@ -70,21 +72,45 @@ function OrbitInstanceUrlChip({ url, threadRef }: { url: string; threadRef: Scop
   );
 }
 
-function orbitThreadLabel(instance: OrbitThreadInstance): string {
-  if (instance.phase === "registering") return "Orbit: setting up";
+function orbitThreadLabel(instance: OrbitWorkspaceView): string {
+  if (instance.phase === "waiting" || instance.phase === "registering") return "Orbit: setting up";
   if (instance.phase === "failed") return "Orbit: not registered";
   // The route's first label is the readable name, e.g. `login-redirect`.
   const host = instance.url?.replace(/^https?:\/\//, "").split(".")[0];
   return `Orbit: ${host || instance.instanceName}`;
 }
 
-function orbitThreadTooltip(instance: OrbitThreadInstance): string {
-  if (instance.phase === "registering") {
+function orbitThreadTooltip(instance: OrbitWorkspaceView): string {
+  if (instance.phase === "waiting") {
     return `Worktree ${instance.checkoutPath}. Orbit registers it once the branch has its name.`;
   }
+  if (instance.phase === "registering") return `Orbit is setting up ${instance.checkoutPath}.`;
   if (instance.phase === "failed")
     return `Orbit could not register this worktree: ${instance.failure}`;
   return `Orbit instance ${instance.instanceName} in ${instance.checkoutPath}`;
+}
+
+function OrbitRetryButton(props: {
+  readonly environmentId: EnvironmentId;
+  readonly input: NonNullable<OrbitWorkspaceView["retryInput"]>;
+}) {
+  return (
+    <Button
+      variant="ghost-muted"
+      size="micro"
+      onClick={() => {
+        void registerOrbitWorkspace(props.environmentId, props.input).catch((error: unknown) =>
+          toastManager.add({
+            type: "error",
+            title: "Orbit could not register the worktree",
+            description: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }}
+    >
+      Retry
+    </Button>
+  );
 }
 
 interface BranchToolbarEnvModeSelectorProps {
@@ -99,7 +125,7 @@ interface BranchToolbarEnvModeSelectorProps {
   /** Where the hidden Orbit check runs; omit to hide the Orbit option. */
   orbitTarget?: { readonly environmentId: EnvironmentId; readonly projectRoot: string } | null;
   /** The Orbit Instance this thread runs in, if any. */
-  orbitThread?: OrbitThreadInstance | null;
+  orbitThread?: OrbitWorkspaceView | null;
   threadRef?: ScopedThreadRef | null;
 }
 
@@ -159,6 +185,12 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
         </Tooltip>
         {orbitThread?.url && threadRef ? (
           <OrbitInstanceUrlChip url={orbitThread.url} threadRef={threadRef} />
+        ) : null}
+        {orbitThread?.retryInput && threadRef ? (
+          <OrbitRetryButton
+            environmentId={threadRef.environmentId}
+            input={orbitThread.retryInput}
+          />
         ) : null}
       </span>
     );

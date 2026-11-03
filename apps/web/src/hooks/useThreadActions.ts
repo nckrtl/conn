@@ -52,7 +52,7 @@ import { useRightPanelStore } from "../rightPanelStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
-import { isOrbitCheckout, useOrbitThreadStore } from "../orbit/orbitThreadStore";
+import { forgetOrbitWorkspace, isOrbitCheckout } from "../orbit/orbitWorkspaces";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
@@ -482,7 +482,7 @@ export function useThreadActions() {
       threadRef.threadId,
     );
     // Orbit owns its Instance checkouts; removing them is Orbit's job.
-    if (isOrbitCheckout(threadRef.environmentId, orphanedWorktreePath)) orphanedWorktreePath = null;
+    if (isOrbitCheckout(orphanedWorktreePath)) orphanedWorktreePath = null;
     // A shell that leaves idle subagent children out cannot prove nobody else uses the worktree,
     // so the server's list decides. A failed read keeps the worktree.
     if (orphanedWorktreePath !== null && environmentConfig?.shellThreadFamilies === true) {
@@ -569,7 +569,7 @@ export function useThreadActions() {
     refreshArchivedThreadsForEnvironment(threadRef.environmentId);
     releaseComposerDraftUploads(threadRef);
     clearComposerDraftForThread(threadRef);
-    useOrbitThreadStore.getState().remove(threadRef);
+    forgetOrbitWorkspace(threadRef);
     clearProjectDraftThreadById(
       scopeProjectRef(threadRef.environmentId, thread.projectId),
       threadRef,

@@ -1,113 +1,54 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
-import { useEffect, useMemo } from "react";
+import type { EnvironmentId } from "@t3tools/contracts";
+import { useEffect } from "react";
+import { useShallow } from "zustand/react/shallow";
 
-import { toastManager } from "../components/ui/toast";
-import { useThreadShell } from "../state/entities";
-import { OrbitApiError } from "./orbitApi";
-import { describeOrbitError, registerOrbitThreadWorktree } from "./orbitInstances";
-import { type OrbitThreadInstance, useOrbitThreadStore } from "./orbitThreadStore";
-import { createTerminalOrbitTransport } from "./orbitTransport";
+import {
+  legacyRegisterInput,
+  registerOrbitWorkspace,
+  useLegacyOrbitThreadStore,
+  useOrbitWorkspaces,
+} from "./orbitWorkspaces";
 
-/** How long to wait for T3's readable branch name before registering anyway. */
-const BRANCH_NAME_WAIT_MS = 60_000;
-const RETRY_AFTER_MS = 30_000;
-const inFlight = new Set<string>();
+const handingOver = new Set<string>();
 
 /**
- * Registers each Orbit thread's worktree as an Orbit Instance once T3's server
- * has given its branch a readable name (or after a minute), so Orbit records
- * that branch and routes the Instance under it. Mounted once, in the main window.
+ * Hands registrations this client started before the server took them over to the
+ * server, once each. Mounted once, in the main window.
  */
 export function OrbitRegistrationSync() {
-  const byThreadKey = useOrbitThreadStore((state) => state.byThreadKey);
+  const keys = useLegacyOrbitThreadStore(
+    useShallow((state) =>
+      Object.keys(state.byThreadKey).filter(
+        (key) => state.byThreadKey[key]?.phase === "registering",
+      ),
+    ),
+  );
   return (
     <>
-      {Object.entries(byThreadKey).map(([key, instance]) =>
-        instance.phase === "registering" ? (
-          <OrbitThreadRegistration key={key} threadKey={key} instance={instance} />
-        ) : null,
-      )}
+      {keys.map((key) => (
+        <LegacyRegistrationHandoff key={key} threadKey={key} />
+      ))}
     </>
   );
 }
 
-function OrbitThreadRegistration(props: {
-  readonly threadKey: string;
-  readonly instance: OrbitThreadInstance;
-}) {
-  const { instance, threadKey } = props;
-  const ref = useMemo(
-    () => scopeThreadRef(instance.environmentId as EnvironmentId, instance.threadId as ThreadId),
-    [instance.environmentId, instance.threadId],
-  );
-  const shell = useThreadShell(ref);
-  const branch = shell?.branch ?? null;
-  const worktreePath = shell?.worktreePath ?? null;
-  const title = shell?.title ?? null;
+function LegacyRegistrationHandoff(props: { readonly threadKey: string }) {
+  const instance = useLegacyOrbitThreadStore((state) => state.byThreadKey[props.threadKey]);
+  const environmentId = instance?.environmentId ?? null;
+  // The first list means the environment is connected and can take the registration.
+  const connected = useOrbitWorkspaces(environmentId) !== null;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hands a stored registration to the server once its environment connects
   useEffect(() => {
-    // The thread must exist and still work in this worktree.
-    if (!branch || worktreePath !== instance.checkoutPath || inFlight.has(threadKey)) return;
-    const waitedMs = Date.now() - Date.parse(instance.createdAt);
-    if (isTemporaryWorktreeBranch(branch) && waitedMs < BRANCH_NAME_WAIT_MS) {
-      // Touching the entry re-runs this effect once the wait is over.
-      const timer = globalThis.setTimeout(
-        () => useOrbitThreadStore.getState().update(ref, { retryAt: Date.now() }),
-        BRANCH_NAME_WAIT_MS - waitedMs,
-      );
-      return () => globalThis.clearTimeout(timer);
-    }
-
-    inFlight.add(threadKey);
-    let retryTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
-    const transport = createTerminalOrbitTransport({
-      environmentId: ref.environmentId,
-      cwd: instance.controlCwd,
-    });
-    void registerOrbitThreadWorktree(transport, {
-      worktreePath: instance.checkoutPath,
-      instanceName: instance.instanceName,
-      branch,
-      title,
-      projectId: instance.projectId,
-      projectSlug: instance.projectSlug,
-      tld: instance.tld,
-    })
-      .then((registered) => {
-        useOrbitThreadStore.getState().update(ref, {
-          phase: "registered",
-          instanceId: registered.id,
-          url: registered.url,
-          failure: null,
-        });
-      })
-      .catch((error: unknown) => {
-        // An unreachable machine or a restarting Gateway: an identical
-        // registration request resumes, so try again later.
-        if (!(error instanceof OrbitApiError) || error.status >= 500) {
-          retryTimer = globalThis.setTimeout(
-            () => useOrbitThreadStore.getState().update(ref, { retryAt: Date.now() }),
-            RETRY_AFTER_MS,
-          );
-          return;
-        }
-        const failure = describeOrbitError(error);
-        useOrbitThreadStore.getState().update(ref, { phase: "failed", failure });
-        toastManager.add({
-          type: "error",
-          title: "Orbit could not register the worktree",
-          description: `${instance.instanceName}: ${failure}`,
-        });
-      })
-      .finally(() => {
-        inFlight.delete(threadKey);
-      });
-    return () => {
-      if (retryTimer !== null) globalThis.clearTimeout(retryTimer);
-    };
-  }, [branch, instance, ref, threadKey, title, worktreePath]);
+    if (!connected || instance === undefined || handingOver.has(props.threadKey)) return;
+    handingOver.add(props.threadKey);
+    void registerOrbitWorkspace(
+      instance.environmentId as EnvironmentId,
+      legacyRegisterInput(instance),
+    )
+      .catch((error: unknown) => console.error("Could not hand the Orbit registration over", error))
+      .finally(() => handingOver.delete(props.threadKey));
+  }, [connected, instance, props.threadKey]);
 
   return null;
 }

@@ -149,8 +149,8 @@ import { createOrbitWorktree } from "../../orbit/orbitInstances";
 import { getOrbitAvailability } from "../../orbit/useOrbitAvailability";
 import { orbitInstanceNameForBranch } from "../../orbit/orbitInstances";
 import { randomUUID } from "~/lib/utils";
-import { runHiddenShell } from "../../orbit/orbitTransport";
-import { useOrbitThreadStore } from "../../orbit/orbitThreadStore";
+import { readOrbitGatewayUrl, runHiddenShell } from "../../orbit/orbitTransport";
+import { registerOrbitWorkspace } from "../../orbit/orbitWorkspaces";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -1318,8 +1318,8 @@ export function useComposerSend(input: ComposerSendInput) {
 
     // New Orbit instance: a worktree of the project's repository in Orbit's
     // managed path, on a temporary branch the thread starts on at once. T3's
-    // server renames the branch after this message; OrbitRegistrationSync then
-    // registers the worktree as an Orbit Instance with a matching route.
+    // server renames the branch after this message, then registers the worktree
+    // as an Orbit Instance with a matching route, with or without this client.
     let orbitWorkspace: { readonly branch: string; readonly worktreePath: string } | null = null;
     if (failure === null && turnAttachmentsResult._tag === "Success" && shouldCreateOrbitInstance) {
       const projectRoot = activeProject.workspaceRoot;
@@ -1350,21 +1350,22 @@ export function useComposerSend(input: ComposerSendInput) {
             worktreePath,
           },
         );
-        useOrbitThreadStore.getState().register(scopeThreadRef(environmentId, threadIdForSend), {
-          environmentId,
+        // The worktree exists either way, so a failed hand-over only warns.
+        await registerOrbitWorkspace(environmentId, {
           threadId: threadIdForSend,
-          phase: "registering",
           instanceName,
-          projectId: source.projectId,
+          orbitProjectId: source.projectId,
           projectSlug: source.projectSlug,
           tld: source.tld,
-          controlCwd: projectRoot,
           checkoutPath: worktreePath,
           temporaryBranch,
-          createdAt: new Date().toISOString(),
-          instanceId: null,
-          url: null,
-          failure: null,
+          gatewayUrl: readOrbitGatewayUrl(),
+        }).catch((error: unknown) => {
+          toastManager.add({
+            type: "error",
+            title: "Orbit could not register the worktree",
+            description: `${instanceName}: ${error instanceof Error ? error.message : String(error)}`,
+          });
         });
         return { branch: temporaryBranch, worktreePath };
       });

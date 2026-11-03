@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { VoiceTranscriptionError } from "@t3tools/client-runtime/voice-input";
-
 const store = vi.hoisted(() => new Map<string, string>());
+const browser = vi.hoisted(() => ({
+  opened: [] as string[],
+  dismissed: 0,
+  close: (): void => {},
+}));
 
 vi.mock("expo-secure-store", () => ({
   getItemAsync: async (key: string) => store.get(key) ?? null,
@@ -18,10 +21,28 @@ vi.mock("expo-file-system", () => ({
   },
 }));
 
+vi.mock("expo-device", () => ({ deviceName: "Polar" }));
+vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
+
+vi.mock("expo-web-browser", () => ({
+  openAuthSessionAsync: (url: string) => {
+    browser.opened.push(url);
+    return new Promise((resolve) => {
+      browser.close = () => resolve({ type: "cancel" });
+    });
+  },
+  dismissAuthSession: () => {
+    browser.dismissed += 1;
+    browser.close();
+  },
+}));
+
 import {
+  getOperatorTranscriptionSettings,
   getOperatorVoiceTranscriber,
-  operatorServerBases,
+  operatorServerUrl,
   saveOperatorTranscriptionSettings,
+  signInToOperator,
 } from "./operatorTranscription";
 
 const signal = new AbortController().signal;
@@ -31,51 +52,77 @@ async function transcribe() {
   return prepared.transcribe("file:///recording.m4a", { signal });
 }
 
-afterEach(() => vi.unstubAllGlobals());
+function stubServer(tokenAnswers: ReadonlyArray<Record<string, unknown>>) {
+  const answers = [...tokenAnswers];
+  const fetch = vi.fn<typeof globalThis.fetch>(async (url) => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/api/devices/authorize") {
+      return Response.json({
+        device_code: "dev-code",
+        user_code: "ABCD",
+        verification_uri_complete: "https://operator.test/device?code=ABCD",
+        interval: 0,
+        expires_in: 60,
+      });
+    }
+    if (path === "/api/devices/token") return Response.json(answers.shift() ?? {});
+    return Response.json({ text: " Hello there. " });
+  });
+  vi.stubGlobal("fetch", fetch);
+  return fetch;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  browser.opened = [];
+  browser.dismissed = 0;
+});
 
 describe("operatorTranscription", () => {
-  it("reads addresses like the Operator app", () => {
-    expect(operatorServerBases(" 10.0.0.2:8000, https://operator.test/ ,")).toEqual([
-      "http://10.0.0.2:8000",
-      "https://operator.test",
+  it("reads a typed server address like the Operator app", () => {
+    expect(operatorServerUrl("operator.test/").origin).toBe("https://operator.test");
+    expect(operatorServerUrl("10.44.0.7:12332").origin).toBe("http://10.44.0.7:12332");
+    expect(() => operatorServerUrl("")).toThrow(/server address/);
+  });
+
+  it("signs in through the server page and dictates to the address it returns", async () => {
+    const fetch = stubServer([
+      { error: "authorization_pending" },
+      { token: "device-token", user: "Nick", team: "Home", openai: "http://10.44.0.7:12331" },
     ]);
-  });
 
-  it("asks for setup when the address or token is missing", async () => {
-    await saveOperatorTranscriptionSettings({ engine: "operator", addresses: "", token: "" });
-    await expect(transcribe()).rejects.toMatchObject({ code: "server-failed" });
-  });
-
-  it("falls through unreachable addresses and sends the token", async () => {
-    await saveOperatorTranscriptionSettings({
+    await expect(signInToOperator("operator.test")).resolves.toBe(true);
+    expect(browser.opened).toEqual(["https://operator.test/device?code=ABCD"]);
+    expect(browser.dismissed).toBe(1);
+    expect(getOperatorTranscriptionSettings()).toMatchObject({
       engine: "operator",
-      addresses: "10.0.0.2:8000, https://operator.test",
-      token: "secret",
+      server: "https://operator.test",
+      speech: "http://10.44.0.7:12331",
+      token: "device-token",
+      account: "Nick · Home",
     });
-    const fetch = vi.fn<typeof globalThis.fetch>(async (url) => {
-      if (String(url).startsWith("http://10.0.0.2")) throw new TypeError("Network request failed");
-      return Response.json({ text: " Hello there. " });
-    });
-    vi.stubGlobal("fetch", fetch);
 
     await expect(transcribe()).resolves.toBe("Hello there.");
-    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
-      "http://10.0.0.2:8000/v1/audio/transcriptions",
-      "https://operator.test/v1/audio/transcriptions",
-    ]);
-    expect(fetch.mock.calls[1]![1]!.headers).toEqual({ Authorization: "Bearer secret" });
+    const upload = fetch.mock.calls.at(-1)!;
+    expect(String(upload[0])).toBe("http://10.44.0.7:12331/v1/audio/transcriptions");
+    expect(upload[1]!.headers).toEqual({ Authorization: "Bearer device-token" });
   });
 
-  it("explains a rejected token", async () => {
+  it("reports a denied sign-in", async () => {
+    stubServer([{ error: "access_denied" }]);
+    await expect(signInToOperator("operator.test")).rejects.toThrow(/denied/);
+  });
+
+  it("asks to sign in again when the server rejects the token", async () => {
     await saveOperatorTranscriptionSettings({
       engine: "operator",
-      addresses: "https://operator.test",
-      token: "wrong",
+      speech: "http://10.44.0.7:12331",
+      token: "revoked",
     });
     vi.stubGlobal("fetch", async () => new Response("", { status: 401 }));
-
-    const error = await transcribe().catch((cause: unknown) => cause);
-    expect(error).toBeInstanceOf(VoiceTranscriptionError);
-    expect((error as VoiceTranscriptionError).message).toMatch(/rejected the token/);
+    await expect(transcribe()).rejects.toMatchObject({
+      code: "server-failed",
+      message: expect.stringMatching(/Sign in again/),
+    });
   });
 });

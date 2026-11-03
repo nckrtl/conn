@@ -8,19 +8,11 @@ import {
   getOperatorTranscriptionSettings,
   loadOperatorTranscriptionSettings,
   saveOperatorTranscriptionSettings,
+  signInToOperator,
+  signOutOfOperator,
   subscribeOperatorTranscriptionSettings,
-  testOperatorServer,
 } from "../voice-input/operatorTranscription";
 import { SettingsSection } from "./components/SettingsSection";
-
-type TestResult =
-  | { readonly kind: "idle" }
-  | { readonly kind: "testing" }
-  | { readonly kind: "ok" }
-  | { readonly kind: "failed"; readonly message: string };
-
-const INPUT_CLASS =
-  "min-h-11 min-w-0 flex-1 rounded-xl border-continuous bg-card px-3 text-base text-foreground";
 
 export function SettingsTranscriptionSection() {
   const settings = useSyncExternalStore(
@@ -29,31 +21,25 @@ export function SettingsTranscriptionSection() {
   );
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the settings from the keychain once
   useEffect(() => void loadOperatorTranscriptionSettings(), []);
-  const [addresses, setAddresses] = useState<string | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [test, setTest] = useState<TestResult>({ kind: "idle" });
+  const [server, setServer] = useState<string | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const draftAddresses = addresses ?? settings.addresses;
-  const draftToken = token ?? settings.token;
-  const dirty = draftAddresses !== settings.addresses || draftToken !== settings.token;
+  const draftServer = server ?? settings.server;
+  const signedIn = settings.token.length > 0;
 
-  const save = () =>
-    void saveOperatorTranscriptionSettings({
-      addresses: draftAddresses.trim(),
-      token: draftToken.trim(),
-    }).then(() => {
-      setAddresses(null);
-      setToken(null);
-    });
-  const runTest = () => {
-    setTest({ kind: "testing" });
-    testOperatorServer(draftAddresses, draftToken).then(
-      () => setTest({ kind: "ok" }),
-      (error: unknown) =>
-        setTest({
-          kind: "failed",
-          message: error instanceof Error ? error.message : String(error),
-        }),
+  const signIn = () => {
+    setSigningIn(true);
+    setError(null);
+    signInToOperator(draftServer).then(
+      () => {
+        setSigningIn(false);
+        setServer(null);
+      },
+      (cause: unknown) => {
+        setSigningIn(false);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      },
     );
   };
 
@@ -77,63 +63,46 @@ export function SettingsTranscriptionSection() {
         />
       </SettingsSection>
       {settings.engine === "operator" ? (
-        <>
-          <SettingsSection title="Operator server">
+        <SettingsSection title="Operator server">
+          {signedIn ? (
+            <View className="flex-row items-center gap-3 p-4">
+              <View className="min-w-0 flex-1 gap-0.5">
+                <Text className="text-base font-t3-medium text-foreground">Signed in</Text>
+                <Text className="text-sm text-foreground-muted" numberOfLines={2}>
+                  {[settings.account, new URL(settings.server).host].filter(Boolean).join(" · ")}
+                </Text>
+              </View>
+              <Button label="Sign out" tone="secondary" onPress={() => void signOutOfOperator()} />
+            </View>
+          ) : (
             <View className="gap-3 p-4">
-              <Text className="text-sm font-t3-medium text-foreground-muted">Address</Text>
               <AppTextInput
                 accessibilityLabel="Operator server address"
-                className={INPUT_CLASS}
-                value={draftAddresses}
+                className="min-h-11 rounded-xl border-continuous bg-card px-3 text-base text-foreground"
+                value={draftServer}
                 onChangeText={(value) => {
-                  setAddresses(value);
-                  setTest({ kind: "idle" });
+                  setServer(value);
+                  setError(null);
                 }}
                 placeholder="https://operator.test"
                 autoCapitalize="none"
                 autoCorrect={false}
                 keyboardType="url"
-                returnKeyType="done"
-                onSubmitEditing={save}
+                returnKeyType="go"
+                editable={!signingIn}
+                onSubmitEditing={signIn}
               />
-              <Text className="text-sm font-t3-medium text-foreground-muted">Token</Text>
-              <AppTextInput
-                accessibilityLabel="Operator client token"
-                className={INPUT_CLASS}
-                value={draftToken}
-                onChangeText={(value) => {
-                  setToken(value);
-                  setTest({ kind: "idle" });
-                }}
-                placeholder="Client token"
-                autoCapitalize="none"
-                autoCorrect={false}
-                secureTextEntry
-                returnKeyType="done"
-                onSubmitEditing={save}
+              <Button
+                label="Sign in"
+                tone="primary"
+                loading={signingIn}
+                disabled={draftServer.trim().length === 0}
+                onPress={signIn}
               />
-              <View className="flex-row gap-3">
-                <Button
-                  label="Test"
-                  tone="secondary"
-                  loading={test.kind === "testing"}
-                  onPress={runTest}
-                />
-                {dirty ? <Button label="Save" tone="primary" onPress={save} /> : null}
-              </View>
-              {test.kind === "ok" ? (
-                <Text className="text-sm text-foreground-muted">Connected. The token works.</Text>
-              ) : test.kind === "failed" ? (
-                <Text className="text-sm text-danger-foreground">{test.message}</Text>
-              ) : null}
+              {error ? <Text className="text-sm text-danger-foreground">{error}</Text> : null}
             </View>
-          </SettingsSection>
-          <Text className="px-2 text-sm text-foreground-muted">
-            Use the address and client token from your Operator server, as in the Operator app.
-            Separate several addresses with commas; they are tried in order. Without a scheme, http
-            is used.
-          </Text>
-        </>
+          )}
+        </SettingsSection>
       ) : null}
     </>
   );

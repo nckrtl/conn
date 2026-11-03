@@ -376,14 +376,20 @@ Sources:
 ### Agent-opened panels
 
 A thread's agent can show a panel in the Conn desktop with the `panel_open` MCP
-tool, so it can show the user its work running. Conn comes to the front, selects
-the agent's thread and opens the panel: `browser`, `database`, `mcp`, `diff` or
-`files`. Only Conn threads can do this; the tool needs a thread scope.
+tool, so it can show the user its work running: `browser`, `database`, `mcp`,
+`diff` or `files`. Only Conn threads can do this; the tool needs a thread scope.
+
+Conn never switches threads for an agent. When the user is on the agent's
+thread, Conn comes to the front and opens the panel. On another thread, Conn
+prepares the panel for that thread without navigating or coming forward, and
+panel actions (`database_query`, `mcp_connect`, `mcp_call`) fail with
+`NOT_ON_THREAD`, asking the user to open the thread.
 
 - `browser` with `url` opens a new desktop tab, and later `preview_*` calls
   without a `tabId` drive it. `tabId` shows an existing tab instead.
 - `database` with `sql` puts the query in the editor.
-- `focusWindow: false` opens the panel without bringing Conn forward.
+- `focusWindow: false` opens the panel without bringing Conn forward, even on
+  the agent's thread.
 
 Two tools act inside a panel and answer with its result, so the user and the
 agent see the same thing:
@@ -693,6 +699,20 @@ Sources:
 - `apps/server/src/provider/codexMcpNetworkGate.ts`.
 - `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`
   (`layerAppServerClientFactory`).
+
+### Swipe navigation setting
+
+Upstream's two-finger trackpad swipe goes back and forward in history. It can
+fire while the user scrolls and switch to the previous thread. Settings >
+General > "Swipe between threads" (`historySwipeNavigation`, default on) turns
+it off. On a conflict, keep the setting gate around `<HistorySwipeNavigation />`.
+
+Sources:
+
+- `packages/contracts/src/settings.ts` (`historySwipeNavigation`).
+- `apps/web/src/components/AppSidebarLayout.tsx`.
+- `apps/web/src/components/settings/SettingsPanels.tsx`,
+  `apps/web/src/components/settings/settingsSearch.ts`.
 
 ## Keep the customizations through an upstream merge
 

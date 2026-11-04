@@ -1789,44 +1789,6 @@ export default function ThreadTerminalDrawer({
     };
   }, [isPanel, visible]);
 
-  if (normalizedTerminalIds.length === 0) {
-    return (
-      <aside
-        ref={drawerRef}
-        {...(!isPanel && visible ? terminalArea : {})}
-        data-thread-terminal-drawer
-        data-terminal-owner={isPanel ? "right-panel" : "drawer"}
-        className={cn(
-          "relative flex min-w-0 flex-col overflow-hidden bg-background",
-          isPanel ? "h-full flex-1" : "z-45 shrink-0 border-t border-(--shell-divider)!",
-        )}
-        style={isPanel ? undefined : { height: `var(${DRAG_HEIGHT_PROPERTY}, ${drawerHeight}px)` }}
-      >
-        {!isPanel ? (
-          <div
-            className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
-            onPointerDown={handleResizePointerDown}
-            onPointerMove={handleResizePointerMove}
-            onPointerUp={handleResizePointerEnd}
-            onPointerCancel={handleResizePointerEnd}
-            onLostPointerCapture={handleResizePointerEnd}
-          />
-        ) : null}
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 py-6 text-center text-sm text-muted-foreground">
-          <p>No terminal sessions for this thread yet.</p>
-          <Button
-            size="xs"
-            variant="outline"
-            onClick={onNewTerminalAction}
-            disabled={!canOperateTerminal}
-          >
-            {newTerminalActionLabel}
-          </Button>
-        </div>
-      </aside>
-    );
-  }
-
   // The single-terminal row and the split sidebar header share these controls,
   // so neither layout floats them over terminal text.
   const terminalActions = (
@@ -1873,6 +1835,44 @@ export default function ThreadTerminalDrawer({
       </TerminalActionButton>
     </div>
   );
+
+  if (normalizedTerminalIds.length === 0) {
+    return (
+      <aside
+        ref={drawerRef}
+        {...(!isPanel && visible ? terminalArea : {})}
+        data-thread-terminal-drawer
+        data-terminal-owner={isPanel ? "right-panel" : "drawer"}
+        className={cn(
+          "relative flex min-w-0 flex-col overflow-hidden bg-background",
+          isPanel ? "h-full flex-1" : "z-45 shrink-0 border-t border-(--shell-divider)!",
+        )}
+        style={isPanel ? undefined : { height: `var(${DRAG_HEIGHT_PROPERTY}, ${drawerHeight}px)` }}
+      >
+        {!isPanel ? (
+          <div
+            className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
+            onPointerDown={handleResizePointerDown}
+            onPointerMove={handleResizePointerMove}
+            onPointerUp={handleResizePointerEnd}
+            onPointerCancel={handleResizePointerEnd}
+            onLostPointerCapture={handleResizePointerEnd}
+          />
+        ) : null}
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-4 py-6 text-center text-sm text-muted-foreground">
+          <p>No terminal sessions for this thread yet.</p>
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={onNewTerminalAction}
+            disabled={!canOperateTerminal}
+          >
+            {newTerminalActionLabel}
+          </Button>
+        </div>
+      </aside>
+    );
+  }
 
   return (
     <aside

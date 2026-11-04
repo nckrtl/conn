@@ -2,9 +2,11 @@ import defaultThemeVariables from "../../generated-uniwind-default-theme-variabl
 import {
   createMobileThemeVariables,
   DEFAULT_MOBILE_THEME_ID,
+  flattenThemeColor,
   getMobileThemeVariables,
   shellHighlightColor,
   themeColorWithAlpha,
+  themeColorWithContrast,
   type MobileThemeAppearance,
   type MobileThemeId,
   type MobileThemeVariables,
@@ -19,7 +21,46 @@ const defaults = defaultThemeVariables as Readonly<
   Record<MobileThemeAppearance, MobileThemeVariables>
 >;
 
+const CARD_TEXT_ROLES = [
+  "--color-foreground-secondary",
+  "--color-foreground-muted",
+  "--color-placeholder",
+  "--color-primary-text",
+] as const;
+
+// A selected row in a sidebar sits on the drawer, so it must stay visible there with its labels.
+function withVisibleSelection(variables: MobileThemeVariables): MobileThemeVariables {
+  const selected = themeColorWithContrast(
+    flattenThemeColor(variables["--color-thread-selected"], variables["--color-drawer"]),
+    flattenThemeColor(variables["--color-drawer"], variables["--color-screen"]),
+    1.2,
+  );
+  return {
+    ...variables,
+    "--color-thread-selected": selected,
+    "--color-thread-selected-foreground": themeColorWithContrast(
+      variables["--color-thread-selected-foreground"],
+      selected,
+    ),
+    "--color-thread-selected-foreground-muted": themeColorWithContrast(
+      variables["--color-thread-selected-foreground-muted"],
+      selected,
+    ),
+  };
+}
+
 export function getMobileThemeRuntimeVariables(
+  themeId: MobileThemeId,
+  appearance: MobileThemeAppearance,
+  platform: string,
+  publishedThemes: ReadonlyArray<PublishedMobileTheme> = [],
+): MobileThemeVariables {
+  return withVisibleSelection(
+    platformThemeVariables(themeId, appearance, platform, publishedThemes),
+  );
+}
+
+function platformThemeVariables(
   themeId: MobileThemeId,
   appearance: MobileThemeAppearance,
   platform: string,
@@ -60,10 +101,24 @@ export function getMobileThemeRuntimeVariables(
   }
   if (platform !== "android") return variables;
 
+  // Android paints the drawer as the page inside a lighter frame, so dark cards lift off both.
+  const screen = variables["--color-screen"];
+  const groupedCard =
+    appearance === "dark"
+      ? themeColorWithContrast(
+          variables["--color-grouped-card"],
+          [screen, flattenThemeColor(frame, screen)],
+          1.2,
+        )
+      : variables["--color-grouped-card"];
+  const readableOnCard = (role: (typeof CARD_TEXT_ROLES)[number]) =>
+    [role, themeColorWithContrast(variables[role], groupedCard)] as const;
   return {
     ...variables,
+    ...Object.fromEntries(CARD_TEXT_ROLES.map(readableOnCard)),
     "--color-header": frame,
     "--color-header-foreground": variables["--color-drawer-foreground"],
-    "--color-drawer": variables["--color-screen"],
+    "--color-drawer": screen,
+    "--color-grouped-card": groupedCard,
   };
 }

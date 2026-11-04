@@ -122,6 +122,9 @@ function resolveAppVariant(value: string | undefined): AppVariant {
   }
 }
 
+// Copied thread links open the app. app.t3.codes/.well-known lists every variant's identifiers.
+const HOSTED_APP_HOST = "app.t3.codes";
+
 // nckrtl fork: a build under your own bundle id shows the Conn logo instead of the T3 mark. The
 // Icon Composer projects and exports live in assets/conn (see FORK.md). Preview keeps upstream's.
 const CONN_ICON_ASSETS = {
@@ -306,7 +309,11 @@ const config: ExpoConfig = {
     // T3's relying party only vouches for T3's own app ids.
     associatedDomains: isOwnBundleBuild
       ? []
-      : [`applinks:${variant.relyingParty}`, `webcredentials:${variant.relyingParty}`],
+      : [
+          `applinks:${variant.relyingParty}`,
+          `webcredentials:${variant.relyingParty}`,
+          `applinks:${HOSTED_APP_HOST}`,
+        ],
     entitlements: {
       "keychain-access-groups": [
         `$(AppIdentifierPrefix)${isOwnBundleBuild ? iosBundleIdentifier : variant.iosBundleIdentifier}`,
@@ -358,6 +365,14 @@ const config: ExpoConfig = {
     predictiveBackGestureEnabled: true,
     // expo-sensors declares this for its pedometer, which the app does not use.
     blockedPermissions: ["android.permission.ACTIVITY_RECOGNITION"],
+    intentFilters: [
+      {
+        action: "VIEW",
+        autoVerify: true,
+        data: [{ scheme: "https", host: HOSTED_APP_HOST, pathPrefix: "/threads/" }],
+        category: ["BROWSABLE", "DEFAULT"],
+      },
+    ],
   },
   web: {
     favicon: variant.assets.appIcon,

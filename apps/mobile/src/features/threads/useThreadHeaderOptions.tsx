@@ -52,7 +52,7 @@ export function useThreadHeaderOptions(props: {
           }),
         ]
       : []),
-    sidebarHeaderItem,
+    ...(sidebarHeaderItem ? [sidebarHeaderItem] : []),
     ...(!usesDuoHeader && !props.draft
       ? [
           withNativeGlassHeaderItem({
@@ -127,7 +127,6 @@ export function useThreadHeaderOptions(props: {
       gitStatus?.refName,
       gitStatus?.pr?.url,
     ],
-    sidebar: false,
     fallback:
       !layout.usesSplitView && !props.usesNativeHeaderGlass ? (
         <ThreadGitControls {...props.gitControls} showActionControls />

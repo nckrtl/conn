@@ -57,7 +57,7 @@ export function SettingsRow(props: {
         accessibilityState={{ disabled: Boolean(props.disabled), selected }}
         disabled={props.disabled}
         onPress={onPress}
-        className={cn("rounded-2xl", selected && "bg-subtle-strong")}
+        className={cn("rounded-2xl", selected && "bg-thread-selected")}
       >
         {props.leading !== undefined && props.leading !== null ? (
           // Conn: keep the Orbit ring in the iPad sidebar too.

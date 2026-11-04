@@ -48,9 +48,7 @@ describe("CDP relay", () => {
   it("does not expose other targets through a page session", async () => {
     const send = vi.fn(async () => ({}));
     const written: Array<Record<string, unknown>> = [];
-    const relay = createCdpRelayConnection(makeTarget(send), (raw) =>
-      written.push(JSON.parse(raw)),
-    );
+    const relay = makeRelay(makeTarget(send), (raw) => written.push(JSON.parse(raw)));
     relay.receive(
       JSON.stringify({
         id: 1,
@@ -82,9 +80,7 @@ describe("CDP relay", () => {
   ])("rejects %s without changing the shared debugger or guest", async (method) => {
     const send = vi.fn(async () => ({}));
     const written: Array<Record<string, unknown>> = [];
-    const relay = createCdpRelayConnection(makeTarget(send), (raw) =>
-      written.push(JSON.parse(raw)),
-    );
+    const relay = makeRelay(makeTarget(send), (raw) => written.push(JSON.parse(raw)));
     relay.receive(JSON.stringify({ id: 1, method }));
     relay.receive(JSON.stringify({ id: 2, method, sessionId: "t3-preview-page" }));
     await settle();

@@ -24,7 +24,7 @@ import { BrowserControlInterrupted, SessionControl } from "@t3tools/shared/previ
 import { redactSensitiveValues } from "@t3tools/shared/credentialFill";
 import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import type { NodeWS } from "@effect/platform-node/NodeSocket";
+import type * as NodeWS from "@effect/platform-node/NodeWS";
 import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
@@ -204,6 +204,7 @@ export class DesktopTabRunner {
                 (message) => {
                   runFork(Queue.offer(output, message));
                 },
+                close,
               );
               const listener = (method: string, params: unknown, sessionId: string) =>
                 relay.event(method, params, sessionId);

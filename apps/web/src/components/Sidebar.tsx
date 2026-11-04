@@ -1080,6 +1080,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const allProjectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
   const allProjectConfigsReady = useAtomValue(environmentProjects.projectConfigsReadyAtom);
   // Safari may click after Ctrl+click opens settings; suppress that selection until the picker reopens.
+  const headerSearchRef = useRef<HTMLDivElement | null>(null);
   const suppressNextScopeChangeRef = useRef(false);
   const highlightedProjectScopeKeyRef = useRef<string | null>(null);
   // Hold dropped rows until server placement is confirmed; block another pickup from replacing the hold.

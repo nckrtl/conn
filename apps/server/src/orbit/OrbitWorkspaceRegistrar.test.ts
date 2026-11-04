@@ -251,13 +251,14 @@ describe("OrbitWorkspaceRegistrar", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("tries a 5xx again after 30 seconds", () =>
+  it.effect("tries a 502 or 504 again after 30 seconds", () =>
     Effect.gen(function* () {
       const harness: Harness = {
         thread: renamedThread(),
         gateway: fakeGateway({
           "POST /api/v1/instances/register": [
             refused(502, "http.502"),
+            refused(504, "http.504"),
             ok(201, { id: 93, url: null }),
           ],
         }),
@@ -267,10 +268,10 @@ describe("OrbitWorkspaceRegistrar", () => {
       yield* registrar.register(input);
       yield* TestClock.adjust("29 seconds");
       assert.strictEqual(posts(harness).length, 1);
-      yield* TestClock.adjust("1 second");
+      yield* TestClock.adjust("31 seconds");
       const registration = yield* Fiber.join(done);
       assert.strictEqual(registration.phase, "registered");
-      assert.strictEqual(posts(harness).length, 2);
+      assert.strictEqual(posts(harness).length, 3);
     }).pipe(Effect.scoped),
   );
 
@@ -289,6 +290,14 @@ describe("OrbitWorkspaceRegistrar", () => {
             code: "operation.kind_unavailable",
             message: "Native registration currently requires no Route, no worktrees and no setup.",
           },
+        },
+        {
+          answer: [refused(503, "gateway.maintenance", "The Gateway is being released.")],
+          failure: { code: "gateway.maintenance", message: "The Gateway is being released." },
+        },
+        {
+          answer: [refused(500, "server.error", "Something broke.")],
+          failure: { code: "server.error", message: "Something broke." },
         },
         {
           answer: [refused(422, "validation.failed", "The source path is not a checkout.")],

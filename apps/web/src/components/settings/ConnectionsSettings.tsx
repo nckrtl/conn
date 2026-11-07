@@ -138,6 +138,8 @@ import {
   SavedBackendListRow,
 } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
+import { useEnvironmentProvider } from "~/orbit/environmentProvider";
+import { EnvironmentProviderSection, OrbitEnvironmentSections } from "./OrbitSettings";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
@@ -249,6 +251,7 @@ function ConnectionsSettingsContent({
   readonly accessEnvironmentPicker?: ReactNode;
 }) {
   const desktopBridge = window.desktopBridge;
+  const environmentProvider = useEnvironmentProvider((state) => state.provider);
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const peerLinkHosts = usePeerLinkHosts();
@@ -1589,13 +1592,42 @@ function ConnectionsSettingsContent({
 
   if (showsAccess) return <SettingsPageContainer>{primarySettings}</SettingsPageContainer>;
 
+  const thisAppSettings = desktopBridge ? (
+    <SettingsSection id="this-app" title="This app">
+      <LocalEnvironmentSetting />
+    </SettingsSection>
+  ) : null;
+
+  const sharedEnvironmentSettings = (
+    <>
+      {peerLinkHosts.map((environment, index) => (
+        <LinkedEnvironmentsSettings
+          key={environment.environmentId}
+          environmentId={environment.environmentId}
+          environmentLabel={peerLinkHosts.length > 1 ? environment.label : null}
+          isSearchTarget={index === 0}
+        />
+      ))}
+      <LoadBalancingSettings environments={loadBalancingEnvironments} />
+      <PullRequestRoutingSettings environments={loadBalancingEnvironments} />
+    </>
+  );
+
+  if (environmentProvider === "orbit") {
+    return (
+      <SettingsPageContainer width="wide">
+        <EnvironmentProviderSection />
+        {thisAppSettings}
+        <OrbitEnvironmentSections />
+        {sharedEnvironmentSettings}
+      </SettingsPageContainer>
+    );
+  }
+
   return (
     <SettingsPageContainer>
-      {desktopBridge ? (
-        <SettingsSection id="this-app" title="This app">
-          <LocalEnvironmentSetting />
-        </SettingsSection>
-      ) : null}
+      <EnvironmentProviderSection />
+      {thisAppSettings}
       <SettingsSection
         {...searchableSetting("remote-environments")}
         title="Environments"
@@ -1646,16 +1678,7 @@ function ConnectionsSettingsContent({
           }}
         />
       ) : null}
-      {peerLinkHosts.map((environment, index) => (
-        <LinkedEnvironmentsSettings
-          key={environment.environmentId}
-          environmentId={environment.environmentId}
-          environmentLabel={peerLinkHosts.length > 1 ? environment.label : null}
-          isSearchTarget={index === 0}
-        />
-      ))}
-      <LoadBalancingSettings environments={loadBalancingEnvironments} />
-      <PullRequestRoutingSettings environments={loadBalancingEnvironments} />
+      {sharedEnvironmentSettings}
     </SettingsPageContainer>
   );
 }

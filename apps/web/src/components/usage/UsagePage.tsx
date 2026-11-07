@@ -70,7 +70,12 @@ import {
 } from "../ui/menu";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { AppRouteModal, AppRouteModalClose } from "../AppRouteModal";
+import {
+  AppRouteModal,
+  AppRouteModalCard,
+  AppRouteModalClose,
+  AppRouteModalHeader,
+} from "../AppRouteModal";
 import { Skeleton } from "../ui/skeleton";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -512,70 +517,72 @@ export function UsagePage() {
   return (
     <AppRouteModal label="Usage">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="@container/usage-header flex min-h-12 shrink-0 items-center gap-1 border-b ps-5 pe-2">
+        <AppRouteModalHeader className="@container/usage-header gap-1">
           {topbarContent}
           <AppRouteModalClose />
-        </header>
+        </AppRouteModalHeader>
 
-        <ScrollArea className="min-h-0 flex-1">
-          <WorkspacePageContainer width="wide">
-            {selectedEnvironments.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                {environments.length === 0
-                  ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
-                  : `Select an environment to see ${showingLimits ? "limits" : "usage"}.`}
-              </p>
-            ) : showingLimits ? (
-              <UsageLimitsSection
-                selectedEnvironmentIds={selectedEnvironmentIds}
-                hiddenProviders={hiddenProviders}
-                now={limitsNow}
-                cursorPrompt={
-                  cursorAccessEnvironments.length > 0 ? (
-                    <CursorEnableLimits
-                      environments={cursorAccessEnvironments}
-                      onEnabled={() => {
-                        void refresh();
-                        void refreshLimits(false, true);
-                      }}
-                    />
-                  ) : null
-                }
-              />
-            ) : shown === null ? (
-              <UsageSkeleton />
-            ) : !canReadDiagnostics ? (
-              <div className="space-y-2 py-12 text-center text-sm text-muted-foreground">
-                {selectedEnvironments.map((environment) => (
-                  <p key={environment.environmentId}>
-                    {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
-                    {environment.error}
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <UsageOverview
-                merged={merged}
-                shownWindow={shownWindow}
-                hour12={hour12}
-                days={days}
-                hours={hours}
-                showingKept={showingKept}
-                metric={metric === "tokens" ? "tokens" : "cost"}
-                selectedEnvironments={selectedEnvironments}
-                hiddenProviders={hiddenProviders}
-                refreshingUsage={refreshingUsage}
-                cursorAccessEnvironments={cursorAccessEnvironments}
-                showChatGptSharing={showChatGptSharing}
-                onCursorEnabled={() => {
-                  void refresh();
-                  void refreshLimits(false, true);
-                }}
-                onSelectModel={selectUsageModel}
-              />
-            )}
-          </WorkspacePageContainer>
-        </ScrollArea>
+        <AppRouteModalCard>
+          <ScrollArea className="min-h-0 flex-1">
+            <WorkspacePageContainer width="wide">
+              {selectedEnvironments.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {environments.length === 0
+                    ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
+                    : `Select an environment to see ${showingLimits ? "limits" : "usage"}.`}
+                </p>
+              ) : showingLimits ? (
+                <UsageLimitsSection
+                  selectedEnvironmentIds={selectedEnvironmentIds}
+                  hiddenProviders={hiddenProviders}
+                  now={limitsNow}
+                  cursorPrompt={
+                    cursorAccessEnvironments.length > 0 ? (
+                      <CursorEnableLimits
+                        environments={cursorAccessEnvironments}
+                        onEnabled={() => {
+                          void refresh();
+                          void refreshLimits(false, true);
+                        }}
+                      />
+                    ) : null
+                  }
+                />
+              ) : shown === null ? (
+                <UsageSkeleton />
+              ) : !canReadDiagnostics ? (
+                <div className="space-y-2 py-12 text-center text-sm text-muted-foreground">
+                  {selectedEnvironments.map((environment) => (
+                    <p key={environment.environmentId}>
+                      {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
+                      {environment.error}
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <UsageOverview
+                  merged={merged}
+                  shownWindow={shownWindow}
+                  hour12={hour12}
+                  days={days}
+                  hours={hours}
+                  showingKept={showingKept}
+                  metric={metric === "tokens" ? "tokens" : "cost"}
+                  selectedEnvironments={selectedEnvironments}
+                  hiddenProviders={hiddenProviders}
+                  refreshingUsage={refreshingUsage}
+                  cursorAccessEnvironments={cursorAccessEnvironments}
+                  showChatGptSharing={showChatGptSharing}
+                  onCursorEnabled={() => {
+                    void refresh();
+                    void refreshLimits(false, true);
+                  }}
+                  onSelectModel={selectUsageModel}
+                />
+              )}
+            </WorkspacePageContainer>
+          </ScrollArea>
+        </AppRouteModalCard>
       </div>
       {showingLimits ? null : (
         <UsageModelDialogHost

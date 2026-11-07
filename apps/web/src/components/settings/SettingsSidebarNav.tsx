@@ -60,6 +60,7 @@ import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchIte
 import { validateSettingsScopeSearch } from "./settingsScope";
 import { useSettingsSectionNavigation } from "./useSettingsSectionNavigation";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
+import { APP_ROUTE_MODAL_NAV_CLASS } from "../AppRouteModal";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -260,7 +261,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       {...navArea}
       role="navigation"
       className={cn(
-        "flex w-60 shrink-0 flex-col border-e bg-sidebar text-sidebar-foreground max-md:w-14",
+        "flex w-60 shrink-0 flex-col text-sidebar-foreground max-md:w-14",
+        APP_ROUTE_MODAL_NAV_CLASS,
         compactSearchOpen &&
           "max-md:absolute max-md:inset-y-0 max-md:start-0 max-md:z-10 max-md:w-full",
       )}

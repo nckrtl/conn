@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off
 import * as NodeChildProcess from "node:child_process";
 
 import { vitePlusCommand } from "./check-changed-command.ts";

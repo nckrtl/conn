@@ -14,6 +14,11 @@ so a rebase replays them), then run the sync procedure in
 - Desktop typecheck: `scripts/build-desktop-artifact.ts` runs
   `vp run --no-cache --filter @t3tools/desktop typecheck` (the existing Vite
   task) before packing. A missing window or preview member fails the build.
+- Sync-source provenance: packaging records the full HEAD SHA and the origin
+  `sync/*` ref whose tip is that commit. `scripts/sign-macos-local.ts` refuses
+  to sign a short SHA, a local-only commit, or a stale/mismatched remote ref.
+  Publish first with `node scripts/publish-sync-branch.ts`. External nightly
+  install scripts that never call these entrypoints are not protected.
 - T3 Code has no in-page annotator of its own. The browser panel's
   "Annotate preview" feature (`apps/web/src/annotations/`) is product code: it
   loads the overlay into the previewed page from an annotation server the user
@@ -28,6 +33,8 @@ ssh mini
 cd /Volumes/Data/nckrtl/.cache/t3-patches-045
 git pull --ff-only
 vp i
+node scripts/publish-sync-branch.ts
+node scripts/check-sync-provenance.ts --json
 node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch arm64 \
   --build-version 0.0.<upstream patch>-nckrtl.<YYYYMMDD>
 ```

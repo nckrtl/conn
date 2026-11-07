@@ -24,7 +24,14 @@ file before you merge upstream, build, or change shared UI. Upstream's
 - Build, sign and install with the [build guide][build]. Builds ship no update
   feed (`publish: null` in `scripts/build-desktop-artifact.ts`), so the app
   never replaces itself with an upstream release. Re-sign macOS builds with a
-  local identity using `scripts/sign-macos-local.ts`.
+  local identity using `scripts/sign-macos-local.ts`. Packaging and that
+  re-sign preflight fail closed unless the full 40-character source SHA is the
+  tip of an `origin` `refs/heads/sync/*` branch. Publish HEAD with
+  `node scripts/publish-sync-branch.ts`, then verify with
+  `node scripts/check-sync-provenance.ts`. Neither command force-pushes or
+  bypasses hooks. Nightly or install wrappers outside this repo are not
+  covered unless they call those scripts (or the packaging/sign entrypoints)
+  before copying a bundle into `/Applications`.
 
 ## What the fork changes
 
@@ -836,8 +843,10 @@ Sources:
    `apps/mobile/modules/conn-symbols/symbols.json` and
    `node scripts/build-conn-symbols.ts` runs. If upstream bumps a vendored
    tarball in `apps/mobile/deps`, rebuild Conn's as described below.
-4. Build, sign and install with the [build guide][build]. Merge the sync branch
-   into `main` only after a good build.
+4. Publish the exact build commit to an origin `sync/` branch
+   (`node scripts/publish-sync-branch.ts`; a dated `sync/<yyyy-mm-dd>` tip
+   already counts). Then build, sign and install with the [build guide][build].
+   Merge the sync branch into `main` only after a good build.
 
 ### Vendored dependency patches
 

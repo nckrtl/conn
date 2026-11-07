@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -27,6 +29,8 @@ import {
   BundleNotSelfContainedError,
   BuildCommandFailedError,
   typecheckDesktopPackage,
+  requireDesktopBuildSourceProvenance,
+  DesktopSyncSourceProvenanceError,
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
@@ -286,6 +290,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(commands.length, 1);
       assert.deepStrictEqual(commands[0]?.args, [...desktopTypecheckVpArgs]);
     }).pipe(Effect.provide(spawner), Effect.scoped);
+  });
+
+  it.effect("fails closed when the build source is not a published origin sync tip", () => {
+    const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conn-sync-unpublished-"));
+    return Effect.gen(function* () {
+      const error = yield* requireDesktopBuildSourceProvenance(repo).pipe(Effect.flip);
+      assert.instanceOf(error, DesktopSyncSourceProvenanceError);
+      assert.match(error.message, /could not resolve HEAD|not a git repository|not published/i);
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(repo, { recursive: true, force: true }))),
+    );
   });
 
   it("packages the brand's own stable icons and leaves nightly ones alone", () => {

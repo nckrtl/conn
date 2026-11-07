@@ -5,6 +5,7 @@
 // passkey entitlements, so passkey sign-in is unavailable in such a build.
 //
 // Usage: node scripts/sign-macos-local.ts "<Conn.app>" [identity]
+// Refuses to sign unless the artifact's full commit SHA is the tip of an origin sync/ branch.
 // The identity defaults to $LOCAL_SIGNING_IDENTITY. Without either, a signing certificate
 // that belongs to the fork's Apple team (src/branding/forkBrand.json, or T3CODE_APPLE_TEAM_ID) is
 // used, and the signed app must then carry that team id (an identity you pass is not checked).
@@ -15,6 +16,7 @@ import * as NodeURL from "node:url";
 import { sign } from "@electron/osx-sign";
 
 import { resolveForkBrand } from "../apps/desktop/src/branding/forkBrand.ts";
+import { assertInstallArtifactProvenance } from "./sync-source-provenance.ts";
 
 const run = (command: string, args: readonly string[]) =>
   NodeChildProcess.spawnSync(command, args, { encoding: "utf8" });
@@ -36,8 +38,18 @@ function findIdentityForTeam(teamId: string): string | undefined {
 
 const teamId = resolveForkBrand(process.env).appleTeamId;
 const [appPath, explicitIdentity = process.env.LOCAL_SIGNING_IDENTITY] = process.argv.slice(2);
+if (!appPath) {
+  throw new Error(
+    'Usage: node scripts/sign-macos-local.ts "<App.app>" [identity]; set LOCAL_SIGNING_IDENTITY, pass the identity, or install a signing certificate for the Apple team in forkBrand.json.',
+  );
+}
+assertInstallArtifactProvenance({
+  artifactPath: appPath,
+  repo: process.cwd(),
+  remote: process.env.T3CODE_SYNC_PROVENANCE_REMOTE,
+});
 const identity = explicitIdentity ?? (teamId ? findIdentityForTeam(teamId) : undefined);
-if (!appPath || !identity) {
+if (!identity) {
   throw new Error(
     'Usage: node scripts/sign-macos-local.ts "<App.app>" [identity]; set LOCAL_SIGNING_IDENTITY, pass the identity, or install a signing certificate for the Apple team in forkBrand.json.',
   );

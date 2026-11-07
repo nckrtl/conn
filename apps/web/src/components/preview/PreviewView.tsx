@@ -1,11 +1,8 @@
-import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
-import { Button } from "~/components/ui/button";
+import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
-import {
-  previewStreamDownloadUrl,
-  type PreviewStreamControl,
-} from "@t3tools/client-runtime/preview/server-browser-stream";
+import type { DesktopPreviewAnnotationVoiceConfig } from "@t3tools/contracts";
+import { previewStreamDownloadUrl } from "@t3tools/client-runtime/preview/server-browser-stream";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -62,6 +59,10 @@ import {
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useRightPanelStore } from "~/rightPanelStore";
 
+import { effectiveShortcutsForCommand } from "~/keybindings";
+import { randomUUID } from "~/lib/utils";
+import { primaryServerKeybindingsAtom } from "~/state/server";
+import { PreviewAnnotationSpeech } from "./PreviewAnnotationSpeech";
 import { previewBridge } from "./previewBridge";
 import { subscribePreviewAction } from "./previewActionBus";
 import { closePreviewSession } from "./closePreviewSession";
@@ -76,25 +77,19 @@ import { BrowserDeviceToolbar } from "~/browser/BrowserDeviceToolbar";
 import { BROWSER_DEVICE_TOOLBAR_HEIGHT } from "~/browser/browserViewportLayout";
 import { useBrowserLayoutZoomFactor } from "~/browser/useBrowserLayoutZoomFactor";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
-import { BrowserSettingsReadError } from "~/browser/openFileInPreview";
+import { isBrowserSettingsReadError } from "~/browser/openFileInPreview";
 import { PreviewFileNotShown, PreviewUnreachable } from "./PreviewUnreachable";
 import { revealInFileExplorerLabel } from "./fileExplorerLabel";
 import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
-import { BrowserAnnotationControl } from "~/annotations/BrowserAnnotationControl";
 import { Badge } from "~/components/ui/badge";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { alternatePreviewRuntime, useRendersServerTabNatively } from "~/browser/previewRuntime";
-import {
-  ServerBrowserControls,
-  ServerBrowserSurface,
-  type ServerBrowserHandle,
-} from "~/browser/ServerBrowserSurface";
+import { ServerBrowserSurface, type ServerBrowserHandle } from "~/browser/ServerBrowserSurface";
 import { cn } from "~/lib/utils";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { usePreviewSession } from "./usePreviewSession";
 import { ZoomIndicator } from "./ZoomIndicator";
 import { AgentBrowserCursor } from "./AgentBrowserCursor";
-import { BrowserLaravelToolbar } from "~/laravelToolbar/BrowserLaravelToolbar";
 import {
   findActiveBrowserRecordingRuntimeTabId,
   isBrowserRecordingStartCancelledError,
@@ -164,6 +159,9 @@ export function PreviewView({
     Boolean(onSendAnnotation);
   const activeRecordingTabIds = useActiveBrowserRecordingTabIds();
   const pickActiveRef = useRef<{ cancelled: boolean } | null>(null);
+  const [annotationVoice, setAnnotationVoice] =
+    useState<DesktopPreviewAnnotationVoiceConfig | null>(null);
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const previewState = useThreadPreviewState(threadRef);
   const recentHistoryEntries = useThreadRecentHistory(
     threadRef,
@@ -210,15 +208,8 @@ export function PreviewView({
       setServerToolbarWidth(Math.max(1, Math.round(entry?.contentRect.width ?? 0))),
     );
   }, [serverToolbarShown]);
-  const [serverControlState, setServerControlState] = useState<{
-    tabId: string;
-    control: PreviewStreamControl | null;
-  } | null>(null);
-  const serverControl =
-    serverControlState?.tabId === runtimeTabId ? serverControlState.control : null;
-  const runServerAnnotation = (active: boolean, dictation: { startUrl: string; stopUrl: string }) =>
-    serverSurfaceRef.current?.annotation(active, dictation.startUrl, dictation.stopUrl) ?? false;
-  const serverInputDisabled = isServerTab && serverControl?.controller !== "you";
+  const [serverControlledTabId, setServerControlledTabId] = useState<string | null>(null);
+  const serverInputDisabled = isServerTab && serverControlledTabId !== runtimeTabId;
   const [serverFrameTabId, setServerFrameTabId] = useState<string | null>(null);
   // A desktop page that mounted before its tab went headless leaves its stale state here.
   const desktopOverlay =
@@ -226,7 +217,6 @@ export function PreviewView({
   const layoutZoomFactor = useBrowserLayoutZoomFactor(desktopOverlay?.zoomFactor ?? 1);
   const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
   const url = navStatus._tag === "Idle" ? "" : navStatus.url;
-  const navUrl = navStatus._tag === "Success" ? navStatus.url : null;
   const loading = desktopOverlay?.loading ?? navStatus._tag === "Loading";
   const canGoBack = desktopOverlay?.canGoBack ?? snapshot?.canGoBack ?? false;
   const canGoForward = desktopOverlay?.canGoForward ?? snapshot?.canGoForward ?? false;
@@ -260,7 +250,7 @@ export function PreviewView({
     const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
-      if (error instanceof BrowserSettingsReadError) {
+      if (isBrowserSettingsReadError(error)) {
         toastManager.add({
           type: "error",
           title: "Unable to open browser",
@@ -435,28 +425,6 @@ export function PreviewView({
     }
     useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
     await closePreviewSession({ closePreview, snapshot, tabId, threadRef });
-  };
-
-  const handleOpenHere = async () => {
-    const result = await openPreviewSession({
-      openPreview: open,
-      threadRef,
-      ...(url ? { url: resolveDiscoveredServerUrl(threadRef.environmentId, url) } : {}),
-      viewport,
-      ...(snapshot?.profileId ? { profileId: snapshot.profileId } : {}),
-      runtime: "desktop",
-    });
-    if (result._tag === "Failure") {
-      if (isAtomCommandInterrupted(result)) return;
-      const error = squashAtomCommandFailure(result);
-      toastManager.add({
-        type: "error",
-        title: "Unable to open the browser tab here",
-        description: error instanceof Error ? error.message : "An error occurred.",
-      });
-      return;
-    }
-    useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
   };
 
   const handlePictureInPicture = () => {
@@ -777,11 +745,20 @@ export function PreviewView({
     let submitted = false;
     pickActiveRef.current = pickRequest;
     setPickActive(true);
+    // The guest learns only the dictation chords, never the whole keybinding config.
+    const voice: DesktopPreviewAnnotationVoiceConfig = {
+      sessionId: randomUUID(),
+      shortcuts: effectiveShortcutsForCommand(keybindings, "composer.dictation", {
+        context: { previewFocus: true, previewOpen: true, editableFocus: true },
+      }),
+    };
+    setAnnotationVoice(voice);
     const finishPick = () => {
       const isCurrentPick = pickActiveRef.current === pickRequest;
       if (isCurrentPick) {
         pickActiveRef.current = null;
         setPickActive(false);
+        setAnnotationVoice(null);
       }
       if (
         (isCurrentPick || submitted) &&
@@ -802,12 +779,13 @@ export function PreviewView({
           readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
       );
       if (pickRequest.cancelled) return;
-      const result = await bridge.pickElement(runtimeTabId);
+      const result = await bridge.pickElement(runtimeTabId, voice);
       if (!result || pickRequest.cancelled) return;
       // The accepted pick must survive further clicks, tab changes, and unmount; stop cancellation here.
       if (pickActiveRef.current === pickRequest) {
         pickActiveRef.current = null;
         setPickActive(false);
+        setAnnotationVoice(null);
         submitted = true;
       }
       const { annotation: picked, submission, screenshotFailed = false } = result;
@@ -869,6 +847,7 @@ export function PreviewView({
         void previewBridge.cancelPickElement(runtimeTabId).catch(() => undefined);
       }
       setPickActive(false);
+      setAnnotationVoice(null);
     };
   }, [runtimeTabId]);
 
@@ -914,38 +893,22 @@ export function PreviewView({
       className="flex min-h-0 flex-1 flex-col bg-background"
       data-thread-key={scopedThreadKey(threadRef)}
     >
+      {pickActive && runtimeTabId && annotationVoice ? (
+        <PreviewAnnotationSpeech
+          key={annotationVoice.sessionId}
+          threadRef={threadRef}
+          tabId={runtimeTabId}
+          config={annotationVoice}
+          keybindings={keybindings}
+        />
+      ) : null}
       <PreviewChromeRow
         url={url}
         loading={loading || serverStreamPending}
-        canGoBack={
-          canGoBack &&
-          !serverInputDisabled &&
-          Boolean((previewBridge && snapshot?.hostedHere !== false) || isServerTab)
-        }
-        canGoForward={
-          canGoForward &&
-          !serverInputDisabled &&
-          Boolean((previewBridge && snapshot?.hostedHere !== false) || isServerTab)
-        }
-        refreshDisabled={
-          refreshDisabled ||
-          serverInputDisabled ||
-          ((!previewBridge || snapshot?.hostedHere === false) && !isServerTab)
-        }
-        inputDisabled={
-          serverInputDisabled ||
-          ((!previewBridge || snapshot?.hostedHere === false) && !isServerTab)
-        }
-        controlAction={
-          isServerTab && runtimeTabId && !showEmptyState && !isUnreachable ? (
-            <ServerBrowserControls
-              control={serverControl}
-              onToggleControl={() => serverSurfaceRef.current?.toggleControl()}
-            />
-          ) : snapshot?.runtime === "desktop" && snapshot.hostedHere === false ? (
-            <span>Hosted on {snapshot.host ?? "desktop"}</span>
-          ) : null
-        }
+        canGoBack={canGoBack && !serverInputDisabled}
+        canGoForward={canGoForward && !serverInputDisabled}
+        refreshDisabled={refreshDisabled || serverInputDisabled}
+        inputDisabled={serverInputDisabled}
         urlInputRef={urlInputRef}
         onBack={handleBack}
         onForward={handleForward}
@@ -976,34 +939,6 @@ export function PreviewView({
               </TooltipTrigger>
               <TooltipPopup side="top">{activeProfileName}</TooltipPopup>
             </Tooltip>
-          ) : null
-        }
-        credentialAction={
-          previewBridge && tabId && runtimeTabId ? (
-            <CredentialKeyButton
-              threadRef={threadRef}
-              tabId={tabId}
-              runtimeTabId={runtimeTabId}
-              pageUrl={url || null}
-              loading={loading || navStatus._tag !== "Success"}
-              visible={visible && !isUnreachable}
-            />
-          ) : null
-        }
-        annotationAction={
-          previewBridge ? (
-            <BrowserAnnotationControl
-              threadRef={threadRef}
-              runtimeTabId={runtimeTabId}
-              pageUrl={navUrl}
-              loading={loading}
-              {...(isServerTab
-                ? {
-                    inputDisabled: serverInputDisabled,
-                    runServerAnnotation,
-                  }
-                : {})}
-            />
           ) : null
         }
         trailingActions={
@@ -1069,9 +1004,10 @@ export function PreviewView({
                     : null
                 }
                 visible={visible}
-                showControls={false}
                 onFirstFrame={() => setServerFrameTabId(runtimeTabId)}
-                onControl={(control) => setServerControlState({ tabId: runtimeTabId, control })}
+                onControl={(control) =>
+                  setServerControlledTabId(control?.controller === "you" ? runtimeTabId : null)
+                }
                 onPopup={(popupTabId) => showPreviewPopup(threadRef, popupTabId, "panel")}
                 // Stays connected under the empty state so a URL picked there reaches the page.
                 className={cn(
@@ -1082,7 +1018,7 @@ export function PreviewView({
             </div>
           </>
         ) : runtimeTabId && snapshot && !showEmptyState ? (
-          previewBridge && snapshot.hostedHere !== false ? (
+          previewBridge ? (
             <BrowserSurfaceSlot
               key={runtimeTabId}
               tabId={runtimeTabId}
@@ -1090,15 +1026,10 @@ export function PreviewView({
               className="absolute inset-0 h-full w-full"
             />
           ) : (
-            <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+            <div className="flex h-full items-center justify-center p-8 text-center">
               <p className="max-w-sm text-sm text-muted-foreground">
-                Hosted on {snapshot.host ?? "desktop"}
+                This tab is open in the T3 Code desktop app.
               </p>
-              {previewBridge ? (
-                <Button variant="outline" size="sm" onClick={() => void handleOpenHere()}>
-                  Open here
-                </Button>
-              ) : null}
             </div>
           )
         ) : null}
@@ -1149,10 +1080,6 @@ export function PreviewView({
           </div>
         ) : null}
       </div>
-      {/* The Laravel Toolbar takes its height from the page area, so it never covers the page. */}
-      {runtimeTabId && !showEmptyState && navStatus._tag !== "LoadFailed" ? (
-        <BrowserLaravelToolbar tabId={runtimeTabId} threadRef={threadRef} pageUrl={url} />
-      ) : null}
     </div>
   );
 }

@@ -41,6 +41,13 @@ import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
+import { DESKTOP_TYPECHECK_LABEL, desktopTypecheckVpArgs } from "./desktop-typecheck.ts";
+import {
+  checkPublishedSyncSource,
+  sealPublishedSyncSource,
+  syncSourceProvenanceMessage,
+  type SyncSourceProvenance,
+} from "./sync-source-provenance.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import {
   UPSTREAM_APP_BRAND,
@@ -692,6 +699,15 @@ export class DesktopBuildDistDirectoryMissingError extends Schema.TaggedError<De
   }
 }
 
+export class DesktopBuildArtifactCopyError extends Schema.TaggedError<DesktopBuildArtifactCopyError>()(
+  "DesktopBuildArtifactCopyError",
+  { from: Schema.String, to: Schema.String, cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return `Failed to copy build artifact ${this.from} to ${this.to}.`;
+  }
+}
+
 export class DesktopBuildNoArtifactsProducedError extends Schema.TaggedError<DesktopBuildNoArtifactsProducedError>()(
   "DesktopBuildNoArtifactsProducedError",
   {
@@ -861,28 +877,37 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   return { stdout, stderr, exitCode } as const;
 });
 
-const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRoot: string) {
-  const result = yield* spawnAndCollectOutput(
-    ChildProcess.make("git", ["rev-parse", "--short=12", "HEAD"], {
-      cwd: repoRoot,
-    }),
-  ).pipe(
-    Effect.orElseSucceed(() => ({
-      stdout: "",
-      stderr: "",
-      exitCode: 1,
-    })),
-  );
+export class DesktopSyncSourceProvenanceError extends Schema.TaggedError<DesktopSyncSourceProvenanceError>()(
+  "DesktopSyncSourceProvenanceError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return this.reason;
+  }
+}
 
-  if (result.exitCode !== 0) {
-    return "unknown";
-  }
-  const hash = result.stdout.trim();
-  if (!/^[0-9a-f]{7,40}$/i.test(hash)) {
-    return "unknown";
-  }
-  return hash.toLowerCase();
-});
+const provenanceFailure = (cause: unknown) =>
+  new DesktopSyncSourceProvenanceError({
+    reason: syncSourceProvenanceMessage(cause),
+  });
+
+export const requireDesktopBuildSourceProvenance = Effect.fn("requireDesktopBuildSourceProvenance")(
+  function* (repoRoot: string) {
+    return yield* Effect.try({
+      try: () => checkPublishedSyncSource({ repo: repoRoot }),
+      catch: provenanceFailure,
+    });
+  },
+);
+
+export const sealDesktopBuildSourceProvenance = Effect.fn("sealDesktopBuildSourceProvenance")(
+  function* (repoRoot: string, expected: SyncSourceProvenance) {
+    return yield* Effect.try({
+      try: () => sealPublishedSyncSource({ repo: repoRoot, expected }),
+      catch: provenanceFailure,
+    });
+  },
+);
 
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -964,6 +989,7 @@ interface StagePackageJson {
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
+  readonly t3codeSyncRef: string;
   readonly t3codeWebAuthn?: MacWebAuthnEntitlements;
   readonly private: true;
   readonly packageManager: string;
@@ -1012,14 +1038,15 @@ export const LINUX_FILE_EXCLUSIONS = [
   "!**/node_modules/node-pty/prebuilds/darwin-*/**/*",
 ] as const;
 
-// node-pty bundles both Darwin architectures; only universal apps need both.
+// Native packages (node-pty, objc-js) ship prebuilds for both Darwin architectures; only universal
+// apps need both. macOS 27 warns that an arm64 app holding x64-only code won't open on macOS 28.
 export function resolveMacFileExclusions(arch?: typeof BuildArch.Type) {
   if (arch === undefined || arch === "universal") {
     return [...MAC_FILE_EXCLUSIONS];
   }
 
   const unusedArch = arch === "arm64" ? "x64" : "arm64";
-  return [...MAC_FILE_EXCLUSIONS, `!**/node_modules/node-pty/prebuilds/darwin-${unusedArch}/**/*`];
+  return [...MAC_FILE_EXCLUSIONS, `!**/node_modules/**/prebuilds/darwin-${unusedArch}/**/*`];
 }
 // Large ASAR sidecars avoid NSIS extracting thousands of loose files during installs and updates.
 export const WINDOWS_SERVER_ASAR_RESOURCE = "server.asar";
@@ -1787,6 +1814,21 @@ const runCommand = Effect.fn("runCommand")(function* (
   }
 });
 
+export const typecheckDesktopPackage = Effect.fn("typecheckDesktopPackage")(function* (
+  repoRoot: string,
+  verbose: boolean,
+) {
+  const spawnCommand = yield* resolveSpawnCommand("vp", [...desktopTypecheckVpArgs]);
+  yield* runCommand(
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      cwd: repoRoot,
+      shell: spawnCommand.shell,
+      extendEnv: true,
+    }),
+    { label: DESKTOP_TYPECHECK_LABEL, verbose },
+  ).pipe(Effect.scoped);
+});
+
 export class DesktopBuildAlreadyRunningError extends Schema.TaggedError<DesktopBuildAlreadyRunningError>()(
   "DesktopBuildAlreadyRunningError",
   { lockPath: Schema.String },
@@ -2102,7 +2144,7 @@ const NativeMarkerManifest = Schema.Struct({
   dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   optionalDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
-const decodeNativeMarkerManifest = Schema.decodeUnknownSync(
+const decodeNativeMarkerManifest = Schema.decodeUnknownOption(
   Schema.fromJsonString(NativeMarkerManifest),
 );
 
@@ -2142,13 +2184,12 @@ const hasNativeLoaderMarkers = Effect.fn("hasNativeLoaderMarkers")(function* (pa
   if (!(yield* exists(manifestPath))) return false;
   const source = yield* fs.readFileString(manifestPath).pipe(Effect.orElseSucceed(() => ""));
   if (source === "") return false;
-  const manifest = yield* Effect.try(() => decodeNativeMarkerManifest(source)).pipe(
-    Effect.orElseSucceed(() => null),
-  );
-  if (manifest === null) return false;
-  return Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies }).some(
-    (dependency) => dependency.startsWith("node-gyp-build"),
-  );
+  const manifest = decodeNativeMarkerManifest(source);
+  if (Option.isNone(manifest)) return false;
+  return Object.keys({
+    ...manifest.value.dependencies,
+    ...manifest.value.optionalDependencies,
+  }).some((dependency) => dependency.startsWith("node-gyp-build"));
 });
 
 export const copyDirectoryPreservingSymlinks = Effect.fn("copyDirectoryPreservingSymlinks")(
@@ -2834,7 +2875,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // Disable smart unpack so native packages' JS/metadata stay archived and avoid slowing NSIS with loose files.
     ...(platform === "win"
       ? { asar: { smartUnpack: false }, asarUnpack: [WINDOWS_NATIVE_ASAR_UNPACK_GLOB] }
-      : {}),
+      : { asarUnpack: ["**/node_modules/@transcribe-cpp/**/*.{dylib,so,so.*}"] }),
     extraResources: [
       ...DESKTOP_EXTRA_RESOURCES,
       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
@@ -3598,6 +3639,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
+  yield* typecheckDesktopPackage(repoRoot, options.verbose);
+  let sourceProvenance = yield* requireDesktopBuildSourceProvenance(repoRoot);
   const hostPlatform = yield* HostProcess.Platform;
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
@@ -3673,7 +3716,6 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     appVersion,
     resolveForkBrand(loadRepoEnv({ repoRoot })),
   );
-  const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
     prefix: `t3code-desktop-${options.platform}-stage-`,
@@ -3902,11 +3944,13 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     options.platform === "win"
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
+  sourceProvenance = yield* sealDesktopBuildSourceProvenance(repoRoot, sourceProvenance);
   const stagePackageJson: StagePackageJson = {
     name: "t3code",
     version: appVersion,
     buildVersion: appVersion,
-    t3codeCommitHash: commitHash,
+    t3codeCommitHash: sourceProvenance.commit,
+    t3codeSyncRef: sourceProvenance.syncRef,
     // Read by apps/desktop/src/preview/Passkeys.ts; must match the signed entitlements.
     ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
     private: true,
@@ -4123,6 +4167,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     });
   }
 
+  yield* sealDesktopBuildSourceProvenance(repoRoot, sourceProvenance);
   yield* Effect.log("[desktop-artifact] Done. Artifacts:").pipe(
     Effect.annotateLogs({ artifacts: copiedArtifacts }),
   );
@@ -4157,13 +4202,15 @@ export const copyDesktopBuildArtifacts = Effect.fn("copyDesktopBuildArtifacts")(
     // overwrite a directory with a file or a file with a directory, and only merges into
     // an existing directory, so a stale entry of either type must go first.
     yield* fs.remove(to, { recursive: true, force: true });
-    yield* Effect.tryPromise(() =>
-      NodeFSP.cp(from, to, {
-        recursive: true,
-        force: true,
-        verbatimSymlinks: true,
-      }),
-    );
+    yield* Effect.tryPromise({
+      try: () =>
+        NodeFSP.cp(from, to, {
+          recursive: true,
+          force: true,
+          verbatimSymlinks: true,
+        }),
+      catch: (cause) => new DesktopBuildArtifactCopyError({ from, to, cause }),
+    });
     copiedArtifacts.push(to);
   }
 

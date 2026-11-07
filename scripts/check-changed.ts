@@ -1,8 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - hashes inputs with node:crypto and sizes the budget with node:os.
 // Runs CI's fast checks for this branch's changes: format and lint of the
 // changed files, knip, generated GraphQL operations, typecheck of the affected
-// packages and their dependents, the test files beside the changed files, and
-// the cross-file checks those miss (agent context budget, React Compiler
+// packages and their dependents plus @t3tools/desktop, the test files
+// beside the changed files, and the cross-file checks those miss (agent
+// context budget, React Compiler
 // coverage of the changed client files).
 // A dependency change also gets the unused-patch install check below. CI still
 // runs the full test suites and the jobs listed in the summary.
@@ -40,6 +41,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { vitePlusCommand } from "./check-changed-command.ts";
+import { withDesktopTypecheck } from "./desktop-typecheck.ts";
 
 const GiB = 1024 ** 3;
 
@@ -108,7 +110,14 @@ const CacheEntry = Schema.fromJsonString(
 const decodeCacheEntry = Schema.decodeEffect(CacheEntry);
 const encodeCacheEntry = Schema.encodeEffect(CacheEntry);
 const decodeRootPackageJson = Schema.decodeEffect(
-  Schema.fromJsonString(Schema.Struct({ scripts: Schema.Struct({ "knip:check": Schema.String }) })),
+  Schema.fromJsonString(
+    Schema.Struct({
+      scripts: Schema.Struct({
+        "knip:check:files": Schema.String,
+        "knip:check:exports": Schema.String,
+      }),
+    }),
+  ),
 );
 
 const collectBytes = (stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>) =>
@@ -370,14 +379,16 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const runKnip = files.some(
     (file) => CODE.test(file) || path.basename(file) === "package.json" || file === "knip.jsonc",
   );
-  // CI runs knip:check as one script of `knip ... && knip ...` passes. The passes
+  // CI runs knip:check as a task that depends on one script per pass. The passes
   // do not depend on each other, so they run side by side here.
   const rootPackage = yield* fs
     .readFileString(inRoot("package.json"))
     .pipe(Effect.flatMap(decodeRootPackageJson), Effect.orDie);
-  const knipCheck = rootPackage.scripts["knip:check"];
   const knipPasses: Array<Array<string>> = [];
-  for (const command of knipCheck.split(" && ")) {
+  for (const command of [
+    rootPackage.scripts["knip:check:files"],
+    rootPackage.scripts["knip:check:exports"],
+  ]) {
     const [bin, ...args] = command.trim().split(/\s+/);
     if (bin !== "knip" || /["'$\\|;&<>]/.test(command)) {
       return yield* Effect.fail(`check:changed cannot split knip:check: ${command}`);
@@ -461,7 +472,8 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     files.some((file) => file.startsWith(`${dir}/`)),
   );
   const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
-  const typecheckWorkers = Math.min(concurrency, affected.length);
+  const typecheckPackages = withDesktopTypecheck(affected);
+  const typecheckWorkers = Math.min(concurrency, typecheckPackages.length);
   const command = (name: string, args: ReadonlyArray<string>) => ({ name, run: vp(args) });
   const compilerFiles = compilerApps.reduce((count, app) => count + app.names.length, 0);
 
@@ -479,24 +491,20 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     ...graphql.map((dir) =>
       command(`graphql (${dir})`, ["run", "--filter", `./${dir}`, "generate", "--check"]),
     ),
-    ...(affected.length > 0
-      ? [
-          {
-            // `tsc --noEmit` writes nothing another package reads, so dependency order
-            // only made dependents wait: --parallel cut a contracts change from 13 s to 9 s.
-            ...command(`typecheck (${affected.length} packages)`, [
-              "run",
-              "--cache",
-              "--parallel",
-              "--concurrency-limit",
-              String(typecheckWorkers),
-              ...filters(affected),
-              "typecheck",
-            ]),
-            weight: typecheckWorkers,
-          },
-        ]
-      : []),
+    {
+      // `effect-tsgo tsrs --noEmit` writes nothing another package reads, so dependency order
+      // only made dependents wait: --parallel cut a contracts change from 13 s to 9 s.
+      ...command(`typecheck (${typecheckPackages.length} packages)`, [
+        "run",
+        "--cache",
+        "--parallel",
+        "--concurrency-limit",
+        String(typecheckWorkers),
+        ...filters(typecheckPackages),
+        "typecheck",
+      ]),
+      weight: typecheckWorkers,
+    },
     // From the repo root, the root vite.config.ts hands each file to its package's config.
     ...(vitestTests.length > 0
       ? [

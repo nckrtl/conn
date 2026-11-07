@@ -27,7 +27,12 @@ function storedLikeTheGateway(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(storedLikeTheGateway);
   if (typeof value === "object" && value !== null) {
     if (Object.keys(value).length === 0) {
-      throw new OrbitGatewayError("validation.failed", "empty map", 422);
+      throw new OrbitGatewayError({
+        code: "validation.failed",
+        message: "empty map",
+        status: 422,
+        details: {},
+      });
     }
     return Object.fromEntries(
       Object.entries(value).map(([key, entry]) => [key, storedLikeTheGateway(entry)]),
@@ -76,7 +81,12 @@ function fakeGateway(options: { sections?: boolean } = {}) {
     patchSections: async (_id: number, patch: Record<string, OrbitGatewaySectionPatch>) => {
       gateway.patches.push(patch);
       if (gateway.patchStatus !== null) {
-        throw new OrbitGatewayError("gateway.request_failed", "no", gateway.patchStatus);
+        throw new OrbitGatewayError({
+          code: "gateway.request_failed",
+          message: "no",
+          status: gateway.patchStatus,
+          details: {},
+        });
       }
       for (const section of Object.values(patch)) storedLikeTheGateway(section.value);
       const stale = Object.entries(patch).filter(
@@ -84,8 +94,11 @@ function fakeGateway(options: { sections?: boolean } = {}) {
           gateway.alwaysConflict || (gateway.sections.get(name)?.version ?? 0) !== section.version,
       );
       if (stale.length > 0) {
-        throw new OrbitGatewayError("conn.settings_version_conflict", "stale", 409, {
-          current_version: gateway.version,
+        throw new OrbitGatewayError({
+          code: "conn.settings_version_conflict",
+          message: "stale",
+          status: 409,
+          details: { current_version: gateway.version },
         });
       }
       for (const [name, section] of Object.entries(patch)) {
@@ -395,7 +408,9 @@ describe("profile sync engine", () => {
     mac.memory.settings.size = 99;
     fake.gateway.alwaysConflict = true;
     const before = fake.gateway.patches.length;
-    await expect(mac.sync()).rejects.toMatchObject({ code: "conn.settings_version_conflict" });
+    const error = await mac.sync().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(OrbitGatewayError);
+    expect(error).toMatchObject({ code: "conn.settings_version_conflict" });
     expect(fake.gateway.patches.length - before).toBe(3);
   });
 

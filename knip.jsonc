@@ -6,6 +6,8 @@
   "ignoreBinaries": ["eas", "file", "mkfifo", "pkill", "pkg-config", "plutil", "sips"],
   "workspaces": {
     ".": {
+      "ignoreDependencies": ["@effect/tsgo"],
+
       // Keep vendored reference repositories outside the root project.
       "project": ["*.{js,mjs,cjs,ts,mts,cts}", ".github/**/*.cjs"],
       "entry": [
@@ -31,6 +33,9 @@
         "build-conn-symbols.ts",
         "build-conn-vendored-tarball.ts",
         "sign-macos-local.ts",
+        "check-desktop-typecheck.ts",
+        "check-sync-provenance.ts",
+        "publish-sync-branch.ts",
         "knip-schemas.ts",
         "linux-after-pack.ts",
         "mobile-behavior/run.ts",
@@ -48,6 +53,20 @@
       "ignore": ["npm-launcher/**", ".knip-test-*/**"],
     },
     "apps/server": {
+      "ignoreIssues": {
+        "**/*.graphql.ts": ["exports", "types", "namespaceMembers"],
+        "src/credentials/TestLoginStore.ts": ["exports"],
+        "src/orbit/OrbitGateway.ts": ["exports"],
+      },
+      "ignoreDependencies": [
+        "@effect/platform-node-shared",
+        "@napi-rs/keyring",
+        "@t3tools/web",
+        "ffi-rs",
+        "jose",
+        "transcribe-cpp",
+      ],
+
       // Vite+ pack entries and the launcher used by installed background services.
       "entry": [
         "src/bin.ts!",
@@ -62,19 +81,14 @@
         "graphql.config.ts",
       ],
       // The generated operations export every selection's class.
-      "ignoreIssues": { "**/*.graphql.ts": ["exports", "types", "namespaceMembers"] },
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
       // Native and disk-loaded provider packages stay external to the bundle; the
       // CLI archive and desktop sidecar stage them from this manifest.
-      "ignoreDependencies": [
-        "@effect/platform-node-shared",
-        "@t3tools/web",
-        "@napi-rs/keyring",
-        "ffi-rs",
-      ],
     },
     "apps/desktop": {
+      "ignoreIssues": { "src/app/workspaceLink.ts": ["exports"] },
+
       // Electron loads these bundles by filename rather than importing them.
       "entry": [
         "gnome-extension/extension.js!",
@@ -97,6 +111,29 @@
       "ignoreDependencies": ["playwright-core", "electron-builder"],
     },
     "apps/web": {
+      "ignoreIssues": {
+        "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"],
+        "src/annotations/**": ["exports"],
+        "src/orbit/**": ["exports"],
+        "src/browser/ServerBrowserSurface.tsx": ["exports"],
+        "src/components/AppRouteModal.tsx": ["exports"],
+        "src/lib/sidebarTree.ts": ["exports"],
+        "src/workspaceStore.ts": ["exports"],
+      },
+
+      "ignore": [
+        "src/annotations/AnnotationQueuePopover.tsx",
+        "src/annotations/BrowserAnnotationControl.tsx",
+        "src/components/settings/OrbitSettings.tsx",
+        "src/components/settings/PasswordsSettings.tsx",
+        "src/components/settings/VaultProviderRow.tsx",
+        "src/components/settings/VaultwardenSettings.tsx",
+        "src/components/ui/field.tsx",
+        "src/laravelToolbarPreview/dark-ocean.css",
+        "src/laravelToolbarPreview/main.tsx",
+        "src/routes/_chat.settings.passwords.tsx",
+      ],
+
       // Worktree setup (scripts/setup-worktree.ts) runs this directly, and evidence
       // fixtures run under node.
       // toolbar-mockup.html loads the Conn toolbar preview, which knip does not read.
@@ -108,13 +145,31 @@
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.
-      "ignoreIssues": { "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"] },
     },
     "apps/marketing": {
       // `astro check` runs from the typecheck task in vite.config.ts, which knip does not read.
       "ignoreDependencies": ["@astrojs/check"],
     },
     "apps/mobile": {
+      "ignore": [
+        "src/features/home/HomeHeader.tsx",
+        "src/features/home/HomeHeader.android.tsx",
+        "src/features/threads/useThreadHeaderOptions.tsx",
+        "src/features/layout/workspace/WorkspacePhoneBar.tsx",
+        "src/features/layout/workspace/useWorkspacePhoneBar.ts",
+        "src/features/workspace/WorkspacePhoneBar.tsx",
+        "src/features/workspace/useWorkspacePhoneBar.ts",
+        "src/features/layout/workspace/WorkspaceDock.tsx",
+        "src/features/layout/workspace/WorkspaceSearchField.tsx",
+        "src/features/layout/workspace/WorkspaceToolbar.tsx",
+        "src/features/orbit/OrbitEnvironmentSections.tsx",
+        "src/features/orbit/OrbitSheetButton.tsx",
+        "modules/t3-highlights/src/T3Highlights.nitro.ts",
+        "src/native/WorkspaceListEdgeBlur.tsx",
+        "src/features/settings/settings-sheet.ts",
+        "src/features/orbit/OrbitLogo.tsx",
+      ],
+
       // Expo loads plugins and the fingerprint config by string; Metro embeds the browser entry in the native WebView.
       "entry": [
         "index.ts!",
@@ -126,9 +181,11 @@
       ],
       // Fonts are configured as asset paths; Expo autolinks the native packages.
       "ignoreDependencies": [
+        "@expo-google-fonts/dm-sans",
         "@expo-google-fonts/jetbrains-mono",
         "@t3tools/mobile-highlights-native",
         "@t3tools/mobile-review-diff-native",
+        "nitrogen",
         "@t3tools/mobile-terminal-native",
       ],
     },
@@ -152,6 +209,18 @@
     "infra/relay": {
       // Alchemy loads src/worker.ts as the Worker entry and reads its default export.
       "entry": ["alchemy.run.ts!", "src/persistence/schema.ts!", "src/worker.ts!"],
+    },
+    "packages/shared": {
+      "ignore": ["src/previewAnnotation.ts", "src/previewPage.ts", "src/previewSessionControl.ts"],
+      "ignoreDependencies": ["playwright-core", "electron-builder", "jose"],
+      "ignoreIssues": {
+        "src/annotationBridge.ts": ["exports"],
+        "src/credentialFill.ts": ["exports"],
+        "src/orbit.ts": ["exports"],
+      },
+    },
+    "packages/contracts": {
+      "ignoreIssues": { "src/rpc.ts": ["exports"] },
     },
     "packages/*": {
       // These workspace packages are private to this monorepo.

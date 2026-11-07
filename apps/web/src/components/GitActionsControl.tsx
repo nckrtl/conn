@@ -367,7 +367,7 @@ function GitActionProgressButtonContent({ progress }: { progress: GitActionProgr
           <Tooltip>
             <TooltipTrigger
               render={
-                <p className="truncate pt-0.5 text-left text-ui font-normal text-muted-foreground" />
+                <p className="truncate pt-0.5 text-left text-2xs font-normal text-muted-foreground" />
               }
             >
               {progress.output}
@@ -405,7 +405,7 @@ function GitActionSuccessButtonContent({ success }: { success: InlineGitActionSu
           <Tooltip>
             <TooltipTrigger
               render={
-                <p className="truncate pt-0.5 text-left text-ui font-normal text-muted-foreground" />
+                <p className="truncate pt-0.5 text-left text-2xs font-normal text-muted-foreground" />
               }
             >
               {success.description}
@@ -1049,10 +1049,13 @@ export default function GitActionsControl({
   const isRepo = gitStatus?.isRepo ?? true;
   const hasPrimaryRemote = gitStatus?.hasPrimaryRemote ?? false;
   const gitStatusForActions = gitStatus;
-  const changesTotals = resolveChangesTotals(gitStatusForActions) ?? {
-    insertions: 0,
-    deletions: 0,
-  };
+  const resolvedChangesTotals = resolveChangesTotals(gitStatusForActions);
+  const changesTotals = resolvedChangesTotals ?? { insertions: 0, deletions: 0 };
+  const changesBaseLabel = resolvedChangesTotals
+    ? resolvedChangesTotals.baseRef === null
+      ? "Uncommitted"
+      : `vs ${resolvedChangesTotals.baseRef}`
+    : null;
 
   const allFiles = gitStatusForActions?.workingTree.files ?? [];
   // Changed-file paths are repository-relative, so they must resolve against
@@ -1506,7 +1509,7 @@ export default function GitActionsControl({
           className={cn(
             "shrink-0",
             THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS,
-            gitActionProgress && "bg-(--shell-highlight)",
+            gitActionProgress && "bg-black/[0.035] dark:bg-white/[0.055]",
           )}
         >
           {gitActionProgress ? (
@@ -1588,7 +1591,7 @@ export default function GitActionsControl({
           {gitActionProgress ? (
             <GitActionElapsedTime
               startedAtMs={gitActionProgress.startedAtMs}
-              className="flex h-8 shrink-0 items-center self-start pe-2.5 text-ui font-normal tabular-nums text-muted-foreground"
+              className="flex h-8 shrink-0 items-center self-start pe-2.5 text-2xs font-normal tabular-nums text-muted-foreground"
             />
           ) : (
             <>
@@ -1636,21 +1639,41 @@ export default function GitActionsControl({
           onClick={onOpenChanges}
         >
           <FileDiffIcon className={THREAD_DETAILS_PANEL_ICON_CLASS} aria-hidden />
-          <span className={cn("flex-1 text-left", THREAD_DETAILS_PANEL_LABEL_CLASS)}>Changes</span>
-          <span className="flex items-center gap-1.5 text-ui tabular-nums">
-            <span
-              className={
-                changesTotals.insertions ? "text-diff-addition-foreground" : "text-muted-foreground"
-              }
-            >
-              +{formatDiffCount(changesTotals.insertions)}
-            </span>
-            <span
-              className={
-                changesTotals.deletions ? "text-diff-deletion-foreground" : "text-muted-foreground"
-              }
-            >
-              -{formatDiffCount(changesTotals.deletions)}
+          <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+            <span className="shrink-0">Changes</span>
+            {changesBaseLabel ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span className="pointer-events-auto min-w-0 truncate font-normal text-muted-foreground" />
+                  }
+                >
+                  {changesBaseLabel}
+                </TooltipTrigger>
+                <TooltipPopup side="top" className="max-w-96 break-words">
+                  {changesBaseLabel}
+                </TooltipPopup>
+              </Tooltip>
+            ) : null}
+            <span className="ml-auto flex shrink-0 items-baseline gap-2 ps-2 font-mono tabular-nums">
+              <span
+                className={
+                  changesTotals.insertions
+                    ? "text-diff-addition-foreground"
+                    : "text-muted-foreground"
+                }
+              >
+                +{formatDiffCount(changesTotals.insertions)}
+              </span>
+              <span
+                className={
+                  changesTotals.deletions
+                    ? "text-diff-deletion-foreground"
+                    : "text-muted-foreground"
+                }
+              >
+                -{formatDiffCount(changesTotals.deletions)}
+              </span>
             </span>
           </span>
         </ThreadDetailsControl>

@@ -1,6 +1,5 @@
 import {
   EMPTY_ORBIT_ENVIRONMENT_STATE,
-  OrbitGatewayError,
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
@@ -78,9 +77,7 @@ function set(patch: Partial<OrbitGatewayState>): void {
 }
 
 function message(error: unknown): string {
-  return error instanceof OrbitGatewayError || error instanceof Error
-    ? error.message
-    : String(error);
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function saveProvider(): Promise<void> {

@@ -4,6 +4,7 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
+import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -99,10 +100,9 @@ import {
   ThreadId,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
-  ForkWsRpcGroup,
+  OfficialWsRpcGroup,
   RpcScopeAuthorization,
   WS_METHODS,
-  WsRpcGroup,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -167,6 +167,7 @@ import {
   makeLiveBodyDeduper,
   projectDomainEventForWire,
   projectThreadProjectionForWire,
+  threadStreamEventItem,
 } from "./orchestration-v2/WireProjection.ts";
 import { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodies";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
@@ -181,7 +182,6 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
-import * as ServerRestart from "./serverRestart.ts";
 import * as NpmRelease from "./cloud/npmRelease.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -191,13 +191,7 @@ import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecr
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
-import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
-import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
-import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
-import * as AnnotationStore from "./annotations/AnnotationStore.ts";
-import * as OrbitWorkspaceRegistrar from "./orbit/OrbitWorkspaceRegistrar.ts";
-import * as AgentPanelBroker from "./panels/AgentPanelBroker.ts";
-import * as TestLoginStore from "./credentials/TestLoginStore.ts";
+import { terminalOutputStream, withOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
@@ -271,6 +265,10 @@ import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import { isNetworkPath } from "@t3tools/shared/path";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import {
+  SOCKET_FRAME_PARTS_QUERY_PARAM,
+  splitLargeSocketFrames,
+} from "@t3tools/shared/socketFrameParts";
 import { isTelemetryIdHash } from "@t3tools/shared/telemetryId";
 import {
   sameUsageLimitCommandCoverage,
@@ -431,8 +429,44 @@ export const resolveOpenDiscoveryForConfig = <T, D, E1, R1, E2, R2, E3, R3, E4, 
     },
     { concurrency: "unbounded" },
   ).pipe(Effect.map(({ editorConfig, ...endpoints }) => ({ ...editorConfig, ...endpoints })));
-function withoutWorkspaceSnapshots(providers: ReadonlyArray<ServerProvider>): ServerProvider[] {
-  return providers.map(({ workspaceSnapshots: _workspaceSnapshots, ...provider }) => provider);
+// A failed scan leaves no cwd snapshot, so a client without the machine catalog gets it
+// as a pending snapshot, which it shows while it retries the scan.
+function workspaceSnapshotOrCatalog(
+  provider: ServerProvider,
+  cwd: string,
+  catalogOnDemand: boolean,
+) {
+  const snapshots = (provider.workspaceSnapshots ?? []).filter((snapshot) => snapshot.cwd === cwd);
+  if (snapshots.length > 0 || !catalogOnDemand) return snapshots;
+  return [
+    {
+      cwd,
+      checkedAt: provider.checkedAt,
+      slashCommands: provider.slashCommands,
+      slashCommandsPending: true,
+      skills: provider.skills,
+    },
+  ];
+}
+
+// On-demand catalog clients read full entries from the cwd snapshot they fetch. Names still
+// change the config when the machine catalog does, so the client refetches, and skill names
+// and labels keep skill links working where no snapshot is fetched.
+function withoutWorkspaceSnapshots(
+  providers: ReadonlyArray<ServerProvider>,
+  catalogsPerCwd: ReadonlySet<string> = new Set(),
+): ServerProvider[] {
+  return providers.map(({ workspaceSnapshots: _workspaceSnapshots, ...provider }) =>
+    catalogsPerCwd.has(provider.instanceId)
+      ? {
+          ...provider,
+          slashCommands: provider.slashCommands.map(({ name }) => ({ name })),
+          skills: provider.skills.map(
+            ({ description: _d, shortDescription: _s, ...skill }) => skill,
+          ),
+        }
+      : provider,
+  );
 }
 
 function unexpectedCompatibilityError(error: never): never {
@@ -570,6 +604,7 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
   readonly failure: FilesystemBrowseFailure;
   readonly parentPath?: string;
   readonly platform?: string;
+  readonly pathMissing?: boolean;
 } {
   switch (error._tag) {
     case "WorkspaceEntriesWindowsPathUnsupportedError":
@@ -577,7 +612,11 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
     case "WorkspaceEntriesCurrentProjectRequiredError":
       return { failure: "current_project_required" };
     case "WorkspaceEntriesReadDirectoryError":
-      return { failure: "read_directory_failed", parentPath: error.parentPath };
+      return {
+        failure: "read_directory_failed",
+        parentPath: error.parentPath,
+        ...(error.pathMissing ? { pathMissing: true } : {}),
+      };
     default:
       return unexpectedCompatibilityError(error);
   }
@@ -624,35 +663,14 @@ function projectFileFailureContext(
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
-const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-// Conn's own RPCs have a layer of their own, layerWsForkRpc: one `toLayer` over
-// every RPC passes TypeScript's type instantiation limit.
-const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(
-  WS_METHODS.serverRestart,
-  WS_METHODS.credentialsListForSite,
-  WS_METHODS.credentialsFillForSite,
-  WS_METHODS.testLoginsList,
-  WS_METHODS.testLoginsSave,
-  WS_METHODS.testLoginsUpdate,
-  WS_METHODS.testLoginsRemove,
-  WS_METHODS.testLoginsReveal,
-  WS_METHODS.annotationsSubscribe,
-  WS_METHODS.annotationsCreate,
-  WS_METHODS.annotationsRemove,
-  WS_METHODS.agentPanelRequests,
-  WS_METHODS.agentPanelRespond,
-  WS_METHODS.orbitWorkspacesSubscribe,
-  WS_METHODS.orbitWorkspacesRegister,
-  WS_METHODS.orbitWorkspacesRemove,
-);
-const ServerWsForkRpcGroup =
-  ForkWsRpcGroup.middleware(RpcScopeAuthorization).middleware(RpcInstrumentation);
+const ServerWsRpcGroup =
+  OfficialWsRpcGroup.middleware(RpcScopeAuthorization).middleware(RpcInstrumentation);
 
 // RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
 // the group, so its type cost grows with handlers × RPCs. Near 200 methods that
 // crosses TypeScript's instantiation limit and the layer's requirements degrade to
 // `any`, so the handlers are registered as two disjoint, smaller groups.
-type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsCoreRpcGroup>;
+type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsRpcGroup>;
 const SPLIT_WS_RPC_PREFIXES = ["server", "pullRequests", "provider", "orchestration"] as const;
 type SplitWsRpc = Extract<
   ServerWsRpc,
@@ -662,13 +680,14 @@ const isSplitWsRpc = (rpc: ServerWsRpc): rpc is SplitWsRpc =>
   SPLIT_WS_RPC_PREFIXES.some((prefix) => rpc._tag.startsWith(`${prefix}.`));
 const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc> =>
   !isSplitWsRpc(rpc);
-const serverWsRpcs = Array.from(ServerWsCoreRpcGroup.requests.values());
+const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
-
-// Past this many events behind, send a fresh shell snapshot instead of replaying
-// each event (each replay costs a shell refetch). Matches the event store's
-// default page size (DEFAULT_READ_FROM_SEQUENCE_LIMIT).
+export const mountedServerWsRpcTags = [...ServerWsRpcGroup.requests.keys()];
+export const mountedSplitWsRpcTags = [...SplitWsRpcGroup.requests.keys()];
+export const mountedOtherWsRpcTags = [...OtherWsRpcGroup.requests.keys()];
+// Replaying each intervening event costs a shell refetch; past this gap a
+// single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
 // Row counts do not bound large tool payloads; sum stored JSON bytes in SQL and snapshot above budget.
 const ORCHESTRATION_REPLAY_PAYLOAD_BUDGET_BYTES = 8 * 1024 * 1024;
@@ -905,11 +924,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
           afterSequence,
         })
         .pipe(
-          Stream.map((stored) => ({
-            kind: "event" as const,
-            sequence: stored.sequence,
-            event: stored.event,
-          })),
+          Stream.map(threadStreamEventItem),
           coalesceThreadLiveStream,
           Stream.mapError(
             (cause) =>
@@ -1380,7 +1395,6 @@ export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
-  desktopTabRelay: DesktopTabRelay.DesktopTabRelay["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
 ) =>
@@ -1497,6 +1511,7 @@ export const layerWsRpc = (
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const secretResolver = yield* SecretResolver.SecretResolver;
+      const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -1885,6 +1900,7 @@ export const layerWsRpc = (
         readonly usageLimitsCommand: boolean;
         readonly workspaceSnapshotsOnDemand: boolean;
         readonly deferNetworkDiscovery: boolean;
+        readonly catalogsPerCwd?: ReadonlySet<string>;
       }) {
         const keybindingsConfig = yield* keybindings.loadConfigState;
         const currentProviders = yield* providerRegistry.getProviders;
@@ -1892,7 +1908,7 @@ export const layerWsRpc = (
           ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
           : currentProviders;
         const providers = options.workspaceSnapshotsOnDemand
-          ? withoutWorkspaceSnapshots(commandProviders)
+          ? withoutWorkspaceSnapshots(commandProviders, options.catalogsPerCwd)
           : commandProviders;
         const settings = ServerSettings.redactServerSettingsForClient(
           yield* serverSettings.getSettings,
@@ -1963,6 +1979,7 @@ export const layerWsRpc = (
           threadFindProgressive: true,
           secretProviderSettings: true,
           secretReferences: true,
+          secretRequestReferences: true,
           ...Option.match(scratchWorkspaceRoot, {
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
@@ -2029,7 +2046,7 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
-      const handlers = ServerWsCoreRpcGroup.of({
+      const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -2148,6 +2165,16 @@ export const layerWsRpc = (
           getOrchestrationV2ArchivedShellSnapshot,
         [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: (input) =>
           readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
+        [ORCHESTRATION_V2_WS_METHODS.getThreadTitles]: (input) =>
+          threadManagement.getThreadTitles(input.threadIds).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetShellSnapshotError({
+                  message: "Failed to load thread titles",
+                  cause,
+                }),
+            ),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) =>
           loadOlderSettledThreadsPage({
             sql,
@@ -2512,6 +2539,9 @@ export const layerWsRpc = (
             if (instanceId === undefined || cwd === undefined) {
               return { providers: withoutWorkspaceSnapshots(commandProviders) };
             }
+            const catalogOnDemand =
+              input.providerCatalogsOnDemand === true &&
+              (yield* providerInstances.getInstance(instanceId))?.snapshotForCwd !== undefined;
             return {
               providers: commandProviders
                 .filter((provider) => provider.instanceId === instanceId)
@@ -2521,9 +2551,7 @@ export const layerWsRpc = (
                   models: [],
                   slashCommands: [],
                   skills: [],
-                  workspaceSnapshots: (provider.workspaceSnapshots ?? []).filter(
-                    (snapshot) => snapshot.cwd === cwd,
-                  ),
+                  workspaceSnapshots: workspaceSnapshotOrCatalog(provider, cwd, catalogOnDemand),
                 })),
             };
           }),
@@ -2897,8 +2925,12 @@ export const layerWsRpc = (
         [WS_METHODS.subscribeProjectClones]: () => projectCloneTracker.stream,
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
           sourceControlRepositories.publishRepository(input).pipe(
-            Effect.tap(() => repositoryIdentityResolver.resolve(input.cwd, { refresh: true })),
-            Effect.tap(() => refreshGitStatus(input.cwd)),
+            // A failed push still leaves the new remote added.
+            Effect.ensuring(
+              repositoryIdentityResolver
+                .resolve(input.cwd, { refresh: true })
+                .pipe(Effect.andThen(refreshGitStatus(input.cwd))),
+            ),
           ),
         [WS_METHODS.projectsSearchEntries]: (input) =>
           workspaceEntries.search(input).pipe(
@@ -3192,7 +3224,7 @@ export const layerWsRpc = (
         [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
-        [WS_METHODS.previewList]: (input) => desktopTabRelay.list(currentSessionId, input),
+        [WS_METHODS.previewList]: (input) => previewManager.list(input),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
@@ -3253,7 +3285,22 @@ export const layerWsRpc = (
             Effect.gen(function* () {
               const usageLimitsCommand = input.usageLimitsCommand === true;
               const workspaceSnapshotsOnDemand = input.workspaceSnapshotsOnDemand === true;
-              // Buffer changes through discovery and the initial snapshot's RPC ACK wait.
+              // Only providers that can scan a cwd answer the client's on-demand catalog fetch.
+              // Read per update, since a replaced instance can change that.
+              const currentCatalogsPerCwd =
+                workspaceSnapshotsOnDemand && input.providerCatalogsOnDemand === true
+                  ? providerInstances.listInstances.pipe(
+                      Effect.map(
+                        (instances) =>
+                          new Set(
+                            instances
+                              .filter((instance) => instance.snapshotForCwd !== undefined)
+                              .map((instance) => instance.instanceId),
+                          ),
+                      ),
+                    )
+                  : Effect.succeed(new Set<string>());
+              // Buffer changes through discovery and the initial snapshot's send.
               const keybindingsChanges = yield* keybindings.subscribeChanges;
               const settingsChanges = yield* serverSettings.subscribeChanges;
               const remoteTargets = yield* Effect.forkScoped(remoteOpenTargets.resolveTargets(), {
@@ -3269,6 +3316,7 @@ export const layerWsRpc = (
                 usageLimitsCommand,
                 workspaceSnapshotsOnDemand,
                 deferNetworkDiscovery: true,
+                catalogsPerCwd: yield* currentCatalogsPerCwd,
               });
               const keybindingsUpdates = keybindingsChanges.pipe(
                 Stream.map((event) => ({
@@ -3291,16 +3339,19 @@ export const layerWsRpc = (
                     usageLimitsCommand ? sameUsageLimitCommandCoverage : () => true,
                   ),
                 ),
-                (providers, sources) => {
-                  const commandProviders = usageLimitsCommand
-                    ? withUsageLimitsCommands(providers, sources)
-                    : providers;
-                  // Stripped before the de-dupe below, so snapshot-only changes send nothing.
-                  return workspaceSnapshotsOnDemand
-                    ? withoutWorkspaceSnapshots(commandProviders)
-                    : commandProviders;
-                },
+                (providers, sources) =>
+                  usageLimitsCommand ? withUsageLimitsCommands(providers, sources) : providers,
               ).pipe(
+                // Stripped before the de-dupe below, so snapshot-only changes send nothing.
+                Stream.mapEffect((commandProviders) =>
+                  workspaceSnapshotsOnDemand
+                    ? currentCatalogsPerCwd.pipe(
+                        Effect.map((catalogsPerCwd) =>
+                          withoutWorkspaceSnapshots(commandProviders, catalogsPerCwd),
+                        ),
+                      )
+                    : Effect.succeed(commandProviders),
+                ),
                 // Compare initial paired values with the snapshot; blindly dropping them loses changes between snapshot and subscription.
                 (updates) => Stream.concat(rpcInitialItems([config.providers]), updates),
                 Stream.changesWith(
@@ -3447,47 +3498,7 @@ export const layerWsRpc = (
     }),
   );
 
-/** The RPCs of `ForkWsRpcGroup`, beside `layerWsRpc`'s. */
-const layerWsForkRpc = (
-  credentialAutofill: CredentialAutofill.CredentialAutofill["Service"],
-  testLoginStore: TestLoginStore.TestLoginStore["Service"],
-  annotationStore: AnnotationStore.AnnotationStore["Service"],
-  agentPanelBroker: AgentPanelBroker.AgentPanelBroker["Service"],
-  orbitWorkspaces: OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar["Service"],
-) =>
-  ServerWsForkRpcGroup.toLayer(
-    Effect.gen(function* () {
-      const serverRestart = yield* ServerRestart.ServerRestart;
-      return ServerWsForkRpcGroup.of({
-        [WS_METHODS.serverRestart]: () => serverRestart.restart,
-        [WS_METHODS.credentialsListForSite]: (input) => credentialAutofill.listForSite(input),
-        [WS_METHODS.credentialsFillForSite]: (input) => credentialAutofill.fillForSite(input),
-        [WS_METHODS.testLoginsList]: (_input) =>
-          testLoginStore.list.pipe(
-            Effect.map((logins) => ({ items: logins.map(TestLoginStore.summarizeTestLogin) })),
-          ),
-        [WS_METHODS.testLoginsSave]: (input) => testLoginStore.save(input, "user"),
-        [WS_METHODS.testLoginsUpdate]: (input) => testLoginStore.update(input),
-        [WS_METHODS.testLoginsRemove]: (input) => testLoginStore.remove(input.id),
-        [WS_METHODS.testLoginsReveal]: (input) => testLoginStore.reveal(input.id),
-        [WS_METHODS.annotationsSubscribe]: ({ projectId }) => annotationStore.subscribe(projectId),
-        [WS_METHODS.annotationsCreate]: ({ projectId, annotation }) =>
-          annotationStore
-            .create(projectId, annotation)
-            .pipe(Effect.map((record) => ({ annotation: record }))),
-        [WS_METHODS.annotationsRemove]: (input) => annotationStore.remove(input),
-        [WS_METHODS.agentPanelRequests]: (input) => agentPanelBroker.requests(input),
-        [WS_METHODS.agentPanelRespond]: (input) => agentPanelBroker.respond(input),
-        [WS_METHODS.orbitWorkspacesSubscribe]: () => orbitWorkspaces.subscribe,
-        [WS_METHODS.orbitWorkspacesRegister]: (input) => orbitWorkspaces.register(input),
-        [WS_METHODS.orbitWorkspacesRemove]: ({ threadId }) => orbitWorkspaces.remove(threadId),
-      });
-    }),
-  );
-
-// A defect in a handler's effect fails only its own request. RpcServer's default
-// sends a socket-level Defect frame instead, and the client ends every pending
-// request on the socket with it. DefectReporter logs these defects.
+// Default socket-level Defect frames end every pending client request.
 export const WS_RPC_SERVER_OPTIONS = {
   disableTracing: true,
   disableFatalDefects: true,
@@ -3495,19 +3506,14 @@ export const WS_RPC_SERVER_OPTIONS = {
 
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
-    const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
-    const credentialAutofill = yield* CredentialAutofill.CredentialAutofill;
-    const testLoginStore = yield* TestLoginStore.TestLoginStore;
-    const annotationStore = yield* AnnotationStore.AnnotationStore;
-    const agentPanelBroker = yield* AgentPanelBroker.AgentPanelBroker;
-    const orbitWorkspaces = yield* OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const npmRelease = yield* NpmRelease.NpmRelease;
     const pullRequests = yield* PullRequestService.PullRequestService;
+    const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
+    const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
-    const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
       "GET",
@@ -3545,7 +3551,7 @@ export const layer = Layer.unwrap(
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
           yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
-            Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
+            Effect.provideService(RpcServer.Protocol, withOutputWindow(protocol)),
             Effect.provide(
               Layer.merge(
                 RpcAuthorization.layer(session.scopes, (method, payload) => {
@@ -3571,22 +3577,12 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            Layer.merge(
-              layerWsRpc(
-                session,
-                clientAnalyticsProps,
-                serverBrowser,
-                desktopTabRelay,
-                reportProfiles,
-                readSettingsClient(url.value),
-              ),
-              layerWsForkRpc(
-                credentialAutofill,
-                testLoginStore,
-                annotationStore,
-                agentPanelBroker,
-                orbitWorkspaces,
-              ),
+            layerWsRpc(
+              session,
+              clientAnalyticsProps,
+              serverBrowser,
+              reportProfiles,
+              readSettingsClient(url.value),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.
@@ -3605,6 +3601,7 @@ export const layer = Layer.unwrap(
                   reviewGuides,
                 ),
               ),
+              Layer.provide(Layer.succeed(DesktopTabRelay.DesktopTabRelay, desktopTabRelay)),
               Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
               Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
               Layer.provide(
@@ -3623,11 +3620,25 @@ export const layer = Layer.unwrap(
             ),
           ),
         );
+        const framedRpcWebSocketHttpEffect = url.value.searchParams.has(
+          SOCKET_FRAME_PARTS_QUERY_PARAM,
+        )
+          ? rpcWebSocketHttpEffect.pipe(
+              Effect.provideService(
+                HttpServerRequest.HttpServerRequest,
+                // The RPC server upgrades the request itself, so its socket is
+                // wrapped through the request it reads.
+                Object.create(request, {
+                  upgrade: { value: Effect.map(request.upgrade, splitLargeSocketFrames) },
+                }),
+              ),
+            )
+          : rpcWebSocketHttpEffect;
         return yield* Effect.acquireUseRelease(
           sessions.markConnected(session.sessionId),
           () =>
             Effect.raceFirst(
-              rpcWebSocketHttpEffect,
+              framedRpcWebSocketHttpEffect,
               sessions.awaitInvalidation(session.sessionId, session.proofKeyThumbprint).pipe(
                 Effect.as(HttpServerResponse.empty()),
                 Effect.catchTags({

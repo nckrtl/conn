@@ -1,7 +1,7 @@
-import { EdgeBlur } from "../../native/EdgeBlur";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
+import { EdgeBlur } from "../../native/EdgeBlur";
 import { useWorkspaceSettledContentWidth } from "../layout/workspace-content-width";
 import { ThreadMarkdownVideo, ThreadMediaVisibleContext } from "./ThreadMarkdownVideo";
 import { useMarkdownImageSource } from "../../native/useMarkdownImageSource";
@@ -60,6 +60,7 @@ import {
   type ScheduledTaskId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
+import type { ToolCallVisibility } from "@t3tools/contracts/settings";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import { hostedThreadLink, parseThreadLinkHref } from "@t3tools/shared/threadLinks";
@@ -96,7 +97,6 @@ import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3too
 import { imageMimeType } from "@t3tools/shared/image";
 import { videoMimeType } from "@t3tools/shared/video";
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
-import { HeaderHeightContext } from "@react-navigation/elements";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useNativeWorkspaceColumnsSupported } from "../../native/NativeWorkspaceColumns";
 import { useDeviceType } from "../../native/native-layout-metrics";
@@ -104,7 +104,6 @@ import { isDuoDevice } from "../../lib/device-type";
 import {
   memo,
   useCallback,
-  useContext,
   useEffect,
   useEffectEvent,
   useImperativeHandle,
@@ -151,7 +150,6 @@ import { NativeScrollViewMarker } from "../../native/NativeScrollViewMarker";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, { FadeIn, FadeInDown, type SharedValue } from "react-native-reanimated";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
-import { IOS_NAV_BAR_HEIGHT } from "../../lib/layoutMetrics";
 import { SANS_FONT_FAMILY } from "../../lib/fonts";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
@@ -177,6 +175,7 @@ import { getReviewSectionIdForCheckpoint } from "../review/reviewModel";
 import { setReviewSelectedSectionId } from "../review/reviewState";
 import { Menu } from "../../components/ui/Menu";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
+import { useBarInset } from "../../components/ui/useBarInset";
 import { copyPromptLink } from "../prompt-links/prompt-link-actions";
 import { parseReviewCommentMessageSegments } from "../review/reviewCommentSelection";
 import {
@@ -276,7 +275,7 @@ import {
   resolveWorkspaceFilePath,
   resolveWorkspaceRelativeFilePath,
 } from "../files/filePath";
-import { waitForThreadShellReady } from "./threadForkNavigation";
+import { waitForThreadShell } from "./threadForkNavigation";
 import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
 import { fileChipClipboardPath, fileChipMenu, resolveFileChipTarget } from "./fileChipMenu";
 import { useFileChipShare } from "./useFileChipShare";
@@ -288,7 +287,7 @@ import {
   ThreadMarkdownImageView,
 } from "./ThreadMarkdownImage";
 import { openSettings } from "../settings/settings-navigation";
-import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
+import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 
 const WIDE_MARKDOWN_BLOCK_OPTIONS = {
   // iOS blockquotes and selectable text measure separately; definite bubble width matches UIKit's drawing width.
@@ -308,10 +307,7 @@ function formatMessageTime(input: string): string {
   return MESSAGE_TIME_FORMATTER.format(timestamp);
 }
 
-// Fixed heights mirror renderFeedEntry's classNames and are only used while
-// text fits at the current font settings. Larger accessibility text is measured.
-// Conn: mb-3 puts the label's gap above the divider below it too (upstream mb-1, 42).
-const TURN_FOLD_HEIGHT = 49; // min-h-11 (38.5) + mb-3 (10.5), with the mobile 14px rem
+const TURN_FOLD_HEIGHT = 42;
 const FEED_PADDING_TOP = 12;
 // Rows re-measure within a commit or two of a width change. LegendList also defers imperative
 // scrolls for 100ms after it compensates a size change, and a deferred restore could land
@@ -320,8 +316,6 @@ const FEED_REFLOW_SETTLE_MS = 200;
 // A fold resizes the feed in steps about 200ms apart. Holding the place taken at the first step
 // across all of them keeps a passing moment off the end from re-anchoring the rest to a row.
 const FEED_REFLOW_HOLD_MS = 600;
-// Tailwind spacing on the mobile 14px rem: px-3.5 on the user bubble, px-1 on
-// assistant rows. Images size their frame from these before their own layout.
 const USER_BUBBLE_HORIZONTAL_PADDING = 3.5 * 3.5;
 const ASSISTANT_ROW_HORIZONTAL_PADDING = 3.5;
 
@@ -347,6 +341,7 @@ export interface ThreadFeedHandle {
 }
 
 export interface ThreadFeedProps {
+  readonly toolCallVisibility?: ToolCallVisibility;
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
   readonly setupWorkingStartedAt?: string | null;
   readonly queuedMessages: ReadonlyArray<QueuedThreadMessage>;
@@ -385,16 +380,6 @@ export interface ThreadFeedProps {
   readonly onEndFollowEnabledChange?: (enabled: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
-}
-
-async function waitForThreadShell(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-): Promise<boolean> {
-  const atom = environmentThreadShells.threadShellAtom(scopeThreadRef(environmentId, threadId));
-  return waitForThreadShellReady({
-    read: () => appAtomRegistry.get(atom) !== null,
-  });
 }
 
 const USER_MESSAGE_COPY_MENU_ACTIONS = [
@@ -476,7 +461,9 @@ function AssistantForkButton(props: {
         })
           .then(async (result) => {
             if (result._tag !== "Success") return;
-            const targetThreadReady = await waitForThreadShell(props.environmentId, targetThreadId);
+            const targetThreadReady = await waitForThreadShell(
+              scopeThreadRef(props.environmentId, targetThreadId),
+            );
             if (!targetThreadReady) {
               Dialog.alert(
                 "Fork created",
@@ -1331,7 +1318,6 @@ function useMarkdownStyles(): MarkdownStyleSets {
   const markdownUserCodeText = theme["--color-md-user-code-text"];
   const markdownUserInlineCodeText = theme["--color-user-bubble-foreground-muted"];
   const markdownUserFenceBg = theme["--color-md-user-fence-bg"];
-
   return {
     user: {
       nativeTextStyle: {
@@ -1621,7 +1607,7 @@ function RunFoldButton({
         onPress={toggle}
         hitSlop={4}
         className="min-h-11 min-w-0 flex-1 flex-row items-center gap-2"
-        style={{ minHeight: Math.max(TURN_FOLD_HEIGHT - 10.5, rowSizing.estimatedRowHeight) }}
+        style={{ minHeight: Math.max(TURN_FOLD_HEIGHT - 3.5, rowSizing.estimatedRowHeight) }}
       >
         <Text
           key={rowSizing.textSizeKey}
@@ -1728,7 +1714,7 @@ function renderFeedEntry(
 
   if (entry.type === "run-fold") {
     return (
-      <View className="mb-3 flex-row items-center border-b border-border-subtle px-2">
+      <View className="mb-1 flex-row items-center border-b border-border-subtle px-2">
         <RunFoldButton
           key={entry.id}
           entry={entry}
@@ -1749,7 +1735,13 @@ function renderFeedEntry(
   }
 
   if (entry.type === "thinking") {
-    return <ThreadThinkingRow rowSizing={props.workRowSizing} iconSubtleColor={iconSubtleColor} />;
+    return (
+      <ThreadThinkingRow
+        rowSizing={props.workRowSizing}
+        iconSubtleColor={iconSubtleColor}
+        label={entry.label}
+      />
+    );
   }
 
   if (entry.type === "html-render") {
@@ -2575,6 +2567,7 @@ function useThreadFeedPresentation(
   props: ThreadFeedProps,
   expandedTurnIds: ReadonlySet<RunId>,
   expandedWorkGroups: Record<string, boolean>,
+  revealedMessageId: MessageId | null,
 ) {
   const [feedCache] = useState(createThreadFeedCache);
   return appendPendingThreadMessages(
@@ -2590,6 +2583,7 @@ function useThreadFeedPresentation(
       props.activeWorkStartedAt,
       props.runlessWorkActive ?? false,
       feedCache,
+      { toolCallVisibility: props.toolCallVisibility ?? "showAll", revealedMessageId },
     ),
     props.feed,
     props.queuedMessages,
@@ -2745,13 +2739,16 @@ export const ThreadFeed = memo(function ThreadFeed({
     readonly expandedWorkGroups: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly expandedTurnIds: ReadonlySet<RunId>;
+    readonly revealedMessageId: MessageId | null;
   }>({
     copiedRowId: null,
     expandedWorkGroups: {},
     expandedWorkRows: {},
     expandedTurnIds: new Set(),
+    revealedMessageId: null,
   });
-  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds, revealedMessageId } =
+    interactionState;
   const markdownLinkRequest = useRef<AbortController | null>(null);
   const onInlinePlaybackStart = () => {
     markdownLinkRequest.current?.abort();
@@ -2810,7 +2807,8 @@ export const ThreadFeed = memo(function ThreadFeed({
   const markdownContentWidth = Math.max(0, contentWidth - ASSISTANT_ROW_HORIZONTAL_PADDING * 2);
   const reviewCommentBubbleWidth = Math.min(Math.max(280, contentWidth * 0.85), contentWidth);
   const insets = useSafeAreaInsets();
-  const topContentInset = props.contentTopInset ?? insets.top + IOS_NAV_BAR_HEIGHT;
+  const barInset = useBarInset();
+  const topContentInset = props.contentTopInset ?? barInset;
   const bottomContentInset = props.contentBottomInset ?? 18;
   const usesNativeAutomaticInsets =
     props.usesAutomaticContentInsets === true && Platform.OS === "ios";
@@ -2820,10 +2818,7 @@ export const ThreadFeed = memo(function ThreadFeed({
     bottomContentInset,
   });
   // LegendList cannot see UIKit's adjustedContentInset; include header height in anchor offsets.
-  const navigationHeaderHeight = useContext(HeaderHeightContext);
-  const anchorTopInset = usesNativeAutomaticInsets
-    ? (navigationHeaderHeight ?? insets.top + IOS_NAV_BAR_HEIGHT)
-    : topContentInset;
+  const anchorTopInset = usesNativeAutomaticInsets ? barInset : topContentInset;
 
   const theme = useUniwindTheme();
   const iconSubtleColor = theme["--color-icon-subtle"];
@@ -3313,8 +3308,11 @@ export const ThreadFeed = memo(function ThreadFeed({
   const [loadedListKey, setLoadedListKey] = useState<string | null>(null);
   const { jumpToMessageId } = props;
   const jumpReady = !!jumpToMessageId && loadedListKey === `${feedThreadKey}:filled`;
+  if (jumpReady && revealedMessageId !== jumpToMessageId) {
+    setInteractionState((current) => ({ ...current, revealedMessageId: jumpToMessageId }));
+  }
   const presentedFeed = appendGuestPendingMessages(
-    useThreadFeedPresentation(props, expandedTurnIds, expandedWorkGroups),
+    useThreadFeedPresentation(props, expandedTurnIds, expandedWorkGroups, revealedMessageId),
     guestShare,
   );
   const jumpRunId =
@@ -3731,6 +3729,15 @@ export const ThreadFeed = memo(function ThreadFeed({
       >
         <ThreadMediaVisibility>
           {info.item.type === "message" &&
+          info.item.message.projectedItem?.item.type === "user_message" &&
+          info.item.message.projectedItem.item.freshContext ? (
+            <ThreadContextDivider
+              label="New session"
+              icon="arrow.clockwise"
+              iconColor={iconSubtleColor}
+            />
+          ) : null}
+          {info.item.type === "message" &&
           !isCompactionCommandFeedEntry(info.item) &&
           info.item.message.projectedItem?.item.type === "user_message" &&
           info.item.message.projectedItem.item.modelSwitch ? (
@@ -3807,7 +3814,12 @@ export const ThreadFeed = memo(function ThreadFeed({
 
   return (
     <PresentationSource identifier={fileShareSourceIdentifier} style={{ flex: 1 }}>
-      <View className="flex-1" onLayout={handleViewportLayout}>
+      {/* While the pane tracks a sliding sidebar, rows keep its settled width and re-wrap once. */}
+      <View
+        className="flex-1"
+        style={settledPaneWidth !== null ? { width: settledPaneWidth } : undefined}
+        onLayout={handleViewportLayout}
+      >
         <View className="flex-1">
           {/* oxlint-disable-next-line t3code/require-registered-list-scroll -- ThreadFeedScrollView is passed through the iOS-only spread below; the prop rejects undefined. */}
           <KeyboardAwareLegendList

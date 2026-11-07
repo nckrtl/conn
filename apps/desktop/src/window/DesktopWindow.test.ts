@@ -15,23 +15,40 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Electron from "electron";
 import { vi } from "vite-plus/test";
 
-vi.mock("electron", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("electron")>()),
-  session: {
-    fromPartition: vi.fn(() => ({
-      getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/1.2.3"),
-      setPermissionRequestHandler: vi.fn(),
-      setUserAgent: vi.fn(),
-    })),
-  },
-  screen: {
-    getAllDisplays: vi.fn(() => [
-      {
-        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
-      },
-    ]),
-  },
+const electronStubs = vi.hoisted(() => ({
+  fromId: vi.fn(),
+  fromWebContents: vi.fn(),
 }));
+
+vi.mock("electron", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("electron")>();
+  return {
+    ...actual,
+    webContents: {
+      fromId: electronStubs.fromId,
+    },
+    BrowserWindow: {
+      fromWebContents: electronStubs.fromWebContents,
+      fromId: vi.fn(() => null),
+      getAllWindows: vi.fn(() => []),
+      getFocusedWindow: vi.fn(() => null),
+    },
+    session: {
+      fromPartition: vi.fn(() => ({
+        getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/1.2.3"),
+        setPermissionRequestHandler: vi.fn(),
+        setUserAgent: vi.fn(),
+      })),
+    },
+    screen: {
+      getAllDisplays: vi.fn(() => [
+        {
+          bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        },
+      ]),
+    },
+  };
+});
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -77,6 +94,7 @@ function makeFakeBrowserWindow() {
     setZoomLevel: vi.fn((level: number) => {
       zoomLevel = level;
     }),
+    id: 101,
     isLoadingMainFrame: vi.fn(() => false),
     navigationHistory: {
       canGoBack: vi.fn(() => true),
@@ -99,6 +117,7 @@ function makeFakeBrowserWindow() {
   };
 
   const window = {
+    id: 7,
     close: vi.fn(),
     focus: vi.fn(),
     getBounds: vi.fn(() => ({ x: 0, y: 0, width: 1100, height: 780 })),
@@ -1245,6 +1264,48 @@ describe("DesktopWindow", () => {
         assert.equal(yield* Ref.get(createCount), 1);
         assert.equal(fakeWindow.send.mock.calls.length, 0);
         assert.equal(onReveal.mock.calls.length, 0);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("opens an extra window for a workspace and titles it from the renderer report", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const createdWindowOptions: Electron.BrowserWindowConstructorOptions[] = [];
+      const previewWindows: Electron.BrowserWindow[] = [];
+      const layer = layerTest({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        createdWindowOptions,
+        addPreviewWindow: (window) =>
+          Effect.sync(() => {
+            previewWindows.push(window);
+          }),
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        yield* desktopWindow.createAdditional({ workspace: "DLF" });
+        assert.equal(yield* Ref.get(createCount), 2);
+        const extra = createdWindowOptions[1]?.webPreferences?.additionalArguments ?? [];
+        assert.deepEqual(extra, [
+          "--t3code-window=additional",
+          `--t3code-window-workspace=${encodeURIComponent("DLF")}`,
+        ]);
+        assert.equal(previewWindows.length, 2);
+
+        electronStubs.fromId.mockReturnValue(fakeWindow.window.webContents);
+        electronStubs.fromWebContents.mockReturnValue(fakeWindow.window);
+        yield* desktopWindow.noteWorkspace({
+          webContentsId: fakeWindow.window.webContents.id,
+          id: "ws-dlf",
+          name: "DLF",
+        });
+        assert.equal(vi.mocked(fakeWindow.window.setTitle).mock.calls.at(-1)?.[0], "DLF");
       }).pipe(Effect.provide(layer));
     }),
   );

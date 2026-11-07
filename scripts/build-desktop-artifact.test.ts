@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -26,6 +28,9 @@ import {
   DesktopBuildManifestRestoreError,
   BundleNotSelfContainedError,
   BuildCommandFailedError,
+  typecheckDesktopPackage,
+  requireDesktopBuildSourceProvenance,
+  DesktopSyncSourceProvenanceError,
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
@@ -38,6 +43,7 @@ import {
   packWindowsServerAsar,
   preflightWindowsDesktopBuild,
   renderMacPasskeyEntitlements,
+  resolveMacFileExclusions,
   resolveMacWebAuthnEntitlements,
   resolveMacPasskeySigningConfiguration,
   resolveMergedStageDependencies,
@@ -66,6 +72,7 @@ import {
   resolveDesktopBuildIconAssets,
   resolveDesktopWebIconOverride,
 } from "./build-desktop-artifact.ts";
+import { desktopTypecheckVpArgs } from "./desktop-typecheck.ts";
 import { resolveAppBrand } from "../apps/desktop/src/branding/appBrand.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import {
@@ -239,6 +246,63 @@ const makeMacPayloadFixture = Effect.fn("test.makeMacPayloadFixture")(function* 
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it.effect("fails closed when the desktop Vite typecheck exits non-zero", () => {
+    const commands: Array<{
+      readonly command: string;
+      readonly args: ReadonlyArray<string>;
+      readonly options: { readonly cwd?: string };
+    }> = [];
+    const spawner = Layer.succeed(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        commands.push(command as unknown as (typeof commands)[number]);
+        return Effect.succeed(
+          mockProcess(2, "Property 'showWorkspace' does not exist on type 'DesktopWindow'."),
+        );
+      }),
+    );
+
+    return Effect.gen(function* () {
+      const error = yield* typecheckDesktopPackage("/repo", false).pipe(Effect.flip);
+      assert.instanceOf(error, BuildCommandFailedError);
+      assert.equal(error.exitCode, 2);
+      assert.equal(error.command, "vp run --no-cache --filter @t3tools/desktop typecheck");
+      assert.include(error.message, "showWorkspace");
+      assert.equal(commands.length, 1);
+      assert.equal(commands[0]?.command, "vp");
+      assert.deepStrictEqual(commands[0]?.args, [...desktopTypecheckVpArgs]);
+      assert.equal(commands[0]?.options.cwd, "/repo");
+    }).pipe(Effect.provide(spawner), Effect.scoped);
+  });
+
+  it.effect("accepts a passing desktop Vite typecheck", () => {
+    const commands: Array<{ readonly args: ReadonlyArray<string> }> = [];
+    const spawner = Layer.succeed(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        commands.push(command as unknown as (typeof commands)[number]);
+        return Effect.succeed(mockProcess(0));
+      }),
+    );
+
+    return Effect.gen(function* () {
+      yield* typecheckDesktopPackage("/repo", false);
+      assert.equal(commands.length, 1);
+      assert.deepStrictEqual(commands[0]?.args, [...desktopTypecheckVpArgs]);
+    }).pipe(Effect.provide(spawner), Effect.scoped);
+  });
+
+  it.effect("fails closed when the build source is not a published origin sync tip", () => {
+    const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conn-sync-unpublished-"));
+    return Effect.gen(function* () {
+      const error = yield* requireDesktopBuildSourceProvenance(repo).pipe(Effect.flip);
+      assert.instanceOf(error, DesktopSyncSourceProvenanceError);
+      assert.match(error.message, /could not resolve HEAD|not a git repository|not published/i);
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(repo, { recursive: true, force: true }))),
+    );
+  });
+
   it("packages the brand's own stable icons and leaves nightly ones alone", () => {
     const brand = resolveAppBrand(
       {
@@ -698,6 +762,30 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       }),
     ),
   );
+
+  it("drops the other architecture's Darwin prebuilds from single-architecture Mac builds", () => {
+    const excludes = (arch: "arm64" | "x64" | "universal", file: string) =>
+      resolveMacFileExclusions(arch).some((glob) => NodePath.matchesGlob(file, glob.slice(1)));
+    const x64 = [
+      "node_modules/node-pty/prebuilds/darwin-x64/pty.node",
+      "node_modules/objc-js/prebuilds/darwin-x64/node.napi.node",
+    ];
+    const arm64 = [
+      "node_modules/node-pty/prebuilds/darwin-arm64/pty.node",
+      "node_modules/objc-js/prebuilds/darwin-arm64/node.napi.armv8.node",
+    ];
+
+    for (const file of x64) {
+      assert.isTrue(excludes("arm64", file), file);
+      assert.isFalse(excludes("x64", file), file);
+      assert.isFalse(excludes("universal", file), file);
+    }
+    for (const file of arm64) {
+      assert.isTrue(excludes("x64", file), file);
+      assert.isFalse(excludes("arm64", file), file);
+      assert.isFalse(excludes("universal", file), file);
+    }
+  });
 
   it.effect("unpacks target Windows natives while excluding the other architecture", () =>
     Effect.scoped(

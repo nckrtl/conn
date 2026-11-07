@@ -1,5 +1,5 @@
-import { listOrbitInstances, listOrbitNodes, listOrbitProjects, OrbitApiError } from "./orbitApi";
-import { OrbitTransportError, type OrbitTransport, shellQuote } from "./orbitTransport";
+import { isOrbitApiError, listOrbitInstances, listOrbitNodes, listOrbitProjects } from "./orbitApi";
+import { isOrbitTransportError, type OrbitTransport, shellQuote } from "./orbitTransport";
 
 /** Runs a short `sh` script on the environment's machine. */
 export type HiddenShellRunner = (
@@ -54,11 +54,11 @@ function unavailable(reason: string): OrbitAvailability {
 }
 
 function describeOrbitError(error: unknown): string {
-  if (error instanceof OrbitApiError) {
+  if (isOrbitApiError(error)) {
     if (error.code === "peer.identity_unknown") return "This machine is not an Orbit Node";
     return `${error.message} (${error.code})`;
   }
-  if (error instanceof OrbitTransportError) return error.message;
+  if (isOrbitTransportError(error)) return error.message;
   return error instanceof Error ? error.message : "Orbit failed.";
 }
 
@@ -131,7 +131,7 @@ export async function checkOrbitAvailability(
     projects = await listOrbitProjects(transport);
   } catch (error) {
     // Orbit does not know this machine: there is no Orbit here.
-    if (error instanceof OrbitApiError && error.code === "peer.identity_unknown") return HIDDEN;
+    if (isOrbitApiError(error) && error.code === "peer.identity_unknown") return HIDDEN;
     // Orbit unreachable, a broken response, or a failed shell: the repository
     // may well be an Orbit Project, so show the option with the reason.
     return blocked(describeOrbitError(error));

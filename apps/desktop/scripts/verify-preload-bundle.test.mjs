@@ -11,6 +11,22 @@ const validPreload = `
     getLocalEnvironmentBootstraps: () => [],
     getPathForFile: () => "",
     pickFolder: (options) => electron.ipcRenderer.invoke(PICK_FOLDER_CHANNEL, options),
+    apiSend: () => Promise.resolve(undefined),
+    orbitGatewaySend: () => Promise.resolve(undefined),
+    databaseRun: () => Promise.resolve(undefined),
+    vaultwardenSetup: () => Promise.resolve(undefined),
+    vaultLogins: () => Promise.resolve(undefined),
+    vaultFill: () => Promise.resolve(undefined),
+    vaultDatabases: () => Promise.resolve(undefined),
+    mcpConnect: () => Promise.resolve(undefined),
+    mcpRequest: () => Promise.resolve(undefined),
+    mcpDisconnect: () => Promise.resolve(undefined),
+    onMcpEvent: () => () => {},
+    openWorkspaceWindow: () => Promise.resolve(undefined),
+    reportWorkspace: () => Promise.resolve(undefined),
+    windowContext: { additional: false, workspace: null },
+    getLocalThemes: () => Promise.resolve([]),
+    onLocalThemesChanged: () => () => {},
   });
 `;
 
@@ -24,6 +40,16 @@ describe("desktop preload bundle verifier", () => {
           require("electron");
         `),
       /missing executable APIs/,
+    );
+  });
+
+  it("rejects a missing extra-window context object", () => {
+    assert.throws(
+      () =>
+        verifyPreloadBundle(
+          validPreload.replace("windowContext: { additional: false, workspace: null },", ""),
+        ),
+      /missing executable APIs: windowContext/,
     );
   });
 

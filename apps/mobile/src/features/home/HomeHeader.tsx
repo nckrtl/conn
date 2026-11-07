@@ -1,6 +1,6 @@
 import { selectOrbitWorkspace, useOrbitGateway } from "../orbit/orbitGatewayStore";
-import { WorkspacePhoneBar } from "../workspace/WorkspacePhoneBar";
-import { useWorkspacePhoneBar } from "../workspace/useWorkspacePhoneBar";
+import { WorkspacePhoneBar } from "../layout/workspace/WorkspacePhoneBar";
+import { useWorkspacePhoneBar } from "../layout/workspace/useWorkspacePhoneBar";
 import { buildHomeListFilterMenu } from "./home-list-filter-menu";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 

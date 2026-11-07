@@ -322,8 +322,14 @@ Do not reintroduce these:
 
 3. Check that new scroll containers in cards use `scrollbar-inset`, and new
    switches use the primitive (no own track color).
-4. Lint the touched files (`vp lint <files>`) and typecheck `apps/web`
-   (`tsc --noEmit`). Do not run repo-wide checks.
+4. Lint the touched files (`vp lint <files>`) and run `vp run check:changed`.
+   That always typechecks `@t3tools/desktop` via the existing Vite task.
+   `scripts/build-desktop-artifact.ts` runs the same task before packing and
+   fails closed. Packaging also requires the full HEAD SHA to be the tip of an
+   origin `sync/*` branch (`scripts/publish-sync-branch.ts` then
+   `scripts/check-sync-provenance.ts`). Do not add `scripts.typecheck` to
+   `apps/desktop/package.json`.
+   Do not run repo-wide checks.
 5. Visual check, when the user agrees: use the `test-t3-app` skill. Check
    Dark Ocean and at least one built-in light theme. Look at the chat,
    sidebar, Settings, browser, Files, Diff and terminal.

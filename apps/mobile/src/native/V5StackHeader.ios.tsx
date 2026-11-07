@@ -4,12 +4,12 @@ import type {
   NativeStackNavigationOptions,
 } from "@react-navigation/native-stack";
 import { isValidElement, useEffect, useRef } from "react";
-import { Platform, StyleSheet, useWindowDimensions } from "react-native";
+import { StyleSheet, useWindowDimensions } from "react-native";
 import { useScaledTextRole } from "../features/settings/appearance/useScaledTextRole";
 import { KeyboardController, useKeyboardState } from "react-native-keyboard-controller";
 import { isDuoDevice } from "../lib/device-type";
 import { useMobileNavigationTheme } from "../lib/useMobileNavigationTheme";
-import { useDeviceType, useNativeLayoutMetrics } from "../native/native-layout-metrics";
+import { useDeviceType, useNativeLayoutMetrics } from "./native-layout-metrics";
 import { HeaderItemsWidthContext } from "./header-items-width";
 import {
   SearchBar,

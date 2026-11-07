@@ -1,3 +1,5 @@
+import * as Schema from "effect/Schema";
+
 /**
  * The Conn layer of the Orbit Gateway (`/api/v1/conn`, see Orbit's docs/reference/conn.md).
  *
@@ -23,24 +25,15 @@ export interface OrbitGatewayResponse {
 export type OrbitGatewayTransport = (request: OrbitGatewayRequest) => Promise<OrbitGatewayResponse>;
 
 /** A failed Gateway call. `code` is the Gateway's error code, or `gateway.unreachable`/`gateway.response_invalid`. */
-export class OrbitGatewayError extends Error {
-  readonly code: string;
-  readonly status: number;
-  readonly details: Record<string, unknown>;
-
-  constructor(
-    code: string,
-    message: string,
-    status: number,
-    details: Record<string, unknown> = {},
-  ) {
-    super(message);
-    this.name = "OrbitGatewayError";
-    this.code = code;
-    this.status = status;
-    this.details = details;
-  }
-}
+export class OrbitGatewayError extends Schema.TaggedError<OrbitGatewayError>()(
+  "OrbitGatewayError",
+  {
+    code: Schema.String,
+    message: Schema.String,
+    status: Schema.Number,
+    details: Schema.Record(Schema.String, Schema.Unknown),
+  },
+) {}
 
 export interface OrbitGatewayProfile {
   readonly id: number;
@@ -142,23 +135,25 @@ export function createOrbitGatewayClient(transport: OrbitGatewayTransport): Orbi
     try {
       response = await transport(request);
     } catch (cause) {
-      throw new OrbitGatewayError(
-        "gateway.unreachable",
-        `The Orbit Gateway did not answer: ${cause instanceof Error ? cause.message : String(cause)}`,
-        0,
-      );
+      throw new OrbitGatewayError({
+        code: "gateway.unreachable",
+        message: `The Orbit Gateway did not answer: ${cause instanceof Error ? cause.message : String(cause)}`,
+        status: 0,
+        details: {},
+      });
     }
     const json = parseJson(response.body);
     if (response.status < 200 || response.status >= 300) {
       const error = record(record(json)?.error);
-      throw new OrbitGatewayError(
-        typeof error?.code === "string" ? error.code : "gateway.request_failed",
-        typeof error?.message === "string"
-          ? error.message
-          : `The Orbit Gateway answered ${response.status}.`,
-        response.status,
-        record(error?.details) ?? {},
-      );
+      throw new OrbitGatewayError({
+        code: typeof error?.code === "string" ? error.code : "gateway.request_failed",
+        message:
+          typeof error?.message === "string"
+            ? error.message
+            : `The Orbit Gateway answered ${response.status}.`,
+        status: response.status,
+        details: record(error?.details) ?? {},
+      });
     }
     const envelope = record(json);
     if (!envelope || !("data" in envelope)) {
@@ -264,11 +259,12 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 function invalid(path: string): OrbitGatewayError {
-  return new OrbitGatewayError(
-    "gateway.response_invalid",
-    `The Orbit Gateway sent an unexpected ${path} response.`,
-    0,
-  );
+  return new OrbitGatewayError({
+    code: "gateway.response_invalid",
+    message: `The Orbit Gateway sent an unexpected ${path} response.`,
+    status: 0,
+    details: {},
+  });
 }
 
 function list<T>(value: unknown, path: string, item: (value: unknown, path: string) => T): T[] {

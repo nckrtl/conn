@@ -1,7 +1,6 @@
 import {
   APPEARANCE_SECTION,
   DESKTOP_DEVICE_SECTION,
-  OrbitGatewayError,
   type EnvironmentProvider,
   type OrbitGatewayEnvironment,
   type OrbitGatewayNode,
@@ -47,9 +46,7 @@ const PROVIDER_LABELS: Record<EnvironmentProvider, string> = {
 };
 
 function message(error: unknown): string {
-  return error instanceof OrbitGatewayError || error instanceof Error
-    ? error.message
-    : String(error);
+  return error instanceof Error ? error.message : String(error);
 }
 
 function relativeTime(at: number | null): string {

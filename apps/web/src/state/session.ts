@@ -21,7 +21,6 @@ export const environmentSessionStatesAtom = environmentAtomList(
 
 const EMPTY_SESSION_STATE_ATOM = Atom.make(AsyncResult.initial<AuthSessionState>());
 
-/** Uses the selected environment's grant, including cached scopes during a refresh. */
 export function useEnvironmentScope(
   environmentId: EnvironmentId | null,
   scope: AuthEnvironmentScope,
@@ -43,25 +42,6 @@ export function sessionHasScope(
   return result._tag !== "Failure" && session !== null && sessionGrantsScope(session, scope);
 }
 
-/**
- * Conn: true only when the environment's known, authenticated grant lacks `scope`. An unknown,
- * loading or failed session is not judged.
- */
-export function readEnvironmentLacksScope(
-  environmentId: EnvironmentId,
-  scope: AuthEnvironmentScope,
-): boolean {
-  const result = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
-  const session = Option.getOrNull(AsyncResult.value(result));
-  return (
-    result._tag !== "Failure" &&
-    session !== null &&
-    session.authenticated &&
-    !sessionGrantsScope(session, scope)
-  );
-}
-
-// Keyed by scope and ids so callers get one Set per session change, not one per render.
 const environmentsWithScopeAtom = Atom.family((key: string) => {
   const [scope, idsKey = ""] = key.split(/\n(.*)/s) as [AuthEnvironmentScope, string?];
   const ids = idsKey === "" ? [] : (idsKey.split("\n") as EnvironmentId[]);
@@ -111,16 +91,30 @@ export function readPreparedConnection(environmentId: EnvironmentId) {
   );
 }
 
-/**
- * This client's authenticated session on one environment, as reported by that
- * environment's `/api/auth/session` endpoint. `data` stays populated across
- * SWR revalidations; `isPending` is only meaningful before the first resolve.
- */
-export function useEnvironmentSessionState(environmentId: EnvironmentId) {
-  const result = useAtomValue(environmentSession.sessionStateAtom(environmentId));
+/** data survives SWR revalidation; isPending applies only before first resolve. */
+export function useEnvironmentSessionState(environmentId: EnvironmentId | null) {
+  const result = useAtomValue(
+    environmentId === null
+      ? EMPTY_SESSION_STATE_ATOM
+      : environmentSession.sessionStateAtom(environmentId),
+  );
   return {
     data: AsyncResult.getOrElse(result, () => null),
     hasError: result._tag === "Failure",
     isPending: result.waiting,
   };
+}
+
+export function readEnvironmentLacksScope(
+  environmentId: EnvironmentId,
+  scope: AuthEnvironmentScope,
+): boolean {
+  const result = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
+  const session = Option.getOrNull(AsyncResult.value(result));
+  return (
+    result._tag !== "Failure" &&
+    session !== null &&
+    session.authenticated &&
+    !sessionGrantsScope(session, scope)
+  );
 }

@@ -23,3 +23,5 @@ export const LARAVEL_TOOLBAR_RESPONSE_CHANNEL = "preview:laravel-toolbar-respons
  * with a session id, `{ session }` to its `/dictate/start|stop|cancel`.
  */
 export const ANNOTATOR_DICTATION_CHANNEL = "preview:annotator-dictation";
+export const ANNOTATION_VOICE_EVENT_CHANNEL = "preview:annotation-voice-event";
+export const ANNOTATION_VOICE_STATE_CHANNEL = "preview:annotation-voice-state";

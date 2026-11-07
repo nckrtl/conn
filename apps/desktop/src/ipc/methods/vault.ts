@@ -77,14 +77,11 @@ interface Reply {
   };
 }
 
-export class VaultError extends Error {
-  readonly status: "locked" | "unavailable" | "error";
-
-  constructor(status: VaultError["status"], message: string) {
-    super(message);
-    this.status = status;
-  }
-}
+export class VaultError extends Schema.TaggedError<VaultError>()("VaultError", {
+  status: Schema.Literals(["locked", "unavailable", "error"]),
+  message: Schema.String,
+}) {}
+const isVaultError = Schema.is(VaultError);
 
 function frame(payload: object): Buffer {
   const body = Buffer.from(JSON.stringify(payload), "utf8");
@@ -107,7 +104,9 @@ export function vaultBridgeRequest(
 ): Promise<Reply> {
   // The binary exists only where Vault is installed, which is only ever a Mac.
   if (!NodeFS.existsSync(binary)) {
-    return Promise.reject(new VaultError("unavailable", "Vault is not installed on this Mac."));
+    return Promise.reject(
+      new VaultError({ status: "unavailable", message: "Vault is not installed on this Mac." }),
+    );
   }
   const id = NodeCrypto.randomUUID().toUpperCase();
   return new Promise((resolve, reject) => {
@@ -125,18 +124,18 @@ export function vaultBridgeRequest(
       result();
     };
     child.on("error", (error) =>
-      settle(() => reject(new VaultError("unavailable", error.message))),
+      settle(() => reject(new VaultError({ status: "unavailable", message: error.message }))),
     );
     child.on("close", (_code, signal) =>
       settle(() =>
         reject(
           signal === "SIGTERM"
-            ? new VaultError("error", "Vault did not answer in time.")
-            : new VaultError(
+            ? new VaultError({ status: "error", message: "Vault did not answer in time." })
+            : new VaultError({
                 // Vault is installed, so the menu shows this instead of hiding its Vault section.
-                "error",
-                "Vault refused the request. Update Vault, and use the signed Conn app.",
-              ),
+                status: "error",
+                message: "Vault refused the request. Update Vault, and use the signed Conn app.",
+              }),
         ),
       ),
     );
@@ -145,7 +144,9 @@ export function vaultBridgeRequest(
       while (buffer.length >= 4) {
         const size = buffer.readUInt32LE(0);
         if (size === 0 || size > MAX_FRAME) {
-          settle(() => reject(new VaultError("error", "Vault sent an invalid reply.")));
+          settle(() =>
+            reject(new VaultError({ status: "error", message: "Vault sent an invalid reply." })),
+          );
           return;
         }
         if (buffer.length < 4 + size) return;
@@ -155,7 +156,9 @@ export function vaultBridgeRequest(
         try {
           reply = JSON.parse(body.toString("utf8")) as Reply;
         } catch {
-          settle(() => reject(new VaultError("error", "Vault sent an invalid reply.")));
+          settle(() =>
+            reject(new VaultError({ status: "error", message: "Vault sent an invalid reply." })),
+          );
           return;
         }
         if (reply.id !== id) continue;
@@ -206,8 +209,14 @@ function toDatabase(wire: Wire): VaultDatabase | null {
 
 function failure(reply: Reply): VaultError {
   return reply.status === "locked"
-    ? new VaultError("locked", "Vault is locked. Unlock Vault to use this connection.")
-    : new VaultError("error", reply.message ?? "Vault did not return the entry.");
+    ? new VaultError({
+        status: "locked",
+        message: "Vault is locked. Unlock Vault to use this connection.",
+      })
+    : new VaultError({
+        status: "error",
+        message: reply.message ?? "Vault did not return the entry.",
+      });
 }
 
 /** The Database entries in Vault, without passwords. */
@@ -250,7 +259,7 @@ export const vaultDatabases = DesktopIpc.makeIpcMethod({
         const databases = await listVaultDatabases(request.allowUnlock);
         return { status: "ok", databases, error: null };
       } catch (error) {
-        const status = error instanceof VaultError ? error.status : "error";
+        const status = isVaultError(error) ? error.status : "error";
         return {
           status,
           databases: [],

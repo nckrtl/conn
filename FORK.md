@@ -24,7 +24,14 @@ file before you merge upstream, build, or change shared UI. Upstream's
 - Build, sign and install with the [build guide][build]. Builds ship no update
   feed (`publish: null` in `scripts/build-desktop-artifact.ts`), so the app
   never replaces itself with an upstream release. Re-sign macOS builds with a
-  local identity using `scripts/sign-macos-local.ts`.
+  local identity using `scripts/sign-macos-local.ts`. Packaging and that
+  re-sign preflight fail closed unless the full 40-character source SHA is the
+  tip of an `origin` `refs/heads/sync/*` branch. Publish HEAD with
+  `node scripts/publish-sync-branch.ts`, then verify with
+  `node scripts/check-sync-provenance.ts`. Neither command force-pushes or
+  bypasses hooks. Nightly or install wrappers outside this repo are not
+  covered unless they call those scripts (or the packaging/sign entrypoints)
+  before copying a bundle into `/Applications`.
 
 ## What the fork changes
 
@@ -152,6 +159,13 @@ commit `d17002d`). If a saved Orbit server's session lacks `access:write`, Conn
 pairs it again at most once every 6 hours. The shared `lacksAccess` and
 `accessPairedAt` logic is wired into the web and mobile Orbit providers.
 
+Thread-start Orbit instance registration still lives on the client
+(`apps/web/src/orbit/orbitWorkspaces.ts`, contracts
+`orbitWorkspaces.{subscribe,register,remove}`). Official upstream
+`apps/server/src/ws.ts` has no handlers for those methods. Do not add a fork
+WS layer to paper this over. Until Nick decides, that path is a known
+incompatibility against official servers.
+
 Sources:
 
 - `apps/web/src/orbit/*`.
@@ -181,6 +195,10 @@ An environment's `t3 theme set` is not a user choice and never syncs.
 lacks are installed in the "From profile" collection until replaced by the live
 published theme. On an older Gateway without sections, workspace sync still
 works and Conn shows "Gateway doesn't support profile sync yet".
+
+Keep `patches/@alchemy.run__drizzle@2.0.0-beta.85.patch` in
+`patchedDependencies` while the catalog pins that version. drizzle-kit fails
+on an absolute `out`.
 
 The phone adds Settings › Orbit with a profile picker and one-tap pairing for
 the Gateway's T3 servers. The thread list has a Workspace filter.
@@ -672,14 +690,16 @@ Sources:
 
 ### Fork RPC group
 
-Conn's `serverRestart`, `peerLinks*`, `credentials*`, `testLogins*` and `panels.*` RPCs live
-in `ForkWsRpcGroup`, merged into `WsRpcGroup`. They have a separate handler
-layer because one group with every RPC exceeds TypeScript's instantiation limit.
-Add new fork RPCs there.
+Conn's `serverRestart`, `credentials*`, `testLogins*`, `annotations.*`,
+`panels.*` and `orbitWorkspaces.*` RPCs still live in `ForkWsRpcGroup`, merged
+into `WsRpcGroup` in contracts so clients typecheck. Official servers
+instantiate `OfficialWsRpcGroup` only, the upstream method set. Do not
+reintroduce `layerWsForkRpc` or other fork server layers.
+`orbitWorkspaces.*` therefore have no server handlers; see Orbit above.
 
 Sources:
 
-- `packages/contracts/src/rpc.ts`, `apps/server/src/ws.ts` (`layerWsForkRpc`).
+- `packages/contracts/src/rpc.ts` (`OfficialWsRpcGroup`, `ForkWsRpcGroup`).
 
 ### Codex MCP network wait
 
@@ -796,8 +816,13 @@ Sources:
    upstream's diff. New upstream UI must follow the fork's shell rules (glass
    popovers, `ToolbarGroup`, `text-ui`, shell dividers, `scrollbar-inset`). Fix
    what the scan finds on the sync branch, before the build.
-3. Lint and typecheck only the touched scope (`vp lint <files>`,
-   `vp exec tsc --noEmit` in `apps/web`), and run the tests for the fork areas
+3. Lint and typecheck only the touched scope (`vp lint <files>` and
+   `vp run check:changed`). `check:changed` always typechecks
+   `@t3tools/desktop`, and `scripts/build-desktop-artifact.ts` runs
+   `vp run --no-cache --filter @t3tools/desktop typecheck` (the existing Vite
+   task) before packing. Either path fails closed on a missing window or preview
+   member. Do not add `scripts.typecheck` to `apps/desktop/package.json`;
+   that name conflicts with the Vite task. Run the tests for the fork areas
    you touched (from the root, use `vp test run` with paths such as
    `apps/web/src/laravelToolbar`, `apps/web/src/annotations`,
    `apps/web/src/workspaces.test.ts` and `apps/desktop/src/window`). For desktop
@@ -818,8 +843,10 @@ Sources:
    `apps/mobile/modules/conn-symbols/symbols.json` and
    `node scripts/build-conn-symbols.ts` runs. If upstream bumps a vendored
    tarball in `apps/mobile/deps`, rebuild Conn's as described below.
-4. Build, sign and install with the [build guide][build]. Merge the sync branch
-   into `main` only after a good build.
+4. Publish the exact build commit to an origin `sync/` branch
+   (`node scripts/publish-sync-branch.ts`; a dated `sync/<yyyy-mm-dd>` tip
+   already counts). Then build, sign and install with the [build guide][build].
+   Merge the sync branch into `main` only after a good build.
 
 ### Vendored dependency patches
 

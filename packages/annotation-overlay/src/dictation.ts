@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { hostDictationAvailable } from "./dictation-trigger";
 import { attachWaveformMeter } from "./waveform";
 
@@ -184,13 +185,17 @@ function acquireMicrophone(): Promise<MediaStream> {
 
 async function requestMicrophone(): Promise<MediaStream> {
   if (window.isSecureContext === false) {
-    throw new DictationError(
-      "Recording requires HTTPS or localhost. Open this page over HTTPS to use the microphone.",
-      "unsupported",
-    );
+    throw new DictationError({
+      message:
+        "Recording requires HTTPS or localhost. Open this page over HTTPS to use the microphone.",
+      code: "unsupported",
+    });
   }
   if (!navigator.mediaDevices?.getUserMedia) {
-    throw new DictationError("Microphone is not available in this browser.", "unsupported");
+    throw new DictationError({
+      message: "Microphone is not available in this browser.",
+      code: "unsupported",
+    });
   }
 
   try {
@@ -206,10 +211,10 @@ async function requestMicrophone(): Promise<MediaStream> {
       error instanceof DOMException &&
       (error.name === "NotAllowedError" || error.name === "PermissionDeniedError")
     ) {
-      throw new DictationError("Microphone access was denied.", "denied");
+      throw new DictationError({ message: "Microphone access was denied.", code: "denied" });
     }
 
-    throw new DictationError("Could not start the microphone.", "mic");
+    throw new DictationError({ message: "Could not start the microphone.", code: "mic" });
   }
 }
 
@@ -267,7 +272,7 @@ function waitForOpen(socket: WebSocket): Promise<void> {
     const timer = window.setTimeout(() => {
       cleanup();
       socket.close();
-      reject(new DictationError("Could not reach the dictation service.", "ws"));
+      reject(new DictationError({ message: "Could not reach the dictation service.", code: "ws" }));
     }, CONNECT_TIMEOUT_MS);
 
     const onOpen = (): void => {
@@ -277,7 +282,7 @@ function waitForOpen(socket: WebSocket): Promise<void> {
 
     const onError = (): void => {
       cleanup();
-      reject(new DictationError("Could not reach the dictation service.", "ws"));
+      reject(new DictationError({ message: "Could not reach the dictation service.", code: "ws" }));
     };
 
     const cleanup = (): void => {
@@ -377,7 +382,10 @@ function startPcmCapture(stream: MediaStream): LiveCapture {
     (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
 
   if (!AudioContextCtor) {
-    throw new DictationError("This browser cannot capture PCM audio.", "unsupported");
+    throw new DictationError({
+      message: "This browser cannot capture PCM audio.",
+      code: "unsupported",
+    });
   }
 
   const queue: ArrayBuffer[] = [];
@@ -510,12 +518,17 @@ function waitForStop(socket: WebSocket, stop?: AbortSignal, abort?: AbortSignal)
 
     const onClose = (): void => {
       cleanup();
-      reject(new DictationError("The dictation connection closed unexpectedly.", "ws"));
+      reject(
+        new DictationError({
+          message: "The dictation connection closed unexpectedly.",
+          code: "ws",
+        }),
+      );
     };
 
     const onError = (): void => {
       cleanup();
-      reject(new DictationError("The dictation connection failed.", "ws"));
+      reject(new DictationError({ message: "The dictation connection failed.", code: "ws" }));
     };
 
     const cleanup = (): void => {
@@ -536,7 +549,12 @@ function readTranscript(socket: WebSocket, abort?: AbortSignal): Promise<string>
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       cleanup();
-      reject(new DictationError("Dictation timed out waiting for a transcript.", "timeout"));
+      reject(
+        new DictationError({
+          message: "Dictation timed out waiting for a transcript.",
+          code: "timeout",
+        }),
+      );
     }, RESULT_TIMEOUT_MS);
 
     const onMessage = (event: MessageEvent<string | ArrayBuffer>): void => {
@@ -554,7 +572,7 @@ function readTranscript(socket: WebSocket, abort?: AbortSignal): Promise<string>
 
       if (typeof payload.error === "string" && payload.error !== "") {
         cleanup();
-        reject(new DictationError(payload.error, "ws"));
+        reject(new DictationError({ message: payload.error, code: "ws" }));
         return;
       }
 
@@ -566,7 +584,12 @@ function readTranscript(socket: WebSocket, abort?: AbortSignal): Promise<string>
 
     const onClose = (): void => {
       cleanup();
-      reject(new DictationError("The dictation service closed before sending a transcript.", "ws"));
+      reject(
+        new DictationError({
+          message: "The dictation service closed before sending a transcript.",
+          code: "ws",
+        }),
+      );
     };
 
     const onAbort = (): void => {
@@ -613,12 +636,9 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
-export class DictationError extends Error {
-  readonly code: "denied" | "mic" | "ws" | "timeout" | "unsupported";
+const DictationErrorCode = Schema.Literals(["denied", "mic", "ws", "timeout", "unsupported"]);
 
-  constructor(message: string, code: DictationError["code"]) {
-    super(message);
-    this.name = "DictationError";
-    this.code = code;
-  }
-}
+export class DictationError extends Schema.TaggedError<DictationError>()("DictationError", {
+  code: DictationErrorCode,
+  message: Schema.String,
+}) {}

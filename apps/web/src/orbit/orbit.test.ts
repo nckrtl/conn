@@ -226,7 +226,9 @@ describe("checkOrbitAvailability", () => {
   it("explains a failed check instead of hiding the option", async () => {
     const remote = shell("https://github.com/nckrtl/orbit.git");
     const unreachable = fakeTransport(() => {
-      throw new OrbitTransportError("Orbit is not reachable from this machine: timeout");
+      throw new OrbitTransportError({
+        message: "Orbit is not reachable from this machine: timeout",
+      });
     });
     await expect(checkOrbitAvailability(unreachable, remote, "/x")).resolves.toEqual({
       available: false,
@@ -238,7 +240,7 @@ describe("checkOrbitAvailability", () => {
       reason: "Orbit sent an invalid list. (orbit.response_invalid)",
     });
     const noShell: HiddenShellRunner = async () => {
-      throw new OrbitTransportError("Could not open a shell on this machine.");
+      throw new OrbitTransportError({ message: "Could not open a shell on this machine." });
     };
     await expect(checkOrbitAvailability(orbit(), noShell, "/x")).resolves.toEqual({
       available: false,

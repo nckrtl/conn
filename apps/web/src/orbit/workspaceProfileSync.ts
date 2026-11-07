@@ -7,6 +7,9 @@ import {
   type OrbitGatewayNode,
   type OrbitGatewayWorkspace,
 } from "@t3tools/client-runtime/orbit-gateway";
+import * as Schema from "effect/Schema";
+
+const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 /**
  * Keeps this device's workspaces in step with its Orbit profile. The profile on the Gateway is the
@@ -143,7 +146,7 @@ async function replace(
       return { merged };
     } catch (error) {
       if (
-        !(error instanceof OrbitGatewayError) ||
+        !isOrbitGatewayError(error) ||
         error.code !== SETTINGS_VERSION_CONFLICT ||
         attempt >= MAX_REPLACE_ATTEMPTS
       ) {

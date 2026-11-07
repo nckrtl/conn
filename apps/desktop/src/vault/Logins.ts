@@ -10,6 +10,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { vaultBridgeRequest, VaultError } from "../ipc/methods/vault.ts";
 
+const isVaultError = Schema.is(VaultError);
+
 const decodeResponse = Schema.decodeUnknownOption(VaultLoginsResponse);
 
 function httpsOrigin(value: string): string | null {
@@ -61,10 +63,10 @@ export async function listVaultLogins(
     }));
   } catch (error) {
     return {
-      status: error instanceof VaultError ? error.status : "error",
+      status: isVaultError(error) ? error.status : "error",
       items: [],
       error:
-        error instanceof VaultError && error.status === "unavailable"
+        isVaultError(error) && error.status === "unavailable"
           ? "Vault is not installed on this Mac."
           : "Vault could not answer. Open or update Vault and try again.",
     };

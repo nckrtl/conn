@@ -14,6 +14,7 @@ export const serverEnvironment = createServerEnvironmentAtoms(connectionAtomRunt
   environmentThemes: true,
   usageLimitSources: true,
   usageLimitsCommand: true,
+  providerCatalogsOnDemand: true,
 });
 export const describeOutdatedServer = createOutdatedServerDescriptionCommand(connectionAtomRuntime);
 export const updateOutdatedServer = createOutdatedServerUpdateCommand(connectionAtomRuntime);

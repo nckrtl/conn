@@ -5,6 +5,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as Electron from "electron";
@@ -40,6 +41,15 @@ import { makeQuitShortcutHandler } from "./QuitHold.ts";
 import { copyContextMenuImage } from "./ContextMenuImage.ts";
 
 const TITLEBAR_HEIGHT = 40;
+
+class ContextMenuImageCopyError extends Schema.TaggedError<ContextMenuImageCopyError>()(
+  "ContextMenuImageCopyError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not copy the context-menu image.";
+  }
+}
 // The traffic lights center on the shell header (--shell-header-height in
 // apps/web/src/index.css), where the tabs and panel controls also center.
 // Native macOS buttons are 14 points tall and do not scale with the renderer's zoom.
@@ -288,10 +298,7 @@ function syncWindowAppearance(
       return;
     }
 
-    // Preserve the clear renderer backing over the native macOS material.
-    window.setBackgroundColor(
-      platform === "darwin" ? "#00000000" : getInitialWindowBackgroundColor(shouldUseDarkColors),
-    );
+    window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
     const { titleBarOverlay } = getWindowTitleBarOptions(shouldUseDarkColors, platform);
     if (typeof titleBarOverlay === "object") {
       window.setTitleBarOverlay(titleBarOverlay);
@@ -362,8 +369,8 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  // Extra windows (rooms-patches) never stand in for the main window: with
-  // only extra windows open, activation opens a new main window.
+  // Extra windows never stand in for the main window: with only extra windows
+  // open, activation opens a new main window.
   const additionalWindows = new Set<Electron.BrowserWindow>();
   const workspaceClaims = new Map<
     number,
@@ -407,9 +414,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * `additional` makes an extra window (rooms-patches): it opens offset from the
-   * main one with the given workspace, and leaves the main window's state alone
-   * (bounds, preview browser, maximized state, DevTools).
+   * `additional` makes an extra window: it opens offset from the main one with
+   * the given workspace, and leaves the main window's state alone (bounds,
+   * preview browser, maximized state, DevTools).
    */
   const createWindow = Effect.fn("desktop.window.createWindow")(function* (options?: {
     readonly additional?: { readonly workspace: string | null };
@@ -459,21 +466,12 @@ export const make = Effect.gen(function* () {
     if (yield* Ref.get(desktopState.quitting)) return Option.none();
     const window = yield* electronWindow.create({
       ...initialBounds,
-      minWidth: 840,
-      minHeight: 620,
+      minWidth: DesktopAppSettings.MIN_MAIN_WINDOW_SIZE.width,
+      minHeight: DesktopAppSettings.MIN_MAIN_WINDOW_SIZE.height,
       show: false,
       autoHideMenuBar: true,
-      ...(environment.platform === "darwin"
-        ? {
-            disableAutoHideCursor: true,
-            vibrancy: "under-window",
-            visualEffectState: "followWindow",
-          }
-        : {}),
-      backgroundColor:
-        environment.platform === "darwin"
-          ? "#00000000"
-          : getInitialWindowBackgroundColor(shouldUseDarkColors),
+      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+      backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
       ...iconOption,
       title: environment.displayName,
       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
@@ -496,9 +494,7 @@ export const make = Effect.gen(function* () {
                   : [`--t3code-window-workspace=${encodeURIComponent(additional.workspace)}`]),
               ],
             }),
-        // A preview guest's fullscreen request is mirrored onto this embedder,
-        // which would otherwise put the whole window into OS fullscreen. With
-        // both sides opted out the page fills its webview and the window stays.
+        // Guest fullscreen propagates to the embedder; both must opt out to keep it inside the webview.
         disableHtmlFullscreenWindowResize: true,
       },
     });
@@ -679,9 +675,10 @@ export const make = Effect.gen(function* () {
             label: "Copy Image",
             click: () => {
               void runPromise(
-                Effect.tryPromise(() => copyContextMenuImage(contents, params)).pipe(
-                  Effect.catch(() => logWindowWarning("failed to copy context-menu image")),
-                ),
+                Effect.tryPromise({
+                  try: () => copyContextMenuImage(contents, params),
+                  catch: (cause) => new ContextMenuImageCopyError({ cause }),
+                }).pipe(Effect.catch(() => logWindowWarning("failed to copy context-menu image"))),
               );
             },
           });
@@ -1183,17 +1180,10 @@ export const make = Effect.gen(function* () {
   const dispatchRendererEvent = Effect.fn("desktop.window.dispatchRendererEvent")(function* (
     channel: string,
     payload: unknown,
-    {
-      reveal = true,
-      mainOnly = false,
-    }: { readonly reveal?: boolean; readonly mainOnly?: boolean } = {},
+    { reveal = true }: { readonly reveal?: boolean } = {},
   ) {
     if (yield* Ref.get(desktopState.quitting)) return;
-    const existingWindow = yield* mainOnly
-      ? currentMainWindow
-      : reveal
-        ? focusedMainWindow
-        : electronWindow.main;
+    const existingWindow = yield* reveal ? focusedMainWindow : electronWindow.main;
     if (Option.isNone(existingWindow) && (!reveal || (yield* waitingForBackend))) return;
     const window = Option.isSome(existingWindow) ? existingWindow : yield* ensureMain;
     if (Option.isNone(window) || window.value.isDestroyed()) return;
@@ -1271,10 +1261,8 @@ export const make = Effect.gen(function* () {
         event: event.type,
         captureId: "id" in event ? (event.id ?? null) : null,
       });
-      // Only the main window runs snapshots (rooms-patches: not extra windows).
       yield* dispatchRendererEvent(SNAP_SHOT_EVENT_CHANNEL, event, {
         reveal: event.type === "started",
-        mainOnly: true,
       });
     }),
     zoomMain: Effect.fn("desktop.window.zoomMain")(function* (direction) {

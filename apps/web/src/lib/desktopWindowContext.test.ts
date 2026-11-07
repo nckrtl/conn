@@ -1,10 +1,48 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import type { DesktopBridge } from "@t3tools/contracts";
 
 import {
+  canOpenDesktopWindows,
   diffIncomingRecord,
+  isAdditionalDesktopWindow,
   markChangedRecordKeys,
+  openDesktopWorkspaceWindow,
+  readDesktopWindowContext,
   RecentKeyChanges,
 } from "./desktopWindowContext";
+
+describe("preload windowContext bridge", () => {
+  it("treats a missing desktopBridge as the main window", () => {
+    vi.stubGlobal("window", {} as Window & typeof globalThis);
+    try {
+      expect(readDesktopWindowContext()).toEqual({ additional: false, workspace: null });
+      expect(isAdditionalDesktopWindow()).toBe(false);
+      expect(canOpenDesktopWindows()).toBe(false);
+      openDesktopWorkspaceWindow("Alpha");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads extra-window context and opens a workspace through the preload keys", () => {
+    const openWorkspaceWindow = vi.fn(async () => {});
+    vi.stubGlobal("window", {
+      desktopBridge: {
+        windowContext: { additional: true, workspace: "Alpha 2" },
+        openWorkspaceWindow,
+      } as unknown as DesktopBridge,
+    });
+    try {
+      expect(readDesktopWindowContext()).toEqual({ additional: true, workspace: "Alpha 2" });
+      expect(isAdditionalDesktopWindow()).toBe(true);
+      expect(canOpenDesktopWindows()).toBe(true);
+      openDesktopWorkspaceWindow("Alpha 2");
+      expect(openWorkspaceWindow).toHaveBeenCalledWith("Alpha 2");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("RecentKeyChanges", () => {
   it("forgets a change after its window", () => {

@@ -57,8 +57,11 @@ function gateway(initial: {
       workspaces: readonly OrbitGatewayWorkspace[],
     ) => {
       if (version !== profile.version) {
-        throw new OrbitGatewayError("conn.settings_version_conflict", "stale", 409, {
-          current_version: profile.version,
+        throw new OrbitGatewayError({
+          code: "conn.settings_version_conflict",
+          message: "stale",
+          status: 409,
+          details: { current_version: profile.version },
         });
       }
       profile.version += 1;

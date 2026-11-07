@@ -77,6 +77,7 @@ import {
 import { threadEnvironment } from "../../state/threads";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useEnvironmentQuery } from "../../state/query";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
@@ -96,10 +97,6 @@ import {
   THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS,
 } from "./threadDetailsPanelStyles";
 
-// Lineage paging: a busy thread can accumulate dozens of forks and subagents,
-// and the panel it lives in already scrolls. Show a workable window, keep the
-// rest behind Show more, and bound what is shown so the sections below Lineage
-// stay reachable.
 const THREAD_LINEAGE_INITIAL_COUNT = 6;
 const THREAD_LINEAGE_PAGE_COUNT = 12;
 
@@ -118,11 +115,7 @@ function ThreadLineageRowList(props: {
 }) {
   return (
     <>
-      {/*
-        Bounded so Lineage cannot push the rest of the details panel out of view. Plain
-        overflow, not a ScrollArea: it sits in an already scrolling panel. An expanded
-        workflow raises the bound while its tree is open.
-      */}
+      {/* ScrollArea's max-height viewport measures badly inside this scrolling panel. */}
       <ul
         aria-label="Related threads"
         className="m-0 max-h-[13.5rem] list-none overflow-y-auto overscroll-contain p-0 has-data-workflow-expanded:max-h-[min(28rem,55dvh)]"
@@ -133,7 +126,7 @@ function ThreadLineageRowList(props: {
         <button
           type="button"
           onClick={props.onShowMore}
-          className={`flex h-8 w-full cursor-pointer items-center rounded-lg ${THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS} text-sm font-medium text-muted-foreground/70 hover:bg-(--shell-highlight) hover:text-foreground/80`}
+          className={`flex h-8 w-full cursor-pointer items-center rounded-lg ${THREAD_DETAILS_PANEL_ROW_CONTENT_CLASS} text-sm font-medium text-muted-foreground/70 hover:bg-black/[0.055] hover:text-foreground/80 dark:hover:bg-white/[0.075]`}
         >
           <PlusIcon aria-hidden className="size-4 shrink-0" />
           Show {Math.min(props.hiddenCount, THREAD_LINEAGE_PAGE_COUNT)} more
@@ -143,18 +136,32 @@ function ThreadLineageRowList(props: {
   );
 }
 
-function ThreadLineageGroup(props: {
+type RemoteSubagent = OrchestrationV2Subagent & {
+  readonly remoteChild: OrchestrationV2RemoteTaskChild;
+};
+
+/** A task delegated to a linked environment has no thread here, so it gets its own row kind. */
+type LineageRow = ThreadRelationshipWalkRow | { readonly remote: RemoteSubagent };
+
+const lineageRowStatus = (row: LineageRow) =>
+  "remote" in row ? row.remote.status : row.edge.status;
+
+const isFinishedAgentStatus = (status: string | null | undefined) =>
+  ["completed", "failed", "error", "cancelled", "interrupted", "idle"].includes(status ?? "");
+
+function ThreadLineageGroup<Row extends LineageRow>(props: {
   readonly label: string | null;
-  readonly rows: ReadonlyArray<ThreadRelationshipWalkRow>;
+  readonly rows: ReadonlyArray<Row>;
   readonly expanded: boolean;
-  readonly children: (rows: ReadonlyArray<ThreadRelationshipWalkRow>) => ReactNode;
+  readonly children: (rows: ReadonlyArray<Row>) => ReactNode;
 }) {
   const [expanded, setExpanded] = useState(props.expanded);
   const [visibleCount, setVisibleCount] = useState(THREAD_LINEAGE_INITIAL_COUNT);
   const { visibleRows, hiddenCount } = resolveThreadLineageWindow(props.rows, visibleCount);
-  const failedCount = props.rows.filter(
-    ({ edge }) => edge.status === "failed" || edge.status === "error",
-  ).length;
+  const failedCount = props.rows.filter((row) => {
+    const status = lineageRowStatus(row);
+    return status === "failed" || status === "error";
+  }).length;
   if (props.rows.length === 0) return null;
   return (
     <div>
@@ -218,10 +225,6 @@ function LineageTooltipContent(props: { readonly title: string; readonly hint: s
   );
 }
 
-/**
- * The row's timer and hover card follow current child work, including queued
- * follow-ups whose provider turn has not started yet.
- */
 function currentSubagent<Agent extends RuntimeSubagent>(
   agent: Agent | undefined,
   childThread: OrchestrationV2ThreadShell | null | undefined,
@@ -247,7 +250,6 @@ function currentSubagent<Agent extends RuntimeSubagent>(
           : status,
     startedAt: startedAt ? DateTime.formatIso(startedAt) : null,
     completedAt: completedAt ? DateTime.formatIso(completedAt) : null,
-    // The task's output belongs to its recorded run, not newer child work.
     progress: null,
     result: null,
     error: null,
@@ -259,9 +261,7 @@ function currentSubagent<Agent extends RuntimeSubagent>(
  * the thread there, when this client is connected to that environment.
  */
 function RemoteSubagentRow(props: {
-  readonly agent: OrchestrationV2Subagent & {
-    readonly remoteChild: OrchestrationV2RemoteTaskChild;
-  };
+  readonly agent: RemoteSubagent;
   readonly provider: ServerProvider | undefined;
 }) {
   const navigate = useNavigate();
@@ -309,7 +309,7 @@ function RemoteSubagentRow(props: {
             </span>
           </span>
           <span
-            className={`shrink-0 text-ui ${failed ? "text-destructive" : "text-muted-foreground"}`}
+            className={`shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
           >
             on {remoteChild.label} · {threadRelationshipStatusLabel(status)}
           </span>
@@ -373,7 +373,7 @@ function DelegatedFromRow(props: {
             </span>
           </span>
           {label ? (
-            <span className="shrink-0 text-ui text-muted-foreground">on {label}</span>
+            <span className="shrink-0 text-2xs text-muted-foreground">on {label}</span>
           ) : null}
         </TooltipTrigger>
         <TooltipPopup side="left">
@@ -474,8 +474,6 @@ export function ThreadRelationshipsPanel(props: {
         },
       ]),
   );
-  // A workflow coordinator is already a subagent row here; the grouped model
-  // is what lets that row unfold into the phases and members it ran.
   const workflowGroupsById = new Map(
     deriveWorkflowGroups(runtimeSubagents).map((group) => [group.workflow.id, group]),
   );
@@ -514,6 +512,31 @@ export function ThreadRelationshipsPanel(props: {
         : { ...row, edge: { ...row.edge, status: workflowGroup.workflow.status } };
     });
   const canMerge = mergeTargetThreadId !== null && latestMergeBackRun !== null;
+  const unlistedThreadIds = relationshipRows
+    .filter(
+      ({ threadId, edge }) =>
+        !relationshipShells.some((thread) => thread.id === threadId) &&
+        (edge.kind !== "subagent" || !subagentsByThreadId.get(threadId)?.title),
+    )
+    .map(({ threadId }) => threadId);
+  const threadTitles = useEnvironmentQuery(
+    unlistedThreadIds.length === 0
+      ? null
+      : orchestrationEnvironment.threadTitles({
+          environmentId: props.environmentId,
+          input: { threadIds: unlistedThreadIds },
+        }),
+  );
+  const resolvedThreadTitles = threadTitles.data ?? {};
+  // Omitted and archived threads remain reachable; only a settled lookup proves one is gone.
+  const visibleRelationships = relationshipRows.filter(
+    ({ threadId, edge }) =>
+      edge.kind === "subagent" ||
+      !unlistedThreadIds.includes(threadId) ||
+      !threadTitles.isSuccess ||
+      threadTitles.isPending ||
+      Object.hasOwn(resolvedThreadTitles, threadId),
+  );
   const canDetach = projection ? canDetachThreadProviderSession(projection) : false;
 
   const {
@@ -521,28 +544,34 @@ export function ThreadRelationshipsPanel(props: {
     active = [],
     previous = [],
     sideChats = [],
-  } = groupBy(relationshipRows, ({ threadId, edge }) => {
+  } = groupBy(visibleRelationships, ({ threadId, edge }) => {
     const isParent = isParentThreadRelationship(edge, props.threadId);
     if (!isParent && graph.nodes.get(threadId)?.thread?.lineage.sideChat === true)
       return "sideChats";
     if (edge.kind !== "subagent" || isParent) return "related";
-    return ["completed", "failed", "error", "cancelled", "interrupted", "idle"].includes(
-      edge.status ?? "",
-    )
-      ? "previous"
-      : "active";
+    return isFinishedAgentStatus(edge.status) ? "previous" : "active";
   });
-  const groups = [
-    { id: "related", label: null, rows: related, expanded: true },
-    { id: "active", label: null, rows: active, expanded: true },
-    { id: "previous", label: "Previous agents", rows: previous, expanded: false },
-  ];
-  // Tasks running in a linked environment have no thread here; they get their own rows.
-  const remoteSubagents = (projection?.subagents ?? []).filter(
-    (agent): agent is OrchestrationV2Subagent & { remoteChild: OrchestrationV2RemoteTaskChild } =>
-      agent.remoteChild !== undefined,
+  const { remoteActive = [], remotePrevious = [] } = groupBy(
+    (projection?.subagents ?? [])
+      .filter((agent): agent is RemoteSubagent => agent.remoteChild !== undefined)
+      .map((remote) => ({ remote })),
+    ({ remote }) => (isFinishedAgentStatus(remote.status) ? "remotePrevious" : "remoteActive"),
   );
-  // Other subagents without a child thread yet have no row, so count them separately.
+  const groups: ReadonlyArray<{
+    id: string;
+    label: string | null;
+    rows: ReadonlyArray<LineageRow>;
+    expanded: boolean;
+  }> = [
+    { id: "related", label: null, rows: related, expanded: true },
+    { id: "active", label: null, rows: [...active, ...remoteActive], expanded: true },
+    {
+      id: "previous",
+      label: "Previous agents",
+      rows: [...previous, ...remotePrevious],
+      expanded: false,
+    },
+  ];
   const runningCount =
     (projection?.subagents.filter(
       (agent) => agent.childThreadId === null && agent.status === "running",
@@ -557,7 +586,8 @@ export function ThreadRelationshipsPanel(props: {
       active.length > 0 ||
       previous.length > 0 ||
       runningCount > 0 ||
-      remoteSubagents.length > 0 ||
+      remoteActive.length > 0 ||
+      remotePrevious.length > 0 ||
       delegatedFrom !== undefined ||
       // Disconnect lives in this heading, so a thread with only side chats still shows it.
       (canDetach && sideChats.length > 0));
@@ -696,9 +726,15 @@ export function ThreadRelationshipsPanel(props: {
       agent.startedAt &&
       ["pending", "running", "waiting"].includes(agent.status);
     const threadTitle = relationshipThreadTitle({
-      // A workflow's name is shorter than its child thread's title.
       title:
-        workflowGroup?.workflow.workflowName ?? node?.thread?.title ?? agent?.title ?? threadId,
+        workflowGroup?.workflow.workflowName ??
+        // Fresher than an archived snapshot's copy.
+        (Object.hasOwn(resolvedThreadTitles, threadId)
+          ? resolvedThreadTitles[threadId]
+          : undefined) ??
+        node?.thread?.title ??
+        agent?.title ??
+        threadId,
       isSubagent,
     });
     const provider = providers?.find(
@@ -758,7 +794,7 @@ export function ThreadRelationshipsPanel(props: {
         )}
         {agent && !failed && (deriveSubagentElapsedMs(agent, 0) !== null || canStopWorkflow) ? (
           <span
-            className={`shrink-0 text-ui font-normal tabular-nums text-muted-foreground ${canStopWorkflow ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
+            className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${canStopWorkflow ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
           >
             <AgentElapsed agent={agent} compact />
           </span>
@@ -767,7 +803,7 @@ export function ThreadRelationshipsPanel(props: {
             className={
               workflowGroup
                 ? "sr-only"
-                : `shrink-0 text-ui ${failed ? "text-destructive" : "text-muted-foreground"} ${trailingVisibilityClass}`
+                : `shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"} ${trailingVisibilityClass}`
             }
           >
             {threadRelationshipStatusLabel(rowStatus)}
@@ -775,8 +811,6 @@ export function ThreadRelationshipsPanel(props: {
         ) : null}
       </>
     );
-    // A workflow pairs this row with a disclosure, so it renders as the
-    // leading half of a split row; everything else renders it directly.
     const relationshipLink = (
       <Tooltip>
         <TooltipTrigger
@@ -866,7 +900,7 @@ export function ThreadRelationshipsPanel(props: {
                     : "Merge this conversation back into its source"}
               </TooltipPopup>
             </Tooltip>
-            <span className="shrink-0 border border-transparent ps-1 pe-2.5 text-ui font-medium text-muted-foreground">
+            <span className="shrink-0 border border-transparent ps-1 pe-2.5 text-2xs font-medium text-muted-foreground">
               {threadRelationshipStatusLabel(rowStatus)}
             </span>
           </div>
@@ -915,6 +949,7 @@ export function ThreadRelationshipsPanel(props: {
             canDetach ||
             related.length > 0 ||
             active.length > 0 ||
+            remoteActive.length > 0 ||
             delegatedFrom !== undefined
           }
           data-thread-relationships-panel
@@ -954,23 +989,24 @@ export function ThreadRelationshipsPanel(props: {
           )}
           {groups.map((group) => (
             <ThreadLineageGroup key={`${scopedThreadKey(ref)}:${group.id}`} {...group}>
-              {(visibleRows) => visibleRows.map(renderRelationshipRow)}
+              {(visibleRows) =>
+                visibleRows.map((row) =>
+                  "remote" in row ? (
+                    <RemoteSubagentRow
+                      key={row.remote.id}
+                      agent={row.remote}
+                      // Its provider instance belongs to the environment it runs in.
+                      provider={providersByEnvironment
+                        .get(row.remote.remoteChild.environmentId)
+                        ?.find((entry) => entry.instanceId === row.remote.providerInstanceId)}
+                    />
+                  ) : (
+                    renderRelationshipRow(row)
+                  ),
+                )
+              }
             </ThreadLineageGroup>
           ))}
-          {remoteSubagents.length > 0 ? (
-            <ThreadLineageRowList hiddenCount={0} onShowMore={() => {}}>
-              {remoteSubagents.map((agent) => (
-                <RemoteSubagentRow
-                  key={agent.id}
-                  agent={agent}
-                  // Its provider instance belongs to the environment it runs in.
-                  provider={providersByEnvironment
-                    .get(agent.remoteChild.environmentId)
-                    ?.find((entry) => entry.instanceId === agent.providerInstanceId)}
-                />
-              ))}
-            </ThreadLineageRowList>
-          ) : null}
         </ThreadDetailsSection>
       ) : null}
       {sideChatsVisible ? (

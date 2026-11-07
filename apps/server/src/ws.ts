@@ -5,12 +5,6 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
-import * as AgentPanelBroker from "./panels/AgentPanelBroker.ts";
-import * as AnnotationStore from "./annotations/AnnotationStore.ts";
-import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
-import * as TestLoginStore from "./credentials/TestLoginStore.ts";
-import * as OrbitWorkspaceRegistrar from "./orbit/OrbitWorkspaceRegistrar.ts";
-import * as ServerRestart from "./serverRestart.ts";
 
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -106,10 +100,10 @@ import {
   ThreadId,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
+  OfficialWsRpcGroup,
+  RpcScopeAuthorization,
   WS_METHODS,
-  WsRpcGroup,
 } from "@t3tools/contracts";
-import { ForkServerWsRpcGroup, forkWsRpcTags, makeForkWsHandlers } from "./wsFork.ts";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -669,12 +663,13 @@ function projectFileFailureContext(
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
-const FullServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
-const ServerWsRpcGroup = FullServerWsRpcGroup.omit(...forkWsRpcTags);
+const ServerWsRpcGroup =
+  OfficialWsRpcGroup.middleware(RpcScopeAuthorization).middleware(RpcInstrumentation);
 
-// RpcGroup.toLayer scans every RPC; past ~200 methods the requirements become `any`.
-// Upstream handlers stay in two prefix-split groups. Conn's ForkWsRpcGroup is a
-// third group, because contracts says those RPCs need a layer of their own.
+// RpcGroup.toLayer derives each handler's requirements by scanning every RPC in
+// the group, so its type cost grows with handlers × RPCs. Near 200 methods that
+// crosses TypeScript's instantiation limit and the layer's requirements degrade to
+// `any`, so the handlers are registered as two disjoint, smaller groups.
 type ServerWsRpc = RpcGroup.Rpcs<typeof ServerWsRpcGroup>;
 const SPLIT_WS_RPC_PREFIXES = ["server", "pullRequests", "provider", "orchestration"] as const;
 type SplitWsRpc = Extract<
@@ -1514,12 +1509,6 @@ export const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const secretResolver = yield* SecretResolver.SecretResolver;
       const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
-      const serverRestart = yield* ServerRestart.ServerRestart;
-      const credentials = yield* CredentialAutofill.CredentialAutofill;
-      const testLogins = yield* TestLoginStore.TestLoginStore;
-      const annotations = yield* AnnotationStore.AnnotationStore;
-      const panels = yield* AgentPanelBroker.AgentPanelBroker;
-      const orbit = yield* OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -3499,20 +3488,9 @@ export const layerWsRpc = (
       const splitHandlers: Pick<typeof handlers, SplitWsRpc["_tag"]> = handlers;
       const otherHandlers: Pick<typeof handlers, Exclude<ServerWsRpc, SplitWsRpc>["_tag"]> =
         handlers;
-      const forkHandlers = makeForkWsHandlers({
-        serverRestart,
-        credentials,
-        testLogins,
-        annotations,
-        panels,
-        orbit,
-      });
       return Context.merge(
         yield* SplitWsRpcGroup.toHandlers(splitHandlers),
-        Context.merge(
-          yield* OtherWsRpcGroup.toHandlers(otherHandlers),
-          yield* ForkServerWsRpcGroup.toHandlers(forkHandlers),
-        ),
+        yield* OtherWsRpcGroup.toHandlers(otherHandlers),
       );
     }),
   );
@@ -3531,12 +3509,6 @@ export const layer = Layer.unwrap(
     const pullRequests = yield* PullRequestService.PullRequestService;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
-    const serverRestart = yield* ServerRestart.ServerRestart;
-    const credentials = yield* CredentialAutofill.CredentialAutofill;
-    const testLogins = yield* TestLoginStore.TestLoginStore;
-    const annotations = yield* AnnotationStore.AnnotationStore;
-    const panels = yield* AgentPanelBroker.AgentPanelBroker;
-    const orbit = yield* OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
@@ -3575,7 +3547,7 @@ export const layer = Layer.unwrap(
         const reportProfiles = yield* serverBrowser.profileReporter;
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-          yield* RpcServer.make(FullServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
+          yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
             Effect.provideService(RpcServer.Protocol, withOutputWindow(protocol)),
             Effect.provide(
               Layer.merge(
@@ -3627,12 +3599,6 @@ export const layer = Layer.unwrap(
                 ),
               ),
               Layer.provide(Layer.succeed(DesktopTabRelay.DesktopTabRelay, desktopTabRelay)),
-              Layer.provide(Layer.succeed(ServerRestart.ServerRestart, serverRestart)),
-              Layer.provide(Layer.succeed(CredentialAutofill.CredentialAutofill, credentials)),
-              Layer.provide(Layer.succeed(TestLoginStore.TestLoginStore, testLogins)),
-              Layer.provide(Layer.succeed(AnnotationStore.AnnotationStore, annotations)),
-              Layer.provide(Layer.succeed(AgentPanelBroker.AgentPanelBroker, panels)),
-              Layer.provide(Layer.succeed(OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar, orbit)),
               Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
               Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
               Layer.provide(

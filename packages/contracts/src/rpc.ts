@@ -2251,10 +2251,8 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 /**
- * RPCs Conn serves beyond upstream main: its own features and upstream's
- * preview of linked environments. `WsRpcGroup` includes them. The server
- * implements them in a layer of their own, because one `toLayer` over every
- * RPC passes TypeScript's type instantiation limit.
+ * Conn client RPCs beyond upstream. Merged into `WsRpcGroup` for client types.
+ * Official servers instantiate `OfficialWsRpcGroup` only. Do not add fork handlers.
  */
 export const ForkWsRpcGroup = RpcGroup.make(
   WsServerRestartRpc,
@@ -2275,7 +2273,7 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsOrbitWorkspacesRemoveRpc,
 );
 
-export const WsRpcGroup = RpcGroup.make(
+export const OfficialWsRpcGroup = RpcGroup.make(
   WsGuestShareCreateRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
@@ -2490,6 +2488,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
   WsOrchestrationV2SubscribeCommandOutputRpc,
-)
-  .merge(ForkWsRpcGroup)
-  .middleware(RpcScopeAuthorization);
+);
+
+export const WsRpcGroup =
+  OfficialWsRpcGroup.merge(ForkWsRpcGroup).middleware(RpcScopeAuthorization);

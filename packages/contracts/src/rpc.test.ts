@@ -3,7 +3,7 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
-import { WS_METHODS, WsRpcGroup } from "./rpc.ts";
+import { ForkWsRpcGroup, OfficialWsRpcGroup, WS_METHODS, WsRpcGroup } from "./rpc.ts";
 
 describe("WebSocket RPC contracts", () => {
   it("rejects server-internal commands sent to dispatchCommand", () => {
@@ -43,5 +43,20 @@ describe("WebSocket RPC contracts", () => {
 
     expect(Exit.isSuccess(decode({ ...request, path: null }))).toBe(true);
     expect(Exit.isFailure(decode({ ...request, path: "/repo/.git/hooks" }))).toBe(true);
+  });
+
+  it("keeps Conn fork RPCs off the official server group", () => {
+    const official = new Set(OfficialWsRpcGroup.requests.keys());
+    const client = new Set(WsRpcGroup.requests.keys());
+    const fork = [...ForkWsRpcGroup.requests.keys()];
+
+    expect(fork.length).toBeGreaterThan(0);
+    for (const tag of fork) {
+      expect(official.has(tag)).toBe(false);
+      expect(client.has(tag)).toBe(true);
+    }
+    expect(official.has(WS_METHODS.orbitWorkspacesSubscribe)).toBe(false);
+    expect(official.has(WS_METHODS.orbitWorkspacesRegister)).toBe(false);
+    expect(official.has(WS_METHODS.orbitWorkspacesRemove)).toBe(false);
   });
 });

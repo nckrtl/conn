@@ -692,14 +692,14 @@ Sources:
 
 Conn's `serverRestart`, `credentials*`, `testLogins*`, `annotations.*`,
 `panels.*` and `orbitWorkspaces.*` RPCs still live in `ForkWsRpcGroup`, merged
-into `WsRpcGroup` in contracts. Official upstream servers implement the main
-`WsRpcGroup` handlers only. Do not reintroduce `layerWsForkRpc` or other fork
-server layers. `orbitWorkspaces.*` therefore have no server handlers; see
-Orbit above.
+into `WsRpcGroup` in contracts so clients typecheck. Official servers
+instantiate `OfficialWsRpcGroup` only, the upstream method set. Do not
+reintroduce `layerWsForkRpc` or other fork server layers.
+`orbitWorkspaces.*` therefore have no server handlers; see Orbit above.
 
 Sources:
 
-- `packages/contracts/src/rpc.ts` (`ForkWsRpcGroup`).
+- `packages/contracts/src/rpc.ts` (`OfficialWsRpcGroup`, `ForkWsRpcGroup`).
 
 ### Codex MCP network wait
 

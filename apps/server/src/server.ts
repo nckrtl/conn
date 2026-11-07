@@ -88,8 +88,6 @@ import * as AgentPanelBroker from "./panels/AgentPanelBroker.ts";
 import * as AnnotationStore from "./annotations/AnnotationStore.ts";
 import * as CredentialAutofill from "./credentials/CredentialAutofill.ts";
 import * as TestLoginStore from "./credentials/TestLoginStore.ts";
-import * as OrbitGateway from "./orbit/OrbitGateway.ts";
-import * as OrbitWorkspaceRegistrar from "./orbit/OrbitWorkspaceRegistrar.ts";
 import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -535,7 +533,7 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 );
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(
-  Layer.provideMerge(ServerRestart.layer),
+  Layer.provide(ServerRestart.layer),
   Layer.provide(ServerSecretStore.layer),
 );
 
@@ -836,8 +834,7 @@ const layerMakeRoutes = Layer.mergeAll(
   ),
   Layer.provide(layerServerSettings),
   Layer.provide(DesktopTabRelay.layer),
-  Layer.provide(CredentialAutofill.layer.pipe(Layer.provideMerge(TestLoginStore.layer))),
-  Layer.provide(OrbitWorkspaceRegistrar.layer.pipe(Layer.provide(OrbitGateway.layer))),
+  Layer.provide(CredentialAutofill.layer.pipe(Layer.provide(TestLoginStore.layer))),
   Layer.provide(AgentPanelBroker.layer),
   Layer.provide(AnnotationStore.layer),
   Layer.provide(PreviewAutomationBroker.layer),

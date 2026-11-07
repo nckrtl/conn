@@ -14,8 +14,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   SourceControlRepositoryError,
+  OfficialWsRpcGroup,
+  RpcScopeAuthorization,
   WS_METHODS,
-  WsRpcGroup,
   WsServerRefreshProvidersRpc,
   WsSubscribeServerConfigRpc,
   type OrchestrationV2StoredEvent,
@@ -1384,11 +1385,14 @@ it.effect("a publish whose push fails still refreshes the new remote", () =>
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
     );
-    const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
-      ...WS_RPC_SERVER_OPTIONS,
-      onFromServer: (response) =>
-        response._tag === "Exit" ? Queue.offer(exits, response.exit._tag) : Effect.void,
-    }).pipe(
+    const server = yield* RpcServer.makeNoSerialization(
+      OfficialWsRpcGroup.middleware(RpcScopeAuthorization),
+      {
+        ...WS_RPC_SERVER_OPTIONS,
+        onFromServer: (response) =>
+          response._tag === "Exit" ? Queue.offer(exits, response.exit._tag) : Effect.void,
+      },
+    ).pipe(
       Effect.provide(
         layerWsRpc(
           {

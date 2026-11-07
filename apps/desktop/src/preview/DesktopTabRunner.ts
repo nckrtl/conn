@@ -243,10 +243,10 @@ export class DesktopTabRunner {
 
   private async assertScriptAllowed() {
     if (await PageOperations.credentialLocked(this.page!))
-      throw new PageOperations.ServerBrowserOperationError(
-        "PreviewAutomationCredentialLockError",
-        "Saved credentials block scripts in this document.",
-      );
+      throw new PageOperations.ServerBrowserOperationError({
+        tag: "PreviewAutomationCredentialLockError",
+        message: "Saved credentials block scripts in this document.",
+      });
   }
 
   private async scriptEndpoint() {
@@ -357,10 +357,10 @@ export class DesktopTabRunner {
       request.tabId !== this.binding.tabId ||
       request.threadId !== this.binding.threadId
     )
-      throw new BrowserControlInterrupted(
-        "This desktop tab belongs to another thread.",
-        "agentMismatch",
-      );
+      throw new BrowserControlInterrupted({
+        message: "This desktop tab belongs to another thread.",
+        reason: "agentMismatch",
+      });
     if (request.operation === "status") {
       const result = {
         available: true,
@@ -407,10 +407,10 @@ export class DesktopTabRunner {
     if (request.operation === "snapshot")
       return this.control.system(async () => {
         if (this.dialog)
-          throw new BrowserControlInterrupted(
-            "A browser dialog is pending. Read preview_status.",
-            "dialogPending",
-          );
+          throw new BrowserControlInterrupted({
+            message: "A browser dialog is pending. Read preview_status.",
+            reason: "dialogPending",
+          });
         const generation = this.control.generation;
         const cdp = await page.context().newCDPSession(page);
         try {
@@ -453,10 +453,10 @@ export class DesktopTabRunner {
     }
     return this.control.agent(request.agentSessionId ?? "agent", async () => {
       if (this.dialog)
-        throw new BrowserControlInterrupted(
-          "A browser dialog is pending. Read preview_status and use preview_dialog first.",
-          "dialogPending",
-        );
+        throw new BrowserControlInterrupted({
+          message: "A browser dialog is pending. Read preview_status and use preview_dialog first.",
+          reason: "dialogPending",
+        });
       this.focus();
       await this.redactText(null);
       this.acting = true;
@@ -467,10 +467,10 @@ export class DesktopTabRunner {
             const input = decodeNavigate(request.input);
             const url = input.url ?? (input.target?.kind === "url" ? input.target.url : undefined);
             if (!url)
-              throw new PageOperations.ServerBrowserOperationError(
-                "PreviewAutomationExecutionError",
-                "Not supported on desktop tabs yet. Navigate with a URL.",
-              );
+              throw new PageOperations.ServerBrowserOperationError({
+                tag: "PreviewAutomationExecutionError",
+                message: "Not supported on desktop tabs yet. Navigate with a URL.",
+              });
             await page.goto(normalizePreviewUrl(url), {
               waitUntil: "domcontentloaded",
               timeout: request.timeoutMs,
@@ -574,10 +574,10 @@ export class DesktopTabRunner {
           case "cdpEndpoint":
             return { tabId: this.binding.tabId, endpoint: await this.scriptEndpoint() };
           default:
-            throw new PageOperations.ServerBrowserOperationError(
-              "PreviewAutomationExecutionError",
-              `Not supported on desktop tabs: ${request.operation}.`,
-            );
+            throw new PageOperations.ServerBrowserOperationError({
+              tag: "PreviewAutomationExecutionError",
+              message: `Not supported on desktop tabs: ${request.operation}.`,
+            });
         }
         return {};
       } finally {

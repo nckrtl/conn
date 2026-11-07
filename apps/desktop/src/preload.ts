@@ -322,6 +322,17 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
+    getHostDeviceName: () => ipcRenderer.invoke(IpcChannels.PREVIEW_HOST_DEVICE_NAME_CHANNEL),
+    connectTabHost: (input) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_HOST_CONNECT_CHANNEL, input),
+    executeTabRequest: (runtimeTabId, connectionId, request) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_EXECUTE_CHANNEL, {
+        runtimeTabId,
+        connectionId,
+        request,
+      }),
+    disconnectTabHost: (tabId) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_HOST_DISCONNECT_CHANNEL, { tabId }),
     setForwardedShortcuts: (shortcuts) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_SET_FORWARDED_SHORTCUTS_CHANNEL, shortcuts),
     createTab: (tabId, defaults) =>

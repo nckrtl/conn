@@ -1245,10 +1245,10 @@ export const fillCredential = async (
 export const credentialLocked = async (page: Page) => {
   const locked: unknown = await page.evaluate(CREDENTIAL_LOCK_EXPRESSION);
   if (typeof locked !== "boolean")
-    throw new ServerBrowserOperationError(
-      "PreviewAutomationExecutionError",
-      "Credential lock state could not be checked.",
-    );
+    throw new ServerBrowserOperationError({
+      tag: "PreviewAutomationExecutionError",
+      message: "Credential lock state could not be checked.",
+    });
   return locked;
 };
 
@@ -1260,9 +1260,9 @@ export const credentialLocked = async (page: Page) => {
 export const sensitiveInputValues = async (page: Page): Promise<ReadonlyArray<string>> => {
   const values: unknown = await page.evaluate(SENSITIVE_INPUT_VALUES_EXPRESSION);
   if (!Array.isArray(values) || !values.every((value) => typeof value === "string"))
-    throw new ServerBrowserOperationError(
-      "PreviewAutomationExecutionError",
-      "Sensitive input values could not be checked.",
-    );
+    throw new ServerBrowserOperationError({
+      tag: "PreviewAutomationExecutionError",
+      message: "Sensitive input values could not be checked.",
+    });
   return values;
 };

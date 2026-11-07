@@ -1,10 +1,16 @@
+import * as NodeOS from "node:os";
 import * as NodeZlib from "node:zlib";
+import { DesktopTabRunner } from "./DesktopTabRunner.ts";
+import type { DesktopTabHost, PreviewAutomationRequest } from "@t3tools/contracts";
 import {
   DesktopPreviewAnnotationVoiceEventSchema,
   DesktopPreviewRecordingInputSchema,
   DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER,
 } from "@t3tools/contracts";
 import type {
+  CredentialField,
+  DesktopCredentialFillResult,
+  DesktopCredentialFillStatus,
   DesktopPreviewAnnotationTheme,
   DesktopPreviewAnnotationVoiceConfig,
   DesktopPreviewAnnotationVoiceState,
@@ -22,6 +28,11 @@ import type {
   DesktopPreviewTabDefaults,
   PreviewForwardedShortcut,
 } from "@t3tools/contracts";
+import {
+  CREDENTIAL_INSERT_FUNCTION,
+  CREDENTIAL_PREPARE_FUNCTION,
+  credentialFieldExpression,
+} from "@t3tools/shared/credentialFill";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { matchesKeybindingShortcut } from "@t3tools/shared/keybindings";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
@@ -42,6 +53,8 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as HttpBody from "effect/http/HttpBody";
+import * as HttpClient from "effect/http/HttpClient";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -87,6 +100,7 @@ import { type DictationUrls, makeDictationRelay } from "./AnnotatorDictation.ts"
 import { isPreviewAnnotationPayload } from "./PickedElementPayload.ts";
 import { captureFavicon, safeHttpOrigin, selectFaviconCandidates } from "./FaviconCapture.ts";
 import { DEFAULT_RECORDING_INPUT_OPTIONS, type RecordingInputOptions } from "./RecordingInput.ts";
+import { makeResponseHeaderRelay } from "./ResponseHeaderRelay.ts";
 
 export type PreviewNavStatus =
   | { kind: "Idle" }
@@ -117,6 +131,29 @@ export interface PreviewTabState {
   serverTab?: { readonly threadId: string; readonly tabId: string };
   updatedAt: string;
 }
+
+/** A Vault value the desktop read itself, for one field of the tab's page. */
+export interface PreviewCredentialFillInput {
+  readonly field: CredentialField;
+  readonly expectedOrigin: string;
+  readonly value: string;
+}
+
+/** What a credential fill sees of a tab: whether it shows a page, and which. */
+export interface PreviewCredentialPage {
+  readonly available: boolean;
+  readonly url: string | null;
+}
+
+const CREDENTIAL_OBJECT_GROUP = "t3code-credential-fill";
+
+const originOf = (url: string): string | null => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+};
 
 const ZOOM_LEVELS: ReadonlyArray<number> = [
   0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0,
@@ -544,12 +581,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const passkeys = yield* PreviewPasskeys.PreviewPasskeys;
   const context = yield* Effect.context<never>();
   const runFork = Effect.runForkWith(context);
+  const runPromise = Effect.runPromiseWith(context);
   const resolvedArtifactDirectory = path.resolve(artifactDirectory);
 
   let forwardedShortcuts: ReadonlyArray<PreviewForwardedShortcut> = [];
   const annotationThemeRef = yield* Ref.make(DEFAULT_ANNOTATION_THEME);
   const annotationSendEnabled = new Map<string, boolean>();
+  /** Where each tab's annotation dictation requests go; main sends them, not the page. */
   const annotatorDictation = new Map<string, DictationUrls>();
+  const httpClient = yield* HttpClient.HttpClient;
   const dictation = makeDictationRelay({
     fetch: (url, init) =>
       runPromise(
@@ -575,6 +615,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         init.signal ? { signal: init.signal } : undefined,
       ),
   });
+  const responseHeaders = makeResponseHeaderRelay({
+    sendToGuest: (webContentsId, channel, payload) => {
+      const guest = webContents.fromId(webContentsId);
+      if (guest && !guest.isDestroyed()) guest.send(channel, payload);
+    },
+  });
+  const tabRunners = new Map<string, DesktopTabRunner>();
   const mainWindowRef = yield* Ref.make<Option.Option<BrowserWindow>>(Option.none());
   // Every open Conn window may host preview webviews. A closed window's webContents
   // can no longer be read, so each entry keeps the one captured while it was open.
@@ -631,6 +678,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     errorContext: PreviewOperationContext,
     tabId: string,
     wc: Electron.WebContents,
+    options?: Electron.Opts,
   ) {
     const requireCurrentGuest = Effect.gen(function* () {
       const tabs = yield* SynchronizedRef.get(tabsRef);
@@ -641,7 +689,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const capture = Effect.gen(function* () {
       yield* requireCurrentGuest;
       const image = yield* Effect.tryPromise({
-        try: (_signal) => wc.capturePage(),
+        // An abort-signal parameter makes a stalled promise interruptible.
+        try: (_signal) => (options ? wc.capturePage(undefined, options) : wc.capturePage()),
         catch: (cause) => new PreviewOperationError({ ...errorContext, cause }),
       }).pipe(
         Effect.timeout(CAPTURE_PAGE_ATTEMPT_TIMEOUT_MS),
@@ -1788,6 +1837,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
 
   const closeTab = Effect.fn("PreviewManager.closeTab")(function* (tabId: string) {
+    yield* disconnectTabHost(tabId).pipe(Effect.ignore);
     const claimed = yield* Ref.modify(closingTabIdsRef, (closingTabIds) => {
       if (closingTabIds.has(tabId)) return [false, closingTabIds] as const;
       return [true, new Set([...closingTabIds, tabId])] as const;
@@ -2461,6 +2511,204 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     (recover) => Effect.ignore(recover),
   );
 
+  const disconnectTabHost = Effect.fn("PreviewManager.disconnectTabHost")(function* (
+    tabId: string,
+  ) {
+    const runner = tabRunners.get(tabId);
+    tabRunners.delete(tabId);
+    if (runner)
+      yield* attemptPromise({ operation: "disconnectTabHost", tabId }, () => runner.close());
+  });
+  const connectTabHost = Effect.fn("PreviewManager.connectTabHost")(
+    function* (input: DesktopTabHost) {
+      const tabId = input.runtimeTabId;
+      yield* disconnectTabHost(tabId);
+      const wc = yield* requireWebContents(tabId);
+      const state = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
+      if (state?.serverTab) return yield* new PreviewTabNotFoundError({ tabId });
+      const control = yield* ensureControlSession(wc);
+      const runner = new DesktopTabRunner(
+        input.binding,
+        input.connectionId,
+        (active) => {
+          runFork(update(tabId, { controller: active ? "agent" : "none" }).pipe(Effect.ignore));
+        },
+        (value) => browserHost.redactForPage(wc, value),
+        (point, phase) => runPromise(emitAgentPointer({ runtimeTabId: tabId, ...point, phase })),
+        () => wc.focus(),
+      );
+      tabRunners.set(tabId, runner);
+      yield* attemptPromise({ operation: "connectTabHost", tabId }, () =>
+        runner.attach(
+          {
+            send: (method, params, sessionId) =>
+              sessionId === undefined
+                ? control.debugger.sendCommand(method, params)
+                : control.debugger.sendCommand(method, params, sessionId),
+            targetId: async () =>
+              (await control.debugger.sendCommand("Target.getTargetInfo")).targetInfo
+                .targetId as string,
+            url: () => wc.getURL(),
+            title: () => wc.getTitle(),
+            userAgent: () => wc.getUserAgent(),
+            setDownloadDirectory: () => {},
+            // CDP's scaled capture repaints the page and can stall while its
+            // thread is hidden. Native capture holds a capturer lease without
+            // bringing the guest or its window to the foreground.
+            captureScreenshot: (scale) =>
+              runPromise(
+                capturePageWithRetry(
+                  { operation: "tabSnapshot.capturePage", tabId, webContentsId: wc.id },
+                  tabId,
+                  wc,
+                  { stayHidden: true },
+                ).pipe(
+                  Effect.map((image) => {
+                    const size = image.getSize();
+                    const scaled =
+                      scale < 1
+                        ? image.resize({
+                            width: Math.max(1, Math.round(size.width * scale)),
+                            height: Math.max(1, Math.round(size.height * scale)),
+                          })
+                        : image;
+                    return scaled.toPNG().toString("base64");
+                  }),
+                ),
+              ),
+          },
+          {
+            on: (listener) => {
+              const onMessage = (
+                _event: Electron.Event,
+                method: string,
+                params: unknown,
+                sessionId: string,
+              ) => listener(method, params, sessionId);
+              const gone = () => {
+                tabRunners.delete(tabId);
+                void runner.close().catch(() => undefined);
+              };
+              control.debugger.on("message", onMessage);
+              control.debugger.once("detach", gone);
+              wc.once("destroyed", gone);
+              return () => {
+                control.debugger.off("message", onMessage);
+                control.debugger.off("detach", gone);
+                wc.off("destroyed", gone);
+              };
+            },
+          },
+        ),
+      ).pipe(Effect.tapError(() => disconnectTabHost(tabId).pipe(Effect.ignore)));
+    },
+    (effect, input) => withTabLifecycleLock(input.runtimeTabId, effect),
+  );
+  const executeTabRequest = Effect.fn("PreviewManager.executeTabRequest")(function* (
+    tabId: string,
+    connectionId: string,
+    request: PreviewAutomationRequest,
+  ) {
+    const runner = tabRunners.get(tabId);
+    if (!runner || runner.connectionId !== connectionId)
+      return yield* new PreviewTabNotFoundError({ tabId });
+    return yield* attemptPromise({ operation: "executeTabRequest", tabId }, () =>
+      runner.respond(request),
+    );
+  });
+
+  const credentialPage = (tabId: string) =>
+    requireWebContents(tabId).pipe(
+      Effect.map((wc): PreviewCredentialPage =>
+        wc.isDestroyed()
+          ? { available: false, url: null }
+          : { available: true, url: wc.getURL() || null },
+      ),
+      Effect.orElseSucceed((): PreviewCredentialPage => ({ available: false, url: null })),
+    );
+
+  /**
+   * Inserts a Vault value into the tab's page. The value only goes to CDP on
+   * this machine: never into an expression, a result, an error or the relay
+   * to the server, which redacts it from everything the page sends later.
+   * The page's document is marked, so the server blocks agent scripts there.
+   */
+  const fillCredential = Effect.fn("PreviewManager.fillCredential")(
+    function* (tabId: string, input: PreviewCredentialFillInput) {
+      const result = (status: DesktopCredentialFillStatus): DesktopCredentialFillResult => ({
+        status,
+      });
+      const wc = yield* requireWebContents(tabId);
+      if (originOf(wc.getURL()) !== input.expectedOrigin) return result("origin_mismatch");
+      const control = yield* ensureControlSession(wc);
+      const send = (method: string, params: Record<string, unknown>) =>
+        attemptPromise({ operation: "fillCredential", tabId, webContentsId: wc.id }, () =>
+          control.debugger.sendCommand(method, params),
+        ) as Effect.Effect<
+          {
+            readonly result?: {
+              readonly value?: unknown;
+              readonly subtype?: string;
+              readonly objectId?: string;
+            };
+            readonly exceptionDetails?: unknown;
+          },
+          PreviewOperationError
+        >;
+      const callOnField = (objectId: string, functionDeclaration: string, args: unknown[]) =>
+        send("Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration,
+          arguments: args.map((value) => ({ value })),
+          returnByValue: true,
+          userGesture: true,
+        }).pipe(
+          Effect.map((response) => (response.exceptionDetails ? null : response.result?.value)),
+        );
+      const insert = Effect.gen(function* () {
+        const found = yield* send("Runtime.evaluate", {
+          expression: credentialFieldExpression(input.field),
+          returnByValue: false,
+          objectGroup: CREDENTIAL_OBJECT_GROUP,
+        });
+        const objectId =
+          !found.exceptionDetails && found.result?.subtype === "node"
+            ? found.result.objectId
+            : undefined;
+        if (!objectId) return result("field_not_found");
+        const prepared = yield* callOnField(objectId, CREDENTIAL_PREPARE_FUNCTION, [input.field]);
+        if (prepared !== "ready")
+          return result(prepared === "not_editable" ? "not_editable" : "insert_failed");
+        // The page may have navigated while the field was found.
+        if (originOf(wc.getURL()) !== input.expectedOrigin) return result("origin_mismatch");
+        if (input.field !== "username") browserHost.rememberFilledSecret(wc, input.value);
+        // Bind the write to the resolved field; keyboard input can reach the
+        // host composer when Electron has not activated the guest webview.
+        const finished = yield* callOnField(objectId, CREDENTIAL_INSERT_FUNCTION, [
+          input.field,
+          input.value,
+          input.expectedOrigin,
+          true,
+        ]);
+        if (finished === "filled") return result("filled");
+        return result(finished === "origin_mismatch" ? "origin_mismatch" : "insert_failed");
+      }).pipe(
+        Effect.ensuring(
+          send("Runtime.releaseObjectGroup", { objectGroup: CREDENTIAL_OBJECT_GROUP }).pipe(
+            Effect.ignore,
+          ),
+        ),
+      );
+      const runner = tabRunners.get(tabId);
+      if (!runner) return yield* insert;
+      const exit = yield* attemptPromise({ operation: "fillCredential", tabId }, () =>
+        runner.fillCredential(() => Effect.runPromiseExitWith(context)(insert)),
+      );
+      if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+      return exit.value;
+    },
+    (effect, tabId) => withTabLifecycleLock(tabId, effect),
+  );
   const setColorScheme = Effect.fn("PreviewManager.setColorScheme")(function* (
     tabId: string,
     colorScheme: DesktopPreviewColorScheme,
@@ -3329,15 +3577,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   let pointerSequence = 0;
   const emitAgentPointer = Effect.fn("PreviewManager.emitAgentPointer")(function* (pointer: {
-    readonly key: { readonly threadId: string; readonly tabId: string };
+    readonly key?: { readonly threadId: string; readonly tabId: string };
+    readonly runtimeTabId?: string;
     readonly phase: "move" | "click";
     readonly x: number;
     readonly y: number;
   }) {
     const tab = [...(yield* SynchronizedRef.get(tabsRef)).values()].find(
       (candidate) =>
-        candidate.serverTab?.threadId === pointer.key.threadId &&
-        candidate.serverTab.tabId === pointer.key.tabId,
+        candidate.tabId === pointer.runtimeTabId ||
+        (pointer.key !== undefined &&
+          candidate.serverTab?.threadId === pointer.key.threadId &&
+          candidate.serverTab.tabId === pointer.key.tabId),
     );
     if (!tab) return;
     const event: DesktopPreviewPointerEvent = {
@@ -3437,6 +3688,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     cancelPickElement,
     captureScreenshot,
     closeTab,
+    credentialPage,
+    fillCredential,
     copyArtifactToClipboard,
     createTab,
     goBack,
@@ -3451,6 +3704,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     prepareWebview,
     reapplyZoom,
     refresh,
+    connectTabHost,
+    executeTabRequest,
+    disconnectTabHost,
     registerWebview,
     resetZoom: (tabId: string) => applyZoom(tabId, () => DEFAULT_ZOOM_FACTOR),
     setZoomFactor: (tabId: string, zoomFactor: number) =>
@@ -3459,6 +3715,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     saveRecording,
     setAnnotationTheme,
     setAnnotationSendEnabled,
+    installSessionHeaders: responseHeaders.installSession,
     setAudioMuted,
     setShown,
     setColorScheme,
@@ -3640,6 +3897,14 @@ export class PreviewManager extends Context.Service<
       defaults?: DesktopPreviewTabDefaults,
     ) => Effect.Effect<PreviewTabState, PreviewManagerError>;
     readonly closeTab: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
+    readonly getHostDeviceName: () => Effect.Effect<string>;
+    readonly connectTabHost: (input: DesktopTabHost) => Effect.Effect<void, PreviewManagerError>;
+    readonly executeTabRequest: (
+      tabId: string,
+      connectionId: string,
+      request: PreviewAutomationRequest,
+    ) => Effect.Effect<unknown, PreviewManagerError>;
+    readonly disconnectTabHost: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly registerWebview: (
       tabId: string,
       webContentsId: number,
@@ -3654,6 +3919,12 @@ export class PreviewManager extends Context.Service<
     readonly resetZoom: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly reapplyZoom: () => Effect.Effect<void>;
     readonly hardReload: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
+    /** The tab's page, for a Vault fill that the desktop runs itself. */
+    readonly credentialPage: (tabId: string) => Effect.Effect<PreviewCredentialPage>;
+    readonly fillCredential: (
+      tabId: string,
+      input: PreviewCredentialFillInput,
+    ) => Effect.Effect<DesktopCredentialFillResult, PreviewManagerError>;
     readonly setColorScheme: (
       tabId: string,
       colorScheme: DesktopPreviewColorScheme,
@@ -3795,12 +4066,19 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           );
         placeServerDownloads(session);
         passkeys.installSessionHandlers(session);
+        operations.installSessionHeaders(session);
         return session;
       },
     ),
     isBrowserPartition: browserSession.isPartition,
     createTab: operations.createTab,
     closeTab: operations.closeTab,
+    getHostDeviceName: Effect.fn("PreviewManager.getHostDeviceName")(() =>
+      Effect.sync(() => NodeOS.hostname()),
+    ),
+    connectTabHost: operations.connectTabHost,
+    executeTabRequest: operations.executeTabRequest,
+    disconnectTabHost: operations.disconnectTabHost,
     registerWebview: operations.registerWebview,
     prepareWebview: operations.prepareWebview,
     navigate: operations.navigate,
@@ -3813,6 +4091,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     reapplyZoom: operations.reapplyZoom,
     hardReload: operations.hardReload,
     setColorScheme: operations.setColorScheme,
+    credentialPage: operations.credentialPage,
+    fillCredential: operations.fillCredential,
     setZoomFactor: operations.setZoomFactor,
     setAudioMuted: operations.setAudioMuted,
     setShown: operations.setShown,

@@ -30,7 +30,10 @@ import {
   useWorkspaceTabs,
 } from "./WorkspaceTabsContext";
 import { WorkspaceToolbar } from "./WorkspaceToolbar";
+import { useWorkspacePhoneBar } from "./useWorkspacePhoneBar";
 import { WORKSPACE_DOCK, workspaceDockBottomClearance } from "./workspace-tabs-state";
+import { NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET } from "../native-mail-search-toolbar";
+import { HomeConnectionStatusOverlay } from "../../home/WorkspaceConnectionTitle";
 import { WorkspaceSidebarTabs } from "./WorkspaceSidebarTabs";
 import {
   useCompactWorkspaceTabs,
@@ -76,6 +79,7 @@ function WorkspaceRootContent() {
   const compactTabs = useCompactWorkspaceTabs();
   const enabled = useEnabledNavigationTabs();
   const sidebarTabs = useSidebarWorkspaceTabs();
+  const connPhoneBar = useWorkspacePhoneBar();
   const sidebarPicker = sidebarTabs === "picker" || (deviceType === "pad" && layout.usesSplitView);
   const sidebarNavigation =
     primaryColumn !== null &&
@@ -130,7 +134,8 @@ function WorkspaceRootContent() {
               : enabled.length
                 ? TAB_TITLES[state.selectedTab]
                 : "Navigation",
-            headerShown: true,
+            // Conn: iPhones keep the space; the bottom bar shows the selected tab.
+            headerShown: !connPhoneBar,
             headerTransparent: NATIVE_LIQUID_GLASS_SUPPORTED,
             headerStyle: NATIVE_LIQUID_GLASS_SUPPORTED
               ? { backgroundColor: "transparent" }
@@ -164,10 +169,20 @@ function WorkspaceRootContent() {
         {deviceType !== "pad" && deviceType !== "phone" && sidebarPicker ? (
           <WorkspaceSidebarTabs />
         ) : null}
+        {connPhoneBar ? (
+          <HomeConnectionStatusOverlay
+            bottom={insets.bottom + NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET + 8}
+            onOpenEnvironments={() => openSettings(navigation, "SettingsEnvironments")}
+          />
+        ) : null}
         {enabled.length === 0 && !settingsOpen ? null : settingsOpen ||
           state.selectedTab === "threads" ||
           state.selectedTab === "pullRequests" ? (
-          <WorkspaceToolbar sidebar={sidebarNavigation} onNewTask={startNewTask} />
+          // Conn: on iPhone, each list renders WorkspacePhoneBar instead; Settings keeps
+          // the toolbar for its search.
+          connPhoneBar && !settingsOpen ? null : (
+            <WorkspaceToolbar sidebar={sidebarNavigation} onNewTask={startNewTask} />
+          )
         ) : (
           <WorkspaceSectionToolbar onNewTask={startNewTask} showCompose={false} />
         )}

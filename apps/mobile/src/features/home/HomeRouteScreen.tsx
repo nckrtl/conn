@@ -34,6 +34,7 @@ import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspace
 import { WorkspaceListEmptyDetail } from "../layout/workspace/WorkspaceListEmptyDetail";
 import { WorkspaceListHeader } from "../layout/workspace/WorkspaceListHeader";
 import { buildHomeListFilterMenuItems } from "./home-list-filter-menu";
+import { HomeHeader } from "./HomeHeader";
 
 export function HomeRouteScreen() {
   const nativePrimaryColumn = use(NativePrimaryColumnContext);
@@ -184,6 +185,19 @@ export function HomeRouteScreen() {
               onProjectChange: setSelectedProjectKey,
             }),
           }}
+        />
+        <HomeHeader
+          environments={environments}
+          projects={projectFilterOptions}
+          searchQuery={searchQuery}
+          selectedEnvironmentId={selectedEnvironmentId}
+          selectedProjectKey={selectedProjectKey}
+          onEnvironmentChange={setSelectedEnvironmentId}
+          onProjectChange={setSelectedProjectKey}
+          onOpenEnvironments={() => openSettings(navigation, "SettingsEnvironments")}
+          onOpenSettings={() => selectTab("settings")}
+          onSearchQueryChange={setSearchQuery}
+          onStartNewTask={startNewTask}
         />
 
         <HomeScreen

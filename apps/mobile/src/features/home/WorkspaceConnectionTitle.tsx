@@ -92,6 +92,26 @@ function StatusFadeIn(props: {
   );
 }
 
+/** Keep the status above the bottom search toolbar without moving list rows. */
+export function HomeConnectionStatusOverlay(props: {
+  readonly bottom: number;
+  readonly onOpenEnvironments?: () => void;
+}) {
+  const status = use(ConnectionStatusContext);
+  if (status === null) return null;
+  return (
+    <View
+      className="absolute inset-x-0 items-center"
+      pointerEvents="box-none"
+      style={{ bottom: props.bottom }}
+    >
+      <View className="rounded-full border border-border-subtle bg-card px-3 py-1.5">
+        <WorkspaceConnectionTitle brand={null} onPress={props.onOpenEnvironments} />
+      </View>
+    </View>
+  );
+}
+
 export function WorkspaceConnectionTitle(props: {
   readonly brand: ReactNode;
   readonly onPress?: () => void;

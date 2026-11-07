@@ -45,6 +45,8 @@ import { useDebouncedValue } from "../../state/queries";
 import { useWorkspaceTabs } from "../layout/workspace/WorkspaceTabsContext";
 import { useSearchScrollRestoration } from "../layout/workspace/useSearchScrollRestoration";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
+import { WorkspacePhoneBar } from "../layout/workspace/WorkspacePhoneBar";
+import { useWorkspacePhoneBar } from "../layout/workspace/useWorkspacePhoneBar";
 
 function PullRequestListError(props: { readonly message: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -95,6 +97,7 @@ export function PullRequestsScreen(
   const navigation = useNavigation();
   const primaryColumn = use(NativePrimaryColumnContext);
   const workspace = useWorkspaceTabs()!;
+  const connPhoneBar = useWorkspacePhoneBar();
   const { environments } = useWorkspaceState();
   const configs = useAtomValue(environmentServerConfigsAtom);
   const insets = useSafeAreaInsets();
@@ -269,6 +272,7 @@ export function PullRequestsScreen(
   );
   const list = (
     <View className={sidebar ? "flex-1 bg-drawer" : "flex-1 bg-screen"}>
+      {connPhoneBar && !props.sidebar ? <WorkspacePhoneBar /> : null}
       <LegendList
         ref={listRef}
         data={entries}

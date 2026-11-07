@@ -28,6 +28,7 @@ import { useDeviceType } from "../../../native/native-layout-metrics";
 import { WorkspaceSidebarTabs } from "./WorkspaceSidebarTabs";
 import { useAdaptiveWorkspaceLayout } from "../AdaptiveWorkspaceLayout";
 import { useSelectWorkspaceTab } from "./useSelectWorkspaceTab";
+import { useWorkspacePhoneBar } from "./useWorkspacePhoneBar";
 
 const PULL_REQUEST_ICON = require("../../../../assets/icons/pull-request.png");
 
@@ -83,6 +84,8 @@ export function WorkspaceNativeTabs(props: {
   const selectTab = useSelectWorkspaceTab();
   const [provenance, setProvenance] = useState(0);
   const systemTabBar = useSystemWorkspaceTabBar();
+  // Conn: iPhones switch tabs from WorkspacePhoneBar in the bottom toolbar.
+  const connPhoneBar = useWorkspacePhoneBar();
   const deviceType = useDeviceType();
   const compactTabs = useCompactWorkspaceTabs();
   const { layout, panes } = useAdaptiveWorkspaceLayout();
@@ -105,7 +108,7 @@ export function WorkspaceNativeTabs(props: {
     <View style={{ flex: 1 }}>
       <Tabs.Host
         navStateRequest={request}
-        tabBarHidden={props.hidden || !systemTabBar}
+        tabBarHidden={props.hidden || !systemTabBar || connPhoneBar}
         ios={{
           tabBarControllerMode: "tabBar",
           tabBarMinimizeBehavior: "never",
@@ -157,7 +160,9 @@ export function WorkspaceNativeTabs(props: {
           );
         })}
       </Tabs.Host>
-      {(deviceType === "pad" ||
+      {/* Conn: iPhones switch tabs from WorkspacePhoneBar, so the compact picker stays hidden. */}
+      {!connPhoneBar &&
+      (deviceType === "pad" ||
         compactTabs ||
         (layout.variant === "medium" &&
           !workspaceUsesColumns(selectedTab, workspace.settingsOpen))) &&

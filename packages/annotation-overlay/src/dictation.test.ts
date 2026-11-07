@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { dictate, releaseMicrophone, warmMicrophone } from "./dictation";
+import { DictationError, dictate, releaseMicrophone, warmMicrophone } from "./dictation";
 
 function fakeStream() {
   const stop = vi.fn();
@@ -383,7 +383,18 @@ describe("dictation capture ownership", () => {
     it("preserves the unsupported microphone error and permits retry", async () => {
       vi.stubGlobal("navigator", {});
 
-      await expect(dictate({ wsUrl: "wss://mock.invalid/dictation" })).rejects.toMatchObject({
+      const error = await dictate({ wsUrl: "wss://mock.invalid/dictation" }).catch(
+        (cause: unknown) => cause,
+      );
+      expect(error).toBeInstanceOf(DictationError);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({
+        code: "unsupported",
+        message: "Microphone is not available in this browser.",
+        _tag: "DictationError",
+      });
+      expect(JSON.parse(JSON.stringify(error))).toMatchObject({
+        _tag: "DictationError",
         code: "unsupported",
         message: "Microphone is not available in this browser.",
       });

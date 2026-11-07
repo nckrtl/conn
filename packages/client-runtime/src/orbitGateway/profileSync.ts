@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   OrbitGatewayError,
   SETTINGS_VERSION_CONFLICT,
@@ -9,6 +10,8 @@ import {
 } from "./client.ts";
 import { isJsonObject, type JsonObject, type ProfileSectionName } from "./profileDocument.ts";
 import { jsonEqual, toGatewayForm } from "./sectionMerge.ts";
+
+const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 /**
  * Syncs sections of this device's Orbit profile, one channel per section. Per section it keeps
@@ -322,7 +325,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
       try {
         saved = await ports.client.patchSections(profile.id, patch);
       } catch (error) {
-        if (error instanceof OrbitGatewayError) {
+        if (isOrbitGatewayError(error)) {
           if (error.status === 404 || error.status === 405) {
             unsupportedUntil = now() + UNSUPPORTED_RETRY_MS;
             return { kind: "unsupported" };

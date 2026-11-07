@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import type { DictationSettings } from "./dictation";
 import { postDictation, recordDictationTiming } from "./post-dictation";
 
@@ -118,7 +119,11 @@ const SESSION_START_LIMIT_MS = 10_000;
 // Operator waits up to 120 s for a transcript to become final.
 const SESSION_STOP_LIMIT_MS = 130_000;
 const stops = new Map<string, Promise<string>>();
-class HostSessionsUnsupported extends Error {}
+class HostSessionsUnsupported extends Schema.TaggedError<HostSessionsUnsupported>()(
+  "HostSessionsUnsupported",
+  { message: Schema.String },
+) {}
+const isHostSessionsUnsupported = Schema.is(HostSessionsUnsupported);
 
 async function callSession(
   action: HostSessionAction,
@@ -137,7 +142,9 @@ async function callSession(
   );
   if (result === true) return "";
   if (typeof result === "object" && result !== null) {
-    if (result.unsupported === true) throw new HostSessionsUnsupported("No dictation sessions.");
+    if (result.unsupported === true) {
+      throw new HostSessionsUnsupported({ message: "No dictation sessions." });
+    }
     return typeof result.text === "string" ? result.text : "";
   }
   throw new Error(`The host did not ${action} dictation.`);
@@ -168,7 +175,7 @@ export async function startHostDictation(
     await startHostSession(session, signal);
     return "session";
   } catch (cause) {
-    if (!(cause instanceof HostSessionsUnsupported)) throw cause;
+    if (!isHostSessionsUnsupported(cause)) throw cause;
   }
   await callHost("start", AbortSignal.any([signal, AbortSignal.timeout(SESSION_START_LIMIT_MS)]));
   return "paste";

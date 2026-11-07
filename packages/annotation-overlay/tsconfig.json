@@ -17,8 +17,7 @@
           "globalRandom": "off",
           "globalTimers": "off",
           "globalFetch": "off",
-          "cryptoRandomUUID": "off",
-          "extendsNativeError": "off"
+          "cryptoRandomUUID": "off"
         }
       }
     ]

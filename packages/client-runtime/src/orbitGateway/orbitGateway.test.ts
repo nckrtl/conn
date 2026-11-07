@@ -253,7 +253,15 @@ describe("createOrbitGatewayClient", () => {
     );
     const error = await client.settings(1).catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(OrbitGatewayError);
+    expect(error).toBeInstanceOf(Error);
     expect(error).toMatchObject({
+      _tag: "OrbitGatewayError",
+      code: "conn.settings_version_conflict",
+      status: 409,
+      details: { current_version: 5 },
+    });
+    expect(JSON.parse(JSON.stringify(error))).toMatchObject({
+      _tag: "OrbitGatewayError",
       code: "conn.settings_version_conflict",
       status: 409,
       details: { current_version: 5 },
@@ -264,6 +272,9 @@ describe("createOrbitGatewayClient", () => {
     const client = createOrbitGatewayClient(async () => {
       throw new Error("ECONNREFUSED");
     });
-    await expect(client.environments()).rejects.toMatchObject({ code: "gateway.unreachable" });
+    const error = await client.environments().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(OrbitGatewayError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ code: "gateway.unreachable", status: 0 });
   });
 });

@@ -25,12 +25,15 @@ export interface OrbitGatewayResponse {
 export type OrbitGatewayTransport = (request: OrbitGatewayRequest) => Promise<OrbitGatewayResponse>;
 
 /** A failed Gateway call. `code` is the Gateway's error code, or `gateway.unreachable`/`gateway.response_invalid`. */
-export class OrbitGatewayError extends Schema.TaggedError<OrbitGatewayError>()("OrbitGatewayError", {
-  code: Schema.String,
-  message: Schema.String,
-  status: Schema.Number,
-  details: Schema.Record(Schema.String, Schema.Unknown),
-}) {}
+export class OrbitGatewayError extends Schema.TaggedError<OrbitGatewayError>()(
+  "OrbitGatewayError",
+  {
+    code: Schema.String,
+    message: Schema.String,
+    status: Schema.Number,
+    details: Schema.Record(Schema.String, Schema.Unknown),
+  },
+) {}
 
 export interface OrbitGatewayProfile {
   readonly id: number;

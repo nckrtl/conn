@@ -215,13 +215,11 @@ function profileSyncController(): ProfileSyncController | null {
         }
       } catch (error) {
         useOrbitProfileSyncStatus.setState({
-          sectionsError:
-            error instanceof Error ? error.message : String(error),
+          sectionsError: error instanceof Error ? error.message : String(error),
         });
       }
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
       useOrbitProfileSyncStatus.setState((status) => ({
         ...status,
         phase: "error",

@@ -77,6 +77,7 @@ function makeFakeBrowserWindow() {
     setZoomLevel: vi.fn((level: number) => {
       zoomLevel = level;
     }),
+    id: 101,
     isLoadingMainFrame: vi.fn(() => false),
     navigationHistory: {
       canGoBack: vi.fn(() => true),
@@ -99,6 +100,7 @@ function makeFakeBrowserWindow() {
   };
 
   const window = {
+    id: 7,
     close: vi.fn(),
     focus: vi.fn(),
     getBounds: vi.fn(() => ({ x: 0, y: 0, width: 1100, height: 780 })),
@@ -1245,6 +1247,52 @@ describe("DesktopWindow", () => {
         assert.equal(yield* Ref.get(createCount), 1);
         assert.equal(fakeWindow.send.mock.calls.length, 0);
         assert.equal(onReveal.mock.calls.length, 0);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("opens an extra window for a workspace and titles it from the renderer report", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const createdWindowOptions: Electron.BrowserWindowConstructorOptions[] = [];
+      const previewWindows: Electron.BrowserWindow[] = [];
+      const layer = layerTest({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        createdWindowOptions,
+        addPreviewWindow: (window) =>
+          Effect.sync(() => {
+            previewWindows.push(window);
+          }),
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        yield* desktopWindow.createAdditional({ workspace: "DLF" });
+        assert.equal(yield* Ref.get(createCount), 2);
+        const extra = createdWindowOptions[1]?.webPreferences?.additionalArguments ?? [];
+        assert.deepEqual(extra, [
+          "--t3code-window=additional",
+          `--t3code-window-workspace=${encodeURIComponent("DLF")}`,
+        ]);
+        assert.equal(previewWindows.length, 2);
+
+        using _fromId = vi.spyOn(Electron.webContents, "fromId").mockReturnValue(
+          fakeWindow.window.webContents,
+        );
+        using _fromWindow = vi
+          .spyOn(Electron.BrowserWindow, "fromWebContents")
+          .mockReturnValue(fakeWindow.window);
+        yield* desktopWindow.noteWorkspace({
+          webContentsId: fakeWindow.window.webContents.id,
+          id: "ws-dlf",
+          name: "DLF",
+        });
+        assert.equal(vi.mocked(fakeWindow.window.setTitle).mock.calls.at(-1)?.[0], "DLF");
       }).pipe(Effect.provide(layer));
     }),
   );

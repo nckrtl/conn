@@ -542,6 +542,38 @@
     "./speech": {
       "types": "./src/speech.ts",
       "import": "./src/speech.ts"
+    },
+    "./projectIdentity": {
+      "types": "./src/projectIdentity.ts",
+      "import": "./src/projectIdentity.ts"
+    },
+    "./credentialFill": {
+      "types": "./src/credentialFill.ts",
+      "import": "./src/credentialFill.ts"
+    },
+    "./orbit": {
+      "types": "./src/orbit.ts",
+      "import": "./src/orbit.ts"
+    },
+    "./laravelToolbarHeaders": {
+      "types": "./src/laravelToolbarHeaders.ts",
+      "import": "./src/laravelToolbarHeaders.ts"
+    },
+    "./previewAnnotation": {
+      "types": "./src/previewAnnotation.ts",
+      "import": "./src/previewAnnotation.ts"
+    },
+    "./annotationBridge": {
+      "types": "./src/annotationBridge.ts",
+      "import": "./src/annotationBridge.ts"
+    },
+    "./previewSessionControl": {
+      "types": "./src/previewSessionControl.ts",
+      "import": "./src/previewSessionControl.ts"
+    },
+    "./previewPage": {
+      "types": "./src/previewPage.ts",
+      "import": "./src/previewPage.ts"
     }
   },
   "scripts": {

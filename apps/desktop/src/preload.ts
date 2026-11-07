@@ -12,6 +12,7 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
 import { mergeLegacyLocalStorage } from "./legacyLocalStorageMerge.ts";
+import { parseDesktopWindowArgv } from "./window/desktopWindowArgv.ts";
 
 const SNAP_SHOT_EVENT_TYPES = new Set([
   "requested",
@@ -46,17 +47,7 @@ try {
 const clientPlatform = process.platform;
 
 function readWindowContext(): { readonly additional: boolean; readonly workspace: string | null } {
-  const additional = process.argv.includes("--t3code-window=additional");
-  const workspaceArg = process.argv.find((arg) => arg.startsWith("--t3code-window-workspace="));
-  let workspace: string | null = null;
-  if (workspaceArg !== undefined) {
-    try {
-      workspace = decodeURIComponent(workspaceArg.slice("--t3code-window-workspace=".length));
-    } catch {
-      workspace = null;
-    }
-  }
-  return { additional, workspace };
+  return parseDesktopWindowArgv(process.argv);
 }
 
 if (clientPlatform === "darwin") {

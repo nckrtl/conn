@@ -11,6 +11,21 @@ const expectedDesktopBridgeApis = [
   "getLocalEnvironmentBootstraps",
   "getPathForFile",
   "pickFolder",
+  "apiSend",
+  "orbitGatewaySend",
+  "databaseRun",
+  "vaultwardenSetup",
+  "vaultLogins",
+  "vaultFill",
+  "vaultDatabases",
+  "mcpConnect",
+  "mcpRequest",
+  "mcpDisconnect",
+  "onMcpEvent",
+  "openWorkspaceWindow",
+  "reportWorkspace",
+  "getLocalThemes",
+  "onLocalThemesChanged",
 ];
 const clerkPasskeysGlobal = "__clerk_internal_electron_passkeys";
 const preloadExecutionTimeoutMs = 1_000;
@@ -92,6 +107,7 @@ const executeBundle = (source, sandboxModules) => {
     contextIsolated: true,
     // oxlint-disable-next-line t3code/no-global-process-runtime -- This standalone CI verifier supplies the preload's host platform without loading Effect.
     platform: process.platform,
+    argv: [],
     versions: { electron: electronVersion },
   };
   const requireSandboxModule = (moduleName) => {
@@ -137,6 +153,12 @@ export const verifyPreloadBundle = (source) => {
     (api) => typeof desktopBridge?.[api] !== "function",
   );
   if (!exposedGlobals.has("desktopBridge")) missingApis.unshift("desktopBridge exposure");
+  if (
+    desktopBridge?.windowContext === undefined ||
+    typeof desktopBridge.windowContext !== "object"
+  ) {
+    missingApis.push("windowContext");
+  }
   if (!exposedGlobals.has(clerkPasskeysGlobal)) missingApis.push(`${clerkPasskeysGlobal} exposure`);
 
   if (missingApis.length > 0) {

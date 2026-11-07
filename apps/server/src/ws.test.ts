@@ -45,7 +45,7 @@ import { vi } from "vite-plus/test";
 import * as AssetSigner from "./assets/AssetSigner.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
-import type * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
+import * as DesktopTabRelay from "./preview/DesktopTabRelay.ts";
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
@@ -794,6 +794,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(PairingGrantStore.PairingGrantStore)({}),
   Layer.mock(PeerLinks.PeerLinks)({}),
   Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+  Layer.mock(DesktopTabRelay.DesktopTabRelay)({}),
   Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => undefined }),
   Layer.mock(PreviewManager.PreviewManager)({}),
   Layer.mock(ProcessDiagnostics.ProcessDiagnostics)({}),
@@ -994,8 +995,6 @@ it.effect.each([
             },
             {},
             yield* ServerBrowser.ServerBrowser,
-            // Conn: the config RPCs never relay desktop tabs.
-            {} as DesktopTabRelay.DesktopTabRelay["Service"],
             () => Effect.void,
             { secretReferences: true },
           ).pipe(Layer.provide(configRpcServices)),
@@ -1238,8 +1237,6 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
           },
           {},
           yield* ServerBrowser.ServerBrowser,
-          // Conn: the config RPCs never relay desktop tabs.
-          {} as DesktopTabRelay.DesktopTabRelay["Service"],
           () => Effect.void,
           { secretReferences: true },
         ).pipe(Layer.provide(configRpcServices)),

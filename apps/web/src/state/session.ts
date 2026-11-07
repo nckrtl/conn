@@ -104,3 +104,17 @@ export function useEnvironmentSessionState(environmentId: EnvironmentId | null) 
     isPending: result.waiting,
   };
 }
+
+export function readEnvironmentLacksScope(
+  environmentId: EnvironmentId,
+  scope: AuthEnvironmentScope,
+): boolean {
+  const result = appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId));
+  const session = Option.getOrNull(AsyncResult.value(result));
+  return (
+    result._tag !== "Failure" &&
+    session !== null &&
+    session.authenticated &&
+    !sessionGrantsScope(session, scope)
+  );
+}

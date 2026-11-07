@@ -225,6 +225,9 @@ import { WrenchIcon as PhWrench } from "@phosphor-icons/react/dist/csr/Wrench";
 import { XIcon as PhX } from "@phosphor-icons/react/dist/csr/X";
 import { XCircleIcon as PhXCircle } from "@phosphor-icons/react/dist/csr/XCircle";
 
+import { EraserIcon as PhEraser } from "@phosphor-icons/react/dist/csr/Eraser";
+import { WaveformIcon as PhWaveform } from "@phosphor-icons/react/dist/csr/Waveform";
+import { TranslateIcon as PhTranslate } from "@phosphor-icons/react/dist/csr/Translate";
 import {
   ActivityIcon as LuActivity,
   AlarmClockIcon as LuAlarmClock,
@@ -477,6 +480,10 @@ import {
   ZapIcon as LuZap,
   ChevronsLeftRightEllipsisIcon as LuChevronsLeftRightEllipsis,
   SquareSplitHorizontalIcon as LuSquareSplitHorizontal,
+  AudioLinesIcon as LuAudioLines,
+  EraserIcon as LuEraser,
+  LanguagesIcon as LuLanguages,
+  MessageSquarePlusIcon as LuMessageSquarePlus,
 } from "lucide-react-original";
 
 import { connIcon } from "./connIcon";
@@ -1076,5 +1083,15 @@ export const XIcon = connIcon(PhX, LuX, "x", "bold"),
   X = XIcon;
 export const XCircleIcon = connIcon(PhXCircle, LuXCircle, "xcircle"),
   XCircle = XCircleIcon;
+
+export const AudioLinesIcon = connIcon(PhWaveform, LuAudioLines, "audio-lines"),
+  AudioLines = AudioLinesIcon;
+export const EraserIcon = connIcon(PhEraser, LuEraser, "eraser"),
+  Eraser = EraserIcon;
+export const LanguagesIcon = connIcon(PhTranslate, LuLanguages, "languages"),
+  Languages = LanguagesIcon;
+export const MessageSquarePlusIcon = connIcon(PhChat, LuMessageSquarePlus, "message-square-plus"),
+  MessageSquarePlus = MessageSquarePlusIcon;
+
 export const ZapIcon = connIcon(PhLightning, LuZap, "zap"),
   Zap = ZapIcon;

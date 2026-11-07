@@ -322,8 +322,11 @@ Do not reintroduce these:
 
 3. Check that new scroll containers in cards use `scrollbar-inset`, and new
    switches use the primitive (no own track color).
-4. Lint the touched files (`vp lint <files>`) and typecheck `apps/web`
-   (`tsc --noEmit`). Do not run repo-wide checks.
+4. Lint the touched files (`vp lint <files>`) and typecheck web and desktop
+   (`vp run --filter @t3tools/web typecheck`,
+   `vp run --filter @t3tools/desktop typecheck`). Desktop typecheck is required
+   on every sync: web-only `tsc` cannot see missing window or preview members.
+   Do not run repo-wide checks.
 5. Visual check, when the user agrees: use the `test-t3-app` skill. Check
    Dark Ocean and at least one built-in light theme. Look at the chat,
    sidebar, Settings, browser, Files, Diff and terminal.

@@ -797,8 +797,11 @@ Sources:
    popovers, `ToolbarGroup`, `text-ui`, shell dividers, `scrollbar-inset`). Fix
    what the scan finds on the sync branch, before the build.
 3. Lint and typecheck only the touched scope (`vp lint <files>`,
-   `vp exec tsc --noEmit` in `apps/web`), and run the tests for the fork areas
-   you touched (from the root, use `vp test run` with paths such as
+   `vp run --filter @t3tools/web typecheck`, and
+   `vp run --filter @t3tools/desktop typecheck`). Desktop typecheck is required
+   on every sync: web-only `tsc` cannot see missing window or preview members
+   that IPC still calls. Run the tests for the fork areas you touched (from
+   the root, use `vp test run` with paths such as
    `apps/web/src/laravelToolbar`, `apps/web/src/annotations`,
    `apps/web/src/workspaces.test.ts` and `apps/desktop/src/window`). For desktop
    tab automation, run `apps/desktop/src/preview/DesktopTabRunner.test.ts`,

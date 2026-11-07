@@ -1,3 +1,4 @@
+// @effect-diagnostics extendsNativeError:off - Promise-transport envelope checked with instanceof, not an Effect failure.
 /**
  * The Conn layer of the Orbit Gateway (`/api/v1/conn`, see Orbit's docs/reference/conn.md).
  *

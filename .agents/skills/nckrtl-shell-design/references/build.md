@@ -12,8 +12,8 @@ so a rebase replays them), then run the sync procedure in
 - No update feed: every build sets `publish: null`, so the app never replaces
   itself with an upstream release (`scripts/build-desktop-artifact.ts`).
 - Desktop typecheck: `scripts/build-desktop-artifact.ts` runs
-  `vp run --filter @t3tools/desktop typecheck` (the existing Vite task)
-  before packing. A missing window or preview member fails the build.
+  `vp run --no-cache --filter @t3tools/desktop typecheck` (the existing Vite
+  task) before packing. A missing window or preview member fails the build.
 - T3 Code has no in-page annotator of its own. The browser panel's
   "Annotate preview" feature (`apps/web/src/annotations/`) is product code: it
   loads the overlay into the previewed page from an annotation server the user

@@ -262,14 +262,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const error = yield* typecheckDesktopPackage("/repo", false).pipe(Effect.flip);
       assert.instanceOf(error, BuildCommandFailedError);
       assert.equal(error.exitCode, 2);
-      assert.equal(error.command, "vp run --filter @t3tools/desktop typecheck");
+      assert.equal(error.command, "vp run --no-cache --filter @t3tools/desktop typecheck");
       assert.include(error.message, "showWorkspace");
       assert.equal(commands.length, 1);
       assert.equal(commands[0]?.command, "vp");
-      assert.deepStrictEqual(
-        [...desktopTypecheckVpArgs],
-        ["run", "--filter", "@t3tools/desktop", "typecheck"],
-      );
       assert.deepStrictEqual(commands[0]?.args, [...desktopTypecheckVpArgs]);
       assert.equal(commands[0]?.options.cwd, "/repo");
     }).pipe(Effect.provide(spawner), Effect.scoped);
@@ -288,12 +284,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     return Effect.gen(function* () {
       yield* typecheckDesktopPackage("/repo", false);
       assert.equal(commands.length, 1);
-      assert.deepStrictEqual(commands[0]?.args, [
-        "run",
-        "--filter",
-        "@t3tools/desktop",
-        "typecheck",
-      ]);
+      assert.deepStrictEqual(commands[0]?.args, [...desktopTypecheckVpArgs]);
     }).pipe(Effect.provide(spawner), Effect.scoped);
   });
 

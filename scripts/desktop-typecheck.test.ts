@@ -1,7 +1,9 @@
 import { expect } from "vite-plus/test";
 import { describe, it } from "@effect/vitest";
 
+import { vitePlusCommand } from "./check-changed-command.ts";
 import {
+  DESKTOP_TYPECHECK_LABEL,
   DESKTOP_TYPECHECK_PACKAGE,
   desktopTypecheckVpArgs,
   withDesktopTypecheck,
@@ -23,6 +25,16 @@ describe("desktop typecheck gate", () => {
   it("invokes the existing desktop Vite typecheck task", () => {
     expect([...desktopTypecheckVpArgs]).toEqual([
       "run",
+      "--no-cache",
+      "--filter",
+      "@t3tools/desktop",
+      "typecheck",
+    ]);
+    expect(DESKTOP_TYPECHECK_LABEL).toBe("vp run --no-cache --filter @t3tools/desktop typecheck");
+    const [, args] = vitePlusCommand([...desktopTypecheckVpArgs]);
+    expect(args.slice(-5)).toEqual([
+      "run",
+      "--no-cache",
       "--filter",
       "@t3tools/desktop",
       "typecheck",

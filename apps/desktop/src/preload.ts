@@ -45,6 +45,20 @@ try {
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Electron exposes the client platform in its sandboxed preload process.
 const clientPlatform = process.platform;
 
+function readWindowContext(): { readonly additional: boolean; readonly workspace: string | null } {
+  const additional = process.argv.includes("--t3code-window=additional");
+  const workspaceArg = process.argv.find((arg) => arg.startsWith("--t3code-window-workspace="));
+  let workspace: string | null = null;
+  if (workspaceArg !== undefined) {
+    try {
+      workspace = decodeURIComponent(workspaceArg.slice("--t3code-window-workspace=".length));
+    } catch {
+      workspace = null;
+    }
+  }
+  return { additional, workspace };
+}
+
 if (clientPlatform === "darwin") {
   // Native buttons ignore Chromium zoom; reserve native points even after reload.
   const syncWindowControlInset = () => {
@@ -123,6 +137,14 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) =>
     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),
+  getLocalThemes: () => ipcRenderer.invoke(IpcChannels.GET_LOCAL_THEMES_CHANNEL),
+  onLocalThemesChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, themes: unknown) => {
+      if (Array.isArray(themes)) listener(themes);
+    };
+    ipcRenderer.on(IpcChannels.LOCAL_THEMES_CHANGED_CHANNEL, handler);
+    return () => ipcRenderer.removeListener(IpcChannels.LOCAL_THEMES_CHANGED_CHANNEL, handler);
+  },
   requestSnapShotPermissions: (includeAccessibility) =>
     ipcRenderer.invoke(IpcChannels.REQUEST_SNAP_SHOT_PERMISSIONS_CHANNEL, includeAccessibility),
   getSnapShotState: () => ipcRenderer.invoke(IpcChannels.GET_SNAP_SHOT_STATE_CHANNEL),
@@ -210,6 +232,32 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(IpcChannels.OPEN_SYSTEM_SETTINGS_CHANNEL, pane),
   probeRemoteEditors: () => ipcRenderer.invoke(IpcChannels.PROBE_REMOTE_EDITORS_CHANNEL, undefined),
   pasteAsText: () => ipcRenderer.invoke(IpcChannels.PASTE_AS_TEXT_CHANNEL, undefined),
+  apiSend: (request) => ipcRenderer.invoke(IpcChannels.API_SEND_CHANNEL, request),
+  orbitGatewaySend: (request) =>
+    ipcRenderer.invoke(IpcChannels.ORBIT_GATEWAY_SEND_CHANNEL, request),
+  databaseRun: (request) => ipcRenderer.invoke(IpcChannels.DATABASE_RUN_CHANNEL, request),
+  vaultwardenSetup: (request) => ipcRenderer.invoke(IpcChannels.VAULTWARDEN_SETUP_CHANNEL, request),
+  vaultLogins: (request) => ipcRenderer.invoke(IpcChannels.VAULT_LOGINS_CHANNEL, request),
+  vaultFill: (request) => ipcRenderer.invoke(IpcChannels.VAULT_FILL_CHANNEL, request),
+  vaultDatabases: (request) => ipcRenderer.invoke(IpcChannels.VAULT_DATABASES_CHANNEL, request),
+  mcpConnect: (request) => ipcRenderer.invoke(IpcChannels.MCP_CONNECT_CHANNEL, request),
+  mcpRequest: (request) => ipcRenderer.invoke(IpcChannels.MCP_REQUEST_CHANNEL, request),
+  mcpDisconnect: (sessionId) => ipcRenderer.invoke(IpcChannels.MCP_DISCONNECT_CHANNEL, sessionId),
+  onMcpEvent: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, event: unknown) => {
+      if (typeof event !== "object" || event === null || !("sessionId" in event)) return;
+      listener(event as Parameters<typeof listener>[0]);
+    };
+    ipcRenderer.on(IpcChannels.MCP_EVENT_CHANNEL, wrappedListener);
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.MCP_EVENT_CHANNEL, wrappedListener);
+    };
+  },
+  openWorkspaceWindow: (workspace) =>
+    ipcRenderer.invoke(IpcChannels.OPEN_WORKSPACE_WINDOW_CHANNEL, workspace),
+  reportWorkspace: (workspace) =>
+    ipcRenderer.invoke(IpcChannels.REPORT_WORKSPACE_CHANNEL, workspace),
+  windowContext: readWindowContext(),
   onMenuAction: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
       if (typeof action !== "string") return;

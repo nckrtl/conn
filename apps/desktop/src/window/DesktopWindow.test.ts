@@ -15,23 +15,40 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Electron from "electron";
 import { vi } from "vite-plus/test";
 
-vi.mock("electron", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("electron")>()),
-  session: {
-    fromPartition: vi.fn(() => ({
-      getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/1.2.3"),
-      setPermissionRequestHandler: vi.fn(),
-      setUserAgent: vi.fn(),
-    })),
-  },
-  screen: {
-    getAllDisplays: vi.fn(() => [
-      {
-        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
-      },
-    ]),
-  },
+const electronStubs = vi.hoisted(() => ({
+  fromId: vi.fn(),
+  fromWebContents: vi.fn(),
 }));
+
+vi.mock("electron", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("electron")>();
+  return {
+    ...actual,
+    webContents: {
+      fromId: electronStubs.fromId,
+    },
+    BrowserWindow: {
+      fromWebContents: electronStubs.fromWebContents,
+      fromId: vi.fn(() => null),
+      getAllWindows: vi.fn(() => []),
+      getFocusedWindow: vi.fn(() => null),
+    },
+    session: {
+      fromPartition: vi.fn(() => ({
+        getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/1.2.3"),
+        setPermissionRequestHandler: vi.fn(),
+        setUserAgent: vi.fn(),
+      })),
+    },
+    screen: {
+      getAllDisplays: vi.fn(() => [
+        {
+          bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        },
+      ]),
+    },
+  };
+});
 
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -1281,12 +1298,8 @@ describe("DesktopWindow", () => {
         ]);
         assert.equal(previewWindows.length, 2);
 
-        using _fromId = vi.spyOn(Electron.webContents, "fromId").mockReturnValue(
-          fakeWindow.window.webContents,
-        );
-        using _fromWindow = vi
-          .spyOn(Electron.BrowserWindow, "fromWebContents")
-          .mockReturnValue(fakeWindow.window);
+        electronStubs.fromId.mockReturnValue(fakeWindow.window.webContents);
+        electronStubs.fromWebContents.mockReturnValue(fakeWindow.window);
         yield* desktopWindow.noteWorkspace({
           webContentsId: fakeWindow.window.webContents.id,
           id: "ws-dlf",

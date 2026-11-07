@@ -576,6 +576,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       ),
   });
   const mainWindowRef = yield* Ref.make<Option.Option<BrowserWindow>>(Option.none());
+  // Every open Conn window may host preview webviews. A closed window's webContents
+  // can no longer be read, so each entry keeps the one captured while it was open.
+  const appWindows = new Map<BrowserWindow, Electron.WebContents>();
+  // The window that hosts each registered guest, so closing one window releases only its tabs.
+  const tabHostWebContents = new Map<string, Electron.WebContents>();
   const tabsRef = yield* SynchronizedRef.make<ReadonlyMap<string, PreviewTabState>>(new Map());
   const attachedRef = yield* Ref.make<ReadonlyMap<number, ManagedListeners>>(new Map());
   const listenersRef = yield* Ref.make<ReadonlySet<Listener>>(new Set());
@@ -602,7 +607,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const displayMediaHandlerSessions = new WeakSet<Session>();
   let frameCaptureWindowOpen = true;
   let currentMainWindow: BrowserWindow | undefined;
-  let mainWindowCleanupFiber: Fiber.Fiber<void, never> | undefined;
+  let lastWindowCleanupFiber: Fiber.Fiber<void, never> | undefined;
   const tabLifecycleLocks = new Map<
     string,
     { readonly semaphore: Semaphore.Semaphore; users: number }
@@ -699,9 +704,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     );
   });
   const setFrameCaptureBackgroundThrottling = Effect.fnUntraced(function* (enabled: boolean) {
-    const mainWindow = yield* Ref.get(mainWindowRef);
-    if (Option.isNone(mainWindow)) return;
-    yield* setWindowBackgroundThrottling(mainWindow.value, enabled);
+    yield* Effect.forEach([...appWindows.keys()], (window) =>
+      setWindowBackgroundThrottling(window, enabled),
+    );
   });
   const setFrameCaptureWebContentsBackgroundThrottling = Effect.fnUntraced(function* (
     wc: Electron.WebContents,
@@ -1614,28 +1619,49 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     yield* install().pipe(Effect.onError(() => Scope.close(scope, Exit.void).pipe(Effect.ignore)));
   });
 
-  const setMainWindow = Effect.fn("PreviewManager.setMainWindow")(function* (
-    window: BrowserWindow,
+  // Releases what only a closed window's tabs used; their guests are gone with the window.
+  const releaseWindowTabs = Effect.fn("PreviewManager.releaseWindowTabs")(function* (
+    windowContents: Electron.WebContents,
   ) {
-    if (mainWindowCleanupFiber) {
-      yield* Fiber.join(mainWindowCleanupFiber);
-      mainWindowCleanupFiber = undefined;
+    const tabIds = [...tabHostWebContents]
+      .filter(([, host]) => host === windowContents)
+      .map(([tabId]) => tabId);
+    yield* Effect.forEach(
+      tabIds,
+      (tabId) =>
+        Effect.all([closePictureInPicture(tabId), stopRecording(tabId)], {
+          concurrency: 2,
+          discard: true,
+        }).pipe(Effect.ignore),
+      { concurrency: "unbounded", discard: true },
+    );
+  });
+
+  const addWindow = Effect.fn("PreviewManager.addWindow")(function* (window: BrowserWindow) {
+    if (lastWindowCleanupFiber) {
+      yield* Fiber.join(lastWindowCleanupFiber);
+      lastWindowCleanupFiber = undefined;
     }
     yield* SynchronizedRef.modifyEffect(frameCaptureSessionsRef, (sessions) =>
       Effect.gen(function* () {
-        // Cleanup or lock acquisition can outlive the replacement window.
-        if (window.isDestroyed()) return [undefined, sessions] as const;
+        // Cleanup or lock acquisition can outlive the new window.
+        if (window.isDestroyed() || appWindows.has(window)) return [undefined, sessions] as const;
         if (sessions.size > 0) {
           yield* setWindowBackgroundThrottling(window, false);
         }
-        yield* Ref.set(mainWindowRef, Option.some(window));
-        currentMainWindow = window;
+        const windowContents = window.webContents;
+        appWindows.set(window, windowContents);
         frameCaptureWindowOpen = true;
+        if (currentMainWindow === undefined) currentMainWindow = window;
         window.once("closed", () => {
-          if (currentMainWindow !== window) return;
-          currentMainWindow = undefined;
+          if (!appWindows.delete(window)) return;
+          if (currentMainWindow === window) currentMainWindow = undefined;
+          if (appWindows.size > 0) {
+            runFork(releaseWindowTabs(windowContents));
+            return;
+          }
           frameCaptureWindowOpen = false;
-          mainWindowCleanupFiber = runFork(
+          lastWindowCleanupFiber = runFork(
             Effect.all([closeAllPictureInPicture(), stopAllRecordings()], {
               concurrency: "unbounded",
               discard: true,
@@ -1645,6 +1671,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         return [undefined, sessions] as const;
       }),
     ).pipe(Effect.uninterruptible);
+    const existingMain = yield* Ref.get(mainWindowRef);
+    if (Option.isNone(existingMain)) {
+      yield* Ref.set(mainWindowRef, Option.some(window));
+    }
   });
 
   const createTabUnlocked = Effect.fn("PreviewManager.createTabUnlocked")(function* (
@@ -1726,6 +1756,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       ] as const;
     });
     if (Option.isNone(tab)) return;
+    tabHostWebContents.delete(tabId);
     const closedTab = tab.value;
     if (closedTab.serverTab) browserHost.setShown(closedTab.serverTab, undefined);
     if (closedTab.webContentsId != null) {
@@ -1788,15 +1819,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       return yield* new PreviewTabNotFoundError({ tabId });
     }
     const wc = webContents.fromId(webContentsId);
-    const mainWindow = yield* Ref.get(mainWindowRef);
+    const host = wc?.hostWebContents;
     if (
       !wc ||
       wc.isDestroyed() ||
       wc.getType() !== "webview" ||
-      (Option.isSome(mainWindow) && wc.hostWebContents !== mainWindow.value.webContents)
+      // Only Conn's own windows may host preview guests.
+      (appWindows.size > 0 && !(host && [...appWindows.values()].includes(host)))
     ) {
       return yield* new PreviewWebContentsNotFoundError({ tabId, webContentsId });
     }
+    if (host) tabHostWebContents.set(tabId, host);
     yield* rendererHistory.register(wc, { surface: "preview", tabId });
     const attached = yield* Ref.get(attachedRef);
     const annotationTheme = yield* Ref.get(annotationThemeRef);
@@ -3429,7 +3462,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     setAudioMuted,
     setShown,
     setColorScheme,
-    setMainWindow,
+    addWindow,
     setForwardedShortcuts: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) =>
       Effect.sync(() => {
         forwardedShortcuts = shortcuts;
@@ -3592,7 +3625,7 @@ export type PreviewManagerError = typeof PreviewManagerError.Type;
 export class PreviewManager extends Context.Service<
   PreviewManager,
   {
-    readonly setMainWindow: (window: BrowserWindow) => Effect.Effect<void, PreviewManagerError>;
+    readonly addWindow: (window: BrowserWindow) => Effect.Effect<void, PreviewManagerError>;
     readonly setForwardedShortcuts: (
       shortcuts: ReadonlyArray<PreviewForwardedShortcut>,
     ) => Effect.Effect<void>;
@@ -3749,7 +3782,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   );
 
   return PreviewManager.of({
-    setMainWindow: operations.setMainWindow,
+    addWindow: operations.addWindow,
     setForwardedShortcuts: operations.setForwardedShortcuts,
     getBrowserSession: Effect.fn("PreviewManager.getBrowserSession")(
       function* (scope, persistent, namespace) {

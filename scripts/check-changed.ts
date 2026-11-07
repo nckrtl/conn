@@ -1,8 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - hashes inputs with node:crypto and sizes the budget with node:os.
 // Runs CI's fast checks for this branch's changes: format and lint of the
 // changed files, knip, generated GraphQL operations, typecheck of the affected
-// packages and their dependents, the test files beside the changed files, and
-// the cross-file checks those miss (agent context budget, React Compiler
+// packages and their dependents plus @t3tools/desktop, the test files
+// beside the changed files, and the cross-file checks those miss (agent
+// context budget, React Compiler
 // coverage of the changed client files).
 // A dependency change also gets the unused-patch install check below. CI still
 // runs the full test suites and the jobs listed in the summary.
@@ -40,6 +41,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { vitePlusCommand } from "./check-changed-command.ts";
+import { withDesktopTypecheck } from "./desktop-typecheck.ts";
 
 const GiB = 1024 ** 3;
 
@@ -470,7 +472,8 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     files.some((file) => file.startsWith(`${dir}/`)),
   );
   const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
-  const typecheckWorkers = Math.min(concurrency, affected.length);
+  const typecheckPackages = withDesktopTypecheck(affected);
+  const typecheckWorkers = Math.min(concurrency, typecheckPackages.length);
   const command = (name: string, args: ReadonlyArray<string>) => ({ name, run: vp(args) });
   const compilerFiles = compilerApps.reduce((count, app) => count + app.names.length, 0);
 
@@ -488,24 +491,20 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     ...graphql.map((dir) =>
       command(`graphql (${dir})`, ["run", "--filter", `./${dir}`, "generate", "--check"]),
     ),
-    ...(affected.length > 0
-      ? [
-          {
-            // `effect-tsgo tsrs --noEmit` writes nothing another package reads, so dependency order
-            // only made dependents wait: --parallel cut a contracts change from 13 s to 9 s.
-            ...command(`typecheck (${affected.length} packages)`, [
-              "run",
-              "--cache",
-              "--parallel",
-              "--concurrency-limit",
-              String(typecheckWorkers),
-              ...filters(affected),
-              "typecheck",
-            ]),
-            weight: typecheckWorkers,
-          },
-        ]
-      : []),
+    {
+      // `effect-tsgo tsrs --noEmit` writes nothing another package reads, so dependency order
+      // only made dependents wait: --parallel cut a contracts change from 13 s to 9 s.
+      ...command(`typecheck (${typecheckPackages.length} packages)`, [
+        "run",
+        "--cache",
+        "--parallel",
+        "--concurrency-limit",
+        String(typecheckWorkers),
+        ...filters(typecheckPackages),
+        "typecheck",
+      ]),
+      weight: typecheckWorkers,
+    },
     // From the repo root, the root vite.config.ts hands each file to its package's config.
     ...(vitestTests.length > 0
       ? [

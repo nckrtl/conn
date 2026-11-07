@@ -26,6 +26,7 @@ import {
   DesktopBuildManifestRestoreError,
   BundleNotSelfContainedError,
   BuildCommandFailedError,
+  typecheckDesktopPackage,
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
@@ -67,6 +68,7 @@ import {
   resolveDesktopBuildIconAssets,
   resolveDesktopWebIconOverride,
 } from "./build-desktop-artifact.ts";
+import { desktopTypecheckVpArgs } from "./desktop-typecheck.ts";
 import { resolveAppBrand } from "../apps/desktop/src/branding/appBrand.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import {
@@ -240,6 +242,61 @@ const makeMacPayloadFixture = Effect.fn("test.makeMacPayloadFixture")(function* 
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it.effect("fails closed when the desktop Vite typecheck exits non-zero", () => {
+    const commands: Array<{
+      readonly command: string;
+      readonly args: ReadonlyArray<string>;
+      readonly options: { readonly cwd?: string };
+    }> = [];
+    const spawner = Layer.succeed(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        commands.push(command as unknown as (typeof commands)[number]);
+        return Effect.succeed(
+          mockProcess(2, "Property 'showWorkspace' does not exist on type 'DesktopWindow'."),
+        );
+      }),
+    );
+
+    return Effect.gen(function* () {
+      const error = yield* typecheckDesktopPackage("/repo", false).pipe(Effect.flip);
+      assert.instanceOf(error, BuildCommandFailedError);
+      assert.equal(error.exitCode, 2);
+      assert.equal(error.command, "vp run --filter @t3tools/desktop typecheck");
+      assert.include(error.message, "showWorkspace");
+      assert.equal(commands.length, 1);
+      assert.equal(commands[0]?.command, "vp");
+      assert.deepStrictEqual(
+        [...desktopTypecheckVpArgs],
+        ["run", "--filter", "@t3tools/desktop", "typecheck"],
+      );
+      assert.deepStrictEqual(commands[0]?.args, [...desktopTypecheckVpArgs]);
+      assert.equal(commands[0]?.options.cwd, "/repo");
+    }).pipe(Effect.provide(spawner), Effect.scoped);
+  });
+
+  it.effect("accepts a passing desktop Vite typecheck", () => {
+    const commands: Array<{ readonly args: ReadonlyArray<string> }> = [];
+    const spawner = Layer.succeed(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        commands.push(command as unknown as (typeof commands)[number]);
+        return Effect.succeed(mockProcess(0));
+      }),
+    );
+
+    return Effect.gen(function* () {
+      yield* typecheckDesktopPackage("/repo", false);
+      assert.equal(commands.length, 1);
+      assert.deepStrictEqual(commands[0]?.args, [
+        "run",
+        "--filter",
+        "@t3tools/desktop",
+        "typecheck",
+      ]);
+    }).pipe(Effect.provide(spawner), Effect.scoped);
+  });
+
   it("packages the brand's own stable icons and leaves nightly ones alone", () => {
     const brand = resolveAppBrand(
       {

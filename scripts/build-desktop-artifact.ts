@@ -41,6 +41,7 @@ import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
+import { DESKTOP_TYPECHECK_LABEL, desktopTypecheckVpArgs } from "./desktop-typecheck.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import {
   UPSTREAM_APP_BRAND,
@@ -1795,6 +1796,21 @@ const runCommand = Effect.fn("runCommand")(function* (
       ...(stderr.trim() ? { stderrTail: stderr } : {}),
     });
   }
+});
+
+export const typecheckDesktopPackage = Effect.fn("typecheckDesktopPackage")(function* (
+  repoRoot: string,
+  verbose: boolean,
+) {
+  const spawnCommand = yield* resolveSpawnCommand("vp", [...desktopTypecheckVpArgs]);
+  yield* runCommand(
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      cwd: repoRoot,
+      shell: spawnCommand.shell,
+      extendEnv: true,
+    }),
+    { label: DESKTOP_TYPECHECK_LABEL, verbose },
+  ).pipe(Effect.scoped);
 });
 
 export class DesktopBuildAlreadyRunningError extends Schema.TaggedError<DesktopBuildAlreadyRunningError>()(
@@ -3607,6 +3623,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
+  yield* typecheckDesktopPackage(repoRoot, options.verbose);
   const hostPlatform = yield* HostProcess.Platform;
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);

@@ -25,6 +25,7 @@ import {
   type Step,
 } from "./check-changed.ts";
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
+import { DESKTOP_TYPECHECK_PACKAGE } from "./desktop-typecheck.ts";
 
 const GiB = 1024 ** 3;
 
@@ -311,6 +312,7 @@ function launcherFixture() {
   for (const file of [
     "scripts/check-changed.ts",
     "scripts/check-changed-command.ts",
+    "scripts/desktop-typecheck.ts",
     ".github/scripts/ci-changes.cjs",
   ]) {
     write(file, NodeFS.readFileSync(NodePath.join(import.meta.dirname, "..", file), "utf8"));
@@ -415,6 +417,12 @@ it("checks changed source paths through the Windows launcher", () => {
   });
   expect(calls.some(({ args }) => args[0] === "fmt" && args.includes(project.source))).toBe(true);
   expect(calls.some(({ args }) => args[0] === "run" && args.includes("typecheck"))).toBe(true);
+  expect(
+    calls.some(
+      ({ args }) =>
+        args[0] === "run" && args.includes("typecheck") && args.includes(DESKTOP_TYPECHECK_PACKAGE),
+    ),
+  ).toBe(true);
   expect(calls.some(({ args }) => args[0] === "install")).toBe(false);
   expect(result.stdout).toContain("fixture stdout: lint");
   expect(result.stdout).toContain("fixture stderr: lint");
@@ -435,6 +443,9 @@ it("lints an Astro component and runs knip when only it changed", () => {
   const commands = calls.map(({ args }) => args);
   expect(commands).toContainEqual(["exec", "knip", "--include", "files"]);
   expect(commands).toContainEqual(["exec", "knip", "--exports"]);
+  expect(
+    commands.some((args) => args.includes("typecheck") && args.includes(DESKTOP_TYPECHECK_PACKAGE)),
+  ).toBe(true);
 });
 
 it.each(["install", "lint"])("reports a failing %s step with its output", (step) => {

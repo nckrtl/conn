@@ -796,12 +796,14 @@ Sources:
    upstream's diff. New upstream UI must follow the fork's shell rules (glass
    popovers, `ToolbarGroup`, `text-ui`, shell dividers, `scrollbar-inset`). Fix
    what the scan finds on the sync branch, before the build.
-3. Lint and typecheck only the touched scope (`vp lint <files>`,
-   `vp run --filter @t3tools/web typecheck`, and
-   `vp run --filter @t3tools/desktop typecheck`). Desktop typecheck is required
-   on every sync: web-only `tsc` cannot see missing window or preview members
-   that IPC still calls. Run the tests for the fork areas you touched (from
-   the root, use `vp test run` with paths such as
+3. Lint and typecheck only the touched scope (`vp lint <files>` and
+   `vp run check:changed`). `check:changed` always typechecks
+   `@t3tools/desktop`, and `scripts/build-desktop-artifact.ts` runs
+   `vp run --filter @t3tools/desktop typecheck` (the existing Vite task)
+   before packing. Either path fails closed on a missing window or preview
+   member. Do not add `scripts.typecheck` to `apps/desktop/package.json`;
+   that name conflicts with the Vite task. Run the tests for the fork areas
+   you touched (from the root, use `vp test run` with paths such as
    `apps/web/src/laravelToolbar`, `apps/web/src/annotations`,
    `apps/web/src/workspaces.test.ts` and `apps/desktop/src/window`). For desktop
    tab automation, run `apps/desktop/src/preview/DesktopTabRunner.test.ts`,

@@ -183,9 +183,7 @@ export function PreviewView({
   usePreviewSession(threadRef);
 
   const tabId = requestedTabId ?? previewState.activeTabId;
-  const runtimeTabId = tabId
-    ? previewRuntimeTabId(threadRef, previewState.serverEpoch, tabId)
-    : null;
+  const runtimeTabId = tabId ? previewRuntimeTabId(threadRef, tabId) : null;
   const recordingRuntimeTabId =
     tabId && runtimeTabId
       ? activeRecordingTabIds.has(runtimeTabId)

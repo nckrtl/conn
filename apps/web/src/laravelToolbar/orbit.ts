@@ -1,7 +1,7 @@
 import { gatewayApplicationLogs, type FollowApplicationLogs } from "./applicationLogs";
 // The Orbit tool: the processes of the Orbit Instance that serves the page, and their logs.
 // Calls go through the Gateway like T3's other Orbit features (see ~/orbit/orbitTransport.ts).
-import { callOrbit, listOrbitNodes, OrbitApiError } from "~/orbit/orbitApi";
+import { callOrbit, isOrbitApiError, listOrbitNodes } from "~/orbit/orbitApi";
 import type { ToolbarDependency } from "./types";
 import type { OrbitTransport } from "~/orbit/orbitTransport";
 
@@ -204,7 +204,7 @@ export function gatewayOrbitSource(transport: OrbitTransport, domain: string): O
       );
     } catch (error) {
       // Domains Orbit does not serve are not an error; the tool just stays hidden.
-      if (error instanceof OrbitApiError && error.status === 404) return null;
+      if (isOrbitApiError(error) && error.status === 404) return null;
       throw error;
     }
     const instanceId = finite(resolved?.instance_id);

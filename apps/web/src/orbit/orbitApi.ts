@@ -1,3 +1,5 @@
+import * as Schema from "effect/Schema";
+
 import type { OrbitHttpRequest, OrbitHttpResponse, OrbitTransport } from "./orbitTransport";
 
 /**
@@ -14,16 +16,13 @@ export interface OrbitNode {
   readonly wireguardIp: string | null;
 }
 
-export class OrbitApiError extends Error {
-  override readonly name = "OrbitApiError";
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
+export class OrbitApiError extends Schema.TaggedError<OrbitApiError>()("OrbitApiError", {
+  code: Schema.String,
+  message: Schema.String,
+  status: Schema.Number,
+}) {}
+
+export const isOrbitApiError = Schema.is(OrbitApiError);
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -50,15 +49,19 @@ export async function callOrbit(
     return body?.data ?? null;
   }
   const error = record(body?.error);
-  throw new OrbitApiError(
-    text(error?.code) ?? `http.${response.status}`,
-    text(error?.message) ?? `Orbit answered with HTTP ${response.status}.`,
-    response.status,
-  );
+  throw new OrbitApiError({
+    code: text(error?.code) ?? `http.${response.status}`,
+    message: text(error?.message) ?? `Orbit answered with HTTP ${response.status}.`,
+    status: response.status,
+  });
 }
 
 function malformed(what: string): OrbitApiError {
-  return new OrbitApiError("orbit.response_invalid", `Orbit sent an invalid ${what}.`, 200);
+  return new OrbitApiError({
+    code: "orbit.response_invalid",
+    message: `Orbit sent an invalid ${what}.`,
+    status: 200,
+  });
 }
 
 export interface OrbitProject {

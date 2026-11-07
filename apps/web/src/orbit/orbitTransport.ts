@@ -2,6 +2,7 @@ import { type EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { terminalOutputText } from "@t3tools/client-runtime/state/terminal";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/reactivity";
 
 import { randomUUID } from "../lib/utils";
@@ -33,9 +34,12 @@ export interface OrbitHttpResponse {
 
 export type OrbitTransport = (request: OrbitHttpRequest) => Promise<OrbitHttpResponse>;
 
-export class OrbitTransportError extends Error {
-  override readonly name = "OrbitTransportError";
-}
+export class OrbitTransportError extends Schema.TaggedError<OrbitTransportError>()(
+  "OrbitTransportError",
+  { message: Schema.String },
+) {}
+
+export const isOrbitTransportError = Schema.is(OrbitTransportError);
 
 export function readOrbitGatewayUrl(): string {
   try {
@@ -83,7 +87,7 @@ export function buildHiddenShellLine(input: {
   readonly script: string;
 }): string {
   if (!/^[A-Za-z0-9-]+$/.test(input.requestId)) {
-    throw new OrbitTransportError("Invalid request id.");
+    throw new OrbitTransportError({ message: "Invalid request id." });
   }
   const marker = (part: "BEGIN" | "END") =>
     `printf '\\n__T3ORBIT_%s_%s__\\n' ${input.requestId} ${part}`;
@@ -155,13 +159,13 @@ export function parseOrbitCurlOutput(exitCode: number, output: string): OrbitHtt
   const bodyText = lastNewline === -1 ? "" : output.slice(0, lastNewline);
   if (exitCode !== 0) {
     const detail = (bodyText || statusText).trim().split("\n").at(-1) ?? "";
-    throw new OrbitTransportError(
-      `Orbit is not reachable from this machine${detail ? `: ${detail}` : "."}`,
-    );
+    throw new OrbitTransportError({
+      message: `Orbit is not reachable from this machine${detail ? `: ${detail}` : "."}`,
+    });
   }
   const status = Number(statusText.trim());
   if (!Number.isInteger(status) || status <= 0) {
-    throw new OrbitTransportError("Orbit returned no HTTP status.");
+    throw new OrbitTransportError({ message: "Orbit returned no HTTP status." });
   }
   let body: unknown = null;
   if (bodyText.trim() !== "") {
@@ -207,11 +211,15 @@ function waitForShellResult(input: {
         if (parsed._tag === "pending") return;
         cancel();
         if (parsed._tag === "done") resolve(parsed);
-        else reject(new OrbitTransportError(parsed.message));
+        else reject(new OrbitTransportError({ message: parsed.message }));
       };
       timeoutId = globalThis.setTimeout(() => {
         cancel();
-        reject(new OrbitTransportError("The command on this machine did not finish in time."));
+        reject(
+          new OrbitTransportError({
+            message: "The command on this machine did not finish in time.",
+          }),
+        );
       }, input.timeoutMs);
       unsubscribe = appAtomRegistry.subscribe(attachAtom, inspect, { immediate: true });
     },
@@ -243,7 +251,7 @@ export async function runHiddenShell(input: {
     { reportFailure: false },
   );
   if (opened._tag !== "Success") {
-    throw new OrbitTransportError("Could not open a shell on this machine.");
+    throw new OrbitTransportError({ message: "Could not open a shell on this machine." });
   }
   const waiting = waitForShellResult({
     environmentId: input.environmentId,
@@ -260,7 +268,7 @@ export async function runHiddenShell(input: {
       { reportFailure: false },
     );
     if (wrote._tag !== "Success") {
-      throw new OrbitTransportError("Could not run the command on this machine.");
+      throw new OrbitTransportError({ message: "Could not run the command on this machine." });
     }
     return await waiting.promise;
   } finally {

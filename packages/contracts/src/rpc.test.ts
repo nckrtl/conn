@@ -58,5 +58,8 @@ describe("WebSocket RPC contracts", () => {
     expect(official.has(WS_METHODS.orbitWorkspacesSubscribe)).toBe(false);
     expect(official.has(WS_METHODS.orbitWorkspacesRegister)).toBe(false);
     expect(official.has(WS_METHODS.orbitWorkspacesRemove)).toBe(false);
+    expect(official.has(WS_METHODS.desktopTabRegister)).toBe(true);
+    expect(official.has(WS_METHODS.desktopTabRequests)).toBe(true);
+    expect(official.has(WS_METHODS.desktopTabRespond)).toBe(true);
   });
 });

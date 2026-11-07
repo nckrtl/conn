@@ -683,6 +683,9 @@ const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc>
 const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
+export const mountedServerWsRpcTags = [...ServerWsRpcGroup.requests.keys()];
+export const mountedSplitWsRpcTags = [...SplitWsRpcGroup.requests.keys()];
+export const mountedOtherWsRpcTags = [...OtherWsRpcGroup.requests.keys()];
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;

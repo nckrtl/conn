@@ -268,6 +268,8 @@ patchedDependencies:
   app-builder-lib@26.16.1: patches/app-builder-lib@26.16.1.patch
   # A failed Artifacts.cached effect hangs every later caller: https://github.com/alchemy-run/alchemy/issues/2981
   alchemy@2.0.0-beta.85: patches/alchemy@2.0.0-beta.85.patch
+  # drizzle-kit fails on an absolute `out`: https://github.com/alchemy-run/alchemy/issues/2980
+  "@alchemy.run/drizzle@2.0.0-beta.85": patches/@alchemy.run__drizzle@2.0.0-beta.85.patch
 
 # Unmet peers fail resolution, so a pin outside a dependency's peer range is
 # caught when the lockfile changes instead of scrolling past as a warning.

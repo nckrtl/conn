@@ -152,6 +152,13 @@ commit `d17002d`). If a saved Orbit server's session lacks `access:write`, Conn
 pairs it again at most once every 6 hours. The shared `lacksAccess` and
 `accessPairedAt` logic is wired into the web and mobile Orbit providers.
 
+Thread-start Orbit instance registration still lives on the client
+(`apps/web/src/orbit/orbitWorkspaces.ts`, contracts
+`orbitWorkspaces.{subscribe,register,remove}`). Official upstream
+`apps/server/src/ws.ts` has no handlers for those methods. Do not add a fork
+WS layer to paper this over. Until Nick decides, that path is a known
+incompatibility against official servers.
+
 Sources:
 
 - `apps/web/src/orbit/*`.
@@ -181,6 +188,10 @@ An environment's `t3 theme set` is not a user choice and never syncs.
 lacks are installed in the "From profile" collection until replaced by the live
 published theme. On an older Gateway without sections, workspace sync still
 works and Conn shows "Gateway doesn't support profile sync yet".
+
+Keep `patches/@alchemy.run__drizzle@2.0.0-beta.85.patch` in
+`patchedDependencies` while the catalog pins that version. drizzle-kit fails
+on an absolute `out`.
 
 The phone adds Settings › Orbit with a profile picker and one-tap pairing for
 the Gateway's T3 servers. The thread list has a Workspace filter.
@@ -672,14 +683,16 @@ Sources:
 
 ### Fork RPC group
 
-Conn's `serverRestart`, `peerLinks*`, `credentials*`, `testLogins*` and `panels.*` RPCs live
-in `ForkWsRpcGroup`, merged into `WsRpcGroup`. They have a separate handler
-layer because one group with every RPC exceeds TypeScript's instantiation limit.
-Add new fork RPCs there.
+Conn's `serverRestart`, `credentials*`, `testLogins*`, `annotations.*`,
+`panels.*` and `orbitWorkspaces.*` RPCs still live in `ForkWsRpcGroup`, merged
+into `WsRpcGroup` in contracts. Official upstream servers implement the main
+`WsRpcGroup` handlers only. Do not reintroduce `layerWsForkRpc` or other fork
+server layers. `orbitWorkspaces.*` therefore have no server handlers; see
+Orbit above.
 
 Sources:
 
-- `packages/contracts/src/rpc.ts`, `apps/server/src/ws.ts` (`layerWsForkRpc`).
+- `packages/contracts/src/rpc.ts` (`ForkWsRpcGroup`).
 
 ### Codex MCP network wait
 
@@ -799,8 +812,8 @@ Sources:
 3. Lint and typecheck only the touched scope (`vp lint <files>` and
    `vp run check:changed`). `check:changed` always typechecks
    `@t3tools/desktop`, and `scripts/build-desktop-artifact.ts` runs
-   `vp run --filter @t3tools/desktop typecheck` (the existing Vite task)
-   before packing. Either path fails closed on a missing window or preview
+   `vp run --no-cache --filter @t3tools/desktop typecheck` (the existing Vite
+   task) before packing. Either path fails closed on a missing window or preview
    member. Do not add `scripts.typecheck` to `apps/desktop/package.json`;
    that name conflicts with the Vite task. Run the tests for the fork areas
    you touched (from the root, use `vp test run` with paths such as

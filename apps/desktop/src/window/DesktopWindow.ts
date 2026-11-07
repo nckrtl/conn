@@ -5,6 +5,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as Electron from "electron";
@@ -14,7 +15,6 @@ import { type DesktopSnapShotEvent, DEFAULT_CLIENT_SETTINGS } from "@t3tools/con
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
-import { planWorkspaceLink, workspaceToOpen } from "../app/workspaceLink.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
@@ -40,15 +40,20 @@ import { makeQuitShortcutHandler } from "./QuitHold.ts";
 import { copyContextMenuImage } from "./ContextMenuImage.ts";
 
 const TITLEBAR_HEIGHT = 40;
+
+class ContextMenuImageCopyError extends Schema.TaggedError<ContextMenuImageCopyError>()(
+  "ContextMenuImageCopyError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not copy the context-menu image.";
+  }
+}
 // The traffic lights center on the shell header (--shell-header-height in
 // apps/web/src/index.css), where the tabs and panel controls also center.
 // Native macOS buttons are 14 points tall and do not scale with the renderer's zoom.
 const MACOS_SHELL_HEADER_HEIGHT = 44;
 const MACOS_WINDOW_BUTTON_RADIUS = 7;
-const WORKSPACE_LINK_REPORT_WAIT_MS = 1_500;
-const WORKSPACE_LINK_REPORT_POLL_MS = 50;
-const WORKSPACE_LINK_BACKEND_WAIT_MS = 60_000;
-const WORKSPACE_LINK_BACKEND_POLL_MS = 200;
 
 function syncMacosWindowButtons(window: Electron.BrowserWindow): void {
   if (window.isDestroyed() || window.isFullScreen()) return;
@@ -101,21 +106,6 @@ export class DesktopWindow extends Context.Service<
   DesktopWindow,
   {
     readonly createMain: Effect.Effect<Electron.BrowserWindow, DesktopWindowError>;
-    /** Opens an extra window showing `workspace` (an id or name; null = all projects). */
-    readonly createAdditional: (input: {
-      readonly workspace: string | null;
-    }) => Effect.Effect<Electron.BrowserWindow, DesktopWindowError>;
-    /**
-     * Focus the window already showing `token`, or open an extra window on it.
-     * Does not change another window's workspace.
-     */
-    readonly showWorkspace: (token: string) => Effect.Effect<void, DesktopWindowError>;
-    /** Records the workspace the calling renderer is showing. */
-    readonly noteWorkspace: (input: {
-      readonly webContentsId: number;
-      readonly id: string | null;
-      readonly name: string | null;
-    }) => Effect.Effect<void>;
     readonly ensureMain: Effect.Effect<Electron.BrowserWindow, DesktopWindowError>;
     readonly revealOrCreateMain: Effect.Effect<Electron.BrowserWindow, DesktopWindowError>;
     readonly activate: Effect.Effect<void, DesktopWindowError>;
@@ -288,10 +278,7 @@ function syncWindowAppearance(
       return;
     }
 
-    // Preserve the clear renderer backing over the native macOS material.
-    window.setBackgroundColor(
-      platform === "darwin" ? "#00000000" : getInitialWindowBackgroundColor(shouldUseDarkColors),
-    );
+    window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
     const { titleBarOverlay } = getWindowTitleBarOptions(shouldUseDarkColors, platform);
     if (typeof titleBarOverlay === "object") {
       window.setTitleBarOverlay(titleBarOverlay);
@@ -362,35 +349,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  // Extra windows (rooms-patches) never stand in for the main window: with
-  // only extra windows open, activation opens a new main window.
-  const additionalWindows = new Set<Electron.BrowserWindow>();
-  const workspaceClaims = new Map<
-    number,
-    {
-      reported: { id: string | null; name: string | null } | null;
-      launchWorkspace: string | null | undefined;
-    }
-  >();
-  const titleForWorkspaceWindow = (browserWindow: Electron.BrowserWindow): string => {
-    const reportedName = workspaceClaims.get(browserWindow.id)?.reported?.name;
-    return reportedName !== undefined && reportedName !== null && reportedName.length > 0
-      ? reportedName
-      : environment.displayName;
-  };
-  const applyWorkspaceWindowTitle = (browserWindow: Electron.BrowserWindow) => {
-    if (browserWindow.isDestroyed()) return;
-    browserWindow.setTitle(titleForWorkspaceWindow(browserWindow));
-  };
-  const withoutAdditional = (window: Option.Option<Electron.BrowserWindow>) =>
-    Option.isSome(window) && additionalWindows.has(window.value)
-      ? Option.none<Electron.BrowserWindow>()
-      : window;
-
-  const currentMainWindow = electronWindow.currentMainOrFirst.pipe(
-    Effect.flatMap(withoutSplash),
-    Effect.map(withoutAdditional),
-  );
+  const currentMainWindow = electronWindow.currentMainOrFirst.pipe(Effect.flatMap(withoutSplash));
   const focusedMainWindow = electronWindow.focusedMainOrFirst.pipe(Effect.flatMap(withoutSplash));
 
   const zoomWindow = Effect.fn("desktop.window.zoomWindow")(function* (
@@ -406,15 +365,10 @@ export const make = Effect.gen(function* () {
     yield* previewManager.reapplyZoom();
   });
 
-  /**
-   * `additional` makes an extra window (rooms-patches): it opens offset from the
-   * main one with the given workspace, and leaves the main window's state alone
-   * (bounds, preview browser, maximized state, DevTools).
-   */
-  const createWindow = Effect.fn("desktop.window.createWindow")(function* (options?: {
-    readonly additional?: { readonly workspace: string | null };
-  }): Effect.fn.Return<Option.Option<Electron.BrowserWindow>, DesktopWindowError> {
-    const additional = options?.additional;
+  const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
+    Option.Option<Electron.BrowserWindow>,
+    DesktopWindowError
+  > {
     if (yield* Ref.get(desktopState.quitting)) return Option.none();
     yield* previewManager.getBrowserSession();
     const applicationUrl = getDesktopUrl(environment.isDevelopment);
@@ -439,19 +393,7 @@ export const make = Effect.gen(function* () {
         : yield* logWindowWarning("failed to read connected displays; using defaults", {
             cause: displayBoundsResult.cause,
           }).pipe(Effect.as<readonly Electron.Rectangle[]>([]));
-    const anchor = additional === undefined ? Option.none() : yield* focusedMainWindow;
-    const initialBounds =
-      additional !== undefined && Option.isSome(anchor) && !anchor.value.isDestroyed()
-        ? (() => {
-            const bounds = anchor.value.getNormalBounds();
-            return {
-              x: bounds.x + 28,
-              y: bounds.y + 28,
-              width: bounds.width,
-              height: bounds.height,
-            };
-          })()
-        : resolveInitialMainWindowBounds(persistedBounds, displayBounds);
+    const initialBounds = resolveInitialMainWindowBounds(persistedBounds, displayBounds);
     const restoredPersistedBounds = persistedBounds !== null && initialBounds === persistedBounds;
     if (persistedBounds !== null && initialBounds === DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE) {
       yield* logWindowWarning("saved main window bounds could not be restored; using defaults");
@@ -459,21 +401,12 @@ export const make = Effect.gen(function* () {
     if (yield* Ref.get(desktopState.quitting)) return Option.none();
     const window = yield* electronWindow.create({
       ...initialBounds,
-      minWidth: 840,
-      minHeight: 620,
+      minWidth: DesktopAppSettings.MIN_MAIN_WINDOW_SIZE.width,
+      minHeight: DesktopAppSettings.MIN_MAIN_WINDOW_SIZE.height,
       show: false,
       autoHideMenuBar: true,
-      ...(environment.platform === "darwin"
-        ? {
-            disableAutoHideCursor: true,
-            vibrancy: "under-window",
-            visualEffectState: "followWindow",
-          }
-        : {}),
-      backgroundColor:
-        environment.platform === "darwin"
-          ? "#00000000"
-          : getInitialWindowBackgroundColor(shouldUseDarkColors),
+      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+      backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
       ...iconOption,
       title: environment.displayName,
       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
@@ -485,20 +418,7 @@ export const make = Effect.gen(function* () {
         nodeIntegration: false,
         sandbox: true,
         webviewTag: true,
-        // Read by the preload script (desktopBridge.windowContext).
-        ...(additional === undefined
-          ? {}
-          : {
-              additionalArguments: [
-                "--t3code-window=additional",
-                ...(additional.workspace === null
-                  ? []
-                  : [`--t3code-window-workspace=${encodeURIComponent(additional.workspace)}`]),
-              ],
-            }),
-        // A preview guest's fullscreen request is mirrored onto this embedder,
-        // which would otherwise put the whole window into OS fullscreen. With
-        // both sides opted out the page fills its webview and the window stays.
+        // Guest fullscreen propagates to the embedder; both must opt out to keep it inside the webview.
         disableHtmlFullscreenWindowResize: true,
       },
     });
@@ -506,10 +426,6 @@ export const make = Effect.gen(function* () {
       yield* electronWindow.destroyAll;
       return Option.none();
     }
-    workspaceClaims.set(window.id, {
-      reported: null,
-      launchWorkspace: additional === undefined ? undefined : additional.workspace,
-    });
 
     pendingMainReveals.set(window, Effect.void);
     yield* rendererHistory.register(window.webContents, { surface: "main" });
@@ -518,8 +434,7 @@ export const make = Effect.gen(function* () {
     }
     let boundsPersistFiber: Fiber.Fiber<void, never> | undefined;
     let pendingBoundsPersistFiber: Fiber.Fiber<void, never> | undefined;
-    let boundsPersistenceEnabled =
-      additional === undefined && (persistedBounds === null || restoredPersistedBounds);
+    let boundsPersistenceEnabled = persistedBounds === null || restoredPersistedBounds;
     const readPersistableBounds = (): DesktopAppSettings.DesktopWindowBounds | null => {
       if (window.isDestroyed()) {
         return null;
@@ -602,11 +517,9 @@ export const make = Effect.gen(function* () {
         fiber === undefined ? Effect.void : Fiber.join(fiber).pipe(Effect.asVoid),
       ),
     );
-    if (additional === undefined) {
-      flushMainWindowBounds = flushBoundsPersist;
-    }
-    // Workspace windows host in-app browser tabs too.
-    yield* previewManager.addWindow(window);
+    flushMainWindowBounds = flushBoundsPersist;
+
+    yield* previewManager.setMainWindow(window);
     if (yield* Ref.get(desktopState.quitting)) {
       yield* electronWindow.destroyAll;
       return Option.none();
@@ -679,9 +592,10 @@ export const make = Effect.gen(function* () {
             label: "Copy Image",
             click: () => {
               void runPromise(
-                Effect.tryPromise(() => copyContextMenuImage(contents, params)).pipe(
-                  Effect.catch(() => logWindowWarning("failed to copy context-menu image")),
-                ),
+                Effect.tryPromise({
+                  try: () => copyContextMenuImage(contents, params),
+                  catch: (cause) => new ContextMenuImageCopyError({ cause }),
+                }).pipe(Effect.catch(() => logWindowWarning("failed to copy context-menu image"))),
               );
             },
           });
@@ -782,17 +696,15 @@ export const make = Effect.gen(function* () {
 
     window.on("page-title-updated", (event) => {
       event.preventDefault();
-      applyWorkspaceWindowTitle(window);
+      window.setTitle(environment.displayName);
     });
-    if (additional === undefined) {
-      window.on("resize", scheduleBoundsPersist);
-      window.on("move", scheduleBoundsPersist);
-      window.on("maximize", scheduleBoundsPersist);
-      window.on("unmaximize", scheduleBoundsPersist);
-      window.on("close", () => {
-        runFork(flushBoundsPersist);
-      });
-    }
+    window.on("resize", scheduleBoundsPersist);
+    window.on("move", scheduleBoundsPersist);
+    window.on("maximize", scheduleBoundsPersist);
+    window.on("unmaximize", scheduleBoundsPersist);
+    window.on("close", () => {
+      runFork(flushBoundsPersist);
+    });
 
     if (environment.platform === "darwin") {
       // Mouse drivers can deliver Back/Forward as macOS swipe gestures instead of buttons.
@@ -865,7 +777,7 @@ export const make = Effect.gen(function* () {
       }
       clearDevelopmentLoadRetry();
       developmentLoadRetryIndex = 0;
-      applyWorkspaceWindowTitle(window);
+      window.setTitle(environment.displayName);
       if (environment.platform === "darwin") syncMacosWindowButtons(window);
     });
     window.webContents.on(
@@ -956,14 +868,11 @@ export const make = Effect.gen(function* () {
     });
 
     loadApplication();
-    if (environment.isDevelopment && additional === undefined) {
+    if (environment.isDevelopment) {
       window.webContents.openDevTools({ mode: "detach" });
     }
 
-    if (additional !== undefined) additionalWindows.add(window);
     window.on("closed", () => {
-      additionalWindows.delete(window);
-      workspaceClaims.delete(window.id);
       if (!backendHasStarted) mainClosedDuringStartup = true;
       clearDevelopmentLoadRetry();
       clearBoundsPersist();
@@ -972,120 +881,6 @@ export const make = Effect.gen(function* () {
 
     return Option.some(window);
   });
-
-  const createAdditional = Effect.fn("desktop.window.createAdditional")(function* (input: {
-    readonly workspace: string | null;
-  }) {
-    const window = yield* createWindow({ additional: { workspace: input.workspace } });
-    yield* logWindowInfo("additional window created", { workspace: input.workspace });
-    return window;
-  });
-
-  const presentOnItsSpace = Effect.fn("desktop.window.presentOnItsSpace")(function* (
-    browserWindow: Electron.BrowserWindow,
-  ) {
-    const failed = yield* Effect.sync((): unknown => {
-      try {
-        if (browserWindow.isDestroyed()) return null;
-        if (browserWindow.isMinimized()) browserWindow.restore();
-        // show() switches to the Space that holds this window. Activating the
-        // app on its own would follow the main window instead.
-        browserWindow.show();
-        browserWindow.focus();
-        if (environment.platform === "darwin") {
-          Electron.app.focus({ steal: true });
-        }
-        if (!browserWindow.isDestroyed()) browserWindow.focus();
-        return null;
-      } catch (cause) {
-        return cause;
-      }
-    });
-    if (failed !== null) {
-      yield* logWindowWarning("failed to present the workspace window", { cause: failed });
-    }
-  });
-
-  const workspaceClaimSnapshot = () => {
-    const focused = Electron.BrowserWindow.getFocusedWindow();
-    const windows = Electron.BrowserWindow.getAllWindows().filter(
-      (browserWindow) => !browserWindow.isDestroyed() && workspaceClaims.has(browserWindow.id),
-    );
-    const ordered =
-      focused !== null && !focused.isDestroyed() && workspaceClaims.has(focused.id)
-        ? [focused, ...windows.filter((browserWindow) => browserWindow.id !== focused.id)]
-        : windows;
-    return ordered.flatMap((browserWindow) => {
-      const claim = workspaceClaims.get(browserWindow.id);
-      if (claim === undefined) return [];
-      return [
-        {
-          windowId: browserWindow.id,
-          reported: claim.reported,
-          launchWorkspace: claim.launchWorkspace,
-        },
-      ];
-    });
-  };
-
-  const showWorkspace = Effect.fn("desktop.window.showWorkspace")(function* (token: string) {
-    // A link can launch the app. Like the main window, a workspace window
-    // opens only once the backend is ready.
-    const linkArrived = yield* Clock.currentTimeMillis;
-    while (yield* waitingForBackend) {
-      if ((yield* Clock.currentTimeMillis) - linkArrived >= WORKSPACE_LINK_BACKEND_WAIT_MS) {
-        yield* logWindowWarning("workspace link dropped: the backend is not ready", {
-          workspace: token,
-        });
-        return;
-      }
-      yield* Effect.sleep(WORKSPACE_LINK_BACKEND_POLL_MS);
-    }
-    const started = yield* Clock.currentTimeMillis;
-    let claims = workspaceClaimSnapshot();
-    let plan = planWorkspaceLink(token, claims);
-    while (
-      plan.action === "open" &&
-      claims.some((claim) => claim.reported === null) &&
-      (yield* Clock.currentTimeMillis) - started < WORKSPACE_LINK_REPORT_WAIT_MS
-    ) {
-      yield* Effect.sleep(WORKSPACE_LINK_REPORT_POLL_MS);
-      claims = workspaceClaimSnapshot();
-      plan = planWorkspaceLink(token, claims);
-    }
-    if (plan.action === "focus") {
-      const target = Electron.BrowserWindow.fromId(plan.windowId);
-      if (target !== null && !target.isDestroyed()) {
-        yield* presentOnItsSpace(target);
-        yield* logWindowInfo("workspace link focused a window", {
-          workspace: token,
-          windowId: target.id,
-        });
-        return;
-      }
-    }
-    const workspace = workspaceToOpen(token);
-    yield* createAdditional({ workspace });
-    yield* logWindowInfo("workspace link opened a window", { workspace });
-  });
-
-  const noteWorkspace = (input: {
-    readonly webContentsId: number;
-    readonly id: string | null;
-    readonly name: string | null;
-  }) =>
-    Effect.sync(() => {
-      const contents = Electron.webContents.fromId(input.webContentsId);
-      if (contents === undefined || contents.isDestroyed()) return;
-      const browserWindow = Electron.BrowserWindow.fromWebContents(contents);
-      if (browserWindow === null || browserWindow.isDestroyed()) return;
-      const claim = workspaceClaims.get(browserWindow.id);
-      if (claim === undefined) return;
-      const id = input.id === null || input.id.trim() === "" ? null : input.id;
-      const name = input.name === null || input.name.trim() === "" ? null : input.name;
-      workspaceClaims.set(browserWindow.id, { ...claim, reported: { id, name } });
-      applyWorkspaceWindowTitle(browserWindow);
-    });
 
   const createMain = Effect.gen(function* () {
     const window = yield* createWindow();
@@ -1183,17 +978,10 @@ export const make = Effect.gen(function* () {
   const dispatchRendererEvent = Effect.fn("desktop.window.dispatchRendererEvent")(function* (
     channel: string,
     payload: unknown,
-    {
-      reveal = true,
-      mainOnly = false,
-    }: { readonly reveal?: boolean; readonly mainOnly?: boolean } = {},
+    { reveal = true }: { readonly reveal?: boolean } = {},
   ) {
     if (yield* Ref.get(desktopState.quitting)) return;
-    const existingWindow = yield* mainOnly
-      ? currentMainWindow
-      : reveal
-        ? focusedMainWindow
-        : electronWindow.main;
+    const existingWindow = yield* reveal ? focusedMainWindow : electronWindow.main;
     if (Option.isNone(existingWindow) && (!reveal || (yield* waitingForBackend))) return;
     const window = Option.isSome(existingWindow) ? existingWindow : yield* ensureMain;
     if (Option.isNone(window) || window.value.isDestroyed()) return;
@@ -1214,11 +1002,6 @@ export const make = Effect.gen(function* () {
 
   return DesktopWindow.of({
     createMain: createMain.pipe(Effect.flatMap(requireWindow)),
-    createAdditional: Effect.fn("DesktopWindow.createAdditional")((input) =>
-      createAdditional(input).pipe(Effect.flatMap(requireWindow)),
-    ),
-    showWorkspace,
-    noteWorkspace,
     ensureMain: ensureMain.pipe(Effect.flatMap(requireWindow)),
     revealOrCreateMain,
     prepareCaptureReveal: Effect.gen(function* () {
@@ -1271,10 +1054,8 @@ export const make = Effect.gen(function* () {
         event: event.type,
         captureId: "id" in event ? (event.id ?? null) : null,
       });
-      // Only the main window runs snapshots (rooms-patches: not extra windows).
       yield* dispatchRendererEvent(SNAP_SHOT_EVENT_CHANNEL, event, {
         reveal: event.type === "started",
-        mainOnly: true,
       });
     }),
     zoomMain: Effect.fn("desktop.window.zoomMain")(function* (direction) {

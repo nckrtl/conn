@@ -2,19 +2,17 @@ import { SheetHeader } from "../../components/ui/SheetHeader";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import * as Dialog from "../../components/ui/Dialog";
 import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { EnvironmentId, ThreadId, type PreviewSessionSnapshot } from "@t3tools/contracts";
 import { normalizePreviewUrl, previewPdfAssetUrl } from "@t3tools/shared/preview";
 import * as Option from "effect/Option";
 import { useEffect, useRef, useState } from "react";
-import { Platform, Text, TextInput, View } from "react-native";
+import { Platform, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ControlPill } from "../../components/ui/ControlPill";
 import { useAppForeground } from "../../lib/appState";
-import { AppBar } from "../../components/ui/AppBar";
 
-import { useThreadBrowserTabs } from "../../state/preview";
+import { useThreadServerBrowserTabs } from "../../state/preview";
 import { usePreparedConnection } from "../../state/session";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { BrowserTabMenu } from "./BrowserTabMenu";
@@ -24,8 +22,6 @@ import {
   type PreviewPictureInPictureState,
   type PreviewStreamRef,
 } from "./PreviewStreamWebView";
-
-const BrowserPreviewStack = createNativeStackNavigator<{ BrowserPreview: undefined }>();
 
 const NO_PICTURE_IN_PICTURE: PreviewPictureInPictureState = { supported: false, active: false };
 
@@ -39,28 +35,12 @@ export function BrowserPreviewRouteScreen({ route }: BrowserPreviewRouteScreenPr
   const navigation = useNavigation();
   const onClose = () => navigation.goBack();
   return (
-    <View collapsable={false} className="flex-1 bg-sheet">
-      <BrowserPreviewStack.Navigator
-        screenOptions={{
-          headerShown: Platform.OS === "ios",
-          headerBackVisible: false,
-          headerShadowVisible: false,
-          headerTransparent: false,
-          headerTitleStyle: { fontSize: 17, fontWeight: "600" },
-        }}
-      >
-        <BrowserPreviewStack.Screen name="BrowserPreview">
-          {() => (
-            <BrowserPreviewScreen
-              environmentId={EnvironmentId.make(route.params.environmentId)}
-              threadId={ThreadId.make(route.params.threadId)}
-              initialTabId={route.params.tabId ?? null}
-              onClose={onClose}
-            />
-          )}
-        </BrowserPreviewStack.Screen>
-      </BrowserPreviewStack.Navigator>
-    </View>
+    <BrowserPreviewScreen
+      environmentId={EnvironmentId.make(route.params.environmentId)}
+      threadId={ThreadId.make(route.params.threadId)}
+      initialTabId={route.params.tabId ?? null}
+      onClose={onClose}
+    />
   );
 }
 
@@ -86,7 +66,7 @@ function BrowserPreviewScreen({
   const [streaming, setStreaming] = useState(false);
   const [canControl, setCanControl] = useState(false);
   const streamRef = useRef<PreviewStreamRef>(null);
-  const { tabs, loaded } = useThreadBrowserTabs({ environmentId, threadId, enabled: true });
+  const { tabs, loaded } = useThreadServerBrowserTabs({ environmentId, threadId, enabled: true });
   const tab = tabs.find((entry) => entry.tabId === selectedTabId) ?? latestBrowserTab(tabs);
   const pdfUri =
     tab?.navStatus._tag === "Success" ? previewPdfAssetUrl(tab.navStatus.url, httpBaseUrl) : null;
@@ -111,10 +91,10 @@ function BrowserPreviewScreen({
 
   return (
     <View className="flex-1 bg-sheet" style={{ paddingBottom: insets.bottom }}>
-      <AppBar
+      <SheetHeader
         title={tab ? browserTabTitle(tab) : "Browser"}
-        onBack={onClose}
-        options={{ headerBackVisible: false }}
+        onClose={onClose}
+        accessibilityLabel="Close browser"
         actions={
           // Android WebView cannot play video in picture in picture.
           Platform.OS === "ios" &&
@@ -153,18 +133,7 @@ function BrowserPreviewScreen({
             : []
         }
       />
-      {Platform.OS === "ios" ? (
-        <SheetHeader
-          title={tab ? browserTabTitle(tab) : "Browser"}
-          onClose={onClose}
-          accessibilityLabel="Close browser"
-        />
-      ) : null}
-      {tab?.runtime === "desktop" ? (
-        <View className="flex-1 items-center justify-center">
-          <Text className="text-muted-foreground">Hosted on {tab.host ?? "desktop"}</Text>
-        </View>
-      ) : tab ? (
+      {tab ? (
         <>
           <BrowserAddressBar
             key={`address:${tab.tabId}`}

@@ -1,27 +1,21 @@
-import type {
-  DeviceHostSummary,
-  DeviceSummary,
-  EnvironmentId,
-  ScopedThreadRef,
-} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import type { DeviceHostSummary, DeviceSummary, EnvironmentId } from "@t3tools/contracts";
 import { useRef, useState } from "react";
 import {
   captureDeviceScreenshot,
   DeviceScreenshotError,
 } from "@t3tools/client-runtime/device/screenshot";
 import { refreshDeviceHubAccess, useDeviceHubAccess } from "~/state/device";
-import { useAnnotationQueue, useThreadAnnotationTarget } from "~/annotations/useAnnotationQueue";
-import { AnnotationQueuePopover } from "~/annotations/AnnotationQueuePopover";
-import { annotationsForPathname, deviceAnnotationPathname } from "./deviceAnnotations";
 import { DeviceControlsRail } from "./DeviceControlsRail";
 import { DeviceStreamView } from "./DeviceStreamView";
 import { DeviceToolsPanel } from "./DeviceToolsPanel";
 import { useDeviceControls } from "./useDeviceControls";
 
+const isDeviceScreenshotError = Schema.is(DeviceScreenshotError);
+
 const DOWNLOAD_URL_LIFETIME_MS = 60_000;
 
 export function DeviceWorkspace(props: {
-  threadRef: ScopedThreadRef;
   environmentId: EnvironmentId;
   device: DeviceSummary;
   hostLabel: string;
@@ -34,7 +28,6 @@ export function DeviceWorkspace(props: {
 }) {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [axOverlay, setAxOverlay] = useState(false);
-  const [annotating, setAnnotating] = useState(false);
   const [screenshotPending, setScreenshotPending] = useState(false);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   // A capture always finishes, even if the panel hides or closes meanwhile; the user asked for it.
@@ -47,12 +40,6 @@ export function DeviceWorkspace(props: {
     access,
     visible: props.visible && runsHostCommands,
   });
-  const annotationTarget = useThreadAnnotationTarget(props.threadRef);
-  const queue = useAnnotationQueue(annotationTarget);
-  const pathname = deviceAnnotationPathname(props.device.hostId, props.device.id);
-  const annotations =
-    queue.annotations === null ? null : annotationsForPathname(queue.annotations, pathname);
-  const toggleAnnotating = () => setAnnotating(!annotating && annotationTarget !== null);
   const saveScreenshot = () => {
     if (!access || capturing.current || !props.visible) return;
     capturing.current = true;
@@ -75,7 +62,7 @@ export function DeviceWorkspace(props: {
         window.setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_LIFETIME_MS);
       })
       .catch((cause: unknown) => {
-        if (cause instanceof DeviceScreenshotError && cause.status === 401)
+        if (isDeviceScreenshotError(cause) && cause.status === 401)
           refreshDeviceHubAccess(props.environmentId);
         setScreenshotError(
           cause instanceof Error ? cause.message : "Screenshot capture failed. Try again.",
@@ -105,10 +92,6 @@ export function DeviceWorkspace(props: {
             visible={props.visible}
             serveSimOnly={props.hostKind === "simlock"}
             axOverlay={axOverlay}
-            annotating={annotating}
-            annotations={annotations ?? []}
-            annotationTarget={annotationTarget}
-            onToggleAnnotating={toggleAnnotating}
             allowPhoneView
             renderControls={(view) => (
               <DeviceControlsRail
@@ -119,19 +102,6 @@ export function DeviceWorkspace(props: {
                 controls={controls}
                 screenshotPending={screenshotPending}
                 onScreenshot={() => void saveScreenshot()}
-                annotation={
-                  <AnnotationQueuePopover
-                    threadRef={props.threadRef}
-                    target={annotationTarget}
-                    annotations={annotations}
-                    error={queue.error}
-                    annotating={annotating}
-                    onToggle={toggleAnnotating}
-                    subject="device"
-                    side="left"
-                    size="icon-sm"
-                  />
-                }
                 toolsOpen={toolsOpen}
                 onTools={() => setToolsOpen(!toolsOpen)}
                 onFloat={props.onFloat}

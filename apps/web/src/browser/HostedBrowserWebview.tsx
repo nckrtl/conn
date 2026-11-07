@@ -141,6 +141,9 @@ export function HostedBrowserWebview(props: {
 
   const [webviewGeneration, setWebviewGeneration] = useState(0);
   const [recoverySrc, setRecoverySrc] = useState(initialSrc);
+  const active = presentation.visible && presentation.rect !== null;
+  const shown = active || pictureInPicture;
+  const reportedShown = useEffectEvent(() => serverDriven && shown);
   const remountCrashedWebview = useEffectEvent(() => {
     setRecoverySrc(initialUrl ?? initialSrc);
     setWebviewGeneration((generation) => generation + 1);
@@ -206,6 +209,19 @@ export function HostedBrowserWebview(props: {
         register();
       };
       void attempt().then(settle, settle);
+      if (!lease) return;
+      void (async () => {
+        try {
+          // Tab creation and webview attachment use separate effects; wait to avoid PreviewTabNotFoundError.
+          await lease.ready;
+          if (disposed || webviewRef.current !== webview) return;
+          const webContentsId = webview.getWebContentsId();
+          if (Number.isInteger(webContentsId) && webContentsId > 0) {
+            await bridge.registerWebview(runtimeTabId, webContentsId);
+            withDesktopTab(runtimeTabId, () => bridge.setShown(runtimeTabId, reportedShown()));
+          }
+        } catch {}
+      })();
     };
     const recoverGuest = () => {
       if (disposed || recoveryTimeout !== null) return;
@@ -271,7 +287,6 @@ export function HostedBrowserWebview(props: {
     webviewGeneration,
   ]);
 
-  const active = presentation.visible && presentation.rect !== null;
   const lastRect = presentation.rect;
   const layoutZoomFactor = useBrowserLayoutZoomFactor(zoomFactor);
   const viewportWidth = viewport._tag === "fill" ? null : viewport.width;
@@ -356,6 +371,14 @@ export function HostedBrowserWebview(props: {
     viewportHeight,
     viewportWidth,
   ]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Report the mounted webview's visibility to the desktop host.
+  useEffect(() => {
+    const bridge = window.desktopBridge?.preview;
+    if (!clientSettingsHydrated || !bridge || !serverDriven) return;
+    withDesktopTab(runtimeTabId, () => bridge.setShown(runtimeTabId, shown));
+    return () => withDesktopTab(runtimeTabId, () => bridge.setShown(runtimeTabId, false));
+  }, [clientSettingsHydrated, runtimeTabId, serverDriven, shown]);
 
   if (!clientSettingsHydrated || !config) return null;
 

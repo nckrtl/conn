@@ -70,12 +70,7 @@ import {
 } from "../ui/menu";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import {
-  AppRouteModal,
-  AppRouteModalCard,
-  AppRouteModalClose,
-  AppRouteModalHeader,
-} from "../AppRouteModal";
+import { AppRouteModal, AppRouteModalClose } from "../AppRouteModal";
 import { Skeleton } from "../ui/skeleton";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -105,7 +100,12 @@ import {
   resolveUsageShortcut,
   type UsageMetric,
 } from "./usageShortcuts";
-import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
+import {
+  PROVIDER_ORDER,
+  PROVIDER_PRESENTATION,
+  providersWithUsage,
+  rankProvidersByMetric,
+} from "./usageProviders";
 import {
   readUsagePagePreferences,
   saveUsagePagePreferences,
@@ -512,72 +512,70 @@ export function UsagePage() {
   return (
     <AppRouteModal label="Usage">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <AppRouteModalHeader className="@container/usage-header gap-1">
+        <header className="@container/usage-header flex min-h-12 shrink-0 items-center gap-1 border-b ps-5 pe-2">
           {topbarContent}
           <AppRouteModalClose />
-        </AppRouteModalHeader>
+        </header>
 
-        <AppRouteModalCard>
-          <ScrollArea className="min-h-0 flex-1">
-            <WorkspacePageContainer width="wide">
-              {selectedEnvironments.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  {environments.length === 0
-                    ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
-                    : `Select an environment to see ${showingLimits ? "limits" : "usage"}.`}
-                </p>
-              ) : showingLimits ? (
-                <UsageLimitsSection
-                  selectedEnvironmentIds={selectedEnvironmentIds}
-                  hiddenProviders={hiddenProviders}
-                  now={limitsNow}
-                  cursorPrompt={
-                    cursorAccessEnvironments.length > 0 ? (
-                      <CursorEnableLimits
-                        environments={cursorAccessEnvironments}
-                        onEnabled={() => {
-                          void refresh();
-                          void refreshLimits(false, true);
-                        }}
-                      />
-                    ) : null
-                  }
-                />
-              ) : shown === null ? (
-                <UsageSkeleton />
-              ) : !canReadDiagnostics ? (
-                <div className="space-y-2 py-12 text-center text-sm text-muted-foreground">
-                  {selectedEnvironments.map((environment) => (
-                    <p key={environment.environmentId}>
-                      {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
-                      {environment.error}
-                    </p>
-                  ))}
-                </div>
-              ) : (
-                <UsageOverview
-                  merged={merged}
-                  shownWindow={shownWindow}
-                  hour12={hour12}
-                  days={days}
-                  hours={hours}
-                  showingKept={showingKept}
-                  metric={metric === "tokens" ? "tokens" : "cost"}
-                  selectedEnvironments={selectedEnvironments}
-                  hiddenProviders={hiddenProviders}
-                  refreshingUsage={refreshingUsage}
-                  cursorAccessEnvironments={cursorAccessEnvironments}
-                  showChatGptSharing={showChatGptSharing}
-                  onCursorEnabled={() => {
-                    void refresh();
-                    void refreshLimits(false, true);
-                  }}
-                  onSelectModel={selectUsageModel}
-                />
-              )}
-            </WorkspacePageContainer>
-          </ScrollArea>
-        </AppRouteModalCard>
+        <ScrollArea className="min-h-0 flex-1">
+          <WorkspacePageContainer width="wide">
+            {selectedEnvironments.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                {environments.length === 0
+                  ? `Connect an environment to see ${showingLimits ? "limits" : "usage"}.`
+                  : `Select an environment to see ${showingLimits ? "limits" : "usage"}.`}
+              </p>
+            ) : showingLimits ? (
+              <UsageLimitsSection
+                selectedEnvironmentIds={selectedEnvironmentIds}
+                hiddenProviders={hiddenProviders}
+                now={limitsNow}
+                cursorPrompt={
+                  cursorAccessEnvironments.length > 0 ? (
+                    <CursorEnableLimits
+                      environments={cursorAccessEnvironments}
+                      onEnabled={() => {
+                        void refresh();
+                        void refreshLimits(false, true);
+                      }}
+                    />
+                  ) : null
+                }
+              />
+            ) : shown === null ? (
+              <UsageSkeleton />
+            ) : !canReadDiagnostics ? (
+              <div className="space-y-2 py-12 text-center text-sm text-muted-foreground">
+                {selectedEnvironments.map((environment) => (
+                  <p key={environment.environmentId}>
+                    {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
+                    {environment.error}
+                  </p>
+                ))}
+              </div>
+            ) : (
+              <UsageOverview
+                merged={merged}
+                shownWindow={shownWindow}
+                hour12={hour12}
+                days={days}
+                hours={hours}
+                showingKept={showingKept}
+                metric={metric === "tokens" ? "tokens" : "cost"}
+                selectedEnvironments={selectedEnvironments}
+                hiddenProviders={hiddenProviders}
+                refreshingUsage={refreshingUsage}
+                cursorAccessEnvironments={cursorAccessEnvironments}
+                showChatGptSharing={showChatGptSharing}
+                onCursorEnabled={() => {
+                  void refresh();
+                  void refreshLimits(false, true);
+                }}
+                onSelectModel={selectUsageModel}
+              />
+            )}
+          </WorkspacePageContainer>
+        </ScrollArea>
       </div>
       {showingLimits ? null : (
         <UsageModelDialogHost
@@ -677,17 +675,18 @@ function UsageOverview({
     (peak, model) => Math.max(peak, metric === "tokens" ? model.totalTokens : model.costUsd),
     0,
   );
+  const rankedProviders = rankProvidersByMetric(activeProviders, merged.providers, metric);
   const cursorInsertAt =
-    Math.max(activeProviders.indexOf("codex"), activeProviders.indexOf("claude")) + 1;
+    Math.max(rankedProviders.indexOf("codex"), rankedProviders.indexOf("claude")) + 1;
   const summaryRows: ReadonlyArray<
     | { readonly kind: "usage"; readonly provider: UsageProviderKind }
     | { readonly kind: "enable"; readonly environment: EnvironmentUsageStatus }
   > = [
-    ...activeProviders
+    ...rankedProviders
       .slice(0, cursorInsertAt)
       .map((provider) => ({ kind: "usage" as const, provider })),
     ...cursorAccessEnvironments.map((environment) => ({ kind: "enable" as const, environment })),
-    ...activeProviders
+    ...rankedProviders
       .slice(cursorInsertAt)
       .map((provider) => ({ kind: "usage" as const, provider })),
   ];
@@ -779,7 +778,7 @@ function UsageOverview({
                       <span className="truncate">{PROVIDER_PRESENTATION[provider].label}</span>
                       <span
                         className={cn(
-                          "shrink-0 whitespace-nowrap text-ui text-muted-foreground tabular-nums",
+                          "shrink-0 whitespace-nowrap text-2xs text-muted-foreground tabular-nums",
                           figureClass(providerLoading),
                           awaitingData && "invisible",
                         )}
@@ -803,7 +802,7 @@ function UsageOverview({
                 </div>
                 <span
                   className={cn(
-                    "text-ui text-muted-foreground",
+                    "text-xs text-muted-foreground",
                     figureClass(providerLoading),
                     awaitingData && "invisible",
                   )}
@@ -926,12 +925,12 @@ function UsageOverview({
         {breakdown === "model" ? (
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-(--shell-divider)! text-right text-ui text-muted-foreground">
-                <th className="py-2 pr-3 text-left font-normal">#</th>
+              <tr className="border-b border-border text-right text-xs text-muted-foreground">
+                <th className="py-2 pr-3 pl-2 text-left font-normal">#</th>
                 <th className="w-full py-2 text-left font-normal">Model</th>
                 <th className="py-2 pl-6 font-normal">Cost</th>
                 <th className="hidden py-2 pl-6 font-normal sm:table-cell">Share</th>
-                <th className="py-2 pl-6 font-normal">Tokens</th>
+                <th className="py-2 pr-2 pl-6 font-normal">Tokens</th>
               </tr>
             </thead>
             <tbody>
@@ -951,9 +950,9 @@ function UsageOverview({
                   return (
                     <tr
                       key={key}
-                      className="relative border-b border-(--shell-divider)! text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-foreground/4 has-focus-visible:bg-foreground/4"
+                      className="relative border-b border-border/50 text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-muted/50 has-focus-visible:bg-muted/50"
                     >
-                      <td className="py-2.5 pr-3 text-left text-ui">{index + 1}</td>
+                      <td className="py-2.5 pr-3 pl-2 text-left text-xs">{index + 1}</td>
                       <td className="py-2.5 text-left whitespace-normal">
                         <button
                           type="button"
@@ -988,7 +987,7 @@ function UsageOverview({
                       <td className={cn("hidden py-2.5 pl-6 sm:table-cell", rowFigures)}>
                         {share === null ? "" : formatPercent(share)}
                       </td>
-                      <td className={cn("py-2.5 pl-6", rowFigures)}>
+                      <td className={cn("py-2.5 pr-2 pl-6", rowFigures)}>
                         {formatTokens(model.totalTokens)}
                       </td>
                     </tr>
@@ -1009,15 +1008,15 @@ function UsageOverview({
                 <col className="w-2/5" />
               </colgroup>
               <thead>
-                <tr className="border-b border-(--shell-divider)! text-left text-ui text-muted-foreground">
-                  <th className="py-2 font-normal">{shownHourly ? "Hour" : "Day"}</th>
+                <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                  <th className="py-2 pl-2 font-normal">{shownHourly ? "Hour" : "Day"}</th>
                   {activeProviders.map((provider) => (
                     <th key={provider} className="py-2 pl-4 text-right font-normal">
                       {PROVIDER_PRESENTATION[provider].label}
                     </th>
                   ))}
                   <th className="py-2 pl-4 text-right font-normal">Total</th>
-                  <th className="py-2 pl-4 text-right font-normal">Tokens</th>
+                  <th className="py-2 pr-2 pl-4 text-right font-normal">Tokens</th>
                 </tr>
               </thead>
               <tbody>
@@ -1034,9 +1033,9 @@ function UsageOverview({
                   breakdownPeriods.map((period) => (
                     <tr
                       key={"hourStart" in period ? period.hourStart : period.day}
-                      className="border-b border-(--shell-divider)! transition-colors hover:bg-foreground/4"
+                      className="border-b border-border/50 transition-colors hover:bg-muted/50"
                     >
-                      <td className="py-2 text-foreground">
+                      <td className="py-2 pl-2 text-foreground">
                         {"hourStart" in period
                           ? formatHourShort(period.hourStart, shownWindow.timeZone, hour12)
                           : formatDayShort(period.day)}
@@ -1062,7 +1061,7 @@ function UsageOverview({
                       </td>
                       <td
                         className={cn(
-                          "py-2 pl-4 text-right text-muted-foreground tabular-nums",
+                          "py-2 pr-2 pl-4 text-right text-muted-foreground tabular-nums",
                           figureClass(loadingPartial),
                         )}
                       >
@@ -1240,7 +1239,7 @@ function Metric({
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-ui text-muted-foreground">{label}</span>
+      <span className="text-xs text-muted-foreground">{label}</span>
       <span
         className={cn("text-base font-medium text-foreground tabular-nums", figureClass(loading))}
       >
@@ -1272,7 +1271,7 @@ function UsageCoverageNotice({
   }
 
   return (
-    <div className="flex flex-col gap-1 border-t border-(--glass-divider)! px-2 py-2 text-ui text-muted-foreground">
+    <div className="flex flex-col gap-1 border-t border-border px-2 py-2 text-xs text-muted-foreground">
       {failed.map((environment) => (
         <span key={environment.label}>
           {environment.label}: {environment.error}
@@ -1393,7 +1392,7 @@ function UsageEnvironmentFilter({
                 {showUsageStatus ? (
                   <span
                     className={cn(
-                      "shrink-0 text-ui text-muted-foreground",
+                      "shrink-0 text-xs text-muted-foreground",
                       environment.error !== null && "text-destructive",
                     )}
                   >
@@ -1405,10 +1404,10 @@ function UsageEnvironmentFilter({
           );
         })}
         {environments.length === 0 ? (
-          <p className="px-2 py-2 text-ui text-muted-foreground">No environments connected.</p>
+          <p className="px-2 py-2 text-xs text-muted-foreground">No environments connected.</p>
         ) : null}
         {showUsageStatus && isPartial ? (
-          <p className="px-2 py-2 text-ui text-muted-foreground">
+          <p className="px-2 py-2 text-xs text-muted-foreground">
             Totals are partial while selected environments scan.
           </p>
         ) : null}
@@ -1552,7 +1551,7 @@ function MetricSkeletons({ labels }: { readonly labels: readonly string[] }) {
     <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
       {labels.map((label) => (
         <div key={label} className="flex flex-col gap-0.5">
-          <span className="text-ui text-muted-foreground">{label}</span>
+          <span className="text-xs text-muted-foreground">{label}</span>
           <Skeleton className="h-6 w-16" />
         </div>
       ))}

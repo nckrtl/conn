@@ -1,5 +1,6 @@
 import type {
   DesktopBridge,
+  DesktopPreviewAnnotationVoiceEvent,
   DesktopPreviewOpenLinkEvent,
   DesktopPreviewPointerEvent,
   DesktopPreviewRecordingInputEvent,
@@ -43,22 +44,6 @@ try {
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Electron exposes the client platform in its sandboxed preload process.
 const clientPlatform = process.platform;
-
-// Extra windows (rooms-patches) get their identity as command-line arguments
-// from DesktopWindow.createAdditional; the main window has none.
-function readWindowContext(): { readonly additional: boolean; readonly workspace: string | null } {
-  const additional = process.argv.includes("--t3code-window=additional");
-  const workspaceArg = process.argv.find((arg) => arg.startsWith("--t3code-window-workspace="));
-  let workspace: string | null = null;
-  if (workspaceArg !== undefined) {
-    try {
-      workspace = decodeURIComponent(workspaceArg.slice("--t3code-window-workspace=".length));
-    } catch {
-      workspace = null;
-    }
-  }
-  return { additional, workspace };
-}
 
 if (clientPlatform === "darwin") {
   // Native buttons ignore Chromium zoom; reserve native points even after reload.
@@ -138,15 +123,6 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) =>
     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),
-  getLocalThemes: () => ipcRenderer.invoke(IpcChannels.GET_LOCAL_THEMES_CHANNEL),
-  onLocalThemesChanged: (listener) => {
-    // The main process sends themes it already validated.
-    const handler = (_event: Electron.IpcRendererEvent, themes: unknown) => {
-      if (Array.isArray(themes)) listener(themes);
-    };
-    ipcRenderer.on(IpcChannels.LOCAL_THEMES_CHANGED_CHANNEL, handler);
-    return () => ipcRenderer.removeListener(IpcChannels.LOCAL_THEMES_CHANGED_CHANNEL, handler);
-  },
   requestSnapShotPermissions: (includeAccessibility) =>
     ipcRenderer.invoke(IpcChannels.REQUEST_SNAP_SHOT_PERMISSIONS_CHANNEL, includeAccessibility),
   getSnapShotState: () => ipcRenderer.invoke(IpcChannels.GET_SNAP_SHOT_STATE_CHANNEL),
@@ -233,33 +209,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   openSystemSettings: (pane: string) =>
     ipcRenderer.invoke(IpcChannels.OPEN_SYSTEM_SETTINGS_CHANNEL, pane),
   probeRemoteEditors: () => ipcRenderer.invoke(IpcChannels.PROBE_REMOTE_EDITORS_CHANNEL, undefined),
-  apiSend: (request) => ipcRenderer.invoke(IpcChannels.API_SEND_CHANNEL, request),
-  orbitGatewaySend: (request) =>
-    ipcRenderer.invoke(IpcChannels.ORBIT_GATEWAY_SEND_CHANNEL, request),
-  databaseRun: (request) => ipcRenderer.invoke(IpcChannels.DATABASE_RUN_CHANNEL, request),
-  vaultwardenSetup: (request) => ipcRenderer.invoke(IpcChannels.VAULTWARDEN_SETUP_CHANNEL, request),
-  vaultLogins: (request) => ipcRenderer.invoke(IpcChannels.VAULT_LOGINS_CHANNEL, request),
-  vaultFill: (request) => ipcRenderer.invoke(IpcChannels.VAULT_FILL_CHANNEL, request),
-  vaultDatabases: (request) => ipcRenderer.invoke(IpcChannels.VAULT_DATABASES_CHANNEL, request),
-  mcpConnect: (request) => ipcRenderer.invoke(IpcChannels.MCP_CONNECT_CHANNEL, request),
-  mcpRequest: (request) => ipcRenderer.invoke(IpcChannels.MCP_REQUEST_CHANNEL, request),
-  mcpDisconnect: (sessionId) => ipcRenderer.invoke(IpcChannels.MCP_DISCONNECT_CHANNEL, sessionId),
-  onMcpEvent: (listener) => {
-    const wrappedListener = (_event: Electron.IpcRendererEvent, event: unknown) => {
-      if (typeof event !== "object" || event === null || !("sessionId" in event)) return;
-      listener(event as Parameters<typeof listener>[0]);
-    };
-    ipcRenderer.on(IpcChannels.MCP_EVENT_CHANNEL, wrappedListener);
-    return () => {
-      ipcRenderer.removeListener(IpcChannels.MCP_EVENT_CHANNEL, wrappedListener);
-    };
-  },
   pasteAsText: () => ipcRenderer.invoke(IpcChannels.PASTE_AS_TEXT_CHANNEL, undefined),
-  openWorkspaceWindow: (workspace) =>
-    ipcRenderer.invoke(IpcChannels.OPEN_WORKSPACE_WINDOW_CHANNEL, workspace),
-  reportWorkspace: (workspace) =>
-    ipcRenderer.invoke(IpcChannels.REPORT_WORKSPACE_CHANNEL, workspace),
-  windowContext: readWindowContext(),
   onMenuAction: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
       if (typeof action !== "string") return;
@@ -372,17 +322,6 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
-    getHostDeviceName: () => ipcRenderer.invoke(IpcChannels.PREVIEW_HOST_DEVICE_NAME_CHANNEL),
-    connectTabHost: (input) =>
-      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_HOST_CONNECT_CHANNEL, input),
-    executeTabRequest: (runtimeTabId, connectionId, request) =>
-      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_EXECUTE_CHANNEL, {
-        runtimeTabId,
-        connectionId,
-        request,
-      }),
-    disconnectTabHost: (tabId) =>
-      ipcRenderer.invoke(IpcChannels.PREVIEW_TAB_HOST_DISCONNECT_CHANNEL, { tabId }),
     setForwardedShortcuts: (shortcuts) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_SET_FORWARDED_SHORTCUTS_CHANNEL, shortcuts),
     createTab: (tabId, defaults) =>
@@ -410,6 +349,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.invoke(IpcChannels.PREVIEW_SET_COLOR_SCHEME_CHANNEL, { tabId, colorScheme }),
     setAudioMuted: (tabId, audioMuted) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_SET_AUDIO_MUTED_CHANNEL, { tabId, audioMuted }),
+    setShown: (tabId, shown) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_SET_SHOWN_CHANNEL, { tabId, shown }),
     openDevTools: (tabId) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_OPEN_DEVTOOLS_CHANNEL, { tabId }),
     listBrowserImportSources: () => ipcRenderer.invoke(IpcChannels.PREVIEW_IMPORT_SOURCES_CHANNEL),
@@ -433,7 +374,20 @@ contextBridge.exposeInMainWorld("desktopBridge", {
         tabId,
         dictation,
       }),
-    pickElement: (tabId) => ipcRenderer.invoke(IpcChannels.PREVIEW_PICK_ELEMENT_CHANNEL, { tabId }),
+    annotationVoice: {
+      onEvent: (listener) => {
+        const onEvent = (_event: Electron.IpcRendererEvent, tabId: string, value: unknown) => {
+          if (typeof tabId !== "string" || typeof value !== "object" || value === null) return;
+          listener(tabId, value as DesktopPreviewAnnotationVoiceEvent);
+        };
+        ipcRenderer.on(IpcChannels.PREVIEW_ANNOTATION_VOICE_EVENT_CHANNEL, onEvent);
+        return () => ipcRenderer.off(IpcChannels.PREVIEW_ANNOTATION_VOICE_EVENT_CHANNEL, onEvent);
+      },
+      update: (state) =>
+        ipcRenderer.invoke(IpcChannels.PREVIEW_ANNOTATION_VOICE_STATE_CHANNEL, state),
+    },
+    pickElement: (tabId, voice) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_PICK_ELEMENT_CHANNEL, { tabId, voice }),
     cancelPickElement: (tabId) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_CANCEL_PICK_ELEMENT_CHANNEL, { tabId }),
     captureScreenshot: (tabId) =>

@@ -1,15 +1,3 @@
-import type {
-  DesktopTabHost,
-  PreviewAutomationRequest,
-  PreviewAutomationResponse,
-} from "./previewAutomation.ts";
-import type { VaultwardenSetupRequest, VaultwardenSetupResponse } from "./vaultwarden.ts";
-import type {
-  VaultLoginsRequest,
-  VaultLoginsResponse,
-  VaultFillRequest,
-  VaultFillResult,
-} from "./vaultLogins.ts";
 import * as Schema from "effect/Schema";
 import type { PreviewCaptureFailureEncoded } from "./previewCapture.ts";
 
@@ -26,8 +14,7 @@ import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { type ClientSettings, type QuitConfirmationMode, SnapShotShortcut } from "./settings.ts";
 import type { EditorId } from "./editor.ts";
-import type { EnvironmentTheme } from "./server.ts";
-import type { PreviewForwardedShortcut } from "./keybindings.ts";
+import { KeybindingShortcut, type PreviewForwardedShortcut } from "./keybindings.ts";
 
 import type {
   DesktopAppActivationRequest,
@@ -39,13 +26,9 @@ export interface ContextMenuItem<T extends string = string> {
   label: string;
   destructive?: boolean;
   disabled?: boolean;
-  /** Renders as a non-interactive section header label. Web fallback only — stripped on desktop native menus. */
   header?: boolean;
-  /** Icon keyword resolved by the web fallback. Stripped on desktop native menus. */
   icon?: string;
-  /** Inserts a visual section divider immediately before this item. */
   separatorBefore?: boolean;
-  /** Shows a check mark. Used to mark the current option inside a submenu. */
   checked?: boolean;
   children?: readonly ContextMenuItem<T>[];
 }
@@ -228,7 +211,7 @@ export const DesktopSnapShotId = TrimmedNonEmptyString.check(
 );
 export type DesktopSnapShotId = typeof DesktopSnapShotId.Type;
 
-/** Main-process capture lifecycle pushes. `id` is absent for failures before a capture exists. */
+/** `id` is absent for failures before a capture exists. */
 export const DesktopSnapShotEvent = Schema.Union([
   Schema.Struct({ type: Schema.Literal("requested"), id: DesktopSnapShotId }),
   Schema.Struct({ type: Schema.Literal("started"), id: DesktopSnapShotId }),
@@ -298,11 +281,6 @@ export interface DesktopUpdateState {
   message: string | null;
   errorContext: "check" | "download" | "install" | null;
   canRetry: boolean;
-  /**
-   * The version the last install handed to the OS installer that did not
-   * apply: the app came back on its old version. Server-triggered updates do
-   * not install it again; the user can retry it from the update button.
-   */
   notAppliedVersion?: string;
   /** Off only because a managed policy rules out this channel; switching channels turns it on. */
   channelBlockedByPolicy?: true;
@@ -351,18 +329,10 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   notAppliedVersion: Schema.optionalKey(Schema.String),
 });
 
-/** The desktop app's `t3` command on PATH, managed from Settings. */
 export const DesktopCliCommandStateSchema = Schema.Struct({
-  /** Only installed builds have a launcher to put on PATH. */
   supported: Schema.Boolean,
-  /** The `t3` the app installed, or null when it is not installed. */
   installedPath: Schema.NullOr(Schema.String),
-  /** Whether a new terminal finds it; false when the folder is not on PATH yet. */
   onPath: Schema.Boolean,
-  /**
-   * Another `t3` a new terminal runs instead, earlier on PATH. Install refuses
-   * while it is there, since a link behind it would never run.
-   */
   shadowedBy: Schema.optionalKey(Schema.String),
   /** The app's bundled `t3` launcher, which runs without Node or a PATH entry. */
   launcherPath: Schema.NullOr(Schema.String),
@@ -391,16 +361,10 @@ export const DesktopUpdateCheckResultSchema = Schema.Struct({
   state: DesktopUpdateStateSchema,
 });
 
-// Stable id for the Windows-native primary backend. Desktop side wraps
-// this with a brand inside DesktopBackendManager; web side keeps it as
-// a plain string so the env-runtime can compare against it without
-// importing brand machinery from the desktop package.
 export const PRIMARY_LOCAL_ENVIRONMENT_ID = "primary";
 
 export interface DesktopEnvironmentBootstrap {
-  // Stable backend instance id (e.g. "primary" or "wsl:ubuntu"). The
-  // web env runtime keys local environments off this so projects
-  // routed to a specific backend reopen against the same one.
+  // Stable backend identity used to reopen routed projects.
   id: string;
   label: string;
   // Actual distro for this run; id stays wsl:default when tracking the default.
@@ -549,8 +513,6 @@ export const DesktopServerExposureStateSchema = Schema.Struct({
 
 export interface PickFolderOptions {
   initialPath?: string | null;
-  // Opens the dialog against this backend's filesystem (e.g. a WSL project); omit it
-  // for the primary's.
   targetEnvironmentId?: string;
 }
 
@@ -559,11 +521,7 @@ export const PickFolderOptionsSchema = Schema.Struct({
   targetEnvironmentId: Schema.optionalKey(Schema.String),
 });
 
-/**
- * A file returned by the desktop theme-file picker. Oversized files carry an
- * empty text so the renderer can reject them by size without the main
- * process ever holding their contents.
- */
+/** Oversized files have empty text so the main process never loads their contents. */
 export interface PickedThemeFile {
   name: string;
   size: number;
@@ -589,23 +547,13 @@ export const DesktopWslDistroSchema = Schema.Struct({
 });
 
 export interface DesktopWslState {
-  // True when the user has opted the WSL backend in; the actual backend
-  // process is registered with the desktop pool independently of this
-  // flag and may take a moment to come up after the user enables it.
   enabled: boolean;
   // null means "track the current WSL default distro".
   distro: string | null;
   available: boolean;
-  // When true (and `enabled` is also true) the desktop runs only the
-  // WSL backend as the primary; the Windows-side Node backend is not
-  // started. Toggling this requires an app restart because the
-  // primary backend's spec is captured once at layer init.
   wslOnly: boolean;
   distros: readonly DesktopWslDistro[];
-  // Reason the dual-mode WSL backend last failed preflight (no node, wrong
-  // version, missing build tools), or null. Surfaced inline in Connections
-  // settings. Always null in wsl-only mode — that path shows a dialog and
-  // falls back to Windows instead.
+  // Always null in wsl-only mode, which falls back to Windows with a dialog.
   preflightError: string | null;
 }
 
@@ -618,10 +566,6 @@ export const DesktopWslStateSchema = Schema.Struct({
   preflightError: Schema.NullOr(Schema.String),
 });
 
-/**
- * Renderer-facing snapshot of a desktop preview tab. Mirrors the main-process
- * PreviewTabState shape but uses serialisable primitives only.
- */
 export type DesktopPreviewNavStatus =
   | { kind: "Idle" }
   | { kind: "Loading"; url: string; title: string }
@@ -634,10 +578,6 @@ export type DesktopPreviewNavStatus =
       description: string;
     };
 
-/**
- * Emulated `prefers-color-scheme` for the guest page. "system" clears the
- * override so the page follows the OS appearance.
- */
 export type DesktopPreviewColorScheme = "system" | "light" | "dark";
 
 export const DesktopPreviewColorSchemeSchema: Schema.Codec<DesktopPreviewColorScheme> =
@@ -658,16 +598,9 @@ export interface DesktopPreviewTabState {
   navStatus: DesktopPreviewNavStatus;
   canGoBack: boolean;
   canGoForward: boolean;
-  /** Current zoom factor (1.0 = 100%). */
   zoomFactor: number;
-  /** Whether this tab is currently mirrored into a desktop picture-in-picture window. */
   pictureInPicture: boolean;
   colorScheme: DesktopPreviewColorScheme;
-  /**
-   * Whether the user has silenced this tab. Per tab rather than per origin, so
-   * two tabs on the same site mute independently. Survives navigation and
-   * webview swaps, but is dropped when the tab closes.
-   */
   audioMuted: boolean;
   /** Chromium reports playback even when audioMuted is true. */
   audible: boolean;
@@ -691,15 +624,12 @@ export interface DesktopPreviewPointerEvent {
   createdAt: string;
 }
 
-/** A `target="_blank"` link the previewed page asked to open beside itself. */
 export interface DesktopPreviewOpenLinkEvent {
   tabId: string;
   url: string;
-  /** True for middle-click / Cmd-click, which should not take focus. */
   background: boolean;
 }
 
-/** Recording decorations are forwarded separately from the captured page pixels. */
 export const DesktopPreviewRecordingInputSchema = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("pointer"),
@@ -723,20 +653,9 @@ export interface DesktopPreviewRecordingInputEvent {
   readonly input: DesktopPreviewRecordingInput;
 }
 
-/**
- * Static config a renderer needs to mount a preview `<webview>`. Returned
- * atomically by `DesktopPreviewBridge.getPreviewConfig()` so the renderer
- * doesn't have to wait on three separate IPC round-trips before the webview
- * can attach.
- */
 export interface DesktopPreviewWebviewConfig {
-  /** `persist:t3code-preview` (or whatever the desktop chose). */
   partition: string;
-  /**
-   * Canonical `<webview webpreferences="...">` string. Encodes the security
-   * posture (sandboxed but contextIsolation off so the picker preload can
-   * read the page's React DevTools hook). Always present.
-   */
+  /** Sandboxed with contextIsolation off so the picker preload can read the React DevTools hook. */
   webPreferences: string;
   /** Absolute file:// preload URL; null requires disabling element picking. */
   preloadUrl: string | null;
@@ -836,11 +755,6 @@ export const DesktopPreviewScreenshotArtifactSchema: Schema.Codec<DesktopPreview
     createdAt: Schema.String,
   });
 
-/**
- * Single stack frame captured by react-grab's `getElementContext`. We surface
- * the source file/line so coding agents can jump straight to the JSX that
- * produced the picked DOM node.
- */
 export interface PickedElementStackFrame {
   functionName: string | null;
   fileName: string | null;
@@ -855,32 +769,16 @@ export const PickedElementStackFrameSchema: Schema.Codec<PickedElementStackFrame
   columnNumber: Schema.NullOr(Schema.Number),
 });
 
-/**
- * A successful element pick from the preview webview. All fields are
- * best-effort — pages that don't ship a React fiber tree (or aren't running
- * in dev) will still produce a usable payload (selector + html preview),
- * just without component / source attribution.
- */
 export interface PickedElementPayload {
-  /** URL of the page the element was picked on. */
   pageUrl: string;
-  /** Optional `<title>` of that page (best-effort). */
   pageTitle: string | null;
-  /** Lowercase tag name, e.g. `"button"`. */
   tagName: string;
-  /** CSS selector resolving back to the element on a re-render. */
   selector: string | null;
-  /** Truncated outer-HTML preview (matches react-grab's `htmlPreview`). */
   htmlPreview: string;
-  /** Nearest React component display name, or null when unavailable. */
   componentName: string | null;
-  /** First source-mapped stack frame (file + line of the JSX source). */
   source: PickedElementStackFrame | null;
-  /** Full owner-stack frames; can be empty. Useful for richer context. */
   stack: ReadonlyArray<PickedElementStackFrame>;
-  /** Author CSS only (UA defaults stripped) — react-grab's `styles`. */
   styles: string;
-  /** Wall-clock pick time as ISO-8601 string. */
   pickedAt: string;
 }
 
@@ -994,11 +892,6 @@ export const PreviewAnnotationScreenshotSchema: Schema.Codec<PreviewAnnotationSc
     cropRect: PreviewAnnotationRectSchema,
   });
 
-/**
- * A submitted preview annotation. One annotation may reference multiple DOM
- * elements, freeform regions, and ink strokes. The desktop main process adds
- * the screenshot after the guest preload submits the structured draft.
- */
 export interface PreviewAnnotationPayload {
   id: string;
   pageUrl: string;
@@ -1034,7 +927,6 @@ export const PreviewAnnotationSubmissionSchema: Schema.Codec<PreviewAnnotationSu
 export interface PreviewAnnotationSubmissionResult {
   annotation: PreviewAnnotationPayload;
   submission: PreviewAnnotationSubmission;
-  /** The crop was requested but failed or timed out, so `annotation.screenshot` is null. */
   screenshotFailed?: boolean;
 }
 export const PreviewAnnotationSubmissionResultSchema: Schema.Codec<PreviewAnnotationSubmissionResult> =
@@ -1048,10 +940,7 @@ export const DesktopPreviewTabInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
 });
 
-/**
- * Tab creation carries the browser defaults so the guest starts zoomed and
- * color-scheme-emulated (no 100% flash). Optional so older renderers get the old defaults.
- */
+/** Apply zoom and color scheme at creation to avoid flashing browser defaults. */
 export const DesktopPreviewCreateTabInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
   zoomFactor: Schema.optional(Schema.Number.check(Schema.isGreaterThan(0))),
@@ -1064,7 +953,6 @@ export const DesktopPreviewCreateTabInputSchema = Schema.Struct({
 export interface DesktopPreviewTabDefaults {
   readonly zoomFactor?: number | undefined;
   readonly colorScheme?: DesktopPreviewColorScheme | undefined;
-  /** A tab of the desktop's own server: the server drives it through the desktop browser channel. */
   readonly serverTab?: { readonly threadId: string; readonly tabId: string } | undefined;
 }
 
@@ -1080,12 +968,7 @@ export const DesktopPreviewNavigateInputSchema = Schema.Struct({
 
 export const DesktopPreviewConfigInputSchema = Schema.Struct({
   environmentId: EnvironmentId,
-  /**
-   * Browser profile the partition is derived from. Derivation stays in main:
-   * `will-attach-webview` only prefix-checks the partition string, so a
-   * renderer-supplied partition could attach to a session that never had the
-   * UA rewrite or permission handlers installed.
-   */
+  /** Main must derive the partition to ensure its session has UA rewrites and permission handlers. */
   profileId: Schema.optional(BrowserProfileId),
 });
 
@@ -1108,6 +991,11 @@ export const DesktopPreviewSetZoomFactorInputSchema = Schema.Struct({
 export const DesktopPreviewSetAudioMutedInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
   audioMuted: Schema.Boolean,
+});
+
+export const DesktopPreviewSetShownInputSchema = Schema.Struct({
+  tabId: DesktopPreviewTabIdSchema,
+  shown: Schema.Boolean,
 });
 
 export const DesktopPreviewAnnotationThemeInputSchema = Schema.Struct({
@@ -1149,202 +1037,8 @@ export const DesktopMediaReadSchema = Schema.Struct({
 });
 export type DesktopMediaRead = typeof DesktopMediaReadSchema.Type;
 
-/**
- * A System Settings pane the app can deep-link to. The identifier crosses IPC
- * rather than a URL, so the renderer can only reach these known destinations.
- */
-
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
-
-export interface DesktopApiHeader {
-  readonly name: string;
-  readonly value: string;
-}
-
-export interface DesktopApiRequest {
-  readonly method: string;
-  readonly url: string;
-  readonly headers: readonly DesktopApiHeader[];
-  readonly body: string | null;
-  readonly timeoutMs?: number;
-}
-
-export interface DesktopApiResponse {
-  /** Set when no response arrived (bad URL, DNS, TLS, timeout); the other fields are empty. */
-  readonly error: string | null;
-  readonly status: number;
-  readonly statusText: string;
-  /** The final URL, after redirects. */
-  readonly url: string;
-  readonly headers: readonly DesktopApiHeader[];
-  /** Text for text-like content types, otherwise base64. */
-  readonly body: string;
-  readonly bodyEncoding: "text" | "base64";
-  /** Bytes the server sent; `truncated` when the body kept fewer. */
-  readonly size: number;
-  readonly truncated: boolean;
-  readonly durationMs: number;
-}
-
-/** One call to the Orbit Gateway's Conn layer; `path` is below `/api/v1/conn`. */
-export interface DesktopOrbitGatewayRequest {
-  readonly method: "GET" | "POST" | "PUT" | "PATCH";
-  readonly path: string;
-  /** A JSON body, or null. */
-  readonly body: string | null;
-}
-
-export interface DesktopOrbitGatewayResponse {
-  /** Set when no response arrived (DNS, TLS, timeout); `status` is then 0. */
-  readonly error: string | null;
-  readonly status: number;
-  readonly body: string;
-}
-
-export interface DesktopDatabaseConnection {
-  readonly driver: "mysql" | "pgsql" | "sqlite";
-  readonly host: string;
-  readonly port: number | null;
-  /** The database name, or the SQLite file's absolute path. */
-  readonly database: string;
-  readonly username: string;
-  readonly password: string;
-  /** nckrtl fork: a Vault Database entry. The desktop app fetches its credentials per call. */
-  readonly vaultItemId?: string;
-}
-
-export interface DesktopDatabaseRequest {
-  readonly connection: DesktopDatabaseConnection;
-  /** Whether a locked Vault may ask for Touch ID. Only explicit actions set it. */
-  readonly allowUnlock?: boolean;
-  /** nckrtl fork: close an open connection first, so a changed Vault entry is read again. */
-  readonly reconnect?: boolean;
-  readonly operation: "tables" | "describe" | "query";
-  readonly table?: string;
-  readonly sql?: string;
-}
-
-export interface DesktopDatabaseColumn {
-  readonly name: string;
-  readonly type: string;
-  readonly nullable: boolean;
-  readonly default: string | null;
-  readonly primary: boolean;
-}
-
-export interface DesktopDatabaseResponse {
-  readonly error: string | null;
-  readonly tables: readonly string[];
-  readonly columns: readonly DesktopDatabaseColumn[];
-  readonly resultColumns: readonly string[];
-  readonly rows: ReadonlyArray<Readonly<Record<string, string | number | boolean | null>>>;
-  /** Rows the query returned; `truncated` when the panel kept the first 500. */
-  readonly rowCount: number;
-  readonly truncated: boolean;
-  readonly durationMs: number;
-}
-
-/** nckrtl fork: a Database entry in the Vault Mac app. Listings never carry its password. */
-export interface DesktopVaultDatabase {
-  readonly id: string;
-  readonly name: string;
-  readonly driver: "mysql" | "pgsql";
-  readonly host: string;
-  readonly port: number;
-  readonly database: string;
-  readonly username: string;
-  readonly tls: "disabled" | "required" | "verify-ca" | "verify-full";
-  /** Set when the database is reached through SSH; `host` and `port` are then as the server sees them. */
-  readonly sshHost: string | null;
-  readonly sshPort: number | null;
-  readonly sshUser: string | null;
-  /** The organization's name, or null for the personal vault. */
-  readonly organization: string | null;
-}
-
-export interface DesktopVaultDatabasesResponse {
-  readonly status: "ok" | "locked" | "unavailable" | "error";
-  readonly databases: readonly DesktopVaultDatabase[];
-  readonly error: string | null;
-}
-
-/** An MCP server the MCP panel connects to: a local command, or a Streamable HTTP / SSE URL. */
-export type DesktopMcpServer =
-  | {
-      readonly transport: "stdio";
-      readonly command: string;
-      readonly args: readonly string[];
-      /** Added to the desktop app's environment. */
-      readonly env: Readonly<Record<string, string>>;
-      /** The folder the command runs in, on this machine; null for the home folder. */
-      readonly cwd: string | null;
-    }
-  | {
-      readonly transport: "http" | "sse";
-      readonly url: string;
-      readonly headers: readonly DesktopApiHeader[];
-    };
-
-export interface DesktopMcpConnectRequest {
-  /** Chosen by the panel; a second connect with the same id replaces the first session. */
-  readonly sessionId: string;
-  readonly server: DesktopMcpServer;
-}
-
-export interface DesktopMcpServerInfo {
-  readonly name: string;
-  readonly title: string | null;
-  readonly version: string;
-  readonly protocolVersion: string | null;
-  readonly instructions: string | null;
-  readonly capabilities: {
-    readonly tools: boolean;
-    readonly resources: boolean;
-    readonly prompts: boolean;
-    readonly logging: boolean;
-  };
-}
-
-export interface DesktopMcpConnectResponse {
-  readonly error: string | null;
-  readonly info: DesktopMcpServerInfo | null;
-  readonly durationMs: number;
-}
-
-export type DesktopMcpMethod =
-  | "ping"
-  | "tools/list"
-  | "tools/call"
-  | "resources/list"
-  | "resources/templates/list"
-  | "resources/read"
-  | "prompts/list"
-  | "prompts/get";
-
-export interface DesktopMcpRequest {
-  readonly sessionId: string;
-  readonly method: DesktopMcpMethod;
-  /** The JSON-RPC params. List methods return every page as one result. */
-  readonly params: unknown;
-}
-
-export interface DesktopMcpResponse {
-  readonly error: string | null;
-  /** The JSON-RPC result, as the server sent it. */
-  readonly result: unknown;
-  readonly durationMs: number;
-}
-
-/** Traffic of one MCP session, pushed by the main process for the panel's log. */
-export interface DesktopMcpEvent {
-  readonly sessionId: string;
-  readonly at: number;
-  /** `send`/`receive`: a JSON-RPC message; `stderr`: server output; `closed`: the session ended. */
-  readonly kind: "send" | "receive" | "stderr" | "closed";
-  readonly message?: unknown;
-  readonly text?: string;
-}
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
@@ -1367,22 +1061,15 @@ export interface DesktopBridge {
    * regardless of OS settings.
    */
   getSystemLocale: () => string | null;
-  // One bootstrap per pool instance currently registered with bootstrap
-  // info (omits instances whose backend hasn't produced a config yet).
-  // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
   getLocalEnvironmentEnabled: () => boolean;
   setLocalEnvironmentEnabled: (enabled: boolean) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
-  /** Themes from this machine's themes folder, read without a local server. */
-  getLocalThemes?: () => Promise<readonly EnvironmentTheme[]>;
-  onLocalThemesChanged?: (listener: (themes: readonly EnvironmentTheme[]) => void) => () => void;
   getConnectionCatalog: () => Promise<string | null>;
   setConnectionCatalog: (catalog: string) => Promise<boolean>;
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
-  /** Resolves a suggested SSH alias before populating the connection form. */
   resolveSshHost: (alias: string) => Promise<DesktopSshEnvironmentTarget>;
   requestSnapShotPermissions: (includeAccessibility: boolean) => Promise<void>;
   getSnapShotState: () => Promise<DesktopSnapShotState>;
@@ -1439,61 +1126,10 @@ export interface DesktopBridge {
   openExternal: (url: string) => Promise<boolean>;
   /** Reads http(s) media in the main process, outside renderer CORS and CSP; null on network failure. */
   readMedia: (url: string) => Promise<DesktopMediaRead | null>;
-  /** Open a System Settings pane by identifier. */
-
   openSystemSettings: (pane: SystemSettingsPane) => Promise<boolean>;
   checkSystemPermission: (pane: SystemSettingsPane) => Promise<boolean>;
-  /**
-   * Probe this desktop machine for installed remote-capable editor CLIs
-   * (used for remote open-in-editor deep links).
-   */
   probeRemoteEditors: () => Promise<readonly EditorId[]>;
-  /**
-   * nckrtl fork: sends one API panel request from the main process (no CORS, all headers,
-   * the integrated browser's certificate trust). Optional: other desktop builds lack it.
-   */
-  apiSend?: (request: DesktopApiRequest) => Promise<DesktopApiResponse>;
-  /**
-   * nckrtl fork: one Orbit Gateway call for the profile workspace sync, sent by the main process
-   * (the Gateway refuses a page Origin). Optional: other desktop builds lack it.
-   */
-  orbitGatewaySend?: (request: DesktopOrbitGatewayRequest) => Promise<DesktopOrbitGatewayResponse>;
-  /**
-   * nckrtl fork: one read-only Database panel call, run by the main process on a direct
-   * connection. Optional: other desktop builds lack it.
-   */
-  databaseRun?: (request: DesktopDatabaseRequest) => Promise<DesktopDatabaseResponse>;
-  /** Dedicated Vaultwarden account setup. Secrets are write-only and held by the OS credential store. */
-  vaultwardenSetup?: (request: VaultwardenSetupRequest) => Promise<VaultwardenSetupResponse>;
-  vaultLogins?: (request: VaultLoginsRequest) => Promise<VaultLoginsResponse>;
-  vaultFill?: (request: VaultFillRequest) => Promise<VaultFillResult>;
-  /** nckrtl fork: Database entries from the Vault Mac app. `allowUnlock` may prompt for Touch ID. */
-  vaultDatabases?: (request: {
-    readonly allowUnlock: boolean;
-  }) => Promise<DesktopVaultDatabasesResponse>;
-  /**
-   * nckrtl fork: the MCP panel's sessions, held by the main process (stdio servers run on this
-   * machine; HTTP servers get the integrated browser's certificate trust). Optional: other
-   * desktop builds lack them.
-   */
-  mcpConnect?: (request: DesktopMcpConnectRequest) => Promise<DesktopMcpConnectResponse>;
-  mcpRequest?: (request: DesktopMcpRequest) => Promise<DesktopMcpResponse>;
-  mcpDisconnect?: (sessionId: string) => Promise<void>;
-  onMcpEvent?: (listener: (event: DesktopMcpEvent) => void) => () => void;
-  /** Performs an ordered plain-text paste. */
   pasteAsText: () => Promise<void>;
-  /** Opens an extra desktop window showing a workspace (id or name; null = all projects). */
-  openWorkspaceWindow?: (workspace: string | null) => Promise<void>;
-  /**
-   * Tells the shell which workspace this window is showing, so
-   * `t3code://workspace/<name>` can focus it. Optional: older shells lack it.
-   */
-  reportWorkspace?: (workspace: {
-    readonly id: string | null;
-    readonly name: string | null;
-  }) => Promise<void>;
-  /** Which window this is: extra windows carry their starting workspace. Absent in older shells. */
-  windowContext?: { readonly additional: boolean; readonly workspace: string | null };
   onMenuAction: (listener: (action: string) => void) => () => void;
   onSnapShotEvent: (listener: (event: DesktopSnapShotEvent) => void) => () => void;
   onQuitShortcut: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
@@ -1511,16 +1147,11 @@ export interface DesktopBridge {
   /** With a version, installs only that downloaded build. */
   installUpdate: (expectedVersion?: string) => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
-  /** Settings → `t3` command. */
   cliCommand: {
     getState: () => Promise<DesktopCliCommandState>;
     install: () => Promise<DesktopCliCommandState>;
     uninstall: () => Promise<DesktopCliCommandState>;
   };
-  /**
-   * Web links the OS opens with Conn as the default browser (macOS). The
-   * renderer reports when it listens; links queue in the main process until then.
-   */
   webLinks: {
     setReady: (ready: boolean) => Promise<void>;
     onOpen: (listener: (url: string) => void) => () => void;
@@ -1536,15 +1167,80 @@ export interface DesktopBridge {
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
+/**
+ * Dictation for the annotation editor drawn inside a preview guest. The guest only shows
+ * controls and forwards trusted user gestures; the renderer records, with its consent
+ * checks, and publishes state back. `shortcuts` are the dictation chords in effect.
+ */
+export const DesktopPreviewAnnotationVoiceConfigSchema = Schema.Struct({
+  sessionId: Schema.String.check(Schema.isMaxLength(64)),
+  shortcuts: Schema.Array(KeybindingShortcut).check(Schema.isMaxLength(16)),
+});
+export type DesktopPreviewAnnotationVoiceConfig =
+  typeof DesktopPreviewAnnotationVoiceConfigSchema.Type;
+
+export const DesktopPreviewAnnotationVoiceEventSchema = Schema.Struct({
+  sessionId: Schema.String.check(Schema.isMaxLength(64)),
+  text: Schema.String.check(Schema.isMaxLength(100_000)),
+  cursor: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  selectionEnd: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  action: Schema.Literals([
+    "sync",
+    "start",
+    "stop",
+    "cancel",
+    "skip",
+    "settings",
+    "key",
+    "focus",
+    "blur",
+  ]),
+  keyboard: Schema.optional(
+    Schema.Struct({
+      type: Schema.Literals(["keydown", "keyup"]),
+      key: Schema.String.check(Schema.isMaxLength(32)),
+      code: Schema.String.check(Schema.isMaxLength(64)),
+      metaKey: Schema.Boolean,
+      ctrlKey: Schema.Boolean,
+      shiftKey: Schema.Boolean,
+      altKey: Schema.Boolean,
+      repeat: Schema.Boolean,
+    }),
+  ),
+});
+export type DesktopPreviewAnnotationVoiceEvent =
+  typeof DesktopPreviewAnnotationVoiceEventSchema.Type;
+
+export const DesktopPreviewAnnotationVoiceStateSchema = Schema.Struct({
+  tabId: DesktopPreviewTabIdSchema,
+  sessionId: Schema.String.check(Schema.isMaxLength(64)),
+  available: Schema.Boolean,
+  phase: Schema.Literals([
+    "idle",
+    "preparing",
+    "recording",
+    "transcribing",
+    "post-processing",
+    "error",
+  ]),
+  status: Schema.NullOr(Schema.String),
+  errorAction: Schema.NullOr(Schema.Literals(["retry", "settings"])),
+  preview: Schema.NullOr(Schema.String),
+  level: Schema.Number,
+  shortcutLabel: Schema.NullOr(Schema.String),
+  freezesEditor: Schema.Boolean,
+  blocksSubmission: Schema.Boolean,
+  draft: Schema.NullOr(Schema.Struct({ text: Schema.String, cursor: Schema.Int })),
+});
+export type DesktopPreviewAnnotationVoiceState =
+  typeof DesktopPreviewAnnotationVoiceStateSchema.Type;
+
+export const DesktopPreviewPickElementInputSchema = Schema.Struct({
+  tabId: DesktopPreviewTabIdSchema,
+  voice: Schema.optional(DesktopPreviewAnnotationVoiceConfigSchema),
+});
+
 export interface DesktopPreviewBridge {
-  getHostDeviceName?: () => Promise<string>;
-  connectTabHost?: (input: DesktopTabHost) => Promise<void>;
-  executeTabRequest?: (
-    runtimeTabId: string,
-    connectionId: string,
-    request: PreviewAutomationRequest,
-  ) => Promise<PreviewAutomationResponse>;
-  disconnectTabHost?: (runtimeTabId: string) => Promise<void>;
   setForwardedShortcuts: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
@@ -1556,38 +1252,19 @@ export interface DesktopPreviewBridge {
   zoomIn: (tabId: string) => Promise<void>;
   zoomOut: (tabId: string) => Promise<void>;
   resetZoom: (tabId: string) => Promise<void>;
-  /** Sets a tab's zoom to the factor its environment published, for tabs the server drives. */
   setZoomFactor: (tabId: string, zoomFactor: number) => Promise<void>;
-  /** Reload bypassing the HTTP cache. */
   hardReload: (tabId: string) => Promise<void>;
-  /**
-   * Emulate `prefers-color-scheme` on the guest page ("system" clears the
-   * override). Persists per tab and is re-applied across webview swaps.
-   */
   setColorScheme: (tabId: string, colorScheme: DesktopPreviewColorScheme) => Promise<void>;
-  /**
-   * Silence the tab's audio output. Persists per tab and is re-applied across
-   * webview swaps, but is dropped when the tab closes. Muting a silent tab is
-   * allowed; it simply takes effect once the page plays something.
-   */
   setAudioMuted: (tabId: string, audioMuted: boolean) => Promise<void>;
-  /** Open the guest webview's DevTools (detached). */
+  /** Tells the tab's server whether its webview is on screen. */
+  setShown: (tabId: string, shown: boolean) => Promise<void>;
   openDevTools: (tabId: string) => Promise<void>;
-  /** Drop cookies + storage data for the preview partition (all tabs). */
   clearCookies: (environmentId: EnvironmentId, profileId?: string) => Promise<void>;
-  /** Drop the HTTP cache for the preview partition (all tabs). */
   clearCache: (environmentId: EnvironmentId, profileId?: string) => Promise<void>;
-  /**
-   * One-shot config for mounting a preview `<webview>`. Replaces three
-   * earlier round-trip calls (`getBrowserPartition`, `getWebviewPreferences`,
-   * `getPickPreloadPath`) so adding a new field here only requires touching
-   * the contract + main, not the renderer's mount logic.
-   */
   getPreviewConfig: (
     environmentId: EnvironmentId,
     profileId?: string,
   ) => Promise<DesktopPreviewWebviewConfig>;
-  /** Browsers on this machine whose cookies can be imported. */
   listBrowserImportSources: () => Promise<ReadonlyArray<BrowserImportSource>>;
   importBrowserCookies: (input: {
     readonly environmentId: EnvironmentId;
@@ -1596,16 +1273,23 @@ export interface DesktopPreviewBridge {
     readonly targetProfileId: string;
   }) => Promise<BrowserImportResult>;
   setAnnotationTheme: (theme: DesktopPreviewAnnotationTheme) => Promise<void>;
-  /** Keep an open annotation picker's send shortcut in sync with its thread grant. */
   setAnnotationSendEnabled: (tabId: string, enabled: boolean) => Promise<void>;
   /** Sets the dictation URLs the desktop POSTs for the tab's overlay (never the page). */
   setAnnotationDictation?: (
     tabId: string,
     dictation: { readonly startUrl: string | null; readonly stopUrl: string | null },
   ) => Promise<void>;
+  annotationVoice: {
+    onEvent: (
+      listener: (tabId: string, event: DesktopPreviewAnnotationVoiceEvent) => void,
+    ) => () => void;
+    update: (state: DesktopPreviewAnnotationVoiceState) => Promise<void>;
+  };
   /** Resolves with the annotation and attach/send intent, or null on cancellation. Rejects if activation fails. */
-  pickElement: (tabId: string) => Promise<PreviewAnnotationSubmissionResult | null>;
-  /** Cancel an in-flight preview annotation session. */
+  pickElement: (
+    tabId: string,
+    voice?: DesktopPreviewAnnotationVoiceConfig,
+  ) => Promise<PreviewAnnotationSubmissionResult | null>;
   cancelPickElement: (tabId: string) => Promise<void>;
   captureScreenshot: (
     tabId: string,
@@ -1637,10 +1321,6 @@ export interface ConfirmDialogOptions {
   readonly variant?: ConfirmDialogVariant;
 }
 
-/**
- * APIs of the local app shell (dialogs, external links, context menus, app config), not of
- * any backend environment. Never use them as a proxy for the targeted environment.
- */
 export interface LocalApi {
   dialogs: {
     pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
@@ -1648,7 +1328,6 @@ export interface LocalApi {
   };
   shell: {
     openExternal: (url: string) => Promise<void>;
-    /** Opens a known System Settings pane; no-ops outside the desktop app. */
     openSystemSettings: (pane: SystemSettingsPane) => Promise<void>;
   };
   contextMenu: {

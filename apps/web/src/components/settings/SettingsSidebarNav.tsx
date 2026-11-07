@@ -18,11 +18,12 @@ import {
   GitBranchIcon,
   GlobeIcon,
   InfoIcon,
-  KeyRoundIcon,
   MessageSquareTextIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
   KeyboardIcon,
+  KeyRoundIcon,
+  MicIcon,
   PaletteIcon,
   SearchIcon,
   ServerIcon,
@@ -55,7 +56,6 @@ import {
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
-import { APP_ROUTE_MODAL_NAV_CLASS } from "../AppRouteModal";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 import { validateSettingsScopeSearch } from "./settingsScope";
 import { useSettingsSectionNavigation } from "./useSettingsSectionNavigation";
@@ -89,6 +89,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
 > = {
   "/settings/general": Settings2Icon,
   "/settings/diagnostics": WrenchIcon,
+  "/settings/voice": MicIcon,
   "/settings/appearance": PaletteIcon,
   "/settings/chat": MessageSquareTextIcon,
   "/settings/diffs": FileDiffIcon,
@@ -98,7 +99,6 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/providers": BotIcon,
   "/settings/threads": MessagesSquareIcon,
   "/settings/browser": GlobeIcon,
-  "/settings/passwords": KeyRoundIcon,
   "/settings/devices": SmartphoneIcon,
   "/settings/scheduled-tasks": CalendarClockIcon,
   "/settings/source-control": GitBranchIcon,
@@ -259,10 +259,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       {...navArea}
       role="navigation"
       className={cn(
-        "flex w-60 shrink-0 flex-col text-sidebar-foreground max-md:w-14",
-        APP_ROUTE_MODAL_NAV_CLASS,
+        "flex w-60 shrink-0 flex-col border-e bg-sidebar text-sidebar-foreground max-md:w-14",
         compactSearchOpen &&
-          "max-md:absolute! max-md:inset-x-0 max-md:top-0 max-md:bottom-0 max-md:z-30 max-md:w-auto max-md:me-(--shell-inset) max-md:rounded-(--shell-corner) max-md:border-e-0",
+          "max-md:absolute max-md:inset-y-0 max-md:start-0 max-md:z-10 max-md:w-full",
       )}
     >
       <SidebarContent className="overflow-x-hidden">
@@ -270,7 +269,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
           <div className="flex flex-col gap-2">
             <div
               className={cn(
-                "flex h-8 items-center gap-2 rounded-md px-2 py-1.5 text-ui font-medium text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+                "flex h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
                 !compactSearchOpen && "max-md:hidden",
               )}
             >
@@ -348,7 +347,6 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       tabIndex={-1}
                       size="sm"
                       isActive={index === activeResultIndex}
-                      variant="row"
                       className="h-auto min-h-10 items-start"
                       onMouseMove={() => setActiveResultIndex(index)}
                       onClick={() => handleSearchResultClick(item)}
@@ -373,7 +371,6 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     <SidebarMenuItem>
                       <SidebarMenuButton
                         aria-label="Search settings"
-                        variant="row"
                         onClick={() => setCompactSearchOpen(true)}
                       >
                         <SearchIcon />
@@ -399,7 +396,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                         <h3
                           aria-hidden="true"
                           className={cn(
-                            "px-2 text-ui font-medium text-sidebar-muted-foreground/80",
+                            "px-2 text-xs font-medium text-sidebar-muted-foreground/80",
                             !compactSearchOpen && "max-md:hidden",
                           )}
                         >
@@ -419,7 +416,6 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                                 aria-selected={isActive}
                                 aria-current={isActive ? "page" : undefined}
                                 isActive={isActive}
-                                variant="row"
                                 onClick={() => handleSectionClick(to)}
                               >
                                 <Icon />

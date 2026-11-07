@@ -148,14 +148,11 @@ function scrollAndFocusSettingsTarget(target: HTMLElement, highlight = true): vo
   if (!highlight || prefersReducedMotion) return;
   void target.offsetWidth;
   target.classList.add("settings-search-target-pulse");
-  // The class also suppresses the focus outline (the pulse is the destination
-  // indicator), so drop it once the element is no longer the destination.
   target.addEventListener("blur", () => target.classList.remove("settings-search-target-pulse"), {
     once: true,
   });
 }
 
-/** The row id a settings-search jump is currently trying to reach, if any. */
 export function useSettingsSearchTargetId(): string | null {
   return useContext(SettingsSearchTargetContext).targetId;
 }
@@ -175,6 +172,8 @@ export function useSettingsSearchTarget<T extends HTMLElement>(id: string | unde
 
 export function SettingsSearchTarget({
   children,
+  // `searchableSetting` names the target for search; as an HTML title it shows a native tooltip.
+  title: _searchTitle,
   ...targetProps
 }: ComponentPropsWithoutRef<"div">) {
   const targetRef = useSettingsSearchTarget<HTMLDivElement>(targetProps.id);
@@ -189,7 +188,6 @@ export function SettingsSearchTarget({
 export const SETTINGS_PICKER_TRIGGER_CLASSNAME =
   "min-w-0 max-w-none shrink-0 border-input bg-background font-normal text-foreground shadow-xs/5 hover:bg-accent/50 dark:bg-input/32 [&_svg[data-composer-control-chevron]]:stroke-[1.75] [&_svg[data-composer-control-chevron]]:opacity-70";
 
-/** Info affordance explaining how a setting interacts with the shared background policy. */
 export function PolicyTooltip({ children }: { readonly children: string }) {
   return (
     <Tooltip>
@@ -220,7 +218,6 @@ export function SettingsSection({
   title: string;
   hideTitle?: boolean;
   icon?: ReactNode;
-  /** Small control shown right after the title, such as an add button. */
   titleAction?: ReactNode;
   headerAction?: ReactNode;
   variant?: "grouped" | "plain";
@@ -243,7 +240,7 @@ export function SettingsSection({
           className="flex min-h-7 items-start justify-between gap-4 px-3 sm:px-4"
         >
           <div className="flex min-w-0 items-center gap-1">
-            <h2 className="flex min-h-7 items-center gap-2 text-ui font-medium text-foreground">
+            <h2 className="flex min-h-7 items-center gap-2 text-base font-semibold text-foreground">
               {icon}
               {title}
             </h2>
@@ -269,16 +266,12 @@ export function SettingsUnavailableGroup({
   if (message === undefined) return children;
 
   return (
-    <div className="border-(--shell-divider-header)! pb-1.5">
-      <div className="p-1">
-        <div className="flex items-center gap-2 rounded-md bg-info/10 px-2.5 py-2 text-ui text-info-foreground sm:px-3">
-          <InfoIcon className="size-3.5 shrink-0" />
-          <p>{message}</p>
-        </div>
+    <div className="border-border/60 bg-muted/20 py-1.5">
+      <div className="flex items-start gap-2 px-3 py-2 text-xs leading-relaxed text-muted-foreground sm:px-4">
+        <InfoIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
+        <p>{message}</p>
       </div>
-      <div className="border-t border-(--shell-settings-card-divider)! [&_h3]:opacity-64 [&_p]:opacity-64 [&>*+*]:border-t [&>*+*]:border-(--shell-settings-card-divider)!">
-        {children}
-      </div>
+      <div className="[&_h3]:opacity-64 [&_p]:opacity-64">{children}</div>
     </div>
   );
 }
@@ -309,11 +302,6 @@ function projectOverrides(
   });
 }
 
-/**
- * One setting. Without a primary environment, server-scoped rows go inert.
- * Control sizes: `sm`/`icon-sm` in the row slot, `xs`/`icon-xs` in headers,
- * lists and toolbars, `icon-micro` for inline affordances.
- */
 export function SettingsRow({
   title,
   description,
@@ -334,7 +322,6 @@ export function SettingsRow({
   description?: ReactNode;
   status?: ReactNode;
   resetAction?: ReactNode;
-  /** Replaces the default override clear for rows with side effects beyond the settings key. */
   onResetOverride?: () => void;
   control?: ReactNode;
   serverScoped?: boolean;
@@ -381,8 +368,6 @@ export function SettingsRow({
   const isProjectScope =
     context !== null && (context.scope.kind === "project" || context.scope.kind === "checkout");
   const scopedKeys = settingKeys.filter(isProjectScopedSettingKey);
-  // A project scope can only edit keys that support overrides; the rest stay
-  // visible so the user sees the inherited value, but cannot change it here.
   const environmentWide = isProjectScope && serverScoped && scopedKeys.length === 0;
   const mixed =
     mixedOverride ?? (context !== null && scopedSettingsAreMixed(context.targets, settingKeys));
@@ -405,8 +390,6 @@ export function SettingsRow({
         : [],
     ),
   );
-  // At environment scope, projects with their own value keep it when the
-  // environment default changes; the chain names them and can reset them.
   const overridingProjects = isProjectScope ? [] : projectOverrides(context, scopedKeys);
   const renderedReset =
     unavailable || managedBy !== undefined || managed !== undefined ? null : isProjectScope &&
@@ -425,10 +408,9 @@ export function SettingsRow({
     <Tooltip>
       <TooltipTrigger
         render={
-          // Focusable so keyboard users can still reach the explanation.
           <span
             tabIndex={0}
-            className="flex w-full items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring @min-[32rem]/settings-row:min-h-5 @min-[32rem]/settings-row:w-auto @min-[32rem]/settings-row:items-start @min-[32rem]/settings-row:has-[[data-slot=switch]]:self-start"
+            className="flex w-full items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring @min-[32rem]/settings-row:w-auto"
           />
         }
       >
@@ -442,9 +424,6 @@ export function SettingsRow({
       <TooltipPopup side="top">{message}</TooltipPopup>
     </Tooltip>
   );
-  // A mixed selection keeps the real control with "Mixed" as its placeholder
-  // (the multi-selection inspector convention): the popover shows who has
-  // what, and picking a value applies it to every target.
   const renderedControl =
     managed !== undefined && control
       ? inertControl(managed)
@@ -468,8 +447,6 @@ export function SettingsRow({
           : environmentWide && control
             ? inertControl("Environment-wide setting. Select an environment to change it.")
             : control;
-  // Server rows get an indicator beside the title that opens the resolution
-  // chain per target at every scope; client rows keep a plain status only.
   const customized =
     context !== null &&
     settingKeys.some((key) =>
@@ -518,15 +495,15 @@ export function SettingsRow({
       tabIndex={rowProps.id ? -1 : rowProps.tabIndex}
       data-slot="settings-row"
       className={cn(
-        "group/settings-row @container/settings-row rounded-lg px-3 sm:px-4 aria-disabled:opacity-64 aria-disabled:[&_*]:text-muted-foreground",
+        "group/settings-row @container/settings-row rounded-xl px-3 sm:px-4 aria-disabled:opacity-64 aria-disabled:[&_*]:text-muted-foreground",
         children ? "pt-3 pb-1" : "py-3",
         className,
       )}
     >
-      <div className="flex flex-col gap-3 @min-[32rem]/settings-row:grid @min-[32rem]/settings-row:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] @min-[32rem]/settings-row:items-start @min-[32rem]/settings-row:gap-8">
-        <div className="min-w-0 flex-1 space-y-0.5">
+      <div className="flex flex-col gap-3 @min-[32rem]/settings-row:grid @min-[32rem]/settings-row:grid-cols-[minmax(0,1fr)_auto] @min-[32rem]/settings-row:items-center @min-[32rem]/settings-row:gap-8">
+        <div className="min-w-0 flex-1 space-y-1">
           <div className="flex min-h-5 items-center gap-1.5">
-            <h3 className="text-ui font-medium text-foreground">{title}</h3>
+            <h3 className="text-sm font-medium text-foreground">{title}</h3>
             {renderedInheritance ? (
               <span
                 className={cn(
@@ -545,24 +522,16 @@ export function SettingsRow({
             </span>
           </div>
           {description ? (
-            <p className="max-w-2xl text-balance text-ui leading-snug text-muted-foreground/80">
+            <p className="max-w-2xl text-pretty text-xs leading-normal text-muted-foreground">
               {description}
             </p>
           ) : null}
           {renderedStatus ? (
-            <div className="pt-0.5 text-ui text-muted-foreground">{renderedStatus}</div>
+            <div className="pt-0.5 text-xs text-muted-foreground">{renderedStatus}</div>
           ) : null}
         </div>
         {renderedControl ? (
-          <div
-            className={cn(
-              "flex w-full min-w-0 shrink-0 items-center gap-2 @min-[32rem]/settings-row:w-auto @min-[32rem]/settings-row:justify-end @min-[32rem]/settings-row:[&>[data-slot=switch]]:self-start @min-[32rem]/settings-row:[&_[data-slot=switch]]:mt-[max(0px,calc((1lh_-_var(--thumb-size)_-_2px)/2))] [&_button]:text-ui [&_input]:text-ui",
-              description
-                ? // Same height as the title line + gap + first description line (leading-snug).
-                  "@min-[32rem]/settings-row:min-h-[calc(var(--text-ui)*var(--text-ui--line-height)+--spacing(0.5)+var(--text-ui)*var(--leading-snug))] @min-[32rem]/settings-row:items-center"
-                : "@min-[32rem]/settings-row:min-h-5 @min-[32rem]/settings-row:items-start",
-            )}
-          >
+          <div className="flex w-full min-w-0 shrink-0 items-center gap-2 @min-[32rem]/settings-row:w-auto @min-[32rem]/settings-row:justify-end @min-[32rem]/settings-row:[&_[data-slot=select-trigger]]:min-w-40">
             {renderedControl}
           </div>
         ) : null}
@@ -616,10 +585,12 @@ export function SettingsPageContainer({
   children,
   className,
   width = "readable",
+  searchTargetFallbacks,
 }: {
   children: ReactNode;
   className?: string;
   width?: WorkspacePageWidth;
+  searchTargetFallbacks?: Readonly<Record<string, string | undefined>>;
 }) {
   const navigate = useNavigate();
   const hash = useLocation({ select: (location) => location.hash });
@@ -639,12 +610,12 @@ export function SettingsPageContainer({
 
   return (
     <SettingsSearchTargetProvider
-      targetId={targetId}
+      targetId={targetId === null ? null : (searchTargetFallbacks?.[targetId] ?? targetId)}
       highlightTarget={highlightTarget}
       onTargetHandled={clearTargetHash}
     >
       <div
-        className="topbar-scroll-fade scrollbar-gutter-both scrollbar-inset flex-1 overflow-y-auto"
+        className="topbar-scroll-fade scrollbar-gutter-both flex-1 overflow-y-auto"
         data-settings-page-scroll
       >
         <WorkspacePageContainer width={width} className={cn("gap-8", className)}>

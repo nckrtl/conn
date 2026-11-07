@@ -1,16 +1,10 @@
-import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import { createContext, use, useEffect, useState, type ReactNode } from "react";
-import { Animated, AppState, Platform, Pressable, View } from "react-native";
+import { Animated, Platform, Pressable, View } from "react-native";
 
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
-import {
-  brandTitleOffset,
-  CompactBrandTitle,
-  getCompactBrandHeaderOptions,
-} from "../../components/CompactBrandTitle";
 import { useDeadlinePassed } from "../../lib/clock";
 import { useWorkspaceState } from "../../state/workspace";
 import {
@@ -59,58 +53,7 @@ export function WorkspaceConnectionStatusProvider(props: { readonly children: Re
   return <ConnectionStatusContext value={status}>{props.children}</ConnectionStatusContext>;
 }
 
-/**
- * Conn: connection status presentation, debounced for display, for a screen that shows it
- * outside a header: null until the workspace has been in a non-connected state for
- * STATUS_SHOW_DELAY_MS, then live-updating until the workspace reconnects (null again
- * immediately).
- */
-export function useDelayedConnectionStatus(
-  options: {
-    /**
-     * Keep the status hidden for this long after the app returns to the
-     * foreground, so the reconnect that every resume triggers does not flash
-     * it. Off by default.
-     */
-    readonly resumeGraceMs?: number;
-  } = {},
-): WorkspaceConnectionStatusPresentation | null {
-  const { state } = useWorkspaceState();
-  const presentation = workspaceConnectionStatusPresentation(state);
-  const hasStatus = presentation !== null;
-  const resumeGraceMs = options.resumeGraceMs ?? 0;
-  const [visible, setVisible] = useState(false);
-  const [resumedAt, setResumedAt] = useState(0);
-
-  useEffect(() => {
-    if (resumeGraceMs <= 0) return;
-    const subscription = AppState.addEventListener("change", (next) => {
-      if (next !== "active") return;
-      setResumedAt(Date.now());
-    });
-    return () => subscription.remove();
-  }, [resumeGraceMs]);
-
-  useEffect(() => {
-    // A resume restarts the delay, so a status already showing is withdrawn
-    // and only returns if the connection is still down after the grace.
-    setVisible(false);
-    if (!hasStatus) return;
-    const sinceResume = Date.now() - resumedAt;
-    const delay = Math.max(STATUS_SHOW_DELAY_MS, resumeGraceMs - sinceResume);
-    const timer = setTimeout(() => setVisible(true), delay);
-    return () => clearTimeout(timer);
-  }, [hasStatus, resumedAt, resumeGraceMs]);
-
-  return visible ? presentation : null;
-}
-
-/**
- * Deliberately JS-driven: this can mount inside a native header item
- * (RNSScreenStackHeaderSubview), where native-driver animated nodes blank the
- * re-hosted view entirely. The JS driver updates opacity through the ordinary
- * style path, which those subviews handle.
- */
+/** Native-driver animation blanks views re-hosted in RNSScreenStackHeaderSubview; use the JS style path. */
 function StatusFadeIn(props: {
   readonly children: ReactNode;
   readonly animate: boolean;
@@ -156,16 +99,8 @@ export function WorkspaceConnectionTitle(props: {
   readonly size?: "navbar" | "pageTitle";
   readonly statusOffset?: number;
   readonly maxWidth?: number;
-  /** Conn: presentation to show instead of the workspace's shared status; it fades in. */
-  readonly status?: WorkspaceConnectionStatusPresentation | null;
 }) {
-  const sharedStatus = use(ConnectionStatusContext);
-  const status: ConnectionStatus | null =
-    props.status === undefined
-      ? sharedStatus
-      : props.status === null
-        ? null
-        : { ...props.status, fadeIn: true };
+  const status = use(ConnectionStatusContext);
   const size = props.size ?? "navbar";
   const { scale } = useAndroidControlSizing();
 
@@ -208,7 +143,7 @@ export function WorkspaceConnectionTitle(props: {
           />
         )}
         <Text
-          className="font-t3-semibold text-foreground-muted"
+          className="font-t3-bold text-foreground-muted"
           numberOfLines={1}
           style={{ flexShrink: 1, fontSize: (size === "pageTitle" ? 20 : 16) * scale }}
         >
@@ -217,58 +152,4 @@ export function WorkspaceConnectionTitle(props: {
       </Pressable>
     </StatusFadeIn>
   );
-}
-
-/**
- * Home header without the brand lockup: the title slot is empty while
- * connected and only shows the connection status while an environment is
- * unavailable. The header itself stays mounted because the native bottom
- * toolbar is attached to it.
- */
-export function getConnectionStatusOnlyHeaderOptions(opts: {
-  readonly headerWidth: number;
-  readonly onOpenEnvironments: () => void;
-}): NativeStackNavigationOptions {
-  // No trailing header actions remain, so only bar margins and title spacing
-  // limit the status label.
-  const maxWidth = Math.max(0, opts.headerWidth - 64);
-
-  return {
-    headerTitle: () => (
-      <WorkspaceConnectionTitle
-        brand={null}
-        maxWidth={maxWidth}
-        onPress={opts.onOpenEnvironments}
-        statusOffset={brandTitleOffset()}
-      />
-    ),
-    title: "",
-    unstable_headerLeftItems: undefined,
-  };
-}
-
-/**
- * getCompactBrandHeaderOptions with the brand slot upgraded to the
- * connection-status swap. Screens with an environment-settings callback apply
- * this over the static brand options at mount.
- */
-export function getConnectionAwareBrandHeaderOptions(opts: {
-  readonly headerWidth: number;
-  readonly trailingItemCount?: number;
-  readonly onOpenEnvironments: () => void;
-  readonly fallbackTitleStyle?: NativeStackNavigationOptions["headerTitleStyle"];
-}): NativeStackNavigationOptions {
-  const maxWidth = Math.max(0, opts.headerWidth - 64 - 44 * (opts.trailingItemCount ?? 1));
-
-  return {
-    ...getCompactBrandHeaderOptions(opts.fallbackTitleStyle),
-    headerTitle: () => (
-      <WorkspaceConnectionTitle
-        brand={<CompactBrandTitle />}
-        maxWidth={maxWidth}
-        onPress={opts.onOpenEnvironments}
-        statusOffset={brandTitleOffset()}
-      />
-    ),
-  };
 }

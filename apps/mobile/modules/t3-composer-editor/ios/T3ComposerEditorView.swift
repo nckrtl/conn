@@ -24,6 +24,7 @@ private struct ComposerControlledDocumentPayload: Decodable {
   let tokensJson: String
   let mostRecentEventCount: Int
   let isNativeEcho: Bool
+  let resetGeneration: Int
 }
 
 private struct ComposerThemePayload: Decodable {
@@ -425,7 +426,9 @@ private final class ComposerTextView: UITextView {
 }
 
 public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDropDelegate, UIGestureRecognizerDelegate {
-  private let textView = ComposerTextView()
+  // This view reads `layoutManager`, which otherwise swaps a live TextKit 2 view to
+  // TextKit 1 mid-edit; that swap can leave typed text laid out but never drawn.
+  private let textView = ComposerTextView(usingTextLayoutManager: false)
   private let placeholderLabel = UILabel()
   private var value = ""
   private var tokensJson = "[]"
@@ -435,16 +438,19 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     text: "#262626",
     placeholder: "#8e8e93"
   )
-  private var fontFamily = "System"
-  private var fontSize: CGFloat = 16
-  private var lineHeight: CGFloat = 23
+  private var fontFamily = "DMSans-Regular"
+  private var fontSize: CGFloat = 14
+  private var lineHeight: CGFloat = 20
   private var contentInsetVertical: CGFloat = 0
-  private var singleLineCentered = false
   private var shouldAutoFocus = false
   private var didAutoFocus = false
   private var isReadOnly = false
   private var isApplyingControlledValue = false
   private var nativeEventCount = 0
+  // Count of the latest intercepted paste, so a flush can tell whether JS has received it.
+  private var lastPasteEventCount = 0
+  private var hasControlledDocument = false
+  private var resetGeneration = 0
   private var lastContentSize = CGSize.zero
   private var iconImages: [String: UIImage] = [:]
   private var pendingIconUris = Set<String>()
@@ -479,7 +485,15 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     textView.keyboardDismissMode = .interactive
     textView.alwaysBounceVertical = false
     textView.showsVerticalScrollIndicator = true
-    textView.adjustsFontForContentSizeCategory = false
+    textView.adjustsFontForContentSizeCategory = true
+    if #available(iOS 26.0, *) {
+      // UIKit can attach a nearby bar's scroll edge effect to this text view; its backdrop
+      // then draws over the typed text while the caret stays visible.
+      let edges = [textView.topEdgeEffect, textView.leftEdgeEffect, textView.bottomEdgeEffect, textView.rightEdgeEffect]
+      for edge in edges {
+        edge.isHidden = true
+      }
+    }
     textView.onPasteImages = { [weak self] urls in
       self?.onComposerPasteImages(["uris": urls])
     }
@@ -487,9 +501,11 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       guard let self else { return }
       let selection = self.sourceSelection()
       self.nativeEventCount += 1
+      self.lastPasteEventCount = self.nativeEventCount
       var payload: [String: Any] = context
       payload["value"] = self.textView.serializedText()
       payload["eventCount"] = self.nativeEventCount
+      payload["resetGeneration"] = self.resetGeneration
       payload["selection"] = ["start": selection.start, "end": selection.end]
       self.onComposerPasteContext(payload)
     }
@@ -497,9 +513,11 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       guard let self else { return }
       let selection = self.sourceSelection()
       self.nativeEventCount += 1
+      self.lastPasteEventCount = self.nativeEventCount
       self.onComposerPasteText([
         "value": self.textView.serializedText(),
         "eventCount": self.nativeEventCount,
+        "resetGeneration": self.resetGeneration,
         "text": text,
         "selection": ["start": selection.start, "end": selection.end],
       ])
@@ -517,7 +535,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     addSubview(textView)
 
     placeholderLabel.numberOfLines = 0
-    placeholderLabel.adjustsFontForContentSizeCategory = false
+    placeholderLabel.adjustsFontForContentSizeCategory = true
     addSubview(placeholderLabel)
     applyTypography()
     applyTheme()
@@ -601,14 +619,6 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     super.layoutSubviews()
     let previousSize = textView.bounds.size
     textView.frame = bounds
-    // Center the resting line with the toolbar icons; expanded editors retain
-    // their caller's inset.
-    let verticalInset = singleLineCentered
-      ? max(0, (bounds.height - max(lineHeight, textView.font?.lineHeight ?? lineHeight)) / 2)
-      : contentInsetVertical
-    textView.textContainerInset = UIEdgeInsets(
-      top: verticalInset, left: 0, bottom: verticalInset, right: 0
-    )
     if chipsNeedMeasuredWidth, bounds.width > 0 {
       chipsNeedMeasuredWidth = false
       applyControlledDocument(force: true)
@@ -644,14 +654,6 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     emitContentSizeIfNeeded()
   }
 
-  public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-    super.traitCollectionDidChange(previousTraitCollection)
-    if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
-      applyTypography()
-      applyControlledDocument(force: true)
-    }
-  }
-
   func setClipboardFragment(_ fragment: String) {
     textView.clipboardFragment = fragment
   }
@@ -668,13 +670,28 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   }
 
   func setControlledDocumentJson(_ documentJson: String) {
-    guard let document = decode(ComposerControlledDocumentPayload.self, from: documentJson),
-          document.mostRecentEventCount >= nativeEventCount else {
+    guard let document = decode(ComposerControlledDocumentPayload.self, from: documentJson) else {
       return
     }
-    if document.isNativeEcho && textView.serializedText() != document.value {
+    // A parent reset (a send clear) wins over native edits it could not see; JS drops their events
+    // by generation, so the revision restarts where the parent last acknowledged.
+    let isReset = document.resetGeneration > resetGeneration
+    guard isReset || document.mostRecentEventCount >= nativeEventCount else {
       return
     }
+    if isReset {
+      resetGeneration = document.resetGeneration
+      // JS drops a paste from before the reset by generation, so the flush must not wait for it.
+      lastPasteEventCount = 0
+      endComposition()
+    }
+    // iOS destroys this view under display: none and mounts a fresh one while JS keeps its
+    // revision and draft. Continue from them, or JS drops every event the new view sends.
+    nativeEventCount = document.mostRecentEventCount
+    if document.isNativeEcho && !isReset && hasControlledDocument && textView.serializedText() != document.value {
+      return
+    }
+    hasControlledDocument = true
     if tokensJson != document.tokensJson {
       tokensJson = document.tokensJson
       tokens = decode([ComposerTokenPayload].self, from: document.tokensJson) ?? []
@@ -711,21 +728,16 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     applyControlledDocument(force: true)
   }
 
-  func setFontSize(_ size: CGFloat) {
-    fontSize = size
+  func setFontSize(_ fontSize: CGFloat) {
+    self.fontSize = fontSize
     applyTypography()
     applyControlledDocument(force: true)
   }
 
-  func setLineHeight(_ height: CGFloat) {
-    lineHeight = height
+  func setLineHeight(_ lineHeight: CGFloat) {
+    self.lineHeight = lineHeight
     applyTypography()
     applyControlledDocument(force: true)
-  }
-
-  func setSingleLineCentered(_ centered: Bool) {
-    singleLineCentered = centered
-    setNeedsLayout()
   }
 
   func setContentInsetVertical(_ contentInsetVertical: CGFloat) {
@@ -799,6 +811,17 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
 
   func blurEditor() {
     textView.resignFirstResponder()
+  }
+
+  func readState() -> [String: Any] {
+    let selection = sourceSelection()
+    return [
+      "value": value,
+      "selection": ["start": selection.start, "end": selection.end],
+      "eventCount": nativeEventCount,
+      "resetGeneration": resetGeneration,
+      "pasteEventCount": lastPasteEventCount,
+    ]
   }
 
   func setSelection(start: Int, end: Int) {
@@ -922,6 +945,15 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     emitContentSizeIfNeeded()
   }
 
+  private func endComposition() {
+    guard textView.markedTextRange != nil else {
+      return
+    }
+    isApplyingControlledValue = true
+    textView.unmarkText()
+    isApplyingControlledValue = false
+  }
+
   private func makeAttributedDocument() -> NSAttributedString {
     let result = NSMutableAttributedString()
     let source = value as NSString
@@ -962,7 +994,8 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   private func makeAttachmentString(_ token: ComposerTokenPayload) -> NSAttributedString {
     let color = token.accent.flatMap { UIColor(composerHex: $0) }
       ?? UIColor(composerHex: theme.text) ?? .label
-    let chipFont = UIFont.systemFont(ofSize: fontSize, weight: .medium)
+    let chipFont = UIFont(name: "DMSans-Medium", size: fontSize)
+      ?? UIFont.systemFont(ofSize: fontSize, weight: .medium)
     let icon = token.iconUri.flatMap(iconImage(for:)).map {
       token.tintsIcon == true ? Self.tinted($0, color: color) : $0
     }
@@ -1134,6 +1167,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       "value": value,
       "selection": ["start": selection.start, "end": selection.end],
       "eventCount": nativeEventCount,
+      "resetGeneration": resetGeneration,
     ])
     updatePlaceholderVisibility()
     emitContentSizeIfNeeded()
@@ -1150,6 +1184,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       "value": currentValue,
       "selection": ["start": selection.start, "end": selection.end],
       "eventCount": nativeEventCount,
+      "resetGeneration": resetGeneration,
     ])
   }
 

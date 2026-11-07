@@ -2282,10 +2282,10 @@ const make = Effect.gen(function* () {
               findTab(request.threadId, request.tabId).pipe(Effect.orElseSucceed(constVoid)),
             );
       if (!userTab)
-        throw new ServerBrowserPage.ServerBrowserOperationError(
-          "PreviewAutomationTabNotFoundError",
-          "This browser tab is not open on the server.",
-        );
+        throw new ServerBrowserPage.ServerBrowserOperationError({
+          tag: "PreviewAutomationTabNotFoundError",
+          message: "This browser tab is not open on the server.",
+        });
       return userTab.control.system(() =>
         fillCredentialIn(userTab, input as ServerBrowserPage.CredentialFillRequest),
       );
@@ -2380,10 +2380,10 @@ const make = Effect.gen(function* () {
         return statusWithTitle(tab, request.agentSessionId);
       }
       case "cdpEndpoint":
-        throw new ServerBrowserPage.ServerBrowserOperationError(
-          "PreviewAutomationExecutionError",
-          "Not supported on server tabs: temporary CDP endpoints. Use a desktop tab.",
-        );
+        throw new ServerBrowserPage.ServerBrowserOperationError({
+          tag: "PreviewAutomationExecutionError",
+          message: "Not supported on server tabs: temporary CDP endpoints. Use a desktop tab.",
+        });
       case "resize": {
         const setting = resolvePreviewViewport(input as PreviewAutomationResizeInput);
         await runPromise(

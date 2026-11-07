@@ -122,7 +122,7 @@ describe("operatorTranscription", () => {
     });
     vi.stubGlobal("fetch", async () => new Response("", { status: 401 }));
     await expect(transcribe()).rejects.toMatchObject({
-      code: "server-failed",
+      code: "transcription-failed",
       message: expect.stringMatching(/Sign in again/),
     });
   });

@@ -241,10 +241,10 @@ export function getOperatorVoiceTranscriber(locale: string): VoiceTranscriber {
   if (speech.length === 0 || token.length === 0) {
     return {
       prepare: async () => {
-        throw new VoiceTranscriptionError(
-          "server-failed",
-          "Sign in to your Operator server in Settings › Microphone.",
-        );
+        throw new VoiceTranscriptionError({
+          code: "transcription-failed",
+          message: "Sign in to your Operator server in Settings › Microphone.",
+        });
       },
     };
   }
@@ -271,14 +271,17 @@ export function getOperatorVoiceTranscriber(locale: string): VoiceTranscriber {
             });
           } catch (cause) {
             throwIfVoiceTranscriptionAborted(options.signal);
-            throw new VoiceTranscriptionError(
-              "server-failed",
-              `Cannot reach the Operator server at ${hostOf(speech)}.`,
-              { cause },
-            );
+            throw new VoiceTranscriptionError({
+              code: "transcription-failed",
+              message: `Cannot reach the Operator server at ${hostOf(speech)}.`,
+              cause,
+            });
           }
           if (!response.ok) {
-            throw new VoiceTranscriptionError("server-failed", await failureMessage(response));
+            throw new VoiceTranscriptionError({
+              code: "transcription-failed",
+              message: await failureMessage(response),
+            });
           }
           const json = (await response.json()) as { readonly text?: unknown };
           throwIfVoiceTranscriptionAborted(options.signal);

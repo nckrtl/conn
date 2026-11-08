@@ -1,3 +1,4 @@
+import { BrowserAnnotationControl } from "~/annotations/BrowserAnnotationControl";
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
@@ -90,6 +91,7 @@ import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { usePreviewSession } from "./usePreviewSession";
 import { ZoomIndicator } from "./ZoomIndicator";
 import { AgentBrowserCursor } from "./AgentBrowserCursor";
+import { BrowserLaravelToolbar } from "~/laravelToolbar/BrowserLaravelToolbar";
 import {
   findActiveBrowserRecordingRuntimeTabId,
   isBrowserRecordingStartCancelledError,
@@ -195,6 +197,8 @@ export function PreviewView({
   const isServerTab = snapshot?.runtime === "server" && !nativeServerTab;
   const serverOwnsRendering = snapshot?.runtime === "server";
   const serverSurfaceRef = useRef<ServerBrowserHandle | null>(null);
+  const runServerAnnotation = (active: boolean, dictation: { startUrl: string; stopUrl: string }) =>
+    serverSurfaceRef.current?.annotation(active, dictation.startUrl, dictation.stopUrl) ?? false;
   const [serverAspectRatioLocked, setServerAspectRatioLocked] = useState(false);
   const [serverToolbarWidth, setServerToolbarWidth] = useState(0);
   const serverToolbarShown =
@@ -941,6 +945,22 @@ export function PreviewView({
             </Tooltip>
           ) : null
         }
+        annotationAction={
+          previewBridge ? (
+            <BrowserAnnotationControl
+              threadRef={threadRef}
+              runtimeTabId={runtimeTabId}
+              pageUrl={url}
+              loading={loading}
+              {...(isServerTab
+                ? {
+                    inputDisabled: serverInputDisabled,
+                    runServerAnnotation,
+                  }
+                : {})}
+            />
+          ) : null
+        }
         trailingActions={
           moreMenuActions ? (
             <PreviewMoreMenu
@@ -1080,6 +1100,10 @@ export function PreviewView({
           </div>
         ) : null}
       </div>
+      {/* Keep the toolbar outside the page area so it has its own space. */}
+      {runtimeTabId && !showEmptyState && navStatus._tag !== "LoadFailed" ? (
+        <BrowserLaravelToolbar tabId={runtimeTabId} threadRef={threadRef} pageUrl={url} />
+      ) : null}
     </div>
   );
 }

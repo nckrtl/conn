@@ -1,3 +1,8 @@
+import {
+  selectedWorkspaceProjectRefs,
+  useOrbitGateway,
+  selectOrbitWorkspace,
+} from "../orbit/orbitGatewayStore";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -258,6 +263,8 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     titleRegenerationEnvironmentIds,
   } = listEnvironments;
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
+  const orbitGateway = useOrbitGateway();
+  const workspaceProjectRefs = selectedWorkspaceProjectRefs(orbitGateway);
   const pendingOrder = usePendingThreadOrder();
   const {
     layout: threadListV2Layout,
@@ -268,7 +275,8 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
     threads,
     pendingTasks,
     environmentId: options.selectedEnvironmentId,
-    projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
+    projectRefs:
+      selectedProjectScope === null ? workspaceProjectRefs : selectedProjectScope.projectRefs,
     searchQuery: props.searchQuery,
     searchMatches: threadSearchMatchByKey,
     settlementEnvironmentIds,
@@ -535,8 +543,14 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
         accessibilityLabel: "Search threads",
       }}
       filter={{
-        customized: options.selectedEnvironmentId !== null || selectedProjectKey !== null,
+        customized:
+          options.selectedEnvironmentId !== null ||
+          selectedProjectKey !== null ||
+          orbitGateway.selectedWorkspaceId !== null,
         items: buildHomeListFilterMenuItems({
+          workspaces: orbitGateway.workspaces.map(({ id, name }) => ({ id, label: name })),
+          selectedWorkspaceId: orbitGateway.selectedWorkspaceId,
+          onWorkspaceChange: selectOrbitWorkspace,
           environments,
           projects: projectFilterOptions,
           selectedEnvironmentId: options.selectedEnvironmentId,

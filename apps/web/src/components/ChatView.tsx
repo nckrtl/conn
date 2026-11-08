@@ -3896,12 +3896,13 @@ export default function ChatView(props: ChatViewProps) {
                                   projectId={activeThread.projectId}
                                   worktreePath={activeThread.worktreePath}
                                   isServerThread={isServerThread}
-                                  showGitControls={isGitRepo}
+                                  showGitControls={isGitRepo || isOrbitProjectFolder}
+                                  orbitProjectFolder={isOrbitProjectFolder}
                                   {...(routeKind === "draft" && draftId ? { draftId } : {})}
                                   onEnvModeChange={onEnvModeChangeStable}
                                   startFromOrigin={startFromOrigin}
                                   onStartFromOriginChange={onStartFromOriginChange}
-                                  envMode={envMode}
+                                  envMode={isOrbitProjectFolder ? "orbit" : envMode}
                                   {...(canOverrideServerThreadEnvMode
                                     ? {
                                         activeThreadBranchOverride: activeThreadBranch,

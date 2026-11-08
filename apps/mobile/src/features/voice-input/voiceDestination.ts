@@ -1,4 +1,10 @@
 import {
+  getOperatorTranscriptionSettings,
+  getOperatorVoiceTranscriber,
+  loadOperatorTranscriptionSettings,
+  subscribeOperatorTranscriptionSettings,
+} from "./operatorTranscription";
+import {
   AuthOrchestrationOperateScope,
   type CloudSpeechModelId,
   type CloudSpeechProvider,
@@ -239,10 +245,23 @@ export const voiceSpeechBenchmarksAtom = Atom.family((id: EnvironmentId) =>
   speechAtom(id, (prepared) => getEnvironmentSpeechModels(prepared, true)),
 );
 
-// null selects on-device; a grant with no usable transcriber must never fall back.
+export const operatorTranscriptionSettingsAtom = Atom.make((get) => {
+  get.addFinalizer(
+    subscribeOperatorTranscriptionSettings(() => get.setSelf(getOperatorTranscriptionSettings())),
+  );
+  void loadOperatorTranscriptionSettings();
+  return getOperatorTranscriptionSettings();
+}).pipe(Atom.keepAlive);
+
+// An explicit environment wins; without one, use the selected local/Operator engine.
 export const voiceRouteAtom = Atom.make((get) => {
   const grant = get(voiceGrantAtom);
-  if (!grant) return null;
+  if (!grant) {
+    const settings = get(operatorTranscriptionSettingsAtom);
+    return settings.engine === "operator"
+      ? { transcriber: getOperatorVoiceTranscriber(Intl.DateTimeFormat().resolvedOptions().locale) }
+      : null;
+  }
   const cloud = grant.destination.kind === "cloud" ? grant.destination : undefined;
   const connectionAtom = (cloud ? cloudVoiceConnectionAtom : voiceConnectionAtom)(
     grant.destination.environmentId,

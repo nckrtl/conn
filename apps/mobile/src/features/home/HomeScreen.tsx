@@ -1,3 +1,4 @@
+import { selectedWorkspaceProjectRefs, useOrbitGateway } from "../orbit/orbitGatewayStore";
 import { usePaneRole } from "../../components/ui/Pane";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { useActiveNewTask } from "../../state/active-new-task";
@@ -386,6 +387,8 @@ export function HomeScreen(props: HomeScreenProps) {
     return map;
   })();
 
+  const orbitGateway = useOrbitGateway();
+  const workspaceProjectRefs = selectedWorkspaceProjectRefs(orbitGateway);
   const v2ProjectScopeKey = props.selectedProjectKey;
   // An archived project's filter reads as all projects, matching the filter menu.
   const v2ScopedProjectGroup = findHomeProjectScope(
@@ -465,7 +468,8 @@ export function HomeScreen(props: HomeScreenProps) {
     threads: props.threads,
     pendingTasks: props.pendingTasks,
     environmentId: props.selectedEnvironmentId,
-    projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
+    projectRefs:
+      v2ScopedProjectGroup === null ? workspaceProjectRefs : v2ScopedProjectGroup.projectRefs,
     searchQuery: props.searchQuery,
     searchMatches: threadSearchMatchByKey,
     settlementEnvironmentIds,

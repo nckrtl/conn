@@ -8,6 +8,7 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { __setClientSettingsForTests, getClientSettings } from "../hooks/useSettings";
 import { useProjects } from "../state/entities";
 import type { Project } from "../types";
+import { useWorkspaceStore } from "../workspaceStore";
 import Sidebar from "./Sidebar";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -39,6 +40,7 @@ function project(id: string): Project {
 describe("sidebar header new thread", () => {
   it.each([
     { mode: "normal", count: 2, shift: false, picker: true },
+    { mode: "normal", count: 2, shift: false, picker: false, workspace: true },
     { mode: "boring", count: 2, shift: false, picker: true },
     { mode: "boring", count: 2, shift: true, picker: false },
     { mode: "boring", count: 1, shift: false, picker: false },
@@ -51,6 +53,25 @@ describe("sidebar header new thread", () => {
       ...DEFAULT_CLIENT_SETTINGS,
       boringSidebarEnabled: scenario.mode === "boring",
       legacySidebarEnabled: scenario.mode === "legacy",
+    });
+    const previousWorkspaces = useWorkspaceStore.getState();
+    stack.defer(() => useWorkspaceStore.setState(previousWorkspaces));
+    useWorkspaceStore.setState({
+      workspaces:
+        "workspace" in scenario
+          ? [
+              {
+                id: "selected",
+                name: "Selected",
+                color: "blue",
+                icon: null,
+                projectKeys: [],
+                projectRefs: ["local:active"],
+              },
+            ]
+          : [],
+      activeWorkspaceId: "workspace" in scenario ? "selected" : null,
+      availableProjects: [],
     });
     const projects = [project("active"), project("idle")].slice(0, scenario.count);
     const currentProjectRef = {
@@ -74,6 +95,9 @@ describe("sidebar header new thread", () => {
       </SidebarProvider>,
     );
 
+    await vi.waitFor(() =>
+      expect(useWorkspaceStore.getState().availableProjects).toHaveLength(scenario.count),
+    );
     await userEvent.click(screen.getByRole("button", { name: "New thread", exact: true }), {
       modifiers: scenario.shift ? ["Shift"] : [],
     });

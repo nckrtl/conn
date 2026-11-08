@@ -1,3 +1,5 @@
+import { useActiveWorkspace, useWorkspaceStore } from "../workspaceStore";
+import { resolveScopedProjectKeys } from "../workspaces.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
@@ -1007,6 +1009,50 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   );
   const environmentMachineById = useEnvironmentMachines();
   const projectGroupsRef = useRef(projectGroups);
+  // Workspaces (rooms-patches): the rail's editor lists these projects, and the
+  // active workspace narrows the sidebar to its projects.
+  const publishWorkspaceProjects = useWorkspaceStore((store) => store.publishProjects);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the workspace store's project registry in step with the sidebar's groups while mounted
+  useEffect(() => {
+    publishWorkspaceProjects(
+      projectGroups.map(({ projectKey, displayName, memberProjectRefs, memberProjects }) => ({
+        projectKey,
+        displayName,
+        refs: memberProjectRefs.map((ref) => `${ref.environmentId}:${ref.projectId}`),
+        connections: [...new Set(memberProjects.map((member) => member.environmentId))].map(
+          (environmentId) => ({
+            environmentId,
+            label:
+              environmentLabelById.get(environmentId) ??
+              memberProjects.find((member) => member.environmentId === environmentId)
+                ?.environmentLabel ??
+              "Remote",
+            kind: environmentMachineById.get(environmentId) ?? "server",
+            primary: environmentId === primaryEnvironmentId,
+          }),
+        ),
+      })),
+    );
+  }, [
+    environmentLabelById,
+    environmentMachineById,
+    primaryEnvironmentId,
+    projectGroups,
+    publishWorkspaceProjects,
+  ]);
+  const activeWorkspace = useActiveWorkspace();
+  // A workspace lists only its own projects (rooms-patches).
+  const isProjectGroupInWorkspace = (project: SidebarProjectSnapshot) =>
+    resolveScopedProjectKeys({
+      projectGroups: [project],
+      workspace: activeWorkspace,
+      scopedProjectGroups: [],
+    })?.size !== 0;
+  const workspaceProjectScopeItems = lookupProjectScopeItems.filter((item) => {
+    if (item.value === "all") return true;
+    const project = projectGroupByScopeKey.get(item.value);
+    return project === undefined || isProjectGroupInWorkspace(project);
+  });
   const persistedProjectScopeKeys = useUiStateStore((store) => store.sidebarProjectScopeKeys);
   const setPersistedProjectScopeKeys = useUiStateStore((store) => store.setSidebarProjectScopeKeys);
   const [projectScopeMenuState, dispatchProjectScopeMenu] = useReducer(
@@ -1164,7 +1210,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   };
   // Pinning from a row keeps rows in place while the menu is open.
   const projectScopeItems = useOrderWhileOpen(
-    lookupProjectScopeItems,
+    workspaceProjectScopeItems,
     (item) => item.value,
     projectScopeMenuState.open,
   );
@@ -1181,7 +1227,20 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   });
   const scopedProjectGroups = revealWidensScope ? [] : chosenProjectGroups;
   const scopedProjectRefs = scopedProjectGroups.flatMap((project) => project.memberProjectRefs);
-  const scopedProjectKeys = revealWidensScope ? null : chosenScopeProjectKeys;
+  const scopedProjectKeys = resolveScopedProjectKeys({
+    projectGroups,
+    workspace: activeWorkspace,
+    scopedProjectGroups,
+  });
+  // A workspace switch can hide selected rows, like a scope flip.
+  const activeWorkspaceId = activeWorkspace?.id ?? null;
+  const previousActiveWorkspaceIdRef = useRef(activeWorkspaceId);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the selection store when the workspace store switches workspace
+  useEffect(() => {
+    if (previousActiveWorkspaceIdRef.current === activeWorkspaceId) return;
+    previousActiveWorkspaceIdRef.current = activeWorkspaceId;
+    clearSelection();
+  }, [activeWorkspaceId, clearSelection]);
   const threadSearch = useThreadSearch(
     connectedEnvironmentIds,
     threadSearchQuery,
@@ -1328,7 +1387,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     pinnedKeysById,
     activeKeysById,
   } = useSidebarThreads({
-    projectScopeKey,
+    projectScopeKey: `${activeWorkspaceId ?? "all"}:${projectScopeKey ?? "all"}`,
     scopedProjectKeys,
     serverConfigs,
     connectedEnvironmentIds,
@@ -2945,13 +3004,22 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   );
   const showJumpHints = useThreadJumpHintsVisible(shouldShowJumpHintsNow);
 
+  // A workspace counts only its own projects (rooms-patches).
+  const workspaceScopeGroupCount =
+    activeWorkspace === null
+      ? scopeGroups.length
+      : scopeGroups.filter(isProjectGroupInWorkspace).length;
+  const workspaceProjectGroupCount =
+    activeWorkspace === null
+      ? projectGroups.length
+      : projectGroups.filter(isProjectGroupInWorkspace).length;
   const handleNewThreadClick = (event?: ReactMouseEvent) => {
     if (
       legacySidebarEnabled ||
       shouldCreateNewThreadInCurrentProject(
         event?.shiftKey ?? false,
-        scopeGroups.length,
-        projectGroups.length,
+        workspaceScopeGroupCount,
+        workspaceProjectGroupCount,
       )
     ) {
       if (isMobile) setOpenMobile(false);
@@ -2972,7 +3040,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
 
   const newThreadShortcutLabel =
     shortcutLabelForCommand(keybindings, "chat.new") ??
-    (shouldCreateNewThreadInCurrentProject(false, scopeGroups.length, projectGroups.length)
+    (shouldCreateNewThreadInCurrentProject(
+      false,
+      workspaceScopeGroupCount,
+      workspaceProjectGroupCount,
+    )
       ? shortcutLabelForCommand(keybindings, "chat.newLocal")
       : undefined);
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
@@ -3197,8 +3269,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 !legacySidebarEnabled &&
                 !shouldCreateNewThreadInCurrentProject(
                   false,
-                  scopeGroups.length,
-                  projectGroups.length,
+                  workspaceScopeGroupCount,
+                  workspaceProjectGroupCount,
                 )
               }
               searchInputRef={threadSearchInputRef}

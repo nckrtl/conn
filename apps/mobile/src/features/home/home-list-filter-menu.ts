@@ -135,6 +135,9 @@ export function buildHomeListFilterMenuItems(props: {
   readonly selectedProjectKey: string | null;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
+  readonly workspaces?: ReadonlyArray<HomeListFilterMenuWorkspace>;
+  readonly selectedWorkspaceId?: string | null;
+  readonly onWorkspaceChange?: (workspaceId: string | null) => void;
 }): AppBarMenuItem[] {
   const items: AppBarMenuItem[] = [
     {
@@ -157,6 +160,28 @@ export function buildHomeListFilterMenuItems(props: {
       ],
     },
   ];
+
+  const onWorkspaceChange = props.onWorkspaceChange;
+  if (props.workspaces?.length && onWorkspaceChange) {
+    items.unshift({
+      id: "workspace",
+      title: "Workspace",
+      items: [
+        {
+          id: "workspace:all",
+          title: "All projects",
+          selected: props.selectedWorkspaceId == null,
+          onPress: () => onWorkspaceChange(null),
+        },
+        ...props.workspaces.map((workspace) => ({
+          id: `workspace:${workspace.id}`,
+          title: workspace.label,
+          selected: props.selectedWorkspaceId === workspace.id,
+          onPress: () => onWorkspaceChange(workspace.id),
+        })),
+      ],
+    });
+  }
 
   if (props.projects.length > 0) {
     items.push({

@@ -16,7 +16,21 @@ const mocks = vi.hoisted(() => ({
   markerRead: vi.fn<() => string>(),
   markerWrite: vi.fn<(id: string) => void>(),
   probe: vi.fn(),
+  operatorSettings: { engine: "device" },
+  operatorListeners: new Set<() => void>(),
+  operatorTranscriber: {
+    prepare: async () => ({ locale: "en", transcribe: async () => "Operator transcript" }),
+  },
   fetch: vi.fn<typeof fetch>(),
+}));
+vi.mock("./operatorTranscription", () => ({
+  getOperatorTranscriptionSettings: () => mocks.operatorSettings,
+  loadOperatorTranscriptionSettings: async () => {},
+  subscribeOperatorTranscriptionSettings: (listener: () => void) => {
+    mocks.operatorListeners.add(listener);
+    return () => mocks.operatorListeners.delete(listener);
+  },
+  getOperatorVoiceTranscriber: () => mocks.operatorTranscriber,
 }));
 vi.mock("expo", () => ({
   requireOptionalNativeModule: () => ({ decodeRecording: async () => new Uint8Array([0, 0]) }),
@@ -254,6 +268,29 @@ it("a late cloud key save cannot override a newer destination choice", () => {
     expect(appAtomRegistry.get(voiceGrantAtom)).toBe(grant);
     expect(grant?.destination).toEqual({ kind: "cloud", environmentId: host, provider: "xai" });
   } finally {
+    appAtomRegistry.reset();
+  }
+});
+
+it("routes local dictation through the selected Operator and keeps explicit environment routing", async () => {
+  const unmount = appAtomRegistry.mount(voiceRouteAtom);
+  try {
+    chooseVoiceDestination(null);
+    expect(appAtomRegistry.get(voiceRouteAtom)).toBeNull();
+    mocks.operatorSettings = { engine: "operator" };
+    for (const listener of mocks.operatorListeners) listener();
+    const operator = appAtomRegistry.get(voiceRouteAtom)?.transcriber;
+    expect(operator).toBe(mocks.operatorTranscriber);
+    chooseVoiceDestination(EnvironmentId.make("offline"));
+    expect(appAtomRegistry.get(voiceRouteAtom)).toEqual({ transcriber: null });
+    chooseVoiceDestination(null);
+    expect(appAtomRegistry.get(voiceRouteAtom)?.transcriber).toBe(operator);
+    mocks.operatorSettings = { engine: "device" };
+    for (const listener of mocks.operatorListeners) listener();
+    expect(appAtomRegistry.get(voiceRouteAtom)).toBeNull();
+  } finally {
+    mocks.operatorSettings = { engine: "device" };
+    unmount();
     appAtomRegistry.reset();
   }
 });

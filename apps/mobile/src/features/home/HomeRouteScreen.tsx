@@ -1,3 +1,4 @@
+import { selectOrbitWorkspace, useOrbitGateway } from "../orbit/orbitGatewayStore";
 import { uuidv4 } from "../../lib/uuid";
 import { ThreadUndoNotice } from "./ThreadUndoNotice";
 import { use } from "react";
@@ -37,6 +38,7 @@ import { buildHomeListFilterMenuItems } from "./home-list-filter-menu";
 import { HomeHeader } from "./HomeHeader";
 
 export function HomeRouteScreen() {
+  const orbitGateway = useOrbitGateway();
   const nativePrimaryColumn = use(NativePrimaryColumnContext);
   const { layout, primarySidebarSearchQuery, setPrimarySidebarSearchQuery, startNewTask } =
     useAdaptiveWorkspaceLayout();
@@ -175,8 +177,14 @@ export function HomeRouteScreen() {
             accessibilityLabel: "Search threads",
           }}
           filter={{
-            customized: selectedEnvironmentId !== null || selectedProjectKey !== null,
+            customized:
+              selectedEnvironmentId !== null ||
+              selectedProjectKey !== null ||
+              orbitGateway.selectedWorkspaceId !== null,
             items: buildHomeListFilterMenuItems({
+              workspaces: orbitGateway.workspaces.map(({ id, name }) => ({ id, label: name })),
+              selectedWorkspaceId: orbitGateway.selectedWorkspaceId,
+              onWorkspaceChange: selectOrbitWorkspace,
               environments,
               projects: projectFilterOptions,
               selectedEnvironmentId,

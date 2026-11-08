@@ -2019,7 +2019,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   ) {
     yield* rendererHistory.register(wc, { surface: "preview" });
     const webContentsId = wc.id;
+    responseHeaders.attachGuest(wc);
+    dictation.attachGuest(wc);
+    wc.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+      if (isMainFrame) responseHeaders.navigatedInPage(webContentsId, url);
+    });
     wc.once("destroyed", () => {
+      responseHeaders.forget(webContentsId);
+      dictation.forget(webContentsId);
       runFork(hideDestroyedGuest(webContentsId));
       runFork(detachControlSession(webContentsId));
     });

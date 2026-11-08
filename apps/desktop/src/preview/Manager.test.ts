@@ -162,7 +162,7 @@ const {
   fromId: vi.fn<(_id?: number) => Electron.WebContents | null>((_id?: number) => null),
   getFocusedWebContents: vi.fn(() => null),
   mkdir: vi.fn((_path: string) => undefined),
-  previewSession: { on: vi.fn() },
+  previewSession: { on: vi.fn(), webRequest: { onHeadersReceived: vi.fn() } },
   showItemInFolder: vi.fn(),
   webviewSend: vi.fn(),
   writeFile: vi.fn((_path: string, _data: Uint8Array) => undefined),
@@ -3023,3 +3023,54 @@ describe("PreviewManager", () => {
     ),
   );
 });
+
+effectIt.effect("prepares the Laravel document relay before the guest registers its tab", () =>
+  withManager((manager) =>
+    Effect.gen(function* () {
+      const handlers = new Map<string, (event: { senderFrame: { url: string } }) => unknown>();
+      const guest = Object.assign(
+        makeTestPreviewWebContents(async () => ({
+          toJPEG: () => Buffer.from("frame"),
+          getSize: () => ({ width: 10, height: 10 }),
+        })),
+        {
+          once: vi.fn(),
+          ipc: {
+            on: vi.fn(),
+            off: vi.fn(),
+            removeHandler: (channel: string) => handlers.delete(channel),
+            handle: (
+              channel: string,
+              handler: (event: { senderFrame: { url: string } }) => unknown,
+            ) => handlers.set(channel, handler),
+          },
+        },
+      );
+      const onHeadersReceived = previewSession.webRequest.onHeadersReceived;
+      onHeadersReceived.mockClear();
+      yield* manager.getBrowserSession();
+      const receive = onHeadersReceived.mock.calls[0]![0];
+      const data = { request_id: "document-1", profiler: {} };
+      receive(
+        {
+          webContentsId: guest.id,
+          resourceType: "mainFrame",
+          method: "GET",
+          url: "https://example.com",
+          responseHeaders: {
+            "x-toolbar": [Buffer.from(JSON.stringify(data)).toString("base64")],
+          },
+        },
+        () => {},
+      );
+      yield* manager.prepareWebview(guest as never);
+      const read = handlers.get("preview:laravel-toolbar-document");
+      expect(read).toBeDefined();
+      expect(read!({ senderFrame: { url: "https://example.com" } })).toMatchObject({
+        kind: "full",
+        data,
+      });
+      expect(read!({ senderFrame: { url: "https://example.com" } })).toBeNull();
+    }),
+  ),
+);

@@ -1,3 +1,6 @@
+import * as WsFork from "./wsFork.ts";
+import * as AnnotationStore from "./annotations/AnnotationStore.ts";
+import * as OrbitWorkspaceRegistrar from "./orbit/OrbitWorkspaceRegistrar.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -683,7 +686,8 @@ const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc>
 const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
-export const mountedServerWsRpcTags = [...ServerWsRpcGroup.requests.keys()];
+const MountedServerWsRpcGroup = ServerWsRpcGroup.merge(WsFork.ForkServerWsRpcGroup);
+export const mountedServerWsRpcTags = [...MountedServerWsRpcGroup.requests.keys()];
 export const mountedSplitWsRpcTags = [...SplitWsRpcGroup.requests.keys()];
 export const mountedOtherWsRpcTags = [...OtherWsRpcGroup.requests.keys()];
 // Replaying each intervening event costs a shell refetch; past this gap a
@@ -3513,6 +3517,8 @@ export const layer = Layer.unwrap(
     const pullRequests = yield* PullRequestService.PullRequestService;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
+    const annotations = yield* AnnotationStore.AnnotationStore;
+    const orbit = yield* OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
@@ -3551,7 +3557,7 @@ export const layer = Layer.unwrap(
         const reportProfiles = yield* serverBrowser.profileReporter;
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-          yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
+          yield* RpcServer.make(MountedServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
             Effect.provideService(RpcServer.Protocol, withOutputWindow(protocol)),
             Effect.provide(
               Layer.merge(
@@ -3585,6 +3591,14 @@ export const layer = Layer.unwrap(
               reportProfiles,
               readSettingsClient(url.value),
             ).pipe(
+              Layer.merge(
+                WsFork.layer.pipe(
+                  Layer.provide(Layer.succeed(AnnotationStore.AnnotationStore, annotations)),
+                  Layer.provide(
+                    Layer.succeed(OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar, orbit),
+                  ),
+                ),
+              ),
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.
               Layer.provide(DefectReporter.layer),

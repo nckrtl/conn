@@ -159,6 +159,8 @@ import { usePreviewMiniPlayerStore } from "~/previewMiniPlayerStore";
 import { dispatchPreviewAction } from "./previewActionBus";
 import { PreviewView } from "./PreviewView";
 import { ToastProvider } from "~/components/ui/toast";
+import { relayLaravelToolbarMessage } from "~/laravelToolbar/bridge";
+import { useLaravelToolbarStore } from "~/laravelToolbar/store";
 
 const TEST_THREAD_REF = {
   environmentId: EnvironmentId.make("environment-1"),
@@ -213,9 +215,45 @@ function setup() {
   });
   usePreviewMiniPlayerStore.setState({ byThreadKey: {} });
   useBrowserPointerStore.setState({ byTabId: {} });
+  useLaravelToolbarStore.setState({ byTabId: {} });
 }
 
 describe("PreviewView", () => {
+  it("shows Laravel request tools when bridge data arrives and hides them when leaving Laravel", async () => {
+    setup();
+    await using _screen = await render(view());
+    const requests = page.getByRole("button", { name: "Requests on this page" });
+    await expect.element(requests).not.toBeInTheDocument();
+
+    const webview = Object.assign(document.createElement("div"), {
+      insertCSS: async () => "",
+    });
+    const message = (kind: string, data?: unknown) =>
+      Object.assign(new Event("ipc-message"), {
+        channel: "laravel-toolbar",
+        args: [{ kind, data }],
+      });
+    await act(async () => {
+      relayLaravelToolbarMessage(
+        TEST_RUNTIME_TAB_ID,
+        webview,
+        message("page", {
+          request_id: "laravel-request",
+          profiler: {},
+          request: { method: "GET", uri: "/" },
+          response: { status_code: 200 },
+        }),
+      );
+    });
+    await expect.element(requests).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Request details" })).toBeVisible();
+
+    await act(async () => {
+      relayLaravelToolbarMessage(TEST_RUNTIME_TAB_ID, webview, message("none"));
+    });
+    await expect.element(requests).not.toBeInTheDocument();
+  });
+
   it.each(["mailto:alice@example.com", "http://"])(
     "reports rejected address %s without navigating or recording it",
     async (address) => {

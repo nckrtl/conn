@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { buildHomeListFilterMenu } from "./home-list-filter-menu";
+import { buildHomeListFilterMenu, buildHomeListFilterMenuItems } from "./home-list-filter-menu";
 
 describe("buildHomeListFilterMenu", () => {
   it("adds a project scope submenu that selects and clears the same scope as the chips", () => {
@@ -76,4 +76,32 @@ describe("buildHomeListFilterMenu", () => {
     expect(onWorkspaceChange).toHaveBeenNthCalledWith(1, "ws-1");
     expect(onWorkspaceChange).toHaveBeenNthCalledWith(2, null);
   });
+});
+
+it("selects and clears a workspace through the native list header menu", () => {
+  const onWorkspaceChange = vi.fn();
+  const menu = buildHomeListFilterMenuItems({
+    environments: [],
+    projects: [],
+    selectedEnvironmentId: null,
+    selectedProjectKey: null,
+    onEnvironmentChange: vi.fn(),
+    onProjectChange: vi.fn(),
+    workspaces: [{ id: "apps", label: "Apps" }],
+    selectedWorkspaceId: "apps",
+    onWorkspaceChange,
+  });
+  const workspace = menu.find((item) => item.id === "workspace");
+  expect(workspace).toMatchObject({
+    title: "Workspace",
+    items: [
+      { title: "All projects", selected: false },
+      { title: "Apps", selected: true },
+    ],
+  });
+  if (!workspace || !("items" in workspace)) throw new Error("Missing workspace menu");
+  for (const item of workspace.items ?? []) {
+    if ("onPress" in item) item.onPress?.();
+  }
+  expect(onWorkspaceChange.mock.calls).toEqual([[null], ["apps"]]);
 });

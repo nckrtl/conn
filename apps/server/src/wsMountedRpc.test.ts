@@ -4,6 +4,15 @@ import { ForkWsRpcGroup, OfficialWsRpcGroup, WS_METHODS } from "@t3tools/contrac
 import authorizedUpstreamWsRpcTags from "./authorizedUpstreamWsRpcTags.json" with { type: "json" };
 import { mountedOtherWsRpcTags, mountedServerWsRpcTags, mountedSplitWsRpcTags } from "./ws.ts";
 
+const restoredFeatureRpcs = [
+  WS_METHODS.annotationsSubscribe,
+  WS_METHODS.annotationsCreate,
+  WS_METHODS.annotationsRemove,
+  WS_METHODS.orbitWorkspacesSubscribe,
+  WS_METHODS.orbitWorkspacesRegister,
+  WS_METHODS.orbitWorkspacesRemove,
+] as const;
+
 const connMainAlreadyMountedExtras = [
   WS_METHODS.desktopTabRegister,
   WS_METHODS.desktopTabRequests,
@@ -11,27 +20,27 @@ const connMainAlreadyMountedExtras = [
 ] as const;
 
 describe("mounted server WS RPCs", () => {
-  it("matches OfficialWsRpcGroup and does not mount ForkWsRpcGroup", () => {
+  it("mounts official RPCs and only the authorized annotation and Orbit fork RPCs", () => {
     const mounted = new Set(mountedServerWsRpcTags);
     const official = new Set(OfficialWsRpcGroup.requests.keys());
     const splitAndOther = new Set([...mountedSplitWsRpcTags, ...mountedOtherWsRpcTags]);
 
-    expect(mounted).toEqual(official);
-    expect(splitAndOther).toEqual(mounted);
-    expect(mountedSplitWsRpcTags.length + mountedOtherWsRpcTags.length).toBe(
-      mountedServerWsRpcTags.length,
-    );
+    expect(mounted).toEqual(new Set([...official, ...restoredFeatureRpcs]));
+    expect(splitAndOther).toEqual(official);
+    expect(mountedSplitWsRpcTags.length + mountedOtherWsRpcTags.length).toBe(official.size);
 
     for (const tag of ForkWsRpcGroup.requests.keys()) {
-      expect(mounted.has(tag)).toBe(false);
+      expect(mounted.has(tag)).toBe(restoredFeatureRpcs.some((restored) => restored === tag));
     }
-    expect(mounted.has(WS_METHODS.orbitWorkspacesSubscribe)).toBe(false);
-    expect(mounted.has(WS_METHODS.orbitWorkspacesRegister)).toBe(false);
-    expect(mounted.has(WS_METHODS.orbitWorkspacesRemove)).toBe(false);
   });
 
-  it("adds only Conn main desktop tab relay methods beyond upstream 240446e2", () => {
-    const authorized = new Set([...authorizedUpstreamWsRpcTags, ...connMainAlreadyMountedExtras]);
+  it("adds only desktop relay and authorized feature RPCs beyond upstream 240446e2 and its November 8 auth update", () => {
+    const authorized = new Set([
+      ...authorizedUpstreamWsRpcTags,
+      ...connMainAlreadyMountedExtras,
+      WS_METHODS.providerAuthRemoveMethod,
+      ...restoredFeatureRpcs,
+    ]);
     expect(new Set(mountedServerWsRpcTags)).toEqual(authorized);
     expect(authorizedUpstreamWsRpcTags).not.toContain(WS_METHODS.desktopTabRegister);
     expect(authorizedUpstreamWsRpcTags).not.toContain(WS_METHODS.desktopTabRequests);

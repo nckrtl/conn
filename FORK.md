@@ -116,6 +116,15 @@ Sources:
 A workspace rail sits beside the thread sidebar. Workspaces have their own
 projects, icons and extra windows. New threads stay in the selected workspace.
 
+The rail alone does not provide workspace isolation. `Sidebar.tsx` must publish
+the available projects to `useWorkspaceStore`, intersect the project filter
+with the active workspace, and reset row selection and the settled tail on a
+workspace change. `WorkspaceDialog` reads that project registry. On mobile,
+`HomeScreen.tsx` and `ThreadNavigationSidebar.tsx` must pass
+`selectedWorkspaceProjectRefs` into the thread list when no narrower project
+is selected. Preserve these consumers when upstream moves the list or filter
+UI. See the [November 8 audit](#upstream-sync-audit-2026-11-08) for the restored consumers.
+
 Upstream has one desktop window, so upstream code often assumes a single main
 window. In the fork every window must behave the same. `DesktopWindow.ts`
 registers each window with `PreviewManager.addWindow`, and the preview manager
@@ -159,12 +168,19 @@ commit `d17002d`). If a saved Orbit server's session lacks `access:write`, Conn
 pairs it again at most once every 6 hours. The shared `lacksAccess` and
 `accessPairedAt` logic is wired into the web and mobile Orbit providers.
 
-Thread-start Orbit instance registration still lives on the client
-(`apps/web/src/orbit/orbitWorkspaces.ts`, contracts
-`orbitWorkspaces.{subscribe,register,remove}`). Official upstream
-`apps/server/src/ws.ts` has no handlers for those methods. Do not add a fork
-WS layer to paper this over. Until Nick decides, that path is a known
-incompatibility against official servers.
+Thread-start Orbit registration uses the client RPCs in
+`apps/web/src/orbit/orbitWorkspaces.ts` and the server's
+`OrbitWorkspaceRegistrar.ts`. The client is not a replacement for the server
+registrar. Conn mounts `orbitWorkspaces.{subscribe,register,remove}` through
+`wsFork.ts` and provides `OrbitWorkspaceRegistrar` with `OrbitGateway` at
+server startup. Official upstream servers do not implement this fork group.
+See [Fork RPC group](#fork-rpc-group).
+
+An Orbit project folder can contain checkouts without being a Git repository
+itself. `ChatView.tsx` must pass `showGitControls={isGitRepo ||
+isOrbitProjectFolder}`, `orbitProjectFolder={isOrbitProjectFolder}` and the
+effective Orbit mode to `BranchToolbar`. Otherwise the composer hides the
+Orbit instance selector for this kind of project.
 
 Sources:
 
@@ -230,9 +246,48 @@ adapter show Symfony's icon, version and environment. Pages with a
 Content-Security-Policy get no inline toolbar data; the desktop main process
 reads the `x-toolbar` response headers instead.
 
+Preserve the whole browser integration, including its mount points:
+
+1. `preview-pick-preload.ts` imports `LaravelToolbarPreload.ts`. The preload
+   reads page data and update events, or the header payload supplied by
+   `ResponseHeaderRelay.ts`, and sends `laravel-toolbar` messages to its host.
+   The preview manager must install the response listener and attach each guest.
+2. `HostedBrowserWebview.tsx` passes those guest messages to
+   `relayLaravelToolbarMessage` with the environment-scoped runtime tab ID.
+   The relay writes `useLaravelToolbarStore`; a `none` message clears that tab.
+3. `components/preview/PreviewView.tsx` renders `BrowserLaravelToolbar` below
+   the page area, with the same `runtimeTabId`, `threadRef` and page URL. Mount
+   it only for an existing, nonempty tab without a load failure. The component
+   renders nothing until data arrives. Keep it outside the page area so its
+   height does not cover the page.
+
+`ApiPanel.tsx` has a separate toolbar mount. Keeping that mount, the toolbar
+directory, or the preload is not enough to preserve the browser toolbar. The
+November 7 sync removed the browser mount and the guest attachment in
+`Manager.prepareWebview`, while still typechecking. Preserve both the
+response-header and dictation attachments, in-page navigation notification,
+and guest cleanup when merging upstream preview-manager changes.
+
+Run `PreviewView.browser.test.tsx` as well as the toolbar relay and store tests.
+The browser test sends a page payload through the relay, checks that the
+Requests control and request details appear, then clears them with `none`.
+For an integrated desktop check, open a bridge-enabled Laravel page, inspect
+a request, navigate to a non-Laravel page, and check that another tab's data
+does not appear. Include a CSP page so the response-header path is exercised.
+
+The native display of server-owned tabs uses the same guest attachment. A
+working PHP bridge or API-panel toolbar alone does not prove this path works.
+`Manager.test.ts` covers header delivery through the guest preload handler;
+`PreviewView.browser.test.tsx` covers the relay-to-toolbar consumer.
+
 Sources:
 
 - `apps/web/src/laravelToolbar/*`.
+- `apps/web/src/components/preview/PreviewView.tsx` and
+  `PreviewView.browser.test.tsx` in the same directory.
+- `apps/web/src/browser/HostedBrowserWebview.tsx`,
+  `apps/web/src/api/ApiPanel.tsx`.
+- `apps/desktop/src/preview-pick-preload.ts`.
 - Desktop (`apps/desktop/src/preview/`): `LaravelToolbarPreload.ts`,
   `ResponseHeaderRelay.ts`.
 - `packages/shared/src/laravelToolbarHeaders.ts`.
@@ -325,6 +380,14 @@ preload and the hosting renderer; server tabs through a Playwright binding.
 Agents use the `annotations_list`, `annotations_claim`,
 `annotations_complete` and `annotations_release` MCP tools. Send and Watch
 prompt the thread with those tools.
+
+The queue needs visible entry points as well as its store and overlay bridge.
+`PreviewView.tsx` passes `BrowserAnnotationControl` to
+`PreviewChromeRow.annotationAction`. `DeviceWorkspace.tsx` connects the
+annotation target and queue to `DeviceStreamView` and places
+`AnnotationQueuePopover` in `DeviceControlsRail`. Upstream's element picker
+and dictation UI do not replace Conn's persistent annotation queue. These
+entry points were lost in the November 7 sync; see the audit below.
 
 Drift dictation starts from the overlay. On desktop tabs the overlay asks the
 guest preload (`window.__ANNOTATOR_HOST__`), and the main process POSTs the
@@ -578,7 +641,7 @@ Sources:
 - `patches/react-native-screens-conn.patch`.
 - `apps/mobile/src/native/V5StackHeader.ios.tsx` (`filterInsideSearch`, search
   field `fontSize`).
-- Workspace (`apps/mobile/src/features/workspace/`): `WorkspacePhoneBar.tsx`,
+- Workspace (`apps/mobile/src/features/layout/workspace/`): `WorkspacePhoneBar.tsx`,
   `useWorkspacePhoneBar.ts`, `WorkspaceNativeTabs.ios.tsx`,
   `WorkspaceRootScreen.tsx` (`connPhoneBar`).
 - Mobile (`apps/mobile/src/features/`): `home/HomeHeader.tsx`,
@@ -688,18 +751,48 @@ Sources:
   `state/environments.ts`.
 - Native chips: `apps/mobile/modules/t3-composer-editor/`.
 
+### Mobile Operator dictation
+
+Settings > Voice lets the user select an Operator server and sign in, instead
+of using the device recognizer. Keep both the settings UI
+(`SettingsTranscriptionSection.tsx`) and the recording consumer connected to
+`voice-input/operatorTranscription.ts`. A recording with Operator selected
+must use `getOperatorVoiceTranscriber`; its availability must also reach the
+microphone control. Preserve this choice alongside upstream's environment and
+cloud transcription routes. The November 7 sync kept the settings but removed
+the consumer from `VoiceInputProvider.tsx`.
+
+Sources under `apps/mobile/src/features/`:
+
+- `settings/SettingsVoiceRouteScreen.tsx`, `settings/SettingsTranscriptionSection.tsx`.
+- `voice-input/VoiceInputProvider.tsx`, `voice-input/voiceDestination.ts`,
+  `voice-input/operatorTranscription.ts` and its tests.
+
 ### Fork RPC group
 
-Conn's `serverRestart`, `credentials*`, `testLogins*`, `annotations.*`,
-`panels.*` and `orbitWorkspaces.*` RPCs still live in `ForkWsRpcGroup`, merged
-into `WsRpcGroup` in contracts so clients typecheck. Official servers
-instantiate `OfficialWsRpcGroup` only, the upstream method set. Do not
-reintroduce `layerWsForkRpc` or other fork server layers.
-`orbitWorkspaces.*` therefore have no server handlers; see Orbit above.
+Conn's fork contracts live in `ForkWsRpcGroup`. On November 8, Nick authorized
+restoring the RPCs required by annotation queues and Orbit registration:
+`annotations.{subscribe,create,remove}` and
+`orbitWorkspaces.{subscribe,register,remove}`. `wsFork.ts` mounts only these six
+methods; `ws.ts` merges them into the production socket group. Keep their
+handler layer separate from the large upstream groups to avoid TypeScript's
+handler-type expansion limit.
+
+Subscriptions require `orchestration:read`. Annotation mutations require
+`preview:operate`; Orbit mutations require `orchestration:operate`. Both the
+scope authorization and instrumentation middleware apply to the fork group.
+`wsFork.test.ts` exercises the handlers through RPC, including rejected
+mutations and the real annotation store. `wsMountedRpc.test.ts` checks the
+production mount against the explicit six-method allowlist.
+
+`serverRestart`, `credentials*`, `testLogins*` and `panels.*` remain unmounted.
+Do not broaden this allowlist during an upstream sync without a new decision.
+Typed contracts alone do not prove a method is available on a server.
 
 Sources:
 
 - `packages/contracts/src/rpc.ts` (`OfficialWsRpcGroup`, `ForkWsRpcGroup`).
+- `apps/server/src/wsFork.ts`, `ws.ts`, `server.ts`.
 
 ### Codex MCP network wait
 
@@ -790,6 +883,16 @@ Sources:
      without replay. The files under `apps/web/src/` are
      `rpc/desktopTabRelay.ts`, `browser/HostedBrowserWebview.tsx`,
      `browser/ElectronBrowserHost.tsx` and `browser/previewRuntimeTabId.ts`.
+   - Laravel Toolbar: preserve the `BrowserLaravelToolbar` mount in
+     `components/preview/PreviewView.tsx`, not just the files in
+     `laravelToolbar/`. Keep its guest-message consumer in
+     `browser/HostedBrowserWebview.tsx` and the preload/header path described
+     above. Run `PreviewView.browser.test.tsx` after changing preview layout.
+   - Workspace and annotation UI: preserve the list consumers and visible
+     controls described above. A rail, store, overlay or optional prop that
+     still exists but has no caller is a lost feature.
+   - Mobile voice: preserve the Operator selection from settings through the
+     actual recorder/transcriber route when adopting upstream voice changes.
    - Under `packages/contracts/src/`, keep Conn's desktop preview entries in
      `previewAutomation.ts`, `rpc.ts`, `ipc.ts` and `clientRpcPermissions.ts`
      next to upstream's.
@@ -808,7 +911,8 @@ Sources:
      `apps/server/src/mcp/McpHttpServer.ts`, the `ConnAnnotationsPreload.ts`
      import in `apps/desktop/src/preview-pick-preload.ts`, the overlay
      injection and binding in `apps/server/src/preview/ServerBrowser.ts`, the
-     `annotations.*` RPCs in `packages/contracts/src/rpc.ts` and `ws.ts`, and
+     `annotations.*` contracts (subject to the known server restriction in
+     [Fork RPC group](#fork-rpc-group)), and
      the `attachOverlayBridge` effect in
      `apps/web/src/browser/HostedBrowserWebview.tsx`.
    - `pnpm-lock.yaml`: take upstream's, then let `vp i` rewrite it.
@@ -816,6 +920,10 @@ Sources:
    upstream's diff. New upstream UI must follow the fork's shell rules (glass
    popovers, `ToolbarGroup`, `text-ui`, shell dividers, `scrollbar-inset`). Fix
    what the scan finds on the sync branch, before the build.
+   Compare the sync with its first parent for removed fork imports, renders,
+   props, subscriptions and service registrations. Trace each removed consumer
+   to its replacement and exercise its user-visible behavior. A surviving
+   implementation file or a green typecheck is not evidence of preservation.
 3. Lint and typecheck only the touched scope (`vp lint <files>` and
    `vp run check:changed`). `check:changed` always typechecks
    `@t3tools/desktop`, and `scripts/build-desktop-artifact.ts` runs
@@ -847,6 +955,70 @@ Sources:
    (`node scripts/publish-sync-branch.ts`; a dated `sync/<yyyy-mm-dd>` tip
    already counts). Then build, sign and install with the [build guide][build].
    Merge the sync branch into `main` only after a good build.
+
+### Upstream sync audit: 2026-11-08
+
+Source audit of the six November 1–8 sync merges against their first parents,
+then checked against `ff4fb8d847a9e8ca5f262e6c38cd5a039aa164ee` and the repair
+commits between them. This is a call-site and history audit of fork features,
+not runtime acceptance of every desktop and mobile feature.
+
+| Sync date  | Merge        |
+| ---------- | ------------ |
+| November 1 | `09e37a43cc` |
+| November 2 | `7444c815b2` |
+| November 3 | `337aad549b` |
+| November 4 | `b129d4f5cb` |
+| November 7 | `4b7c3e1509` |
+| November 8 | `2ef40fa2f6` |
+
+The following lost consumers all trace to `4b7c3e1509` and are restored in
+this repair. Preserve these connections when adapting future upstream changes:
+
+| Feature                                 | Loss and evidence                                                                                                                                                                                                                                      |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Browser Laravel Toolbar                 | `PreviewView.tsx` lost its import and render of `BrowserLaravelToolbar`. Restored here; the regression test fails without the mount. `Manager.prepareWebview` also lost the guest header and dictation attachments; these are restored.                |
+| Desktop workspace filtering and editing | `Sidebar.tsx` no longer calls `publishProjects` or `resolveScopedProjectKeys` with the active workspace. The sidebar ignores workspace selection; `WorkspaceDialog` reads an unpopulated project registry.                                             |
+| Mobile workspace filtering              | `HomeScreen.tsx` and `ThreadNavigationSidebar.tsx` no longer call `selectedWorkspaceProjectRefs`. The phone filter could select a workspace, but the thread list did not use it. Sidebar and Android filter consumers also lost the workspace choices. |
+| Browser and device annotation queues    | `PreviewView.tsx` lost `BrowserAnnotationControl`; `DeviceWorkspace.tsx` lost its queue hook, annotation props and `AnnotationQueuePopover`. The upstream picker remains, but Conn's queue controls are disconnected.                                  |
+| Operator mobile dictation               | `VoiceInputProvider.tsx` stopped selecting `getOperatorVoiceTranscriber`. Settings and authentication remain, but neither the provider nor its replacement `voiceDestination.ts` reads that selection.                                                 |
+| Orbit project-folder controls           | `ChatView.tsx` now passes only `isGitRepo` to `BranchToolbar.showGitControls` and omits `orbitProjectFolder` and the forced Orbit mode. Non-Git Orbit project folders lose the instance selector even though send-time Orbit detection remains.        |
+
+The same sync removed the fork server RPC handlers. `3ab777b7c8` briefly
+restored a separate group, then `6bf5145e37` removed it again and `e5053317cb`
+added tests enforcing the exclusion. Nick's November 8 decision restores the
+six annotation and Orbit RPCs needed by these features. The other fork RPCs
+remain excluded; see [Fork RPC group](#fork-rpc-group).
+
+Validation in `nick-vm`: the stock Laravel container spike renders its toolbar
+in a fresh native desktop tab; request details open, and navigation to a
+non-Laravel page clears the toolbar. The workspace editor lists projects again.
+A page-bridge annotation appears in the live queue and is removed through the
+queue RPC in the rebuilt desktop app.
+A tab already marked headless remains server-rendered and does not receive the
+native preload's toolbar data; this repair does not add a headless toolbar
+transport. Reopen it as a fresh desktop tab to use the native path.
+
+The focused RPC tests verify annotation create/list/remove and Orbit
+register/list/remove, plus rejection of unauthorized mutations. Mobile route
+and filter tests pass; physical-device dictation and native mobile UI were
+not exercised in this VM run.
+`check:changed` passes formatting, lint, Knip, GraphQL, 297 focused tests and
+17 compiler checks. Typechecking reproduces the same existing server errors
+on unchanged `ff4fb8d847a9`; no new server diagnostics remain.
+
+The Operator route now lives in `voiceDestination.ts`, alongside upstream's
+environment and cloud routes. Selecting Operator clears an explicit remote
+route; selecting device transcription clears Operator. An explicitly selected
+remote route never silently falls back to Operator.
+
+Several other losses were repaired before the audited head: workspace windows
+and titles (`c61fc3639b`, `c8d4aedbf4`), desktop tab hosting and Vault fill
+(`2a4d7df207`, `f5889fa273`), the iPhone home bar/header (`6e8954e090`), Orbit
+connection settings (`78acc025df`, `c8b7e2ed32`), and shared exports
+(`111129c3bd`). The consumers listed above needed this additional repair.
+No additional unresolved fork-feature loss was confirmed in the other five
+syncs by this audit.
 
 ### Vendored dependency patches
 

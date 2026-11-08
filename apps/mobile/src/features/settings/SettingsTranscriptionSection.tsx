@@ -1,3 +1,5 @@
+import { useAtomValue } from "@effect/atom-react";
+import { chooseVoiceDestination, voiceGrantAtom } from "../voice-input/voiceDestination";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { View } from "react-native";
 
@@ -15,6 +17,15 @@ import {
 import { SettingsSection } from "./components/SettingsSection";
 
 export function SettingsTranscriptionSection() {
+  const grant = useAtomValue(voiceGrantAtom);
+  const selectEngine = async (engine: "device" | "operator") => {
+    try {
+      await saveOperatorTranscriptionSettings({ engine });
+      chooseVoiceDestination(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
   const settings = useSyncExternalStore(
     subscribeOperatorTranscriptionSettings,
     getOperatorTranscriptionSettings,
@@ -32,7 +43,8 @@ export function SettingsTranscriptionSection() {
     setSigningIn(true);
     setError(null);
     signInToOperator(draftServer).then(
-      () => {
+      (signedIn) => {
+        if (signedIn) chooseVoiceDestination(null);
         setSigningIn(false);
         setServer(null);
       },
@@ -49,17 +61,17 @@ export function SettingsTranscriptionSection() {
         <ListChoiceRow
           label="On this device"
           description="Apple speech recognition, offline"
-          selected={settings.engine === "device"}
+          selected={!grant && settings.engine === "device"}
           disabled={!settings.loaded}
-          onPress={() => void saveOperatorTranscriptionSettings({ engine: "device" })}
+          onPress={() => void selectEngine("device")}
         />
         <ListChoiceRow
           label="Operator server"
           description="Higher quality; sends recordings to your server"
-          selected={settings.engine === "operator"}
+          selected={!grant && settings.engine === "operator"}
           separated
           disabled={!settings.loaded}
-          onPress={() => void saveOperatorTranscriptionSettings({ engine: "operator" })}
+          onPress={() => void selectEngine("operator")}
         />
       </SettingsSection>
       {settings.engine === "operator" ? (

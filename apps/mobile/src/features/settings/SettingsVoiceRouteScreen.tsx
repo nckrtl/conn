@@ -1,3 +1,4 @@
+import { saveOperatorTranscriptionSettings } from "../voice-input/operatorTranscription";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
@@ -24,6 +25,7 @@ import * as Dialog from "../../components/ui/Dialog";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import {
   chooseVoiceDestination,
+  operatorTranscriptionSettingsAtom,
   voiceConnectionAtom,
   voiceGrantAtom,
   voiceSpeechStatusAtom,
@@ -114,8 +116,9 @@ const UNAVAILABLE_EXPLANATION =
     ? "Dictation on this device needs Android 12 or later and Google speech services that support your language. Your keyboard’s voice typing is separate."
     : "Dictation on this device needs iOS 26 or later, a supported device, and a supported language. Your keyboard’s dictation is separate.";
 
-function saveDestination(id: EnvironmentId | null) {
+async function saveDestination(id: EnvironmentId | null) {
   try {
+    if (id === null) await saveOperatorTranscriptionSettings({ engine: "device" });
     chooseVoiceDestination(id);
   } catch {
     Dialog.alert(
@@ -170,6 +173,7 @@ function EnvironmentChoice({
 export function SettingsVoiceRouteScreen() {
   const transcriber = useAtomValue(localVoiceTranscriberAtom);
   const grant = useAtomValue(voiceGrantAtom);
+  const operatorSettings = useAtomValue(operatorTranscriptionSettingsAtom);
   const { environments, isReady } = useEnvironments();
   const grantEnvironment = grant
     ? environments.find(
@@ -235,7 +239,7 @@ export function SettingsVoiceRouteScreen() {
           <ListChoiceRow
             label="This device"
             description="Audio stays on this device and is transcribed here."
-            selected={!grant}
+            selected={!grant && operatorSettings.engine === "device"}
             onPress={() => saveDestination(null)}
           />
           {hasEnvironmentVoiceCapture &&
@@ -286,7 +290,7 @@ export function SettingsVoiceRouteScreen() {
             label={grantEnvironment.label}
           />
         ) : null}
-        {!grant && transcriber === null ? (
+        {!grant && operatorSettings.engine === "device" && transcriber === null ? (
           <Text className="px-2 text-sm text-foreground-muted">{UNAVAILABLE_EXPLANATION}</Text>
         ) : null}
         {permission === "ask" || permission === "denied" ? (

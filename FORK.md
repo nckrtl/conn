@@ -45,6 +45,10 @@ colors: inset cards, two-tone dividers, glass popovers, toolbar groups, soft
 fields, inset scrollbars and a 44px header. This covers chat, sidebar, Settings,
 browser, Files, Diff, terminal, Agents and fork panels.
 
+Browser pages meet the address bar's bottom divider. Keep `PreviewChromeRow`'s
+zero bottom margin: the shared inline-panel subheader margin otherwise leaves
+a dark strip above both native and streamed browser pages.
+
 Settings and Usage are upstream's route modals (`_chat.settings.*`, `_chat.usage`
 over the thread view through `mainAppLocation`). Conn keeps upstream's modal
 behavior and draws the shell inside it: `AppRouteModal` is the frosted frame,

@@ -512,6 +512,9 @@ const config: ExpoConfig = {
     appVariant: APP_VARIANT,
     // nckrtl fork: a renamed build shows its name and the Conn mark in the app's brand lockups.
     brandName: ownAppName || null,
+    secretsFeatureEnabled: ["1", "true"].includes(
+      process.env.T3CODE_FEATURE_SECRETS?.trim().toLowerCase() ?? "",
+    ),
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,

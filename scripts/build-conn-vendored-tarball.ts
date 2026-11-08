@@ -1,18 +1,9 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off - a one-off build helper run by hand.
 /**
- * Builds a Conn tarball of a vendored package: upstream's tarball in
- * apps/mobile/deps with patches/<package>-conn.patch applied.
- *
- * Upstream vendors some packages as tarballs (`file:deps/...tgz`), which pnpm
- * patches cannot target. Conn keeps its native changes in a patch file instead
- * and ships the patched tarball next to upstream's. After an upstream merge
- * that bumps a vendored tarball, run this script again and point
- * apps/mobile/package.json at the tarball it prints (see FORK.md).
- *
- *   node scripts/build-conn-vendored-tarball.ts <package> [path/to/upstream.tgz]
- *
- * Packages: react-native-screens, react-native-enriched-markdown.
+ * Rebuilds apps/mobile/deps/<package>-*-conn.tgz from the upstream tarball,
+ * then patches/<package>@*.patch, then patches/<package>-conn.patch.
+ * Usage: node scripts/build-conn-vendored-tarball.ts <package> [upstream.tgz]
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -49,15 +40,30 @@ const work = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), `conn-${packageNa
 try {
   NodeChildProcess.execFileSync("tar", ["-xzf", source, "-C", work]);
   const packageDir = NodePath.join(work, "package");
+  // Upstream may also ship versioned pnpm patches for this package. Those
+  // cannot target Conn's rebuilt -conn.tgz, so apply them here first.
+  const patchesDir = NodePath.join(repoRoot, "patches");
+  const upstreamPatches = NodeFS.readdirSync(patchesDir)
+    .filter((name) => name.startsWith(`${packageName}@`) && name.endsWith(".patch"))
+    .sort();
   // --forward refuses an already-applied hunk; any rejected hunk fails the build.
-  NodeChildProcess.execFileSync(
-    "patch",
-    ["-p1", "--forward", "--batch", "--no-backup-if-mismatch", "-i", patchFile],
-    {
-      cwd: packageDir,
-      stdio: "inherit",
-    },
-  );
+  for (const name of [...upstreamPatches, NodePath.basename(patchFile)]) {
+    NodeChildProcess.execFileSync(
+      "patch",
+      [
+        "-p1",
+        "--forward",
+        "--batch",
+        "--no-backup-if-mismatch",
+        "-i",
+        NodePath.join(patchesDir, name),
+      ],
+      {
+        cwd: packageDir,
+        stdio: "inherit",
+      },
+    );
+  }
 
   const manifestPath = NodePath.join(packageDir, "package.json");
   const manifest = JSON.parse(NodeFS.readFileSync(manifestPath, "utf8")) as { version: string };

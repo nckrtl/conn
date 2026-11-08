@@ -136,6 +136,7 @@ import { LockOpenIcon as PhLockOpen } from "@phosphor-icons/react/dist/csr/LockO
 import { MagnifyingGlassIcon as PhMagnifyingGlass } from "@phosphor-icons/react/dist/csr/MagnifyingGlass";
 import { MemoryIcon as PhMemory } from "@phosphor-icons/react/dist/csr/Memory";
 import { MicrophoneIcon as PhMicrophone } from "@phosphor-icons/react/dist/csr/Microphone";
+import { MicrophoneSlashIcon as PhMicrophoneSlash } from "@phosphor-icons/react/dist/csr/MicrophoneSlash";
 import { MinusIcon as PhMinus } from "@phosphor-icons/react/dist/csr/Minus";
 import { MonitorIcon as PhMonitor } from "@phosphor-icons/react/dist/csr/Monitor";
 import { MoonIcon as PhMoon } from "@phosphor-icons/react/dist/csr/Moon";
@@ -376,6 +377,7 @@ import {
   MessageSquareWarningIcon as LuMessageSquareWarning,
   MessagesSquareIcon as LuMessagesSquare,
   MicIcon as LuMic,
+  MicOffIcon as LuMicOff,
   Minimize2Icon as LuMinimize2,
   MinusIcon as LuMinus,
   MonitorIcon as LuMonitor,
@@ -853,6 +855,8 @@ export const MessagesSquareIcon = connIcon(PhChats, LuMessagesSquare, "messages-
   MessagesSquare = MessagesSquareIcon;
 export const MicIcon = connIcon(PhMicrophone, LuMic, "mic"),
   Mic = MicIcon;
+export const MicOffIcon = connIcon(PhMicrophoneSlash, LuMicOff, "mic-off"),
+  MicOff = MicOffIcon;
 export const Minimize2Icon = connIcon(PhArrowsIn, LuMinimize2, "minimize-2"),
   Minimize2 = Minimize2Icon;
 export const MinusIcon = connIcon(PhMinus, LuMinus, "minus", "bold"),

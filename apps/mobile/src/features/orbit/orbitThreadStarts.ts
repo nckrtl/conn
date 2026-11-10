@@ -75,7 +75,8 @@ function afterSave(store: OrbitThreadStartStore, gateway: OrbitGatewayClient): O
     operation: saved(gateway.operation),
     environments: saved(gateway.environments),
     startPairing: saved(gateway.startPairing),
-    readPairing: saved(gateway.readPairing),
+    // Not readPairing: the Operation poll before it already waited, and a failed wait there
+    // would make Retry mint a second pairing.
   };
 }
 

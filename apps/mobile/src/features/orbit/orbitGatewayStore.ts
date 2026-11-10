@@ -313,9 +313,10 @@ export async function keepProjectInOrbitWorkspace(
 ): Promise<void> {
   if (workspaceId === null) return;
   try {
-    // A start resumed at launch can send before the first refresh read the profile.
-    if (state.node === null) await refreshOrbitGateway();
-    const profileId = state.node?.profile?.id;
+    // A start resumed at launch can send before the first refresh read the profile; a refresh
+    // could wait on another server's pairing, so read only the Node.
+    const node = state.node ?? (await client.me());
+    const profileId = node.profile?.id;
     if (profileId === undefined) return;
     const saved = await addProjectRefToProfileWorkspace(client, profileId, workspaceId, projectRef);
     if (saved) set({ workspaces: saved.workspaces });

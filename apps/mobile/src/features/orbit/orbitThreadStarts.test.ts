@@ -13,6 +13,7 @@ import {
   dismissOrbitThreadStart,
   heldOrbitInstanceIds,
   orbitThreadStartRow,
+  parseOrbitThreadStarts,
   retryOrbitThreadStart,
   type OrbitThreadStartStorage,
 } from "./orbitThreadStartStore";
@@ -291,7 +292,8 @@ describe("Orbit thread starts on the phone", () => {
       { id: "old", commandId: "c", threadId: "t", projectId: 1 },
       { id: "legacy", threadId: "t", projectId: 1 },
     ]);
-    const store = createOrbitThreadStartStore(memoryFile(saved).storage);
+    const { file, storage } = memoryFile(saved);
+    const store = createOrbitThreadStartStore(storage);
     beginOrbitThreadStart(store, {
       project,
       message: "x",
@@ -300,6 +302,9 @@ describe("Orbit thread starts on the phone", () => {
       now: 0,
     });
     await store.load();
+    await store.flush();
     expect(store.starts().map((start) => start.id)).toEqual(["old", "id-1"]);
+    // The write made before the load must not drop the saved start.
+    expect(parseOrbitThreadStarts(file.text).map((start) => start.id)).toEqual(["old", "id-1"]);
   });
 });

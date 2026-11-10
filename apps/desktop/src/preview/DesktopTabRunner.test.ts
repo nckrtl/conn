@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Exercises uploads with a local fixture file.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import {
@@ -261,7 +262,9 @@ describe("desktop tab runner", () => {
   });
 
   it("uploads directly and through the page's intercepted file picker", async () => {
-    const directory = await NodeFSP.mkdtemp(NodePath.join(process.cwd(), "build/upload-test-"));
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-desktop-upload-test-"),
+    );
     const path = NodePath.join(directory, "fixture.txt");
     try {
       await NodeFSP.writeFile(path, "Desktop upload fixture");

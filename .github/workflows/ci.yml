@@ -375,11 +375,17 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    name: Test Web
+    # The fork's 4 vCPU runners take about 9 minutes for the whole web suite,
+    # against a 10 minute limit, so the fork splits it over two runners.
+    name: Test Web${{ matrix.shard.total > 1 && format(' {0}', matrix.shard.index) || '' }}
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test_web != 'false' }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1}]' || '[{"index":1,"total":2},{"index":2,"total":2}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -421,7 +427,7 @@ jobs:
           fi
 
       - name: Test
-        run: vp run --filter @t3tools/web test
+        run: vp run --filter @t3tools/web test --shard=${{ matrix.shard.index }}/${{ matrix.shard.total }}
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
   # one at a time. Sharding spreads them over separate runners instead of

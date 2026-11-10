@@ -231,10 +231,11 @@ the Gateway returns the Operation it may already have admitted. A create refused
 `operation.target_busy` (another Operation owns the Instance: an older build's create, a lost
 key, or a second caller) repeats the same way until the create's deadline, then stops with
 "press Retry in a minute"; the pairing admission takes no target lock, so it cannot be busy.
-Any other Gateway error stops the start. Only the main window runs starts. When it opens the
-sent thread, the selected workspace gets the clone's `<environmentId>:<projectId>` ref unless it
-already lists that project, so the sidebar shows the thread (a clone is a new environment).
-Refs of clones that are gone stay in the workspace until a follow-up prunes them. A row can be
+Any other Gateway error stops the start. Only the main window runs starts. A start saves the
+workspace selected at Start (null for all). Once the first message is sent, that workspace gets the
+clone's `<environmentId>:<projectId>` ref unless it already lists the project or no longer exists,
+so the sidebar shows the thread (a clone is a new environment). Refs of clones that are gone stay
+in the workspace until a follow-up prunes them. A row can be
 dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).

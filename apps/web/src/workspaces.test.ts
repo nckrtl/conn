@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { filterSidebarV2VisibleThreads } from "./components/Sidebar.logic";
-import { keepProjectInActiveWorkspace, useWorkspaceStore } from "./workspaceStore";
+import { useWorkspaceStore } from "./workspaceStore";
 import {
   groupProjectsByConnection,
   reorderWorkspaces,
@@ -230,27 +230,6 @@ describe("workspaceStore", () => {
   beforeEach(() =>
     useWorkspaceStore.setState({ workspaces: [], activeWorkspaceId: null, availableProjects: [] }),
   );
-
-  it("adds an Orbit clone's project to the selected workspace only when it does not list it", () => {
-    const s = { ...workspace("S", []), projectRefs: ["beast:bench"] };
-    useWorkspaceStore.setState({
-      workspaces: [s],
-      activeWorkspaceId: s.id,
-      availableProjects: cloneProjects,
-    });
-    keepProjectInActiveWorkspace("clone:ws");
-    const kept = useWorkspaceStore.getState().workspaces[0]!;
-    expect(kept.projectRefs).toEqual(["beast:bench", "clone:ws"]);
-
-    keepProjectInActiveWorkspace("clone:ws");
-    expect(useWorkspaceStore.getState().workspaces[0]).toBe(kept);
-    const byKey = workspace("K", ["/srv/workspace"]);
-    useWorkspaceStore.setState({ workspaces: [byKey], activeWorkspaceId: byKey.id });
-    keepProjectInActiveWorkspace("clone:ws");
-    useWorkspaceStore.setState({ activeWorkspaceId: null });
-    keepProjectInActiveWorkspace("clone:ws");
-    expect(useWorkspaceStore.getState().workspaces[0]).toBe(byKey);
-  });
 
   it("creates, selects by name, renames and deletes workspaces", () => {
     const store = useWorkspaceStore.getState();

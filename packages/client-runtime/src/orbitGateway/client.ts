@@ -228,7 +228,8 @@ export function createOrbitGatewayClient(
       }
       const after =
         typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds * 1000 : 0;
-      await sleep(Math.min(Math.max(after, MIN_POLL_MS), MAX_POLL_MS));
+      const wait = Math.min(Math.max(after, MIN_POLL_MS), MAX_POLL_MS);
+      await sleep(Math.max(Math.min(wait, deadline - now()), 0));
       operation = record(await call({ method: "GET", path: `/operations/${operation.id}` }));
     }
   };

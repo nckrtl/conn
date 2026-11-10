@@ -517,7 +517,8 @@ const config: ExpoConfig = {
   extra: {
     appVariant: APP_VARIANT,
     // nckrtl fork: a renamed build shows its name and the Conn mark in the app's brand lockups.
-    brandName: ownAppName || null,
+    // Omit it when unset: manifest null becomes {} and crashes the brand title at launch.
+    ...(ownAppName ? { brandName: ownAppName } : {}),
     secretsFeatureEnabled: ["1", "true"].includes(
       process.env.T3CODE_FEATURE_SECRETS?.trim().toLowerCase() ?? "",
     ),

@@ -4,10 +4,11 @@ import { View } from "react-native";
 
 import { AppText as Text } from "./ui/AppText";
 import { T3_CODE_BRAND_MARK_SOURCE } from "./brandAssets";
+import { resolveBrandName } from "../lib/mobileBranding";
 
 const appVariant = Constants.expoConfig?.extra?.appVariant;
 // A renamed build (the nckrtl fork ships as Conn) shows its own icon and name.
-const brandName: string | null = Constants.expoConfig?.extra?.brandName ?? null;
+const brandName = resolveBrandName(Constants.expoConfig?.extra?.brandName);
 const BRAND_MARK_SOURCE = brandName
   ? appVariant === "development"
     ? require("../../../../assets/conn/dev/conn-dev-ios-1024.png")

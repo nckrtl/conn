@@ -7,7 +7,7 @@ import { AppText as Text } from "./ui/AppText";
 import { ConnMark } from "./ConnMark";
 import { T3Wordmark } from "./T3Wordmark";
 import { IPAD_HOME_TITLE_OFFSET } from "../lib/layoutMetrics";
-import { resolveMobileStageLabel } from "../lib/mobileBranding";
+import { resolveBrandName, resolveMobileStageLabel } from "../lib/mobileBranding";
 import { useAndroidControlSizing } from "./ui/useAndroidControlSizing";
 
 const BRAND_MAX_FONT_SCALE = 1.4;
@@ -27,7 +27,7 @@ export function CompactBrandTitle(
 ) {
   const stageLabel = resolveMobileStageLabel(Constants.expoConfig?.extra?.appVariant);
   // A renamed build (the nckrtl fork ships as Conn) shows its own mark and name.
-  const brandName: string | null = Constants.expoConfig?.extra?.brandName ?? null;
+  const brandName = resolveBrandName(Constants.expoConfig?.extra?.brandName);
   // Callers label the screen as "T3 Code, <tab>"; a renamed build reads its own name.
   const accessibilityLabel = props.accessibilityLabel ?? "T3 Code, Threads";
   const brandedAccessibilityLabel = brandName

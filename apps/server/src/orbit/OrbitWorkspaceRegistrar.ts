@@ -38,15 +38,17 @@ import {
 /** How long to wait for T3's readable branch name before registering anyway. */
 const BRANCH_NAME_WAIT_MS = 60_000;
 const BRANCH_CHECK_INTERVAL_MS = 2_000;
-/** An unreachable Gateway or a 5xx: try again this often, this many times. */
+/** A transient failure (see `isTransient`): try again this often, this many times. */
 const TRANSIENT_RETRY_INTERVAL_MS = 30_000;
 const TRANSIENT_ATTEMPTS = 10;
 const OPERATION_WAIT_MS = 30 * 60_000;
 const DEFAULT_POLL_AFTER_SECONDS = 2;
 const ROUTE_SUFFIX_ATTEMPTS = 5;
 
-// Orbit refuses a registration it cannot run yet; repeating it changes nothing.
-const NON_RETRYABLE_5XX = new Set(["operation.kind_unavailable"]);
+// Only a proxy between us and the Gateway answers 502 or 504. To the registration request any
+// other status, a 500 or a 503 such as `operation.kind_unavailable` included, is the Gateway's
+// answer and is final.
+const TRANSIENT_STATUSES = new Set([502, 504]);
 
 const decodeRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(OrbitWorkspaceRegistration));
 const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(OrbitWorkspaceRegistration));
@@ -98,8 +100,10 @@ function answerFailure(response: OrbitGatewayResponse): OrbitWorkspaceFailure {
   };
 }
 
-const isTransient = (response: OrbitGatewayResponse) =>
-  response.status >= 500 && !NON_RETRYABLE_5XX.has(answerFailure(response).code);
+// A read (an Operation's status, an Instance) that gets a 5xx says nothing about the
+// registration: the Operation may still run. Reads try every 5xx again.
+const isTransient = (request: OrbitGatewayRequest, response: OrbitGatewayResponse) =>
+  request.method === "GET" ? response.status >= 500 : TRANSIENT_STATUSES.has(response.status);
 
 const responseData = (response: OrbitGatewayResponse) => record(response.body)?.data;
 
@@ -191,11 +195,14 @@ const make = Effect.gen(function* () {
 
   const fail = (failure: OrbitWorkspaceFailure) => new RegistrationFailed(failure);
 
-  /** One Gateway call; an unreachable Gateway or a passing 5xx is tried again for a while. */
+  /**
+   * One Gateway call; an unreachable Gateway, a 502 or a 504 is tried again for a while, and
+   * for a read any 5xx.
+   */
   const call = Effect.fn("OrbitWorkspaceRegistrar.call")(function* (request: OrbitGatewayRequest) {
     for (let attempt = 1; ; attempt += 1) {
       const result = yield* Effect.result(gateway.request(request));
-      if (Result.isSuccess(result) && !isTransient(result.success)) return result.success;
+      if (Result.isSuccess(result) && !isTransient(request, result.success)) return result.success;
       if (attempt >= TRANSIENT_ATTEMPTS) {
         return yield* fail(
           Result.isSuccess(result)

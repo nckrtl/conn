@@ -219,6 +219,35 @@ describe("OrbitWorkspaceRegistrar", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("keeps following an Operation and reading its Instance through a 5xx", () =>
+    Effect.gen(function* () {
+      const queued = { id: 4509, status: "queued", target_id: 95, poll_after_seconds: 1 };
+      const harness: Harness = {
+        thread: renamedThread(),
+        gateway: fakeGateway({
+          "POST /api/v1/instances/register": [ok(202, queued)],
+          "GET /api/v1/operations/4509": [
+            refused(503, "gateway.maintenance", "The Gateway is being released."),
+            ok(200, { ...queued, status: "succeeded", poll_after_seconds: null }),
+          ],
+          "GET /api/v1/instances/95": [
+            refused(500, "server.error", "Something broke."),
+            ok(200, { id: 95, url: "https://ui-refinement.hauzer.test" }),
+          ],
+        }),
+      };
+      const registrar = yield* startRegistrar(memoryFiles(), harness);
+      const done = yield* Effect.forkChild(settled(registrar));
+      yield* registrar.register(input);
+      yield* TestClock.adjust("70 seconds");
+      const registration = yield* Fiber.join(done);
+
+      assert.strictEqual(registration.phase, "registered");
+      assert.strictEqual(registration.url, "https://ui-refinement.hauzer.test");
+      assert.strictEqual(harness.gateway.requests.length, 5);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("tries the next domain when Orbit reports the route domain taken", () =>
     Effect.gen(function* () {
       const harness: Harness = {
@@ -251,13 +280,14 @@ describe("OrbitWorkspaceRegistrar", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("tries a 5xx again after 30 seconds", () =>
+  it.effect("tries a 502 or 504 again after 30 seconds", () =>
     Effect.gen(function* () {
       const harness: Harness = {
         thread: renamedThread(),
         gateway: fakeGateway({
           "POST /api/v1/instances/register": [
             refused(502, "http.502"),
+            refused(504, "http.504"),
             ok(201, { id: 93, url: null }),
           ],
         }),
@@ -267,10 +297,10 @@ describe("OrbitWorkspaceRegistrar", () => {
       yield* registrar.register(input);
       yield* TestClock.adjust("29 seconds");
       assert.strictEqual(posts(harness).length, 1);
-      yield* TestClock.adjust("1 second");
+      yield* TestClock.adjust("31 seconds");
       const registration = yield* Fiber.join(done);
       assert.strictEqual(registration.phase, "registered");
-      assert.strictEqual(posts(harness).length, 2);
+      assert.strictEqual(posts(harness).length, 3);
     }).pipe(Effect.scoped),
   );
 
@@ -291,6 +321,14 @@ describe("OrbitWorkspaceRegistrar", () => {
           },
         },
         {
+          answer: [refused(503, "gateway.maintenance", "The Gateway is being released.")],
+          failure: { code: "gateway.maintenance", message: "The Gateway is being released." },
+        },
+        {
+          answer: [refused(500, "server.error", "Something broke.")],
+          failure: { code: "server.error", message: "Something broke." },
+        },
+        {
           answer: [refused(422, "validation.failed", "The source path is not a checkout.")],
           failure: { code: "validation.failed", message: "The source path is not a checkout." },
         },
@@ -303,10 +341,12 @@ describe("OrbitWorkspaceRegistrar", () => {
         const registrar = yield* startRegistrar(memoryFiles(), harness);
         const done = yield* Effect.forkChild(settled(registrar));
         yield* registrar.register(input);
+        // A retried answer would post again after 30 seconds; catch that before the join waits.
+        yield* TestClock.adjust("30 seconds");
+        assert.strictEqual(posts(harness).length, 1);
         const registration = yield* Fiber.join(done);
         assert.strictEqual(registration.phase, "failed");
         assert.deepStrictEqual(registration.failure, failure);
-        assert.strictEqual(posts(harness).length, 1);
       }
 
       const harness: Harness = {

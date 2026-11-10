@@ -23,8 +23,10 @@ file before you merge upstream, build, or change shared UI. Upstream's
   with `scripts/build-cli-archive.ts`.
 - Build, sign and install with the [build guide][build]. Builds ship no update
   feed (`publish: null` in `scripts/build-desktop-artifact.ts`), so the app
-  never replaces itself with an upstream release. Re-sign macOS builds with a
-  local identity using `scripts/sign-macos-local.ts`. Packaging and that
+  never replaces itself with an upstream release. Build and sign the Mac app
+  on Nick's MacBook; `scripts/sign-macos-local.ts` re-signs it with the
+  Developer ID of team 9SVJ4SYB9B (not notarized). iOS builds run in nick-vm
+  and are signed on the MacBook. Packaging and that
   re-sign preflight fail closed unless the full 40-character source SHA is the
   tip of an `origin` `refs/heads/sync/*` branch. Publish HEAD with
   `node scripts/publish-sync-branch.ts`, then verify with
@@ -718,6 +720,13 @@ On iOS 26 and later, a native `EdgeBlur` replaces upstream's color fade under
 the composer and header, and the composer is realigned. `T3EdgeBlurView` lives
 in `t3-composer-editor`.
 
+The iOS composer editor follows Dynamic Type through JS: `T3ComposerEditor.ios.tsx`
+sends the body size and line height times `fontScale` and re-renders when the text
+size changes. `T3ComposerEditorView.swift` therefore keeps
+`adjustsFontForContentSizeCategory` off, re-applies typography on a content size
+change, uses the JS font family (default "System"), gives chips the system font and
+supports `singleLineCentered`.
+
 The "Worked for" fold row has 10.5pt on both sides of its divider (`mb-3`). Its
 fixed size is 49 in `ThreadFeed.tsx` and `thread-feed-item-size.ts`. Dividers on
 glass and sheets use foreground at 12%: the working pill, composer command
@@ -731,7 +740,9 @@ Sources:
 - Mobile (`apps/mobile/src/`): `native/EnrichedMarkdownText.tsx`,
   `lib/fonts.ts`, `features/terminal/TerminalContextSheet.tsx`,
   `native/EdgeBlur*`.
-- `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorModule.swift`.
+- `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorModule.swift`,
+  `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift` and
+  `apps/mobile/src/native/T3ComposerEditor.ios.tsx`.
 
 ### Linked environments (peer links)
 
@@ -758,6 +769,49 @@ Sources:
   `mcp/toolkits/orchestrator/*`.
 - `packages/contracts/src/rpc.ts` (`peerLinks*`).
 
+### Orbit registration
+
+`scripts/orbit/t3-orbit-register URL` registers the host's T3 server with the
+Orbit Gateway. It issues a fresh admin session labeled "Orbit Gateway" and
+sends it to `POST /api/v1/conn/environments`. A scheduled job runs it daily,
+because the Gateway's admin session expires.
+
+The script needs the T3 CLI of the server that is running now. On macOS, give
+it the server's launchd job with `--service-label LABEL`. At every run it reads
+`ProgramArguments:0` of `~/Library/LaunchAgents/LABEL.plist`, skipping an
+`env VAR=value` wrapper. The label differs per host:
+
+- mini: `com.t3tools.t3code.service`.
+- nick-vm: `com.nckrtl.conn-server`.
+- nick headless: `com.nckrtl.t3-headless`.
+
+Install the script in `~/.local/bin`. Fill in the placeholders of
+`scripts/orbit/com.nckrtl.t3-orbit-register.plist` and put it in
+`~/Library/LaunchAgents`. It logs to `~/Library/Logs/t3-orbit-register.log`.
+`RunAtLoad` registers as soon as the job loads, so load it only when you mean
+to register. On Linux, install `scripts/orbit/t3-orbit-register.service` and
+`.timer` in `~/.config/systemd/user`. Put `T3_ORBIT_REGISTER_URL=<url>` in
+`~/.config/t3-orbit-register.env`, then enable the timer and lingering. The
+unit runs the `~/.local/bin/t3` launcher symlink, which updates repoint.
+
+> [!WARNING]
+> Never put a versioned runtime path (`…/runtime/versions/<version>/t3`) in a
+> register or relink job. Runtimes are pruned after updates, and `t3 update`
+> repoints only launcher symlinks, not job files. On 2026-10-30 nick-vm's job
+> still pointed at the pruned 0.0.46 runtime and failed with "No such file or
+> directory". It had not registered since 2026-10-27. The script warns when
+> it gets a versioned path. `--print-cli` shows the binary it resolves
+> without contacting anything. `sh scripts/orbit/t3-orbit-register.test.sh`
+> checks the lookup offline.
+
+Sources:
+
+- `scripts/orbit/t3-orbit-register`,
+  `scripts/orbit/com.nckrtl.t3-orbit-register.plist`,
+  `scripts/orbit/t3-orbit-register.service`,
+  `scripts/orbit/t3-orbit-register.timer`,
+  `scripts/orbit/t3-orbit-register.test.sh`.
+
 ### Linked environment renewal
 
 Linked sessions expire after 30 days without automatic renewal in T3.
@@ -765,7 +819,8 @@ Linked sessions expire after 30 days without automatic renewal in T3.
 requests a pairing link with `POST /api/v1/conn/environments/<id>/pairings`,
 then links again with the same addresses and access.
 
-Install the script in `~/.local/bin`, next to `t3-orbit-register`, and its
+Install the script in `~/.local/bin`, next to `t3-orbit-register` (see Orbit
+registration), and its
 `scripts/orbit/com.nckrtl.t3-orbit-relink.plist` in `~/Library/LaunchAgents`. It
 runs daily and logs to `~/Library/Logs/t3-orbit-relink.log`. The recorded mini
 setup links nick, beast and shark with full access.
@@ -1144,4 +1199,4 @@ commit.
 
 ## Pull request runners
 
-Public forks use GitHub-hosted Ubuntu and macOS runners for the main CI and native fingerprint checks. Upstream keeps its Blacksmith labels. The fork does not register runners or require a Blacksmith installation; server shards run at most four at a time.
+Public forks use GitHub-hosted Ubuntu and macOS runners for the main CI and native fingerprint checks. Upstream keeps its Blacksmith labels. The fork does not register runners or require a Blacksmith installation; server shards run at most four at a time. The 4 vCPU runners are about half as fast as upstream's 8 vCPU ones, so the fork also splits two jobs that fit upstream's 10 minute limit only on 8 vCPU: Test Web runs as two shards, and Test runs as three (`@t3tools/mobile`, `@t3tools/oxlint-plugin-t3code`, and every other package). Upstream's matrix keeps one job each, so on a sync keep the fork's `strategy`, `name` and shard parts of the steps: the `--shard` argument in Test Web, and in Test the `SHARD_ONLY`/`SHARD_SKIP` filters and the `if: matrix.shard.index == 1` steps.

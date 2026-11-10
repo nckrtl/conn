@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   createOrbitGatewayClient,
+  isFinalPairingError,
   OrbitGatewayError,
   type OrbitGatewayRequest,
   type OrbitGatewayWorkspace,
@@ -276,5 +277,140 @@ describe("createOrbitGatewayClient", () => {
     expect(error).toBeInstanceOf(OrbitGatewayError);
     expect(error).toBeInstanceOf(Error);
     expect(error).toMatchObject({ code: "gateway.unreachable", status: 0 });
+  });
+
+  describe("pair", () => {
+    const pairing = {
+      id: 1851,
+      environment_id: "env-spike",
+      node_id: 8,
+      node_name: "nick",
+      client_label: "nick via Orbit vfkeru69",
+      issued_at: "2026-11-10T06:45:00+00:00",
+      expires_at: "2026-11-10T06:50:04+00:00",
+      revoked_at: null,
+    };
+    const operation = (status: string, extra: Record<string, unknown> = {}) => ({
+      id: 16044,
+      kind: "conn.pairing_create",
+      status,
+      error_code: null,
+      result: null,
+      poll_after_seconds: status === "running" ? 2 : null,
+      ...extra,
+    });
+    /** Answers each request with the next scripted reply and records what was asked. */
+    const scripted = (replies: ReadonlyArray<readonly [number, unknown]>) => {
+      const requests: OrbitGatewayRequest[] = [];
+      let next = 0;
+      const transport = async (request: OrbitGatewayRequest) => {
+        requests.push(request);
+        const reply = replies[next++];
+        if (!reply) throw new Error(`unexpected ${request.method} ${request.path}`);
+        return { status: reply[0], body: JSON.stringify({ data: reply[1] }) };
+      };
+      return { requests, transport };
+    };
+
+    it("follows the Gateway's Operation and reads the link once it succeeded", async () => {
+      const { requests, transport } = scripted([
+        [202, operation("running")],
+        [200, operation("running")],
+        [200, operation("succeeded", { result: { backend: "issued", pairing_id: 1851 } })],
+        [200, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
+      ]);
+      const waits: number[] = [];
+      const client = createOrbitGatewayClient(transport, {
+        sleep: async (ms) => {
+          waits.push(ms);
+        },
+      });
+
+      await expect(client.pair("env-spike")).resolves.toEqual({
+        environmentId: "env-spike",
+        pairingUrl: "http://10.44.0.7:3801/pair#token=ABC",
+        expiresAt: "2026-11-10T06:50:04+00:00",
+      });
+      expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+        "POST /environments/env-spike/pairings",
+        "GET /operations/16044",
+        "GET /operations/16044",
+        "GET /environments/env-spike/pairings/1851",
+      ]);
+      expect(waits).toEqual([2000, 2000]);
+    });
+
+    it("still accepts a Gateway that answers with the link at once", async () => {
+      const { requests, transport } = scripted([
+        [201, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
+      ]);
+      const client = createOrbitGatewayClient(transport);
+      await expect(client.pair("env-spike")).resolves.toMatchObject({
+        pairingUrl: "http://10.44.0.7:3801/pair#token=ABC",
+      });
+      expect(requests).toHaveLength(1);
+    });
+
+    it("reports a failed Operation with its error code and reads no link", async () => {
+      const { requests, transport } = scripted([
+        [202, operation("failed", { error_code: "conn.server_unreachable" })],
+      ]);
+      const client = createOrbitGatewayClient(transport, { sleep: async () => {} });
+      await expect(client.pair("env-spike")).rejects.toMatchObject({
+        code: "conn.server_unreachable",
+        details: { operation_id: 16044 },
+      });
+      expect(requests).toHaveLength(1);
+    });
+
+    it("ends on an interrupted Operation without polling again", async () => {
+      const { requests, transport } = scripted([
+        [202, operation("running", { poll_after_seconds: null })],
+        [200, operation("interrupted")],
+      ]);
+      const waits: number[] = [];
+      const client = createOrbitGatewayClient(transport, {
+        sleep: async (ms) => {
+          waits.push(ms);
+        },
+      });
+      await expect(client.pair("env-spike")).rejects.toMatchObject({ code: "operation.failed" });
+      expect(requests).toHaveLength(2);
+      expect(waits).toEqual([500]);
+    });
+
+    it("marks only the codes the Gateway calls final", () => {
+      const error = (code: string) =>
+        new OrbitGatewayError({ code, message: code, status: 0, details: {} });
+      expect(isFinalPairingError(error("conn.session_rejected"))).toBe(true);
+      expect(isFinalPairingError(error("conn.request_refused"))).toBe(true);
+      expect(isFinalPairingError(error("conn.response_invalid"))).toBe(true);
+      expect(isFinalPairingError(error("conn.pairing_outcome_unknown"))).toBe(false);
+      expect(isFinalPairingError(error("gateway.unreachable"))).toBe(false);
+      expect(isFinalPairingError(new Error("conn.session_rejected"))).toBe(false);
+    });
+
+    it("gives up on an Operation that does not end in time", async () => {
+      let clock = 0;
+      const client = createOrbitGatewayClient(
+        async () => ({ status: 200, body: JSON.stringify({ data: operation("running") }) }),
+        {
+          now: () => clock,
+          sleep: async (ms) => {
+            clock += ms;
+          },
+        },
+      );
+      await expect(client.pair("env-spike")).rejects.toMatchObject({ code: "operation.timeout" });
+      expect(clock).toBeGreaterThanOrEqual(60_000);
+    });
+
+    it("rejects a succeeded Operation without a pairing id", async () => {
+      const { transport } = scripted([[202, operation("succeeded", { result: {} })]]);
+      const client = createOrbitGatewayClient(transport);
+      await expect(client.pair("env-spike")).rejects.toMatchObject({
+        code: "gateway.response_invalid",
+      });
+    });
   });
 });

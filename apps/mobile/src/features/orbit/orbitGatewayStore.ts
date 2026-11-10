@@ -1,10 +1,13 @@
 import {
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  isFinalPairingError,
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
   recordAccessPairing,
   recordPaired,
+  recordPairingAttempt,
+  recordPairingRefused,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayEnvironment,
@@ -26,12 +29,9 @@ import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
 
 /**
- * The phone's view of the Orbit Gateway: this device's Node and profile, the profile's workspaces,
- * and the registered T3 servers. Workspaces are read-only here; the desktop edits them. The
- * appearance syncs both ways, see orbitProfileSync.
- *
- * It also applies the environment provider (see planEnvironmentProvider): in Orbit mode the
- * Gateway's servers are paired automatically and the environments added by hand are switched off.
+ * The phone's view of the Orbit Gateway: Node, profile, workspaces (read-only) and T3 servers.
+ * The appearance syncs both ways (orbitProfileSync). In Orbit mode it pairs the Gateway's servers
+ * and switches off environments added by hand (see planEnvironmentProvider).
  */
 
 export interface OrbitGatewayState {
@@ -136,8 +136,15 @@ async function reconcileEnvironments(
   for (const environmentId of plan.disable) await setEnabled(environmentId, false);
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
   let next = plan.state;
-  for (const environmentId of plan.pair) {
-    if (savedIds.has(environmentId)) next = recordAccessPairing(next, environmentId, now);
+  // One server per refresh: pairing waits for a Gateway Operation, and the refresh waits too.
+  const environmentId = plan.pair[0];
+  if (environmentId !== undefined) {
+    next = savedIds.has(environmentId)
+      ? recordAccessPairing(next, environmentId, now)
+      : recordPairingAttempt(next, environmentId, now);
+    // Saved before the attempt, so a restart during the pairing still backs off.
+    environmentState = next;
+    await saveProvider();
     try {
       const pairing = await client.pair(environmentId);
       const result = await runAtomCommand(
@@ -149,8 +156,12 @@ async function reconcileEnvironments(
         },
       );
       if (result._tag === "Success") next = recordPaired(next, environmentId);
-    } catch {
-      // An unreachable server pairs on a later refresh.
+    } catch (error) {
+      // An unreachable server pairs on a later refresh; a refused one after it registers again.
+      const environment = orbit?.find((entry) => entry.environmentId === environmentId);
+      if (environment && isFinalPairingError(error)) {
+        next = recordPairingRefused(next, environment);
+      }
     }
   }
   environmentState = next;
@@ -261,6 +272,7 @@ const APPEARANCE_PROBE_MS = 30_000;
  * While the app is in front it also checks the profile's appearance every 30 seconds.
  */
 export function useOrbitGateway(): OrbitGatewayState {
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts the app-wide AppState listener and appearance timer once
   useEffect(() => {
     if (started) return;
     started = true;

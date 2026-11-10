@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - The Gateway client runs in the app, outside an Effect runtime.
 import * as Schema from "effect/Schema";
 
 /**
@@ -93,6 +94,8 @@ export interface OrbitGatewayEnvironment {
   readonly url: string;
   readonly serverVersion: string | null;
   readonly registeredBy: string | null;
+  /** When the server last registered. A refused pairing waits for the next registration. */
+  readonly registeredAt: string | null;
   readonly status: "registered" | "session_expired";
 }
 
@@ -123,13 +126,45 @@ export interface OrbitGatewayClient {
     sections: Readonly<Record<string, OrbitGatewaySectionPatch>>,
   ) => Promise<OrbitGatewaySettings>;
   readonly environments: () => Promise<readonly OrbitGatewayEnvironment[]>;
-  /** Mints a one-time pairing link to the server for this device. */
+  /**
+   * Mints a one-time pairing link to the server for this device. The Gateway mints it in an
+   * Operation; this follows the Operation and reads the link, which the Gateway hands out once.
+   */
   readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
 }
 
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 
-export function createOrbitGatewayClient(transport: OrbitGatewayTransport): OrbitGatewayClient {
+/** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
+const OPERATION_TIMEOUT_MS = 60_000;
+const MIN_POLL_MS = 500;
+const MAX_POLL_MS = 15_000;
+/** Operation statuses that are not final yet; every other status ends the Operation. */
+const OPEN_OPERATION_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "waiting"]);
+
+/**
+ * Pairing error codes that the Gateway calls final: T3 answered and refused. Callers must not
+ * retry them on their own (Orbit docs/reference/conn.md, "Pairing Operations").
+ */
+const FINAL_PAIRING_ERROR_CODES: ReadonlySet<string> = new Set([
+  "conn.session_rejected",
+  "conn.request_refused",
+  "conn.response_invalid",
+]);
+
+export interface OrbitGatewayClientOptions {
+  /** Waits between Operation polls. Tests replace it. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly now?: () => number;
+}
+
+export function createOrbitGatewayClient(
+  transport: OrbitGatewayTransport,
+  options: OrbitGatewayClientOptions = {},
+): OrbitGatewayClient {
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
   const call = async (request: OrbitGatewayRequest): Promise<unknown> => {
     let response: OrbitGatewayResponse;
     try {
@@ -160,6 +195,43 @@ export function createOrbitGatewayClient(transport: OrbitGatewayTransport): Orbi
       throw invalid(request.path);
     }
     return envelope.data;
+  };
+
+  /** Polls a Conn Operation until it ends, and returns it when it succeeded. */
+  const settle = async (
+    started: Record<string, unknown> | null,
+    path: string,
+  ): Promise<Record<string, unknown>> => {
+    let operation = started;
+    const deadline = now() + OPERATION_TIMEOUT_MS;
+    for (;;) {
+      if (typeof operation?.id !== "number" || typeof operation.status !== "string") {
+        throw invalid(path);
+      }
+      if (operation.status === "succeeded") return operation;
+      if (!OPEN_OPERATION_STATUSES.has(operation.status)) {
+        throw new OrbitGatewayError({
+          code:
+            typeof operation.error_code === "string" ? operation.error_code : "operation.failed",
+          message: `The Orbit Gateway could not finish ${path}: the Operation ${operation.status}.`,
+          status: 0,
+          details: { operation_id: operation.id },
+        });
+      }
+      if (now() >= deadline) {
+        throw new OrbitGatewayError({
+          code: "operation.timeout",
+          message: `The Orbit Gateway did not finish ${path} in time.`,
+          status: 0,
+          details: { operation_id: operation.id },
+        });
+      }
+      const after =
+        typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds * 1000 : 0;
+      const wait = Math.min(Math.max(after, MIN_POLL_MS), MAX_POLL_MS);
+      await sleep(Math.max(Math.min(wait, deadline - now()), 0));
+      operation = record(await call({ method: "GET", path: `/operations/${operation.id}` }));
+    }
   };
 
   return {
@@ -200,7 +272,13 @@ export function createOrbitGatewayClient(transport: OrbitGatewayTransport): Orbi
       list(await call({ method: "GET", path: "/environments" }), "/environments", environment),
     pair: async (environmentId) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
-      const data = record(await call({ method: "POST", path }));
+      let data = record(await call({ method: "POST", path }));
+      // The Gateway mints the link in an Operation (202). Follow it, then read the link once.
+      if (typeof data?.pairing_url !== "string") {
+        const result = record((await settle(data, path)).result);
+        if (typeof result?.pairing_id !== "number") throw invalid(path);
+        data = record(await call({ method: "GET", path: `${path}/${result.pairing_id}` }));
+      }
       const pairing = record(data?.pairing);
       if (
         typeof data?.pairing_url !== "string" ||
@@ -217,6 +295,13 @@ export function createOrbitGatewayClient(transport: OrbitGatewayTransport): Orbi
     },
   };
 }
+
+/** Whether a `pair` failure is one the Gateway calls final, so the caller must not retry it. */
+export function isFinalPairingError(error: unknown): boolean {
+  return isOrbitGatewayError(error) && FINAL_PAIRING_ERROR_CODES.has(error.code);
+}
+
+const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 /** A string the way the Gateway stores it: trimmed, and null when nothing is left. */
 export function gatewayText(value: string | null | undefined): string | null {
@@ -401,6 +486,7 @@ function environment(value: unknown, path: string): OrbitGatewayEnvironment {
     url: data.url,
     serverVersion: typeof data.server_version === "string" ? data.server_version : null,
     registeredBy: typeof data.registered_by === "string" ? data.registered_by : null,
+    registeredAt: typeof data.registered_at === "string" ? data.registered_at : null,
     status: data.status,
   };
 }

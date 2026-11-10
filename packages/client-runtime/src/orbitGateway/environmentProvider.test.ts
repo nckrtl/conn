@@ -4,9 +4,13 @@ import type { OrbitGatewayEnvironment } from "./client.ts";
 import {
   ACCESS_PAIRING_RETRY_MS,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  PAIRING_RETRY_MS,
+  parseOrbitEnvironmentState,
   planEnvironmentProvider,
   recordAccessPairing,
   recordPaired,
+  recordPairingAttempt,
+  recordPairingRefused,
   type ManagedEnvironment,
   type OrbitEnvironmentState,
 } from "./environmentProvider.ts";
@@ -18,6 +22,7 @@ const orbit = (id: string, status: OrbitGatewayEnvironment["status"] = "register
     url: `http://${id}`,
     serverVersion: null,
     registeredBy: null,
+    registeredAt: "2026-11-09T14:48:58+00:00",
     status,
   }) as OrbitGatewayEnvironment;
 const saved = (id: string, enabled = true): ManagedEnvironment => ({ environmentId: id, enabled });
@@ -146,5 +151,55 @@ describe("planEnvironmentProvider", () => {
     expect(
       planEnvironmentProvider({ ...input, state: tried, now: now + ACCESS_PAIRING_RETRY_MS }).pair,
     ).toEqual(["mini"]);
+  });
+
+  it("waits before pairing a new server again after an attempt that did not save it", () => {
+    const now = 1_000_000_000;
+    const input = { provider: "orbit" as const, saved: [], orbit: [orbit("spike")], now };
+    const first = planEnvironmentProvider({ ...input, state: EMPTY_ORBIT_ENVIRONMENT_STATE });
+    expect(first.pair).toEqual(["spike"]);
+
+    const tried = recordPairingAttempt(first.state, "spike", now);
+    expect(planEnvironmentProvider({ ...input, state: tried, now: now + 15_000 }).pair).toEqual([]);
+    expect(
+      planEnvironmentProvider({ ...input, state: tried, now: now + PAIRING_RETRY_MS }).pair,
+    ).toEqual(["spike"]);
+  });
+
+  it("keeps pairing attempt times across a reload", () => {
+    const state = recordPairingAttempt(EMPTY_ORBIT_ENVIRONMENT_STATE, "spike", 42);
+    expect(parseOrbitEnvironmentState(JSON.parse(JSON.stringify(state))).pairAttemptedAt).toEqual({
+      spike: 42,
+    });
+    expect(parseOrbitEnvironmentState({ pairAttemptedAt: { spike: "x" } }).pairAttemptedAt).toEqual(
+      {},
+    );
+  });
+
+  it("pairs a server T3 refused only after it registers again", () => {
+    const now = 1_000_000_000;
+    const input = { provider: "orbit" as const, saved: [], now: now + PAIRING_RETRY_MS };
+    const refused = recordPairingRefused(
+      recordPairingAttempt(EMPTY_ORBIT_ENVIRONMENT_STATE, "spike", now),
+      orbit("spike"),
+    );
+    expect(
+      planEnvironmentProvider({ ...input, orbit: [orbit("spike")], state: refused }).pair,
+    ).toEqual([]);
+    const registeredAgain = { ...orbit("spike"), registeredAt: "2026-11-10T08:00:00+00:00" };
+    expect(
+      planEnvironmentProvider({ ...input, orbit: [registeredAgain], state: refused }).pair,
+    ).toEqual(["spike"]);
+  });
+
+  it("keeps the pairing backoff across a switch to Default and back", () => {
+    const tried = recordPairingAttempt(EMPTY_ORBIT_ENVIRONMENT_STATE, "spike", 42);
+    const toDefault = planEnvironmentProvider({
+      provider: "default",
+      saved: [],
+      orbit: null,
+      state: tried,
+    });
+    expect(toDefault.state.pairAttemptedAt).toEqual({ spike: 42 });
   });
 });

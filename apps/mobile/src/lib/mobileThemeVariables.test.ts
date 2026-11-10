@@ -4,14 +4,32 @@ import { readDefaultMobileThemeVariables } from "./mobileTheme.test-support";
 import { getMobileThemeVariables, MOBILE_THEME_IDS, themeColorWithAlpha } from "./mobileTheme";
 import { getMobileThemeRuntimeVariables } from "./mobileThemeVariables";
 
+// Upstream's runtime guards own these roles: the selected row is lifted off the fork's
+// sidebar-colored screen, and Android lifts dark cards and their text off the frame.
+const SELECTION_ROLES = [
+  "--color-thread-selected",
+  "--color-thread-selected-foreground",
+  "--color-thread-selected-foreground-muted",
+];
+const ANDROID_DARK_CARD_ROLES = [
+  "--color-grouped-card",
+  "--color-foreground-secondary",
+  "--color-foreground-muted",
+  "--color-placeholder",
+  "--color-primary-text",
+];
+
+function omitRoles(variables: Readonly<Record<string, string>>, roles: ReadonlyArray<string>) {
+  return Object.fromEntries(Object.entries(variables).filter(([role]) => !roles.includes(role)));
+}
+
 describe("mobile theme runtime variables", () => {
   it("matches the standard base palette to the generated stylesheet", () => {
-    expect(getMobileThemeRuntimeVariables("t3-code", "light", "web")).toEqual(
-      readDefaultMobileThemeVariables("light"),
-    );
-    expect(getMobileThemeRuntimeVariables("t3-code", "dark", "web")).toEqual(
-      readDefaultMobileThemeVariables("dark"),
-    );
+    for (const appearance of ["light", "dark"] as const) {
+      expect(
+        omitRoles(getMobileThemeRuntimeVariables("t3-code", appearance, "web"), SELECTION_ROLES),
+      ).toEqual(omitRoles(readDefaultMobileThemeVariables(appearance), SELECTION_ROLES));
+    }
   });
 
   it("uses the same shared palette source as generated custom themes", () => {
@@ -32,8 +50,12 @@ describe("mobile theme runtime variables", () => {
           appearance,
         );
         const android = getMobileThemeRuntimeVariables(themeId, appearance, "android");
-        expect(android).toEqual({
-          ...base,
+        const ignored =
+          appearance === "dark"
+            ? [...SELECTION_ROLES, ...ANDROID_DARK_CARD_ROLES]
+            : SELECTION_ROLES;
+        expect(omitRoles(android, ignored)).toEqual({
+          ...omitRoles(base, ignored),
           "--color-header": themeColorWithAlpha(
             base[
               themeId === "t3-code" || themeId === "material-you"
@@ -92,8 +114,8 @@ describe("mobile theme runtime variables", () => {
           "--color-thread-canvas",
           "--color-card",
           "--color-composer-surface",
-          "--color-grouped-card",
-        ] as const) {
+          ...(appearance === "light" ? (["--color-grouped-card"] as const) : []),
+        ]) {
           expect(ios[role]).toBe(android[role]);
         }
       }

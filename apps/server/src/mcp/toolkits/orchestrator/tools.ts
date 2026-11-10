@@ -3,6 +3,8 @@ import {
   OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpEnvironmentLinkInput,
+  OrchestratorMcpEnvironmentLinkOrbitInput,
+  OrchestratorMcpEnvironmentLinkOrbitResult,
   OrchestratorMcpEnvironmentLinkResult,
   OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpEnvironmentUnlinkInput,
@@ -42,6 +44,7 @@ import { McpSchema, Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
+import * as OrbitEnvironmentLink from "../../../orbit/OrbitEnvironmentLink.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
@@ -335,6 +338,20 @@ const EnvironmentLinkTool = Tool.make("t3_environment_link", {
   .annotate(Tool.OpenWorld, true)
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileLinksOff);
 
+const EnvironmentLinkOrbitTool = Tool.make("t3_environment_link_orbit", {
+  description:
+    "Link a T3 server that Orbit lists. This server pairs as its Node; you never see a pairing code. Returns `linked` with the `environmentId` to use, or `failed` with a `code` and what to do.",
+  parameters: OrchestratorMcpEnvironmentLinkOrbitInput,
+  success: OrchestratorMcpEnvironmentLinkOrbitResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: [...dependencies, OrbitEnvironmentLink.OrbitEnvironmentLink],
+})
+  .annotate(Tool.Title, "Link an Orbit environment")
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.OpenWorld, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileLinksOff);
+
 const EnvironmentUnlinkTool = Tool.make("t3_environment_unlink", {
   description:
     "Forget a linked environment. That machine's Connections list its session until revoked there.",
@@ -369,5 +386,6 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadInterruptTool,
   EnvironmentLinksTool,
   EnvironmentLinkTool,
+  EnvironmentLinkOrbitTool,
   EnvironmentUnlinkTool,
 );

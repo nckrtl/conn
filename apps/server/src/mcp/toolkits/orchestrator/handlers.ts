@@ -2,6 +2,7 @@ import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
 
+import * as OrbitEnvironmentLink from "../../../orbit/OrbitEnvironmentLink.ts";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../../peer/PeerLinks.ts";
@@ -198,6 +199,24 @@ const handlers = {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const requests = yield* PeerLinkRequests.PeerLinkRequests;
       return yield* requests.request(scope, input);
+    }),
+  ),
+  t3_environment_link_orbit: McpToolAccess.writesEnvironment(({ environment, access }) =>
+    Effect.gen(function* () {
+      const orbit = yield* OrbitEnvironmentLink.OrbitEnvironmentLink;
+      return yield* orbit
+        .link({ environmentId: environment, access: access ?? "approval-required" })
+        .pipe(
+          Effect.map((linked) => ({ status: "linked" as const, ...linked })),
+          Effect.catchTags({
+            OrbitEnvironmentLinkError: (error) =>
+              Effect.succeed({
+                status: "failed" as const,
+                code: error.code,
+                message: error.message,
+              }),
+          }),
+        );
     }),
   ),
   t3_environment_unlink: McpToolAccess.writesEnvironment(({ environmentId }) =>

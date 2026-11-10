@@ -56,6 +56,10 @@ export type PeerLinkRemoveInput = typeof PeerLinkRemoveInput.Type;
 export const PeerLinkRemoveResult = Schema.Struct({ removed: Schema.Boolean });
 export type PeerLinkRemoveResult = typeof PeerLinkRemoveResult.Type;
 
+/** How a peer with Linked environments off refuses to register a link. */
+export const PEER_LINKS_OFF_DESCRIPTION =
+  "Linked environments is off on that machine. Turn it on in its Settings → Labs.";
+
 /** Why linking or calling a peer failed, in words a user can act on. */
 export class PeerLinkError extends Schema.TaggedError<PeerLinkError>()("PeerLinkError", {
   reason: Schema.Literals([
@@ -68,6 +72,8 @@ export class PeerLinkError extends Schema.TaggedError<PeerLinkError>()("PeerLink
     "unknown_link",
     "storage",
     "disabled",
+    /** The peer has Linked environments off. */
+    "peer_disabled",
   ]),
   message: Schema.String,
   cause: Schema.optionalKey(Schema.Defect()),

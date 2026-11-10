@@ -10,6 +10,7 @@ import {
   type PeerLink,
   type PeerLinkCreateInput,
   PeerLinkError,
+  PEER_LINKS_OFF_DESCRIPTION,
   type PeerLinkSummary,
 } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -304,7 +305,10 @@ const make = Effect.gen(function* () {
           Effect.catchIf(Schema.is(AuthMcpRegistrationError), (error) =>
             Effect.fail(
               new PeerLinkError({
-                reason: "pairing_rejected",
+                reason:
+                  error.error_description === PEER_LINKS_OFF_DESCRIPTION
+                    ? "peer_disabled"
+                    : "pairing_rejected",
                 message: `The peer refused to register this environment: ${error.message}`,
               }),
             ),

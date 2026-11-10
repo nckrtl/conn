@@ -52,6 +52,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import * as OrbitEnvironmentLink from "../orbit/OrbitEnvironmentLink.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 
@@ -245,7 +246,12 @@ describe("orchestrator MCP toolkit", () => {
           Layer.provide(ServerSettings.layerTest()),
           Layer.provide(layerUnusedScheduledTaskStub),
           Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-          Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+          Layer.provide(
+            Layer.merge(
+              Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+              Layer.mock(OrbitEnvironmentLink.OrbitEnvironmentLink)({}),
+            ),
+          ),
           Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
           Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
           Layer.provideMerge(

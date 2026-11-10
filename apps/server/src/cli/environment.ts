@@ -14,6 +14,8 @@ import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as OrbitEnvironmentLink from "../orbit/OrbitEnvironmentLink.ts";
+import * as OrbitGateway from "../orbit/OrbitGateway.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ServerRestart from "../serverRestart.ts";
@@ -88,6 +90,13 @@ const formatLinks = (links: ReadonlyArray<PeerLinkSummary>) =>
         )
         .join("\n\n")}\n`;
 
+const accessFlag = Flag.Literals("access", AuthMcpClientAccess.literals).pipe(
+  Flag.withDescription(
+    "What this environment's agents may do there: read-only, or the broadest runtime mode.",
+  ),
+  Flag.withDefault("approval-required" as const),
+);
+
 const environmentLinkCommand = Command.make("link", {
   ...authLocationFlags,
   url: Argument.String("url").pipe(
@@ -102,12 +111,7 @@ const environmentLinkCommand = Command.make("link", {
   pairingCode: Flag.String("pairing-code").pipe(
     Flag.withDescription("A pairing code from the other environment (`t3 pair` there)."),
   ),
-  access: Flag.Literals("access", AuthMcpClientAccess.literals).pipe(
-    Flag.withDescription(
-      "What this environment's agents may do there: read-only, or the broadest runtime mode.",
-    ),
-    Flag.withDefault("approval-required" as const),
-  ),
+  access: accessFlag,
 }).pipe(
   Command.withDescription(
     "Link another T3 Code environment, so agents here can work there. It shows up there under Settings → Connections, where it can be revoked.",
@@ -126,6 +130,47 @@ const environmentLinkCommand = Command.make("link", {
         );
       }),
     ),
+  ),
+);
+
+const environmentLinkOrbitCommand = Command.make("link-orbit", {
+  ...authLocationFlags,
+  environment: Argument.String("gateway-environment-id").pipe(
+    Argument.withDescription("The environment's id in Orbit, from `conn-environment-list`."),
+  ),
+  access: accessFlag,
+  gatewayUrl: Flag.String("gateway-url").pipe(
+    Flag.withDescription("The Orbit Gateway to pair through."),
+    Flag.withDefault(OrbitGateway.DEFAULT_ORBIT_GATEWAY_URL),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Link a T3 Code server that Orbit lists. This machine pairs through Orbit as its own Node, so the pairing code is never shown.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const gateway = yield* OrbitGateway.OrbitGateway;
+      yield* runWithPeerLinks(flags, (links) =>
+        Effect.gen(function* () {
+          const orbit = yield* OrbitEnvironmentLink.OrbitEnvironmentLink;
+          const linked = yield* orbit.link({
+            environmentId: flags.environment,
+            access: flags.access,
+            gatewayUrl: flags.gatewayUrl,
+          });
+          yield* Console.log(
+            `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, until ${linked.expiresAt}.\n`,
+          );
+        }).pipe(
+          Effect.provide(
+            OrbitEnvironmentLink.layer.pipe(
+              Layer.provide(Layer.succeed(OrbitGateway.OrbitGateway, gateway)),
+              Layer.provide(Layer.succeed(PeerLinks.PeerLinks, links)),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(OrbitGateway.layer)),
   ),
 );
 
@@ -171,6 +216,7 @@ export const environmentCommand = Command.make("environment").pipe(
   Command.withDescription("Link other T3 Code environments, so agents here can work there."),
   Command.withSubcommands([
     environmentLinkCommand,
+    environmentLinkOrbitCommand,
     environmentListCommand,
     environmentUnlinkCommand,
   ]),

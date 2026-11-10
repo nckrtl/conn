@@ -1,4 +1,5 @@
 import * as OrbitGateway from "./orbit/OrbitGateway.ts";
+import * as OrbitEnvironmentLink from "./orbit/OrbitEnvironmentLink.ts";
 import * as OrbitWorkspaceRegistrar from "./orbit/OrbitWorkspaceRegistrar.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
@@ -827,8 +828,14 @@ const layerMakeRoutes = Layer.mergeAll(
   ),
   // delegate_task to a linked environment, from /mcp and the follower above.
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
-  // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
-  Layer.provide(PeerLinkRequests.layer),
+  // Links agents ask for: shown in a thread from /mcp, answered over WebSocket. Orbit
+  // links pair as this Node, so the pairing code stays in this process.
+  Layer.provide(
+    Layer.merge(
+      PeerLinkRequests.layer,
+      OrbitEnvironmentLink.layer.pipe(Layer.provide(OrbitGateway.layer)),
+    ),
+  ),
   // Share the service so HTTP/WS clients single-flight reads and invalidate each other's cached patches.
   Layer.provide(layerPullRequestService),
   // The same activity instance RunExecutionService reports to, by layer memoization.

@@ -6,6 +6,8 @@ import {
 } from "./ProviderTextDeltaCoalescer.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import * as NodePath from "@effect/platform-node/NodePath";
 import {
   CommandId,
   CheckpointId,
@@ -892,7 +894,9 @@ describe("CodexAdapterV2 process exit", () => {
 
   it.effect("counts the app-server as a running agent until its session closes", () => {
     let runningAgents = 0;
+    // Conn's Codex MCP network wait reads the Codex config through the file system.
     const factoryLayer = CodexAdapterV2.layerAppServerClientFactory.pipe(
+      Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer)),
       Layer.provide(
         Layer.mock(PortScanner.PortDiscovery)({
           trackAgent: () => {
@@ -947,8 +951,7 @@ describe("CodexAdapterV2 process exit", () => {
           .pipe(Effect.tap(() => Effect.sync(() => assert.equal(runningAgents, 1)))),
       );
       assert.equal(runningAgents, 0);
-      // Conn's Codex MCP network wait reads the Codex config through the file system.
-    }).pipe(Effect.provide(factoryLayer), Effect.provide(NodeServices.layer));
+    }).pipe(Effect.provide(factoryLayer));
   });
 });
 

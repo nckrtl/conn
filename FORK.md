@@ -290,6 +290,13 @@ Preserve the whole browser integration, including its mount points:
    renders nothing until data arrives. Keep it outside the page area so its
    height does not cover the page.
 
+Numbers use the toolbar's own format, not the bridge's text. `formatMs` in
+`laravelToolbar/model.ts` shows a space before the unit and steps up from
+`ms` to `s` to `min` (`245 ms`, `30.2 s`, `2 min 5 s`); `formatCount` groups
+thousands. Request rows reformat the bridge's duration (`30168ms`) through
+`parseDuration` and sort on `RequestSummary.durationMs`. `model.test.ts`
+covers both.
+
 `ApiPanel.tsx` has a separate toolbar mount. Keeping that mount, the toolbar
 directory, or the preload is not enough to preserve the browser toolbar. The
 November 7 sync removed the browser mount and the guest attachment in

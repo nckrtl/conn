@@ -1,5 +1,5 @@
 import { ChevronRight, CornerDownRight, Globe, ListIcon, Search, X } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -28,7 +28,7 @@ import {
   UnderlineTabs,
 } from "./parts";
 
-import { durationSortValue, SortHeader, sortTableRows, useTableSort } from "./tableSort";
+import { SortHeader, sortTableRows, useTableSort } from "./tableSort";
 
 const KIND_LABEL = { page: "page", inertia: "inertia", xhr: "xhr" } as const;
 
@@ -49,11 +49,7 @@ export function RequestsPanel() {
   const { tab, selectedId, select } = useToolbarTab();
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
   const searchButtonRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (searchOpen) inputRef.current?.focus();
-  }, [searchOpen]);
   const closeSearch = () => {
     setQuery("");
     setSearchOpen(false);
@@ -71,7 +67,7 @@ export function RequestsPanel() {
         summary.route.toLowerCase().includes(needle),
     );
   const rows = sortTableRows(filtered, sorting.sort, ({ entry, summary }, column) => {
-    if (column === "duration") return durationSortValue(summary.duration);
+    if (column === "duration") return summary.durationMs;
     if (column === "time") return entry.receivedAt;
     if (column === "status") return summary.status;
     if (column === "method") return summary.method;
@@ -89,7 +85,7 @@ export function RequestsPanel() {
           {searchOpen ? (
             <div className="w-40 sm:w-64">
               <Input
-                ref={inputRef}
+                autoFocus
                 unstyled
                 size="compact"
                 aria-label="Search requests"
@@ -291,7 +287,7 @@ function PropNode({
           <button
             type="button"
             onClick={() => setOpen(!open)}
-            className="flex cursor-pointer items-center gap-1.5 rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex cursor-pointer items-center gap-1.5 rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
           >
             <ChevronRight
               className={cn(

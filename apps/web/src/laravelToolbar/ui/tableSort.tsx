@@ -33,26 +33,6 @@ export function sortTableRows<T>(
   });
 }
 
-/** History can contain formatted durations even before the full request payload loads. */
-export function durationSortValue(duration: string | null): number | null {
-  if (!duration) return null;
-  const match = /^\s*([\d.]+)\s*(ns|μs|µs|us|ms|s|sec|min|m)?\s*$/i.exec(duration);
-  if (!match) return null;
-  const factors: Record<string, number> = {
-    ns: 0.000001,
-    μs: 0.001,
-    µs: 0.001,
-    us: 0.001,
-    ms: 1,
-    s: 1000,
-    sec: 1000,
-    min: 60000,
-    m: 60000,
-  };
-  const value = Number(match[1]);
-  return Number.isFinite(value) ? value * (factors[match[2]?.toLowerCase() ?? "ms"] ?? 1) : null;
-}
-
 export function useTableSort() {
   const [sort, setSort] = useState<TableSort>(null);
   return { sort, onSort: (column: string) => setSort((current) => nextTableSort(current, column)) };
@@ -87,7 +67,7 @@ export function SortHeader({
         aria-label={`${label}: sort ${next}`}
         onClick={() => onSort(column)}
         className={cn(
-          "flex h-9 w-full cursor-pointer items-center gap-1 text-left outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring",
+          "flex h-9 w-full cursor-pointer items-center gap-1 text-left outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset",
           align === "right" && "justify-end text-right",
         )}
       >

@@ -21,6 +21,7 @@ export interface RequestSummary {
   readonly component: string | null;
   readonly kind: RequestKind;
   readonly duration: string | null;
+  readonly durationMs: number | null;
   readonly size: string | null;
 }
 
@@ -115,9 +116,46 @@ export function summarize(row: ToolbarHistoryRow, data?: ToolbarData | null): Re
     action: data?.request?.controller_action ?? row.action ?? null,
     component: data?.request?.view_name ?? null,
     kind: requestKind(row),
-    duration: data?.profiler?.total_wall_time?.formattedValue ?? row.duration ?? null,
+    ...requestDuration(row, data),
     size: responseSize(data) ?? row.size ?? null,
   };
+}
+
+const DURATION_UNIT_MS: Record<string, number> = {
+  ns: 0.000001,
+  μs: 0.001,
+  µs: 0.001,
+  us: 0.001,
+  ms: 1,
+  s: 1000,
+  sec: 1000,
+  min: 60000,
+  m: 60000,
+};
+
+/** Milliseconds in a formatted duration such as `30168ms`, `1,234 ms` or `2 min 5 s`. */
+export function parseDuration(duration: string | null): number | null {
+  if (!duration?.trim()) return null;
+  const part = /\s*([\d.,]+)\s*(ns|μs|µs|us|ms|sec|min|s|m)?\s*/iy;
+  let total = 0;
+  let match: RegExpExecArray | null;
+  while (part.lastIndex < duration.length && (match = part.exec(duration))) {
+    const value = Number(match[1]?.replaceAll(",", ""));
+    if (!Number.isFinite(value)) return null;
+    total += value * (DURATION_UNIT_MS[match[2]?.toLowerCase() ?? "ms"] ?? 1);
+  }
+  return part.lastIndex === duration.length ? total : null;
+}
+
+/** The bridge formats durations itself (`30168ms`); show them in the toolbar's format. */
+function requestDuration(
+  row: ToolbarHistoryRow,
+  data?: ToolbarData | null,
+): Pick<RequestSummary, "duration" | "durationMs"> {
+  const wallTime = data?.profiler?.total_wall_time;
+  const text = wallTime?.formattedValue ?? row.duration ?? null;
+  const durationMs = wallTime?.value ?? parseDuration(text);
+  return { duration: durationMs == null ? text : formatMs(durationMs), durationMs };
 }
 
 /** Newer package versions send the response size as a measurement, older ones as text. */
@@ -252,8 +290,35 @@ export function modelCount(data: ToolbarData): number {
   return toolbarModels(data).reduce((total, model) => total + (model.retrieved ?? 0), 0);
 }
 
+// A fixed locale keeps formatted durations parseable by parseDuration.
+const numberFormats = new Map<number, Intl.NumberFormat>();
+function formatNumber(value: number, fractionDigits = 0): string {
+  let format = numberFormats.get(fractionDigits);
+  if (!format) {
+    format = new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    });
+    numberFormats.set(fractionDigits, format);
+  }
+  return format.format(value);
+}
+
+export function formatCount(value: number): string {
+  return formatNumber(value);
+}
+
+/** Three significant digits up to a minute, as `4.27 ms`, `245 ms` or `30.2 s`. */
 export function formatMs(value: number): string {
-  return value >= 100 ? `${Math.round(value)}ms` : `${value.toFixed(value >= 10 ? 1 : 2)}ms`;
+  if (value < 10) return `${formatNumber(value, 2)} ms`;
+  if (value < 100) return `${formatNumber(value, 1)} ms`;
+  if (value < 999.5) return `${formatNumber(value)} ms`;
+  const seconds = value / 1000;
+  if (seconds < 9.995) return `${formatNumber(seconds, 2)} s`;
+  if (seconds < 59.95) return `${formatNumber(seconds, 1)} s`;
+  const minutes = Math.floor(Math.round(seconds) / 60);
+  const rest = Math.round(seconds) % 60;
+  return minutes < 60 && rest > 0 ? `${minutes} min ${rest} s` : `${formatCount(minutes)} min`;
 }
 
 export function formatBytes(value: number): string {

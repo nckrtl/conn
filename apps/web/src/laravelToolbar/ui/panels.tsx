@@ -10,6 +10,7 @@ import { useToolbarTab } from "../context";
 import {
   errorReportingLabel,
   formatBytes,
+  formatCount,
   formatMs,
   formatUptime,
   type Framework,
@@ -93,7 +94,7 @@ export function TimingsPanel() {
                     }}
                   />
                 </div>
-                <span className="w-14 shrink-0 text-right tabular-nums">
+                <span className="w-16 shrink-0 text-right tabular-nums">
                   {formatMs(stage.durationMs)}
                 </span>
                 <span className="w-8 shrink-0 text-right text-muted-foreground tabular-nums">
@@ -322,7 +323,7 @@ export function DatabasePanel() {
         ) : (
           <>
             <StatStrip>
-              <Stat label="Queries" value={visible.length} />
+              <Stat label="Queries" value={formatCount(visible.length)} />
               <Stat
                 label="Query time"
                 value={formatMs(totalTime)}
@@ -467,7 +468,7 @@ export function ModelsPanel() {
           <div className="flex items-center gap-2 text-muted-foreground text-xs">
             <span>{total} retrieved</span>
             <MetaDot />
-            <span>{models.length} models</span>
+            <span>{formatCount(models.length)} models</span>
           </div>
         ) : null
       }
@@ -505,7 +506,9 @@ export function ModelsPanel() {
                   </td>
                   <td className={cellClass}>
                     <div className="flex items-center gap-3">
-                      <span className="w-6 text-right tabular-nums">{model.retrieved ?? 0}</span>
+                      <span className="w-6 text-right tabular-nums">
+                        {formatCount(model.retrieved ?? 0)}
+                      </span>
                       <span className="relative h-1 flex-1">
                         <span
                           className="absolute inset-y-0 left-0 rounded-full bg-primary/70"
@@ -529,7 +532,7 @@ export function ModelsPanel() {
                         !count && "text-muted-foreground",
                       )}
                     >
-                      {count ? count : "–"}
+                      {count ? formatCount(count) : "–"}
                     </td>
                   ))}
                 </tr>

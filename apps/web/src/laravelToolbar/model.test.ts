@@ -5,6 +5,8 @@ import {
   modelCount,
   errorReportingLabel,
   formatBytes,
+  formatCount,
+  formatMs,
   formatUptime,
   framework,
   iniSwitch,
@@ -113,7 +115,27 @@ describe("laravel toolbar model", () => {
 
   it("completes a history row with its loaded payload", () => {
     const summary = summarize({ id: "r1", method: "GET", uri: "/", duration: "40ms" }, page);
-    expect(summary).toMatchObject({ component: "Home", duration: "41ms", status: 200 });
+    expect(summary).toMatchObject({ component: "Home", duration: "41.3 ms", status: 200 });
+  });
+
+  it("formats durations with a readable unit, a space and grouped digits", () => {
+    expect(formatMs(4.271)).toBe("4.27 ms");
+    expect(formatMs(41.27)).toBe("41.3 ms");
+    expect(formatMs(245.4)).toBe("245 ms");
+    expect(formatMs(1234)).toBe("1.23 s");
+    expect(formatMs(30168)).toBe("30.2 s");
+    expect(formatMs(125_000)).toBe("2 min 5 s");
+    expect(formatMs(7_260_000)).toBe("121 min");
+    expect(formatCount(12345)).toBe("12,345");
+  });
+
+  it("reformats a history row's bridge duration before its payload loads", () => {
+    const row = { id: "r2", method: "GET", uri: "/", duration: "30168ms" };
+    expect(summarize(row)).toMatchObject({ duration: "30.2 s", durationMs: 30168 });
+    expect(summarize({ ...row, duration: "slow" })).toMatchObject({
+      duration: "slow",
+      durationMs: null,
+    });
   });
 
   it("formats freed memory with a sign", () => {

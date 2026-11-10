@@ -10,11 +10,20 @@ import {
 import { createPortal } from "react-dom";
 
 import { RenderErrorBoundary } from "~/components/RenderErrorBoundary";
+import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 import { ToolbarGroup } from "~/components/ToolbarGroup";
 
 import { useOrbitTool, useToolbarTab } from "../context";
-import { formatMs, framework, hasQueryIssues, modelCount, summarize, wallTimeMs } from "../model";
+import {
+  formatCount,
+  formatMs,
+  framework,
+  hasQueryIssues,
+  modelCount,
+  summarize,
+  wallTimeMs,
+} from "../model";
 import { LaravelIcon, PhpIcon, SymfonyIcon } from "./brandIcons";
 import { DatabasePanel, EnvironmentPanel, MemoryPanel, ModelsPanel, TimingsPanel } from "./panels";
 import { OrbitIcon, OrbitPanel } from "./orbit";
@@ -61,6 +70,7 @@ function usePanels(initialPinned: PanelId | null) {
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = null;
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears a pending hover timer on unmount
   useEffect(
     () => () => {
       if (timer.current !== null) window.clearTimeout(timer.current);
@@ -99,6 +109,7 @@ function usePanels(initialPinned: PanelId | null) {
  */
 function useHostRect(hostRef: RefObject<HTMLDivElement | null>, open: boolean) {
   const [rect, setRect] = useState<DOMRect | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks the host's viewport rect while the flyout is open
   useLayoutEffect(() => {
     const host = hostRef.current;
     if (!open || !host) {
@@ -107,12 +118,13 @@ function useHostRect(hostRef: RefObject<HTMLDivElement | null>, open: boolean) {
     }
     const measure = () => setRect(host.getBoundingClientRect());
     measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(host);
-    if (host.parentElement) observer.observe(host.parentElement);
+    const stopResize = observeResize(
+      host.parentElement ? [host, host.parentElement] : host,
+      measure,
+    );
     window.addEventListener("resize", measure);
     return () => {
-      observer.disconnect();
+      stopResize();
       window.removeEventListener("resize", measure);
     };
   }, [hostRef, open]);
@@ -145,7 +157,7 @@ export function ToolbarBar({ initialPanel = null }: { initialPanel?: PanelId | n
       onMouseLeave={panels.leave}
       onClick={() => panels.toggle(id)}
       className={cn(
-        "inline-flex h-6 min-w-0 cursor-pointer items-center gap-1 rounded-(--control-radius) pr-2 font-medium text-foreground text-ui outline-none hover:bg-foreground/6 focus-visible:ring-1 focus-visible:ring-ring data-pressed:bg-foreground/10 [&_svg]:shrink-0 [&_svg]:text-muted-foreground [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5",
+        "inline-flex h-6 min-w-0 cursor-pointer items-center gap-1 rounded-(--control-radius) pr-2 font-medium text-foreground text-ui outline-none hover:bg-foreground/6 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset data-pressed:bg-foreground/10 [&_svg]:shrink-0 [&_svg]:text-muted-foreground [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5",
         id === "request" ? "pl-1" : "pl-2",
         shrink ? "shrink" : "shrink-0",
       )}
@@ -222,7 +234,7 @@ export function ToolbarBar({ initialPanel = null }: { initialPanel?: PanelId | n
             "Requests on this page",
             <>
               <ListIcon />
-              <span className="tabular-nums">{tab.history.length}</span>
+              <span className="tabular-nums">{formatCount(tab.history.length)}</span>
             </>,
           )}
           {summary
@@ -271,7 +283,9 @@ export function ToolbarBar({ initialPanel = null }: { initialPanel?: PanelId | n
                     <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-warning" />
                   ) : null}
                 </span>
-                <span className="tabular-nums">{selected.queries?.queries?.length ?? 0}</span>
+                <span className="tabular-nums">
+                  {formatCount(selected.queries?.queries?.length ?? 0)}
+                </span>
               </>,
             )}
             {item(
@@ -279,7 +293,7 @@ export function ToolbarBar({ initialPanel = null }: { initialPanel?: PanelId | n
               "Eloquent models",
               <>
                 <Box />
-                <span className="tabular-nums">{modelCount(selected)}</span>
+                <span className="tabular-nums">{formatCount(modelCount(selected))}</span>
               </>,
             )}
           </ToolbarGroup>

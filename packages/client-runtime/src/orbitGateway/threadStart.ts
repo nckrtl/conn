@@ -154,9 +154,16 @@ function isTransient(error: unknown): boolean {
   return isOrbitGatewayError(error) && (error.status === 0 || error.status >= 500);
 }
 
-/** An admission whose answer was lost on the way; the same key may repeat it. */
+/**
+ * An admission whose answer was lost on the way: no answer, or a proxy's 502/504 without the
+ * Gateway's error envelope. A Gateway error, also a 5xx, is final.
+ */
 function isLostAdmission(error: unknown): boolean {
-  return isOrbitGatewayError(error) && [0, 502, 503, 504].includes(error.status);
+  return (
+    isOrbitGatewayError(error) &&
+    (error.status === 0 ||
+      ((error.status === 502 || error.status === 504) && error.code === "gateway.request_failed"))
+  );
 }
 
 function stepFailed(message: string, reset: Partial<OrbitThreadStart>): StepFailed {
@@ -233,9 +240,10 @@ export async function runOrbitThreadStart(
   try {
     checkStopped();
     if (current.environmentId === null) {
+      const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
       if (current.createOperationId === null) {
         if (!current.createKey) update({ createKey: newKey("create") });
-        const operation = await admit(ports.now() + CREATE_TIMEOUT_MS, () =>
+        const operation = await admit(createDeadline, () =>
           ports.client.createThreadInstance(
             current.projectId,
             current.instanceName,
@@ -246,7 +254,7 @@ export async function runOrbitThreadStart(
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
-      await follow(current.createOperationId!, CREATE_TIMEOUT_MS, (code) =>
+      await follow(current.createOperationId!, createDeadline - ports.now(), (code) =>
         stepFailed(
           `Orbit could not create the clone (${code}).`,
           code === "operation.timeout" ? {} : { createOperationId: null, createKey: null },

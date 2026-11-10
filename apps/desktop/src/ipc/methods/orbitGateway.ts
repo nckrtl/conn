@@ -22,7 +22,7 @@ const OrbitGatewayRequest = Schema.Struct({
     Schema.Int.check(Schema.isGreaterThanOrEqualTo(1_000), Schema.isLessThanOrEqualTo(120_000)),
   ),
   idempotencyKey: Schema.optional(
-    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9:._-]{1,255}$/)),
+    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9:._-]{1,128}$/)),
   ),
 });
 

@@ -45,17 +45,24 @@ function gateway(script: {
   readonly readPairing?: () => Promise<{ pairingUrl: string }>;
   readonly servers?: ReadonlyArray<OrbitGatewayEnvironment>;
   /** Answers each admission's first tries with these HTTP statuses (0: no answer), then admits. */
-  readonly createLost?: ReadonlyArray<number>;
+  readonly createLost?: ReadonlyArray<number | OrbitGatewayError>;
   readonly pairingLost?: ReadonlyArray<number>;
 }) {
   const calls: string[] = [];
   const keys: string[] = [];
   const createLost = [...(script.createLost ?? [])];
   const pairingLost = [...(script.pairingLost ?? [])];
-  const lose = (statuses: number[]) => {
+  /** A bare status is a proxy's answer without the Gateway's error envelope. */
+  const lose = (statuses: Array<number | OrbitGatewayError>) => {
     const status = statuses.shift();
     if (status === undefined) return;
-    throw new OrbitGatewayError({ code: "x", message: `lost ${status}`, status, details: {} });
+    if (typeof status !== "number") throw status;
+    throw new OrbitGatewayError({
+      code: "gateway.request_failed",
+      message: `lost ${status}`,
+      status,
+      details: {},
+    });
   };
   const statuses = new Map<number, OrbitGatewayOperation["status"][]>([
     [100, [...(script.create ?? ["running", "succeeded"])]],
@@ -254,14 +261,51 @@ describe("runOrbitThreadStart", () => {
     expect(run.saves.at(-1)).toMatchObject({ createOperationId: 100, error: null });
   });
 
-  it("stops at once on a create the Gateway refused", async () => {
-    const { client, calls } = gateway({ createLost: [409] });
+  it.each([
+    [409, "lost 409"],
+    [503, "lost 503"],
+    [
+      new OrbitGatewayError({
+        code: "operation.kind_unavailable",
+        message: "Conn is off.",
+        status: 503,
+        details: {},
+      }),
+      "Conn is off.",
+    ],
+    [
+      new OrbitGatewayError({
+        code: "database.server_command_failed",
+        message: "The command failed.",
+        status: 502,
+        details: {},
+      }),
+      "The command failed.",
+    ],
+  ])("stops at once on a create the Gateway refused (%s)", async (answer, error) => {
+    const { client, calls } = gateway({ createLost: [answer] });
     const run = ports(client);
 
     expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
 
     expect(calls).toEqual(["create 3 fix-the-login-bug-on-ios-k3j9"]);
-    expect(run.saves.at(-1)).toMatchObject({ createOperationId: null, error: "lost 409" });
+    expect(run.saves.at(-1)).toMatchObject({ createOperationId: null, error });
+  });
+
+  it("ends a start dismissed while it repeats a lost create, without an error", async () => {
+    let dismissed = false;
+    const { client, calls } = gateway({ createLost: [0, 0, 0] });
+    const run = ports(client, { stopped: () => dismissed });
+    const sleep = run.ports.sleep;
+    run.ports.sleep = async (ms) => {
+      await sleep(ms);
+      dismissed = true;
+    };
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+
+    expect(calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
+    expect(run.saves.at(-1)?.error).toBeNull();
   });
 
   it("keeps the create's key when its answers stay lost, so Retry gets the Operation the Gateway admitted", async () => {

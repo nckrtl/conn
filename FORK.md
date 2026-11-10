@@ -223,9 +223,9 @@ thread with the first message in its `/srv/workspace` project. Each start is sav
 localStorage after every step, with a fixed launch command id, so a reload resumes it and a
 repeated launch finishes the first one. The Gateway admits a create or a pairing only after it
 copies secrets to Swamp (19-27 s), so those two calls get a 60 s limit instead of the desktop's
-15 s default, and carry a saved `Idempotency-Key`. A lost answer (no answer, 502, 503, 504)
-repeats the same request with a clamped back-off, so the Gateway returns the Operation it may
-already have admitted; a 4xx stops the start. Only the main window runs starts. A row can be
+15 s default, and carry a saved `Idempotency-Key`. A lost answer (none, or a proxy's 502 or
+504 without the Gateway's error envelope) repeats the same request with a clamped back-off, so
+the Gateway returns the Operation it may already have admitted. A Gateway error stops the start. Only the main window runs starts. A row can be
 dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).

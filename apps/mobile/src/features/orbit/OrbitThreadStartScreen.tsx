@@ -13,9 +13,9 @@ import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
 import { ListSection } from "../../components/ui/ListSection";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
-import { isDraftThreadRoute } from "../threads/thread-route-state";
 import { orbitGatewayClient } from "./orbitGatewayClient";
 import { startOrbitThread } from "./orbitThreadStartRuntime";
+import { orbitStartReturn } from "./orbitThreadStarts";
 
 /**
  * Conn: starts a thread in an Orbit Project. Orbit creates a clone of the Project's default
@@ -52,13 +52,8 @@ export function OrbitThreadStartScreen() {
   const start = () => {
     if (started.current || project === null || text.trim() === "") return;
     started.current = true;
-    // Back past Choose project, and past the new-thread draft that opened it: an empty draft
-    // closes itself on focus, so the thread opens on the screen under it. The start row waits there.
-    const state = navigation.getState();
-    let back = state?.routes[state.index - 1]?.name === "NewTaskProject" ? 2 : 1;
-    if (isDraftThreadRoute(state?.routes[state.index - back])) back += 1;
-    const returnRoute = state?.routes[state.index - back];
-    startOrbitThread(project, text.trim(), returnRoute?.key);
+    const { back, returnRouteKey } = orbitStartReturn(navigation.getState());
+    startOrbitThread(project, text.trim(), returnRouteKey);
     navigation.dispatch(StackActions.pop(back));
   };
 

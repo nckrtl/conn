@@ -19,6 +19,7 @@ import { resolveServerInstallation } from "../cli/invocation.ts";
 import { readAgentActivityPublishingActive } from "../cloud/config.ts";
 import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
+import { readOrbitInstanceDescriptor } from "../orbit/OrbitInstanceFile.ts";
 import * as ServerRestart from "../serverRestart.ts";
 import * as ServerConfig from "../config.ts";
 import { databaseMigrationHead } from "../persistence/databaseMigrationHead.ts";
@@ -209,6 +210,7 @@ export const make = Effect.gen(function* () {
     serverSelfUpdate === "desktop-managed" && serverConfig.desktopTelemetryControlFd !== undefined;
 
   const databaseMigration = databaseMigrationHead(serverConfig.dbPath);
+  const orbitInstance = yield* readOrbitInstanceDescriptor();
   const descriptor: ExecutionEnvironmentDescriptor = {
     environmentId,
     label,
@@ -294,6 +296,7 @@ export const make = Effect.gen(function* () {
       mcpApprovalCodes: true,
       mcpHostedApproval: true,
     },
+    ...(orbitInstance === undefined ? {} : { orbitInstance }),
   };
 
   return ServerEnvironment.of({

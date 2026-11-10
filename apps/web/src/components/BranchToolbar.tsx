@@ -19,7 +19,9 @@ import { flushSync } from "react-dom";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
-import { useProject, useThreadShellsForProjectRefs } from "../state/entities";
+import { useProject, useServerConfigs, useThreadShellsForProjectRefs } from "../state/entities";
+import { useOpenLink } from "../browser/useOpenLink";
+import { ThreadDetailsOrbitRows } from "./chat/ThreadDetailsOrbitRows";
 import {
   ADD_TO_MACHINE_LABEL_CLASS,
   type EnvMode,
@@ -710,13 +712,22 @@ export const BranchToolbar = memo(function BranchToolbar({
     canPickEnvironment: hasMultipleEnvironments,
   });
   const [attachStrip, labelsOverflow] = useLabelsOverflow();
+  const orbitInstance = useServerConfigs().get(environmentId)?.environment.orbitInstance;
+  const openLink = useOpenLink(threadRef);
 
   if (!activeProject) return null;
 
   if (layout === "panel") {
     return (
       <div className="flex w-full flex-col" data-thread-panel-run-context>
-        {panelSection !== "branch" ? (
+        {panelSection !== "branch" && orbitInstance ? (
+          <ThreadDetailsOrbitRows
+            orbitInstance={orbitInstance}
+            onOpenUrl={(url, event) => {
+              void openLink(url, { event }).catch((error: unknown) => console.error(error));
+            }}
+          />
+        ) : panelSection !== "branch" ? (
           <RunContextSelector
             displayMode="panel"
             workspaceRoot={activeProject.workspaceRoot}

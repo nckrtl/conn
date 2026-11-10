@@ -478,6 +478,100 @@ describe("fork-sync merge", () => {
           expect.objectContaining({ path: "pnpm-lock.yaml", reason: "package_json_conflicted" }),
         ]),
       );
+      expect(merged.install).toEqual(
+        expect.objectContaining({
+          status: "skipped",
+          detail: expect.stringMatching(/install skipped: .*still unresolved/),
+        }),
+      );
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("runs the lockfile command after merge when package.json and lockfile are resolved", () => {
+    const fixture = createMergeFixture();
+    try {
+      requireGit(fixture.repo, ["checkout", fixture.upstreamSha]);
+      write(fixture.repo, "pnpm-lock.yaml", "fork lock\n");
+      requireGit(fixture.repo, ["add", "pnpm-lock.yaml"]);
+      requireGit(fixture.repo, ["commit", "-m", "same lock"]);
+      const upstream = requireGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+      requireGit(fixture.repo, ["checkout", "main"]);
+      const result = runCli(
+        [
+          "merge",
+          "--repo",
+          fixture.repo,
+          "--upstream",
+          upstream,
+          "--base",
+          "main",
+          "--branch",
+          "sync/install",
+          "--worktree",
+          fixture.worktree(),
+          "--json",
+        ],
+        fixture.repo,
+      );
+      expect(result.status, result.stderr).toBe(FORK_SYNC_NEEDS_REVIEW_EXIT);
+      const report = JSON.parse(result.stdout) as {
+        install: { status: string; detail: string };
+        guards: Array<{ path: string; ok: boolean }>;
+        autoResolved: Array<{ path: string; rule: string }>;
+      };
+      expect(report.autoResolved.some((item) => item.path === "pnpm-lock.yaml")).toBe(false);
+      expect(report.install.status).toBe("ok");
+      expect(report.install.detail).toMatch(/^ran /);
+      expect(report.guards).toEqual([expect.objectContaining({ path: "guard.mjs", ok: true })]);
+      expect(NodeFS.readFileSync(NodePath.join(fixture.worktree(), "pnpm-lock.yaml"), "utf8")).toBe(
+        "regenerated\n",
+      );
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("skips guards when package.json is still unresolved", () => {
+    const fixture = createMergeFixture();
+    try {
+      write(fixture.repo, "package.json", '{"name":"fork"}\n');
+      requireGit(fixture.repo, ["add", "package.json"]);
+      requireGit(fixture.repo, ["commit", "-m", "fork package"]);
+      requireGit(fixture.repo, ["checkout", fixture.upstreamSha]);
+      write(fixture.repo, "package.json", '{"name":"upstream"}\n');
+      requireGit(fixture.repo, ["add", "package.json"]);
+      requireGit(fixture.repo, ["commit", "-m", "upstream package"]);
+      const upstream = requireGit(fixture.repo, ["rev-parse", "HEAD"]).trim();
+      requireGit(fixture.repo, ["checkout", "main"]);
+      const result = runCli(
+        [
+          "merge",
+          "--repo",
+          fixture.repo,
+          "--upstream",
+          upstream,
+          "--base",
+          "main",
+          "--branch",
+          "sync/install-skip",
+          "--worktree",
+          fixture.worktree(),
+          "--json",
+        ],
+        fixture.repo,
+      );
+      expect(result.status, result.stderr).toBe(FORK_SYNC_NEEDS_REVIEW_EXIT);
+      const report = JSON.parse(result.stdout) as {
+        install: { status: string; detail: string };
+        guards: unknown[];
+        failures: string[];
+      };
+      expect(report.install.status).toBe("skipped");
+      expect(report.install.detail).toMatch(/still unresolved/);
+      expect(report.guards).toEqual([]);
+      expect(report.failures.some((line) => line.includes("install skipped"))).toBe(true);
     } finally {
       fixture.dispose();
     }
@@ -661,6 +755,7 @@ describe("fork-sync CLI", () => {
         unresolved: Array<{ path: string }>;
         autoResolved: Array<{ path: string; rule: string }>;
         guards: Array<{ path: string; ok: boolean }>;
+        install: { status: string; detail: string };
         failures: string[];
         branch: { committed: boolean; tip: string | null };
         settings: {
@@ -677,6 +772,7 @@ describe("fork-sync CLI", () => {
         "pnpm-lock.yaml",
       ]);
       expect(report.guards).toEqual([expect.objectContaining({ path: "guard.mjs", ok: true })]);
+      expect(report.install).toEqual(expect.objectContaining({ status: "ok" }));
       expect(report.failures.some((line) => line.includes("mixed.ts"))).toBe(true);
       expect(report.branch.committed).toBe(false);
       expect(report.branch.tip).toBeNull();
@@ -812,6 +908,7 @@ describe("fork-sync CLI", () => {
   it("rejects --in-place and provenance", () => {
     expect(runCli(["merge", "--in-place"], repoRoot).stderr).toMatch(/unknown argument/);
     expect(runCli(["provenance"], repoRoot).stderr).toMatch(/unknown command/);
+    expect(runCli(["settings-diff"], repoRoot).stderr).toMatch(/unknown command/);
   });
 });
 

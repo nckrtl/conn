@@ -174,6 +174,11 @@ export interface CleanMerge {
   readonly forkHeading?: string | undefined;
 }
 
+export interface InstallResult {
+  readonly status: "ok" | "skipped" | "failed";
+  readonly detail: string;
+}
+
 export interface ForkSyncReport {
   readonly version: typeof FORK_SYNC_REPORT_VERSION;
   readonly status: "ok" | "needs_review" | "error";
@@ -192,6 +197,7 @@ export interface ForkSyncReport {
   readonly unresolved: ReadonlyArray<UnresolvedConflict>;
   readonly cleanMerges: ReadonlyArray<CleanMerge>;
   readonly conflictMarkers: ReadonlyArray<string>;
+  readonly install: InstallResult | null;
   readonly presence: ReadonlyArray<FeaturePresenceResult>;
   readonly guards: ReadonlyArray<GuardTestResult>;
   readonly settings: SettingsDiffResult | null;
@@ -209,15 +215,13 @@ export interface ForkSyncCliArgs {
   readonly report: string | undefined;
   readonly json: boolean;
   readonly manifest: string | undefined;
-  readonly old: string | undefined;
-  readonly new: string | undefined;
   readonly mainResults: string | undefined;
   readonly syncResults: string | undefined;
 }
 
 const STRATEGIES = new Set<ConflictStrategy>(["ours", "regenerate", "manual", "reapply"]);
 const PRESENCE_KINDS = new Set<PresenceKind>(["file", "symbol"]);
-const COMMANDS = ["merge", "guards", "settings-diff", "baseline", "check"] as const;
+const COMMANDS = ["merge", "guards", "baseline", "check"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -414,12 +418,9 @@ function looksLikeRepoPath(value: string): boolean {
 }
 
 export function pathCoveredBy(entry: string, filePath: string): boolean {
-  if (entry === filePath) return true;
-  if (filePath.startsWith(`${entry}/`)) return true;
-  if (matchGlob(entry, filePath)) return true;
-  if (entry.endsWith("/**") && matchGlob(entry, filePath)) return true;
-  if (filePath.startsWith(entry.replace(/\/\*\*?$/, "/"))) return true;
-  return false;
+  const glob = entry.replaceAll("\\", "/");
+  const file = filePath.replaceAll("\\", "/");
+  return file === glob || file.startsWith(`${glob}/`) || matchGlob(glob, file);
 }
 
 export function featureForPath(
@@ -430,23 +431,13 @@ export function featureForPath(
 }
 
 function namesTheSamePath(entry: string, known: string): boolean {
-  const file = entry.replace(/\\/g, "/");
-  const spot = known.replace(/\\/g, "/").replace(/\/$/, "");
-  if (pathCoveredBy(file, spot) || pathCoveredBy(spot, file)) return true;
-  if (file === spot || file.endsWith(`/${spot}`) || spot.endsWith(`/${NodePath.basename(file)}`)) {
-    return true;
-  }
-  if (file.includes(`/${spot}/`) || file.includes(`/${spot}/**`) || file.endsWith(`/${spot}`)) {
-    return true;
-  }
-  if (spot.includes("*") && file.includes(spot)) return true;
-  const base = NodePath.basename(file);
-  const knownBase = NodePath.basename(spot);
-  if (base === knownBase) return true;
-  if (base.replace(/\.ios\.(tsx|ts)$/, ".$1") === knownBase.replace(/\.ios\.(tsx|ts)$/, ".$1")) {
-    return true;
-  }
-  return matchGlob(file, spot);
+  const file = entry.replaceAll("\\", "/");
+  const spot = known.replaceAll("\\", "/").replace(/\/$/, "");
+  if (pathCoveredBy(file, spot) || pathCoveredBy(spot, file) || matchGlob(file, spot)) return true;
+  const stripIos = (name: string) => name.replace(/\.ios\.(tsx|ts)$/, ".$1");
+  if (stripIos(NodePath.basename(file)) === stripIos(NodePath.basename(spot))) return true;
+  if (file.includes(`/${spot}/`) || file.includes(`/${spot}/**`)) return true;
+  return spot.includes("*") && file.includes(spot);
 }
 
 export function coversKnownSpot(manifest: ForkSyncManifest, known: string): boolean {
@@ -817,18 +808,12 @@ function presenceFromContents(
   };
 }
 
-export function runPresenceChecks(
-  root: string,
+function mapPresence(
   features: ReadonlyArray<ForkFeature>,
+  read: (path: string) => string | undefined,
 ): ReadonlyArray<FeaturePresenceResult> {
   return features.map((feature) => {
-    const checks = feature.presence.map((check) => {
-      const absolute = NodePath.join(root, check.path);
-      const contents = NodeFS.existsSync(absolute)
-        ? NodeFS.readFileSync(absolute, "utf8")
-        : undefined;
-      return presenceFromContents(check, contents);
-    });
+    const checks = feature.presence.map((check) => presenceFromContents(check, read(check.path)));
     return {
       id: feature.id,
       forkHeading: feature.forkHeading,
@@ -838,22 +823,24 @@ export function runPresenceChecks(
   });
 }
 
+export function runPresenceChecks(
+  root: string,
+  features: ReadonlyArray<ForkFeature>,
+): ReadonlyArray<FeaturePresenceResult> {
+  return mapPresence(features, (path) => {
+    const absolute = NodePath.join(root, path);
+    return NodeFS.existsSync(absolute) ? NodeFS.readFileSync(absolute, "utf8") : undefined;
+  });
+}
+
 export function runPresenceChecksAtRef(
   repo: string,
   ref: string,
   features: ReadonlyArray<ForkFeature>,
 ): ReadonlyArray<FeaturePresenceResult> {
-  return features.map((feature) => {
-    const checks = feature.presence.map((check) => {
-      const shown = runGit(repo, ["show", `${ref}:${check.path}`]);
-      return presenceFromContents(check, shown.status === 0 ? shown.stdout : undefined);
-    });
-    return {
-      id: feature.id,
-      forkHeading: feature.forkHeading,
-      ok: checks.every((check) => check.ok),
-      checks,
-    };
+  return mapPresence(features, (path) => {
+    const shown = runGit(repo, ["show", `${ref}:${path}`]);
+    return shown.status === 0 ? shown.stdout : undefined;
   });
 }
 
@@ -876,8 +863,21 @@ export function defaultGuardRunner(root: string, testPath: string): GuardTestRes
   return {
     path: testPath,
     ok,
-    detail: ok ? `passed ${testPath}` : output.slice(-500) || `failed ${testPath}`,
+    detail: ok ? `passed ${testPath}` : guardFailureDetail(output, testPath),
   };
+}
+
+function guardFailureDetail(output: string, testPath: string): string {
+  const lines = output.split("\n");
+  const start = lines.findIndex(
+    (line) =>
+      line.includes("FAIL ") ||
+      line.includes("TypeError:") ||
+      line.includes("AssertionError") ||
+      line.includes("Error:"),
+  );
+  const picked = (start >= 0 ? lines.slice(start, start + 8) : lines.slice(-8)).join("\n").trim();
+  return picked.slice(0, 700) || `failed ${testPath}`;
 }
 
 export function runGuardTests(
@@ -969,6 +969,7 @@ function emptyReport(command: string): ForkSyncReport {
     unresolved: [],
     cleanMerges: [],
     conflictMarkers: [],
+    install: null,
     presence: [],
     guards: [],
     settings: null,
@@ -979,6 +980,7 @@ function emptyReport(command: string): ForkSyncReport {
 
 function failureLines(report: ForkSyncReport): ReadonlyArray<string> {
   const lines: string[] = [];
+  if (report.install !== null && report.install.status !== "ok") lines.push(report.install.detail);
   for (const item of report.unresolved) {
     const feature = item.forkHeading === undefined ? "" : ` (${item.forkHeading})`;
     lines.push(`unresolved ${item.path} ${item.reason}${feature}`);
@@ -1006,15 +1008,8 @@ function failureLines(report: ForkSyncReport): ReadonlyArray<string> {
 
 function finalizeReport(report: ForkSyncReport): ForkSyncReport {
   const failures = failureLines(report);
-  const needsReview =
-    failures.length > 0 ||
-    report.unresolved.length > 0 ||
-    report.presence.some((feature) => !feature.ok) ||
-    report.guards.some((guard) => !guard.ok) ||
-    report.settings?.blocking === true ||
-    (report.baseline !== null && report.baseline.newFailures.length > 0);
   if (report.status === "error") return { ...report, failures };
-  if (!needsReview) return { ...report, failures, status: "ok", exitCode: 0 };
+  if (failures.length === 0) return { ...report, failures, status: "ok", exitCode: 0 };
   return { ...report, failures, status: "needs_review", exitCode: FORK_SYNC_NEEDS_REVIEW_EXIT };
 }
 
@@ -1222,11 +1217,42 @@ function pruneStaleForkSyncWorktrees(repo: string, keep?: string): void {
   }
 }
 
-function linkNodeModules(worktree: string, source: string): void {
-  const from = NodePath.join(source, "node_modules");
-  const to = NodePath.join(worktree, "node_modules");
-  if (!NodeFS.existsSync(from) || NodeFS.existsSync(to)) return;
-  NodeFS.symlinkSync(from, to, "dir");
+function blocksInstall(path: string): boolean {
+  const name = NodePath.basename(path);
+  return name === "package.json" || name === "pnpm-lock.yaml";
+}
+
+function installWorktree(
+  repo: string,
+  unresolved: ReadonlyArray<UnresolvedConflict>,
+  rules: ReadonlyArray<ConflictRule>,
+  autoResolved: ReadonlyArray<AutoResolvedConflict>,
+): InstallResult {
+  const blockers = [...unresolved.map((item) => item.path), ...unmergedPaths(repo)].filter(
+    blocksInstall,
+  );
+  if (blockers.length > 0) {
+    return {
+      status: "skipped",
+      detail: `install skipped: ${[...new Set(blockers)].join(", ")} still unresolved`,
+    };
+  }
+  if (autoResolved.some((item) => item.rule === "regenerate" && blocksInstall(item.path))) {
+    return { status: "ok", detail: "lockfile regenerated during conflict resolution" };
+  }
+  const command = firstMatchingRule(rules, "pnpm-lock.yaml")?.command;
+  if (command === undefined) {
+    return { status: "ok", detail: "no lockfile regenerate command" };
+  }
+  const result = runShellCommand(repo, command);
+  if (result.status !== 0) {
+    return {
+      status: "failed",
+      detail: `install failed: ${(result.stderr || result.stdout).trim().slice(-400) || command}`,
+    };
+  }
+  runGit(repo, ["add", "--", "pnpm-lock.yaml"]);
+  return { status: "ok", detail: `ran ${command}` };
 }
 
 function conflictMarkerPaths(repo: string, paths: ReadonlyArray<string>): ReadonlyArray<string> {
@@ -1288,6 +1314,7 @@ export function mergeUpstream(input: {
   readonly unresolved: ReadonlyArray<UnresolvedConflict>;
   readonly cleanMerges: ReadonlyArray<CleanMerge>;
   readonly conflictMarkers: ReadonlyArray<string>;
+  readonly install: InstallResult;
   readonly notes: ReadonlyArray<string>;
 } {
   const upstreamSha = resolveCommit(input.repo, input.upstreamRef);
@@ -1308,6 +1335,7 @@ export function mergeUpstream(input: {
       unresolved: [],
       cleanMerges: [],
       conflictMarkers: [],
+      install: { status: "ok", detail: "already up to date" },
       notes,
     };
   }
@@ -1369,8 +1397,20 @@ export function mergeUpstream(input: {
       conflicts,
       input.manifest.features,
     );
+    const install = installWorktree(
+      repo,
+      applied.unresolved,
+      input.manifest.conflictRules,
+      applied.autoResolved,
+    );
+    notes.push(install.detail);
     let committed = false;
-    if (applied.unresolved.length === 0 && unmergedPaths(repo).length === 0 && inMerge(repo)) {
+    if (
+      applied.unresolved.length === 0 &&
+      unmergedPaths(repo).length === 0 &&
+      inMerge(repo) &&
+      install.status === "ok"
+    ) {
       requireGit(
         repo,
         [
@@ -1397,6 +1437,7 @@ export function mergeUpstream(input: {
       unresolved: applied.unresolved,
       cleanMerges: cleanMergePaths(repo, baseSha, upstreamSha, remaining, input.manifest.features),
       conflictMarkers: markers,
+      install,
       notes,
     };
   } catch (cause) {
@@ -1408,6 +1449,18 @@ export function mergeUpstream(input: {
   }
 }
 
+const VALUE_FLAGS = {
+  "--repo": "repo",
+  "--upstream": "upstream",
+  "--base": "base",
+  "--branch": "branch",
+  "--worktree": "worktree",
+  "--report": "report",
+  "--manifest": "manifest",
+  "--main": "mainResults",
+  "--sync": "syncResults",
+} as const;
+
 export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs {
   const [command, ...flags] = argv;
   if (command === undefined || command.startsWith("--")) {
@@ -1416,87 +1469,56 @@ export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs 
   if (!COMMANDS.includes(command as (typeof COMMANDS)[number])) {
     throw new ForkSyncError(`unknown command ${command}`);
   }
-  let repo = process.cwd();
-  let upstream: string | undefined;
-  let base = "main";
-  let branch: string | undefined;
-  let worktree: string | undefined;
-  let report: string | undefined;
-  let json = false;
-  let manifest: string | undefined;
-  let oldSha: string | undefined;
-  let newSha: string | undefined;
-  let mainResults: string | undefined;
-  let syncResults: string | undefined;
+  const parsed: {
+    -readonly [K in keyof ForkSyncCliArgs]: ForkSyncCliArgs[K];
+  } = {
+    command,
+    repo: process.cwd(),
+    upstream: undefined,
+    base: "main",
+    branch: undefined,
+    worktree: undefined,
+    report: undefined,
+    json: false,
+    manifest: undefined,
+    mainResults: undefined,
+    syncResults: undefined,
+  };
   for (let index = 0; index < flags.length; index += 1) {
     const flag = flags[index];
     if (flag === "--json") {
-      json = true;
+      parsed.json = true;
       continue;
     }
+    const field = VALUE_FLAGS[flag as keyof typeof VALUE_FLAGS];
     const value = flags[index + 1];
-    const needsValue =
-      flag === "--repo" ||
-      flag === "--upstream" ||
-      flag === "--base" ||
-      flag === "--branch" ||
-      flag === "--worktree" ||
-      flag === "--report" ||
-      flag === "--manifest" ||
-      flag === "--old" ||
-      flag === "--new" ||
-      flag === "--main" ||
-      flag === "--sync";
-    if (needsValue) {
-      if (value === undefined || value.startsWith("--")) {
-        throw new ForkSyncError(`missing value for ${flag}`);
-      }
-      index += 1;
-      if (flag === "--repo") repo = value;
-      else if (flag === "--upstream") upstream = value;
-      else if (flag === "--base") base = value;
-      else if (flag === "--branch") branch = value;
-      else if (flag === "--worktree") worktree = value;
-      else if (flag === "--report") report = value;
-      else if (flag === "--manifest") manifest = value;
-      else if (flag === "--old") oldSha = value;
-      else if (flag === "--new") newSha = value;
-      else if (flag === "--main") mainResults = value;
-      else syncResults = value;
-      continue;
+    if (field === undefined) throw new ForkSyncError(`unknown argument: ${flag}`);
+    if (value === undefined || value.startsWith("--")) {
+      throw new ForkSyncError(`missing value for ${flag}`);
     }
-    throw new ForkSyncError(`unknown argument: ${flag}`);
+    index += 1;
+    parsed[field] = value;
   }
-  return {
-    command,
-    repo,
-    upstream,
-    base,
-    branch,
-    worktree,
-    report,
-    json,
-    manifest,
-    old: oldSha,
-    new: newSha,
-    mainResults,
-    syncResults,
-  };
+  return parsed;
 }
 
-function attachChecks(
+function applyRepoChecks(
   report: ForkSyncReport,
   repo: string,
-  sourceRepo: string,
   manifest: ForkSyncManifest,
-  policyFile: string,
-  oldSha: string,
-  newSha: string,
+  policy: SettingsPolicy | null,
+  oldSha?: string,
+  newSha?: string,
 ): ForkSyncReport {
-  if (repo !== sourceRepo) linkNodeModules(repo, sourceRepo);
   const presence = runPresenceChecks(repo, manifest.features);
-  const guards = runGuardTests(repo, manifest.guardTests);
-  const settings = diffSettingsAtShas(repo, oldSha, newSha, loadSettingsPolicy(policyFile));
+  const guards =
+    report.install !== null && report.install.status !== "ok"
+      ? []
+      : runGuardTests(repo, manifest.guardTests);
+  const settings =
+    policy !== null && oldSha !== undefined && newSha !== undefined
+      ? diffSettingsAtShas(repo, oldSha, newSha, policy)
+      : report.settings;
   return finalizeReport({ ...report, presence, guards, settings });
 }
 
@@ -1519,47 +1541,27 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
   const manifest = loadManifest(args.repo, args.manifest);
 
   if (args.command === "guards") {
-    const presence = runPresenceChecks(args.repo, manifest.features);
-    const guards = runGuardTests(args.repo, manifest.guardTests);
-    return finalizeReport({ ...emptyReport("guards"), presence, guards });
+    return applyRepoChecks({ ...emptyReport("guards") }, args.repo, manifest, null);
   }
 
-  if (args.command === "settings-diff") {
-    const newSha = resolveCommit(
-      args.repo,
-      args.new ?? args.upstream ?? `${manifest.upstream.remote}/${manifest.upstream.ref}`,
-    );
-    const oldSha = resolveCommit(
-      args.repo,
-      args.old ?? resolveMergeBase(args.repo, args.base, newSha),
-    );
-    const settings = diffSettingsAtShas(
-      args.repo,
-      oldSha,
-      newSha,
-      loadSettingsPolicy(policyFilePath(args, manifest.settingsPolicy)),
-    );
-    return finalizeReport({
-      ...emptyReport("settings-diff"),
-      upstream: { ref: args.new ?? args.upstream ?? manifest.upstream.ref, sha: newSha },
-      base: { ref: args.old ?? args.base, sha: oldSha },
-      settings,
-    });
-  }
+  const policy = loadSettingsPolicy(policyFilePath(args, manifest.settingsPolicy));
 
   if (args.command === "check") {
-    const presence = runPresenceChecks(args.repo, manifest.features);
-    const guards = runGuardTests(args.repo, manifest.guardTests);
     const upstreamRef = args.upstream ?? `${manifest.upstream.remote}/${manifest.upstream.ref}`;
     const newSha = resolveCommit(args.repo, upstreamRef);
     const oldSha = resolveMergeBase(args.repo, args.base, newSha);
-    const settings = diffSettingsAtShas(
+    return applyRepoChecks(
+      {
+        ...emptyReport("check"),
+        upstream: { ref: upstreamRef, sha: newSha },
+        base: { ref: args.base, sha: oldSha },
+      },
       args.repo,
+      manifest,
+      policy,
       oldSha,
       newSha,
-      loadSettingsPolicy(policyFilePath(args, manifest.settingsPolicy)),
     );
-    return finalizeReport({ ...emptyReport("check"), presence, guards, settings });
   }
 
   if (args.command !== "merge") {
@@ -1584,15 +1586,15 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
     unresolved: merged.unresolved,
     cleanMerges: merged.cleanMerges,
     conflictMarkers: merged.conflictMarkers,
+    install: merged.install,
     notes: merged.notes,
   };
   if (merged.worktree === null) return finalizeReport(report);
-  const checked = attachChecks(
+  const checked = applyRepoChecks(
     report,
     merged.repo,
-    args.repo,
     manifest,
-    policyFilePath(args, manifest.settingsPolicy),
+    policy,
     resolveMergeBase(merged.repo, merged.baseSha, merged.upstreamSha),
     merged.upstreamSha,
   );

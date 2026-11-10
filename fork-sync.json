@@ -72,10 +72,6 @@
       "strategy": "ours"
     },
     {
-      "glob": "scripts/fork-sync.schema.json",
-      "strategy": "ours"
-    },
-    {
       "glob": "scripts/fork-sync.test.ts",
       "strategy": "ours"
     },

@@ -8,6 +8,8 @@ import * as NodeURL from "node:url";
 
 export const FORK_SYNC_NEEDS_REVIEW_EXIT = 3;
 export const FORK_SYNC_REPORT_VERSION = 1;
+export const SUITE_LOAD = "<suite load>";
+export const UNPARSED_TEST_OUTPUT_ID = "unparsed-test-output";
 export const SETTINGS_SOURCE_PATH = "packages/contracts/src/settings.ts";
 export const SETTINGS_SCHEMA_NAMES = ["ClientSettingsSchema", "ServerSettings"] as const;
 const FULL_COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -888,6 +890,37 @@ export function runGuardTests(
   return tests.map((testPath) => run(root, testPath));
 }
 
+function checkResultsFromGuards(guards: ReadonlyArray<GuardTestResult>): CheckResults {
+  return {
+    failures: guards
+      .filter((guard) => !guard.ok)
+      .map((guard) => ({ id: suiteLoadFailureId(guard.path), detail: guard.detail })),
+  };
+}
+
+function runGuardsAtSha(
+  repo: string,
+  sha: string,
+  tests: ReadonlyArray<string>,
+  installCommand: string | undefined,
+): ReadonlyArray<GuardTestResult> {
+  if (tests.length === 0) return [];
+  if (resolveCommit(repo, "HEAD") === sha) return runGuardTests(repo, tests);
+  const worktree = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), `${WORKTREE_PREFIX}base-`));
+  NodeFS.rmSync(worktree, { recursive: true, force: true });
+  requireGit(
+    repo,
+    ["worktree", "add", "--detach", worktree, sha],
+    `could not create base worktree at ${worktree}`,
+  );
+  try {
+    if (installCommand === "vp i") runShellCommand(worktree, installCommand);
+    return runGuardTests(worktree, tests);
+  } finally {
+    removeWorktree(repo, worktree);
+  }
+}
+
 export function parseCheckResults(value: unknown): CheckResults {
   if (!isRecord(value)) throw new ForkSyncError("check results must be an object");
   const failures = requireArray(value.failures, "failures").map((failure, index) => {
@@ -900,6 +933,17 @@ export function parseCheckResults(value: unknown): CheckResults {
       ...(typeof failure.detail === "string" ? { detail: failure.detail } : {}),
     };
   });
+  const exitCode = typeof value.exitCode === "number" ? value.exitCode : 0;
+  if (failures.length === 0 && exitCode !== 0) {
+    return {
+      failures: [
+        {
+          id: UNPARSED_TEST_OUTPUT_ID,
+          detail: `exit ${String(exitCode)} with no parsed failures`,
+        },
+      ],
+    };
+  }
   return { failures };
 }
 
@@ -919,17 +963,49 @@ export function parseTypecheckOutput(text: string): CheckResults {
   return { failures };
 }
 
-export function parseTestOutput(text: string): CheckResults {
+function testOutputLooksFailed(text: string): boolean {
+  return /^(?: FAIL | × |Failed Suites)/m.test(text) || /Test Files\s+\d+\s+failed/.test(text);
+}
+
+function recordFailure(
+  failures: CheckFailure[],
+  seen: Set<string>,
+  id: string,
+  detail: string,
+): void {
+  if (seen.has(id)) return;
+  seen.add(id);
+  failures.push({ id, detail });
+}
+
+export function suiteLoadFailureId(filePath: string): string {
+  return `${filePath} > ${SUITE_LOAD}`;
+}
+
+export function parseTestOutput(text: string, exitCode = 0): CheckResults {
   const failures: CheckFailure[] = [];
   const seen = new Set<string>();
   for (const match of text.matchAll(/^(?: FAIL | × )\s*(.+?\.test\.\w+)\s+>\s+(.+)$/gm)) {
     const file = match[1];
     const name = match[2];
     if (file === undefined || name === undefined) continue;
-    const id = `${file} > ${name}`;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    failures.push({ id, detail: match[0] });
+    recordFailure(failures, seen, `${file} > ${name}`, match[0]);
+  }
+  for (const match of text.matchAll(/^(?: FAIL | × )\s+(.+)$/gm)) {
+    const line = match[0];
+    if (/\s>\s/.test(line)) continue;
+    const rest = match[1] ?? "";
+    const file = rest.match(/\[ (\S+\.test\.\w+) \]/)?.[1] ?? rest.match(/(\S+\.test\.\w+)/)?.[1];
+    if (file === undefined) continue;
+    recordFailure(failures, seen, suiteLoadFailureId(file), line);
+  }
+  if (failures.length === 0 && (exitCode !== 0 || testOutputLooksFailed(text))) {
+    recordFailure(
+      failures,
+      seen,
+      UNPARSED_TEST_OUTPUT_ID,
+      text.trim().slice(0, 700) || `exit ${String(exitCode)} with no parsed failures`,
+    );
   }
   return { failures };
 }
@@ -991,8 +1067,11 @@ function failureLines(report: ForkSyncReport): ReadonlyArray<string> {
       if (!check.ok) lines.push(`presence ${feature.id}: ${check.detail}`);
     }
   }
+  const stillFailing = new Set((report.baseline?.stillFailing ?? []).map((failure) => failure.id));
   for (const guard of report.guards) {
-    if (!guard.ok) lines.push(`guard ${guard.path}: ${guard.detail.split("\n")[0] ?? "failed"}`);
+    if (!guard.ok && !stillFailing.has(suiteLoadFailureId(guard.path))) {
+      lines.push(`guard ${guard.path}: ${guard.detail.split("\n")[0] ?? "failed"}`);
+    }
   }
   for (const change of report.settings?.changes ?? []) {
     if (change.blocking) {
@@ -1002,6 +1081,9 @@ function failureLines(report: ForkSyncReport): ReadonlyArray<string> {
   for (const path of report.conflictMarkers) lines.push(`conflict-marker ${path}`);
   for (const failure of report.baseline?.newFailures ?? []) {
     lines.push(`baseline ${failure.id}`);
+  }
+  for (const failure of report.baseline?.stillFailing ?? []) {
+    if (failure.id === UNPARSED_TEST_OUTPUT_ID) lines.push(`baseline ${failure.id}`);
   }
   return lines;
 }
@@ -1598,16 +1680,32 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
     resolveMergeBase(merged.repo, merged.baseSha, merged.upstreamSha),
     merged.upstreamSha,
   );
-  if (args.mainResults !== undefined && args.syncResults !== undefined) {
-    return finalizeReport({
-      ...checked,
-      baseline: compareBaselines(
-        loadBaselineFile(args.mainResults),
-        loadBaselineFile(args.syncResults),
-      ),
-    });
+  let baseline: BaselineComparison | null = null;
+  if (checked.install?.status === "ok") {
+    const mainGuards = runGuardsAtSha(
+      args.repo,
+      merged.baseSha,
+      manifest.guardTests,
+      firstMatchingRule(manifest.conflictRules, "pnpm-lock.yaml")?.command,
+    );
+    baseline = compareBaselines(
+      checkResultsFromGuards(mainGuards),
+      checkResultsFromGuards(checked.guards),
+    );
   }
-  return checked;
+  if (args.mainResults !== undefined && args.syncResults !== undefined) {
+    const files = compareBaselines(
+      loadBaselineFile(args.mainResults),
+      loadBaselineFile(args.syncResults),
+    );
+    baseline = {
+      newFailures: [...(baseline?.newFailures ?? []), ...files.newFailures],
+      stillFailing: [...(baseline?.stillFailing ?? []), ...files.stillFailing],
+      resolved: [...(baseline?.resolved ?? []), ...files.resolved],
+    };
+  }
+  if (baseline === null) return checked;
+  return finalizeReport({ ...checked, baseline });
 }
 
 export function writeReport(report: ForkSyncReport, path: string | undefined, json: boolean): void {

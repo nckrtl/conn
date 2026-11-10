@@ -22,10 +22,12 @@ import {
   matchGlob,
   mergeUpstream,
   oursRulesHittingRef,
+  parseCheckResults,
   parseForkSyncManifest,
   parseSettingsPolicy,
   parseTestOutput,
   parseTypecheckOutput,
+  suiteLoadFailureId,
   runGuardTests,
   runPresenceChecks,
   runPresenceChecksAtRef,
@@ -727,6 +729,51 @@ describe("fork-sync baseline", () => {
       },
     ]);
   });
+
+  it("records a vitest suite-load TypeError as a suite-load failure", () => {
+    const output = `note: You are running \`vp test\` as a Vite+ built-in command.
+
+ RUN  v5.0.5 /tmp/conn-main-desktop-baseline
+
+stdout | src/window/DesktopWindow.test.ts
+Downloading Electron binary...
+
+ ❯ |@t3tools/desktop| src/window/DesktopWindow.test.ts (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |@t3tools/desktop| src/window/DesktopWindow.test.ts [ apps/desktop/src/window/DesktopWindow.test.ts ]
+TypeError: Cannot read properties of undefined (reading 'config')
+ ❯ src/window/DesktopWindow.test.ts:485:1
+    483| const captureTwo = DesktopSnapShotId.make("22222222-2222-4222-8222-222…
+    484|
+    485| describe("DesktopWindow", () => {
+       | ^
+
+ Test Files  1 failed (1)
+      Tests  no tests
+`;
+    expect(parseTestOutput(output).failures).toEqual([
+      {
+        id: suiteLoadFailureId("apps/desktop/src/window/DesktopWindow.test.ts"),
+        detail:
+          " FAIL  |@t3tools/desktop| src/window/DesktopWindow.test.ts [ apps/desktop/src/window/DesktopWindow.test.ts ]",
+      },
+    ]);
+  });
+
+  it("treats unparsed output and a non-zero exit with nothing parsed as failures", () => {
+    expect(parseTestOutput("totally inscrutable tester noise\n", 1).failures).toEqual([
+      expect.objectContaining({ id: "unparsed-test-output" }),
+    ]);
+    expect(parseTestOutput("", 1).failures).toEqual([
+      expect.objectContaining({ id: "unparsed-test-output" }),
+    ]);
+    expect(parseTestOutput("all green\n", 0).failures).toEqual([]);
+    expect(parseCheckResults({ failures: [], exitCode: 1 }).failures).toEqual([
+      expect.objectContaining({ id: "unparsed-test-output" }),
+    ]);
+  });
 });
 
 describe("fork-sync CLI", () => {
@@ -762,6 +809,10 @@ describe("fork-sync CLI", () => {
           blocking: boolean;
           changes: Array<{ change: { kind: string; key: string }; blocking: boolean }>;
         };
+        baseline: {
+          stillFailing: Array<{ id: string }>;
+          newFailures: Array<{ id: string }>;
+        } | null;
       };
       expect(report.unresolved).toEqual([
         expect.objectContaining({ path: "mixed.ts", reason: "no_rule" }),
@@ -777,6 +828,58 @@ describe("fork-sync CLI", () => {
       expect(report.branch.committed).toBe(false);
       expect(report.branch.tip).toBeNull();
       expect(report.settings.blocking).toBe(false);
+      expect(report.baseline?.stillFailing).toEqual([]);
+      expect(report.baseline?.newFailures).toEqual([]);
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("keeps a guard that already fails on main as stillFailing, not a guard failure", () => {
+    const fixture = createMergeFixture();
+    try {
+      write(fixture.repo, "fail.mjs", "process.exit(1);\n");
+      write(
+        fixture.repo,
+        "fork-sync.json",
+        `${JSON.stringify(toyManifest({ guardTests: ["guard.mjs", "fail.mjs"] }), null, 2)}\n`,
+      );
+      requireGit(fixture.repo, ["add", "fail.mjs", "fork-sync.json"]);
+      requireGit(fixture.repo, ["commit", "-m", "failing guard"]);
+      const result = runCli(
+        [
+          "merge",
+          "--repo",
+          fixture.repo,
+          "--upstream",
+          fixture.upstreamSha,
+          "--base",
+          "main",
+          "--branch",
+          "sync/still-failing",
+          "--worktree",
+          fixture.worktree(),
+          "--json",
+        ],
+        fixture.repo,
+      );
+      expect(result.status, result.stderr).toBe(FORK_SYNC_NEEDS_REVIEW_EXIT);
+      const report = JSON.parse(result.stdout) as {
+        guards: Array<{ path: string; ok: boolean }>;
+        failures: string[];
+        baseline: {
+          stillFailing: Array<{ id: string }>;
+          newFailures: Array<{ id: string }>;
+        } | null;
+      };
+      expect(report.guards).toEqual(
+        expect.arrayContaining([expect.objectContaining({ path: "fail.mjs", ok: false })]),
+      );
+      expect(report.baseline?.stillFailing).toEqual([
+        expect.objectContaining({ id: suiteLoadFailureId("fail.mjs") }),
+      ]);
+      expect(report.baseline?.newFailures).toEqual([]);
+      expect(report.failures.some((line) => line.includes("guard fail.mjs"))).toBe(false);
     } finally {
       fixture.dispose();
     }

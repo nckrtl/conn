@@ -269,7 +269,8 @@ clone record of `GET /api/v1/conn/environments` carries `project_id`, `project_n
 (`orbitInstanceFromEnvironment`; both ids or no facts, missing or mistyped fields read as
 null). The desktop keeps the last list's facts in localStorage, so the row shows right after
 start (`useOrbitInstance`). The same URL is the thread's preview URL when it has no Orbit
-workspace (`useOrbitThreadUrl`). The phone has no machine row, so it shows none of this.
+workspace (`useOrbitThreadUrl`). The phone has no thread details panel like the desktop's, so it shows none of this; its
+thread lists keep the environment label.
 
 The fallback, for a fork server outside Orbit mode: the server reads `/etc/orbit/instance` at
 start (`apps/server/src/orbit/OrbitInstanceFile.ts`). Orbit writes it: `KEY=value` lines, `#`

@@ -1,6 +1,7 @@
 import {
   EMPTY_ORBIT_ENVIRONMENT_STATE,
   isFinalPairingError,
+  orbitInstanceFromEnvironment,
   orbitInstancesByEnvironment,
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
@@ -57,8 +58,19 @@ function parseOrbitInstances(value: unknown): Record<string, OrbitInstanceDescri
   const result: Record<string, OrbitInstanceDescriptor> = {};
   if (typeof value !== "object" || value === null) return result;
   for (const [environmentId, entry] of Object.entries(value)) {
-    const descriptor = decodeOrbitInstance(entry);
-    if (descriptor._tag === "Some") result[environmentId] = descriptor.value;
+    const decoded = decodeOrbitInstance(entry);
+    if (decoded._tag === "None") continue;
+    // The Gateway's own rule again, so a stored URL other than http(s) never comes back.
+    const { url, ...facts } = decoded.value;
+    const descriptor = orbitInstanceFromEnvironment({
+      ...facts,
+      projectSlug: facts.projectSlug ?? null,
+      projectName: facts.projectName ?? null,
+      instanceName: facts.instanceName ?? null,
+      nodeName: facts.nodeName ?? null,
+      instanceUrl: url ?? null,
+    });
+    if (descriptor) result[environmentId] = descriptor;
   }
   return result;
 }

@@ -70,6 +70,11 @@ export function planEnvironmentProvider(input: {
   readonly state: OrbitEnvironmentState;
   /** Conn: saved Orbit servers whose session is known to lack `access:write`. */
   readonly lacksAccess?: readonly string[];
+  /**
+   * Conn: Instances whose server a thread start pairs with itself. Their servers are left alone, so
+   * the device pairs with each once.
+   */
+  readonly heldInstanceIds?: readonly number[];
   readonly now?: number;
 }): EnvironmentProviderPlan {
   const { saved, state } = input;
@@ -110,10 +115,14 @@ export function planEnvironmentProvider(input: {
     }
   }
   const lacksAccess = new Set(input.lacksAccess ?? []);
+  const held = new Set(input.heldInstanceIds ?? []);
   const now = input.now ?? 0;
   const pair = input.orbit
     .filter((environment) => {
       if (environment.status !== "registered") return false;
+      if (environment.instanceId !== null && held.has(environment.instanceId)) return false;
+      // An asleep Instance's server cannot mint a pairing link.
+      if (environment.powerState === "stopped") return false;
       const id = environment.environmentId;
       if (!savedIds.has(id)) {
         const refusedAt = state.pairRefusedAt?.[id];

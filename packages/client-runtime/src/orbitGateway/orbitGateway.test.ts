@@ -338,6 +338,7 @@ describe("createOrbitGatewayClient", () => {
         "GET /environments/env-spike/pairings/1851",
       ]);
       expect(waits).toEqual([2000, 2000]);
+      expect(requests[0]?.timeoutMs).toBe(60_000);
     });
 
     it("still accepts a Gateway that answers with the link at once", async () => {
@@ -411,6 +412,63 @@ describe("createOrbitGatewayClient", () => {
       await expect(client.pair("env-spike")).rejects.toMatchObject({
         code: "gateway.response_invalid",
       });
+    });
+  });
+
+  it("reads a server's Instance and power state, the thread Projects, and an Operation", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    const bodies: Record<string, unknown> = {
+      "GET /environments": [
+        {
+          environment_id: "env-clone",
+          label: "mealou / fix",
+          url: "http://10.44.0.7:3800",
+          status: "registered",
+          instance_id: 41,
+          power_state: "stopped",
+        },
+        { environment_id: "env-beast", label: "beast", url: "http://x", status: "registered" },
+      ],
+      "GET /projects": [{ id: 3, slug: "mealou", name: "Mealou", node_id: 7, node_name: "beast" }],
+      "POST /projects/3/instances": {
+        id: 100,
+        kind: "instance.create",
+        status: "queued",
+        target_id: 41,
+        error_code: null,
+        poll_after_seconds: 2,
+      },
+    };
+    const client = createOrbitGatewayClient(async (request) => {
+      requests.push(request);
+      return {
+        status: 200,
+        body: JSON.stringify({ data: bodies[`${request.method} ${request.path}`] }),
+      };
+    });
+
+    const servers = await client.environments();
+    expect(servers.map(({ instanceId, powerState }) => ({ instanceId, powerState }))).toEqual([
+      { instanceId: 41, powerState: "stopped" },
+      { instanceId: null, powerState: null },
+    ]);
+    await expect(client.projects()).resolves.toEqual([
+      { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" },
+    ]);
+    await expect(client.createThreadInstance(3, "fix-k3j9", "key-1")).resolves.toEqual({
+      id: 100,
+      kind: "instance.create",
+      status: "queued",
+      targetId: 41,
+      errorCode: null,
+      pollAfterSeconds: 2,
+    });
+    expect(requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/projects/3/instances",
+      body: { name: "fix-k3j9" },
+      timeoutMs: 60_000,
+      idempotencyKey: "key-1",
     });
   });
 });

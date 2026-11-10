@@ -16,6 +16,10 @@ export interface OrbitGatewayRequest {
   /** A path below `/api/v1/conn`, such as `/me`. */
   readonly path: string;
   readonly body?: unknown;
+  /** Overrides the transport's default limit for a call the Gateway answers slowly. */
+  readonly timeoutMs?: number;
+  /** Sent as `Idempotency-Key`: the same key and input return the same Operation. */
+  readonly idempotencyKey?: string;
 }
 
 export interface OrbitGatewayResponse {
@@ -97,7 +101,45 @@ export interface OrbitGatewayEnvironment {
   /** When the server last registered. A refused pairing waits for the next registration. */
   readonly registeredAt: string | null;
   readonly status: "registered" | "session_expired";
+  /** The container Instance whose T3 server this is, or null for a server that registered itself. */
+  readonly instanceId: number | null;
+  /** The Instance container's power state; `stopped` means the Instance is asleep. */
+  readonly powerState: "running" | "stopped" | null;
 }
+
+/** A Project a thread can start in: its default Instance runs in a container on `nodeName`. */
+export interface OrbitGatewayProject {
+  readonly id: number;
+  readonly slug: string;
+  readonly name: string;
+  readonly nodeId: number;
+  readonly nodeName: string;
+}
+
+/** The fields of an Orbit Operation that Conn follows. */
+export interface OrbitGatewayOperation {
+  readonly id: number;
+  readonly kind: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "waiting"
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | "interrupted";
+  readonly targetId: number;
+  readonly errorCode: string | null;
+  /** Seconds to wait before the next read, or null once the Operation ended. */
+  readonly pollAfterSeconds: number | null;
+}
+
+export const OPERATION_TERMINAL_STATUSES: ReadonlySet<OrbitGatewayOperation["status"]> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
 
 export interface OrbitGatewayPairing {
   readonly environmentId: string;
@@ -131,14 +173,44 @@ export interface OrbitGatewayClient {
    * Operation; this follows the Operation and reads the link, which the Gateway hands out once.
    */
   readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
+  /** The Projects a thread can start in. */
+  readonly projects: () => Promise<readonly OrbitGatewayProject[]>;
+  /**
+   * Admits the clone a thread starts in; the Operation's `targetId` is the new Instance. The
+   * Gateway admits it slowly, so the call has a 60 s limit; the same key returns the same Operation.
+   */
+  readonly createThreadInstance: (
+    projectId: number,
+    name: string,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayOperation>;
+  /** Reads an Operation this device started through the Conn layer. */
+  readonly operation: (operationId: number) => Promise<OrbitGatewayOperation>;
+  /**
+   * Admits a pairing with the server; the Operation's `targetId` is the pairing. Admission copies
+   * a secret to Swamp, so it has the create's limit; the same key returns the same Operation.
+   */
+  readonly startPairing: (
+    environmentId: string,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayOperation>;
+  /** Reads the link of a pairing whose Operation succeeded. The Gateway hands it out once. */
+  readonly readPairing: (environmentId: string, pairingId: number) => Promise<OrbitGatewayPairing>;
 }
 
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 
 /** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
-const OPERATION_TIMEOUT_MS = 60_000;
+export const OPERATION_TIMEOUT_MS = 60_000;
+/** The Gateway copies secrets to Swamp before it admits a create or a pairing: 19-27 s today. */
+const ADMISSION_TIMEOUT_MS = 60_000;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 15_000;
+
+/** The wait before the next read of an Operation: the Gateway's interval, kept between 0.5 and 15 s. */
+export function operationPollDelayMs(pollAfterSeconds: number | null): number {
+  return Math.min(Math.max((pollAfterSeconds ?? 0) * 1000, MIN_POLL_MS), MAX_POLL_MS);
+}
 /** Operation statuses that are not final yet; every other status ends the Operation. */
 const OPEN_OPERATION_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "waiting"]);
 
@@ -226,9 +298,9 @@ export function createOrbitGatewayClient(
           details: { operation_id: operation.id },
         });
       }
-      const after =
-        typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds * 1000 : 0;
-      const wait = Math.min(Math.max(after, MIN_POLL_MS), MAX_POLL_MS);
+      const wait = operationPollDelayMs(
+        typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds : null,
+      );
       await sleep(Math.max(Math.min(wait, deadline - now()), 0));
       operation = record(await call({ method: "GET", path: `/operations/${operation.id}` }));
     }
@@ -272,27 +344,110 @@ export function createOrbitGatewayClient(
       list(await call({ method: "GET", path: "/environments" }), "/environments", environment),
     pair: async (environmentId) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
-      let data = record(await call({ method: "POST", path }));
+      let data = record(await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS }));
       // The Gateway mints the link in an Operation (202). Follow it, then read the link once.
       if (typeof data?.pairing_url !== "string") {
         const result = record((await settle(data, path)).result);
         if (typeof result?.pairing_id !== "number") throw invalid(path);
         data = record(await call({ method: "GET", path: `${path}/${result.pairing_id}` }));
       }
-      const pairing = record(data?.pairing);
-      if (
-        typeof data?.pairing_url !== "string" ||
-        typeof pairing?.environment_id !== "string" ||
-        typeof pairing.expires_at !== "string"
-      ) {
-        throw invalid(path);
-      }
-      return {
-        environmentId: pairing.environment_id,
-        pairingUrl: data.pairing_url,
-        expiresAt: pairing.expires_at,
-      };
+      return issuedPairing(data, path);
     },
+    projects: async () =>
+      list(await call({ method: "GET", path: "/projects" }), "/projects", project),
+    createThreadInstance: async (projectId, name, idempotencyKey) => {
+      const path = `/projects/${projectId}/instances`;
+      return operation(
+        await call({
+          method: "POST",
+          path,
+          body: { name },
+          timeoutMs: ADMISSION_TIMEOUT_MS,
+          idempotencyKey,
+        }),
+        path,
+      );
+    },
+    operation: async (operationId) => {
+      const path = `/operations/${operationId}`;
+      return operation(await call({ method: "GET", path }), path);
+    },
+    startPairing: async (environmentId, idempotencyKey) => {
+      const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
+      return operation(
+        await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS, idempotencyKey }),
+        path,
+      );
+    },
+    readPairing: async (environmentId, pairingId) => {
+      const path = `/environments/${encodeURIComponent(environmentId)}/pairings/${pairingId}`;
+      return issuedPairing(await call({ method: "GET", path }), path);
+    },
+  };
+}
+
+function issuedPairing(value: unknown, path: string): OrbitGatewayPairing {
+  const data = record(value);
+  const pairing = record(data?.pairing);
+  if (
+    typeof data?.pairing_url !== "string" ||
+    typeof pairing?.environment_id !== "string" ||
+    typeof pairing.expires_at !== "string"
+  ) {
+    throw invalid(path);
+  }
+  return {
+    environmentId: pairing.environment_id,
+    pairingUrl: data.pairing_url,
+    expiresAt: pairing.expires_at,
+  };
+}
+
+const OPERATION_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "waiting",
+  ...OPERATION_TERMINAL_STATUSES,
+]);
+
+function operation(value: unknown, path: string): OrbitGatewayOperation {
+  const data = record(value);
+  if (
+    typeof data?.id !== "number" ||
+    typeof data.kind !== "string" ||
+    typeof data.status !== "string" ||
+    !OPERATION_STATUSES.has(data.status) ||
+    typeof data.target_id !== "number"
+  ) {
+    throw invalid(path);
+  }
+  return {
+    id: data.id,
+    kind: data.kind,
+    status: data.status as OrbitGatewayOperation["status"],
+    targetId: data.target_id,
+    errorCode: typeof data.error_code === "string" ? data.error_code : null,
+    pollAfterSeconds: typeof data.poll_after_seconds === "number" ? data.poll_after_seconds : null,
+  };
+}
+
+function project(value: unknown, path: string): OrbitGatewayProject {
+  const data = record(value);
+  if (
+    typeof data?.id !== "number" ||
+    typeof data.slug !== "string" ||
+    typeof data.name !== "string" ||
+    typeof data.node_id !== "number" ||
+    typeof data.node_name !== "string"
+  ) {
+    throw invalid(path);
+  }
+  return {
+    id: data.id,
+    slug: data.slug,
+    name: data.name,
+    nodeId: data.node_id,
+    nodeName: data.node_name,
   };
 }
 
@@ -488,5 +643,8 @@ function environment(value: unknown, path: string): OrbitGatewayEnvironment {
     registeredBy: typeof data.registered_by === "string" ? data.registered_by : null,
     registeredAt: typeof data.registered_at === "string" ? data.registered_at : null,
     status: data.status,
+    instanceId: typeof data.instance_id === "number" ? data.instance_id : null,
+    powerState:
+      data.power_state === "running" || data.power_state === "stopped" ? data.power_state : null,
   };
 }

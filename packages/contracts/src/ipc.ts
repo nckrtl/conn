@@ -1268,6 +1268,9 @@ export interface DesktopOrbitGatewayRequest {
   readonly path: string;
   /** A JSON body, or null. */
   readonly body: string | null;
+  /** Overrides the default 15 s limit, up to 120 s. */
+  readonly timeoutMs?: number;
+  readonly idempotencyKey?: string;
 }
 
 export interface DesktopOrbitGatewayResponse {

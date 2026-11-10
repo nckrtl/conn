@@ -218,11 +218,27 @@ isOrbitProjectFolder}`, `orbitProjectFolder={isOrbitProjectFolder}` and the
 effective Orbit mode to `BranchToolbar`. Otherwise the composer hides the
 Orbit instance selector for this kind of project.
 
+In Orbit mode the desktop sidebar header has a button that starts a thread in an Orbit
+Project (Orbit's `docs/cli/instance/container/thread.mmd`). Orbit creates a clone of the
+Project's default Instance, Conn pairs with the clone's T3 server once, and launches a new
+thread with the first message in its `/srv/workspace` project. Each start is saved in
+localStorage after every step, with a fixed launch command id, so a reload resumes it and a
+repeated launch finishes the first one. The Gateway admits a create or a pairing only after it
+copies secrets to Swamp (19-27 s), so those two calls get a 60 s limit instead of the desktop's
+15 s default, and carry a saved `Idempotency-Key`. A lost answer (none, or a proxy's 502 or
+504 without the Gateway's error envelope) repeats the same request with a clamped back-off, so
+the Gateway returns the Operation it may already have admitted. A Gateway error stops the start. Only the main window runs starts. A row can be
+dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
+start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
+is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
+
 Sources:
 
 - `apps/web/src/orbit/*`.
 - `apps/web/src/components/settings/ConnectionsSettings.tsx`.
 - `packages/client-runtime/src/orbitGateway/environmentProvider.ts`.
+- `packages/client-runtime/src/orbitGateway/threadStart.ts`.
+- `apps/web/src/components/sidebar/SidebarThreadHeader.tsx` (`orbitThread` slot).
 
 ### Orbit profile sync
 

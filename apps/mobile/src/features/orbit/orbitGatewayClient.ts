@@ -10,6 +10,9 @@ export const orbitGatewayClient = createOrbitGatewayClient(async (request) => {
     headers: {
       Accept: "application/json",
       ...(request.body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(request.idempotencyKey === undefined
+        ? {}
+        : { "Idempotency-Key": request.idempotencyKey }),
     },
     ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
   });

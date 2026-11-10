@@ -21,6 +21,7 @@ import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readEnvironmentLacksScope } from "../state/session";
+import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
@@ -58,6 +59,18 @@ export function setEnvironmentProvider(provider: EnvironmentProvider): void {
   useEnvironmentProvider.setState({ provider });
 }
 
+/** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
+export function recordOrbitPaired(environmentId: string): void {
+  useEnvironmentProvider.setState(({ state }) => ({ state: recordPaired(state, environmentId) }));
+}
+
+/** Saves a reconcile run's state, keeping the pairings a thread start recorded during the run. */
+function saveReconciledState(next: OrbitEnvironmentState): void {
+  useEnvironmentProvider.setState(({ state: current }) => ({
+    state: current.pairedByOrbit.reduce(recordPaired, next),
+  }));
+}
+
 /**
  * Brings the saved environments in line with the provider: Orbit mode turns the default
  * environments off and pairs the Gateway's servers; Default mode undoes both. The desktop's own
@@ -84,7 +97,15 @@ export async function reconcileEnvironmentProvider(
     )
     .map((entry) => entry.environmentId);
   const now = Date.now();
-  const plan = planEnvironmentProvider({ provider, saved, orbit, state, lacksAccess, now });
+  const plan = planEnvironmentProvider({
+    provider,
+    saved,
+    orbit,
+    state,
+    lacksAccess,
+    heldInstanceIds: heldOrbitInstanceIds(),
+    now,
+  });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
 
   const setEnabled = (environmentId: string, enabled: boolean) =>
@@ -105,7 +126,7 @@ export async function reconcileEnvironmentProvider(
       ? recordAccessPairing(next, environmentId, now)
       : recordPairingAttempt(next, environmentId, now);
     // Saved before the attempt, so a reload during the pairing still backs off.
-    useEnvironmentProvider.setState({ state: next });
+    saveReconciledState(next);
     try {
       const pairing = await client.pair(environmentId);
       const result = await runAtomCommand(
@@ -123,6 +144,6 @@ export async function reconcileEnvironmentProvider(
       }
     }
   }
-  useEnvironmentProvider.setState({ state: next });
+  saveReconciledState(next);
   return orbit;
 }

@@ -10,13 +10,20 @@ import { ORBIT_GATEWAY_SEND_CHANNEL } from "../channels.ts";
 // main process because the Gateway refuses requests that carry a page `Origin`, and Chromium's
 // network stack trusts the Orbit root CA from the keychain. Only paths below /api/v1/conn are sent.
 
-const TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 15_000;
 const CONN_PREFIX = "/api/v1/conn";
 
 const OrbitGatewayRequest = Schema.Struct({
   method: Schema.Literals(["GET", "POST", "PUT", "PATCH"]),
   path: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.%-]{0,512}$/)),
   body: Schema.NullOr(Schema.String.check(Schema.isMaxLength(2_000_000))),
+  /** A longer limit for a call the Gateway answers slowly, such as a clone's create. */
+  timeoutMs: Schema.optional(
+    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1_000), Schema.isLessThanOrEqualTo(120_000)),
+  ),
+  idempotencyKey: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[A-Za-z0-9:._-]{1,128}$/)),
+  ),
 });
 
 const OrbitGatewayResponse = Schema.Struct({
@@ -66,9 +73,12 @@ async function send(
       headers: {
         Accept: "application/json",
         ...(request.body === null ? {} : { "Content-Type": "application/json" }),
+        ...(request.idempotencyKey === undefined
+          ? {}
+          : { "Idempotency-Key": request.idempotencyKey }),
       },
       body: request.body,
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(request.timeoutMs ?? DEFAULT_TIMEOUT_MS),
       bypassCustomProtocolHandlers: true,
     });
     return { error: null, status: response.status, body: await response.text() };

@@ -15,7 +15,11 @@ import {
   type OrbitEnvironmentState,
 } from "./environmentProvider.ts";
 
-const orbit = (id: string, status: OrbitGatewayEnvironment["status"] = "registered") =>
+const orbit = (
+  id: string,
+  status: OrbitGatewayEnvironment["status"] = "registered",
+  instanceId: number | null = null,
+) =>
   ({
     environmentId: id,
     label: id,
@@ -24,6 +28,8 @@ const orbit = (id: string, status: OrbitGatewayEnvironment["status"] = "register
     registeredBy: null,
     registeredAt: "2026-11-09T14:48:58+00:00",
     status,
+    instanceId,
+    powerState: instanceId === null ? null : "running",
   }) as OrbitGatewayEnvironment;
 const saved = (id: string, enabled = true): ManagedEnvironment => ({ environmentId: id, enabled });
 
@@ -57,6 +63,17 @@ describe("planEnvironmentProvider", () => {
     expect(plan.pair).toEqual(["mini"]);
     // An environment the user had already switched off is not Orbit's to switch back on.
     expect(plan.state.disabledByOrbit).toEqual(["laptop"]);
+  });
+
+  it("leaves the server of an Instance that a thread start pairs with itself", () => {
+    const plan = planEnvironmentProvider({
+      provider: "orbit",
+      saved: [],
+      orbit: [orbit("clone", "registered", 41), orbit("other-clone", "registered", 42)],
+      state: EMPTY_ORBIT_ENVIRONMENT_STATE,
+      heldInstanceIds: [41],
+    });
+    expect(plan.pair).toEqual(["other-clone"]);
   });
 
   it("changes nothing in Orbit mode while the Gateway cannot be read", () => {

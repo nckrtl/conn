@@ -408,9 +408,11 @@ export function OrbitEnvironmentSections() {
                   <span className="text-ui text-muted-foreground">
                     {environment.status === "session_expired"
                       ? "Registration expired"
-                      : connected.has(environment.environmentId)
-                        ? "Paired"
-                        : "Pairing…"}
+                      : environment.powerState === "stopped"
+                        ? "Asleep"
+                        : connected.has(environment.environmentId)
+                          ? "Paired"
+                          : "Pairing…"}
                   </span>
                 }
               />

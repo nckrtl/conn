@@ -216,11 +216,21 @@ isOrbitProjectFolder}`, `orbitProjectFolder={isOrbitProjectFolder}` and the
 effective Orbit mode to `BranchToolbar`. Otherwise the composer hides the
 Orbit instance selector for this kind of project.
 
+In Orbit mode the desktop sidebar header has a button that starts a thread in an Orbit
+Project (Orbit's `docs/cli/instance/container/thread.mmd`). Orbit creates a clone of the
+Project's default Instance, Conn pairs with the clone's T3 server once, and queues the first
+message in a new thread of its `/srv/workspace` project. Each start is saved in localStorage
+until its message is sent, so a reload resumes it; only the main window runs starts. The
+environment sync skips a clone a start is pairing with. Settings › Connections shows a clone
+whose container is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
+
 Sources:
 
 - `apps/web/src/orbit/*`.
 - `apps/web/src/components/settings/ConnectionsSettings.tsx`.
 - `packages/client-runtime/src/orbitGateway/environmentProvider.ts`.
+- `packages/client-runtime/src/orbitGateway/threadStart.ts`.
+- `apps/web/src/components/sidebar/SidebarThreadHeader.tsx` (`orbitThread` slot).
 
 ### Orbit profile sync
 

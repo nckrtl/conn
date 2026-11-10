@@ -16,6 +16,8 @@ export interface SidebarThreadHeaderProps {
   searchFieldRef?: RefObject<HTMLDivElement | null>;
   hasProjects: boolean;
   projectScope: ReactNode;
+  /** Conn: the button that starts a thread in an Orbit Project. */
+  orbitThread?: ReactNode;
   onNewProject: () => void;
   onNewThread: (event: ReactMouseEvent) => void;
   newThreadDisabled: boolean;
@@ -36,6 +38,7 @@ export function SidebarThreadHeader({
   searchFieldRef,
   hasProjects,
   projectScope,
+  orbitThread,
   onNewProject,
   onNewThread,
   newThreadDisabled,
@@ -110,6 +113,7 @@ export function SidebarThreadHeader({
             </SidebarHeaderIconButton>
           </>
         ) : null}
+        {orbitThread}
         <SidebarHeaderIconButton
           label="New thread"
           tooltip={

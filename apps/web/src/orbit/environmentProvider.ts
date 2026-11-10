@@ -21,6 +21,7 @@ import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readEnvironmentLacksScope } from "../state/session";
+import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
@@ -58,6 +59,11 @@ export function setEnvironmentProvider(provider: EnvironmentProvider): void {
   useEnvironmentProvider.setState({ provider });
 }
 
+/** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
+export function recordOrbitPaired(environmentId: string): void {
+  useEnvironmentProvider.setState(({ state }) => ({ state: recordPaired(state, environmentId) }));
+}
+
 /**
  * Brings the saved environments in line with the provider: Orbit mode turns the default
  * environments off and pairs the Gateway's servers; Default mode undoes both. The desktop's own
@@ -84,7 +90,15 @@ export async function reconcileEnvironmentProvider(
     )
     .map((entry) => entry.environmentId);
   const now = Date.now();
-  const plan = planEnvironmentProvider({ provider, saved, orbit, state, lacksAccess, now });
+  const plan = planEnvironmentProvider({
+    provider,
+    saved,
+    orbit,
+    state,
+    lacksAccess,
+    heldInstanceIds: heldOrbitInstanceIds(),
+    now,
+  });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
 
   const setEnabled = (environmentId: string, enabled: boolean) =>
@@ -123,6 +137,9 @@ export async function reconcileEnvironmentProvider(
       }
     }
   }
-  useEnvironmentProvider.setState({ state: next });
+  // A thread start may have recorded its own pairing while this run paired the others.
+  useEnvironmentProvider.setState(({ state: current }) => ({
+    state: current.pairedByOrbit.reduce(recordPaired, next),
+  }));
   return orbit;
 }

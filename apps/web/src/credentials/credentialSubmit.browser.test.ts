@@ -1,14 +1,14 @@
-// @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { credentialSubmitScript, type CredentialSubmitField } from "./credentialSubmit";
 
 const submit = (field: CredentialSubmitField, origin = location.origin, selection = "choice-1") =>
-  // oxlint-disable-next-line no-eval
+  // oxlint-disable-next-line no-eval -- runs the script string a guest page evaluates
   (0, eval)(credentialSubmitScript(field, origin, selection));
-let submissions: number;
-beforeEach(() => {
+let submissions = 0;
+// A visible sign-in form whose submissions are counted instead of navigating the test page.
+const loginPage = (): Disposable => {
   submissions = 0;
-  vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+  const spy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
     x: 0,
     y: 0,
     width: 100,
@@ -25,17 +25,20 @@ beforeEach(() => {
     event.preventDefault();
     submissions++;
   });
-});
-afterEach(() => {
-  vi.restoreAllMocks();
-  document.body.innerHTML = "";
-});
+  return {
+    [Symbol.dispose]() {
+      spy.mockRestore();
+      document.body.innerHTML = "";
+    },
+  };
+};
 
 describe("selected login step submission", () => {
   it.each([
     "javascript:throw new Error('React form unexpectedly submitted.')",
     "javascript:throw new Error('A React form was unexpectedly submitted. If you called form.submit() manually, consider using form.requestSubmit() instead. If you\\'re trying to use event.stopPropagation() in a submit event handler, consider also calling event.preventDefault().')",
   ])("clicks React-managed login forms with action %s", (action) => {
+    using _page = loginPage();
     document.querySelector("form")!.setAttribute("action", action);
     expect(submit("username")).toBe("submitted");
     expect(submissions).toBe(1);
@@ -45,6 +48,7 @@ describe("selected login step submission", () => {
     expect(submissions).toBe(2);
   });
   it("submits a filled OTP once", () => {
+    using _page = loginPage();
     const input = document.querySelector("input")!;
     input.type = "text";
     input.autocomplete = "one-time-code";
@@ -54,6 +58,7 @@ describe("selected login step submission", () => {
     expect(submissions).toBe(1);
   });
   it("rejects arbitrary script actions and submitter destination overrides", () => {
+    using _page = loginPage();
     const form = document.querySelector("form")!;
     form.action = "javascript:alert('unexpected')";
     expect(submit("username")).toBe("unavailable");
@@ -67,6 +72,7 @@ describe("selected login step submission", () => {
     expect(submissions).toBe(0);
   });
   it("submits the username once, allowing a new explicit selection to retry", () => {
+    using _page = loginPage();
     expect(submit("username")).toBe("submitted");
     expect(submit("username")).toBe("unavailable");
     expect(submissions).toBe(1);
@@ -74,6 +80,7 @@ describe("selected login step submission", () => {
     expect(submissions).toBe(2);
   });
   it("waits for the password on a combined form and then submits", () => {
+    using _page = loginPage();
     document
       .querySelector("form")!
       .insertAdjacentHTML(
@@ -87,6 +94,7 @@ describe("selected login step submission", () => {
     expect(submissions).toBe(1);
   });
   it("waits for a disabled button and preserves validation", () => {
+    using _page = loginPage();
     const button = document.querySelector("button")!;
     button.disabled = true;
     expect(submit("username")).toBe("waiting");
@@ -97,6 +105,7 @@ describe("selected login step submission", () => {
     expect(submit("username")).toBe("submitted");
   });
   it("does not submit across origins, on registration forms, or with ambiguous actions", () => {
+    using _page = loginPage();
     expect(submit("username", "https://other.example")).toBe("unavailable");
     document.querySelector("form")!.action = "https://other.example";
     expect(submit("username")).toBe("unavailable");

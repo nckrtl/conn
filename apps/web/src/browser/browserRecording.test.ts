@@ -79,7 +79,6 @@ vi.mock("~/hooks/useSettings", () => ({
 }));
 
 import {
-  BrowserRecordingConflictError,
   findActiveBrowserRecordingRuntimeTabId,
   readActiveBrowserRecordingTabIds,
   readActiveBrowserRecordingTargets,

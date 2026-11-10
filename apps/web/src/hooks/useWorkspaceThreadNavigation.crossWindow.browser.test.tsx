@@ -1,44 +1,48 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import { act, render, stubGlobal } from "../../test/render";
 
 // Two desktop windows share the workspace store through localStorage. This
 // window is the main one; the test plays the second window, which shows the
 // same workspace on another thread and writes its own last thread back.
-const fake = vi.hoisted(() => {
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  const items = new Map<string, string>();
-  const listeners = new Set<(event: unknown) => void>();
+function otherWindow() {
+  window.localStorage.clear();
+  // Writes the other window makes skip the spy, so `writes` holds only this window's.
+  const setItem = Storage.prototype.setItem;
   const writes: string[] = [];
-  const localStorage = {
-    getItem: (key: string) => items.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      writes.push(key);
-      items.set(key, value);
-    },
-    removeItem: (key: string) => void items.delete(key),
-  };
+  const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+    this: Storage,
+    key,
+    value,
+  ) {
+    writes.push(key);
+    setItem.call(this, key, value);
+  });
   const reportWorkspace = vi.fn(
     async (_workspace: { id: string | null; name: string | null }) => {},
   );
-  (globalThis as { window?: unknown }).window = {
-    localStorage,
-    desktopBridge: { reportWorkspace },
-    addEventListener: (type: string, listener: (event: unknown) => void) => {
-      if (type === "storage") listeners.add(listener);
-    },
-    removeEventListener: (type: string, listener: (event: unknown) => void) => {
-      if (type === "storage") listeners.delete(listener);
-    },
-  };
+  const bridge = stubGlobal("desktopBridge", { reportWorkspace });
   /** Another window writes `key`: store it, then fire `storage` here. */
   const writeFromOtherWindow = (key: string, value: string) => {
-    items.set(key, value);
-    for (const listener of listeners) listener({ storageArea: localStorage, key, newValue: value });
+    setItem.call(window.localStorage, key, value);
+    window.dispatchEvent(
+      new StorageEvent("storage", { storageArea: window.localStorage, key, newValue: value }),
+    );
   };
-  return { items, writes, reportWorkspace, writeFromOtherWindow };
-});
+  return {
+    read: (key: string) => window.localStorage.getItem(key),
+    writes,
+    reportWorkspace,
+    writeFromOtherWindow,
+    [Symbol.dispose]() {
+      bridge[Symbol.dispose]();
+      spy.mockRestore();
+      window.localStorage.clear();
+    },
+  };
+}
 
 const routerState = vi.hoisted(() => ({
   params: { environmentId: "local", threadId: "a1" } as Record<string, string>,
@@ -50,7 +54,8 @@ const routerState = vi.hoisted(() => ({
     lineage: { relationshipToParent: null, parentThreadId: null },
   })),
 }));
-vi.mock("@tanstack/react-router", () => ({
+vi.mock("@tanstack/react-router", async (original) => ({
+  ...(await original<object>()),
   useNavigate: () => vi.fn(),
   useParams: ({ select }: { select: (params: Record<string, string>) => unknown }) =>
     select(routerState.params),
@@ -86,17 +91,12 @@ async function settle() {
   for (let i = 0; i < 5; i += 1) await act(async () => {});
 }
 
-let renderer: ReactTestRenderer | undefined;
-afterEach(async () => {
-  await act(() => renderer?.unmount());
-});
-
 describe("workspace store across windows", () => {
   it("reports the workspace once per real change while another window writes its last thread", async () => {
+    using fake = otherWindow();
     useWorkspaceStore.setState({ workspaces: [workspace], activeWorkspaceId: "a" });
-    await act(() => {
-      renderer = create(<Probe />);
-    });
+    // The hook's router reads are mocked above, so a real router has nothing to drive.
+    await using _screen = await render(<Probe />, { router: false });
     await settle();
     fake.reportWorkspace.mockClear();
     fake.writes.length = 0;
@@ -107,7 +107,7 @@ describe("workspace store across windows", () => {
     let answers = 0;
     let handled = 0;
     const answer = () => {
-      const stored = JSON.parse(fake.items.get(WORKSPACE_STORAGE_KEY)!) as {
+      const stored = JSON.parse(fake.read(WORKSPACE_STORAGE_KEY)!) as {
         state: { lastThreadByWorkspace: Record<string, unknown> };
       };
       stored.state.lastThreadByWorkspace = { a: otherThread };
@@ -138,14 +138,14 @@ describe("workspace store across windows", () => {
   });
 
   it("does not report again when another window edits a workspace this window is not showing", async () => {
+    using fake = otherWindow();
     useWorkspaceStore.setState({ workspaces: [workspace], activeWorkspaceId: "a" });
-    await act(() => {
-      renderer = create(<Probe />);
-    });
+    // The hook's router reads are mocked above, so a real router has nothing to drive.
+    await using _screen = await render(<Probe />, { router: false });
     await settle();
     fake.reportWorkspace.mockClear();
 
-    const stored = JSON.parse(fake.items.get(WORKSPACE_STORAGE_KEY)!) as {
+    const stored = JSON.parse(fake.read(WORKSPACE_STORAGE_KEY)!) as {
       state: { workspaces: unknown[] };
     };
     stored.state.workspaces = [...stored.state.workspaces, { ...workspace, id: "b", name: "Beta" }];

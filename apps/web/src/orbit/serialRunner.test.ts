@@ -2,7 +2,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { createSerialRunner } from "./serialRunner";
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+// Every step of the runner is a promise continuation, so draining microtasks settles it.
+const settle = async () => {
+  for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+};
 
 function slowTask() {
   const log = { started: 0, finished: 0, maxInFlight: 0, options: [] as unknown[] };

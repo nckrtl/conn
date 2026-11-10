@@ -1,14 +1,13 @@
-// @vitest-environment jsdom
 import {
   CREDENTIAL_INSERT_FUNCTION,
   CREDENTIAL_PREPARE_FUNCTION,
   SENSITIVE_INPUT_VALUES_EXPRESSION,
   credentialFieldExpression,
 } from "@t3tools/shared/credentialFill";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 // These scripts run in the guest page over CDP; evaluating them here is the closest stand-in.
-// oxlint-disable-next-line no-eval
+// oxlint-disable-next-line no-eval -- runs the script string a guest page evaluates
 const evaluate = (expression: string): unknown => (0, eval)(expression);
 const callOn = (element: Element, declaration: string, ...args: unknown[]): unknown =>
   (evaluate(`(${declaration})`) as (...rest: unknown[]) => unknown).apply(element, args);
@@ -16,27 +15,31 @@ const callOn = (element: Element, declaration: string, ...args: unknown[]): unkn
 const find = (field: "username" | "password" | "otp", selector?: string) =>
   evaluate(credentialFieldExpression(field, selector)) as HTMLInputElement | null;
 
-describe("credential page scripts", () => {
-  beforeEach(() => {
-    // jsdom has no layout; give every element a box so it counts as visible.
-    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
-      x: 0,
-      y: 0,
-      width: 100,
-      height: 20,
-      top: 0,
-      left: 0,
-      right: 100,
-      bottom: 20,
-      toJSON: () => ({}),
-    });
+// Gives every element a box so the fixtures count as visible regardless of layout, and clears
+// the page fixture when the test ends.
+const visiblePage = (): Disposable => {
+  const spy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 20,
+    top: 0,
+    left: 0,
+    right: 100,
+    bottom: 20,
+    toJSON: () => ({}),
   });
-  afterEach(() => {
-    vi.restoreAllMocks();
-    document.body.innerHTML = "";
-  });
+  return {
+    [Symbol.dispose]() {
+      spy.mockRestore();
+      document.body.innerHTML = "";
+    },
+  };
+};
 
+describe("credential page scripts", () => {
   it("finds the username and current password of a sign-in form", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `
       <input type="search" name="q">
       <form>
@@ -49,6 +52,7 @@ describe("credential page scripts", () => {
   });
 
   it("falls back to the text input before the password", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `
       <input type="text" id="first">
       <input type="text" id="second">
@@ -57,6 +61,7 @@ describe("credential page scripts", () => {
   });
 
   it("finds a one-time code input and skips hidden or disabled inputs", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `
       <input type="text" id="hidden" autocomplete="one-time-code" style="display:none">
       <input type="text" id="disabled" autocomplete="one-time-code" disabled>
@@ -65,6 +70,7 @@ describe("credential page scripts", () => {
   });
 
   it("uses an explicit selector and returns null when nothing fits", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `<input type="password" id="a"><input type="password" id="b">`;
     expect(find("password", "#b")?.id).toBe("b");
     expect(find("password", "#missing")).toBeNull();
@@ -74,6 +80,7 @@ describe("credential page scripts", () => {
   });
 
   it("fills a password input, fires input events, and marks it", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `<input type="password" id="password" value="old">`;
     const input = document.getElementById("password") as HTMLInputElement;
     const events: string[] = [];
@@ -89,6 +96,7 @@ describe("credential page scripts", () => {
   });
 
   it("fills a username without marking it as a secret", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `<input type="text" id="user">`;
     const input = document.getElementById("user") as HTMLInputElement;
     expect(callOn(input, CREDENTIAL_PREPARE_FUNCTION, "username")).toBe("ready");
@@ -102,6 +110,7 @@ describe("credential page scripts", () => {
   });
 
   it("refuses to put a password into a visible text input", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `<input type="text" id="plain"><input type="password" id="ro" readonly>`;
     expect(callOn(document.getElementById("plain")!, CREDENTIAL_PREPARE_FUNCTION, "password")).toBe(
       "not_editable",
@@ -112,6 +121,7 @@ describe("credential page scripts", () => {
   });
 
   it("collects filled values even after the agent unmasks the input", () => {
+    using _page = visiblePage();
     document.body.innerHTML = `<input type="password" id="p"><input type="text" id="t" value="visible">`;
     const input = document.getElementById("p") as HTMLInputElement;
     callOn(input, CREDENTIAL_PREPARE_FUNCTION, "password");

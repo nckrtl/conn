@@ -121,8 +121,8 @@ Mac.
    running; agent threads run on it.
 4. Replace the bundle. With
    `/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister`,
-   unregister the staging paths (`-u`), register `/Applications/Conn.app`
-   (`-f`), and check its path in `-dump`. Do not reset the whole
+   unregister the staging paths and obsolete backup paths (`-u`), register
+   `/Applications/Conn.app` (`-f`), and check its path in `-dump`. Do not reset the whole
    LaunchServices database. Remove the staging folder.
 5. Relaunch with `env -u ELECTRON_RUN_AS_NODE open /Applications/Conn.app`.
    Check for 60 s that it runs the new version and no new crash report shows
@@ -136,8 +136,11 @@ the old app's user data (see FORK.md, "Conn").
 
 ### Device build in nick-vm
 
-Use an own VM worktree of `nckrtl/conn` at the exact commit. In an existing
-worktree whose lockfile did not change, skip `pnpm install`. Run the long
+Use an own VM worktree of `nckrtl/conn` at the exact commit
+(`git worktree add --detach ~/apps/conn-<task> <sha>` from the VM's
+`~/apps/conn`, then
+`pnpm install --frozen-lockfile --filter '@t3tools/mobile...'`). In an
+existing worktree whose lockfile did not change, skip `pnpm install`. Run the long
 build as one `vmpal_exec` job that writes a log and an rc file, and poll in
 separate calls.
 
@@ -163,37 +166,43 @@ xcodebuild -workspace ios/Conn.xcworkspace -scheme Conn -configuration Release \
    in one zip (about 58 MB). Keep their folders: `<ents>/Conn/`,
    `<ents>/ExpoWidgetsTarget/`, `<ents>/expo-sharing-extension/`.
 2. Sign: `~/conn-ios-sign/sign.sh <Conn.app> <ents dir> <out>`, with `<out>`
-   under `~/conn-ios-sign/work/polar-<sha>/`. It embeds the Xcode-managed
+   exactly `~/conn-ios-sign/work/polar-<new sha>/signed` (`sign.sh` empties
+   `<out>` first, so never pass the `polar-<sha>` folder itself). `<sha>` is
+   the 7-character short SHA. It embeds the Xcode-managed
    profiles and signs with Apple Development G9Y9TT23QF. Check
    `codesign --verify --deep --strict` and the embedded profiles.
 3. Find the signed app of the build now on Polar
-   (`~/conn-ios-sign/work/polar-<sha>/signed/Conn.app`). Keep it as the one
+   (`~/conn-ios-sign/work/polar-<old sha>/signed/Conn.app`). Keep it as the one
    rollback.
 4. Install in place, never uninstall:
 
    ```bash
    xcrun devicectl device install app --device 00008140-00014C941E80801C \
-     ~/conn-ios-sign/work/polar-<sha>/signed/Conn.app
+     ~/conn-ios-sign/work/polar-<new sha>/signed/Conn.app
    xcrun devicectl device process launch --device 00008140-00014C941E80801C com.nckrtl.conn
    ```
 
-5. After 30 s, check it still runs (`xcrun devicectl device info processes`).
+5. After 30 s, check it still runs
+   (`xcrun devicectl device info processes --device 00008140-00014C941E80801C`).
    On a crash, install the rollback app the same way. To read a device-only
-   JS crash: `xcrun devicectl device sysdiagnose`, then
+   JS crash:
+   `xcrun devicectl device sysdiagnose --device <udid> --destination <dir>`,
+   then
    `/usr/bin/log show <archive> --predicate 'process == "Conn"'`.
 
 ## iOS simulator proof
 
 Build in nick-vm, run on the MacBook.
 
-1. In the VM worktree, build Release for the simulator with ad-hoc signing
-   and an own derived-data folder. Without signing the app has no
+1. In the VM worktree, run the same exports and prebuild as the device
+   build, then build Release for the simulator with ad-hoc signing and an own
+   git-ignored derived-data folder (for example `ios/.derived-sim`). Without signing the app has no
    entitlements, so secure storage fails and it shows "Loading environments"
    forever.
 
    ```bash
    xcodebuild -workspace ios/Conn.xcworkspace -scheme Conn -configuration Release \
-     -destination 'generic/platform=iOS Simulator' -derivedDataPath <own folder> \
+     -destination 'generic/platform=iOS Simulator' -derivedDataPath ios/.derived-sim \
      CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
      DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= build
    ```

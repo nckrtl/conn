@@ -338,6 +338,7 @@ describe("createOrbitGatewayClient", () => {
         "GET /environments/env-spike/pairings/1851",
       ]);
       expect(waits).toEqual([2000, 2000]);
+      expect(requests[0]?.timeoutMs).toBe(60_000);
     });
 
     it("still accepts a Gateway that answers with the link at once", async () => {
@@ -454,7 +455,7 @@ describe("createOrbitGatewayClient", () => {
     await expect(client.projects()).resolves.toEqual([
       { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" },
     ]);
-    await expect(client.createThreadInstance(3, "fix-k3j9")).resolves.toEqual({
+    await expect(client.createThreadInstance(3, "fix-k3j9", "key-1")).resolves.toEqual({
       id: 100,
       kind: "instance.create",
       status: "queued",
@@ -466,6 +467,8 @@ describe("createOrbitGatewayClient", () => {
       method: "POST",
       path: "/projects/3/instances",
       body: { name: "fix-k3j9" },
+      timeoutMs: 60_000,
+      idempotencyKey: "key-1",
     });
   });
 });

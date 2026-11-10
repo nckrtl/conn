@@ -6,6 +6,7 @@ import {
   OrbitGatewayError,
   operationPollDelayMs,
   type OrbitGatewayClient,
+  type OrbitGatewayOperation,
   type OrbitGatewayProject,
 } from "./client.ts";
 
@@ -30,9 +31,15 @@ export interface OrbitThreadStart {
   readonly messageId: string;
   readonly commandId: string;
   readonly createdAt: number;
+  /**
+   * The `Idempotency-Key` of the create and of the pairing, saved before the first try, so a
+   * repeat after a lost answer, a reload or Retry gets the same Operation. Missing on older rows.
+   */
+  readonly createKey?: string | null;
   readonly createOperationId: number | null;
   readonly instanceId: number | null;
   readonly environmentId: string | null;
+  readonly pairingKey?: string | null;
   readonly pairingOperationId: number | null;
   readonly pairingId: number | null;
   /** Conn read the one-time pairing link. A resume that finds it with an unsaved server waits for Retry. */
@@ -67,6 +74,8 @@ const READ_OUTAGE_MS = 60_000;
 /** A clone's create runs for minutes; a pairing follows #9's `pair` deadline. */
 const CREATE_TIMEOUT_MS = 30 * 60_000;
 const PAIRING_TIMEOUT_MS = OPERATION_TIMEOUT_MS;
+/** How long a pairing admission may keep losing its answer; each try may take up to 60 s. */
+const PAIRING_ADMISSION_MS = 5 * 60_000;
 
 /**
  * The clone's Instance name: the first words of the message as a slug, and a random suffix so two
@@ -108,9 +117,11 @@ export function newOrbitThreadStart(input: {
     messageId: input.messageId,
     commandId: input.commandId,
     createdAt: input.now,
+    createKey: null,
     createOperationId: null,
     instanceId: null,
     environmentId: null,
+    pairingKey: null,
     pairingOperationId: null,
     pairingId: null,
     pairingLinkRead: false,
@@ -141,6 +152,11 @@ const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 /** The Gateway did not answer, or failed on its side. */
 function isTransient(error: unknown): boolean {
   return isOrbitGatewayError(error) && (error.status === 0 || error.status >= 500);
+}
+
+/** An admission whose answer was lost on the way; the same key may repeat it. */
+function isLostAdmission(error: unknown): boolean {
+  return isOrbitGatewayError(error) && [0, 502, 503, 504].includes(error.status);
 }
 
 function stepFailed(message: string, reset: Partial<OrbitThreadStart>): StepFailed {
@@ -193,22 +209,47 @@ export async function runOrbitThreadStart(
     }
   };
 
+  /**
+   * Starts an Operation under a saved key. A lost answer repeats the same request with a growing,
+   * clamped wait until the deadline: the Gateway returns the Operation it may have admitted.
+   */
+  const admit = async (
+    deadline: number,
+    start: () => Promise<OrbitGatewayOperation>,
+  ): Promise<OrbitGatewayOperation> => {
+    for (let attempt = 0; ; attempt++) {
+      checkStopped();
+      try {
+        return await start();
+      } catch (error) {
+        if (!isLostAdmission(error) || ports.now() >= deadline) throw error;
+      }
+      const wait = operationPollDelayMs(2 ** attempt);
+      await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
+    }
+  };
+  const newKey = (step: string) => `conn-thread-start:${current.id}:${step}:${ports.now()}`;
+
   try {
     checkStopped();
     if (current.environmentId === null) {
       if (current.createOperationId === null) {
-        const operation = await ports.client.createThreadInstance(
-          current.projectId,
-          current.instanceName,
+        if (!current.createKey) update({ createKey: newKey("create") });
+        const operation = await admit(ports.now() + CREATE_TIMEOUT_MS, () =>
+          ports.client.createThreadInstance(
+            current.projectId,
+            current.instanceName,
+            current.createKey!,
+          ),
         );
         update({ createOperationId: operation.id, instanceId: operation.targetId });
       }
-      // A failed clone resumes when the same name is created again, so a retry admits it anew.
-      // A create that is still running past the deadline keeps its Operation for the retry.
+      // A failed clone resumes when the same name is created again, so a retry admits it anew
+      // under a new key. A create still running past the deadline keeps its Operation.
       await follow(current.createOperationId!, CREATE_TIMEOUT_MS, (code) =>
         stepFailed(
           `Orbit could not create the clone (${code}).`,
-          code === "operation.timeout" ? {} : { createOperationId: null },
+          code === "operation.timeout" ? {} : { createOperationId: null, createKey: null },
         ),
       );
       const server = (await ports.client.environments()).find(
@@ -238,11 +279,14 @@ export async function runOrbitThreadStart(
           });
         }
         if (current.pairingOperationId === null) {
-          const operation = await ports.client.startPairing(environmentId);
+          if (!current.pairingKey) update({ pairingKey: newKey("pairing") });
+          const operation = await admit(ports.now() + PAIRING_ADMISSION_MS, () =>
+            ports.client.startPairing(environmentId, current.pairingKey!),
+          );
           update({ pairingOperationId: operation.id, pairingId: operation.targetId });
         }
-        // A failed pairing needs a new pairing: only a retry starts it.
-        const newPairing = { pairingOperationId: null, pairingId: null };
+        // A failed pairing needs a new pairing: only a retry starts it, under a new key.
+        const newPairing = { pairingOperationId: null, pairingId: null, pairingKey: null };
         await follow(current.pairingOperationId!, PAIRING_TIMEOUT_MS, (code) =>
           stepFailed(`Orbit could not pair with the clone (${code}).`, newPairing),
         );

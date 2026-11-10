@@ -44,16 +44,30 @@ function gateway(script: {
   readonly pairing?: ReadonlyArray<OrbitGatewayOperation["status"]>;
   readonly readPairing?: () => Promise<{ pairingUrl: string }>;
   readonly servers?: ReadonlyArray<OrbitGatewayEnvironment>;
+  /** Answers each admission's first tries with these HTTP statuses (0: no answer), then admits. */
+  readonly createLost?: ReadonlyArray<number>;
+  readonly pairingLost?: ReadonlyArray<number>;
 }) {
   const calls: string[] = [];
+  const keys: string[] = [];
+  const createLost = [...(script.createLost ?? [])];
+  const pairingLost = [...(script.pairingLost ?? [])];
+  const lose = (statuses: number[]) => {
+    const status = statuses.shift();
+    if (status === undefined) return;
+    throw new OrbitGatewayError({ code: "x", message: `lost ${status}`, status, details: {} });
+  };
   const statuses = new Map<number, OrbitGatewayOperation["status"][]>([
     [100, [...(script.create ?? ["running", "succeeded"])]],
     [200, [...(script.pairing ?? ["queued", "succeeded"])]],
   ]);
   const client = {
-    createThreadInstance: async (projectId: number, name: string) => {
+    createThreadInstance: async (projectId: number, name: string, key: string) => {
       calls.push(`create ${projectId} ${name}`);
+      keys.push(key);
+      // The Gateway admits it even when the answer is lost.
       statuses.set(100, [...(script.create ?? ["running", "succeeded"])]);
+      lose(createLost);
       return op(100, 41, "queued");
     },
     operation: async (id: number) => {
@@ -71,8 +85,10 @@ function gateway(script: {
       calls.push("environments");
       return script.servers ?? [server(41)];
     },
-    startPairing: async (environmentId: string) => {
+    startPairing: async (environmentId: string, key: string) => {
       calls.push(`pair ${environmentId}`);
+      keys.push(key);
+      lose(pairingLost);
       return op(200, 9, "queued");
     },
     readPairing: async (environmentId: string, pairingId: number) => {
@@ -82,7 +98,7 @@ function gateway(script: {
         : { environmentId, pairingUrl: "http://10.44.0.7:3800/pair#token=t", expiresAt: "" };
     },
   } as unknown as OrbitGatewayClient;
-  return { client, calls };
+  return { client, calls, keys };
 }
 
 function ports(
@@ -215,10 +231,87 @@ describe("runOrbitThreadStart", () => {
       error: expect.stringContaining("instance.t3_unready"),
     });
 
+    expect(stopped.createKey).toBeNull();
+
     const retry = gateway({});
     expect(await runOrbitThreadStart(stopped, ports(retry.client).ports)).toBe(true);
     expect(retry.calls[0]).toBe(`create 3 ${stopped.instanceName}`);
     expect(calls.filter((call) => call.startsWith("pair"))).toEqual([]);
+  });
+
+  it("repeats a create whose answer was lost with the same name and key, and follows its Operation", async () => {
+    const { client, calls, keys } = gateway({ createLost: [0, 502, 504] });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+
+    expect(calls.filter((call) => call.startsWith("create"))).toEqual(
+      Array(4).fill("create 3 fix-the-login-bug-on-ios-k3j9"),
+    );
+    expect(new Set(keys.slice(0, 4)).size).toBe(1);
+    expect(keys[0]).toMatch(/^conn-thread-start:s1:create:/);
+    expect(run.sleeps.slice(0, 3)).toEqual([1000, 2000, 4000]);
+    expect(run.saves.at(-1)).toMatchObject({ createOperationId: 100, error: null });
+  });
+
+  it("stops at once on a create the Gateway refused", async () => {
+    const { client, calls } = gateway({ createLost: [409] });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+
+    expect(calls).toEqual(["create 3 fix-the-login-bug-on-ios-k3j9"]);
+    expect(run.saves.at(-1)).toMatchObject({ createOperationId: null, error: "lost 409" });
+  });
+
+  it("keeps the create's key when its answers stay lost, so Retry gets the Operation the Gateway admitted", async () => {
+    const { client, keys } = gateway({ createLost: Array(500).fill(0) });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    const stopped = run.saves.at(-1)!;
+    expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(30 * 60_000);
+    expect(stopped).toMatchObject({ createOperationId: null, error: "lost 0" });
+    expect(stopped.createKey).toBe(keys[0]);
+
+    const retry = gateway({});
+    expect(await runOrbitThreadStart(stopped, ports(retry.client).ports)).toBe(true);
+    expect(retry.calls[0]).toBe(`create 3 ${stopped.instanceName}`);
+    expect(retry.keys[0]).toBe(stopped.createKey);
+    expect(retry.calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
+  });
+
+  it("resumes on Retry a start that an older build stopped when the create timed out", async () => {
+    const {
+      createKey: _createKey,
+      pairingKey: _pairingKey,
+      ...older
+    } = {
+      ...fresh(),
+      error: "The Orbit Gateway did not answer in time.",
+    };
+    const { client, calls, keys } = gateway({});
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(older, run.ports)).toBe(true);
+
+    // The Gateway resumes the device's own clone by its name and answers its Operation.
+    expect(calls.slice(0, 2)).toEqual(["create 3 fix-the-login-bug-on-ios-k3j9", "operation 100"]);
+    expect(calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
+    expect(run.saves[0]?.createKey).toBe(keys[0]);
+    expect(run.saves.at(-1)).toMatchObject({ createOperationId: 100, instanceId: 41, error: null });
+  });
+
+  it("repeats a pairing whose answer was lost with the same key", async () => {
+    const { client, calls, keys } = gateway({ pairingLost: [0] });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+
+    expect(calls.filter((call) => call.startsWith("pair"))).toEqual(["pair env-41", "pair env-41"]);
+    expect(keys.slice(1)).toEqual([keys[1], keys[1]]);
+    expect(keys[1]).toMatch(/^conn-thread-start:s1:pairing:/);
+    expect(run.saves.at(-1)).toMatchObject({ pairingKey: null, connected: true });
   });
 
   it("stops without a second pairing when the link was already read", async () => {

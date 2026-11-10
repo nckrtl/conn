@@ -16,6 +16,10 @@ export interface OrbitGatewayRequest {
   /** A path below `/api/v1/conn`, such as `/me`. */
   readonly path: string;
   readonly body?: unknown;
+  /** Overrides the transport's default limit for a call the Gateway answers slowly. */
+  readonly timeoutMs?: number;
+  /** Sent as `Idempotency-Key`: the same key and input return the same Operation. */
+  readonly idempotencyKey?: string;
 }
 
 export interface OrbitGatewayResponse {
@@ -171,15 +175,25 @@ export interface OrbitGatewayClient {
   readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
   /** The Projects a thread can start in. */
   readonly projects: () => Promise<readonly OrbitGatewayProject[]>;
-  /** Admits the clone a thread starts in; the Operation's `targetId` is the new Instance. */
+  /**
+   * Admits the clone a thread starts in; the Operation's `targetId` is the new Instance. The
+   * Gateway admits it slowly, so the call has a 60 s limit; the same key returns the same Operation.
+   */
   readonly createThreadInstance: (
     projectId: number,
     name: string,
+    idempotencyKey: string,
   ) => Promise<OrbitGatewayOperation>;
   /** Reads an Operation this device started through the Conn layer. */
   readonly operation: (operationId: number) => Promise<OrbitGatewayOperation>;
-  /** Admits a pairing with the server; the Operation's `targetId` is the pairing. */
-  readonly startPairing: (environmentId: string) => Promise<OrbitGatewayOperation>;
+  /**
+   * Admits a pairing with the server; the Operation's `targetId` is the pairing. Admission copies
+   * a secret to Swamp, so it has the create's limit; the same key returns the same Operation.
+   */
+  readonly startPairing: (
+    environmentId: string,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayOperation>;
   /** Reads the link of a pairing whose Operation succeeded. The Gateway hands it out once. */
   readonly readPairing: (environmentId: string, pairingId: number) => Promise<OrbitGatewayPairing>;
 }
@@ -188,6 +202,8 @@ export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 
 /** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
 export const OPERATION_TIMEOUT_MS = 60_000;
+/** The Gateway copies secrets to Swamp before it admits a create or a pairing: 19-27 s today. */
+const ADMISSION_TIMEOUT_MS = 60_000;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 15_000;
 
@@ -328,7 +344,7 @@ export function createOrbitGatewayClient(
       list(await call({ method: "GET", path: "/environments" }), "/environments", environment),
     pair: async (environmentId) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
-      let data = record(await call({ method: "POST", path }));
+      let data = record(await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS }));
       // The Gateway mints the link in an Operation (202). Follow it, then read the link once.
       if (typeof data?.pairing_url !== "string") {
         const result = record((await settle(data, path)).result);
@@ -339,17 +355,29 @@ export function createOrbitGatewayClient(
     },
     projects: async () =>
       list(await call({ method: "GET", path: "/projects" }), "/projects", project),
-    createThreadInstance: async (projectId, name) => {
+    createThreadInstance: async (projectId, name, idempotencyKey) => {
       const path = `/projects/${projectId}/instances`;
-      return operation(await call({ method: "POST", path, body: { name } }), path);
+      return operation(
+        await call({
+          method: "POST",
+          path,
+          body: { name },
+          timeoutMs: ADMISSION_TIMEOUT_MS,
+          idempotencyKey,
+        }),
+        path,
+      );
     },
     operation: async (operationId) => {
       const path = `/operations/${operationId}`;
       return operation(await call({ method: "GET", path }), path);
     },
-    startPairing: async (environmentId) => {
+    startPairing: async (environmentId, idempotencyKey) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
-      return operation(await call({ method: "POST", path }), path);
+      return operation(
+        await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS, idempotencyKey }),
+        path,
+      );
     },
     readPairing: async (environmentId, pairingId) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings/${pairingId}`;

@@ -63,7 +63,7 @@ describe("sendOrbitFirstMessage", () => {
 
     await expect(sendOrbitFirstMessage(start, run)).rejects.toThrow("socket closed");
     // Retry, or a resume after a reload.
-    await sendOrbitFirstMessage(start, run);
+    await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
 
     expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
   });

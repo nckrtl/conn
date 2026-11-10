@@ -26,6 +26,10 @@ const group = (projectKey: string, ...refs: [string, string][]) => ({
 const orbit = group("repo:orbit", ["local", "p1"], ["beast", "p9"]);
 const drift = group("repo:drift", ["local", "p2"]);
 const rooms = group("repo:rooms", ["local", "p3"]);
+const cloneProjects = [
+  { projectKey: "repo:bench", displayName: "bench", refs: ["beast:bench"] },
+  { projectKey: "/srv/workspace", displayName: "workspace", refs: ["clone:ws"] },
+];
 const workspace = (name: string, projectKeys: string[], id = `ws-${name}`): Workspace => ({
   id,
   name,
@@ -86,10 +90,8 @@ describe("workspaces.logic", () => {
     ).toEqual(new Set(["local:p1", "beast:p9"]));
   });
 
-  it("keeps an Orbit clone's new thread in the workspace it was started from", () => {
+  it("lists an Orbit clone's thread in a workspace only once it covers the clone's project", () => {
     // The clone is a new environment, so its project is in no workspace yet.
-    const bench = group("repo:bench", ["beast", "bench"]);
-    const clone = group("/srv/workspace", ["clone", "ws"]);
     const thread = {
       id: "t1",
       environmentId: "clone",
@@ -97,15 +99,14 @@ describe("workspaces.logic", () => {
       archivedAt: null,
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "t1" },
     } as unknown as Parameters<typeof filterSidebarV2VisibleThreads>[0][number];
-    const projects = [
-      { projectKey: "repo:bench", displayName: "bench", refs: ["beast:bench"] },
-      { projectKey: "/srv/workspace", displayName: "workspace", refs: ["clone:ws"] },
-    ];
     const listed = (scoped: Workspace) =>
       filterSidebarV2VisibleThreads(
         [thread],
         resolveScopedProjectKeys({
-          projectGroups: [bench, clone],
+          projectGroups: [
+            group("repo:bench", ["beast", "bench"]),
+            group("/srv/workspace", ["clone", "ws"]),
+          ],
           workspace: scoped,
           scopedProjectGroups: [],
         }),
@@ -114,32 +115,12 @@ describe("workspaces.logic", () => {
     const s = { ...workspace("S", []), projectRefs: ["beast:bench"] };
     // The bug: the sidebar lists nothing and shows "No threads yet".
     expect(listed(s)).toEqual([]);
-    expect(workspaceCoversProjectRef(s, projects, "clone:ws")).toBe(false);
-
-    useWorkspaceStore.setState({
-      workspaces: [s],
-      activeWorkspaceId: s.id,
-      availableProjects: projects,
-    });
-    keepProjectInActiveWorkspace("clone:ws");
-    const kept = useWorkspaceStore.getState().workspaces[0]!;
-    expect(kept.projectRefs).toEqual(["beast:bench", "clone:ws"]);
-    expect(listed(kept)).toEqual([thread]);
-
-    // A workspace that covers the project, by ref or by key, and "all" stay as they are.
-    keepProjectInActiveWorkspace("clone:ws");
-    keepProjectInActiveWorkspace("beast:bench");
-    expect(useWorkspaceStore.getState().workspaces[0]).toBe(kept);
-    const byKey = workspace("K", ["/srv/workspace"]);
-    expect(workspaceCoversProjectRef(byKey, projects, "clone:ws")).toBe(true);
-    useWorkspaceStore.setState({ workspaces: [byKey], activeWorkspaceId: byKey.id });
-    keepProjectInActiveWorkspace("clone:ws");
-    expect(useWorkspaceStore.getState().workspaces[0]).toBe(byKey);
-    expect(workspaceCoversProjectRef(null, projects, "clone:ws")).toBe(true);
-    useWorkspaceStore.setState({ activeWorkspaceId: null });
-    keepProjectInActiveWorkspace("clone:ws");
-    expect(useWorkspaceStore.getState().workspaces[0]).toBe(byKey);
-    useWorkspaceStore.setState({ workspaces: [], activeWorkspaceId: null, availableProjects: [] });
+    expect(workspaceCoversProjectRef(s, cloneProjects, "clone:ws")).toBe(false);
+    expect(listed({ ...s, projectRefs: ["beast:bench", "clone:ws"] })).toEqual([thread]);
+    expect(
+      workspaceCoversProjectRef(workspace("K", ["/srv/workspace"]), cloneProjects, "clone:ws"),
+    ).toBe(true);
+    expect(workspaceCoversProjectRef(null, cloneProjects, "clone:ws")).toBe(true);
   });
 
   it("narrows a workspace further by the sidebar's project filter, never widens it", () => {
@@ -249,6 +230,27 @@ describe("workspaceStore", () => {
   beforeEach(() =>
     useWorkspaceStore.setState({ workspaces: [], activeWorkspaceId: null, availableProjects: [] }),
   );
+
+  it("adds an Orbit clone's project to the selected workspace only when it does not list it", () => {
+    const s = { ...workspace("S", []), projectRefs: ["beast:bench"] };
+    useWorkspaceStore.setState({
+      workspaces: [s],
+      activeWorkspaceId: s.id,
+      availableProjects: cloneProjects,
+    });
+    keepProjectInActiveWorkspace("clone:ws");
+    const kept = useWorkspaceStore.getState().workspaces[0]!;
+    expect(kept.projectRefs).toEqual(["beast:bench", "clone:ws"]);
+
+    keepProjectInActiveWorkspace("clone:ws");
+    expect(useWorkspaceStore.getState().workspaces[0]).toBe(kept);
+    const byKey = workspace("K", ["/srv/workspace"]);
+    useWorkspaceStore.setState({ workspaces: [byKey], activeWorkspaceId: byKey.id });
+    keepProjectInActiveWorkspace("clone:ws");
+    useWorkspaceStore.setState({ activeWorkspaceId: null });
+    keepProjectInActiveWorkspace("clone:ws");
+    expect(useWorkspaceStore.getState().workspaces[0]).toBe(byKey);
+  });
 
   it("creates, selects by name, renames and deletes workspaces", () => {
     const store = useWorkspaceStore.getState();

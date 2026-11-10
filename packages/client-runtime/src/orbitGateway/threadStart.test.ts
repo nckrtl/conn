@@ -31,6 +31,7 @@ function server(instanceId: number, powerState: "running" | "stopped" = "running
     url: "http://10.44.0.7:3800",
     serverVersion: null,
     registeredBy: "beast",
+    registeredAt: "2026-11-10T08:00:00+00:00",
     status: "registered",
     instanceId,
     powerState,

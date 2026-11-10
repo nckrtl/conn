@@ -1,3 +1,4 @@
+/* oxlint-disable t3code/require-disposable-render -- node-environment test with react-test-renderer; it has no DOM screen to dispose. */
 import { act, useEffect } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, expect, it, vi } from "vite-plus/test";
@@ -16,7 +17,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("~/env", () => ({ isElectron: true }));
 vi.mock("~/hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "light" }) }));
 vi.mock("~/hooks/useSettings", () => ({ useClientSettingsHydrated: () => true }));
-vi.mock("~/state/session", () => ({ useEnvironmentScope: () => true }));
+vi.mock("~/state/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/state/session")>()),
+  useEnvironmentScope: () => true,
+}));
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => () => {} }));
 vi.mock("~/state/primaryEnvironment", async () => {
   const { Atom } = await import("effect/reactivity");
@@ -27,13 +31,19 @@ vi.mock("~/connection/catalog", async () => {
   const state = Atom.make(AsyncResult.success({ phase: "connected" }));
   return { environmentCatalog: { stateAtom: () => state } };
 });
-vi.mock("~/state/threads", async () => {
+vi.mock("~/state/threads", async (importOriginal) => {
   const { Atom } = await import("effect/reactivity");
   const Option = await import("effect/Option");
   const state = Atom.make({ data: Option.some({ runs: [] }) });
-  return { environmentThreadDetails: { stateAtom: () => state } };
+  return {
+    ...(await importOriginal<typeof import("~/state/threads")>()),
+    environmentThreadDetails: { stateAtom: () => state },
+  };
 });
-vi.mock("@t3tools/client-runtime/state/runtime", () => ({ runAtomCommand: mocks.runCommand }));
+vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/runtime")>()),
+  runAtomCommand: mocks.runCommand,
+}));
 vi.mock("~/state/preview", async () => {
   const { Atom } = await import("effect/reactivity");
   const list = Atom.make(null);

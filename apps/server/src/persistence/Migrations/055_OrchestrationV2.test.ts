@@ -13,7 +13,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 75 }, (_, index) => index + 1),
+        Array.from({ length: 80 }, (_, index) => index + 1),
       );
     }),
   );
@@ -47,6 +47,11 @@ layer("055_OrchestrationV2", (it) => {
         [73, "ActiveTurnItemIndexes"],
         [74, "ExcludeAttachmentPlaceholdersFromSearch"],
         [75, "SubagentDeliveryState"],
+        [76, "ProjectionProjectsPinArchive"],
+        [77, "RepairBooleanSettledOverride"],
+        [78, "DropOrchestrationEventCorrelationIndex"],
+        [79, "DelegatedRecoveryIndexes"],
+        [80, "ScheduledTaskThreadMode"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -88,6 +93,11 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 73, name: "ActiveTurnItemIndexes" },
         { migration_id: 74, name: "ExcludeAttachmentPlaceholdersFromSearch" },
         { migration_id: 75, name: "SubagentDeliveryState" },
+        { migration_id: 76, name: "ProjectionProjectsPinArchive" },
+        { migration_id: 77, name: "RepairBooleanSettledOverride" },
+        { migration_id: 78, name: "DropOrchestrationEventCorrelationIndex" },
+        { migration_id: 79, name: "DelegatedRecoveryIndexes" },
+        { migration_id: 80, name: "ScheduledTaskThreadMode" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

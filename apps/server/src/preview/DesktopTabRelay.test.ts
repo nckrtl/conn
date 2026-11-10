@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, expect } from "@effect/vitest";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
@@ -17,7 +18,7 @@ const layer = Relay.layer.pipe(
   Layer.provide(
     Layer.mock(Environment.ServerEnvironment)({ getEnvironmentId: Effect.succeed(environmentId) }),
   ),
-  Layer.provide(NodeServices.layer),
+  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
 it.layer(layer)("desktop tab relay bindings", (it) => {
@@ -130,7 +131,9 @@ it.layer(layer)("desktop tab relay bindings", (it) => {
   it.effect("re-registers the same client-owned tab after the server loses its preview index", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("restart-thread");
-      const oldManager = yield* Manager.make.pipe(Effect.provide(NodeServices.layer));
+      const oldManager = yield* Manager.make.pipe(
+        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
       const tab = yield* oldManager.open({ threadId, url: "https://fixture.test" });
       const oldEpoch = (yield* oldManager.list({ threadId })).serverEpoch;
       const manager = yield* Manager.PreviewManager;

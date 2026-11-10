@@ -209,5 +209,11 @@
   "orchestration.launchThread",
   "orchestration.subscribeShell",
   "orchestration.subscribeThread",
-  "orchestration.subscribeCommandOutput"
+  "orchestration.subscribeCommandOutput",
+  "orchestration.getThreadLinkMetadata",
+  "orchestration.subscribePromptSuggestion",
+  "server.listTextGeneratorModels",
+  "server.reclaimDatabaseSpace",
+  "subscribeVcsBranch",
+  "vcs.refreshBranch"
 ]

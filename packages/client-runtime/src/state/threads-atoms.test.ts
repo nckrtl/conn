@@ -56,6 +56,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
   readonly snapshotUnavailable?: boolean;
   readonly listed?: Atom.Writable<boolean>;
   readonly socketSnapshot?: false;
+  /** The server does not page snapshots, so a cold open asks HTTP first. */
+  readonly httpOnly?: boolean;
 }) {
   const subscriptions = yield* Queue.unbounded<{
     readonly afterSequence: number | undefined;
@@ -101,7 +103,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     client,
     initialConfig: Effect.succeed({
       threadResumeCompletionMarker: true,
-      threadSnapshotPagination: true,
+      threadSnapshotPagination: options?.httpOnly !== true,
     } as never),
     subscribeServerConfig: (input = {}) => client.subscribeServerConfig(input),
     ready: Effect.void,
@@ -308,7 +310,7 @@ describe("createEnvironmentThreadStateAtoms", () => {
   it.effect("loads a thread that was missing once the server lists it, while still mounted", () =>
     Effect.gen(function* () {
       const listed = Atom.make(false);
-      const h = yield* makeHarness({ listed });
+      const h = yield* makeHarness({ listed, httpOnly: true });
       const unmount = h.registry.mount(h.stateAtom);
       yield* observeState(h.registry, h.stateAtom, (state) => state.status === "deleted");
 

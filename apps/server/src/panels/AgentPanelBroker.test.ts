@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ThreadId, type AgentPanelRequest } from "@t3tools/contracts";
@@ -27,7 +28,9 @@ const desktop = (
     Effect.forkChild({ startImmediately: true }),
   );
 
-const layer = AgentPanelBroker.layer.pipe(Layer.provide(NodeServices.layer));
+const layer = AgentPanelBroker.layer.pipe(
+  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+);
 
 describe("AgentPanelBroker", () => {
   it.effect("fails at once when no desktop is connected", () =>

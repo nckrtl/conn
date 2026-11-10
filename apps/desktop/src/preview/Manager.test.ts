@@ -613,12 +613,14 @@ describe("PreviewManager", () => {
             Layer.mergeAll(
               layerEnvironment,
               layerBrowserSession,
+              NodeHttpClient.layerUndici,
               Layer.mock(DesktopBrowserHost.DesktopBrowserHost)({
                 attach: () => {},
                 detach: () => {},
                 setShown: () => {},
                 humanStartedDownload: () => true,
                 placeDownload: () => true,
+                rememberFilledSecret: () => {},
               }),
               Layer.mock(PreviewPasskeys.PreviewPasskeys)({
                 bridgeEnabled: false,

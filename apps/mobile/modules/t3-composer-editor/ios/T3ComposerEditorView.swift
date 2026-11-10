@@ -458,9 +458,9 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     text: "#262626",
     placeholder: "#8e8e93"
   )
-  private var fontFamily = "DMSans-Regular"
-  private var fontSize: CGFloat = 14
-  private var lineHeight: CGFloat = 20
+  private var fontFamily = "System"
+  private var fontSize: CGFloat = 16
+  private var lineHeight: CGFloat = 23
   private var contentInsetVertical: CGFloat = 0
   private var singleLineCentered = false
   private var shouldAutoFocus = false
@@ -506,7 +506,8 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     textView.keyboardDismissMode = .interactive
     textView.alwaysBounceVertical = false
     textView.showsVerticalScrollIndicator = true
-    textView.adjustsFontForContentSizeCategory = true
+    // Conn: JS sends font sizes already scaled for Dynamic Type; UIKit must not scale them again.
+    textView.adjustsFontForContentSizeCategory = false
     if #available(iOS 26.0, *) {
       // UIKit can attach a nearby bar's scroll edge effect to this text view; its backdrop
       // then draws over the typed text while the caret stays visible.
@@ -556,10 +557,19 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     addSubview(textView)
 
     placeholderLabel.numberOfLines = 0
-    placeholderLabel.adjustsFontForContentSizeCategory = true
+    placeholderLabel.adjustsFontForContentSizeCategory = false
     addSubview(placeholderLabel)
     applyTypography()
     applyTheme()
+    // JS sends the new scaled size and line height as props after a text size change; this
+    // only rebuilds the current document in place until those props arrive. The pod targets
+    // iOS 16.4, so the trait API needs an availability check.
+    if #available(iOS 17.0, *) {
+      registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: T3ComposerEditorView, _: UITraitCollection) in
+        view.applyTypography()
+        view.applyControlledDocument(force: true)
+      }
+    }
   }
 
   @objc private func openContext(_ recognizer: UITapGestureRecognizer) {
@@ -1028,8 +1038,8 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   private func makeAttachmentString(_ token: ComposerTokenPayload) -> NSAttributedString {
     let color = token.accent.flatMap { UIColor(composerHex: $0) }
       ?? UIColor(composerHex: theme.text) ?? .label
-    let chipFont = UIFont(name: "DMSans-Medium", size: fontSize)
-      ?? UIFont.systemFont(ofSize: fontSize, weight: .medium)
+    // Conn: chips use the system font, like the rest of the composer.
+    let chipFont = UIFont.systemFont(ofSize: fontSize, weight: .medium)
     let icon = token.iconUri.flatMap(iconImage(for:)).map {
       token.tintsIcon == true ? Self.tinted($0, color: color) : $0
     }

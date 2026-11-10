@@ -6,11 +6,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 // Conn fork guard: the thread list sits in an inset shell card, and the workspace
 // rail, not the sidebar footer, holds updates and utilities. Types and other tests
-// still pass without either. See FORK.md, "Shell design".
-const sidebar = NodeFS.readFileSync(
-  NodePath.join(import.meta.dirname, "..", "Sidebar.tsx"),
-  "utf8",
-);
+// still pass without either. The header has no back and forward buttons. See
+// FORK.md, "Shell design".
+const read = (path: string) =>
+  NodeFS.readFileSync(NodePath.join(import.meta.dirname, path), "utf8");
+const sidebar = read("../Sidebar.tsx");
 
 describe("Conn shell sidebar", () => {
   it("wraps the thread list in an inset shell card", () => {
@@ -20,5 +20,9 @@ describe("Conn shell sidebar", () => {
   it("leaves updates and utilities to the workspace rail", () => {
     expect(sidebar).toContain("<SidebarChromeFooter utilities={false} />");
     expect(sidebar).not.toContain("<SidebarChromeFooter />");
+  });
+
+  it("keeps back and forward buttons out of the sidebar header", () => {
+    expect(read("SidebarChrome.tsx")).not.toContain("navigateHistory");
   });
 });

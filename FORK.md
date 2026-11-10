@@ -62,6 +62,11 @@ footer must not show them again. Without the wrapper the sidebar loses its
 darker card; with the default footer a second row of utility icons appears
 under the thread list.
 
+The sidebar header (`SidebarChromeHeader` in `SidebarChrome.tsx`) shows no
+brand and no back and forward buttons. Upstream added those buttons in #27430;
+Conn keeps the history shortcuts and trackpad swipes but drops the buttons,
+which otherwise show beside the traffic lights behind the sidebar card.
+
 Browser pages meet the address bar's bottom divider. Keep `PreviewChromeRow`'s
 zero bottom margin. Do not add a Conn override for the inline-panel subheader
 (`[data-surface-subheader]` under `[data-right-panel-surface-content]`): it
@@ -85,7 +90,7 @@ Sources:
   `routes/_chat.settings.tsx`, `components/ChatView.tsx`,
   `components/RightPanelTabs.tsx`, `components/Sidebar.tsx`,
   `components/sidebar/SidebarChrome.tsx`, `lib/windowControlsOverlay.ts`
-  (`electron-macos`), `routes/__root.tsx`, `pierre-tree-theme.ts`.
+  (`electron-macos`), `navigationHistory.ts` (no button hook), `routes/__root.tsx`, `pierre-tree-theme.ts`.
 - Desktop traffic lights and window glass:
   `apps/desktop/src/window/DesktopWindow.ts`.
 - Guards: `apps/desktop/src/window/DesktopWindow.test.ts` (window glass) and
@@ -892,7 +897,8 @@ Sources:
      `visualEffectState` and clear background, both at window creation and in
      `syncWindowAppearance`. In `apps/web/src/components/Sidebar.tsx` keep the
      `shell-inner-panel` wrapper around `SidebarContent` and
-     `<SidebarChromeFooter utilities={false} />` inside it. Take upstream's
+     `<SidebarChromeFooter utilities={false} />` inside it. Keep the back and
+     forward buttons out of `SidebarChromeHeader`. Take upstream's
      sidebar content changes inside that wrapper. The November 7 sync dropped
      all three; see [Shell design](#shell-design).
    - `apps/web/src/components/ChatView.tsx`: keep `<ConnIconScope>` around

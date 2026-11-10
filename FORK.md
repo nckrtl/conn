@@ -23,8 +23,10 @@ file before you merge upstream, build, or change shared UI. Upstream's
   with `scripts/build-cli-archive.ts`.
 - Build, sign and install with the [build guide][build]. Builds ship no update
   feed (`publish: null` in `scripts/build-desktop-artifact.ts`), so the app
-  never replaces itself with an upstream release. Re-sign macOS builds with a
-  local identity using `scripts/sign-macos-local.ts`. Packaging and that
+  never replaces itself with an upstream release. Build and sign the Mac app
+  on Nick's MacBook; `scripts/sign-macos-local.ts` re-signs it with the
+  Developer ID of team 9SVJ4SYB9B (not notarized). iOS builds run in nick-vm
+  and are signed on the MacBook. Packaging and that
   re-sign preflight fail closed unless the full 40-character source SHA is the
   tip of an `origin` `refs/heads/sync/*` branch. Publish HEAD with
   `node scripts/publish-sync-branch.ts`, then verify with

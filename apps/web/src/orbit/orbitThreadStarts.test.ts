@@ -20,6 +20,7 @@ vi.mock("@t3tools/client-runtime/orbit-gateway", async (importOriginal) => ({
     await ports.send({ ...start, environmentId: "clone" });
     return true;
   },
+  sendOrbitFirstMessage: async () => "ws",
 }));
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({
   runAtomCommand: vi.fn(),
@@ -42,7 +43,6 @@ vi.mock("./environmentProvider", () => ({
   recordOrbitPaired: vi.fn(),
   useEnvironmentProvider: { getState: () => ({ provider: "orbit" }) },
 }));
-vi.mock("./orbitThreadTurn", () => ({ sendOrbitFirstMessage: async () => "ws" }));
 
 function createLocalStorageStub(): Storage {
   const values = new Map<string, string>();

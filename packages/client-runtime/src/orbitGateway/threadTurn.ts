@@ -1,5 +1,3 @@
-import type { OrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
-import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
   CommandId,
   MessageId,
@@ -7,6 +5,9 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+
+import { deriveThreadTitleSeed } from "../operations/threadTitle.ts";
+import type { OrbitThreadStart } from "./threadStart.ts";
 
 /**
  * Conn: the launch that starts a thread in a clone with its first message, in the clone's

@@ -1,6 +1,8 @@
 import {
   newOrbitThreadStart,
   runOrbitThreadStart,
+  sendOrbitFirstMessage,
+  type OrbitFirstMessagePorts,
   type OrbitGatewayClient,
   type OrbitGatewayProject,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -19,7 +21,6 @@ import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
 import { readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
-import { type OrbitFirstMessagePorts, sendOrbitFirstMessage } from "./orbitThreadTurn";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
 

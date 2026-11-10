@@ -27,9 +27,12 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
+import { heldOrbitInstanceIds, orbitThreadStartStore } from "./orbitThreadStartStore";
+import { addProjectRefToProfileWorkspace } from "./orbitWorkspaceRef";
 
 /**
- * The phone's view of the Orbit Gateway: Node, profile, workspaces (read-only) and T3 servers.
+ * The phone's view of the Orbit Gateway: Node, profile, workspaces and T3 servers. The phone edits
+ * workspaces only to add a started thread's clone project (keepProjectInOrbitWorkspace).
  * The appearance syncs both ways (orbitProfileSync). In Orbit mode it pairs the Gateway's servers
  * and switches off environments added by hand (see planEnvironmentProvider).
  */
@@ -162,6 +165,12 @@ async function attemptPairing(
   }
 }
 
+/** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
+export async function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
+  // The server is saved already; a lost record only means a later sync re-checks it.
+  await updateEnvironmentState((current) => recordPaired(current, environmentId)).catch(() => {});
+}
+
 /**
  * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets a
  * later refresh retry it if this attempt fails.
@@ -197,6 +206,8 @@ async function reconcileEnvironments(
     orbit,
     state: environmentState,
     lacksAccess,
+    // Conn: a thread start pairs its own clone; the sync must not pair it a second time.
+    heldInstanceIds: heldOrbitInstanceIds(),
     requestedEnvironmentIds: [...requestedEnvironmentIds],
     now: Date.now(),
   });
@@ -217,6 +228,8 @@ async function reconcileEnvironments(
       disabledByOrbit: plan.state.disabledByOrbit,
     }),
   );
+  // Conn: until the saved thread starts load, the sync cannot tell which clones they hold.
+  if (!orbitThreadStartStore.loaded()) return;
   // One server per refresh: pairing waits for a Gateway Operation, and the refresh waits too.
   const environmentId = plan.pair.find((id) => !pairings.has(id));
   const environment = orbit?.find((entry) => entry.environmentId === environmentId);
@@ -290,6 +303,28 @@ export async function syncOrbitAppearanceNow(): Promise<void> {
   }
 }
 
+/**
+ * Conn: adds a started thread's clone project to the profile workspace selected at Start, so the
+ * workspace filter shows the thread. Failures leave the workspace as it was.
+ */
+export async function keepProjectInOrbitWorkspace(
+  workspaceId: string | null,
+  projectRef: string,
+): Promise<void> {
+  if (workspaceId === null) return;
+  try {
+    // A start resumed at launch can send before the first refresh read the profile; a refresh
+    // could wait on another server's pairing, so read only the Node.
+    const node = state.node ?? (await client.me());
+    const profileId = node.profile?.id;
+    if (profileId === undefined) return;
+    const saved = await addProjectRefToProfileWorkspace(client, profileId, workspaceId, projectRef);
+    if (saved) set({ workspaces: saved.workspaces });
+  } catch {
+    // The thread is sent; a later Start or the desktop can still add the ref.
+  }
+}
+
 export function selectOrbitWorkspace(workspaceId: string | null): void {
   set({ selectedWorkspaceId: workspaceId });
 }
@@ -313,9 +348,13 @@ export function selectedWorkspaceProjectRefs(
   });
 }
 
-function subscribe(listener: () => void): () => void {
+export function subscribeOrbitGateway(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+export function orbitGatewayState(): OrbitGatewayState {
+  return state;
 }
 
 let started = false;
@@ -339,5 +378,5 @@ export function useOrbitGateway(): OrbitGatewayState {
       if (AppState.currentState === "active" && !refreshing) void syncOrbitAppearanceNow();
     }, APPEARANCE_PROBE_MS);
   }, []);
-  return useSyncExternalStore(subscribe, () => state);
+  return useSyncExternalStore(subscribeOrbitGateway, () => state);
 }

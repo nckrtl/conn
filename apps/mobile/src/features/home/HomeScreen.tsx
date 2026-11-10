@@ -1,5 +1,6 @@
 import { useContentTopInset } from "../../components/ui/useBarInset";
 import { selectedWorkspaceProjectRefs, useOrbitGateway } from "../orbit/orbitGatewayStore";
+import { OrbitThreadStartRows } from "../orbit/OrbitThreadStartRows";
 import { usePaneRole } from "../../components/ui/Pane";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { useActiveNewTask } from "../../state/active-new-task";
@@ -695,6 +696,7 @@ export function HomeScreen(props: HomeScreenProps) {
             }}
           >
             <View className="w-full max-w-[430px]">
+              <OrbitThreadStartRows />
               <EmptyState
                 title={emptyState.title}
                 detail={emptyState.detail}
@@ -748,6 +750,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onProjectChange={props.onProjectChange}
         />
       ) : null}
+      <OrbitThreadStartRows />
     </>
   );
 

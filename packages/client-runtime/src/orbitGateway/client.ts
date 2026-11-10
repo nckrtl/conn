@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - The Gateway client runs in the app, outside an Effect runtime.
 import * as Schema from "effect/Schema";
 
 /**
@@ -123,13 +124,33 @@ export interface OrbitGatewayClient {
     sections: Readonly<Record<string, OrbitGatewaySectionPatch>>,
   ) => Promise<OrbitGatewaySettings>;
   readonly environments: () => Promise<readonly OrbitGatewayEnvironment[]>;
-  /** Mints a one-time pairing link to the server for this device. */
+  /**
+   * Mints a one-time pairing link to the server for this device. The Gateway mints it in an
+   * Operation; this follows the Operation and reads the link, which the Gateway hands out once.
+   */
   readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
 }
 
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 
-export function createOrbitGatewayClient(transport: OrbitGatewayTransport): OrbitGatewayClient {
+/** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
+const OPERATION_TIMEOUT_MS = 60_000;
+const MIN_POLL_MS = 500;
+const MAX_POLL_MS = 5_000;
+
+export interface OrbitGatewayClientOptions {
+  /** Waits between Operation polls. Tests replace it. */
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly now?: () => number;
+}
+
+export function createOrbitGatewayClient(
+  transport: OrbitGatewayTransport,
+  options: OrbitGatewayClientOptions = {},
+): OrbitGatewayClient {
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
   const call = async (request: OrbitGatewayRequest): Promise<unknown> => {
     let response: OrbitGatewayResponse;
     try {
@@ -160,6 +181,42 @@ export function createOrbitGatewayClient(transport: OrbitGatewayTransport): Orbi
       throw invalid(request.path);
     }
     return envelope.data;
+  };
+
+  /** Polls a Conn Operation until it ends, and returns it when it succeeded. */
+  const settle = async (
+    started: Record<string, unknown> | null,
+    path: string,
+  ): Promise<Record<string, unknown>> => {
+    let operation = started;
+    const deadline = now() + OPERATION_TIMEOUT_MS;
+    for (;;) {
+      if (typeof operation?.id !== "number" || typeof operation.status !== "string") {
+        throw invalid(path);
+      }
+      if (operation.status === "succeeded") return operation;
+      if (operation.status === "failed" || operation.status === "cancelled") {
+        throw new OrbitGatewayError({
+          code:
+            typeof operation.error_code === "string" ? operation.error_code : "operation.failed",
+          message: `The Orbit Gateway could not finish ${path}: the Operation ${operation.status}.`,
+          status: 0,
+          details: { operation_id: operation.id },
+        });
+      }
+      if (now() >= deadline) {
+        throw new OrbitGatewayError({
+          code: "operation.timeout",
+          message: `The Orbit Gateway did not finish ${path} in time.`,
+          status: 0,
+          details: { operation_id: operation.id },
+        });
+      }
+      const after =
+        typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds * 1000 : 0;
+      await sleep(Math.min(Math.max(after, MIN_POLL_MS), MAX_POLL_MS));
+      operation = record(await call({ method: "GET", path: `/operations/${operation.id}` }));
+    }
   };
 
   return {
@@ -200,7 +257,13 @@ export function createOrbitGatewayClient(transport: OrbitGatewayTransport): Orbi
       list(await call({ method: "GET", path: "/environments" }), "/environments", environment),
     pair: async (environmentId) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
-      const data = record(await call({ method: "POST", path }));
+      let data = record(await call({ method: "POST", path }));
+      // The Gateway mints the link in an Operation (202). Follow it, then read the link once.
+      if (typeof data?.pairing_url !== "string") {
+        const result = record((await settle(data, path)).result);
+        if (typeof result?.pairing_id !== "number") throw invalid(path);
+        data = record(await call({ method: "GET", path: `${path}/${result.pairing_id}` }));
+      }
       const pairing = record(data?.pairing);
       if (
         typeof data?.pairing_url !== "string" ||

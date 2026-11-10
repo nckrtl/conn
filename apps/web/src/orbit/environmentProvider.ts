@@ -5,6 +5,7 @@ import {
   planEnvironmentProvider,
   recordAccessPairing,
   recordPaired,
+  recordPairingAttempt,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayClient,
@@ -96,7 +97,9 @@ export async function reconcileEnvironmentProvider(
 
   let next = plan.state;
   for (const environmentId of plan.pair) {
-    if (savedIds.has(environmentId)) next = recordAccessPairing(next, environmentId, now);
+    next = savedIds.has(environmentId)
+      ? recordAccessPairing(next, environmentId, now)
+      : recordPairingAttempt(next, environmentId, now);
     try {
       const pairing = await client.pair(environmentId);
       const result = await runAtomCommand(

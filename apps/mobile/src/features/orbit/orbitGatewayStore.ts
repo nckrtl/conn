@@ -5,6 +5,7 @@ import {
   planEnvironmentProvider,
   recordAccessPairing,
   recordPaired,
+  recordPairingAttempt,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayEnvironment,
@@ -26,12 +27,9 @@ import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
 
 /**
- * The phone's view of the Orbit Gateway: this device's Node and profile, the profile's workspaces,
- * and the registered T3 servers. Workspaces are read-only here; the desktop edits them. The
- * appearance syncs both ways, see orbitProfileSync.
- *
- * It also applies the environment provider (see planEnvironmentProvider): in Orbit mode the
- * Gateway's servers are paired automatically and the environments added by hand are switched off.
+ * The phone's view of the Orbit Gateway: Node, profile, workspaces (read-only) and T3 servers.
+ * The appearance syncs both ways (orbitProfileSync). In Orbit mode it pairs the Gateway's servers
+ * and switches off environments added by hand (see planEnvironmentProvider).
  */
 
 export interface OrbitGatewayState {
@@ -137,7 +135,9 @@ async function reconcileEnvironments(
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
   let next = plan.state;
   for (const environmentId of plan.pair) {
-    if (savedIds.has(environmentId)) next = recordAccessPairing(next, environmentId, now);
+    next = savedIds.has(environmentId)
+      ? recordAccessPairing(next, environmentId, now)
+      : recordPairingAttempt(next, environmentId, now);
     try {
       const pairing = await client.pair(environmentId);
       const result = await runAtomCommand(
@@ -261,6 +261,7 @@ const APPEARANCE_PROBE_MS = 30_000;
  * While the app is in front it also checks the profile's appearance every 30 seconds.
  */
 export function useOrbitGateway(): OrbitGatewayState {
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts the app-wide AppState listener and appearance timer once
   useEffect(() => {
     if (started) return;
     started = true;

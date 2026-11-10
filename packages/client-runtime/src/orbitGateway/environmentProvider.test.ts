@@ -4,9 +4,12 @@ import type { OrbitGatewayEnvironment } from "./client.ts";
 import {
   ACCESS_PAIRING_RETRY_MS,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  PAIRING_RETRY_MS,
+  parseOrbitEnvironmentState,
   planEnvironmentProvider,
   recordAccessPairing,
   recordPaired,
+  recordPairingAttempt,
   type ManagedEnvironment,
   type OrbitEnvironmentState,
 } from "./environmentProvider.ts";
@@ -146,5 +149,28 @@ describe("planEnvironmentProvider", () => {
     expect(
       planEnvironmentProvider({ ...input, state: tried, now: now + ACCESS_PAIRING_RETRY_MS }).pair,
     ).toEqual(["mini"]);
+  });
+
+  it("waits before pairing a new server again after an attempt that did not save it", () => {
+    const now = 1_000_000_000;
+    const input = { provider: "orbit" as const, saved: [], orbit: [orbit("spike")], now };
+    const first = planEnvironmentProvider({ ...input, state: EMPTY_ORBIT_ENVIRONMENT_STATE });
+    expect(first.pair).toEqual(["spike"]);
+
+    const tried = recordPairingAttempt(first.state, "spike", now);
+    expect(planEnvironmentProvider({ ...input, state: tried, now: now + 15_000 }).pair).toEqual([]);
+    expect(
+      planEnvironmentProvider({ ...input, state: tried, now: now + PAIRING_RETRY_MS }).pair,
+    ).toEqual(["spike"]);
+  });
+
+  it("keeps pairing attempt times across a reload", () => {
+    const state = recordPairingAttempt(EMPTY_ORBIT_ENVIRONMENT_STATE, "spike", 42);
+    expect(parseOrbitEnvironmentState(JSON.parse(JSON.stringify(state))).pairAttemptedAt).toEqual({
+      spike: 42,
+    });
+    expect(parseOrbitEnvironmentState({ pairAttemptedAt: { spike: "x" } }).pairAttemptedAt).toEqual(
+      {},
+    );
   });
 });

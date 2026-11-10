@@ -16,6 +16,8 @@ export interface OrbitEnvironmentState {
   readonly pairedByOrbit: readonly string[];
   /** Conn: when Orbit last paired a server again because its session could not manage access. */
   readonly accessPairedAt?: Readonly<Record<string, number>>;
+  /** Conn: when Orbit last tried to pair a server this client has not saved yet. */
+  readonly pairAttemptedAt?: Readonly<Record<string, number>>;
 }
 
 export const EMPTY_ORBIT_ENVIRONMENT_STATE: OrbitEnvironmentState = {
@@ -25,6 +27,12 @@ export const EMPTY_ORBIT_ENVIRONMENT_STATE: OrbitEnvironmentState = {
 
 /** Conn: how long to wait before pairing a server again whose session still lacks `access:write`. */
 export const ACCESS_PAIRING_RETRY_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Conn: how long to wait before pairing a new server again after an attempt that did not save it.
+ * Each attempt mints a link on the server, so a failure must not repeat on every sync.
+ */
+export const PAIRING_RETRY_MS = 5 * 60 * 1000;
 
 /** A saved environment the provider manages. The desktop's own local backend is never passed in. */
 export interface ManagedEnvironment {
@@ -37,8 +45,9 @@ export interface EnvironmentProviderPlan {
   readonly disable: readonly string[];
   /**
    * Registered Orbit servers this client has not saved yet, and (Conn) saved ones to pair again
-   * because their session lacks `access:write`. Record each success with `recordPaired`, and each
-   * attempt at the second kind with `recordAccessPairing`.
+   * because their session lacks `access:write`. Record each success with `recordPaired`, each
+   * attempt at the first kind with `recordPairingAttempt`, and at the second with
+   * `recordAccessPairing`.
    */
   readonly pair: readonly string[];
   readonly state: OrbitEnvironmentState;
@@ -101,7 +110,10 @@ export function planEnvironmentProvider(input: {
     .filter((environment) => {
       if (environment.status !== "registered") return false;
       const id = environment.environmentId;
-      if (!savedIds.has(id)) return true;
+      if (!savedIds.has(id)) {
+        const lastAttempt = state.pairAttemptedAt?.[id];
+        return lastAttempt === undefined || now - lastAttempt >= PAIRING_RETRY_MS;
+      }
       // Conn: pair again so the session can manage linked environments (see FORK.md, "Orbit").
       const lastTry = state.accessPairedAt?.[id];
       return (
@@ -127,6 +139,15 @@ export function recordAccessPairing(
   return { ...state, accessPairedAt: { ...state.accessPairedAt, [environmentId]: now } };
 }
 
+/** Conn: records an attempt to pair a server this client has not saved, successful or not. */
+export function recordPairingAttempt(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+  now: number,
+): OrbitEnvironmentState {
+  return { ...state, pairAttemptedAt: { ...state.pairAttemptedAt, [environmentId]: now } };
+}
+
 export function recordPaired(
   state: OrbitEnvironmentState,
   environmentId: string,
@@ -145,15 +166,19 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
   const ids = (list: unknown) =>
     Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === "string") : [];
-  const accessPairedAt: Record<string, number> = {};
-  if (typeof record.accessPairedAt === "object" && record.accessPairedAt !== null) {
-    for (const [id, at] of Object.entries(record.accessPairedAt)) {
-      if (typeof at === "number") accessPairedAt[id] = at;
+  const times = (value: unknown) => {
+    const result: Record<string, number> = {};
+    if (typeof value === "object" && value !== null) {
+      for (const [id, at] of Object.entries(value)) {
+        if (typeof at === "number") result[id] = at;
+      }
     }
-  }
+    return result;
+  };
   return {
     disabledByOrbit: ids(record.disabledByOrbit),
     pairedByOrbit: ids(record.pairedByOrbit),
-    accessPairedAt,
+    accessPairedAt: times(record.accessPairedAt),
+    pairAttemptedAt: times(record.pairAttemptedAt),
   };
 }

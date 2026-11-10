@@ -870,6 +870,16 @@ Sources:
 
 ## Keep the customizations through an upstream merge
 
+`fork-sync.json` lists each customization, a presence check, and conflict
+rules (`ours`, `theirs`, `regenerate`, `manual`). Settings-default policy
+lives in `settings-carryover.json`. Run
+`node scripts/fork-sync.ts merge --upstream upstream/main` to merge onto a
+sync branch, apply those rules, and write a JSON report of auto-resolved
+files, leftover conflicts, and presence checks. Unmatched conflicts and
+failed presence checks exit 3 for ForkBot. The script does not publish,
+sign, or install; `publish-sync-branch.ts` and `check-sync-provenance.ts`
+still do that.
+
 1. Merge `upstream/main` into the sync branch. Work through every conflict,
    keeping all fork work and as much upstream work as possible. Conflicts are
    expected in the files listed above, most often `index.css`,

@@ -341,12 +341,12 @@ describe("OrbitWorkspaceRegistrar", () => {
         const registrar = yield* startRegistrar(memoryFiles(), harness);
         const done = yield* Effect.forkChild(settled(registrar));
         yield* registrar.register(input);
-        // A retried answer would post again after 30 seconds.
+        // A retried answer would post again after 30 seconds; catch that before the join waits.
         yield* TestClock.adjust("30 seconds");
+        assert.strictEqual(posts(harness).length, 1);
         const registration = yield* Fiber.join(done);
         assert.strictEqual(registration.phase, "failed");
         assert.deepStrictEqual(registration.failure, failure);
-        assert.strictEqual(posts(harness).length, 1);
       }
 
       const harness: Harness = {

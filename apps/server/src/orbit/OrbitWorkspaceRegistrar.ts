@@ -1,5 +1,5 @@
 import {
-  type OrbitWorkspaceFailure,
+  OrbitWorkspaceFailure,
   type OrbitWorkspaceList,
   type OrbitWorkspaceRegisterInput,
   OrbitWorkspaceRegistration,
@@ -11,7 +11,6 @@ import { orbitRouteSlug, orbitRouteSlugAttempt } from "@t3tools/shared/orbit";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
@@ -65,7 +64,10 @@ export class OrbitWorkspaceRegistrar extends Context.Service<
   }
 >()("t3/orbit/OrbitWorkspaceRegistrar") {}
 
-class RegistrationFailed extends Data.TaggedError("RegistrationFailed")<OrbitWorkspaceFailure> {}
+class RegistrationFailed extends Schema.TaggedError<RegistrationFailed>()(
+  "RegistrationFailed",
+  OrbitWorkspaceFailure.fields,
+) {}
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)

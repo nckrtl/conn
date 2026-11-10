@@ -1,14 +1,7 @@
 /**
- * Which saved login URLs may be filled into which browser origins.
- *
- * The rule is deliberately strict: same host (ignoring a leading `www.`),
- * same port, and https unless the saved URL itself says http. A saved URL
- * without a scheme means https, except for loopback and `.localhost`/`.test`
- * development hosts, which may also use http. Subdomains do not match; save
- * the exact sign-in host in the password manager instead, or turn on
- * `allowSubdomains`, which lets a saved host also fill hosts below it. That
- * never applies to a public suffix such as `github.io` or `co.uk`, which
- * belongs to many unrelated owners.
+ * Which saved login URLs may fill which origins: same host (ignoring `www.`), same port, and https
+ * unless the saved URL says http (loopback, `.localhost` and `.test` may use http). Subdomains need
+ * `allowSubdomains`, which never spans a public suffix such as `github.io`.
  */
 
 import { getDomain } from "tldts";

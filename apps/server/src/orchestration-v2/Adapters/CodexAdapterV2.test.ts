@@ -947,7 +947,8 @@ describe("CodexAdapterV2 process exit", () => {
           .pipe(Effect.tap(() => Effect.sync(() => assert.equal(runningAgents, 1)))),
       );
       assert.equal(runningAgents, 0);
-    }).pipe(Effect.provide(factoryLayer));
+      // Conn's Codex MCP network wait reads the Codex config through the file system.
+    }).pipe(Effect.provide(factoryLayer), Effect.provide(NodeServices.layer));
   });
 });
 

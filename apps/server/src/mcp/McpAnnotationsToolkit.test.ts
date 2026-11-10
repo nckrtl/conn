@@ -43,7 +43,7 @@ const client = McpSchema.McpServerClient.of({
 });
 
 const layer = McpHttpServer.layerAnnotationsToolkit.pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
   Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
   Layer.provideMerge(AnnotationStore.layer),
   Layer.provide(

@@ -150,7 +150,11 @@ function openThread(environmentId: string, threadId: string): void {
     params: { environmentId: EnvironmentId.make(environmentId), threadId: ThreadId.make(threadId) },
   };
   startOpeningDetail(detail);
-  rootNavigationRef.dispatch(selectWorkspaceDetail(detail));
+  // Aimed at the root stack, as linkToRootPath does; the focused nested navigator drops it.
+  rootNavigationRef.dispatch({
+    ...selectWorkspaceDetail(detail),
+    target: rootNavigationRef.getRootState()?.key,
+  });
 }
 
 function runReadyStarts(): void {

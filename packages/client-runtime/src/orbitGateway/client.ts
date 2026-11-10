@@ -228,6 +228,8 @@ export interface OrbitGatewayClientOptions {
   /** Waits between Operation polls. Tests replace it. */
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
+  /** How long `pair` follows the Operation; `OPERATION_TIMEOUT_MS` by default. */
+  readonly operationTimeoutMs?: number;
 }
 
 export function createOrbitGatewayClient(
@@ -275,7 +277,7 @@ export function createOrbitGatewayClient(
     path: string,
   ): Promise<Record<string, unknown>> => {
     let operation = started;
-    const deadline = now() + OPERATION_TIMEOUT_MS;
+    const deadline = now() + (options.operationTimeoutMs ?? OPERATION_TIMEOUT_MS);
     for (;;) {
       if (typeof operation?.id !== "number" || typeof operation.status !== "string") {
         throw invalid(path);

@@ -1,6 +1,7 @@
 import {
   type AuthMcpClientAccess,
   EnvironmentId,
+  type OrchestratorMcpFailure,
   type PeerLinkError,
   OrbitEnvironmentLinkErrorCode,
 } from "@t3tools/contracts";
@@ -38,6 +39,8 @@ export interface OrbitEnvironmentLinkInput {
   readonly environmentId: string;
   readonly access: AuthMcpClientAccess;
   readonly gatewayUrl?: string;
+  /** Runs just before the link is made, after the Gateway wait, e.g. to check the caller again. */
+  readonly beforeLink?: Effect.Effect<void, OrchestratorMcpFailure>;
 }
 
 export interface OrbitEnvironmentLinked {
@@ -52,7 +55,7 @@ export class OrbitEnvironmentLink extends Context.Service<
   {
     readonly link: (
       input: OrbitEnvironmentLinkInput,
-    ) => Effect.Effect<OrbitEnvironmentLinked, OrbitEnvironmentLinkError>;
+    ) => Effect.Effect<OrbitEnvironmentLinked, OrbitEnvironmentLinkError | OrchestratorMcpFailure>;
   }
 >()("t3/orbit/OrbitEnvironmentLink") {}
 
@@ -188,12 +191,13 @@ export const makeLink = (deps: {
       catch: (error) => gatewayFailure(error, input.environmentId),
     });
     const code = pairingCode(pairing.pairingUrl);
-    if (code === null) {
+    if (code === null || pairing.environmentId !== environment.environmentId) {
       return yield* fail(
         "pairing_failed",
-        "Orbit returned a pairing link without a code. Update Orbit, then try again.",
+        "Orbit returned a pairing link this version cannot use. Update Orbit, then try again.",
       );
     }
+    if (input.beforeLink) yield* input.beforeLink;
     // Only an address that proves to be this environment receives the code.
     const linked = yield* deps.links
       .link({
@@ -225,6 +229,8 @@ const make = Effect.gen(function* () {
       clientOptions: {
         sleep: (ms) => run(Effect.sleep(ms)),
         now: () => clock.currentTimeMillisUnsafe(),
+        // MCP clients drop a tool call after about 60 s; a dropped call invites a second pairing.
+        operationTimeoutMs: 30_000,
       },
     }),
   });

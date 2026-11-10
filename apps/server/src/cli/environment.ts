@@ -162,6 +162,12 @@ const environmentLinkOrbitCommand = Command.make("link-orbit", {
             `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, until ${linked.expiresAt}.\n`,
           );
         }).pipe(
+          // Scripts branch on the code, so it leads the message.
+          Effect.tapError((error) =>
+            error._tag === "OrbitEnvironmentLinkError"
+              ? Console.error(`${error.code}: ${error.message}`)
+              : Effect.void,
+          ),
           Effect.provide(
             OrbitEnvironmentLink.layer.pipe(
               Layer.provide(Layer.succeed(OrbitGateway.OrbitGateway, gateway)),

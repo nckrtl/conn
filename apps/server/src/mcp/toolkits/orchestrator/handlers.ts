@@ -201,11 +201,16 @@ const handlers = {
       return yield* requests.request(scope, input);
     }),
   ),
-  t3_environment_link_orbit: McpToolAccess.writesEnvironment(({ environment, access }) =>
+  t3_environment_link_orbit: McpToolAccess.writesEnvironment(({ environment, access }, check) =>
     Effect.gen(function* () {
       const orbit = yield* OrbitEnvironmentLink.OrbitEnvironmentLink;
+      const services = yield* Effect.context<Effect.Services<typeof check>>();
       return yield* orbit
-        .link({ environmentId: environment, access: access ?? "approval-required" })
+        .link({
+          environmentId: environment,
+          access: access ?? "approval-required",
+          beforeLink: check.pipe(Effect.asVoid, Effect.provideContext(services)),
+        })
         .pipe(
           Effect.map((linked) => ({ status: "linked" as const, ...linked })),
           Effect.catchTags({

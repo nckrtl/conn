@@ -1,11 +1,13 @@
 import {
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  isFinalPairingError,
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
   recordAccessPairing,
   recordPaired,
   recordPairingAttempt,
+  recordPairingRefused,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayClient,
@@ -96,10 +98,14 @@ export async function reconcileEnvironmentProvider(
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
 
   let next = plan.state;
-  for (const environmentId of plan.pair) {
+  // One server per run: pairing waits for a Gateway Operation, and the rest of the sync waits too.
+  const environmentId = plan.pair[0];
+  if (environmentId !== undefined) {
     next = savedIds.has(environmentId)
       ? recordAccessPairing(next, environmentId, now)
       : recordPairingAttempt(next, environmentId, now);
+    // Saved before the attempt, so a reload during the pairing still backs off.
+    useEnvironmentProvider.setState({ state: next });
     try {
       const pairing = await client.pair(environmentId);
       const result = await runAtomCommand(
@@ -109,8 +115,12 @@ export async function reconcileEnvironmentProvider(
         { reportFailure: false },
       );
       if (result._tag === "Success") next = recordPaired(next, environmentId);
-    } catch {
-      // An unreachable server pairs on a later run.
+    } catch (error) {
+      // An unreachable server pairs on a later run; a refused one after it registers again.
+      const environment = orbit?.find((entry) => entry.environmentId === environmentId);
+      if (environment && isFinalPairingError(error)) {
+        next = recordPairingRefused(next, environment);
+      }
     }
   }
   useEnvironmentProvider.setState({ state: next });

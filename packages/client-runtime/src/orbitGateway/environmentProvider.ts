@@ -18,6 +18,11 @@ export interface OrbitEnvironmentState {
   readonly accessPairedAt?: Readonly<Record<string, number>>;
   /** Conn: when Orbit last tried to pair a server this client has not saved yet. */
   readonly pairAttemptedAt?: Readonly<Record<string, number>>;
+  /**
+   * Conn: servers whose pairing T3 refused with a final error code, with the `registeredAt` they
+   * had then. Orbit pairs such a server again only after it registers again.
+   */
+  readonly pairRefusedAt?: Readonly<Record<string, string>>;
 }
 
 export const EMPTY_ORBIT_ENVIRONMENT_STATE: OrbitEnvironmentState = {
@@ -85,7 +90,7 @@ export function planEnvironmentProvider(input: {
       enable,
       disable,
       pair: [],
-      state: { disabledByOrbit: [], pairedByOrbit: [...pairedByOrbit] },
+      state: { ...state, disabledByOrbit: [], pairedByOrbit: [...pairedByOrbit] },
     };
   }
 
@@ -111,6 +116,8 @@ export function planEnvironmentProvider(input: {
       if (environment.status !== "registered") return false;
       const id = environment.environmentId;
       if (!savedIds.has(id)) {
+        const refusedAt = state.pairRefusedAt?.[id];
+        if (refusedAt !== undefined && refusedAt === environment.registeredAt) return false;
         const lastAttempt = state.pairAttemptedAt?.[id];
         return lastAttempt === undefined || now - lastAttempt >= PAIRING_RETRY_MS;
       }
@@ -148,6 +155,24 @@ export function recordPairingAttempt(
   return { ...state, pairAttemptedAt: { ...state.pairAttemptedAt, [environmentId]: now } };
 }
 
+/**
+ * Conn: records that T3 refused a new server's pairing with a final error code. It is paired
+ * again once its registration changes. Without a known registration time it only backs off.
+ */
+export function recordPairingRefused(
+  state: OrbitEnvironmentState,
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+): OrbitEnvironmentState {
+  if (environment.registeredAt === null) return state;
+  return {
+    ...state,
+    pairRefusedAt: {
+      ...state.pairRefusedAt,
+      [environment.environmentId]: environment.registeredAt,
+    },
+  };
+}
+
 export function recordPaired(
   state: OrbitEnvironmentState,
   environmentId: string,
@@ -175,10 +200,20 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     }
     return result;
   };
+  const texts = (value: unknown) => {
+    const result: Record<string, string> = {};
+    if (typeof value === "object" && value !== null) {
+      for (const [id, at] of Object.entries(value)) {
+        if (typeof at === "string") result[id] = at;
+      }
+    }
+    return result;
+  };
   return {
     disabledByOrbit: ids(record.disabledByOrbit),
     pairedByOrbit: ids(record.pairedByOrbit),
     accessPairedAt: times(record.accessPairedAt),
     pairAttemptedAt: times(record.pairAttemptedAt),
+    pairRefusedAt: texts(record.pairRefusedAt),
   };
 }

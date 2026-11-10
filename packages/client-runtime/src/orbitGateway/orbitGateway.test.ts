@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   createOrbitGatewayClient,
+  isFinalPairingError,
   OrbitGatewayError,
   type OrbitGatewayRequest,
   type OrbitGatewayWorkspace,
@@ -360,6 +361,33 @@ describe("createOrbitGatewayClient", () => {
         details: { operation_id: 16044 },
       });
       expect(requests).toHaveLength(1);
+    });
+
+    it("ends on an interrupted Operation without polling again", async () => {
+      const { requests, transport } = scripted([
+        [202, operation("running", { poll_after_seconds: null })],
+        [200, operation("interrupted")],
+      ]);
+      const waits: number[] = [];
+      const client = createOrbitGatewayClient(transport, {
+        sleep: async (ms) => {
+          waits.push(ms);
+        },
+      });
+      await expect(client.pair("env-spike")).rejects.toMatchObject({ code: "operation.failed" });
+      expect(requests).toHaveLength(2);
+      expect(waits).toEqual([500]);
+    });
+
+    it("marks only the codes the Gateway calls final", () => {
+      const error = (code: string) =>
+        new OrbitGatewayError({ code, message: code, status: 0, details: {} });
+      expect(isFinalPairingError(error("conn.session_rejected"))).toBe(true);
+      expect(isFinalPairingError(error("conn.request_refused"))).toBe(true);
+      expect(isFinalPairingError(error("conn.response_invalid"))).toBe(true);
+      expect(isFinalPairingError(error("conn.pairing_outcome_unknown"))).toBe(false);
+      expect(isFinalPairingError(error("gateway.unreachable"))).toBe(false);
+      expect(isFinalPairingError(new Error("conn.session_rejected"))).toBe(false);
     });
 
     it("gives up on an Operation that does not end in time", async () => {

@@ -94,6 +94,8 @@ export interface OrbitGatewayEnvironment {
   readonly url: string;
   readonly serverVersion: string | null;
   readonly registeredBy: string | null;
+  /** When the server last registered. A refused pairing waits for the next registration. */
+  readonly registeredAt: string | null;
   readonly status: "registered" | "session_expired";
 }
 
@@ -136,7 +138,19 @@ export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 /** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
 const OPERATION_TIMEOUT_MS = 60_000;
 const MIN_POLL_MS = 500;
-const MAX_POLL_MS = 5_000;
+const MAX_POLL_MS = 15_000;
+/** Operation statuses that are not final yet; every other status ends the Operation. */
+const OPEN_OPERATION_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "waiting"]);
+
+/**
+ * Pairing error codes that the Gateway calls final: T3 answered and refused. Callers must not
+ * retry them on their own (Orbit docs/reference/conn.md, "Pairing Operations").
+ */
+const FINAL_PAIRING_ERROR_CODES: ReadonlySet<string> = new Set([
+  "conn.session_rejected",
+  "conn.request_refused",
+  "conn.response_invalid",
+]);
 
 export interface OrbitGatewayClientOptions {
   /** Waits between Operation polls. Tests replace it. */
@@ -195,7 +209,7 @@ export function createOrbitGatewayClient(
         throw invalid(path);
       }
       if (operation.status === "succeeded") return operation;
-      if (operation.status === "failed" || operation.status === "cancelled") {
+      if (!OPEN_OPERATION_STATUSES.has(operation.status)) {
         throw new OrbitGatewayError({
           code:
             typeof operation.error_code === "string" ? operation.error_code : "operation.failed",
@@ -280,6 +294,13 @@ export function createOrbitGatewayClient(
     },
   };
 }
+
+/** Whether a `pair` failure is one the Gateway calls final, so the caller must not retry it. */
+export function isFinalPairingError(error: unknown): boolean {
+  return isOrbitGatewayError(error) && FINAL_PAIRING_ERROR_CODES.has(error.code);
+}
+
+const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 /** A string the way the Gateway stores it: trimmed, and null when nothing is left. */
 export function gatewayText(value: string | null | undefined): string | null {
@@ -464,6 +485,7 @@ function environment(value: unknown, path: string): OrbitGatewayEnvironment {
     url: data.url,
     serverVersion: typeof data.server_version === "string" ? data.server_version : null,
     registeredBy: typeof data.registered_by === "string" ? data.registered_by : null,
+    registeredAt: typeof data.registered_at === "string" ? data.registered_at : null,
     status: data.status,
   };
 }

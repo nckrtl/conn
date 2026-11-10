@@ -702,6 +702,12 @@ On iOS 26 and later, a native `EdgeBlur` replaces upstream's color fade under
 the composer and header, and the composer is realigned. `T3EdgeBlurView` lives
 in `t3-composer-editor`.
 
+The iOS composer editor follows Dynamic Type through JS: `T3ComposerEditor.ios.tsx`
+sends the body size times `fontScale`, so `T3ComposerEditorView.swift` keeps
+`adjustsFontForContentSizeCategory` off, re-applies typography in
+`traitCollectionDidChange`, uses the system font (also for chips) and supports
+`singleLineCentered`.
+
 The "Worked for" fold row has 10.5pt on both sides of its divider (`mb-3`). Its
 fixed size is 49 in `ThreadFeed.tsx` and `thread-feed-item-size.ts`. Dividers on
 glass and sheets use foreground at 12%: the working pill, composer command
@@ -715,7 +721,8 @@ Sources:
 - Mobile (`apps/mobile/src/`): `native/EnrichedMarkdownText.tsx`,
   `lib/fonts.ts`, `features/terminal/TerminalContextSheet.tsx`,
   `native/EdgeBlur*`.
-- `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorModule.swift`.
+- `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorModule.swift` and
+  `T3ComposerEditorView.swift`.
 
 ### Linked environments (peer links)
 

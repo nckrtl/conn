@@ -99,12 +99,11 @@ if [ "$status" != 200 ]; then
     echo "t3-orbit-register: the Gateway answered $status for $environment_id ($label):" >&2
     cat "$response" >&2 || true
     echo >&2
-    # With no answer the Gateway may have stored this session; revoking it would leave a dead one.
-    if [ "$status" = 000 ]; then
-        echo "t3-orbit-register: no answer from the Gateway; kept session $session_id in case it was stored." >&2
-    else
-        "$@" auth session revoke "$session_id" >/dev/null || echo "t3-orbit-register: could not revoke session $session_id" >&2
-    fi
+    # Only a 4xx is a sure refusal; after a timeout or 5xx the Gateway may hold this session.
+    case "$status" in
+        4??) "$@" auth session revoke "$session_id" >/dev/null || echo "t3-orbit-register: could not revoke session $session_id" >&2 ;;
+        *) echo "t3-orbit-register: kept session $session_id in case the Gateway stored it." >&2 ;;
+    esac
     exit 1
 fi
 

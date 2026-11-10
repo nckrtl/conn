@@ -57,6 +57,7 @@ if command -v jq >/dev/null 2>&1; then
     mkdir -p "$tmp/fake"
     cat > "$tmp/fake/curl" <<'EOF'
 #!/bin/sh
+echo "$*" >> "$FAKE_DIR/curl.log"
 for a in "$@"; do last=$a; done
 case "$last" in */.well-known/*) echo '{"environmentId":"env-1","label":"test"}'; exit 0 ;; esac
 cat > "$FAKE_DIR/body"
@@ -71,16 +72,25 @@ echo "$*" >> "$FAKE_DIR/t3.log"
 case "$*" in *"session issue"*) echo '{"sessionId":"s-1","token":"tok-secret"}' ;; esac
 EOF
     chmod +x "$tmp/fake/curl" "$tmp/fake/t3"
-    for case in 200:keep 409:revoke 000:keep; do
-        st=${case%%:*}; want=${case#*:}
+    rm -f "$tmp/curl.log"
+    for c in 200:keep:0:Registered 409:revoke:1:answered 503:keep:1:kept 000:keep:1:kept; do
+        st=${c%%:*}; rest=${c#*:}; want=${rest%%:*}; rest=${rest#*:}; want_rc=${rest%%:*}; want_out=${rest#*:}
         rm -f "$tmp/t3.log" "$tmp/body"
         out=$(FAKE_DIR=$tmp FAKE_STATUS=$st PATH="$tmp/fake:$PATH" sh "$script" http://127.0.0.1:1 2>&1); rc=$?
         if grep -q 'session revoke s-1' "$tmp/t3.log" 2>/dev/null; then got=revoke; else got=keep; fi
-        [ "$got" = "$want" ] && pass "status $st: session $want" || fail "status $st: session $want" "rc=$rc got=$got $out"
+        if [ "$got" = "$want" ] && [ "$rc" = "$want_rc" ] && grep -q 'session issue' "$tmp/t3.log" 2>/dev/null \
+            && case "$out" in *"$want_out"*) true ;; *) false ;; esac; then
+            pass "status $st: session $want"
+        else
+            fail "status $st: session $want" "rc=$rc got=$got $out"
+        fi
+        grep -q 'tok-secret' "$tmp/t3.log" && fail "status $st: token off t3 argv" "seen"
     done
-    grep -q 'tok-secret' "$tmp/t3.log" && fail "token stays off argv" "seen in t3 argv" || pass "token stays off argv"
+    grep -q 'tok-secret' "$tmp/curl.log" && fail "token stays off argv" "seen in curl argv" || pass "token stays off argv"
     jq -e '.admin_session == "tok-secret" and .environment_id == "env-1"' "$tmp/body" >/dev/null 2>&1 \
         && pass "token sent in body" || fail "token sent in body" "$(cat "$tmp/body" 2>/dev/null)"
+else
+    echo "skip registration flow (no jq)"
 fi
 
 sh "$script" >/dev/null 2>&1; rc=$?

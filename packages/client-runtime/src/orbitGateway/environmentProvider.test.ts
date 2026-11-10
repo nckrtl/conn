@@ -76,9 +76,39 @@ describe("planEnvironmentProvider", () => {
       ],
       state: EMPTY_ORBIT_ENVIRONMENT_STATE,
       heldInstanceIds: [41],
+      requestedEnvironmentIds: ["clone", "other-clone", "asleep-clone"],
     });
     // An asleep clone cannot mint a pairing link, so pairing it would only fail again on each run.
     expect(plan.pair).toEqual(["other-clone"]);
+  });
+
+  it("pairs a host server at once but a clone only when the user asks for it", () => {
+    const input = {
+      provider: "orbit" as const,
+      saved: [saved("saved-clone")],
+      orbit: [
+        orbit("host"),
+        orbit("clone", "registered", 41),
+        orbit("requested-clone", "registered", 42),
+        orbit("saved-clone", "registered", 43),
+      ],
+      state: EMPTY_ORBIT_ENVIRONMENT_STATE,
+      requestedEnvironmentIds: ["requested-clone"],
+    };
+    expect(planEnvironmentProvider(input).pair).toEqual(["host", "requested-clone"]);
+    // A clone paired earlier still pairs again when its session cannot manage access.
+    expect(planEnvironmentProvider({ ...input, lacksAccess: ["saved-clone"] }).pair).toEqual([
+      "host",
+      "requested-clone",
+      "saved-clone",
+    ]);
+    // A clone this device started is paired by the start; the sync leaves it alone.
+    expect(
+      planEnvironmentProvider({
+        ...input,
+        heldInstanceIds: [42],
+      }).pair,
+    ).toEqual(["host"]);
   });
 
   it("changes nothing in Orbit mode while the Gateway cannot be read", () => {

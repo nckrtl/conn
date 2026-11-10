@@ -98,6 +98,71 @@ async function loadProvider(): Promise<void> {
   }
 }
 
+/** Conn: clones the user asked to connect in Settings; a refresh retries them after a failure. */
+const requestedEnvironmentIds = new Set<string>();
+const pairingEnvironmentIds = new Set<string>();
+
+async function updateEnvironmentState(
+  change: (current: OrbitEnvironmentState) => OrbitEnvironmentState,
+): Promise<void> {
+  environmentState = change(environmentState);
+  await saveProvider();
+}
+
+/**
+ * Conn: pairs this device with one Orbit server now and records the attempt and its result.
+ * Resolves true when the server is saved. A pairing already in flight for the server is not repeated.
+ */
+async function pairOne(
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+  isSaved: boolean,
+): Promise<boolean> {
+  const { environmentId } = environment;
+  if (pairingEnvironmentIds.has(environmentId)) return false;
+  pairingEnvironmentIds.add(environmentId);
+  const now = Date.now();
+  let paired = false;
+  try {
+    // Saved before the attempt, so a restart during the pairing still backs off.
+    await updateEnvironmentState((current) =>
+      isSaved
+        ? recordAccessPairing(current, environmentId, now)
+        : recordPairingAttempt(current, environmentId, now),
+    );
+    try {
+      const pairing = await client.pair(environmentId);
+      const result = await runAtomCommand(
+        appAtomRegistry,
+        connectPairingUrl,
+        { pairingUrl: pairing.pairingUrl },
+        { reportFailure: false },
+      );
+      paired = result._tag === "Success";
+      if (paired) await updateEnvironmentState((current) => recordPaired(current, environmentId));
+    } catch (error) {
+      // An unreachable server pairs on a later refresh; a refused one after it registers again.
+      if (isFinalPairingError(error)) {
+        await updateEnvironmentState((current) => recordPairingRefused(current, environment));
+      }
+    }
+  } catch {
+    // The secure store could not save; the next refresh records the pairing again.
+  }
+  pairingEnvironmentIds.delete(environmentId);
+  return paired;
+}
+
+/**
+ * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets a
+ * later refresh retry it if this attempt fails.
+ */
+export function connectOrbitEnvironment(
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+): Promise<boolean> {
+  requestedEnvironmentIds.add(environment.environmentId);
+  return pairOne(environment, false);
+}
+
 /** Switches the saved environments to match the provider, pairing Orbit servers as needed. */
 async function reconcileEnvironments(
   orbit: readonly OrbitGatewayEnvironment[] | null,
@@ -116,14 +181,14 @@ async function reconcileEnvironments(
       readEnvironmentLacksScope(entry.environmentId as EnvironmentId, AuthAccessWriteScope),
     )
     .map((entry) => entry.environmentId);
-  const now = Date.now();
   const plan = planEnvironmentProvider({
     provider: state.provider,
     saved,
     orbit,
     state: environmentState,
     lacksAccess,
-    now,
+    requestedEnvironmentIds: [...requestedEnvironmentIds],
+    now: Date.now(),
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
   const setEnabled = (environmentId: string, enabled: boolean) =>
@@ -135,37 +200,17 @@ async function reconcileEnvironments(
     );
   for (const environmentId of plan.disable) await setEnabled(environmentId, false);
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
-  let next = plan.state;
+  // Pairing records come from the current state, so a Connect during this refresh keeps its own.
+  await updateEnvironmentState((current) =>
+    plan.state.pairedByOrbit.reduce(recordPaired, {
+      ...current,
+      disabledByOrbit: plan.state.disabledByOrbit,
+    }),
+  );
   // One server per refresh: pairing waits for a Gateway Operation, and the refresh waits too.
-  const environmentId = plan.pair[0];
-  if (environmentId !== undefined) {
-    next = savedIds.has(environmentId)
-      ? recordAccessPairing(next, environmentId, now)
-      : recordPairingAttempt(next, environmentId, now);
-    // Saved before the attempt, so a restart during the pairing still backs off.
-    environmentState = next;
-    await saveProvider();
-    try {
-      const pairing = await client.pair(environmentId);
-      const result = await runAtomCommand(
-        appAtomRegistry,
-        connectPairingUrl,
-        { pairingUrl: pairing.pairingUrl },
-        {
-          reportFailure: false,
-        },
-      );
-      if (result._tag === "Success") next = recordPaired(next, environmentId);
-    } catch (error) {
-      // An unreachable server pairs on a later refresh; a refused one after it registers again.
-      const environment = orbit?.find((entry) => entry.environmentId === environmentId);
-      if (environment && isFinalPairingError(error)) {
-        next = recordPairingRefused(next, environment);
-      }
-    }
-  }
-  environmentState = next;
-  await saveProvider();
+  const environmentId = plan.pair.find((id) => !pairingEnvironmentIds.has(id));
+  const environment = orbit?.find((entry) => entry.environmentId === environmentId);
+  if (environment) await pairOne(environment, savedIds.has(environment.environmentId));
 }
 
 let refreshing: Promise<void> | null = null;

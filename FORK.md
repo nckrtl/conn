@@ -204,6 +204,14 @@ commit `d17002d`). If a saved Orbit server's session lacks `access:write`, Conn
 pairs it again at most once every 6 hours. The shared `lacksAccess` and
 `accessPairedAt` logic is wired into the web and mobile Orbit providers.
 
+The environment sync lists every server on the Gateway but pairs only host servers (no
+`instance_id`) by itself. A clone, an Instance's server, pairs only when the user presses Connect
+on its row in the Orbit Servers list, or when a thread start on this device created it. Without
+this every device paired with every new clone within minutes. A failed Connect is retried by the
+sync with the usual back-off. Pairings made before this rule stay; nothing revokes them.
+`planEnvironmentProvider` takes the requested ids; web and mobile share one pairing step
+(`pairOne`) between the sync and Connect.
+
 Thread-start Orbit registration uses the client RPCs in
 `apps/web/src/orbit/orbitWorkspaces.ts` and the server's
 `OrbitWorkspaceRegistrar.ts`. The client is not a replacement for the server

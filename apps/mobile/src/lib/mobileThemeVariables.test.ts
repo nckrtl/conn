@@ -115,7 +115,7 @@ describe("mobile theme runtime variables", () => {
           "--color-card",
           "--color-composer-surface",
           ...(appearance === "light" ? (["--color-grouped-card"] as const) : []),
-        ]) {
+        ] as const) {
           expect(ios[role]).toBe(android[role]);
         }
       }

@@ -261,15 +261,23 @@ thread list. The thread opens once sent if the screen the start returned to stil
 profile's, so a sent start adds the clone's ref to the workspace selected at Start in the
 profile itself (one re-read on a version conflict).
 
-A server in an Orbit Instance container reads `/etc/orbit/instance` at start
-(`apps/server/src/orbit/OrbitInstanceFile.ts`). Orbit writes it: `KEY=value` lines, `#`
+The thread panel's machine row becomes the Orbit row for a server in an Orbit Instance:
+Project, Instance and Node, and the URL as a link (`ThreadDetailsOrbitRows.tsx`). Clones run
+the stock T3 server, so the Gateway's environment record is their source: in Orbit mode each
+clone record of `GET /api/v1/conn/environments` carries `project_id`, `project_name`,
+`project_slug`, `instance_name`, `node_name` and `instance_url` next to `instance_id`
+(`orbitInstanceFromEnvironment`; both ids or no facts, missing or mistyped fields read as
+null). The desktop keeps the last list's facts in localStorage, so the row shows right after
+start (`useOrbitInstance`). The same URL is the thread's preview URL when it has no Orbit
+workspace (`useOrbitThreadUrl`). The phone has no machine row, so it shows none of this.
+
+The fallback, for a fork server outside Orbit mode: the server reads `/etc/orbit/instance` at
+start (`apps/server/src/orbit/OrbitInstanceFile.ts`). Orbit writes it: `KEY=value` lines, `#`
 comments, unquoted values. Conn reads `ORBIT_PROJECT_ID`, `ORBIT_INSTANCE_ID`,
 `ORBIT_PROJECT` (slug), `ORBIT_PROJECT_NAME`, `ORBIT_INSTANCE`, `ORBIT_NODE` and `ORBIT_URL`,
 and ignores other keys. With both ids as positive integers, the environment descriptor gets
 `orbitInstance` with the facts; otherwise it has none, and a missing or unreadable file never
-stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. With the
-descriptor, the thread panel's machine row becomes the Orbit row: Project, Instance and Node,
-and the URL as a link (`ThreadDetailsOrbitRows.tsx`). The sidebar title of the clone's
+stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. The sidebar title of the clone's
 `/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
 
 Sources:

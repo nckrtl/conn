@@ -105,6 +105,13 @@ export interface OrbitGatewayEnvironment {
   readonly instanceId: number | null;
   /** The Instance container's power state; `stopped` means the Instance is asleep. */
   readonly powerState: "running" | "stopped" | null;
+  /** Conn: the clone's Orbit Project, Instance, Node and URL; null on host servers or when not sent. */
+  readonly projectId: number | null;
+  readonly projectName: string | null;
+  readonly projectSlug: string | null;
+  readonly instanceName: string | null;
+  readonly nodeName: string | null;
+  readonly instanceUrl: string | null;
 }
 
 /** A Project a thread can start in: its default Instance runs in a container on `nodeName`. */
@@ -646,5 +653,16 @@ function environment(value: unknown, path: string): OrbitGatewayEnvironment {
     instanceId: typeof data.instance_id === "number" ? data.instance_id : null,
     powerState:
       data.power_state === "running" || data.power_state === "stopped" ? data.power_state : null,
+    projectId: typeof data.project_id === "number" ? data.project_id : null,
+    projectName: optionalText(data.project_name),
+    projectSlug: optionalText(data.project_slug),
+    instanceName: optionalText(data.instance_name),
+    nodeName: optionalText(data.node_name),
+    instanceUrl: optionalText(data.instance_url),
   };
+}
+
+/** A trimmed string, or null for anything else (absent, empty or another type). */
+function optionalText(value: unknown): string | null {
+  return typeof value === "string" ? gatewayText(value) : null;
 }

@@ -35,6 +35,12 @@ function server(instanceId: number, powerState: "running" | "stopped" = "running
     status: "registered",
     instanceId,
     powerState,
+    projectId: null,
+    projectName: null,
+    projectSlug: null,
+    instanceName: null,
+    nodeName: null,
+    instanceUrl: null,
   } satisfies OrbitGatewayEnvironment;
 }
 

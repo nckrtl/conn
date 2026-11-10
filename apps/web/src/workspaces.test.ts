@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
+import { filterSidebarV2VisibleThreads } from "./components/Sidebar.logic";
 import { useWorkspaceStore } from "./workspaceStore";
 import {
   groupProjectsByConnection,
@@ -13,6 +14,7 @@ import {
   validateWorkspaceDraft,
   workspaceLetter,
   workspaceNameKey,
+  workspaceCoversProjectRef,
   workspaceProjectRefs,
   type Workspace,
 } from "./workspaces.logic";
@@ -24,6 +26,10 @@ const group = (projectKey: string, ...refs: [string, string][]) => ({
 const orbit = group("repo:orbit", ["local", "p1"], ["beast", "p9"]);
 const drift = group("repo:drift", ["local", "p2"]);
 const rooms = group("repo:rooms", ["local", "p3"]);
+const cloneProjects = [
+  { projectKey: "repo:bench", displayName: "bench", refs: ["beast:bench"] },
+  { projectKey: "/srv/workspace", displayName: "workspace", refs: ["clone:ws"] },
+];
 const workspace = (name: string, projectKeys: string[], id = `ws-${name}`): Workspace => ({
   id,
   name,
@@ -82,6 +88,39 @@ describe("workspaces.logic", () => {
         scopedProjectGroups: [orbit],
       }),
     ).toEqual(new Set(["local:p1", "beast:p9"]));
+  });
+
+  it("lists an Orbit clone's thread in a workspace only once it covers the clone's project", () => {
+    // The clone is a new environment, so its project is in no workspace yet.
+    const thread = {
+      id: "t1",
+      environmentId: "clone",
+      projectId: "ws",
+      archivedAt: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "t1" },
+    } as unknown as Parameters<typeof filterSidebarV2VisibleThreads>[0][number];
+    const listed = (scoped: Workspace) =>
+      filterSidebarV2VisibleThreads(
+        [thread],
+        resolveScopedProjectKeys({
+          projectGroups: [
+            group("repo:bench", ["beast", "bench"]),
+            group("/srv/workspace", ["clone", "ws"]),
+          ],
+          workspace: scoped,
+          scopedProjectGroups: [],
+        }),
+        new Set(),
+      );
+    const s = { ...workspace("S", []), projectRefs: ["beast:bench"] };
+    // The bug: the sidebar lists nothing and shows "No threads yet".
+    expect(listed(s)).toEqual([]);
+    expect(workspaceCoversProjectRef(s, cloneProjects, "clone:ws")).toBe(false);
+    expect(listed({ ...s, projectRefs: ["beast:bench", "clone:ws"] })).toEqual([thread]);
+    expect(
+      workspaceCoversProjectRef(workspace("K", ["/srv/workspace"]), cloneProjects, "clone:ws"),
+    ).toBe(true);
+    expect(workspaceCoversProjectRef(null, cloneProjects, "clone:ws")).toBe(true);
   });
 
   it("narrows a workspace further by the sidebar's project filter, never widens it", () => {

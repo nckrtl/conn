@@ -31,6 +31,8 @@ export interface OrbitThreadStart {
   readonly messageId: string;
   readonly commandId: string;
   readonly createdAt: number;
+  /** Conn: the workspace selected at Start (null for all); the sent thread's project joins it. */
+  readonly workspaceId?: string | null;
   /**
    * The `Idempotency-Key` of the create and of the pairing, saved before the first try, so a
    * repeat after a lost answer, a reload or Retry gets the same Operation. Missing on older rows.

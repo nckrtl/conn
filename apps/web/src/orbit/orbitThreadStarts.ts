@@ -16,6 +16,7 @@ import { environmentProjects } from "../state/projects";
 import { environmentServerConfigsAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
+import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
 import { readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
 import { type OrbitFirstMessagePorts, sendOrbitFirstMessage } from "./orbitThreadTurn";
@@ -34,7 +35,7 @@ export function beginOrbitThreadStart(
   message: string,
   pathname: string,
 ): void {
-  const start = newOrbitThreadStart({
+  const fresh = newOrbitThreadStart({
     id: randomUUID(),
     project,
     message,
@@ -44,6 +45,7 @@ export function beginOrbitThreadStart(
     commandId: randomUUID(),
     now: Date.now(),
   });
+  const start = { ...fresh, workspaceId: useWorkspaceStore.getState().activeWorkspaceId };
   startedOn.set(start.id, pathname);
   updateStarts((starts) => [...starts, start]);
 }
@@ -178,7 +180,9 @@ export async function runSavedOrbitThreadStart(
       connect,
       send: async (ready) => {
         environmentId = ready.environmentId;
-        await sendOrbitFirstMessage(ready, { ...firstMessagePorts, stopped });
+        const projectId = await sendOrbitFirstMessage(ready, { ...firstMessagePorts, stopped });
+        // A clone is a new environment: without its ref the workspace would hide the thread.
+        keepProjectInWorkspace(start.workspaceId ?? null, `${ready.environmentId}:${projectId}`);
       },
     });
     if (!sent || environmentId === null) return null;

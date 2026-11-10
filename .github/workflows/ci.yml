@@ -268,11 +268,19 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    name: Test
+    # The fork's 4 vCPU runners need 9-10 minutes to test every package, against a
+    # 10 minute limit. Mobile and the lint plugin run longest and start last, so
+    # the fork gives each its own runner. `only` runs just those packages;
+    # `skip` runs the rest.
+    name: Test${{ matrix.shard.total > 1 && format(' {0}', matrix.shard.index) || '' }}
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test != 'false' }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1,"only":"","skip":""}]' || '[{"index":1,"total":3,"only":"","skip":"@t3tools/mobile @t3tools/oxlint-plugin-t3code"},{"index":2,"total":3,"only":"@t3tools/mobile","skip":""},{"index":3,"total":3,"only":"@t3tools/oxlint-plugin-t3code","skip":""}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -313,9 +321,11 @@ jobs:
         run: vp run --filter @t3tools/desktop ensure:electron
 
       - name: Test preview artifact validation
+        if: matrix.shard.index == 1
         run: python3 -B .github/scripts/stage-preview-bundle.test.py
 
       - name: Test release checks
+        if: matrix.shard.index == 1
         run: node --test .github/scripts/check-nightly-release.test.cjs .github/scripts/vercel-deployment-output.test.cjs .github/scripts/mobile-preview-comment.test.cjs
 
       # Conn's desktop tab runner tests drive a real headless Chromium through
@@ -354,12 +364,27 @@ jobs:
       - name: Test
         env:
           TEST_PACKAGES: ${{ needs.changes.outputs.test_packages }}
+          SHARD_ONLY: ${{ matrix.shard.only }}
+          SHARD_SKIP: ${{ matrix.shard.skip }}
         run: |
           set -o pipefail
           filters=(--filter '!t3' --filter '!@t3tools/monorepo' --filter '!@t3tools/web')
+          for package in $SHARD_SKIP; do filters+=(--filter "!$package"); done
+          if [[ -n "$SHARD_ONLY" ]]; then
+            filters=()
+            for package in $SHARD_ONLY; do filters+=(--filter "$package"); done
+          fi
           if [[ -n "$TEST_PACKAGES" ]]; then
             filters=()
-            for package in $TEST_PACKAGES; do filters+=(--filter "$package"); done
+            for package in $TEST_PACKAGES; do
+              if [[ -n "$SHARD_ONLY" && " $SHARD_ONLY " != *" $package "* ]]; then continue; fi
+              if [[ " $SHARD_SKIP " == *" $package "* ]]; then continue; fi
+              filters+=(--filter "$package")
+            done
+            if (( ${#filters[@]} == 0 )); then
+              echo "No affected packages in this shard."
+              exit 0
+            fi
           fi
           # The runner's trace writer can crash on surrogate pairs in test output.
           vp run --parallel --concurrency-limit 4 "${filters[@]}" test 2>&1 | python3 -u -c '

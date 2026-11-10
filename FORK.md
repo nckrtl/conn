@@ -95,12 +95,13 @@ Sources:
 
 On iOS, thread feed icons in messages and the work log are Phosphor. The rest of
 the app, including native toolbars, tab bars and menus, keeps SF Symbols.
-Android keeps Tabler. `AppSymbol.ios.tsx` also uses SF Symbols for git icons
+Android keeps Tabler. `AppSymbol.tsx` (upstream's iOS implementation since its platform-primitive
+refactor, #33173; Conn's version replaces it) also uses SF Symbols for git icons
 that upstream drew with Tabler.
 
 `symbols.json` maps SF names to Phosphor icons and weights: solid by default,
 bold for carets and line glyphs that solid would box. Inside `ConnSymbolScope`
-around `ThreadFeed` in `ThreadDetailScreen.tsx`, `AppSymbol.ios.tsx` requests
+around `ThreadFeed` in `ThreadDetailScreen.tsx`, `AppSymbol.tsx` requests
 mapped names with a `conn.` prefix. `ConnSymbols.swift` swaps `UIImage`'s
 `systemImageNamed` methods only for those names.
 
@@ -112,7 +113,7 @@ Sources:
 
 - `apps/mobile/modules/conn-symbols/` (`symbols.json`, `ios/`).
 - `scripts/build-conn-symbols.ts`.
-- Mobile (`apps/mobile/src/`): `components/ui/AppSymbol.ios.tsx`,
+- Mobile (`apps/mobile/src/`): `components/ui/AppSymbol.tsx`,
   `components/ConnSymbolScope.tsx`, `features/threads/ThreadDetailScreen.tsx`.
 
 ### Workspaces
@@ -654,7 +655,7 @@ Sources:
 ### Mobile thread feed and lists
 
 The connection pill floats over the thread feed, so messages do not shift while
-connecting. The resting composer has 8pt more room above it.
+connecting.
 
 Markdown uses the system font with weights and JetBrains Mono for code. Blocks
 and headings have 12pt above/between them; list items have 6pt between them.
@@ -859,7 +860,7 @@ Sources:
      `<MessagesTimeline>`;
      `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: keep
      `<ConnSymbolScope>` around `<ThreadFeed>`.
-   - `apps/mobile/src/components/ui/AppSymbol.ios.tsx`: keep Conn's version (no
+   - `apps/mobile/src/components/ui/AppSymbol.tsx` (was `AppSymbol.ios.tsx` until 2026-11-10): keep Conn's version (no
      Tabler; `conn.` names inside `ConnSymbolScope`).
    - Work-log icon unions (`thread-work-log.tsx`): keep both sides' icons.
    - `apps/web/vite.config.ts` (`resolve.alias`), `apps/web/tsconfig.json`

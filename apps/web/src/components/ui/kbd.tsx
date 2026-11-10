@@ -12,6 +12,8 @@ const kbdVariants = cva(
         default: "bg-foreground/[0.07] text-muted-foreground",
         // A cap one step lighter than the surface it sits on, with a light glyph.
         raised: "bg-(--shell-highlight) text-foreground/90",
+        // `outline` draws a physical key, so the hint stays distinct inside surrounding text.
+        outline: "border border-b-2 border-foreground/15 px-1.5 text-muted-foreground",
       },
     },
   },

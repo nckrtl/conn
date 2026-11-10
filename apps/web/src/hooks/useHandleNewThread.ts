@@ -43,10 +43,25 @@ import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { getClientSettings } from "./useSettings";
 import { useActiveWorkspaceProjectRefs } from "../workspaceStore";
+import { getLocalStorageItem, useLocalStorage } from "./useLocalStorage";
+import * as Schema from "effect/Schema";
+import { useAtomValue } from "@effect/atom-react";
+import { defaultProjectFallbackReadyAtom } from "../state/projects";
 import { useThreadRouteTarget } from "./useThreadRouteTarget";
 import { readUnloadedThreadCount } from "../state/olderSettledShelf";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
+
+export const LAST_USED_PROJECT_STORAGE_KEY = "t3code:last-used-project:v1";
+export const lastUsedProjectKeySchema = Schema.NullOr(Schema.String);
+
+export function readLastUsedProjectKey(): string | null {
+  try {
+    return getLocalStorageItem(LAST_USED_PROJECT_STORAGE_KEY, lastUsedProjectKeySchema);
+  } catch {
+    return null;
+  }
+}
 
 interface NewThreadWorkspaceOptions {
   branch?: string | null;
@@ -427,9 +442,21 @@ export function createNewThreadHandler(router: AnyRouter) {
 export function resolveDefaultProjectRef(
   projects: ReadonlyArray<EnvironmentProject>,
   projectOrder: readonly string[],
+  lastUsedProjectKey: string | null,
+  fallbackReady = true,
   // Conn: inside a workspace, only its projects can be the default.
   workspaceRefs: ReadonlySet<string> | null = null,
 ): ScopedProjectRef | null {
+  const inWorkspace = (project: EnvironmentProject) =>
+    workspaceRefs === null || workspaceRefs.has(`${project.environmentId}:${project.id}`);
+  const lastUsed = projects.find(
+    (project) =>
+      project.archivedAt == null &&
+      inWorkspace(project) &&
+      scopedProjectKey(scopeProjectRef(project.environmentId, project.id)) === lastUsedProjectKey,
+  );
+  if (lastUsed) return scopeProjectRef(lastUsed.environmentId, lastUsed.id);
+  if (!fallbackReady) return null;
   const orderedProjects = orderItemsByPreferredIds({
     items: projects.filter((project) => project.archivedAt == null),
     preferredIds: projectOrder,
@@ -439,16 +466,20 @@ export function resolveDefaultProjectRef(
       legacyProjectCwdPreferenceKey(project.workspaceRoot),
     ],
   });
-  const defaultProject =
-    orderedProjects.find(
-      (project) =>
-        workspaceRefs === null || workspaceRefs.has(`${project.environmentId}:${project.id}`),
-    ) ?? orderedProjects[0];
+  const defaultProject = orderedProjects.find(inWorkspace) ?? orderedProjects[0];
   return defaultProject ? scopeProjectRef(defaultProject.environmentId, defaultProject.id) : null;
 }
 
 export function useHandleNewThread() {
   const projectOrder = useUiStateStore((store) => store.projectOrder);
+  const [lastUsedProjectKey] = useLocalStorage(
+    LAST_USED_PROJECT_STORAGE_KEY,
+    null,
+    lastUsedProjectKeySchema,
+  );
+  const defaultProjectFallbackReady = useAtomValue(
+    defaultProjectFallbackReadyAtom(lastUsedProjectKey),
+  );
   const routeTarget = useThreadRouteTarget();
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
   const routeDraftId = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
@@ -465,12 +496,19 @@ export function useHandleNewThread() {
   const handleNewThread = useNewThreadHandler();
   // Inside a workspace, the default is its first project (rooms-patches).
   const workspaceRefs = useActiveWorkspaceProjectRefs();
-  const defaultProjectRef = resolveDefaultProjectRef(projects, projectOrder, workspaceRefs);
+  const defaultProjectRef = resolveDefaultProjectRef(
+    projects,
+    projectOrder,
+    lastUsedProjectKey,
+    defaultProjectFallbackReady,
+    workspaceRefs,
+  );
 
   return {
     activeDraftThread,
     activeThread,
     defaultProjectRef,
+    defaultProjectFallbackReady,
     handleNewThread,
     routeDraftId,
     routeThreadRef,

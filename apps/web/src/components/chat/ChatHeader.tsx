@@ -74,9 +74,6 @@ function resolveRenameCommit(input: {
   return { action: "commit", title: trimmed };
 }
 
-// Delay before a title click opens the action menu, so a double-click rename can
-// cancel it. Only the native desktop menu needs it: it swallows input while open.
-const TITLE_MENU_OPEN_DELAY_MS = 500;
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadId,
@@ -219,60 +216,23 @@ export const ChatHeader = memo(function ChatHeader({
     onFind: onFindInThread,
     canShareWithGuest,
   });
-  const titleButtonRef = useRef<HTMLButtonElement | null>(null);
-  const titleMenuTimerRef = useRef<number | null>(null);
-  const cancelPendingTitleMenu = () => {
-    if (titleMenuTimerRef.current === null) return;
-    clearTimeout(titleMenuTimerRef.current);
-    titleMenuTimerRef.current = null;
-  };
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the pending title-menu timer when the thread switches or the header unmounts
-  useEffect(
-    () => () => {
-      if (titleMenuTimerRef.current === null) return;
-      clearTimeout(titleMenuTimerRef.current);
-      titleMenuTimerRef.current = null;
-    },
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A pending title menu belongs to the thread that was clicked, so switching threads drops it.
-    [activeThreadEnvironmentId, activeThreadId],
-  );
-  const openTitleMenuNow = () => {
-    cancelPendingTitleMenu();
-    const rect = titleButtonRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    openMenu({ x: rect.left, y: rect.bottom + 4 });
-  };
   const openMenuFromTitle = (event: ReactMouseEvent<HTMLButtonElement>) => {
     // The trailing click of a double-click belongs to rename, not the menu.
     if (isTrailingDoubleClick(event.detail)) return;
-    // Keyboard activation and the explicit chevron affordance can never be
-    // the first half of a double-click, so they open without waiting.
-    const clickedChevron =
-      (event.target as HTMLElement).closest("[data-thread-title-chevron]") !== null;
-    if (event.detail === 0 || clickedChevron || window.desktopBridge === undefined) {
-      openTitleMenuNow();
-      return;
-    }
-    // Stay pending long enough for dblclick to cancel the open before the
-    // native menu appears and swallows the second click.
-    cancelPendingTitleMenu();
-    titleMenuTimerRef.current = window.setTimeout(() => {
-      titleMenuTimerRef.current = null;
-      openTitleMenuNow();
-    }, TITLE_MENU_OPEN_DELAY_MS);
+    const rect = event.currentTarget.getBoundingClientRect();
+    openMenu({ x: rect.left, y: rect.bottom + 4 });
   };
+  // A native menu takes the second click, so only the in-page menu lets a double-click reach here.
   const handleTitleDoubleClick = (event: ReactMouseEvent) => {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     // The chevron is the explicit menu affordance; only the title text renames.
     if ((event.target as HTMLElement).closest("[data-thread-title-chevron]") !== null) return;
-    cancelPendingTitleMenu();
     closeMenu();
     startRename();
   };
   const handleHeaderContextMenu = (event: ReactMouseEvent) => {
     if (renamingTitle !== null) return;
     if (!isServerThread && onOpenProjectSettings === undefined) return;
-    cancelPendingTitleMenu();
     event.preventDefault();
     if (!isServerThread) {
       const api = readLocalApi();
@@ -405,13 +365,11 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipTrigger
                 render={
                   <button
-                    ref={titleButtonRef}
                     type="button"
                     aria-label={`Thread actions for ${activeThreadTitle}`}
                     aria-haspopup="menu"
                     onClick={openMenuFromTitle}
                     onDoubleClick={canOperateThread ? handleTitleDoubleClick : undefined}
-                    onBlur={cancelPendingTitleMenu}
                     className="group/thread-title inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   />
                 }

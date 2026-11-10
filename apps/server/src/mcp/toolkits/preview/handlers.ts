@@ -243,8 +243,12 @@ const handlers = {
       const scope = yield* McpInvocationContext.requireThreadMcpCapability("preview");
       const autofill = yield* CredentialAutofill.CredentialAutofill;
       // Output selection and saving are MCP-only; the browser still produces a complete snapshot.
-      const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
-      const snapshot = yield* invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
+      const { includeImage: _includeImage, save, ...operationInput } = input ?? {};
+      // The saved file is for people, so it keeps the resolution the agent's image is capped below.
+      const snapshot = yield* invokeTargeted<PreviewAutomationSnapshot>("snapshot", {
+        ...operationInput,
+        ...(save === true ? { fullScreenshot: true } : {}),
+      });
       // Asked after the capture, so a fill that lands during it is still caught.
       if (!(yield* autofill.isScriptLocked(scope, input?.tabId))) return snapshot;
       return { ...snapshot, screenshot: { ...snapshot.screenshot, ...WITHHELD_SCREENSHOT } };

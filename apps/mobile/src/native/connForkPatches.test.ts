@@ -88,11 +88,11 @@ describe("Conn symbols", () => {
   });
 
   it("sends every iOS icon through expo-symbols", () => {
-    expect(read("src/components/ui/AppSymbol.ios.tsx")).not.toContain("@tabler/icons-react-native");
+    expect(read("src/components/ui/AppSymbol.tsx")).not.toContain("@tabler/icons-react-native");
   });
 
   it("limits Phosphor symbols to the thread feed", () => {
-    expect(read("src/components/ui/AppSymbol.ios.tsx")).toContain("useConnSymbolScope");
+    expect(read("src/components/ui/AppSymbol.tsx")).toContain("useConnSymbolScope");
     expect(read("src/features/threads/ThreadDetailScreen.tsx")).toContain("<ConnSymbolScope>");
   });
 });

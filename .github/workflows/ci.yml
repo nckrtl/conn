@@ -269,9 +269,9 @@ jobs:
       contents: read
       id-token: write
     # The fork's 4 vCPU runners need 9-10 minutes to test every package, against a
-    # 10 minute limit. Mobile and the lint plugin run longest and start last, so
-    # the fork gives each its own runner. `only` runs just those packages;
-    # `skip` runs the rest.
+    # 10 minute limit. Mobile and the lint plugin run longest and hold two of
+    # the four slots for minutes, so the fork gives each its own runner. `only`
+    # runs just those packages; `skip` runs the rest.
     name: Test${{ matrix.shard.total > 1 && format(' {0}', matrix.shard.index) || '' }}
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test != 'false' }}

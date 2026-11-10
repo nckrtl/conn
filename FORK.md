@@ -45,9 +45,27 @@ colors: inset cards, two-tone dividers, glass popovers, toolbar groups, soft
 fields, inset scrollbars and a 44px header. This covers chat, sidebar, Settings,
 browser, Files, Diff, terminal, Agents and fork panels.
 
+The macOS window is frosted glass. `DesktopWindow.ts` creates it with
+`vibrancy: "under-window"`, `visualEffectState: "followWindow"` and a clear
+`#00000000` background, and `syncWindowAppearance` keeps that clear background
+when the appearance changes. The `html.electron-macos` block at the end of
+`index.css` makes the page transparent and tints the frame (`--shell-fill`) and
+inner cards (`--shell-inner-fill`) over the native material. The CSS alone shows
+no glass; without the window options the frame is opaque.
+
+The thread sidebar is an inset card, like the chat and right panels. In
+`Sidebar.tsx`, `SidebarContent` sits inside a `div` with `shell-inner-panel`
+(rounded on the left, `mb-(--shell-inset)`), and that card ends with
+`<SidebarChromeFooter utilities={false} />`. The workspace rail holds the update
+button and the settings, source control and usage actions, so the sidebar
+footer must not show them again. Without the wrapper the sidebar loses its
+darker card; with the default footer a second row of utility icons appears
+under the thread list.
+
 Browser pages meet the address bar's bottom divider. Keep `PreviewChromeRow`'s
-zero bottom margin: the shared inline-panel subheader margin otherwise leaves
-a dark strip above both native and streamed browser pages.
+zero bottom margin. Do not add a Conn override for the inline-panel subheader
+(`[data-surface-subheader]` under `[data-right-panel-surface-content]`): it
+removes the space above the panel toolbar controls.
 
 Settings and Usage are upstream's route modals (`_chat.settings.*`, `_chat.usage`
 over the thread view through `mainAppLocation`). Conn keeps upstream's modal
@@ -65,8 +83,14 @@ Sources:
   `components/ui/*` variants, `components/ToolbarGroup.tsx`,
   `components/settings/*`, `components/AppRouteModal.tsx`,
   `routes/_chat.settings.tsx`, `components/ChatView.tsx`,
-  `components/RightPanelTabs.tsx`, `routes/__root.tsx`, `pierre-tree-theme.ts`.
-- Desktop traffic lights: `apps/desktop/src/window/DesktopWindow.ts`.
+  `components/RightPanelTabs.tsx`, `components/Sidebar.tsx`,
+  `components/sidebar/SidebarChrome.tsx`, `lib/windowControlsOverlay.ts`
+  (`electron-macos`), `routes/__root.tsx`, `pierre-tree-theme.ts`.
+- Desktop traffic lights and window glass:
+  `apps/desktop/src/window/DesktopWindow.ts`.
+- Guards: `apps/desktop/src/window/DesktopWindow.test.ts` (window glass) and
+  `apps/web/src/components/sidebar/connShellSidebar.test.ts` (sidebar card and
+  footer).
 
 ### Icons
 
@@ -856,6 +880,14 @@ Sources:
      in composer files take upstream's composer and re-apply only the listed
      fork features (environment contexts: `composerEnvironmentContexts`, the
      `@` environment chips, `EnvironmentContextChip.tsx`).
+   - Shell glass and sidebar card: in
+     `apps/desktop/src/window/DesktopWindow.ts` keep the macOS `vibrancy`,
+     `visualEffectState` and clear background, both at window creation and in
+     `syncWindowAppearance`. In `apps/web/src/components/Sidebar.tsx` keep the
+     `shell-inner-panel` wrapper around `SidebarContent` and
+     `<SidebarChromeFooter utilities={false} />` inside it. Take upstream's
+     sidebar content changes inside that wrapper. The November 7 sync dropped
+     all three; see [Shell design](#shell-design).
    - `apps/web/src/components/ChatView.tsx`: keep `<ConnIconScope>` around
      `<MessagesTimeline>`;
      `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: keep
@@ -947,8 +979,10 @@ Sources:
    `apps/web/src/browser/ElectronBrowserHost.test.tsx`. These focused relay
    tests need a Playwright headless shell. Always run the fork guards
    `apps/mobile/src/native/connForkPatches.test.ts`,
-   `apps/web/src/icons/connIcons.test.ts` and
-   `apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts`. Run `vp i` first: merges change
+   `apps/web/src/icons/connIcons.test.ts`,
+   `apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts`,
+   `apps/web/src/components/sidebar/connShellSidebar.test.ts` and
+   `apps/desktop/src/window/DesktopWindow.test.ts`. Run `vp i` first: merges change
    dependencies. When the web typecheck reports a Lucide name missing from
    `apps/web/src/icons/lucide-react.ts`, add a line for it (the Lucide icon and
    the closest Phosphor icon). New SF Symbol names in the mobile thread feed
@@ -1024,6 +1058,14 @@ connection settings (`78acc025df`, `c8b7e2ed32`), and shared exports
 (`111129c3bd`). The consumers listed above needed this additional repair.
 No additional unresolved fork-feature loss was confirmed in the other five
 syncs by this audit.
+
+This audit missed three more losses from `4b7c3e1509`, found through Nick's
+annotations on 2026-11-10 and restored with guard tests: the macOS window glass
+(vibrancy in `DesktopWindow.ts`), the sidebar's `shell-inner-panel` card, and
+`utilities={false}` on its footer (the duplicate utility row). The 2026-11-04
+fix for the missing space above panel toolbar controls (annotation #264) never
+reached `main` and is restored too. A visual change needs its rule in this file
+and a guard, or a later sync can drop it while every check passes.
 
 ### Vendored dependency patches
 

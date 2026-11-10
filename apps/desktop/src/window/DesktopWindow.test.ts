@@ -594,6 +594,32 @@ describe("DesktopWindow", () => {
       }),
   );
 
+  // Conn fork guard: the frosted outer shell. See FORK.md, "Shell design".
+  it.effect("frosts the macOS window with native vibrancy under a clear backing", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createdWindowOptions: Electron.BrowserWindowConstructorOptions[] = [];
+      const layer = layerTest({
+        window: fakeWindow.window,
+        createCount: yield* Ref.make(0),
+        mainWindow: yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none()),
+        createdWindowOptions,
+        desktopSettings: {
+          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+          localEnvironmentEnabled: false,
+        },
+      });
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.createMainIfBackendReady;
+      }).pipe(Effect.provide(layer));
+      const options = createdWindowOptions[0];
+      assert.equal(options?.vibrancy, "under-window");
+      assert.equal(options?.visualEffectState, "followWindow");
+      assert.equal(options?.backgroundColor, "#00000000");
+    }),
+  );
+
   it.effect.each(["before", "after"] as const)(
     "keeps a closed startup window closed until activation %s backend readiness",
     (activation) =>

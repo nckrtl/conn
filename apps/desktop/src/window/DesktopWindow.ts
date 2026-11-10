@@ -302,7 +302,10 @@ function syncWindowAppearance(
       return;
     }
 
-    window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
+    // Preserve the clear renderer backing over the native macOS material.
+    window.setBackgroundColor(
+      platform === "darwin" ? "#00000000" : getInitialWindowBackgroundColor(shouldUseDarkColors),
+    );
     const { titleBarOverlay } = getWindowTitleBarOptions(shouldUseDarkColors, platform);
     if (typeof titleBarOverlay === "object") {
       window.setTitleBarOverlay(titleBarOverlay);
@@ -474,8 +477,18 @@ export const make = Effect.gen(function* () {
       minHeight: DesktopAppSettings.MIN_MAIN_WINDOW_SIZE.height,
       show: false,
       autoHideMenuBar: true,
-      ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
-      backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+      // The frosted outer shell: native vibrancy under a clear renderer backing.
+      ...(environment.platform === "darwin"
+        ? {
+            disableAutoHideCursor: true,
+            vibrancy: "under-window",
+            visualEffectState: "followWindow",
+          }
+        : {}),
+      backgroundColor:
+        environment.platform === "darwin"
+          ? "#00000000"
+          : getInitialWindowBackgroundColor(shouldUseDarkColors),
       ...iconOption,
       title: environment.displayName,
       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),

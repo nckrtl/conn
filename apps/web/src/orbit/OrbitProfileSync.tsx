@@ -15,6 +15,7 @@ import { create } from "zustand";
 import { useWorkspaceStore } from "../workspaceStore";
 import { WORKSPACE_COLORS, type Workspace, type WorkspaceColor } from "../workspaces.logic";
 import { reconcileEnvironmentProvider, useEnvironmentProvider } from "./environmentProvider";
+import { pruneWorkspaceCloneRefs } from "./cloneWorkspaceRefs";
 import { OrbitAppearanceSync } from "./OrbitAppearanceSync";
 import { getProfileSyncChannels, onLocalProfileChange } from "./profileSyncRegistry";
 import {
@@ -184,12 +185,14 @@ function profileSyncController(): ProfileSyncController | null {
 
   const runOnce = async (options: ProfileSyncRunOptions | undefined): Promise<void> => {
     try {
-      await reconcileEnvironmentProvider(client);
+      const listed = await reconcileEnvironmentProvider(client);
+      const { provider } = useEnvironmentProvider.getState();
       // Everything syncs only while Orbit provides the environments.
-      if (useEnvironmentProvider.getState().provider !== "orbit") {
+      if (provider !== "orbit") {
         useOrbitProfileSyncStatus.setState(INITIAL_STATUS);
         return;
       }
+      pruneWorkspaceCloneRefs(provider, listed);
       const me = await client.me();
       const result = await syncWorkspaceProfile(ports, me);
       useOrbitProfileSyncStatus.setState(

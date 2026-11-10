@@ -243,8 +243,11 @@ key, or a second caller) repeats the same way until the create's deadline, then 
 Any other Gateway error stops the start. Only the main window runs starts. A start saves the
 workspace selected at Start (null for all). Once the first message is sent, that workspace gets the
 clone's `<environmentId>:<projectId>` ref unless it already lists the project or no longer exists,
-so the sidebar shows the thread (a clone is a new environment). Refs of clones that are gone stay
-in the workspace until a follow-up prunes them. A row can be
+so the sidebar shows the thread (a clone is a new environment). The profile sync then drops the
+refs of clones that are gone (`cloneWorkspaceRefs.ts`). A gone record no longer says it was a clone,
+so each device remembers the clone ids it saw in the Gateway list (with an `instance_id`) or started
+itself, and drops only refs of those ids that a fresh, non-empty list in Orbit mode leaves out.
+Host and manual environments' refs are never touched. A row can be
 dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).

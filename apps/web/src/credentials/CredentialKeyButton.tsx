@@ -144,7 +144,8 @@ export function CredentialKeyButton(props: {
     void detect(pageUrl);
     const later = window.setTimeout(() => void detect(pageUrl), 1200);
     return () => window.clearTimeout(later);
-  }, [detect, loading, pageUrl]);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A new tab at the same URL is a new page to detect.
+  }, [detect, loading, pageUrl, runtimeTabId]);
 
   const fields = fieldsToFill(page);
   const ready = page.any && items.length > 0;

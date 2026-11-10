@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { readDefaultMobileThemeVariables } from "./mobileTheme.test-support";
-import { getMobileThemeVariables, MOBILE_THEME_IDS, themeColorWithAlpha } from "./mobileTheme";
+import {
+  flattenThemeColor,
+  getMobileThemeVariables,
+  MOBILE_THEME_IDS,
+  themeColorContrastRatio,
+  themeColorWithAlpha,
+  type MobileThemeVariables,
+} from "./mobileTheme";
 import { getMobileThemeRuntimeVariables } from "./mobileThemeVariables";
 
 // Upstream's runtime guards own these roles: the selected row is lifted off the fork's
@@ -19,6 +26,32 @@ const ANDROID_DARK_CARD_ROLES = [
   "--color-primary-text",
 ];
 
+// The comparisons skip these roles, so check what the guards promise for them instead.
+function expectVisibleSelection(variables: MobileThemeVariables) {
+  const drawer = flattenThemeColor(variables["--color-drawer"], variables["--color-screen"]);
+  const selected = variables["--color-thread-selected"];
+  expect(themeColorContrastRatio(selected, drawer)).toBeGreaterThanOrEqual(1.2 - 0.01);
+  for (const role of [
+    "--color-thread-selected-foreground",
+    "--color-thread-selected-foreground-muted",
+  ] as const) {
+    expect(themeColorContrastRatio(variables[role], selected)).toBeGreaterThanOrEqual(4.5 - 0.01);
+  }
+}
+
+function expectReadableAndroidDarkCards(variables: MobileThemeVariables) {
+  const screen = variables["--color-screen"];
+  const card = variables["--color-grouped-card"];
+  for (const surface of [screen, flattenThemeColor(variables["--color-header"], screen)]) {
+    expect(themeColorContrastRatio(card, surface)).toBeGreaterThanOrEqual(1.2 - 0.01);
+  }
+  for (const role of ANDROID_DARK_CARD_ROLES.slice(1) as ReadonlyArray<
+    keyof MobileThemeVariables
+  >) {
+    expect(themeColorContrastRatio(variables[role], card)).toBeGreaterThanOrEqual(4.5 - 0.01);
+  }
+}
+
 function omitRoles(variables: Readonly<Record<string, string>>, roles: ReadonlyArray<string>) {
   return Object.fromEntries(Object.entries(variables).filter(([role]) => !roles.includes(role)));
 }
@@ -26,9 +59,11 @@ function omitRoles(variables: Readonly<Record<string, string>>, roles: ReadonlyA
 describe("mobile theme runtime variables", () => {
   it("matches the standard base palette to the generated stylesheet", () => {
     for (const appearance of ["light", "dark"] as const) {
-      expect(
-        omitRoles(getMobileThemeRuntimeVariables("t3-code", appearance, "web"), SELECTION_ROLES),
-      ).toEqual(omitRoles(readDefaultMobileThemeVariables(appearance), SELECTION_ROLES));
+      const runtime = getMobileThemeRuntimeVariables("t3-code", appearance, "web");
+      expect(omitRoles(runtime, SELECTION_ROLES)).toEqual(
+        omitRoles(readDefaultMobileThemeVariables(appearance), SELECTION_ROLES),
+      );
+      expectVisibleSelection(runtime);
     }
   });
 
@@ -50,6 +85,8 @@ describe("mobile theme runtime variables", () => {
           appearance,
         );
         const android = getMobileThemeRuntimeVariables(themeId, appearance, "android");
+        expectVisibleSelection(android);
+        if (appearance === "dark") expectReadableAndroidDarkCards(android);
         const ignored =
           appearance === "dark"
             ? [...SELECTION_ROLES, ...ANDROID_DARK_CARD_ROLES]

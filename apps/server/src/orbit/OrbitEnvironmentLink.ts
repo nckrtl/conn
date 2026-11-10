@@ -17,12 +17,6 @@ import * as Schema from "effect/Schema";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import { OrbitGateway } from "./OrbitGateway.ts";
 
-/**
- * Links this environment to a T3 server Orbit knows, without the pairing code
- * leaving this process. As its own Node, the server asks the Gateway for a
- * one-time pairing link, takes the code from it and links with `PeerLinks`.
- * The code and the link never reach the result, an error, a log or storage.
- */
 /** Why a link failed. Each message says what to do. */
 export const OrbitEnvironmentLinkErrorCode = Schema.Literals([
   "node_access_required",
@@ -56,6 +50,12 @@ export interface OrbitEnvironmentLinked {
   readonly expiresAt: string;
 }
 
+/**
+ * Links this environment to a T3 server Orbit knows, without the pairing code
+ * leaving this process. As its own Node, the server asks the Gateway for a
+ * one-time pairing link, takes the code from it and links with `PeerLinks`.
+ * The code and the link never reach the result, an error, a log or storage.
+ */
 export class OrbitEnvironmentLink extends Context.Service<
   OrbitEnvironmentLink,
   {

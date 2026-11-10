@@ -221,7 +221,7 @@ Project (Orbit's `docs/cli/instance/container/thread.mmd`). Orbit creates a clon
 Project's default Instance, Conn pairs with the clone's T3 server once, and queues the first
 message in a new thread of its `/srv/workspace` project. Each start is saved in localStorage
 until its message is sent, so a reload resumes it; only the main window runs starts. The
-environment sync skips a clone a start is pairing with. Settings › Connections shows a clone
+environment sync skips a clone a start is pairing with, and an asleep one. Settings › Connections shows a clone
 whose container is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
 Sources:

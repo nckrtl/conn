@@ -65,14 +65,19 @@ describe("planEnvironmentProvider", () => {
     expect(plan.state.disabledByOrbit).toEqual(["laptop"]);
   });
 
-  it("leaves the server of an Instance that a thread start pairs with itself", () => {
+  it("leaves the server of an Instance that a thread start pairs with itself, and an asleep one", () => {
     const plan = planEnvironmentProvider({
       provider: "orbit",
       saved: [],
-      orbit: [orbit("clone", "registered", 41), orbit("other-clone", "registered", 42)],
+      orbit: [
+        orbit("clone", "registered", 41),
+        orbit("other-clone", "registered", 42),
+        { ...orbit("asleep-clone", "registered", 43), powerState: "stopped" },
+      ],
       state: EMPTY_ORBIT_ENVIRONMENT_STATE,
       heldInstanceIds: [41],
     });
+    // An asleep clone cannot mint a pairing link, so pairing it would only fail again on each run.
     expect(plan.pair).toEqual(["other-clone"]);
   });
 

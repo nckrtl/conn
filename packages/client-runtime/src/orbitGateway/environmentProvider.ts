@@ -121,6 +121,8 @@ export function planEnvironmentProvider(input: {
     .filter((environment) => {
       if (environment.status !== "registered") return false;
       if (environment.instanceId !== null && held.has(environment.instanceId)) return false;
+      // An asleep Instance's server cannot mint a pairing link.
+      if (environment.powerState === "stopped") return false;
       const id = environment.environmentId;
       if (!savedIds.has(id)) {
         const refusedAt = state.pairRefusedAt?.[id];

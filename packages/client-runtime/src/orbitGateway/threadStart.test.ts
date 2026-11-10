@@ -155,7 +155,7 @@ describe("runOrbitThreadStart", () => {
       createOperationId: 100,
       instanceId: 41,
       environmentId: "env-41",
-      pairingOperationId: 200,
+      pairingOperationId: null,
       connected: true,
       error: null,
     });
@@ -231,6 +231,48 @@ describe("runOrbitThreadStart", () => {
       connected: false,
       error: "The pairing link was already used or expired.",
     });
+  });
+
+  it("drops a pairing whose link was read when the connect fails, so a retry pairs anew", async () => {
+    const { client } = gateway({});
+    const run = ports(client);
+    run.ports.connect = async () => {
+      throw new Error("The clone did not answer.");
+    };
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+
+    expect(run.saves.at(-1)).toMatchObject({
+      environmentId: "env-41",
+      pairingOperationId: null,
+      pairingId: null,
+      connected: false,
+      error: "The clone did not answer.",
+    });
+  });
+
+  it("rides out a short Gateway outage while it follows the create", async () => {
+    const { client, calls } = gateway({});
+    const operation = client.operation;
+    let failures = 2;
+    const flaky = {
+      ...client,
+      operation: async (id: number) => {
+        if (id === 100 && failures-- > 0) {
+          throw new OrbitGatewayError({
+            code: "gateway.unreachable",
+            message: "down",
+            status: 0,
+            details: {},
+          });
+        }
+        return operation(id);
+      },
+    } as OrbitGatewayClient;
+    const run = ports(flaky);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+    expect(calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
   });
 
   it("keeps the pairing when the send fails, so a retry only sends", async () => {

@@ -14,7 +14,7 @@ import { connectPairing } from "../connection/onboarding";
 import { newMessageId, newThreadId, randomUUID } from "../lib/utils";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { readThreadShell } from "../state/entities";
+import { readThreadShell, waitForThreadShell } from "../state/entities";
 import { environmentProjects } from "../state/projects";
 import { environmentServerConfigsAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
@@ -104,6 +104,8 @@ async function send(start: OrbitThreadStart & { readonly environmentId: string }
   if (!ready || !configured || project === undefined || config === undefined) {
     throw new Error(`The clone's T3 project ${ORBIT_CLONE_WORKSPACE} did not appear.`);
   }
+  // After a reload the thread may already exist: its shell arrives with the clone's snapshot.
+  if (readThreadShell(scopeThreadRef(environmentId, threadId)) !== null) return;
   const projectId = ProjectId.make(project.id);
   const modelSelection =
     config.settings.defaultModelSelection ??
@@ -123,7 +125,11 @@ async function send(start: OrbitThreadStart & { readonly environmentId: string }
     },
     { reportFailure: false },
   );
-  if (result._tag === "Failure") {
+  // A refusal of a thread that exists means an earlier send already reached the clone.
+  if (
+    result._tag === "Failure" &&
+    !(await waitForThreadShell(scopeThreadRef(environmentId, threadId)))
+  ) {
     const error = squashAtomCommandFailure(result);
     throw new Error(
       `The clone did not take the first message: ${error instanceof Error ? error.message : String(error)}`,
@@ -145,6 +151,13 @@ export async function runSavedOrbitThreadStart(
   if (start === undefined || start.error !== null || running.has(id)) return null;
   running.add(id);
   try {
+    // Whether the device saved the clone's server is known only once the catalog loaded.
+    await waitForAtomValue({
+      registry: appAtomRegistry,
+      atom: environmentCatalog.catalogValueAtom,
+      predicate: (catalog) => catalog.isReady,
+      timeoutMs: CLONE_READY_TIMEOUT_MS,
+    });
     let environmentId: string | null = null;
     const sent = await runOrbitThreadStart(start, {
       client,

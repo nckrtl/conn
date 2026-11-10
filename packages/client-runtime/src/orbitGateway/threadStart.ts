@@ -52,6 +52,7 @@ export interface OrbitThreadStartPorts {
 const NAME_SLUG_LENGTH = 40;
 const NAME_SLUG_WORDS = 6;
 const DEFAULT_POLL_SECONDS = 2;
+const MAX_READ_MISSES = 5;
 
 /**
  * The clone's Instance name: the first words of the message as a slug, and a random suffix so two
@@ -116,6 +117,11 @@ class StepFailed extends Schema.TaggedError<StepFailed>()("OrbitThreadStepFailed
 const isStepFailed = Schema.is(StepFailed);
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
+/** The Gateway did not answer, or failed on its side. */
+function isTransient(error: unknown): boolean {
+  return isOrbitGatewayError(error) && (error.status === 0 || error.status >= 500);
+}
+
 function stepFailed(message: string, reset: Partial<OrbitThreadStart>): StepFailed {
   return new StepFailed({ message, reset });
 }
@@ -134,8 +140,18 @@ export async function runOrbitThreadStart(
     ports.save(current);
   };
   const follow = async (operationId: number, failed: (code: string) => StepFailed) => {
+    let misses = 0;
     for (;;) {
-      const operation = await ports.client.operation(operationId);
+      let operation;
+      try {
+        operation = await ports.client.operation(operationId);
+        misses = 0;
+      } catch (error) {
+        // A create runs for minutes; a short Gateway outage must not stop it.
+        if (!isTransient(error) || ++misses > MAX_READ_MISSES) throw error;
+        await ports.wait(DEFAULT_POLL_SECONDS);
+        continue;
+      }
       if (operation.status === "succeeded") return;
       if (OPERATION_TERMINAL_STATUSES.has(operation.status)) {
         throw failed(operation.errorCode ?? `operation.${operation.status}`);
@@ -193,6 +209,8 @@ export async function runOrbitThreadStart(
           }
           throw error;
         }
+        // The Gateway hands the link out once: a failed connect needs a new pairing.
+        update(newPairing);
         await ports.connect(environmentId, pairingUrl);
       }
       update({ connected: true });

@@ -16,6 +16,7 @@ import {
   MCP_PEER_LINK_SOFTWARE_ID,
   mcpClientScopes,
   parseMcpApprovalCode,
+  PEER_LINKS_OFF_DESCRIPTION,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
@@ -344,8 +345,7 @@ const make = Effect.gen(function* () {
       if (peerLink && !(yield* linksEnabled)) {
         return yield* new AuthMcpRegistrationError({
           error: "invalid_client_metadata",
-          error_description:
-            "Linked environments is off on that machine. Turn it on in its Settings → Labs.",
+          error_description: PEER_LINKS_OFF_DESCRIPTION,
         });
       }
       return {

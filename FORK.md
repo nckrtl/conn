@@ -249,6 +249,17 @@ dismissed at any time; a stopped one also offers Retry. The environment sync ski
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
+A server in an Orbit Instance container reads `/etc/orbit/instance` at start
+(`apps/server/src/orbit/OrbitInstanceFile.ts`). Orbit writes it: `KEY=value` lines, `#`
+comments, unquoted values. Conn reads `ORBIT_PROJECT_ID`, `ORBIT_INSTANCE_ID`,
+`ORBIT_PROJECT` (slug), `ORBIT_PROJECT_NAME`, `ORBIT_INSTANCE`, `ORBIT_NODE` and `ORBIT_URL`,
+and ignores other keys. With both ids as positive integers, the environment descriptor gets
+`orbitInstance` with the facts; otherwise it has none, and a missing or unreadable file never
+stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. With the
+descriptor, the thread panel's machine row becomes the Orbit row: Project, Instance and Node,
+and the URL as a link (`ThreadDetailsOrbitRows.tsx`). The sidebar title of the clone's
+`/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
+
 Sources:
 
 - `apps/web/src/orbit/*`.
@@ -780,10 +791,19 @@ encrypts this traffic. Upstream allows only HTTPS, loopback and Tailscale. When
 the stack lands on upstream `main`, drop Conn's copy and reconcile the migration
 ID again.
 
+`t3 environment link-orbit <id>` links a server that Orbit lists without a pairing code in
+an agent's transcript. The server asks the Gateway for a pairing as its own Node, follows the
+Operation (one pairing per call), takes the code from the link and calls `PeerLinks.link` with
+the Gateway's URL for that server. It prints only the outcome, or `<code>: <message>`. There is
+no MCP tool for it: agents that orchestrate Orbit clones run `t3` in a shell, and a tool would
+add to every agent's tool list. A peer with Linked environments off refuses with
+`peer_disabled` (`PEER_LINKS_OFF_DESCRIPTION`), shown as `target_links_off`. The server reuses
+the Gateway client from `packages/client-runtime/src/orbitGateway/client.ts`.
+
 Sources:
 
 - Server (`apps/server/src/`): `peer/*`, `persistence/Migrations.ts`,
-  `mcp/toolkits/orchestrator/*`.
+  `mcp/toolkits/orchestrator/*`, `orbit/OrbitEnvironmentLink.ts`, `cli/environment.ts`.
 - `packages/contracts/src/rpc.ts` (`peerLinks*`).
 
 ### Orbit registration

@@ -227,7 +227,7 @@ it.effect(
         yield* a.settings.updateSettings({ linkedEnvironmentsEnabled: true });
         yield* b.settings.updateSettings({ linkedEnvironmentsEnabled: false });
         const refusedThere = yield* link.pipe(Effect.flip);
-        expect(refusedThere.reason).toBe("pairing_rejected");
+        expect(refusedThere.reason).toBe("peer_disabled");
         expect(refusedThere.message).toContain("Linked environments is off on that machine");
         expect(yield* linkedSessions(b)).toEqual([]);
 

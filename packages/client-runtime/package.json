@@ -491,6 +491,10 @@
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
     },
+    "./orbit-gateway/client": {
+      "types": "./src/orbitGateway/client.ts",
+      "default": "./src/orbitGateway/client.ts"
+    },
     "./orbit-gateway": {
       "types": "./src/orbitGateway/index.ts",
       "default": "./src/orbitGateway/index.ts"

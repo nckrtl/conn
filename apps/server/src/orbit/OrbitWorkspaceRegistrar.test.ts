@@ -219,6 +219,35 @@ describe("OrbitWorkspaceRegistrar", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("keeps following an Operation and reading its Instance through a 5xx", () =>
+    Effect.gen(function* () {
+      const queued = { id: 4509, status: "queued", target_id: 95, poll_after_seconds: 1 };
+      const harness: Harness = {
+        thread: renamedThread(),
+        gateway: fakeGateway({
+          "POST /api/v1/instances/register": [ok(202, queued)],
+          "GET /api/v1/operations/4509": [
+            refused(503, "gateway.maintenance", "The Gateway is being released."),
+            ok(200, { ...queued, status: "succeeded", poll_after_seconds: null }),
+          ],
+          "GET /api/v1/instances/95": [
+            refused(500, "server.error", "Something broke."),
+            ok(200, { id: 95, url: "https://ui-refinement.hauzer.test" }),
+          ],
+        }),
+      };
+      const registrar = yield* startRegistrar(memoryFiles(), harness);
+      const done = yield* Effect.forkChild(settled(registrar));
+      yield* registrar.register(input);
+      yield* TestClock.adjust("70 seconds");
+      const registration = yield* Fiber.join(done);
+
+      assert.strictEqual(registration.phase, "registered");
+      assert.strictEqual(registration.url, "https://ui-refinement.hauzer.test");
+      assert.strictEqual(harness.gateway.requests.length, 5);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("tries the next domain when Orbit reports the route domain taken", () =>
     Effect.gen(function* () {
       const harness: Harness = {
@@ -312,6 +341,8 @@ describe("OrbitWorkspaceRegistrar", () => {
         const registrar = yield* startRegistrar(memoryFiles(), harness);
         const done = yield* Effect.forkChild(settled(registrar));
         yield* registrar.register(input);
+        // A retried answer would post again after 30 seconds.
+        yield* TestClock.adjust("30 seconds");
         const registration = yield* Fiber.join(done);
         assert.strictEqual(registration.phase, "failed");
         assert.deepStrictEqual(registration.failure, failure);

@@ -60,6 +60,7 @@ export function useOrbitAvailability(input: {
     readonly key: string;
     readonly value: OrbitAvailability;
   } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks the environment whether Orbit manages this project folder
   useEffect(() => {
     if (!enabled || !connected || projectRoot === null || key === null) return;
     let cancelled = false;

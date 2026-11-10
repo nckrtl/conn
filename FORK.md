@@ -966,6 +966,13 @@ Sources:
      the `attachOverlayBridge` effect in
      `apps/web/src/browser/HostedBrowserWebview.tsx`.
    - `pnpm-lock.yaml`: take upstream's, then let `vp i` rewrite it.
+   - Fork Swift and Kotlin files (`apps/mobile/modules/*/ios`, `*/android`):
+     CI lints native code but never compiles it, so a merge that takes
+     upstream's copy passes CI and breaks the app. The November 7 sync took
+     upstream's `T3ComposerEditorView.swift` and dropped `setSingleLineCentered`
+     (the build failed) and the Dynamic Type changes (no error at all). Diff every
+     fork native file against the sync's first parent, and keep the fork's side
+     unless upstream changed the same lines.
 2. Run the regression scan in the shell skill's "Upstream sync procedure" on
    upstream's diff. New upstream UI must follow the fork's shell rules (glass
    popovers, `ToolbarGroup`, `text-ui`, shell dividers, `scrollbar-inset`). Fix

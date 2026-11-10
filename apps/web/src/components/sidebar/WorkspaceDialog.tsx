@@ -1,5 +1,5 @@
 import { ImageIcon, PlusIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { isCommandPaletteOpen, openCommandPalette } from "../../commandPaletteBus";
 import { cn } from "../../lib/utils";
@@ -90,38 +90,36 @@ export function WorkspaceDialog({
 
   // Projects the workspace has but the sidebar doesn't show now (an environment
   // is offline) stay listed, so saving never drops them silently.
-  const projects = useMemo((): WorkspaceProject[] => {
-    const scoped = availableProjects.flatMap((project) =>
-      project.refs.map((ref) => ({
-        ...project,
-        projectKey: ref,
-        refs: [ref],
-        connections: (project.connections ?? []).filter((connection) =>
-          ref.startsWith(`${connection.environmentId}:`),
-        ),
-      })),
-    );
-    const known = new Set(scoped.map((project) => project.projectKey));
-    const unavailable = [
-      ...(editing?.projectRefs ?? []),
-      ...(editing?.projectKeys ?? []).filter(
-        (key) => !availableProjects.some((project) => project.projectKey === key),
+  const scoped = availableProjects.flatMap((project) =>
+    project.refs.map((ref) => ({
+      ...project,
+      projectKey: ref,
+      refs: [ref],
+      connections: (project.connections ?? []).filter((connection) =>
+        ref.startsWith(`${connection.environmentId}:`),
       ),
-    ];
-    return [
-      ...scoped,
-      ...unavailable
-        .filter((key) => !known.has(key))
-        .map((key) => ({
-          projectKey: key,
-          displayName: `${key} (not available now)`,
-          refs: [],
-        })),
-    ];
-  }, [availableProjects, editing]);
+    })),
+  );
+  const known = new Set(scoped.map((project) => project.projectKey));
+  const unavailable = [
+    ...(editing?.projectRefs ?? []),
+    ...(editing?.projectKeys ?? []).filter(
+      (key) => !availableProjects.some((project) => project.projectKey === key),
+    ),
+  ];
+  const projects: WorkspaceProject[] = [
+    ...scoped,
+    ...unavailable
+      .filter((key) => !known.has(key))
+      .map((key) => ({
+        projectKey: key,
+        displayName: `${key} (not available now)`,
+        refs: [],
+      })),
+  ];
   // Listed under the connection each project lives on, so projects on this Mac
   // and on other machines are told apart (rooms-patches).
-  const sections = useMemo(() => groupProjectsByConnection(projects), [projects]);
+  const sections = groupProjectsByConnection(projects);
 
   const save = () => {
     const legacyKeys = new Set(editing?.projectKeys ?? []);
@@ -154,6 +152,7 @@ export function WorkspaceDialog({
     refsBeforeAdd.current = new Set(availableProjects.flatMap((project) => project.refs));
     openCommandPalette({ open: "add-project" });
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- adds projects that appear in the registry after the user started adding one
   useEffect(() => {
     const before = refsBeforeAdd.current;
     if (!before) return;
@@ -232,7 +231,7 @@ export function WorkspaceDialog({
                     aria-pressed={color === option}
                     onClick={() => setColor(option)}
                     className={cn(
-                      "aspect-square rounded-md outline-offset-2",
+                      "aspect-square rounded-md -outline-offset-2",
                       WORKSPACE_COLOR_CLASSES[option],
                       color === option && "outline-2 outline-foreground",
                     )}
@@ -339,7 +338,7 @@ export function WorkspaceDialog({
                           {connection?.primary ? <span>· this machine</span> : null}
                           <button
                             type="button"
-                            className="ml-auto shrink-0 rounded px-1 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring outline-none"
+                            className="ml-auto shrink-0 rounded px-1 hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring outline-none"
                             onClick={() =>
                               setProjectKeys((current) =>
                                 allSelected

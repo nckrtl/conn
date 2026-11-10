@@ -27,7 +27,6 @@ const APP_BUNDLE_ID = isDevelopment
 // Only the app's own scheme: the development launcher makes this bundle the default handler
 // for it, which must not take upstream's scheme away from a T3 Code app that still uses it.
 const APP_PROTOCOL_SCHEMES = [isDevelopment ? brand.devScheme : brand.scheme];
-export const APP_BRAND_NAME = brand.name;
 
 /**
  * Upstream's server (unchanged) lets only upstream's desktop origins through CORS in
@@ -131,7 +130,7 @@ const DEV_RUNTIME_IDENTIFIER = "com.nckrtl.conn.dev";
  * The Developer ID of the fork's team in a `security find-identity` listing, or null.
  * `CONN_DEV_SIGNING_IDENTITY` overrides it; `-` keeps the runtime ad-hoc.
  */
-function pickDevSigningIdentity(listing, teamId, override) {
+export function pickDevSigningIdentity(listing, teamId, override) {
   if (override) return override === "-" ? null : override;
   if (!teamId) return null;
   for (const match of listing.matchAll(/^\s*\d+\)\s+([0-9A-F]{40})\s+"([^"]+)"/gm)) {
@@ -276,7 +275,7 @@ function registerMacLauncherBundle(appBundlePath) {
 }
 
 // Bundle-internal paths are macOS paths whatever host builds them.
-function resolveMacLauncherIconPaths(runtimeDir, development = isDevelopment) {
+export function resolveMacLauncherIconPaths(runtimeDir, development = isDevelopment) {
   return {
     sourceIconPath: development ? developmentMacIconPngPath : productionMacIconPngPath,
     generatedIconPath: NodePath.posix.join(

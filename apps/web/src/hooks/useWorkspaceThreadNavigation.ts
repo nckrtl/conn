@@ -25,6 +25,7 @@ export function useWorkspaceThreadNavigation() {
   const pending = useRef<string | null>(null);
   const routeKey = route ? JSON.stringify([route.environmentId, route.threadId]) : null;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the router to the workspace's last thread when the selected workspace changes
   useEffect(() => {
     const changed = previousWorkspace.current !== workspaceId;
     if (changed && !ready) return;

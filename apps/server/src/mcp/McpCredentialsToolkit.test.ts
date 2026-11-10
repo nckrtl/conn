@@ -10,6 +10,7 @@ import {
   ThreadId,
   TestLoginStoreError,
 } from "@t3tools/contracts";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -160,7 +161,7 @@ const makeHarness = (scenario: Scenario = {}) => {
     McpHttpServer.layerCredentialsToolkit,
     McpHttpServer.layerPreviewToolkit,
   ).pipe(
-    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
     Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
     Layer.provideMerge(CredentialAutofill.layer),
     Layer.provide(broker),
@@ -170,6 +171,12 @@ const makeHarness = (scenario: Scenario = {}) => {
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-credentials-toolkit-test-" }),
     ),
     Layer.provide(NodeServices.layer),
+    Layer.provide(
+      Layer.succeed(
+        SecureRandom.SecureRandom,
+        SecureRandom.make((size) => crypto.getRandomValues(new Uint8Array(size))),
+      ),
+    ),
   );
   const call = (name: string, args: Record<string, unknown>, capabilities = ["preview"] as const) =>
     Effect.gen(function* () {

@@ -1,5 +1,3 @@
-// @vitest-environment jsdom
-
 import {
   createProfileSync,
   type JsonObject,
@@ -8,10 +6,10 @@ import {
   type OrbitGatewaySettings,
   type ProfileSyncState,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { act, createElement, useEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { createElement, useEffect } from "react";
+import { describe, expect, it } from "vite-plus/test";
 
+import { act, render } from "../../test/render";
 import { useTheme } from "../hooks/useTheme";
 import useDefaultThemeSource from "../hooks/useDefaultTheme.ts?raw";
 import {
@@ -38,28 +36,6 @@ const setEnvironmentThemes = (themes: ReadonlyArray<ThemeDefinition>) =>
           colors: theme.colors,
         })),
   );
-
-// The latest `useTheme()` result, set after each render.
-const handle: { current: ReturnType<typeof useTheme> | null } = { current: null };
-const themeNow = () => handle.current!;
-let root: Root;
-let container: HTMLDivElement;
-
-function Harness() {
-  const value = useTheme();
-  useEffect(() => {
-    handle.current = value;
-  });
-  return null;
-}
-
-const host: AppearanceHost = {
-  contrast: () => 100,
-  setContrast: () => {},
-  setTheme: (id) => themeNow().setTheme(id),
-  setThemeHalf: (appearance, id) => themeNow().setThemeHalf(appearance, id),
-  setAppearanceMode: (mode) => themeNow().setAppearanceMode(mode),
-};
 
 /** A one-section Gateway: just enough to see whether the appearance reaches the profile. */
 function gateway() {
@@ -99,26 +75,32 @@ function gateway() {
   return { profile, patches, client, me };
 }
 
-beforeEach(async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+/** Mounts a `useTheme()` host on a fresh device. */
+async function setup() {
   window.localStorage.clear();
   invalidateCustomThemes();
   setEnvironmentThemes([]);
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(async () => {
-    root.render(createElement(Harness));
-  });
-});
+  let theme: ReturnType<typeof useTheme> | null = null;
+  const themeNow = () => theme!;
+  function Harness() {
+    const value = useTheme();
+    useEffect(() => {
+      theme = value;
+    });
+    return null;
+  }
+  const host: AppearanceHost = {
+    contrast: () => 100,
+    setContrast: () => {},
+    setTheme: (id) => themeNow().setTheme(id),
+    setThemeHalf: (appearance, id) => themeNow().setThemeHalf(appearance, id),
+    setAppearanceMode: (mode) => themeNow().setAppearanceMode(mode),
+  };
+  const screen = await render(createElement(Harness));
+  return Object.assign(screen, { host, themeNow });
+}
 
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  vi.unstubAllGlobals();
-});
-
-function syncing(fake: ReturnType<typeof gateway>) {
+function syncing(host: AppearanceHost, fake: ReturnType<typeof gateway>) {
   let saved: ProfileSyncState | null = null;
   const channel = createAppearanceChannel(host);
   const engine = createProfileSync({
@@ -136,8 +118,10 @@ function syncing(fake: ReturnType<typeof gateway>) {
 
 describe("a theme the environment pushed (t3 theme set)", () => {
   it("stays on this device, while the user's own pick spreads", async () => {
+    await using device = await setup();
+    const { themeNow } = device;
     const fake = gateway();
-    const { engine, stop } = syncing(fake);
+    const { engine, stop } = syncing(device.host, fake);
     await engine.run(fake.me());
     expect(fake.profile.section?.value.mode).toBe("system");
 
@@ -158,8 +142,10 @@ describe("a theme the environment pushed (t3 theme set)", () => {
   });
 
   it("does not seed an empty profile", async () => {
+    await using device = await setup();
+    const { themeNow } = device;
     const fake = gateway();
-    const { engine, stop } = syncing(fake);
+    const { engine, stop } = syncing(device.host, fake);
     await act(async () => {
       asDefaultThemeAdoption(() => themeNow().setTheme("ocean"));
     });

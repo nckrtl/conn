@@ -9,6 +9,9 @@ const harness = vi.hoisted(() => ({
 
 vi.mock("react-native", () => ({ View: harness.Passthrough }));
 vi.mock("expo-image", () => ({ Image: () => <img alt="" /> }));
+vi.mock("../features/settings/appearance/AppearancePreferencesProvider", () => ({
+  useAppearancePreferences: () => ({ themeAppearance: "light" }),
+}));
 vi.mock("./ui/AppSymbol", () => ({ SymbolView: () => null }));
 vi.mock("./ui/AppText", () => ({
   AppText: ({ children }: { children?: ReactNode }) => <span>{children}</span>,

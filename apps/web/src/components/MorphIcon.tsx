@@ -23,6 +23,7 @@ export function MorphIcon({ icon: Icon, reducedMotion = "user", ...props }: Morp
   const scoped = useConnIconScope();
   const ref = useRef<SVGSVGElement>(null);
   const previous = useRef(Icon);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs a Web Animations morph on the icon DOM node when the icon changes
   useLayoutEffect(() => {
     if (previous.current === Icon) return;
     previous.current = Icon;

@@ -198,53 +198,17 @@ final class T3EdgeBlurView: ExpoView {
       return
     }
     if edge == "content" {
-      var ancestor = superview
-      while let view = ancestor {
-        if let scroll = view as? UIScrollView, !(scroll is UITextView) {
-          Self.scrollViews.setObject(scroll, forKey: root)
-          for overlay in Self.edges.allObjects where overlay.edge != "content" && overlay.screenRoot() === root {
-            overlay.connect()
-          }
-          return
-        }
-        ancestor = view.superview
-      }
+      registerContentScrollView(root: root)
       return
     }
     guard let scroll = Self.scrollViews.object(forKey: root) else { return }
     let container: UIView?
-    if edge == "toolbar" {
-      // nckrtl shell: the iPhone workspace lists scroll under the navigation controller's bottom
-      // toolbar, which a nested screen's scroll view is not linked to.
-      var responder: UIResponder? = root
-      var toolbar: UIToolbar?
-      while let current = responder {
-        if let controller = current as? UIViewController,
-          let navigation = controller.navigationController, !navigation.isToolbarHidden
-        {
-          toolbar = navigation.toolbar
-          break
-        }
-        responder = current.next
-      }
-      container = toolbar
-      // The header shows the toolbar after this view lands in the window; look again shortly.
-      if toolbar == nil, toolbarRetries < 20 {
-        toolbarRetries += 1
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.connect() }
-      }
-    } else if edge == "top" {
-      var responder: UIResponder? = root
-      var navigationBar: UINavigationBar?
-      while let current = responder {
-        if let controller = current as? UIViewController {
-          navigationBar = controller.navigationController?.navigationBar
-          if navigationBar != nil { break }
-        }
-        responder = current.next
-      }
-      container = navigationBar
-    } else {
+    switch edge {
+    case "toolbar":
+      container = toolbarContainer(root: root)
+    case "top":
+      container = navigationBar(root: root)
+    default:
       // UIKit inspects descendants, so use the real composer control container,
       // not this empty layout marker.
       container = superview
@@ -259,5 +223,51 @@ final class T3EdgeBlurView: ExpoView {
     scroll.bottomEdgeEffect.style = .soft
     scroll.topEdgeEffect.isHidden = false
     scroll.bottomEdgeEffect.isHidden = false
+  }
+
+  private func registerContentScrollView(root: UIView) {
+    var ancestor = superview
+    while let view = ancestor {
+      if let scroll = view as? UIScrollView, !(scroll is UITextView) {
+        Self.scrollViews.setObject(scroll, forKey: root)
+        for overlay in Self.edges.allObjects where overlay.edge != "content" && overlay.screenRoot() === root {
+          overlay.connect()
+        }
+        return
+      }
+      ancestor = view.superview
+    }
+  }
+
+  /// nckrtl shell: the iPhone workspace lists scroll under the navigation controller's bottom
+  /// toolbar, which a nested screen's scroll view is not linked to.
+  private func toolbarContainer(root: UIView) -> UIView? {
+    var responder: UIResponder? = root
+    var toolbar: UIToolbar?
+    while let current = responder {
+      if let controller = current as? UIViewController,
+         let navigation = controller.navigationController, !navigation.isToolbarHidden {
+        toolbar = navigation.toolbar
+        break
+      }
+      responder = current.next
+    }
+    // The header shows the toolbar after this view lands in the window; look again shortly.
+    if toolbar == nil, toolbarRetries < 20 {
+      toolbarRetries += 1
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.connect() }
+    }
+    return toolbar
+  }
+
+  private func navigationBar(root: UIView) -> UIView? {
+    var responder: UIResponder? = root
+    while let current = responder {
+      if let navigationBar = (current as? UIViewController)?.navigationController?.navigationBar {
+        return navigationBar
+      }
+      responder = current.next
+    }
+    return nil
   }
 }

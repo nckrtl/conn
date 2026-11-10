@@ -1,6 +1,6 @@
-// @vitest-environment jsdom
-// @vitest-environment-options {"url":"https://login.example.com"}
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import { stubGlobal } from "../../test/render";
 import {
   credentialInlineCommandScript,
   credentialInlineRect,
@@ -11,33 +11,47 @@ import {
 
 const owner = "inline-test";
 const run = (script: string): Promise<CredentialInlineEvent | null> => {
-  // oxlint-disable-next-line no-eval
+  // oxlint-disable-next-line no-eval -- runs the script string a guest page evaluates
   return (0, eval)(script);
 };
-const next = (revision = -1) => run(credentialInlineWatchScript(owner, location.origin, revision));
-beforeEach(() => {
-  vi.stubGlobal(
+const HTTPS_GUARD = ' || location.protocol !== "https:"';
+// Browser tests are served over http; lift only the https guard, which its own test covers.
+const watchOverHttp = (origin: string, revision = -1) => {
+  const script = credentialInlineWatchScript(owner, origin, revision);
+  expect(script).toContain(HTTPS_GUARD);
+  return run(script.replace(HTTPS_GUARD, ""));
+};
+const next = (revision = -1) => watchOverHttp(location.origin, revision);
+// A visible login field with a stubbed ResizeObserver; disposing stops the watcher first.
+const loginPage = (): AsyncDisposable => {
+  const resizeObserver = stubGlobal(
     "ResizeObserver",
     class {
       observe() {}
       disconnect() {}
     },
   );
-  vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(
-    new DOMRect(30, 50, 200, 40),
-  );
+  const spy = vi
+    .spyOn(Element.prototype, "getBoundingClientRect")
+    .mockReturnValue(new DOMRect(30, 50, 200, 40));
   document.body.innerHTML =
     '<form><input type="email" autocomplete="email"><button>Continue</button></form>';
-});
-afterEach(async () => {
-  await run(credentialInlineCommandScript(owner, "dispose"));
-  document.body.innerHTML = "";
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-});
+  return {
+    async [Symbol.asyncDispose]() {
+      try {
+        await run(credentialInlineCommandScript(owner, "dispose"));
+      } finally {
+        document.body.innerHTML = "";
+        spy.mockRestore();
+        resizeObserver[Symbol.dispose]();
+      }
+    },
+  };
+};
 
 describe("inline login focus watcher", () => {
   it("reports focused input geometry without exposing field values", async () => {
+    await using _page = loginPage();
     const initial = await next();
     const pending = next(initial!.revision);
     const input = document.querySelector("input")!;
@@ -56,6 +70,7 @@ describe("inline login focus watcher", () => {
     expect(parseCredentialInlineEvent(event)).toEqual(event);
   });
   it("dismisses on Escape and reopens only on a new field interaction", async () => {
+    await using _page = loginPage();
     document.querySelector("input")!.focus();
     const initial = await next();
     const pending = next(initial!.revision);
@@ -69,6 +84,7 @@ describe("inline login focus watcher", () => {
     expect((await reopened)?.anchor?.field).toBe("username");
   });
   it("hands ArrowDown to the picker only while it is open", async () => {
+    await using _page = loginPage();
     document.querySelector("input")!.focus();
     const initial = await next();
     const key = () =>
@@ -89,12 +105,15 @@ describe("inline login focus watcher", () => {
     '<form><input type="email"><input type="password" autocomplete="new-password"></form>',
     '<input type="email" readonly>',
   ])("ignores non-login and registration inputs: %s", async (html) => {
+    await using _page = loginPage();
     document.body.innerHTML = html;
     document.querySelector("input")!.focus();
     expect((await next())?.anchor).toBeNull();
   });
-  it("rejects the wrong origin and resolves pending reads when disposed", async () => {
-    expect(await run(credentialInlineWatchScript(owner, "https://other.example"))).toBeNull();
+  it("rejects plain http and the wrong origin, and resolves pending reads when disposed", async () => {
+    await using _page = loginPage();
+    expect(await run(credentialInlineWatchScript(owner, location.origin))).toBeNull();
+    expect(await watchOverHttp("https://other.example")).toBeNull();
     const initial = await next();
     const pending = next(initial!.revision);
     await run(credentialInlineCommandScript(owner, "dispose"));

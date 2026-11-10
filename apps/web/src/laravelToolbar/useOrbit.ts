@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { hasProcessWarning } from "./orbit";
 import type { OrbitPage, OrbitProcess, OrbitSource, ProcessAction } from "./orbit";
@@ -36,27 +36,21 @@ export function useOrbit(source: OrbitSource | null): OrbitTool {
   const pageRef = useRef<OrbitPage | null>(null);
   // Each call is a short script on the thread's machine; never run two refreshes at once.
   const refreshing = useRef<Promise<void> | null>(null);
-  const state = useMemo<OrbitState>(
-    () =>
-      !source
-        ? { status: "none" }
-        : loaded?.source === source
-          ? loaded.state
-          : { status: "loading" },
-    [loaded, source],
-  );
+  const state: OrbitState = !source
+    ? { status: "none" }
+    : loaded?.source === source
+      ? loaded.state
+      : { status: "loading" };
 
-  const update = useCallback(
-    (next: (current: Loaded) => Loaded) => {
-      setLoaded((current) =>
-        current && current.source === source
-          ? { source: current.source, state: next(current.state) }
-          : current,
-      );
-    },
-    [source],
-  );
+  const update = (next: (current: Loaded) => Loaded) => {
+    setLoaded((current) =>
+      current && current.source === source
+        ? { source: current.source, state: next(current.state) }
+        : current,
+    );
+  };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the Orbit page from the thread's machine when the source changes
   useEffect(() => {
     pageRef.current = null;
     if (!source) return;
@@ -80,7 +74,7 @@ export function useOrbit(source: OrbitSource | null): OrbitTool {
     };
   }, [source]);
 
-  const refresh = useCallback(async () => {
+  const refresh = async () => {
     const page = pageRef.current;
     if (!source || !page) return;
     if (refreshing.current) return refreshing.current;
@@ -95,35 +89,26 @@ export function useOrbit(source: OrbitSource | null): OrbitTool {
         refreshing.current = null;
       });
     return refreshing.current;
-  }, [source, update]);
+  };
 
-  const act = useCallback(
-    async (process: OrbitProcess, action: ProcessAction) => {
-      if (!source) return;
-      update((current) => (current.status === "ready" ? { ...current, error: null } : current));
-      try {
-        await source.act(process.id, action);
-      } catch (error) {
-        update((current) =>
-          current.status === "ready"
-            ? { ...current, error: `Could not ${action} ${process.name}: ${message(error)}` }
-            : current,
-        );
-      }
-      await refresh();
-    },
-    [refresh, source, update],
-  );
+  const act = async (process: OrbitProcess, action: ProcessAction) => {
+    if (!source) return;
+    update((current) => (current.status === "ready" ? { ...current, error: null } : current));
+    try {
+      await source.act(process.id, action);
+    } catch (error) {
+      update((current) =>
+        current.status === "ready"
+          ? { ...current, error: `Could not ${action} ${process.name}: ${message(error)}` }
+          : current,
+      );
+    }
+    await refresh();
+  };
 
-  const warnings = useMemo<OrbitTool["warnings"]>(
-    () =>
-      state.status === "ready" && hasProcessWarning(state.processes)
-        ? { processes: "Some processes are not running" }
-        : {},
-    [state],
-  );
-  return useMemo(
-    () => ({ state, source, refresh, act, warnings }),
-    [act, refresh, source, state, warnings],
-  );
+  const warnings: OrbitTool["warnings"] =
+    state.status === "ready" && hasProcessWarning(state.processes)
+      ? { processes: "Some processes are not running" }
+      : {};
+  return { state, source, refresh, act, warnings };
 }

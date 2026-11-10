@@ -1,6 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { FolderGit2Icon, FolderGitIcon, FolderIcon } from "lucide-react";
-import { useMemo, type ReactNode } from "react";
+import { type ReactNode } from "react";
 
 import {
   resolveCurrentWorkspaceLabel,
@@ -87,65 +87,51 @@ export function useWorkspaceOptions({
   const orbitOnly =
     orbitResult !== null && orbitResult.hidden !== true && orbitResult.projectFolder === true;
 
-  const options = useMemo(() => {
-    const currentLabel = resolveCurrentWorkspaceLabel(activeWorktreePath);
-    const list: WorkspaceOption[] = [
-      {
-        value: "local",
-        label: currentLabel,
-        content: (
-          <span className="flex min-w-0 items-center gap-1.5">
-            {activeWorktreePath ? (
-              <FolderGitIcon className="size-3" />
-            ) : (
-              <FolderIcon className="size-3" />
-            )}
-            <MiddleTruncate value={currentLabel} />
-          </span>
-        ),
-        disabled: forceNewWorktree,
-      },
-      {
-        value: "worktree",
-        label: resolveEnvModeLabel("worktree"),
-        content: (
-          <span className="flex min-w-0 items-center gap-1.5">
-            <FolderGit2Icon className="size-3" />
-            <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
-          </span>
-        ),
-        disabled: false,
-      },
-    ];
-    if (orbitOnly) list.length = 0;
-    if (showOrbit || orbitOnly) {
-      list.push({
-        value: "orbit",
-        label: resolveEnvModeLabel("orbit"),
-        content: <OrbitInstanceItemContent note={orbitNote} />,
-        disabled: orbitDisabled && effectiveEnvMode !== "orbit",
-      });
-    }
-    if (previousWorktreeLabel && !orbitOnly) {
-      list.push({
-        value: PREVIOUS_WORKTREE_OPTION,
-        label: previousWorktreeLabel,
-        content: <PreviousWorktreeItemContent branch={previousWorktreeBranch} />,
-        disabled: false,
-      });
-    }
-    return list;
-  }, [
-    activeWorktreePath,
-    effectiveEnvMode,
-    forceNewWorktree,
-    orbitDisabled,
-    orbitNote,
-    orbitOnly,
-    previousWorktreeBranch,
-    previousWorktreeLabel,
-    showOrbit,
-  ]);
-
-  return { options, orbitNote };
+  const currentLabel = resolveCurrentWorkspaceLabel(activeWorktreePath);
+  const list: WorkspaceOption[] = [
+    {
+      value: "local",
+      label: currentLabel,
+      content: (
+        <span className="flex min-w-0 items-center gap-1.5">
+          {activeWorktreePath ? (
+            <FolderGitIcon className="size-3" />
+          ) : (
+            <FolderIcon className="size-3" />
+          )}
+          <MiddleTruncate value={currentLabel} />
+        </span>
+      ),
+      disabled: forceNewWorktree,
+    },
+    {
+      value: "worktree",
+      label: resolveEnvModeLabel("worktree"),
+      content: (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <FolderGit2Icon className="size-3" />
+          <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
+        </span>
+      ),
+      disabled: false,
+    },
+  ];
+  if (orbitOnly) list.length = 0;
+  if (showOrbit || orbitOnly) {
+    list.push({
+      value: "orbit",
+      label: resolveEnvModeLabel("orbit"),
+      content: <OrbitInstanceItemContent note={orbitNote} />,
+      disabled: orbitDisabled && effectiveEnvMode !== "orbit",
+    });
+  }
+  if (previousWorktreeLabel && !orbitOnly) {
+    list.push({
+      value: PREVIOUS_WORKTREE_OPTION,
+      label: previousWorktreeLabel,
+      content: <PreviousWorktreeItemContent branch={previousWorktreeBranch} />,
+      disabled: false,
+    });
+  }
+  return { options: list, orbitNote };
 }

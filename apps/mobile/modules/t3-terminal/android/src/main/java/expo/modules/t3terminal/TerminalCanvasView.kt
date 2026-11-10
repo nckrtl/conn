@@ -37,7 +37,8 @@ internal object TerminalTypefaces {
     if (loaded) return
     loaded = true
     try {
-      regular = Typeface.createFromAsset(context.assets, "fonts/JetBrainsMonoNerdFontMono-Regular.ttf")
+      regular =
+        Typeface.createFromAsset(context.assets, "fonts/JetBrainsMonoNerdFontMono-Regular.ttf")
       bold = Typeface.createFromAsset(context.assets, "fonts/JetBrainsMonoNerdFontMono-Bold.ttf")
     } catch (error: RuntimeException) {
       Log.w("TerminalCanvasView", "bundled terminal font unavailable, using monospace", error)

@@ -21,17 +21,18 @@ const threadRef = {
   threadId: ThreadId.make("thread-1"),
 };
 
+const NOW = 1_800_000_000_000;
+
 describe("credential approval queue", () => {
-  beforeEach(() => vi.useFakeTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
   afterEach(() => vi.useRealTimers());
 
   it("shows prompts one at a time and resolves each with the user's answer", async () => {
-    const first = requestCredentialApproval(request, threadRef, Date.now() + 60_000);
-    const second = requestCredentialApproval(
-      { ...request, field: "otp" },
-      threadRef,
-      Date.now() + 60_000,
-    );
+    const first = requestCredentialApproval(request, threadRef, NOW + 60_000);
+    const second = requestCredentialApproval({ ...request, field: "otp" }, threadRef, NOW + 60_000);
     expect(readCurrentCredentialApproval()?.field).toBe("password");
     respondToCredentialApproval(first.id, true);
     await expect(first.answer).resolves.toEqual({ approved: true, reason: "user" });
@@ -45,7 +46,7 @@ describe("credential approval queue", () => {
     const prompt = requestCredentialApproval(
       { ...request, signInFields: ["username", "password", "otp"] },
       threadRef,
-      Date.now() + 60_000,
+      NOW + 60_000,
     );
     respondToCredentialApproval(prompt.id, true, ["username", "password"]);
     await expect(prompt.answer).resolves.toEqual({
@@ -56,14 +57,14 @@ describe("credential approval queue", () => {
   });
 
   it("denies a prompt nobody answers by its deadline", async () => {
-    const prompt = requestCredentialApproval(request, threadRef, Date.now() + 5_000);
+    const prompt = requestCredentialApproval(request, threadRef, NOW + 5_000);
     vi.advanceTimersByTime(5_000);
     await expect(prompt.answer).resolves.toEqual({ approved: false, reason: "timeout" });
     expect(readCurrentCredentialApproval()).toBeNull();
   });
 
   it("adds the page's field label to a waiting prompt only", async () => {
-    const prompt = requestCredentialApproval(request, threadRef, Date.now() + 60_000);
+    const prompt = requestCredentialApproval(request, threadRef, NOW + 60_000);
     updateCredentialApproval(prompt.id, { highlighted: true, pageFieldLabel: "Passcode" });
     expect(readCurrentCredentialApproval()).toMatchObject({
       highlighted: true,

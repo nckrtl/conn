@@ -1,11 +1,7 @@
 /**
- * Decides what `t3code://workspace/<name>` does.
- *
- * The name key matches `workspaceNameKey` / `meansAllProjects` in
- * `apps/web/src/workspaces.logic.ts`. A link focuses a window already showing
- * that workspace. A shorter name matches when every matching window is the
- * same workspace, so "DLF" focuses "DLF - Leden". It never retargets a window
- * that is showing a different one.
+ * Decides what `t3code://workspace/<name>` does; the key matches `workspaceNameKey` in
+ * `workspaces.logic.ts`. It focuses a window showing that workspace; a shorter name matches when
+ * all matching windows show the same one ("DLF" → "DLF - Leden"). It never retargets a window.
  */
 
 export interface ReportedWorkspace {

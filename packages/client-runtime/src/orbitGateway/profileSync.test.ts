@@ -499,7 +499,8 @@ describe("overlapping runs", () => {
     fake.client.settings = async () => {
       inFlight += 1;
       overlapped ||= inFlight > 1;
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      // Yield long enough for an unserialized run to start its own read.
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
       try {
         return await settings();
       } finally {

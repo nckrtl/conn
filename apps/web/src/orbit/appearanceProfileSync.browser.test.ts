@@ -1,10 +1,8 @@
-// @vitest-environment jsdom
-
 import { type JsonObject } from "@t3tools/client-runtime/orbit-gateway";
-import { act, createElement, useEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { createElement, useEffect } from "react";
+import { describe, expect, it } from "vite-plus/test";
 
+import { act, render } from "../../test/render";
 import { useTheme } from "../hooks/useTheme";
 import {
   getCustomThemes,
@@ -42,31 +40,6 @@ const setEnvironmentThemes = (themes: ReadonlyArray<ThemeDefinition>) =>
         })),
   );
 
-// The latest `useTheme()` result, set after each render.
-const handle: { current: ReturnType<typeof useTheme> | null } = { current: null };
-const themeNow = () => handle.current!;
-let contrast = 100;
-let root: Root;
-let container: HTMLDivElement;
-
-function Harness() {
-  const value = useTheme();
-  useEffect(() => {
-    handle.current = value;
-  });
-  return null;
-}
-
-const host: AppearanceHost = {
-  contrast: () => contrast,
-  setContrast: (value) => {
-    contrast = value;
-  },
-  setTheme: (id) => themeNow().setTheme(id),
-  setThemeHalf: (appearance, id) => themeNow().setThemeHalf(appearance, id),
-  setAppearanceMode: (mode) => themeNow().setAppearanceMode(mode),
-};
-
 // Themes store colors in one canonical form, so the fixtures start there.
 const canonical = (color: string) => toCanonicalThemeColor(color)!;
 const darkColors = {
@@ -100,34 +73,53 @@ const remoteAppearance = (overrides: Record<string, unknown> = {}): JsonObject =
     ...overrides,
   }) as JsonObject;
 
-const apply = (value: JsonObject, previous: JsonObject | null = null) =>
-  act(async () => {
-    applyAppearanceSection(value, previous, host);
-  });
-
-beforeEach(async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+/** Mounts a `useTheme()` host on a fresh device; `contrast` stands in for the contrast setting. */
+async function setup() {
   window.localStorage.clear();
   invalidateCustomThemes();
   setEnvironmentThemes([]);
-  contrast = 100;
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(async () => {
-    root.render(createElement(Harness));
-  });
-});
-
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  setEnvironmentThemes([]);
-  vi.unstubAllGlobals();
-});
+  let contrast = 100;
+  let theme: ReturnType<typeof useTheme> | null = null;
+  const themeNow = () => theme!;
+  function Harness() {
+    const value = useTheme();
+    useEffect(() => {
+      theme = value;
+    });
+    return null;
+  }
+  const host: AppearanceHost = {
+    contrast: () => contrast,
+    setContrast: (value) => {
+      contrast = value;
+    },
+    setTheme: (id) => themeNow().setTheme(id),
+    setThemeHalf: (appearance, id) => themeNow().setThemeHalf(appearance, id),
+    setAppearanceMode: (mode) => themeNow().setAppearanceMode(mode),
+  };
+  const screen = await render(createElement(Harness));
+  return {
+    host,
+    themeNow,
+    contrast: () => contrast,
+    apply: (value: JsonObject, previous: JsonObject | null = null) =>
+      act(async () => {
+        applyAppearanceSection(value, previous, host);
+      }),
+    async [Symbol.asyncDispose]() {
+      try {
+        await screen[Symbol.asyncDispose]();
+      } finally {
+        setEnvironmentThemes([]);
+      }
+    },
+  };
+}
 
 describe("serializing the appearance", () => {
-  it("describes the stock look on a fresh device", () => {
+  it("describes the stock look on a fresh device", async () => {
+    await using device = await setup();
+    const { host } = device;
     expect(readLocalAppearance(host)).toEqual({
       schema: 1,
       mode: "system",
@@ -141,6 +133,8 @@ describe("serializing the appearance", () => {
   });
 
   it("names a built-in theme by id and carries the palette of a custom one", async () => {
+    await using device = await setup();
+    const { host, themeNow } = device;
     installCustomTheme(customTheme("mine"));
     await act(async () => {
       themeNow().setTheme("ocean");
@@ -158,6 +152,8 @@ describe("serializing the appearance", () => {
   });
 
   it("marks a theme the library lacks as published", async () => {
+    await using device = await setup();
+    const { host, themeNow } = device;
     setEnvironmentThemes([customTheme("dark-ocean", "Dark Ocean")]);
     await act(async () => {
       themeNow().setTheme("dark-ocean");
@@ -170,6 +166,8 @@ describe("serializing the appearance", () => {
   });
 
   it("keeps a dark-only theme out of the light slot", async () => {
+    await using device = await setup();
+    const { host, themeNow, apply } = device;
     setEnvironmentThemes([customTheme("dark-ocean", "Dark Ocean")]);
     await act(async () => {
       themeNow().setTheme("dark-ocean");
@@ -191,6 +189,8 @@ describe("serializing the appearance", () => {
   });
 
   it("keeps a dark-only mix half out of the light slot too", async () => {
+    await using device = await setup();
+    const { host, themeNow } = device;
     installCustomTheme(customTheme("night"));
     await act(async () => {
       themeNow().setTheme("ocean");
@@ -202,6 +202,7 @@ describe("serializing the appearance", () => {
   });
 
   it("leaves empty maps out, because the Gateway rejects them", async () => {
+    await using _device = await setup();
     const withoutColors = { ...customTheme("no-colors"), colors: {} } as unknown as ThemeDefinition;
     const withEmptyVariant = {
       ...customTheme("light-less"),
@@ -226,7 +227,9 @@ describe("serializing the appearance", () => {
     expect(hasEmptyMap(local)).toBe(false);
   });
 
-  it("waits for a published theme that has not arrived instead of reporting the stock look", () => {
+  it("waits for a published theme that has not arrived instead of reporting the stock look", async () => {
+    await using device = await setup();
+    const { host } = device;
     window.localStorage.setItem("t3code:theme", "dark-ocean");
     expect(readLocalAppearance(host)).toBeNull();
 
@@ -240,15 +243,19 @@ describe("serializing the appearance", () => {
 
 describe("applying the appearance", () => {
   it("sets slots, mode and contrast, and reads back what it applied", async () => {
+    await using device = await setup();
+    const { host, themeNow, apply } = device;
     const remote = remoteAppearance();
     await apply(remote);
     expect(themeNow().appearanceMode).toBe("dark");
-    expect(contrast).toBe(110);
+    expect(device.contrast()).toBe(110);
     expect(themeNow().themeHalves).toEqual({ dark: "dark-ocean" });
     expect(readLocalAppearance(host)).toEqual(remote);
   });
 
   it("installs a palette the device lacks in the read-only From profile collection", async () => {
+    await using device = await setup();
+    const { host, apply } = device;
     await apply(remoteAppearance());
     const copy = getThemeDefinition("dark-ocean");
     expect(copy?.collection).toEqual(PROFILE_THEME_COLLECTION);
@@ -258,18 +265,22 @@ describe("applying the appearance", () => {
   });
 
   it("gives way to the live published theme as soon as the environment publishes it", async () => {
+    await using device = await setup();
+    const { apply } = device;
     await apply(remoteAppearance());
     const live = {
       ...customTheme("dark-ocean", "Dark Ocean (live)"),
       colors: { ...darkColors, canvas: canonical("#000814") },
     };
     setEnvironmentThemes([live]);
-    act(() => pruneProfileThemeCopies());
+    await act(() => pruneProfileThemeCopies());
     expect(getCustomThemes().some((entry) => entry.id === "dark-ocean")).toBe(false);
     expect(getThemeDefinition("dark-ocean")?.label).toBe("Dark Ocean (live)");
   });
 
   it("drops copies no slot uses any more", async () => {
+    await using device = await setup();
+    const { apply } = device;
     await apply(remoteAppearance());
     await apply(
       remoteAppearance({
@@ -283,6 +294,8 @@ describe("applying the appearance", () => {
   });
 
   it("is quiet when the profile's value is already what the device wears", async () => {
+    await using device = await setup();
+    const { apply } = device;
     const remote = remoteAppearance();
     await apply(remote);
     const before = { ...window.localStorage };
@@ -291,6 +304,8 @@ describe("applying the appearance", () => {
   });
 
   it("uses one whole theme when both slots agree, and a mix when they differ", async () => {
+    await using device = await setup();
+    const { themeNow, apply } = device;
     await apply(
       remoteAppearance({
         themes: {
@@ -314,6 +329,8 @@ describe("applying the appearance", () => {
   });
 
   it("falls back to the stock look for a built-in theme this build lacks", async () => {
+    await using device = await setup();
+    const { themeNow, apply } = device;
     await apply(
       remoteAppearance({
         themes: {
@@ -327,6 +344,8 @@ describe("applying the appearance", () => {
   });
 
   it("installs and updates the custom library, and removes what the profile dropped", async () => {
+    await using device = await setup();
+    const { apply } = device;
     installCustomTheme(customTheme("old"));
     installCustomTheme(customTheme("local-only"));
     const first = remoteAppearance({
@@ -372,7 +391,9 @@ describe("applying the appearance", () => {
   });
 
   it("ignores a contrast outside the range this build accepts", async () => {
+    await using device = await setup();
+    const { apply } = device;
     await apply(remoteAppearance({ contrast: 900 }));
-    expect(contrast).toBe(100);
+    expect(device.contrast()).toBe(100);
   });
 });

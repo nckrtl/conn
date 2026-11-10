@@ -510,7 +510,7 @@ export function createMobileThemeVariables(
  * over the sidebar (desktop light uses 6%; small phone cards need the extra step). Settings groups, composer and glass
  * fallbacks sit on it, one step above the sidebar-colored screen.
  */
-export function shellHighlightColor(colors: ThemeColors, appearance: MobileThemeAppearance) {
+export function shellHighlightColor(colors: ThemeColors, _appearance: MobileThemeAppearance) {
   const pane = themeColorToNativeColor(colors.sidebar);
   return flattenThemeColor(themeColorWithAlpha(themeColorToNativeColor(colors.text), 0.08), pane);
 }
@@ -532,16 +532,8 @@ export function getMobileThemeVariables(
   overrides: Partial<MobileThemeVariables> | null = null,
 ): MobileThemeVariables {
   const colors = getMobileThemeColors(themeId, appearance);
-  const groupedCard =
-    themeId === DEFAULT_MOBILE_THEME_ID
-      ? appearance === "light"
-        ? colors.toolbarControlHover
-        : colors.sidebarRowActive
-      : themeId === "t3-chat"
-        ? appearance === "light"
-          ? colors.toolbarControl
-          : colors.surface
-        : colors.muted;
+  // nckrtl shell: settings groups, composer and glass fallbacks sit on the desktop shell highlight.
+  const groupedCard = shellHighlightColor(colors, appearance);
   const mobileColors =
     themeId === DEFAULT_MOBILE_THEME_ID
       ? {

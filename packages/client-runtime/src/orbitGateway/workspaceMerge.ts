@@ -1,18 +1,9 @@
 import { gatewayText, type OrbitGatewayWorkspace } from "./client.ts";
 
 /**
- * Three-way merge of a profile's workspaces, used when another device replaced the settings while
- * this one had unsent edits (`conn.settings_version_conflict`).
- *
- * `base` is the list both sides started from (the last version this device read), `local` holds
- * this device's edits, and `remote` is the profile's current list. Per workspace id, a side that
- * did not change it since `base` takes the other side's version, so a deletion on one side and no
- * edit on the other removes it. When both sides changed the same workspace, the local edit wins:
- * it is the newer intent of the person in front of this device. An edit beats a deletion, so no
- * change is lost silently.
- *
- * Order follows the remote list unless only this device reordered, then the local order. New
- * workspaces from either side keep their position relative to the side that added them.
+ * Three-way merge of profile workspaces after `conn.settings_version_conflict`. Per id, an
+ * unchanged side takes the other's version; when both changed, local wins and an edit beats a
+ * deletion. Order follows remote unless only this device reordered; new ones keep their position.
  */
 export function mergeWorkspaces(
   base: readonly OrbitGatewayWorkspace[],

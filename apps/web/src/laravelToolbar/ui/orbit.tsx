@@ -179,6 +179,7 @@ function LogLineRow({ time, text }: { time: string | null; text: string }) {
 function useProcessLog(processId: number | null, status: ProcessStatus | null, following: boolean) {
   const { source } = useOrbitTool();
   const [log, setLog] = useState<{ processId: number; text: string } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the process log from Orbit on a timer
   useEffect(() => {
     if (!source || processId === null) return;
     let cancelled = false;
@@ -217,10 +218,12 @@ function ApplicationLogsPanel() {
     error: null,
   });
   const end = useRef<HTMLDivElement>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- streams the application log from Orbit while following
   useEffect(() => {
     if (!source || instanceId === null || !following) return;
     return source.applicationLogs(instanceId, setLog);
   }, [source, instanceId, following]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolls the log viewport DOM to the newest line while following
   useEffect(() => {
     if (!following || !log.text) return;
     const viewport = end.current?.closest<HTMLElement>('[data-slot="scroll-area-viewport"]');
@@ -297,12 +300,14 @@ export function OrbitPanel() {
   const lines = logText === null ? null : parseLogLines(logText);
 
   // Process states change behind our back (crashes, other clients); refresh while open.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshes the process list from Orbit on an interval
   useEffect(() => {
     const timer = window.setInterval(() => void refresh(), PROCESS_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
   // Keep the newest line in view while following.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolls the log viewport DOM to the newest line while following
   useEffect(() => {
     if (!following || logText === null) return;
     const viewport = logEnd.current?.closest<HTMLElement>('[data-slot="scroll-area-viewport"]');
@@ -432,7 +437,7 @@ export function OrbitPanel() {
                   disabled={!canFollow}
                   onClick={() => setFollow((value) => !value)}
                   className={cn(
-                    "inline-flex h-6 cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:opacity-50 [&_svg]:size-3.5",
+                    "inline-flex h-6 cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-xs outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-default disabled:opacity-50 [&_svg]:size-3.5",
                     following
                       ? "bg-success/15 text-success-foreground hover:bg-success/20"
                       : "text-muted-foreground hover:bg-foreground/6 hover:text-foreground",

@@ -21,11 +21,9 @@ export type RendererStorageMigrationResult =
   | { readonly status: "failed"; readonly cause: unknown };
 
 /**
- * localStorage belongs to an origin, and a renamed app has a new link scheme and
- * so a new origin. The copied user-data folder still holds the old origin's
- * localStorage, so a page at the old origin reads it and a page at the new origin
- * writes it. The marker says it is done, so this happens once; a failure leaves the
- * marker alone and the next launch tries again.
+ * A renamed app has a new scheme and so a new origin; its copied user data still holds the old
+ * origin's localStorage. Copy it across once, behind a marker; a failure leaves the marker unset
+ * so the next launch tries again.
  */
 export async function migrateRendererStorage(input: {
   readonly userDataPath: string;

@@ -142,6 +142,7 @@ export default function AnnotationPopup({
     return true;
   }
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to finish-draft and outside-click events from the overlay
   useEffect(() => {
     const unfinish = onFinishActiveDraft(() => void finishRecording());
     if (!stopsOnNextElement(settings)) return unfinish;
@@ -181,6 +182,7 @@ export default function AnnotationPopup({
     };
   }, [settings, dictationState, draft]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- aborts a pending move on unmount
   useEffect(
     () => () => {
       pendingMove.current?.abort();
@@ -288,18 +290,21 @@ export default function AnnotationPopup({
     }
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus back to the field when dictation ends with text
   useEffect(() => {
     if (dictationState === "idle" && commentRef.value.trim()) {
       focusField();
     }
   }, [dictationState]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus to the field when dictation stops recording
   useEffect(() => {
     if (dictationState !== "recording") {
       focusField();
     }
   }, [dictationState]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs the shake animation timer for a new shake token
   useEffect(() => {
     if (previousShake.current === shakeToken) {
       return;
@@ -316,6 +321,7 @@ export default function AnnotationPopup({
     }, 250);
   }, [shakeToken, dictationState]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the draft's comment into the uncontrolled field and focuses it
   useEffect(() => {
     commentRef.value = draft.comment ?? "";
     if (!dictationEnabled || isEditing) {
@@ -323,6 +329,7 @@ export default function AnnotationPopup({
     }
   }, [draft.annotationId]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the field on mount and clears the shake timer on unmount
   useEffect(() => {
     if (!dictationEnabled || isEditing || settings.autoStart === false) {
       focusField();
@@ -333,11 +340,13 @@ export default function AnnotationPopup({
     };
   }, []);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- fits the field and measures the popup DOM after layout changes
   useLayoutEffect(() => {
     fitField();
     setPopupHeight(popup.current?.offsetHeight ?? POPUP_HEIGHT);
   }, [comment, placeholder, draft.annotationId, fieldHeight, controlSize, detailsOpen]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- attaches native key and input listeners to the field DOM node
   useEffect(() => {
     const field = textarea.current;
 

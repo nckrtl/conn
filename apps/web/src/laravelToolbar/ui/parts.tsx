@@ -225,7 +225,7 @@ export function SourceLink({
         onOpen();
       }}
       className={cn(
-        "shrink-0 cursor-pointer truncate rounded-sm font-mono text-foreground/80 underline decoration-foreground/30 underline-offset-2 outline-none focus-visible:ring-1 focus-visible:ring-ring hover:text-foreground hover:decoration-foreground/70",
+        "shrink-0 cursor-pointer truncate rounded-sm font-mono text-foreground/80 underline decoration-foreground/30 underline-offset-2 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring hover:text-foreground hover:decoration-foreground/70",
         small ? "text-2xs leading-4" : "text-xs",
       )}
     >
@@ -287,7 +287,7 @@ export function UnderlineTabs<T extends string>({
           type="button"
           onClick={() => onChange(id)}
           className={cn(
-            "relative cursor-pointer rounded-sm font-medium text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "relative cursor-pointer rounded-sm font-medium text-xs outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
             value === id ? "text-foreground" : "text-muted-foreground hover:text-foreground",
           )}
         >

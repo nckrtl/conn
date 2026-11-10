@@ -110,9 +110,9 @@ export function OrbitEnvironmentSections() {
       await action();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(null);
     }
+    // Not in `finally`: the React Compiler cannot compile a finalizer clause.
+    setBusy(null);
   };
 
   return (

@@ -12,13 +12,9 @@ import * as Schema from "effect/Schema";
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 /**
- * Keeps this device's workspaces in step with its Orbit profile. The profile on the Gateway is the
- * shared copy; the workspace store stays the local working copy every window reads. Only the
- * workspace list syncs; the selected workspace and remembered threads stay per device.
- *
- * `state` records the profile version and the list this device last agreed on with the Gateway.
- * A local list that differs from it holds unsent edits; a profile version that differs holds
- * another device's edits. Both at once is a conflict, merged with mergeWorkspaces.
+ * Syncs the workspace list (not the selection) with the Orbit profile. `state` holds the version
+ * and list this device last agreed on: a differing local list is unsent edits, a differing profile
+ * version is another device's edits, and both at once merge with mergeWorkspaces.
  */
 
 export interface WorkspaceProfileSyncState {

@@ -6,7 +6,7 @@ import type {
   SiteCredentialOption,
 } from "@t3tools/contracts";
 import { KeyRoundIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
@@ -21,6 +21,7 @@ import {
   MenuTrigger,
 } from "~/components/ui/menu";
 import { toastManager } from "~/components/ui/toast";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { credentialsEnvironment } from "~/state/credentials";
 import { useEnvironmentQuery } from "~/state/query";
@@ -125,124 +126,134 @@ export function CredentialKeyButton(props: {
   const unlockingRef = useRef(false);
   const [continuation, setContinuation] = useState<CredentialContinuation | null>(null);
   const currentContext = useRef({ origin, runtimeTabId });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors origin and tab into a ref that in-flight fills compare after awaits
   useEffect(() => {
     currentContext.current = { origin, runtimeTabId };
   }, [origin, runtimeTabId]);
 
-  const detect = useCallback(
-    (url: string) =>
-      detectCredentialPageFields(runtimeTabId).then((fields) => setDetected({ url, fields })),
-    [runtimeTabId, setDetected],
+  // Effects below call these; a stable identity keeps a rerender from restarting their timers.
+  const detect = useStableCallback((url: string) =>
+    detectCredentialPageFields(runtimeTabId).then((fields) => setDetected({ url, fields })),
   );
 
   // Check after each load, and once more shortly after: many sign-in forms
   // render after the load event.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- detects login fields in the guest page after each load, with a retry timer
   useEffect(() => {
     if (loading || pageUrl === null) return;
     void detect(pageUrl);
     const later = window.setTimeout(() => void detect(pageUrl), 1200);
     return () => window.clearTimeout(later);
-  }, [detect, loading, pageUrl]);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A new tab at the same URL is a new page to detect.
+  }, [detect, loading, pageUrl, runtimeTabId]);
 
   const fields = fieldsToFill(page);
   const ready = page.any && items.length > 0;
   const label = ready ? "Fill a saved login" : "Saved logins";
 
-  const fillLogin = useCallback(
+  const fillSteps = async (
+    item: SiteCredentialOption,
+    requestedFields: ReadonlyArray<CredentialField>,
+    automatic: boolean,
+  ) => {
+    if (!origin) return;
+    const { id: itemId, title } = item;
+    const results = await (item.source === "vault"
+      ? fillFromVault(runtimeTabId, itemId, origin, requestedFields)
+      : fill({
+          environmentId,
+          input: {
+            environmentId,
+            threadId,
+            tabId,
+            itemId,
+            source: item.source,
+            fields: [...requestedFields],
+          },
+        }).then((result) => (result._tag === "Failure" ? null : result.value.results)));
+    if (results === null) {
+      setContinuation(null);
+      toastManager.add({ type: "error", title: `Could not fill “${title}”` });
+      return;
+    }
+    const failed = results.find(
+      (entry) =>
+        entry.status !== "filled" &&
+        // A transitioning form can disappear between detection and fill.
+        // Keep polling; only a successful fill consumes the step.
+        entry.status !== "field_not_found" &&
+        entry.status !== "not_editable",
+    );
+    if (failed) {
+      setContinuation(null);
+      toastManager.add({
+        type: "warning",
+        title: `Could not fill “${title}”`,
+        // Vault also returns item_not_found when the selected login has
+        // no OTP seed. Do not present that as a definite site mismatch.
+        description:
+          item.source === "vault" &&
+          failed.field === "otp" &&
+          (failed.status === "item_not_found" || failed.status === "no_value")
+            ? "Vault could not provide a verification code. Check that this login has a code configured in Vault and matches this site."
+            : (FILL_FAILURES[failed.status] ?? "The fill did not finish."),
+      });
+    } else if (
+      currentContext.current.origin === origin &&
+      currentContext.current.runtimeTabId === runtimeTabId
+    ) {
+      const completed = results
+        .filter((entry) => entry.status === "filled")
+        .map((entry) => entry.field);
+      setContinuation((current) => {
+        if (
+          automatic &&
+          (!current ||
+            current.item.id !== item.id ||
+            current.item.source !== item.source ||
+            !continuationMatches(current, runtimeTabId, origin))
+        )
+          return current;
+        const session =
+          automatic && current
+            ? current
+            : beginCredentialContinuation(item, runtimeTabId, origin, []);
+        if (automatic && completed.length === 0) return session;
+        return {
+          ...session,
+          attempted: new Set([...session.attempted, ...completed]),
+          pendingSubmit: completed.includes("otp")
+            ? "otp"
+            : completed.includes("password")
+              ? "password"
+              : completed.includes("username")
+                ? "username"
+                : session.pendingSubmit,
+        };
+      });
+    }
+  };
+
+  const fillLogin = useStableCallback(
     async (
       item: SiteCredentialOption,
       requestedFields: ReadonlyArray<CredentialField>,
-      automatic = false,
+      automatic: boolean = false,
     ) => {
-      const { id: itemId, title } = item;
       if (!origin || requestedFields.length === 0 || fillingRef.current) return;
       fillingRef.current = true;
       setFilling(true);
-      try {
-        const results = await (item.source === "vault"
-          ? fillFromVault(runtimeTabId, itemId, origin, requestedFields)
-          : fill({
-              environmentId,
-              input: {
-                environmentId,
-                threadId,
-                tabId,
-                itemId,
-                source: item.source,
-                fields: [...requestedFields],
-              },
-            }).then((result) => (result._tag === "Failure" ? null : result.value.results)));
-        if (results === null) {
-          setContinuation(null);
-          toastManager.add({ type: "error", title: `Could not fill “${title}”` });
-          return;
-        }
-        const failed = results.find(
-          (entry) =>
-            entry.status !== "filled" &&
-            // A transitioning form can disappear between detection and fill.
-            // Keep polling; only a successful fill consumes the step.
-            entry.status !== "field_not_found" &&
-            entry.status !== "not_editable",
-        );
-        if (failed) {
-          setContinuation(null);
-          toastManager.add({
-            type: "warning",
-            title: `Could not fill “${title}”`,
-            // Vault also returns item_not_found when the selected login has
-            // no OTP seed. Do not present that as a definite site mismatch.
-            description:
-              item.source === "vault" &&
-              failed.field === "otp" &&
-              (failed.status === "item_not_found" || failed.status === "no_value")
-                ? "Vault could not provide a verification code. Check that this login has a code configured in Vault and matches this site."
-                : (FILL_FAILURES[failed.status] ?? "The fill did not finish."),
-          });
-        } else if (
-          currentContext.current.origin === origin &&
-          currentContext.current.runtimeTabId === runtimeTabId
-        ) {
-          const completed = results
-            .filter((entry) => entry.status === "filled")
-            .map((entry) => entry.field);
-          setContinuation((current) => {
-            if (
-              automatic &&
-              (!current ||
-                current.item.id !== item.id ||
-                current.item.source !== item.source ||
-                !continuationMatches(current, runtimeTabId, origin))
-            )
-              return current;
-            const session =
-              automatic && current
-                ? current
-                : beginCredentialContinuation(item, runtimeTabId, origin, []);
-            if (automatic && completed.length === 0) return session;
-            return {
-              ...session,
-              attempted: new Set([...session.attempted, ...completed]),
-              pendingSubmit: completed.includes("otp")
-                ? "otp"
-                : completed.includes("password")
-                  ? "password"
-                  : completed.includes("username")
-                    ? "username"
-                    : session.pendingSubmit,
-            };
-          });
-        }
-      } finally {
+      // Promise.finally, not try/finally: the React Compiler cannot compile a finalizer.
+      await fillSteps(item, requestedFields, automatic).finally(() => {
         fillingRef.current = false;
         setFilling(false);
-      }
+      });
     },
-    [fill, origin, runtimeTabId, tabId, environmentId, threadId, setContinuation, setFilling],
   );
 
   // Only a user-selected login arms this short-lived continuation. It survives
   // same-site navigation and SPA steps, and stores no credential values.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the guest page on a timer to continue a user-started multi-step sign-in
   useEffect(() => {
     if (!continuation) return;
     // Navigation can temporarily have no committed URL. Wait for the next
@@ -263,7 +274,7 @@ export function CredentialKeyButton(props: {
         setContinuation(null);
         return;
       }
-      try {
+      const step = async () => {
         if (!fillingRef.current && document.visibilityState !== "hidden") {
           let nextPage = await detectCredentialPageFields(runtimeTabId);
           if (cancelled) return;
@@ -295,28 +306,27 @@ export function CredentialKeyButton(props: {
           }
           if (continuation.pendingSubmit) {
             fillingRef.current = true;
-            try {
-              const submitted = await submitCredentialStep(
-                runtimeTabId,
-                continuation.pendingSubmit,
-                continuation.origin,
-                continuation.id,
-              );
-              if (!cancelled && submitted !== "waiting") {
-                setContinuation((current) =>
-                  current === continuation ? { ...current, pendingSubmit: undefined } : current,
-                );
-              }
-            } finally {
+            const submitted = await submitCredentialStep(
+              runtimeTabId,
+              continuation.pendingSubmit,
+              continuation.origin,
+              continuation.id,
+            ).finally(() => {
               fillingRef.current = false;
+            });
+            if (!cancelled && submitted !== "waiting") {
+              setContinuation((current) =>
+                current === continuation ? { ...current, pendingSubmit: undefined } : current,
+              );
             }
           }
         }
-      } catch {
+      };
+      // Promise.catch, not try/finally: the React Compiler cannot compile a finalizer.
+      await step().catch(() => {
         if (!cancelled) setContinuation(null);
-      } finally {
-        if (!cancelled) timer = setTimeout(() => void check(), 750);
-      }
+      });
+      if (!cancelled) timer = setTimeout(() => void check(), 750);
     };
     void check();
     return () => {
@@ -327,11 +337,9 @@ export function CredentialKeyButton(props: {
 
   const unlockVault = async () => {
     unlockingRef.current = true;
-    try {
-      await vault.refresh(true);
-    } finally {
+    await vault.refresh(true).finally(() => {
       unlockingRef.current = false;
-    }
+    });
   };
 
   if (origin === null) return null;

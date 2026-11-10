@@ -357,6 +357,15 @@ export default defineConfig({
         rules: { "t3code/no-rpc-permission-bypass": ["error", { allowRawClientAccess: true }] },
       },
       {
+        // Conn: these `.client` fields are the Orbit Gateway, MySQL/PostgreSQL and MCP SDK clients.
+        files: [
+          "apps/web/src/orbit/workspaceProfileSync.ts",
+          "apps/desktop/src/ipc/methods/database.ts",
+          "apps/desktop/src/ipc/methods/mcp.ts",
+        ],
+        rules: { "t3code/no-rpc-permission-bypass": ["error", { allowRawClientAccess: true }] },
+      },
+      {
         files: ["packages/client-runtime/src/connection/outdatedHostUpdate.ts"],
         rules: { "t3code/no-rpc-permission-bypass": "off" },
       },

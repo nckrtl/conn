@@ -26,11 +26,9 @@ import {
 } from "./publishedThemes";
 
 /**
- * How the phone reads and applies the `appearance` section of its Orbit profile: the light/dark
- * mode and one theme per appearance. The phone has no contrast setting and no theme library of
- * its own, so it hands those back as the profile has them. A theme the profile carries with its
- * palette (a desktop custom or published theme) is offered as a `published:` theme, so the phone
- * can wear it without a connected machine publishing it.
+ * How the phone applies the profile's `appearance`: mode and one theme per appearance. Contrast and
+ * the theme library go back unchanged. A theme with its own palette is offered as a `published:`
+ * theme, so the phone can wear it without a machine publishing it.
  */
 
 const STOCK_SLOT: ProfileThemeSlot = { id: DEFAULT_MOBILE_THEME_ID, source: "stock" };

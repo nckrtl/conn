@@ -312,6 +312,7 @@ export function AppearancePreferencesProvider(props: { readonly children: ReactN
   // A theme or mode change goes to the Orbit profile; one the profile applied finds nothing to send.
   const syncedThemeKey = `${themeIds.light}|${themeIds.dark}|${themeMode}`;
   const lastThemeKeyRef = useRef(syncedThemeKey);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- debounces a timer that pushes a theme change to the Orbit profile
   useEffect(() => {
     if (lastThemeKeyRef.current === syncedThemeKey) return;
     lastThemeKeyRef.current = syncedThemeKey;

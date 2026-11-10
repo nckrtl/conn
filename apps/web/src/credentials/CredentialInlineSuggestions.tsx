@@ -1,9 +1,10 @@
 import type { SiteCredentialOption, VaultLoginsResponse } from "@t3tools/contracts";
 import { KeyRoundIcon, LockKeyholeIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Popover, PopoverPopup } from "~/components/ui/popover";
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import {
   executeReadyWebviewScript,
   isNewWebviewDocument,
@@ -18,6 +19,7 @@ import {
 } from "./credentialInline";
 
 let nextWatcher = 0;
+const nextWatcherOwner = () => `inline-${(nextWatcher += 1)}`;
 interface ScriptableWebview extends HTMLElement {
   executeJavaScript(code: string): Promise<unknown>;
 }
@@ -35,6 +37,7 @@ export function CredentialInlineSuggestions(props: {
 }) {
   const { runtimeTabId, origin, enabled, items, vault } = props;
   const latest = useRef(props);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mirrors props into a ref the guest-page watcher loop reads after awaits
   useEffect(() => {
     latest.current = props;
   });
@@ -46,14 +49,15 @@ export function CredentialInlineSuggestions(props: {
   const channel = useRef<{ webview: ScriptableWebview; owner: string } | null>(null);
   const unlocking = useRef(false);
 
-  const command = useCallback((name: "dismiss" | "keyboard", value = false) => {
+  // The keyboard effect calls this; a stable identity keeps rerenders from resending the command.
+  const command = useStableCallback((name: "dismiss" | "keyboard", value: boolean = false) => {
     const current = channel.current;
     if (current)
       void executeReadyWebviewScript(
         current.webview,
         credentialInlineCommandScript(current.owner, name, value),
       );
-  }, []);
+  });
   const close = (restore = false) => {
     setOpen(false);
     const guest = channel.current?.webview;
@@ -67,13 +71,14 @@ export function CredentialInlineSuggestions(props: {
     command("dismiss", restore);
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- attaches the inline-login watcher to the tab's webview and its navigation events while enabled
   useEffect(() => {
     if (!enabled || !origin.startsWith("https://")) return;
     let disposed = false,
       generation = 0;
     let webview: ScriptableWebview | undefined;
     const stop = () => {
-      generation++;
+      generation += 1;
       const current = channel.current;
       channel.current = null;
       if (current)
@@ -89,7 +94,7 @@ export function CredentialInlineSuggestions(props: {
       setKeyboard(0);
       if (!webview || disposed || !isWebviewDomReady(webview)) return;
       const guest = webview,
-        owner = `inline-${++nextWatcher}`,
+        owner = nextWatcherOwner(),
         current = generation;
       channel.current = { webview: guest, owner };
       void (async () => {
@@ -164,12 +169,14 @@ export function CredentialInlineSuggestions(props: {
       detach();
       stop();
     };
-  }, [enabled, origin, runtimeTabId]);
+  }, [channel, enabled, origin, runtimeTabId]);
 
   const shown = enabled && open && anchor !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tells the guest page whether the picker owns arrow keys
   useEffect(() => {
     command("keyboard", shown);
   }, [shown, command]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- schedules a frame to move DOM focus into the opened picker
   useEffect(() => {
     if (!shown || keyboard === 0) return;
     const frame = requestAnimationFrame(() =>

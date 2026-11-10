@@ -309,6 +309,7 @@ export function useDictation(options: Options) {
 
   const onEscape = (): boolean => false;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the dictation key handlers with the overlay while mounted
   useEffect(() => {
     session.current.disposed = false;
     setDictationKeyHandlers({

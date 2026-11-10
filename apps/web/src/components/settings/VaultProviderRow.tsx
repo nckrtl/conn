@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { VaultLoginsResponse } from "@t3tools/contracts";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { SettingsRow } from "./settingsLayout";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
 export function VaultProviderRow() {
   const lookup = window.desktopBridge?.vaultLogins;
   const [state, setState] = useState<VaultLoginsResponse | null>(null);
   const [busy, setBusy] = useState(!!lookup);
-  const check = useCallback(async () => {
+  const check = useStableCallback(async () => {
     if (!lookup) return;
     await lookup({ action: "status" })
       .then(
@@ -16,7 +17,8 @@ export function VaultProviderRow() {
         () => setState({ status: "error", items: [], error: "Vault could not answer." }),
       )
       .finally(() => setBusy(false));
-  }, [lookup]);
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Vault status from the desktop bridge on mount
   useEffect(() => {
     void check();
   }, [check]);

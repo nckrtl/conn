@@ -1,4 +1,5 @@
-import type { Icon } from "@tabler/icons-react-native/types";
+import type { Icon } from "@tabler/icons-react-native";
+/* Type-only import, erased at build: Metro never loads the package root for it. */
 /* Package-root imports eagerly register the entire Tabler icon set in Metro. */
 import IconAdjustmentsHorizontal from "@tabler/icons-react-native/IconAdjustmentsHorizontal";
 import IconAlignLeft from "@tabler/icons-react-native/IconAlignLeft";

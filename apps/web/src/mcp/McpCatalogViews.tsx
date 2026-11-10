@@ -1,6 +1,6 @@
 import type { DesktopMcpMethod, DesktopMcpResponse } from "@t3tools/contracts";
 import { Check, ChevronDown, CircleAlert, Code2, Copy, Eye, Play, Search } from "lucide-react";
-import { type FormEvent, type ReactNode, Suspense, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, Suspense, useState } from "react";
 
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { HighlightedTokens } from "~/components/chat/HighlightedTokens";
@@ -163,7 +163,7 @@ function ItemList({
               type="button"
               onClick={() => onSelect(item.id)}
               className={cn(
-                "flex h-7 w-full cursor-pointer items-center rounded-(--control-radius) px-2.5 text-left text-ui outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                "flex h-7 w-full cursor-pointer items-center rounded-(--control-radius) px-2.5 text-left text-ui outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
                 item.id === selectedId
                   ? "bg-(--shell-highlight) text-foreground"
                   : "text-muted-foreground hover:bg-foreground/4 hover:text-foreground",
@@ -590,7 +590,7 @@ function ResultContent({ result, raw }: { result: unknown; raw: boolean }) {
       {Array.isArray(messages)
         ? messages.map((message, index) => (
             // Messages have no identity; the result is replaced as a whole.
-            // eslint-disable-next-line react/no-array-index-key
+            // eslint-disable-next-line react/no-array-index-key -- content blocks have no stable id
             <div key={index} className="flex flex-col gap-1">
               <Badge variant="outline" className="self-start">
                 {str(field(message, "role")) ?? "message"}
@@ -600,7 +600,7 @@ function ResultContent({ result, raw }: { result: unknown; raw: boolean }) {
           ))
         : null}
       {blocks?.map((block, index) => (
-        // eslint-disable-next-line react/no-array-index-key
+        // eslint-disable-next-line react/no-array-index-key -- content blocks have no stable id
         <ContentBlock key={index} block={block} raw={raw} />
       ))}
       {structured !== undefined ? (
@@ -688,7 +688,7 @@ function ResultView({
   );
 }
 
-function useCall(session: McpSession, sessionKey: string, callKey: string | null) {
+function callControls(session: McpSession, sessionKey: string, callKey: string | null) {
   const call = callKey ? session.calls[callKey] : undefined;
   const values = (callKey ? session.forms[callKey] : undefined) ?? EMPTY_VALUES;
   return {
@@ -726,8 +726,8 @@ export function McpToolsView({ session, sessionKey }: { session: McpSession; ses
   const tool =
     tools.find((candidate) => candidate.name === session.selectedTool) ?? tools[0] ?? null;
   const callKey = tool ? `tool:${tool.name}` : null;
-  const { call, values, setValues, run, fail } = useCall(session, sessionKey, callKey);
-  const fields = useMemo(() => fieldsFromSchema(tool?.inputSchema), [tool]);
+  const { call, values, setValues, run, fail } = callControls(session, sessionKey, callKey);
+  const fields = fieldsFromSchema(tool?.inputSchema);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -796,24 +796,25 @@ export function McpResourcesView({
   session: McpSession;
   sessionKey: string;
 }) {
-  const entries = useMemo<ResourceEntry[]>(
-    () => [
-      ...(session.resources ?? []).map((resource) => ({
-        kind: "resource" as const,
-        id: `resource:${resource.uri}`,
-        resource,
-      })),
-      ...(session.templates ?? []).map((template) => ({
-        kind: "template" as const,
-        id: `template:${template.uriTemplate}`,
-        template,
-      })),
-    ],
-    [session.resources, session.templates],
-  );
+  const entries: ResourceEntry[] = [
+    ...(session.resources ?? []).map((resource) => ({
+      kind: "resource" as const,
+      id: `resource:${resource.uri}`,
+      resource,
+    })),
+    ...(session.templates ?? []).map((template) => ({
+      kind: "template" as const,
+      id: `template:${template.uriTemplate}`,
+      template,
+    })),
+  ];
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const entry = entries.find((candidate) => candidate.id === selectedId) ?? entries[0] ?? null;
-  const { call, values, setValues, run, fail } = useCall(session, sessionKey, entry?.id ?? null);
+  const { call, values, setValues, run, fail } = callControls(
+    session,
+    sessionKey,
+    entry?.id ?? null,
+  );
   const firstTemplate = entries.find((candidate) => candidate.kind === "template");
   const variables = entry?.kind === "template" ? templateVariables(entry.template.uriTemplate) : [];
   const item = entry?.kind === "resource" ? entry.resource : entry?.template;
@@ -919,7 +920,7 @@ export function McpPromptsView({
   const prompt: McpPrompt | null =
     prompts.find((candidate) => candidate.name === selectedName) ?? prompts[0] ?? null;
   const callKey = prompt ? `prompt:${prompt.name}` : null;
-  const { call, values, setValues, run, fail } = useCall(session, sessionKey, callKey);
+  const { call, values, setValues, run, fail } = callControls(session, sessionKey, callKey);
   const fields: McpField[] = (prompt?.arguments ?? []).map((argument) => ({
     name: argument.name,
     type: "string",

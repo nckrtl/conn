@@ -5,6 +5,7 @@ import {
   environmentThemeFileHasColors,
 } from "@t3tools/contracts";
 import { UNPUBLISHABLE_THEME_IDS } from "@t3tools/shared/themePalettes";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -88,7 +89,9 @@ export const installLocalThemesWatcher = Effect.fn("desktop.ipc.localThemes.inst
     yield* fs.makeDirectory(themesDir, { recursive: true }).pipe(Effect.ignore);
 
     let last = yield* readLocalThemes(themesDir);
-    yield* fs.watch(themesDir).pipe(
+    // Return only once the watcher is attached, so a write right after startup is seen.
+    const ready = yield* Deferred.make<void>();
+    yield* fs.watch(themesDir, { onReady: () => Deferred.doneUnsafe(ready, Exit.void) }).pipe(
       Stream.debounce(Duration.millis(100)),
       Stream.runForEach(() =>
         Effect.gen(function* () {
@@ -100,7 +103,9 @@ export const installLocalThemesWatcher = Effect.fn("desktop.ipc.localThemes.inst
         }),
       ),
       Effect.ignoreCause({ log: true }),
+      Effect.ensuring(Deferred.done(ready, Exit.void)),
       Effect.forkScoped,
     );
+    yield* Deferred.await(ready);
   },
 );

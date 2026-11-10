@@ -1,4 +1,7 @@
-import type { EnvironmentProvider } from "@t3tools/client-runtime/orbit-gateway";
+import type {
+  EnvironmentProvider,
+  OrbitGatewayEnvironment,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { useState } from "react";
 import { ActivityIndicator, Pressable, TextInput, View } from "react-native";
 
@@ -11,6 +14,7 @@ import { ConnectionSheetButton } from "./OrbitSheetButton";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import {
   chooseOrbitProfile,
+  connectOrbitEnvironment,
   refreshOrbitGateway,
   setEnvironmentProvider,
   useOrbitGateway,
@@ -247,17 +251,53 @@ export function OrbitEnvironmentSections() {
                   {environment.url.replace(/^https?:\/\//, "")}
                 </Text>
               </View>
-              <Text className="text-sm text-foreground-muted">
-                {environment.status === "session_expired"
-                  ? "Registration expired"
-                  : connected.has(environment.environmentId)
-                    ? "Paired"
-                    : "Pairing…"}
-              </Text>
+              <OrbitServerStatus
+                environment={environment}
+                connected={connected.has(environment.environmentId)}
+              />
             </View>
           ))}
         </SettingsSection>
       ) : null}
+    </View>
+  );
+}
+
+/**
+ * Conn: a Gateway server's state on this phone. Host servers pair by themselves; a clone (an
+ * Instance's server) pairs only when the user connects it here.
+ */
+function OrbitServerStatus(props: {
+  readonly environment: OrbitGatewayEnvironment;
+  readonly connected: boolean;
+}) {
+  const { environment } = props;
+  const [connecting, setConnecting] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const status =
+    environment.status === "session_expired"
+      ? "Registration expired"
+      : environment.powerState === "stopped"
+        ? "Asleep"
+        : props.connected
+          ? "Paired"
+          : environment.instanceId === null || connecting
+            ? "Pairing…"
+            : null;
+  if (status !== null) return <Text className="text-sm text-foreground-muted">{status}</Text>;
+
+  const connect = async () => {
+    setConnecting(true);
+    setFailed(false);
+    setFailed(!(await connectOrbitEnvironment(environment)));
+    setConnecting(false);
+  };
+  return (
+    <View className="flex-row items-center gap-3">
+      <Text className="text-sm text-foreground-muted">
+        {failed ? "Could not pair" : "Not connected"}
+      </Text>
+      <ConnectionSheetButton compact icon="link" label="Connect" onPress={() => void connect()} />
     </View>
   );
 }

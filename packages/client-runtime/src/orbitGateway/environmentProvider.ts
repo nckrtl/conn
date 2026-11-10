@@ -3,8 +3,8 @@ import type { OrbitGatewayEnvironment } from "./client.ts";
 /**
  * Where a client's environments come from. `default` is T3's own list: environments the user adds by
  * hand. `orbit` replaces it with the T3 servers registered on the Orbit Gateway, paired
- * automatically. The two lists never show together: switching to Orbit turns the default
- * environments off, and switching back turns them on again.
+ * automatically (Conn: clones only on request). The two lists never show together: switching to
+ * Orbit turns the default environments off, and switching back turns them on again.
  */
 export type EnvironmentProvider = "default" | "orbit";
 
@@ -75,6 +75,11 @@ export function planEnvironmentProvider(input: {
    * the device pairs with each once.
    */
   readonly heldInstanceIds?: readonly number[];
+  /**
+   * Conn: unsaved Instance servers (clones) the user asked to connect. Every other unsaved clone
+   * is listed but left unpaired, so a new clone does not get a pairing from every device.
+   */
+  readonly requestedEnvironmentIds?: readonly string[];
   readonly now?: number;
 }): EnvironmentProviderPlan {
   const { saved, state } = input;
@@ -116,6 +121,7 @@ export function planEnvironmentProvider(input: {
   }
   const lacksAccess = new Set(input.lacksAccess ?? []);
   const held = new Set(input.heldInstanceIds ?? []);
+  const requested = new Set(input.requestedEnvironmentIds ?? []);
   const now = input.now ?? 0;
   const pair = input.orbit
     .filter((environment) => {
@@ -125,6 +131,7 @@ export function planEnvironmentProvider(input: {
       if (environment.powerState === "stopped") return false;
       const id = environment.environmentId;
       if (!savedIds.has(id)) {
+        if (environment.instanceId !== null && !requested.has(id)) return false;
         const refusedAt = state.pairRefusedAt?.[id];
         if (refusedAt !== undefined && refusedAt === environment.registeredAt) return false;
         const lastAttempt = state.pairAttemptedAt?.[id];

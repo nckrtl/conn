@@ -2,6 +2,7 @@ import {
   APPEARANCE_SECTION,
   DESKTOP_DEVICE_SECTION,
   type EnvironmentProvider,
+  type OrbitGatewayClient,
   type OrbitGatewayEnvironment,
   type OrbitGatewayNode,
   type OrbitGatewayProfile,
@@ -9,13 +10,18 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useEffect, useState } from "react";
 
-import { setEnvironmentProvider, useEnvironmentProvider } from "~/orbit/environmentProvider";
+import {
+  connectOrbitEnvironment,
+  setEnvironmentProvider,
+  useEnvironmentProvider,
+} from "~/orbit/environmentProvider";
 import {
   desktopOrbitGatewayClient,
   forceOrbitProfileSync,
   syncOrbitProfileNow,
   useOrbitProfileSyncStatus,
 } from "~/orbit/OrbitProfileSync";
+import { useOrbitThreadStarts } from "~/orbit/orbitThreadStartStore";
 import { backupLocalSections, restoreSectionBackup } from "~/orbit/profileSyncRegistry";
 import {
   setGroupSyncEnabled,
@@ -74,7 +80,7 @@ export function EnvironmentProviderSection() {
         title="Environments from"
         description={
           provider === "orbit"
-            ? "The T3 servers registered on the Orbit Gateway, paired automatically. Environments added here are switched off until you choose Default again."
+            ? "The T3 servers registered on the Orbit Gateway. Host servers pair automatically; connect a clone in the server list. Environments added here are switched off until you choose Default again."
             : "Environments you add on this device. Orbit uses the servers on the Orbit Gateway instead and syncs workspaces with your profile."
         }
         control={
@@ -267,7 +273,8 @@ function ProfileSyncSection({ profileName }: { readonly profileName: string | nu
 
 /**
  * The Orbit side of Connections: this device's Node and profile on the Gateway, the workspace sync,
- * and the Gateway's T3 servers. Workspaces are edited on the desktop; pairing is automatic.
+ * and the Gateway's T3 servers. Workspaces are edited on the desktop. Host servers pair
+ * automatically; a clone pairs when the user connects it.
  */
 export function OrbitEnvironmentSections() {
   // One client per mount: the load effect below must not restart on every render.
@@ -278,6 +285,7 @@ export function OrbitEnvironmentSections() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState("");
   const [busy, setBusy] = useState(false);
+  const starts = useOrbitThreadStarts((state) => state.starts);
 
   const load = useStableCallback(async () => {
     if (!client) return;
@@ -318,6 +326,12 @@ export function OrbitEnvironmentSections() {
 
   const connected = new Set(
     savedEnvironments.map((environment) => String(environment.environmentId)),
+  );
+  const startingInstanceIds = new Set(
+    // A stopped start waits for Retry; Connect may pair its clone meanwhile.
+    starts.flatMap((start) =>
+      start.instanceId === null || start.error !== null ? [] : [start.instanceId],
+    ),
   );
   const profile = view?.node.profile ?? null;
 
@@ -405,15 +419,15 @@ export function OrbitEnvironmentSections() {
                 title={environment.label}
                 description={environment.url.replace(/^https?:\/\//, "")}
                 control={
-                  <span className="text-ui text-muted-foreground">
-                    {environment.status === "session_expired"
-                      ? "Registration expired"
-                      : environment.powerState === "stopped"
-                        ? "Asleep"
-                        : connected.has(environment.environmentId)
-                          ? "Paired"
-                          : "Pairing…"}
-                  </span>
+                  <OrbitServerControl
+                    gateway={client}
+                    environment={environment}
+                    connected={connected.has(environment.environmentId)}
+                    starting={
+                      environment.instanceId !== null &&
+                      startingInstanceIds.has(environment.instanceId)
+                    }
+                  />
                 }
               />
             ))
@@ -421,5 +435,52 @@ export function OrbitEnvironmentSections() {
         </SettingsSection>
       ) : null}
     </>
+  );
+}
+
+/**
+ * Conn: a Gateway server's state on this device. Host servers pair by themselves; a clone (an
+ * Instance's server) pairs only when the user connects it here or this device started it.
+ */
+export function OrbitServerControl(props: {
+  readonly gateway: OrbitGatewayClient | null;
+  readonly environment: OrbitGatewayEnvironment;
+  readonly connected: boolean;
+  readonly starting: boolean;
+}) {
+  const { environment } = props;
+  const [connecting, setConnecting] = useState(false);
+  const status =
+    environment.status === "session_expired"
+      ? "Registration expired"
+      : environment.powerState === "stopped"
+        ? "Asleep"
+        : props.connected
+          ? "Paired"
+          : environment.instanceId === null || props.starting || connecting
+            ? "Pairing…"
+            : null;
+  if (status !== null) return <span className="text-ui text-muted-foreground">{status}</span>;
+
+  const connect = async () => {
+    if (!props.gateway) return;
+    setConnecting(true);
+    const paired = await connectOrbitEnvironment(props.gateway, environment);
+    if (!paired) {
+      toastManager.add({
+        type: "error",
+        title: "Orbit",
+        description: `Conn could not pair with ${environment.label}.`,
+      });
+    }
+    setConnecting(false);
+  };
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-ui text-muted-foreground">Not connected</span>
+      <Button size="xs" variant="outline" disabled={!props.gateway} onClick={() => void connect()}>
+        Connect
+      </Button>
+    </div>
   );
 }

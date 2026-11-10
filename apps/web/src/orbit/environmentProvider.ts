@@ -64,17 +64,96 @@ export function recordOrbitPaired(environmentId: string): void {
   useEnvironmentProvider.setState(({ state }) => ({ state: recordPaired(state, environmentId) }));
 }
 
-/** Saves a reconcile run's state, keeping the pairings a thread start recorded during the run. */
+/**
+ * Saves a reconcile run's switches. Pairing records come from the store, so a thread start or a
+ * Connect that ran during the run keeps its own.
+ */
 function saveReconciledState(next: OrbitEnvironmentState): void {
   useEnvironmentProvider.setState(({ state: current }) => ({
-    state: current.pairedByOrbit.reduce(recordPaired, next),
+    state: next.pairedByOrbit.reduce(recordPaired, {
+      ...current,
+      disabledByOrbit: next.disabledByOrbit,
+    }),
   }));
+}
+
+function updateState(change: (state: OrbitEnvironmentState) => OrbitEnvironmentState): void {
+  useEnvironmentProvider.setState(({ state }) => ({ state: change(state) }));
+}
+
+/** Conn: clones the user asked to connect in Settings; the sync retries them in this session. */
+const requestedEnvironmentIds = new Set<string>();
+const pairings = new Map<string, Promise<boolean>>();
+
+/**
+ * Conn: pairs this device with one Orbit server and records the attempt and its result. Resolves
+ * true when the server is saved. A second call while one runs joins it.
+ */
+function pairOne(
+  client: OrbitGatewayClient,
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+  isSaved: boolean,
+): Promise<boolean> {
+  const { environmentId } = environment;
+  const running = pairings.get(environmentId);
+  if (running) return running;
+  const pairing = attemptPairing(client, environment, isSaved).finally(() =>
+    pairings.delete(environmentId),
+  );
+  pairings.set(environmentId, pairing);
+  return pairing;
+}
+
+async function attemptPairing(
+  client: OrbitGatewayClient,
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+  isSaved: boolean,
+): Promise<boolean> {
+  const { environmentId } = environment;
+  const now = Date.now();
+  try {
+    // Recorded before the attempt, so a reload during the pairing still backs off.
+    updateState((state) =>
+      isSaved
+        ? recordAccessPairing(state, environmentId, now)
+        : recordPairingAttempt(state, environmentId, now),
+    );
+    const pairing = await client.pair(environmentId);
+    const result = await runAtomCommand(
+      appAtomRegistry,
+      connectPairing,
+      { pairingUrl: pairing.pairingUrl },
+      { reportFailure: false },
+    );
+    if (result._tag !== "Success") return false;
+    updateState((state) => recordPaired(state, environmentId));
+    requestedEnvironmentIds.delete(environmentId);
+    return true;
+  } catch (error) {
+    // An unreachable server pairs on a later run; a refused one after it registers again.
+    if (isFinalPairingError(error)) {
+      updateState((state) => recordPairingRefused(state, environment));
+    }
+    return false;
+  }
+}
+
+/**
+ * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets the
+ * sync retry it if this attempt fails.
+ */
+export function connectOrbitEnvironment(
+  client: OrbitGatewayClient,
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+): Promise<boolean> {
+  requestedEnvironmentIds.add(environment.environmentId);
+  return pairOne(client, environment, false);
 }
 
 /**
  * Brings the saved environments in line with the provider: Orbit mode turns the default
- * environments off and pairs the Gateway's servers; Default mode undoes both. The desktop's own
- * local backend is left alone. Returns the Gateway's server list when Orbit mode read it.
+ * environments off and pairs the Gateway's host servers and the clones the user connected;
+ * Default mode undoes both. The desktop's own local backend is left alone. Returns the Gateway's server list when Orbit mode read it.
  */
 export async function reconcileEnvironmentProvider(
   client: OrbitGatewayClient,
@@ -104,6 +183,7 @@ export async function reconcileEnvironmentProvider(
     state,
     lacksAccess,
     heldInstanceIds: heldOrbitInstanceIds(),
+    requestedEnvironmentIds: [...requestedEnvironmentIds],
     now,
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
@@ -118,32 +198,10 @@ export async function reconcileEnvironmentProvider(
   for (const environmentId of plan.disable) await setEnabled(environmentId, false);
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
 
-  let next = plan.state;
+  saveReconciledState(plan.state);
   // One server per run: pairing waits for a Gateway Operation, and the rest of the sync waits too.
-  const environmentId = plan.pair[0];
-  if (environmentId !== undefined) {
-    next = savedIds.has(environmentId)
-      ? recordAccessPairing(next, environmentId, now)
-      : recordPairingAttempt(next, environmentId, now);
-    // Saved before the attempt, so a reload during the pairing still backs off.
-    saveReconciledState(next);
-    try {
-      const pairing = await client.pair(environmentId);
-      const result = await runAtomCommand(
-        appAtomRegistry,
-        connectPairing,
-        { pairingUrl: pairing.pairingUrl },
-        { reportFailure: false },
-      );
-      if (result._tag === "Success") next = recordPaired(next, environmentId);
-    } catch (error) {
-      // An unreachable server pairs on a later run; a refused one after it registers again.
-      const environment = orbit?.find((entry) => entry.environmentId === environmentId);
-      if (environment && isFinalPairingError(error)) {
-        next = recordPairingRefused(next, environment);
-      }
-    }
-  }
-  saveReconciledState(next);
+  const environmentId = plan.pair.find((id) => !pairings.has(id));
+  const environment = orbit?.find((entry) => entry.environmentId === environmentId);
+  if (environment) await pairOne(client, environment, savedIds.has(environment.environmentId));
   return orbit;
 }

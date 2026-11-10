@@ -526,9 +526,12 @@ internal class ReviewDiffCanvasDrawing(context: Context) {
 private object ReviewDiffTypefaces {
   private const val FAMILY = "JetBrains Mono"
 
-  val regular: Typeface = ReactFontManager.getInstance().getTypeface(FAMILY, 400, false, null)
-  private val medium: Typeface = ReactFontManager.getInstance().getTypeface(FAMILY, 500, false, null)
-  val bold: Typeface = ReactFontManager.getInstance().getTypeface(FAMILY, 700, false, null)
+  val regular: Typeface = jetBrainsMono(400)
+  private val medium: Typeface = jetBrainsMono(500)
+  val bold: Typeface = jetBrainsMono(700)
+
+  private fun jetBrainsMono(weight: Int): Typeface =
+    ReactFontManager.getInstance().getTypeface(FAMILY, weight, false, null)
 
   fun forWeight(weight: String): Typeface = when (weight.lowercase()) {
     "medium", "semibold", "semi-bold" -> medium

@@ -7,7 +7,8 @@ import type { Workspace } from "../workspaces.logic";
 import { useWorkspaceStore } from "../workspaceStore";
 
 // Conn: a gone clone's Gateway record no longer says it was a clone, so this device remembers the
-// clone ids it saw (listed with an `instanceId`, or started here) and drops only their refs.
+// clone ids a list showed with an `instanceId` and drops only their refs. An id is never remembered
+// before a list shows it: a clone a start made after this run's list was read must keep its ref.
 const STORAGE_KEY = "t3code:orbit-clone-environments:v1";
 /** Gone ids stay remembered, so a ref that a profile merge brings back is dropped again. */
 const MAX_REMEMBERED = 500;
@@ -83,13 +84,6 @@ function writeRemembered(ids: readonly string[]): void {
   } catch {
     // A device without storage forgets clones; their refs then stay, which is safe.
   }
-}
-
-/** A thread start on this device made this clone; remember it even if no list showed it. */
-export function rememberCloneEnvironment(environmentId: string): void {
-  const current = readRemembered();
-  if (current.includes(environmentId)) return;
-  writeRemembered(rememberIds(current, [environmentId]));
 }
 
 export function pruneWorkspaceCloneRefs(

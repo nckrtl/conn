@@ -17,7 +17,6 @@ import { environmentServerConfigsAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
-import { rememberCloneEnvironment } from "./cloneWorkspaceRefs";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
 import { readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
 import { type OrbitFirstMessagePorts, sendOrbitFirstMessage } from "./orbitThreadTurn";
@@ -183,7 +182,6 @@ export async function runSavedOrbitThreadStart(
         environmentId = ready.environmentId;
         const projectId = await sendOrbitFirstMessage(ready, { ...firstMessagePorts, stopped });
         // A clone is a new environment: without its ref the workspace would hide the thread.
-        rememberCloneEnvironment(ready.environmentId);
         keepProjectInWorkspace(start.workspaceId ?? null, `${ready.environmentId}:${projectId}`);
       },
     });

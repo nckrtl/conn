@@ -46,6 +46,17 @@ describe("pruneGoneCloneRefs", () => {
     expect(second.workspaces[0]?.projectRefs).toEqual(["host:p1", "clone-gone:p3", "manual:p4"]);
   });
 
+  it("keeps the ref of a clone no list has shown yet, such as one started after the list was read", () => {
+    const workspaces = [workspace(["host:p1", "clone-new:p5"])];
+    const result = pruneGoneCloneRefs({
+      provider: "orbit",
+      workspaces,
+      listed: [host],
+      cloneEnvironmentIds: [],
+    });
+    expect(result.workspaces).toBe(workspaces);
+  });
+
   it.each([
     ["no list (Gateway error)", "orbit", null],
     ["an empty list", "orbit", []],

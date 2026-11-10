@@ -245,8 +245,9 @@ workspace selected at Start (null for all). Once the first message is sent, that
 clone's `<environmentId>:<projectId>` ref unless it already lists the project or no longer exists,
 so the sidebar shows the thread (a clone is a new environment). The profile sync then drops the
 refs of clones that are gone (`cloneWorkspaceRefs.ts`). A gone record no longer says it was a clone,
-so each device remembers the clone ids it saw in the Gateway list (with an `instance_id`) or started
-itself, and drops only refs of those ids that a fresh, non-empty list in Orbit mode leaves out.
+so each device remembers the clone ids it saw in the Gateway list (with an `instance_id`), and drops
+only refs of those ids that a later fresh, non-empty list in Orbit mode leaves out. A clone gone
+before any list showed it keeps its ref.
 Host and manual environments' refs are never touched. A row can be
 dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container

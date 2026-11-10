@@ -27,6 +27,7 @@ import { Textarea } from "../components/ui/textarea";
 import { toastManager } from "../components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip";
 import { buildThreadRouteParams } from "../threadRoutes";
+import { keepProjectInActiveWorkspace } from "../workspaceStore";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useEnvironmentProvider } from "./environmentProvider";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
@@ -67,11 +68,14 @@ export function OrbitThreadStartRunner() {
       if (start.error !== null) continue;
       void runSavedOrbitThreadStart(client, start.id).then((sent) => {
         if (sent !== null) {
-          const open = () =>
+          const open = () => {
+            // A clone is a new environment, so the selected workspace would hide its thread.
+            keepProjectInActiveWorkspace(`${sent.environmentId}:${sent.projectId}`);
             void navigate({
               to: "/$environmentId/$threadId",
               params: buildThreadRouteParams(scopeThreadRef(sent.environmentId, sent.threadId)),
             });
+          };
           // Open the thread only when Nick is still where he started it; otherwise offer it.
           if (stillOnStartRoute(start.id, router.state.location.pathname)) {
             open();

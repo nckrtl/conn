@@ -147,7 +147,11 @@ const running = new Set<string>();
 export async function runSavedOrbitThreadStart(
   client: OrbitGatewayClient,
   id: string,
-): Promise<{ readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null> {
+): Promise<{
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+} | null> {
   const start = readStored().find((entry) => entry.id === id);
   if (start === undefined || start.error !== null || running.has(id)) return null;
   running.add(id);
@@ -168,6 +172,7 @@ export async function runSavedOrbitThreadStart(
       return null;
     }
     let environmentId: string | null = null;
+    let projectId: ProjectId | null = null;
     const sent = await runOrbitThreadStart(start, {
       client,
       save: saveStart,
@@ -178,13 +183,14 @@ export async function runSavedOrbitThreadStart(
       connect,
       send: async (ready) => {
         environmentId = ready.environmentId;
-        await sendOrbitFirstMessage(ready, { ...firstMessagePorts, stopped });
+        projectId = await sendOrbitFirstMessage(ready, { ...firstMessagePorts, stopped });
       },
     });
-    if (!sent || environmentId === null) return null;
+    if (!sent || environmentId === null || projectId === null) return null;
     dismissOrbitThreadStart(id);
     return {
       environmentId: environmentId as EnvironmentId,
+      projectId,
       threadId: ThreadId.make(start.threadId),
     };
   } finally {

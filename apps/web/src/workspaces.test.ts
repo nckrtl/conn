@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { useWorkspaceStore } from "./workspaceStore";
+import { filterSidebarV2VisibleThreads } from "./components/Sidebar.logic";
+import { keepProjectInActiveWorkspace, useWorkspaceStore } from "./workspaceStore";
 import {
   groupProjectsByConnection,
   reorderWorkspaces,
@@ -13,6 +14,7 @@ import {
   validateWorkspaceDraft,
   workspaceLetter,
   workspaceNameKey,
+  workspaceCoversProjectRef,
   workspaceProjectRefs,
   type Workspace,
 } from "./workspaces.logic";
@@ -82,6 +84,62 @@ describe("workspaces.logic", () => {
         scopedProjectGroups: [orbit],
       }),
     ).toEqual(new Set(["local:p1", "beast:p9"]));
+  });
+
+  it("keeps an Orbit clone's new thread in the workspace it was started from", () => {
+    // The clone is a new environment, so its project is in no workspace yet.
+    const bench = group("repo:bench", ["beast", "bench"]);
+    const clone = group("/srv/workspace", ["clone", "ws"]);
+    const thread = {
+      id: "t1",
+      environmentId: "clone",
+      projectId: "ws",
+      archivedAt: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "t1" },
+    } as unknown as Parameters<typeof filterSidebarV2VisibleThreads>[0][number];
+    const projects = [
+      { projectKey: "repo:bench", displayName: "bench", refs: ["beast:bench"] },
+      { projectKey: "/srv/workspace", displayName: "workspace", refs: ["clone:ws"] },
+    ];
+    const listed = (scoped: Workspace) =>
+      filterSidebarV2VisibleThreads(
+        [thread],
+        resolveScopedProjectKeys({
+          projectGroups: [bench, clone],
+          workspace: scoped,
+          scopedProjectGroups: [],
+        }),
+        new Set(),
+      );
+    const s = { ...workspace("S", []), projectRefs: ["beast:bench"] };
+    // The bug: the sidebar lists nothing and shows "No threads yet".
+    expect(listed(s)).toEqual([]);
+    expect(workspaceCoversProjectRef(s, projects, "clone:ws")).toBe(false);
+
+    useWorkspaceStore.setState({
+      workspaces: [s],
+      activeWorkspaceId: s.id,
+      availableProjects: projects,
+    });
+    keepProjectInActiveWorkspace("clone:ws");
+    const kept = useWorkspaceStore.getState().workspaces[0]!;
+    expect(kept.projectRefs).toEqual(["beast:bench", "clone:ws"]);
+    expect(listed(kept)).toEqual([thread]);
+
+    // A workspace that covers the project, by ref or by key, and "all" stay as they are.
+    keepProjectInActiveWorkspace("clone:ws");
+    keepProjectInActiveWorkspace("beast:bench");
+    expect(useWorkspaceStore.getState().workspaces[0]).toBe(kept);
+    const byKey = workspace("K", ["/srv/workspace"]);
+    expect(workspaceCoversProjectRef(byKey, projects, "clone:ws")).toBe(true);
+    useWorkspaceStore.setState({ workspaces: [byKey], activeWorkspaceId: byKey.id });
+    keepProjectInActiveWorkspace("clone:ws");
+    expect(useWorkspaceStore.getState().workspaces[0]).toBe(byKey);
+    expect(workspaceCoversProjectRef(null, projects, "clone:ws")).toBe(true);
+    useWorkspaceStore.setState({ activeWorkspaceId: null });
+    keepProjectInActiveWorkspace("clone:ws");
+    expect(useWorkspaceStore.getState().workspaces[0]).toBe(byKey);
+    useWorkspaceStore.setState({ workspaces: [], activeWorkspaceId: null, availableProjects: [] });
   });
 
   it("narrows a workspace further by the sidebar's project filter, never widens it", () => {

@@ -66,11 +66,11 @@ export interface OrbitFirstMessagePorts {
   readonly stopped: () => boolean;
 }
 
-/** Sends the first message. Only a launch the server took counts as sent. */
+/** Sends the first message; resolves its clone project. Only a launch the server took counts. */
 export async function sendOrbitFirstMessage(
   start: OrbitThreadStart & { readonly environmentId: string },
   ports: OrbitFirstMessagePorts,
-): Promise<void> {
+): Promise<ProjectId> {
   const clone = await ports.waitForClone(start.environmentId);
   if (clone === null) throw new Error("The clone's T3 project /srv/workspace did not appear.");
   if (clone.modelSelection === null) throw new Error("The clone's T3 server offers no model.");
@@ -90,4 +90,5 @@ export async function sendOrbitFirstMessage(
       `The clone did not take the first message: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  return clone.projectId;
 }

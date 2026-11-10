@@ -14,6 +14,7 @@ import {
   reorderWorkspaces,
   meansAllProjects,
   validateWorkspaceDraft,
+  workspaceCoversProjectRef,
   workspaceNameKey,
   workspaceProjectRefs,
   type Workspace,
@@ -271,6 +272,14 @@ useWorkspaceStore.subscribe((state, previous) => {
   onOtherWindowStorageChange(WORKSPACE_STORAGE_KEY, () => {
     void useWorkspaceStore.persist.rehydrate();
   });
+}
+
+/** Adds a project ref to the selected workspace unless that workspace already lists the project. */
+export function keepProjectInActiveWorkspace(projectRef: string): void {
+  const state = useWorkspaceStore.getState();
+  const active = state.workspaces.find((workspace) => workspace.id === state.activeWorkspaceId);
+  if (workspaceCoversProjectRef(active ?? null, state.availableProjects, projectRef)) return;
+  state.addProjectToActiveWorkspace(projectRef);
 }
 
 /** The selected workspace, or null for all projects. */

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "keys": {
+    "fastWorktreeCheckout": {
+      "keepUpstreamDefault": true,
+      "note": "Upstream default-off Labs beta. Standing policy keeps the upstream default."
+    },
+    "promptSuggestionsEnabled": {
+      "keepUpstreamDefault": true,
+      "note": "Upstream default-off beta. Standing policy keeps the upstream default."
+    },
+    "historySwipeNavigation": {
+      "keepUpstreamDefault": false,
+      "note": "Fork setting. Default on. Gate around HistorySwipeNavigation."
+    }
+  }
+}

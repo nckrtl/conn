@@ -35,6 +35,7 @@
         "sign-macos-local.ts",
         "check-desktop-typecheck.ts",
         "check-sync-provenance.ts",
+        "fork-sync.ts",
         "publish-sync-branch.ts",
         "knip-schemas.ts",
         "linux-after-pack.ts",

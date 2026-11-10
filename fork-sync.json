@@ -1,0 +1,575 @@
+{
+  "$schema": "./scripts/fork-sync.schema.json",
+  "version": 1,
+  "upstream": {
+    "remote": "upstream",
+    "url": "https://github.com/pingdotgg/t3code.git",
+    "ref": "main"
+  },
+  "conflictRules": [
+    {
+      "glob": "pnpm-lock.yaml",
+      "strategy": "regenerate",
+      "command": "vp i"
+    },
+    {
+      "glob": "apps/web/src/components/chat/ChatComposer.tsx",
+      "strategy": "theirs"
+    },
+    {
+      "glob": "apps/web/src/composer*.ts",
+      "strategy": "theirs"
+    },
+    {
+      "glob": "apps/web/src/lib/composer*.ts",
+      "strategy": "theirs"
+    },
+    {
+      "glob": "apps/web/src/components/chat/composer*.ts",
+      "strategy": "theirs"
+    },
+    {
+      "glob": "apps/web/src/components/chat/useComposer*.ts",
+      "strategy": "theirs"
+    },
+    {
+      "glob": "FORK.md",
+      "strategy": "ours"
+    },
+    {
+      "glob": "fork-sync.json",
+      "strategy": "ours"
+    },
+    {
+      "glob": "settings-carryover.json",
+      "strategy": "ours"
+    },
+    {
+      "glob": "scripts/fork-sync.ts",
+      "strategy": "ours"
+    },
+    {
+      "glob": "scripts/fork-sync.schema.json",
+      "strategy": "ours"
+    },
+    {
+      "glob": "scripts/fork-sync.test.ts",
+      "strategy": "ours"
+    },
+    {
+      "glob": "scripts/orbit/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "assets/conn/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/desktop/src/branding/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "patches/*-conn.patch",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/orbit/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/laravelToolbar/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/api/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/database/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/mcp/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/annotations/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/workspace*.ts",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/components/sidebar/Workspace*.tsx",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/web/src/components/EnvironmentContextChip.tsx",
+      "strategy": "ours"
+    },
+    {
+      "glob": "packages/annotation-overlay/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/server/src/orbit/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/server/src/annotations/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/server/src/wsFork.ts",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/server/src/peer/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/server/src/persistence/Migrations.ts",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/mobile/modules/conn-symbols/**",
+      "strategy": "ours"
+    },
+    {
+      "glob": "apps/mobile/src/features/orbit/**",
+      "strategy": "ours"
+    }
+  ],
+  "guardTests": [
+    "apps/mobile/src/native/connForkPatches.test.ts",
+    "apps/web/src/icons/connIcons.test.ts",
+    "apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts",
+    "apps/desktop/src/window/DesktopWindow.test.ts"
+  ],
+  "settingsPolicy": "settings-carryover.json",
+  "features": [
+    {
+      "id": "shell-design",
+      "forkHeading": "Shell design",
+      "files": [
+        "apps/web/src/index.css",
+        "apps/web/src/components/AppRouteModal.tsx",
+        "apps/web/src/components/ToolbarGroup.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/AppRouteModal.tsx",
+          "symbol": "APP_ROUTE_MODAL_NAV_CLASS"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/AppRouteModal.tsx",
+          "symbol": "AppRouteModalCard"
+        }
+      ]
+    },
+    {
+      "id": "icons",
+      "forkHeading": "Icons",
+      "files": [
+        "apps/web/src/icons/connIcon.tsx",
+        "apps/web/src/icons/lucide-react.ts",
+        "apps/web/src/components/ChatView.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/ChatView.tsx",
+          "symbol": "<ConnIconScope>"
+        },
+        {
+          "kind": "test",
+          "path": "apps/web/src/icons/connIcons.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "ios-icons",
+      "forkHeading": "iOS icons",
+      "files": [
+        "apps/mobile/modules/conn-symbols/symbols.json",
+        "apps/mobile/src/components/ConnSymbolScope.tsx",
+        "apps/mobile/src/features/threads/ThreadDetailScreen.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/src/features/threads/ThreadDetailScreen.tsx",
+          "symbol": "<ConnSymbolScope>"
+        }
+      ]
+    },
+    {
+      "id": "workspaces",
+      "forkHeading": "Workspaces",
+      "files": [
+        "apps/web/src/workspaceStore.ts",
+        "apps/web/src/components/sidebar/WorkspaceRail.tsx",
+        "apps/web/src/components/Sidebar.tsx",
+        "apps/mobile/src/features/home/HomeScreen.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/web/src/components/sidebar/WorkspaceRail.tsx"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/Sidebar.tsx",
+          "symbol": "publishProjects"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/src/features/home/HomeScreen.tsx",
+          "symbol": "selectedWorkspaceProjectRefs"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/src/features/threads/ThreadNavigationSidebar.tsx",
+          "symbol": "selectedWorkspaceProjectRefs"
+        }
+      ]
+    },
+    {
+      "id": "desktop-control-socket",
+      "forkHeading": "Desktop control socket and links",
+      "files": ["apps/desktop/src/app/DesktopApp.ts"],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/desktop/src/app/DesktopApp.ts",
+          "symbol": "select-workspace"
+        }
+      ]
+    },
+    {
+      "id": "orbit",
+      "forkHeading": "Orbit",
+      "files": [
+        "apps/web/src/orbit/orbitWorkspaces.ts",
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/components/settings/ConnectionsSettings.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/web/src/orbit/orbitWorkspaces.ts"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/ChatView.tsx",
+          "symbol": "orbitProjectFolder"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/ChatView.tsx",
+          "symbol": "isGitRepo || isOrbitProjectFolder"
+        }
+      ]
+    },
+    {
+      "id": "orbit-profile-sync",
+      "forkHeading": "Orbit profile sync",
+      "files": [
+        "packages/client-runtime/src/orbitGateway/profileSync.ts",
+        "apps/web/src/orbit/OrbitProfileSync.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "packages/client-runtime/src/orbitGateway/profileSync.ts"
+        },
+        {
+          "kind": "file",
+          "path": "apps/web/src/orbit/OrbitProfileSync.tsx"
+        }
+      ]
+    },
+    {
+      "id": "laravel-toolbar",
+      "forkHeading": "Laravel Toolbar",
+      "files": [
+        "apps/web/src/laravelToolbar/BrowserLaravelToolbar.tsx",
+        "apps/web/src/components/preview/PreviewView.tsx",
+        "apps/web/src/browser/HostedBrowserWebview.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/preview/PreviewView.tsx",
+          "symbol": "BrowserLaravelToolbar"
+        }
+      ]
+    },
+    {
+      "id": "api-panel",
+      "forkHeading": "API panel",
+      "files": ["apps/web/src/api/ApiPanel.tsx"],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/web/src/api/ApiPanel.tsx"
+        }
+      ]
+    },
+    {
+      "id": "database-panel",
+      "forkHeading": "Database panel",
+      "files": [
+        "apps/web/src/database/databaseStore.ts",
+        "apps/desktop/src/ipc/methods/database.ts"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/web/src/database/databaseStore.ts"
+        }
+      ]
+    },
+    {
+      "id": "mcp-panel",
+      "forkHeading": "MCP panel",
+      "files": ["apps/web/src/mcp/mcpStore.ts", "apps/desktop/src/ipc/methods/mcp.ts"],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/web/src/mcp/mcpStore.ts"
+        }
+      ]
+    },
+    {
+      "id": "annotations",
+      "forkHeading": "Browser and device annotations",
+      "files": [
+        "apps/web/src/annotations/BrowserAnnotationControl.tsx",
+        "apps/web/src/components/preview/PreviewView.tsx",
+        "apps/web/src/components/device/DeviceWorkspace.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/preview/PreviewView.tsx",
+          "symbol": "BrowserAnnotationControl"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/device/DeviceWorkspace.tsx",
+          "symbol": "AnnotationQueuePopover"
+        }
+      ]
+    },
+    {
+      "id": "desktop-tab-automation",
+      "forkHeading": "Desktop tab automation",
+      "files": [
+        "apps/server/src/preview/DesktopTabRelay.ts",
+        "apps/desktop/src/preview/DesktopTabRunner.ts",
+        "apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/server/src/preview/DesktopTabRelay.ts"
+        },
+        {
+          "kind": "test",
+          "path": "apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts"
+        }
+      ]
+    },
+    {
+      "id": "agent-opened-panels",
+      "forkHeading": "Agent-opened panels",
+      "files": [
+        "apps/server/src/panels/AgentPanelBroker.ts",
+        "packages/contracts/src/agentPanels.ts"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/server/src/panels/AgentPanelBroker.ts"
+        }
+      ]
+    },
+    {
+      "id": "password-manager-autofill",
+      "forkHeading": "Password-manager autofill",
+      "files": [
+        "apps/server/src/credentials",
+        "apps/web/src/components/settings/PasswordsSettings.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/web/src/components/settings/PasswordsSettings.tsx"
+        }
+      ]
+    },
+    {
+      "id": "conn-rename",
+      "forkHeading": "Conn (app rename)",
+      "files": ["apps/desktop/src/branding/forkBrand.json", "assets/conn"],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/desktop/src/branding/forkBrand.json",
+          "symbol": "\"name\": \"Conn\""
+        }
+      ]
+    },
+    {
+      "id": "mobile-home-bar",
+      "forkHeading": "Mobile home bar and filter",
+      "files": [
+        "apps/mobile/src/features/layout/workspace/WorkspacePhoneBar.tsx",
+        "apps/mobile/src/features/home/HomeHeader.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/mobile/src/features/layout/workspace/WorkspacePhoneBar.tsx"
+        }
+      ]
+    },
+    {
+      "id": "mobile-thread-feed",
+      "forkHeading": "Mobile thread feed and lists",
+      "files": [
+        "apps/mobile/src/features/threads/thread-feed-item-size.ts",
+        "apps/mobile/src/features/threads/ThreadFeed.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/mobile/src/features/threads/thread-feed-item-size.ts"
+        }
+      ]
+    },
+    {
+      "id": "linked-environments",
+      "forkHeading": "Linked environments (peer links)",
+      "files": ["apps/server/src/peer/PeerLinks.ts", "apps/server/src/persistence/Migrations.ts"],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/server/src/persistence/Migrations.ts",
+          "symbol": "reconcileConnPeerLinksMigration"
+        }
+      ]
+    },
+    {
+      "id": "linked-environment-renewal",
+      "forkHeading": "Linked environment renewal",
+      "files": ["scripts/orbit/t3-orbit-relink"],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "scripts/orbit/t3-orbit-relink"
+        }
+      ]
+    },
+    {
+      "id": "machine-mentions",
+      "forkHeading": "Machine @-mentions",
+      "files": [
+        "apps/web/src/components/chat/ChatComposer.tsx",
+        "apps/web/src/components/EnvironmentContextChip.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/chat/ChatComposer.tsx",
+          "symbol": "composerEnvironmentContexts"
+        },
+        {
+          "kind": "file",
+          "path": "apps/web/src/components/EnvironmentContextChip.tsx"
+        }
+      ]
+    },
+    {
+      "id": "mobile-operator-dictation",
+      "forkHeading": "Mobile Operator dictation",
+      "files": [
+        "apps/mobile/src/features/voice-input/voiceDestination.ts",
+        "apps/mobile/src/features/voice-input/operatorTranscription.ts"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/src/features/voice-input/voiceDestination.ts",
+          "symbol": "getOperatorVoiceTranscriber"
+        }
+      ]
+    },
+    {
+      "id": "fork-rpc-group",
+      "forkHeading": "Fork RPC group",
+      "files": ["apps/server/src/wsFork.ts", "packages/contracts/src/rpc.ts"],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/server/src/wsFork.ts"
+        },
+        {
+          "kind": "symbol",
+          "path": "packages/contracts/src/rpc.ts",
+          "symbol": "ForkWsRpcGroup"
+        }
+      ]
+    },
+    {
+      "id": "codex-mcp-network-wait",
+      "forkHeading": "Codex MCP network wait",
+      "files": ["apps/server/src/provider/codexMcpNetworkGate.ts"],
+      "presence": [
+        {
+          "kind": "file",
+          "path": "apps/server/src/provider/codexMcpNetworkGate.ts"
+        }
+      ]
+    },
+    {
+      "id": "swipe-navigation",
+      "forkHeading": "Swipe navigation setting",
+      "files": [
+        "packages/contracts/src/settings.ts",
+        "apps/web/src/components/AppSidebarLayout.tsx",
+        "apps/web/src/components/HistorySwipeNavigation.tsx"
+      ],
+      "presence": [
+        {
+          "kind": "symbol",
+          "path": "packages/contracts/src/settings.ts",
+          "symbol": "historySwipeNavigation"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/AppSidebarLayout.tsx",
+          "symbol": "HistorySwipeNavigation"
+        }
+      ]
+    },
+    {
+      "id": "vendored-patches",
+      "forkHeading": "Vendored dependency patches",
+      "files": [
+        "patches/react-native-screens-conn.patch",
+        "apps/mobile/src/native/connForkPatches.test.ts"
+      ],
+      "presence": [
+        {
+          "kind": "test",
+          "path": "apps/mobile/src/native/connForkPatches.test.ts"
+        }
+      ]
+    }
+  ]
+}

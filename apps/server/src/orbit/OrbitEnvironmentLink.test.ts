@@ -272,4 +272,25 @@ describe("OrbitEnvironmentLink", () => {
       assert.strictEqual(linkInputs.length, 0);
     }),
   );
+  it.effect("passes a request's Idempotency-Key to the Gateway", () =>
+    Effect.gen(function* () {
+      const seen: OrbitGatewayRequest[] = [];
+      const transport = orbitGatewayTransport(
+        (request) =>
+          Effect.sync(() => {
+            seen.push(request);
+            return ok({ id: 9, status: "running" }, 202);
+          }),
+        "https://gateway.orbit",
+        Effect.runPromise,
+      );
+      yield* Effect.promise(() =>
+        transport({ method: "POST", path: "/x", timeoutMs: 60_000, idempotencyKey: "key-1" }),
+      );
+      yield* Effect.promise(() => transport({ method: "GET", path: "/y" }));
+      assert.strictEqual(seen[0]?.idempotencyKey, "key-1");
+      assert.strictEqual(seen[0]?.path, "/api/v1/conn/x");
+      assert.isFalse("idempotencyKey" in (seen[1] ?? {}));
+    }),
+  );
 });

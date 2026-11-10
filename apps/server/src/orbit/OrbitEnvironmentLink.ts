@@ -149,6 +149,8 @@ export const orbitGatewayTransport =
         method: input.method,
         path: `/api/v1/conn${input.path}`,
         ...(input.body === undefined ? {} : { body: input.body }),
+        // curl's own limit already covers the client's admission `timeoutMs`.
+        ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
       }),
     );
     return {

@@ -1,6 +1,6 @@
 import type { OrbitGatewayProject } from "@t3tools/client-runtime/orbit-gateway";
 import { orbitThreadStartStep } from "@t3tools/client-runtime/orbit-gateway";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouter } from "@tanstack/react-router";
 import { BoxIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -35,6 +35,7 @@ import {
   dismissOrbitThreadStart,
   retryOrbitThreadStart,
   runSavedOrbitThreadStart,
+  stillOnStartRoute,
 } from "./orbitThreadStarts";
 import { useOrbitThreadStarts } from "./orbitThreadStartStore";
 
@@ -56,6 +57,7 @@ export function OrbitThreadStartRunner() {
   const available = useOrbitThreadsAvailable();
   const starts = useOrbitThreadStarts((state) => state.starts);
   const navigate = useNavigate();
+  const router = useRouter();
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs each saved start that has not stopped
   useEffect(() => {
@@ -65,9 +67,26 @@ export function OrbitThreadStartRunner() {
       if (start.error !== null) continue;
       void runSavedOrbitThreadStart(client, start.id).then((sent) => {
         if (sent !== null) {
-          void navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(scopeThreadRef(sent.environmentId, sent.threadId)),
+          const open = () =>
+            void navigate({
+              to: "/$environmentId/$threadId",
+              params: buildThreadRouteParams(scopeThreadRef(sent.environmentId, sent.threadId)),
+            });
+          // Open the thread only when Nick is still where he started it; otherwise offer it.
+          if (stillOnStartRoute(start.id, router.state.location.pathname)) {
+            open();
+            return;
+          }
+          const id = toastManager.add({
+            type: "success",
+            title: `Thread started in ${start.projectSlug}`,
+            actionProps: {
+              children: "Open",
+              onClick: () => {
+                toastManager.close(id);
+                open();
+              },
+            },
           });
           return;
         }
@@ -83,7 +102,7 @@ export function OrbitThreadStartRunner() {
         }
       });
     }
-  }, [available, navigate, starts]);
+  }, [available, navigate, router, starts]);
 
   return null;
 }
@@ -124,6 +143,7 @@ function OrbitThreadDialog(props: {
   readonly loadError: string | null;
 }) {
   const { projects, loadError } = props;
+  const router = useRouter();
   const [chosenId, setChosenId] = useState<string | null>(null);
   const [text, setText] = useState("");
 
@@ -131,7 +151,7 @@ function OrbitThreadDialog(props: {
   const canStart = project !== null && text.trim() !== "";
   const start = () => {
     if (!project || text.trim() === "") return;
-    beginOrbitThreadStart(project, text.trim());
+    beginOrbitThreadStart(project, text.trim(), router.state.location.pathname);
     setText("");
     props.onOpenChange(false);
   };
@@ -219,7 +239,7 @@ const STEP_LABELS = {
   sending: "Sending the first message",
 } as const;
 
-/** The thread starts still on their way, with Retry and Dismiss for one that stopped. */
+/** The thread starts still on their way, with Dismiss, and Retry for one that stopped. */
 export function OrbitThreadStartList() {
   const available = useOrbitThreadsAvailable();
   const starts = useOrbitThreadStarts((state) => state.starts);
@@ -250,16 +270,15 @@ export function OrbitThreadStartList() {
               <RotateCcwIcon className="size-3" />
             </Button>
           ) : null}
-          {start.error ? (
-            <Button
-              size="icon-micro"
-              variant="ghost-muted"
-              aria-label="Dismiss"
-              onClick={() => dismissOrbitThreadStart(start.id)}
-            >
-              <XIcon className="size-3" />
-            </Button>
-          ) : null}
+          {/* A running start can be dismissed too; it stops following Orbit at its next step. */}
+          <Button
+            size="icon-micro"
+            variant="ghost-muted"
+            aria-label="Dismiss"
+            onClick={() => dismissOrbitThreadStart(start.id)}
+          >
+            <XIcon className="size-3" />
+          </Button>
         </li>
       ))}
     </ul>

@@ -218,11 +218,13 @@ Orbit instance selector for this kind of project.
 
 In Orbit mode the desktop sidebar header has a button that starts a thread in an Orbit
 Project (Orbit's `docs/cli/instance/container/thread.mmd`). Orbit creates a clone of the
-Project's default Instance, Conn pairs with the clone's T3 server once, and queues the first
-message in a new thread of its `/srv/workspace` project. Each start is saved in localStorage
-until its message is sent, so a reload resumes it; only the main window runs starts. The
-environment sync skips a clone a start is pairing with, and an asleep one. Settings › Connections shows a clone
-whose container is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
+Project's default Instance, Conn pairs with the clone's T3 server once, and launches a new
+thread with the first message in its `/srv/workspace` project. Each start is saved in
+localStorage after every step, with a fixed launch command id, so a reload resumes it and a
+repeated launch finishes the first one. Only the main window runs starts. A row can be
+dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
+start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
+is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
 Sources:
 

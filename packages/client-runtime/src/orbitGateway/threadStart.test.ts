@@ -85,18 +85,29 @@ function gateway(script: {
   return { client, calls };
 }
 
-function ports(client: OrbitGatewayClient, options: { saved?: boolean; sendFails?: boolean } = {}) {
+function ports(
+  client: OrbitGatewayClient,
+  options: { saved?: boolean; sendFails?: boolean; stopped?: () => boolean } = {},
+) {
   const saves: OrbitThreadStart[] = [];
   const connected: string[] = [];
   const sent: string[] = [];
+  const sleeps: number[] = [];
+  let clock = 0;
   return {
     saves,
     connected,
     sent,
+    sleeps,
     ports: {
       client,
       save: (start: OrbitThreadStart) => saves.push(start),
-      wait: async () => {},
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+        clock += ms;
+      },
+      now: () => clock,
+      stopped: options.stopped ?? (() => false),
       isSaved: () => options.saved ?? false,
       connect: async (_environmentId: string, url: string) => {
         connected.push(url);
@@ -117,6 +128,7 @@ const fresh = () =>
     suffix: "k3j9",
     threadId: "thread-1",
     messageId: "message-1",
+    commandId: "command-1",
     now: 0,
   });
 
@@ -247,9 +259,90 @@ describe("runOrbitThreadStart", () => {
       environmentId: "env-41",
       pairingOperationId: null,
       pairingId: null,
+      pairingLinkRead: false,
       connected: false,
       error: "The clone did not answer.",
     });
+  });
+
+  it("waits for Retry when a reload comes after the link was read and before the server was saved", async () => {
+    const { client, calls } = gateway({});
+    const run = ports(client);
+    const reloaded: OrbitThreadStart = {
+      ...fresh(),
+      createOperationId: 100,
+      instanceId: 41,
+      environmentId: "env-41",
+      pairingLinkRead: true,
+    };
+
+    expect(await runOrbitThreadStart(reloaded, run.ports)).toBe(false);
+    const stopped = run.saves.at(-1)!;
+    expect(calls).toEqual([]);
+    expect(stopped).toMatchObject({
+      pairingLinkRead: false,
+      error: expect.stringContaining("link"),
+    });
+
+    const retry = gateway({});
+    expect(await runOrbitThreadStart(stopped, ports(retry.client).ports)).toBe(true);
+    expect(retry.calls.filter((call) => call.startsWith("pair"))).toEqual(["pair env-41"]);
+  });
+
+  it("stops a pairing that does not finish within 60 s, and keeps a slow create for the retry", async () => {
+    const pairing = gateway({ pairing: ["running"] });
+    const run = ports(pairing.client);
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    expect(run.saves.at(-1)).toMatchObject({
+      pairingOperationId: null,
+      error: expect.stringContaining("operation.timeout"),
+    });
+    // One 2 s poll of the create, then the pairing's 60 s.
+    expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(62_000);
+
+    const create = gateway({ create: ["running"] });
+    const slow = ports(create.client);
+    expect(await runOrbitThreadStart(fresh(), slow.ports)).toBe(false);
+    expect(slow.saves.at(-1)).toMatchObject({ createOperationId: 100, environmentId: null });
+  });
+
+  it("never polls faster than every 0.5 s", async () => {
+    const { client } = gateway({});
+    const operation = client.operation;
+    const fast = {
+      ...client,
+      operation: async (id: number) => ({ ...(await operation(id)), pollAfterSeconds: 0 }),
+    } as OrbitGatewayClient;
+    const run = ports(fast);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+    expect(run.sleeps.every((ms) => ms >= 500)).toBe(true);
+  });
+
+  it("ends a dismissed start at the next step without saving it", async () => {
+    const { client, calls } = gateway({ create: ["running", "running", "succeeded"] });
+    let dismissed = false;
+    const run = ports(client, { stopped: () => dismissed });
+    const original = run.ports.sleep;
+    run.ports.sleep = async (ms: number) => {
+      dismissed = true;
+      await original(ms);
+    };
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    expect(calls.filter((call) => call.startsWith("operation"))).toEqual(["operation 100"]);
+    expect(run.saves.every((start) => start.error === null)).toBe(true);
+  });
+
+  it("does not pair with a server whose registration expired", async () => {
+    const { client, calls } = gateway({
+      servers: [{ ...server(41), status: "session_expired" }],
+    });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    expect(calls.some((call) => call.startsWith("pair"))).toBe(false);
+    expect(run.saves.at(-1)?.error).toContain("expired");
   });
 
   it("rides out a short Gateway outage while it follows the create", async () => {

@@ -1,10 +1,8 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   newOrbitThreadStart,
   runOrbitThreadStart,
   type OrbitGatewayClient,
   type OrbitGatewayProject,
-  type OrbitThreadStart,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
@@ -14,14 +12,13 @@ import { connectPairing } from "../connection/onboarding";
 import { newMessageId, newThreadId, randomUUID } from "../lib/utils";
 import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { readThreadShell, waitForThreadShell } from "../state/entities";
 import { environmentProjects } from "../state/projects";
 import { environmentServerConfigsAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
 import { recordOrbitPaired } from "./environmentProvider";
 import { readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
-import { orbitFirstTurnInput } from "./orbitThreadTurn";
+import { type OrbitFirstMessagePorts, sendOrbitFirstMessage } from "./orbitThreadTurn";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
 
@@ -29,7 +26,14 @@ import { orbitFirstTurnInput } from "./orbitThreadTurn";
 const ORBIT_CLONE_WORKSPACE = "/srv/workspace";
 const CLONE_READY_TIMEOUT_MS = 60_000;
 
-export function beginOrbitThreadStart(project: OrbitGatewayProject, message: string): void {
+/** The route each start began on in this window; the runner opens the thread only if it is still there. */
+const startedOn = new Map<string, string>();
+
+export function beginOrbitThreadStart(
+  project: OrbitGatewayProject,
+  message: string,
+  pathname: string,
+): void {
   const start = newOrbitThreadStart({
     id: randomUUID(),
     project,
@@ -37,9 +41,18 @@ export function beginOrbitThreadStart(project: OrbitGatewayProject, message: str
     suffix: randomUUID().slice(0, 4),
     threadId: newThreadId(),
     messageId: newMessageId(),
+    commandId: randomUUID(),
     now: Date.now(),
   });
+  startedOn.set(start.id, pathname);
   updateStarts((starts) => [...starts, start]);
+}
+
+/** Whether the window still shows the route the start began on. */
+export function stillOnStartRoute(id: string, pathname: string): boolean {
+  const route = startedOn.get(id);
+  startedOn.delete(id);
+  return route === pathname;
 }
 
 export function retryOrbitThreadStart(id: string): void {
@@ -74,18 +87,15 @@ async function connect(environmentId: string, pairingUrl: string): Promise<void>
   recordOrbitPaired(environmentId);
 }
 
-/** Starts the thread with the first message in the clone's workspace project, queued behind any running turn. */
-async function send(start: OrbitThreadStart & { readonly environmentId: string }): Promise<void> {
-  const environmentId = start.environmentId as EnvironmentId;
-  const threadId = ThreadId.make(start.threadId);
-  if (readThreadShell(scopeThreadRef(environmentId, threadId)) !== null) return;
+/** The clone's workspace project and its server's default model, once both loaded. */
+async function waitForClone(environmentId: string) {
+  const id = environmentId as EnvironmentId;
   const findProject = () =>
     appAtomRegistry
       .get(environmentProjects.projectsAtom)
       .find(
         (project) =>
-          project.environmentId === environmentId &&
-          project.workspaceRoot === ORBIT_CLONE_WORKSPACE,
+          project.environmentId === id && project.workspaceRoot === ORBIT_CLONE_WORKSPACE,
       );
   const ready = await waitForAtomValue({
     registry: appAtomRegistry,
@@ -96,46 +106,36 @@ async function send(start: OrbitThreadStart & { readonly environmentId: string }
   const configured = await waitForAtomValue({
     registry: appAtomRegistry,
     atom: environmentServerConfigsAtom,
-    predicate: (configs) => configs.has(environmentId),
+    predicate: (configs) => configs.has(id),
     timeoutMs: CLONE_READY_TIMEOUT_MS,
   });
   const project = findProject();
-  const config = appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId);
-  if (!ready || !configured || project === undefined || config === undefined) {
-    throw new Error(`The clone's T3 project ${ORBIT_CLONE_WORKSPACE} did not appear.`);
-  }
-  // After a reload the thread may already exist: its shell arrives with the clone's snapshot.
-  if (readThreadShell(scopeThreadRef(environmentId, threadId)) !== null) return;
+  const config = appAtomRegistry.get(environmentServerConfigsAtom).get(id);
+  if (!ready || !configured || project === undefined || config === undefined) return null;
   const projectId = ProjectId.make(project.id);
-  const modelSelection =
-    config.settings.defaultModelSelection ??
-    resolveProjectDefaultProviderModelSelection(config.providers, config.settings, projectId);
-  if (modelSelection === null) throw new Error("The clone's T3 server offers no model.");
-  const result = await runAtomCommand(
-    appAtomRegistry,
-    threadEnvironment.startTurn,
-    {
-      environmentId,
-      input: orbitFirstTurnInput({
-        start,
-        projectId,
-        modelSelection,
-        createdAt: new Date().toISOString(),
-      }),
-    },
-    { reportFailure: false },
-  );
-  // A refusal of a thread that exists means an earlier send already reached the clone.
-  if (
-    result._tag === "Failure" &&
-    !(await waitForThreadShell(scopeThreadRef(environmentId, threadId)))
-  ) {
-    const error = squashAtomCommandFailure(result);
-    throw new Error(
-      `The clone did not take the first message: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  return {
+    projectId,
+    modelSelection:
+      config.settings.defaultModelSelection ??
+      resolveProjectDefaultProviderModelSelection(config.providers, config.settings, projectId),
+  };
 }
+
+const firstMessagePorts: OrbitFirstMessagePorts = {
+  waitForClone,
+  startTurn: async (environmentId, input) => {
+    const result = await runAtomCommand(
+      appAtomRegistry,
+      threadEnvironment.startTurn,
+      { environmentId: environmentId as EnvironmentId, input },
+      { reportFailure: false },
+    );
+    return result._tag === "Success"
+      ? { ok: true }
+      : { ok: false, error: squashAtomCommandFailure(result) };
+  },
+  now: () => new Date().toISOString(),
+};
 
 const running = new Set<string>();
 
@@ -152,22 +152,29 @@ export async function runSavedOrbitThreadStart(
   running.add(id);
   try {
     // Whether the device saved the clone's server is known only once the catalog loaded.
-    await waitForAtomValue({
+    const catalogReady = await waitForAtomValue({
       registry: appAtomRegistry,
       atom: environmentCatalog.catalogValueAtom,
       predicate: (catalog) => catalog.isReady,
       timeoutMs: CLONE_READY_TIMEOUT_MS,
     });
+    if (!catalogReady) {
+      saveStart({ ...start, error: "Conn's saved environments did not load." });
+      return null;
+    }
     let environmentId: string | null = null;
     const sent = await runOrbitThreadStart(start, {
       client,
       save: saveStart,
-      wait: (seconds) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      now: Date.now,
+      // Dismiss removes the start from the list.
+      stopped: () => !readStored().some((entry) => entry.id === id),
       isSaved,
       connect,
       send: async (ready) => {
         environmentId = ready.environmentId;
-        await send(ready);
+        await sendOrbitFirstMessage(ready, firstMessagePorts);
       },
     });
     if (!sent || environmentId === null) return null;

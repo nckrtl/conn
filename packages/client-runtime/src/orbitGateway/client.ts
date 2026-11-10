@@ -187,9 +187,14 @@ export interface OrbitGatewayClient {
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 
 /** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
-const OPERATION_TIMEOUT_MS = 60_000;
+export const OPERATION_TIMEOUT_MS = 60_000;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 15_000;
+
+/** The wait before the next read of an Operation: the Gateway's interval, kept between 0.5 and 15 s. */
+export function operationPollDelayMs(pollAfterSeconds: number | null): number {
+  return Math.min(Math.max((pollAfterSeconds ?? 0) * 1000, MIN_POLL_MS), MAX_POLL_MS);
+}
 /** Operation statuses that are not final yet; every other status ends the Operation. */
 const OPEN_OPERATION_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "waiting"]);
 
@@ -277,9 +282,9 @@ export function createOrbitGatewayClient(
           details: { operation_id: operation.id },
         });
       }
-      const after =
-        typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds * 1000 : 0;
-      const wait = Math.min(Math.max(after, MIN_POLL_MS), MAX_POLL_MS);
+      const wait = operationPollDelayMs(
+        typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds : null,
+      );
       await sleep(Math.max(Math.min(wait, deadline - now()), 0));
       operation = record(await call({ method: "GET", path: `/operations/${operation.id}` }));
     }

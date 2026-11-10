@@ -308,6 +308,64 @@ describe("runOrbitThreadStart", () => {
     expect(run.saves.at(-1)?.error).toBeNull();
   });
 
+  const busy = () =>
+    new OrbitGatewayError({
+      code: "operation.target_busy",
+      message: "Another Operation owns this target.",
+      status: 409,
+      details: {},
+    });
+
+  it("repeats a create refused as busy with the same name and key, and follows the replayed Operation", async () => {
+    const { client, calls, keys } = gateway({ createLost: [busy(), busy()] });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+
+    expect(calls.filter((call) => call.startsWith("create"))).toEqual(
+      Array(3).fill("create 3 fix-the-login-bug-on-ios-k3j9"),
+    );
+    expect(new Set(keys.slice(0, 3)).size).toBe(1);
+    expect(run.sleeps.slice(0, 2)).toEqual([1000, 2000]);
+    expect(run.saves.at(-1)).toMatchObject({
+      createOperationId: 100,
+      connected: true,
+      error: null,
+    });
+  });
+
+  it("stops a create that stays busy at its deadline, and keeps the key for Retry", async () => {
+    const { client, keys } = gateway({ createLost: Array.from({ length: 500 }, busy) });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+
+    expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(30 * 60_000);
+    expect(run.sleeps.every((ms) => ms <= 15_000)).toBe(true);
+    const stopped = run.saves.at(-1)!;
+    expect(stopped).toMatchObject({
+      createOperationId: null,
+      createKey: keys[0],
+      error: "Orbit is still creating this clone; press Retry in a minute.",
+    });
+  });
+
+  it("ends a start dismissed while a busy create repeats, without an error", async () => {
+    let dismissed = false;
+    const { client, calls } = gateway({ createLost: [busy(), busy(), busy()] });
+    const run = ports(client, { stopped: () => dismissed });
+    const sleep = run.ports.sleep;
+    run.ports.sleep = async (ms) => {
+      await sleep(ms);
+      dismissed = true;
+    };
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+
+    expect(calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
+    expect(run.saves.every((start) => start.error === null)).toBe(true);
+  });
+
   it("keeps the create's key when its answers stay lost, so Retry gets the Operation the Gateway admitted", async () => {
     const { client, keys } = gateway({ createLost: Array(500).fill(0) });
     const run = ports(client);

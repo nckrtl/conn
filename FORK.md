@@ -227,7 +227,11 @@ repeated launch finishes the first one. The Gateway admits a create or a pairing
 copies secrets to Swamp (19-27 s), so those two calls get a 60 s limit instead of the desktop's
 15 s default, and carry a saved `Idempotency-Key`. A lost answer (none, or a proxy's 502 or
 504 without the Gateway's error envelope) repeats the same request with a clamped back-off, so
-the Gateway returns the Operation it may already have admitted. A Gateway error stops the start. Only the main window runs starts. A row can be
+the Gateway returns the Operation it may already have admitted. A create refused with 409
+`operation.target_busy` (another Operation owns the Instance: an older build's create, a lost
+key, or a second caller) repeats the same way until the create's deadline, then stops with
+"press Retry in a minute"; the pairing admission takes no target lock, so it cannot be busy.
+Any other Gateway error stops the start. Only the main window runs starts. A row can be
 dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).

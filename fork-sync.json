@@ -1,5 +1,4 @@
 {
-  "$schema": "./scripts/fork-sync.schema.json",
   "version": 1,
   "upstream": {
     "remote": "upstream",
@@ -14,23 +13,47 @@
     },
     {
       "glob": "apps/web/src/components/chat/ChatComposer.tsx",
-      "strategy": "theirs"
+      "strategy": "manual"
     },
     {
       "glob": "apps/web/src/composer*.ts",
-      "strategy": "theirs"
+      "strategy": "manual"
     },
     {
       "glob": "apps/web/src/lib/composer*.ts",
-      "strategy": "theirs"
+      "strategy": "manual"
     },
     {
       "glob": "apps/web/src/components/chat/composer*.ts",
-      "strategy": "theirs"
+      "strategy": "manual"
     },
     {
       "glob": "apps/web/src/components/chat/useComposer*.ts",
-      "strategy": "theirs"
+      "strategy": "manual"
+    },
+    {
+      "glob": "apps/server/src/persistence/Migrations.ts",
+      "strategy": "manual"
+    },
+    {
+      "glob": "apps/server/src/peer/**",
+      "strategy": "manual"
+    },
+    {
+      "glob": "apps/web/src/workspace*.ts",
+      "strategy": "manual"
+    },
+    {
+      "glob": "apps/mobile/modules/*/ios/**",
+      "strategy": "manual"
+    },
+    {
+      "glob": "apps/mobile/modules/*/android/**",
+      "strategy": "manual"
+    },
+    {
+      "glob": "apps/mobile/src/features/threads/thread-work-log.tsx",
+      "strategy": "manual"
     },
     {
       "glob": "FORK.md",
@@ -97,15 +120,7 @@
       "strategy": "ours"
     },
     {
-      "glob": "apps/web/src/workspace*.ts",
-      "strategy": "ours"
-    },
-    {
       "glob": "apps/web/src/components/sidebar/Workspace*.tsx",
-      "strategy": "ours"
-    },
-    {
-      "glob": "apps/web/src/components/EnvironmentContextChip.tsx",
       "strategy": "ours"
     },
     {
@@ -125,14 +140,6 @@
       "strategy": "ours"
     },
     {
-      "glob": "apps/server/src/peer/**",
-      "strategy": "ours"
-    },
-    {
-      "glob": "apps/server/src/persistence/Migrations.ts",
-      "strategy": "ours"
-    },
-    {
       "glob": "apps/mobile/modules/conn-symbols/**",
       "strategy": "ours"
     },
@@ -145,7 +152,8 @@
     "apps/mobile/src/native/connForkPatches.test.ts",
     "apps/web/src/icons/connIcons.test.ts",
     "apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts",
-    "apps/desktop/src/window/DesktopWindow.test.ts"
+    "apps/desktop/src/window/DesktopWindow.test.ts",
+    "apps/web/src/components/sidebar/connShellSidebar.test.ts"
   ],
   "settingsPolicy": "settings-carryover.json",
   "features": [
@@ -155,7 +163,9 @@
       "files": [
         "apps/web/src/index.css",
         "apps/web/src/components/AppRouteModal.tsx",
-        "apps/web/src/components/ToolbarGroup.tsx"
+        "apps/web/src/components/ToolbarGroup.tsx",
+        "apps/web/src/components/Sidebar.tsx",
+        "apps/desktop/src/window/DesktopWindow.ts"
       ],
       "presence": [
         {
@@ -167,6 +177,16 @@
           "kind": "symbol",
           "path": "apps/web/src/components/AppRouteModal.tsx",
           "symbol": "AppRouteModalCard"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/Sidebar.tsx",
+          "symbol": "shell-inner-panel"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/desktop/src/window/DesktopWindow.ts",
+          "symbol": "vibrancy: \"under-window\""
         }
       ]
     },
@@ -176,7 +196,12 @@
       "files": [
         "apps/web/src/icons/connIcon.tsx",
         "apps/web/src/icons/lucide-react.ts",
-        "apps/web/src/components/ChatView.tsx"
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/vite.config.ts",
+        "apps/web/tsconfig.json",
+        "apps/web/package.json",
+        "apps/mobile/package.json",
+        "pnpm-workspace.yaml"
       ],
       "presence": [
         {
@@ -185,8 +210,24 @@
           "symbol": "<ConnIconScope>"
         },
         {
-          "kind": "test",
-          "path": "apps/web/src/icons/connIcons.test.ts"
+          "kind": "symbol",
+          "path": "apps/web/package.json",
+          "symbol": "lucide-react-original"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/vite.config.ts",
+          "symbol": "find: /^lucide-react$/"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/tsconfig.json",
+          "symbol": "src/icons/lucide-react.ts"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/package.json",
+          "symbol": "-conn.tgz"
         }
       ]
     },
@@ -196,13 +237,25 @@
       "files": [
         "apps/mobile/modules/conn-symbols/symbols.json",
         "apps/mobile/src/components/ConnSymbolScope.tsx",
-        "apps/mobile/src/features/threads/ThreadDetailScreen.tsx"
+        "apps/mobile/src/features/threads/ThreadDetailScreen.tsx",
+        "apps/mobile/src/components/ui/AppSymbol.tsx",
+        "apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift"
       ],
       "presence": [
         {
           "kind": "symbol",
           "path": "apps/mobile/src/features/threads/ThreadDetailScreen.tsx",
           "symbol": "<ConnSymbolScope>"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/src/components/ui/AppSymbol.tsx",
+          "symbol": "conn.${name}"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift",
+          "symbol": "setSingleLineCentered"
         }
       ]
     },
@@ -271,6 +324,11 @@
           "kind": "symbol",
           "path": "apps/web/src/components/ChatView.tsx",
           "symbol": "isGitRepo || isOrbitProjectFolder"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/components/settings/ConnectionsSettings.tsx",
+          "symbol": "environmentProvider === \"orbit\""
         }
       ]
     },
@@ -298,6 +356,7 @@
       "files": [
         "apps/web/src/laravelToolbar/BrowserLaravelToolbar.tsx",
         "apps/web/src/components/preview/PreviewView.tsx",
+        "apps/web/src/components/preview/PreviewView.browser.test.tsx",
         "apps/web/src/browser/HostedBrowserWebview.tsx"
       ],
       "presence": [
@@ -305,6 +364,11 @@
           "kind": "symbol",
           "path": "apps/web/src/components/preview/PreviewView.tsx",
           "symbol": "BrowserLaravelToolbar"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/browser/HostedBrowserWebview.tsx",
+          "symbol": "relayLaravelToolbarMessage"
         }
       ]
     },
@@ -350,7 +414,11 @@
       "files": [
         "apps/web/src/annotations/BrowserAnnotationControl.tsx",
         "apps/web/src/components/preview/PreviewView.tsx",
-        "apps/web/src/components/device/DeviceWorkspace.tsx"
+        "apps/web/src/components/device/DeviceWorkspace.tsx",
+        "apps/server/src/mcp/McpHttpServer.ts",
+        "apps/desktop/src/preview-pick-preload.ts",
+        "apps/desktop/src/preview/ConnAnnotationsPreload.ts",
+        "apps/web/src/browser/HostedBrowserWebview.tsx"
       ],
       "presence": [
         {
@@ -362,6 +430,21 @@
           "kind": "symbol",
           "path": "apps/web/src/components/device/DeviceWorkspace.tsx",
           "symbol": "AnnotationQueuePopover"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/server/src/mcp/McpHttpServer.ts",
+          "symbol": "layerAnnotationsToolkit"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/desktop/src/preview-pick-preload.ts",
+          "symbol": "ConnAnnotationsPreload"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/web/src/browser/HostedBrowserWebview.tsx",
+          "symbol": "attachOverlayBridge"
         }
       ]
     },
@@ -371,7 +454,24 @@
       "files": [
         "apps/server/src/preview/DesktopTabRelay.ts",
         "apps/desktop/src/preview/DesktopTabRunner.ts",
-        "apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts"
+        "apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts",
+        "apps/server/src/mcp/PreviewAutomationBroker.ts",
+        "apps/web/src/rpc/desktopTabRelay.ts",
+        "apps/web/src/browser/ElectronBrowserHost.tsx",
+        "apps/web/src/browser/previewRuntimeTabId.ts",
+        "apps/desktop/src/preview/Manager.ts",
+        "apps/desktop/src/preview/CdpRelay.ts",
+        "apps/desktop/src/ipc/methods/preview.ts",
+        "apps/desktop/src/preload.ts",
+        "apps/server/src/mcp/toolkits/preview/tools.ts",
+        "apps/server/src/preview/Manager.ts",
+        "apps/server/src/preview/ServerBrowser.ts",
+        "packages/shared/src/previewPage.ts",
+        "packages/shared/src/previewSessionControl.ts",
+        "packages/contracts/src/previewAutomation.ts",
+        "packages/contracts/src/ipc.ts",
+        "packages/contracts/src/clientRpcPermissions.ts",
+        "docs/user/default-browser.md"
       ],
       "presence": [
         {
@@ -379,8 +479,8 @@
           "path": "apps/server/src/preview/DesktopTabRelay.ts"
         },
         {
-          "kind": "test",
-          "path": "apps/server/src/mcp/toolkits/connForkPreviewCopy.test.ts"
+          "kind": "file",
+          "path": "apps/web/src/rpc/desktopTabRelay.ts"
         }
       ]
     },
@@ -443,12 +543,19 @@
       "forkHeading": "Mobile thread feed and lists",
       "files": [
         "apps/mobile/src/features/threads/thread-feed-item-size.ts",
-        "apps/mobile/src/features/threads/ThreadFeed.tsx"
+        "apps/mobile/src/features/threads/ThreadFeed.tsx",
+        "apps/mobile/src/features/threads/thread-work-log.tsx"
       ],
       "presence": [
         {
-          "kind": "file",
-          "path": "apps/mobile/src/features/threads/thread-feed-item-size.ts"
+          "kind": "symbol",
+          "path": "apps/mobile/src/features/threads/thread-feed-item-size.ts",
+          "symbol": "Conn: matches ThreadFeed's run-fold row with mb-3"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/mobile/src/features/threads/thread-work-log.tsx",
+          "symbol": "props.icon === \"credential\""
         }
       ]
     },
@@ -480,17 +587,20 @@
       "forkHeading": "Machine @-mentions",
       "files": [
         "apps/web/src/components/chat/ChatComposer.tsx",
-        "apps/web/src/components/EnvironmentContextChip.tsx"
+        "apps/web/src/components/EnvironmentContextChip.tsx",
+        "apps/web/src/composerDraftStore.ts",
+        "apps/web/src/components/chat/useComposerSend.ts"
       ],
       "presence": [
         {
           "kind": "symbol",
-          "path": "apps/web/src/components/chat/ChatComposer.tsx",
-          "symbol": "composerEnvironmentContexts"
+          "path": "apps/web/src/composerDraftStore.ts",
+          "symbol": "\"orbit\": the first message creates an Orbit Instance copy"
         },
         {
-          "kind": "file",
-          "path": "apps/web/src/components/EnvironmentContextChip.tsx"
+          "kind": "symbol",
+          "path": "apps/web/src/components/chat/useComposerSend.ts",
+          "symbol": "registerOrbitWorkspace"
         }
       ]
     },
@@ -512,7 +622,11 @@
     {
       "id": "fork-rpc-group",
       "forkHeading": "Fork RPC group",
-      "files": ["apps/server/src/wsFork.ts", "packages/contracts/src/rpc.ts"],
+      "files": [
+        "apps/server/src/wsFork.ts",
+        "packages/contracts/src/rpc.ts",
+        "apps/server/src/ws.ts"
+      ],
       "presence": [
         {
           "kind": "file",
@@ -522,17 +636,30 @@
           "kind": "symbol",
           "path": "packages/contracts/src/rpc.ts",
           "symbol": "ForkWsRpcGroup"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/server/src/ws.ts",
+          "symbol": "wsFork"
         }
       ]
     },
     {
       "id": "codex-mcp-network-wait",
       "forkHeading": "Codex MCP network wait",
-      "files": ["apps/server/src/provider/codexMcpNetworkGate.ts"],
+      "files": [
+        "apps/server/src/provider/codexMcpNetworkGate.ts",
+        "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts"
+      ],
       "presence": [
         {
           "kind": "file",
           "path": "apps/server/src/provider/codexMcpNetworkGate.ts"
+        },
+        {
+          "kind": "symbol",
+          "path": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
+          "symbol": "makeCodexMcpNetworkGate"
         }
       ]
     },
@@ -553,7 +680,7 @@
         {
           "kind": "symbol",
           "path": "apps/web/src/components/AppSidebarLayout.tsx",
-          "symbol": "HistorySwipeNavigation"
+          "symbol": "historySwipeNavigation"
         }
       ]
     },
@@ -566,7 +693,7 @@
       ],
       "presence": [
         {
-          "kind": "test",
+          "kind": "file",
           "path": "apps/mobile/src/native/connForkPatches.test.ts"
         }
       ]

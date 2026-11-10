@@ -6,26 +6,25 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import {
-  checkPublishedSyncSource,
-  FULL_COMMIT_SHA_PATTERN,
-  syncSourceProvenanceMessage,
-} from "./sync-source-provenance.ts";
-
 export const FORK_SYNC_NEEDS_REVIEW_EXIT = 3;
 export const FORK_SYNC_REPORT_VERSION = 1;
 export const SETTINGS_SOURCE_PATH = "packages/contracts/src/settings.ts";
 export const SETTINGS_SCHEMA_NAMES = ["ClientSettingsSchema", "ServerSettings"] as const;
+const FULL_COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const SYNC_BRANCH = /^sync\/.+/;
+const WORKTREE_PREFIX = "conn-fork-sync-";
 
-export type ConflictStrategy = "ours" | "theirs" | "regenerate" | "manual";
-export type PresenceKind = "file" | "symbol" | "route" | "test";
+export type ConflictStrategy = "ours" | "regenerate" | "manual" | "reapply";
+export type PresenceKind = "file" | "symbol";
 export type SettingsDefaultKind = "off" | "on" | "other";
 
 export class ForkSyncError {
   readonly _tag = "ForkSyncError";
   readonly message: string;
-  constructor(message: string) {
+  readonly worktree?: string;
+  constructor(message: string, options: { worktree?: string } = {}) {
     this.message = message;
+    if (options.worktree !== undefined) this.worktree = options.worktree;
   }
   toString() {
     return this.message;
@@ -41,13 +40,13 @@ export interface ConflictRule {
   readonly glob: string;
   readonly strategy: ConflictStrategy;
   readonly command?: string | undefined;
+  readonly patch?: string | undefined;
 }
 
 export interface PresenceCheck {
   readonly kind: PresenceKind;
   readonly path: string;
   readonly symbol?: string | undefined;
-  readonly route?: string | undefined;
 }
 
 export interface ForkFeature {
@@ -128,6 +127,12 @@ export interface FeaturePresenceResult {
   readonly checks: ReadonlyArray<PresenceCheckResult>;
 }
 
+export interface GuardTestResult {
+  readonly path: string;
+  readonly ok: boolean;
+  readonly detail: string;
+}
+
 export interface CheckFailure {
   readonly id: string;
   readonly detail?: string | undefined;
@@ -151,8 +156,22 @@ export interface AutoResolvedConflict {
 
 export interface UnresolvedConflict {
   readonly path: string;
-  readonly reason: "no_rule" | "manual" | "regenerate_failed";
+  readonly reason:
+    | "no_rule"
+    | "manual"
+    | "regenerate_failed"
+    | "reapply_failed"
+    | "checkout_failed"
+    | "package_json_conflicted";
   readonly glob?: string | undefined;
+  readonly id?: string | undefined;
+  readonly forkHeading?: string | undefined;
+}
+
+export interface CleanMerge {
+  readonly path: string;
+  readonly id?: string | undefined;
+  readonly forkHeading?: string | undefined;
 }
 
 export interface ForkSyncReport {
@@ -160,20 +179,23 @@ export interface ForkSyncReport {
   readonly status: "ok" | "needs_review" | "error";
   readonly exitCode: number;
   readonly command: string;
+  readonly failures: ReadonlyArray<string>;
   readonly upstream: { readonly ref: string; readonly sha: string };
   readonly base: { readonly ref: string; readonly sha: string };
-  readonly branch: { readonly name: string; readonly tip: string | null };
+  readonly branch: {
+    readonly name: string | null;
+    readonly tip: string | null;
+    readonly committed: boolean;
+  };
   readonly worktree: string | null;
   readonly autoResolved: ReadonlyArray<AutoResolvedConflict>;
   readonly unresolved: ReadonlyArray<UnresolvedConflict>;
+  readonly cleanMerges: ReadonlyArray<CleanMerge>;
+  readonly conflictMarkers: ReadonlyArray<string>;
   readonly presence: ReadonlyArray<FeaturePresenceResult>;
+  readonly guards: ReadonlyArray<GuardTestResult>;
   readonly settings: SettingsDiffResult | null;
   readonly baseline: BaselineComparison | null;
-  readonly provenance: {
-    readonly publish: string;
-    readonly check: string;
-    readonly published?: { readonly commit: string; readonly syncRef: string };
-  } | null;
   readonly notes: ReadonlyArray<string>;
 }
 
@@ -184,7 +206,6 @@ export interface ForkSyncCliArgs {
   readonly base: string;
   readonly branch: string | undefined;
   readonly worktree: string | undefined;
-  readonly inPlace: boolean;
   readonly report: string | undefined;
   readonly json: boolean;
   readonly manifest: string | undefined;
@@ -192,12 +213,11 @@ export interface ForkSyncCliArgs {
   readonly new: string | undefined;
   readonly mainResults: string | undefined;
   readonly syncResults: string | undefined;
-  readonly remote: string | undefined;
 }
 
-const STRATEGIES = new Set<ConflictStrategy>(["ours", "theirs", "regenerate", "manual"]);
-const PRESENCE_KINDS = new Set<PresenceKind>(["file", "symbol", "route", "test"]);
-const COMMANDS = ["merge", "guards", "settings-diff", "baseline", "check", "provenance"] as const;
+const STRATEGIES = new Set<ConflictStrategy>(["ours", "regenerate", "manual", "reapply"]);
+const PRESENCE_KINDS = new Set<PresenceKind>(["file", "symbol"]);
+const COMMANDS = ["merge", "guards", "settings-diff", "baseline", "check"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -216,31 +236,7 @@ function requireArray(value: unknown, path: string): ReadonlyArray<unknown> {
 }
 
 export function matchGlob(glob: string, filePath: string): boolean {
-  const pattern = glob.replaceAll("\\", "/");
-  const file = filePath.replaceAll("\\", "/");
-  return matchSegments(pattern.split("/"), file.split("/"));
-}
-
-function matchSegments(pattern: ReadonlyArray<string>, file: ReadonlyArray<string>): boolean {
-  if (pattern.length === 0) return file.length === 0;
-  const [head, ...rest] = pattern;
-  if (head === undefined) return file.length === 0;
-  if (head === "**") {
-    if (rest.length === 0) return true;
-    for (let index = 0; index <= file.length; index += 1) {
-      if (matchSegments(rest, file.slice(index))) return true;
-    }
-    return false;
-  }
-  if (file.length === 0) return false;
-  const [segment, ...remaining] = file;
-  if (segment === undefined || !matchSegment(head, segment)) return false;
-  return matchSegments(rest, remaining);
-}
-
-function matchSegment(pattern: string, segment: string): boolean {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*");
-  return new RegExp(`^${escaped}$`).test(segment);
+  return NodePath.matchesGlob(filePath.replaceAll("\\", "/"), glob.replaceAll("\\", "/"));
 }
 
 export function firstMatchingRule(
@@ -254,16 +250,13 @@ export function parsePresenceCheck(value: unknown, path: string): PresenceCheck 
   if (!isRecord(value)) throw new ForkSyncError(`${path} must be an object`);
   const kind = requireString(value.kind, `${path}.kind`);
   if (!PRESENCE_KINDS.has(kind as PresenceKind)) {
-    throw new ForkSyncError(`${path}.kind is not a presence check kind`);
+    throw new ForkSyncError(`${path}.kind must be file or symbol`);
   }
   const filePath = requireString(value.path, `${path}.path`);
   if (kind === "symbol") {
     return { kind, path: filePath, symbol: requireString(value.symbol, `${path}.symbol`) };
   }
-  if (kind === "route") {
-    return { kind, path: filePath, route: requireString(value.route, `${path}.route`) };
-  }
-  return { kind: kind as "file" | "test", path: filePath };
+  return { kind: "file", path: filePath };
 }
 
 export function parseConflictRule(value: unknown, path: string): ConflictRule {
@@ -271,15 +264,18 @@ export function parseConflictRule(value: unknown, path: string): ConflictRule {
   const glob = requireString(value.glob, `${path}.glob`);
   const strategy = requireString(value.strategy, `${path}.strategy`);
   if (!STRATEGIES.has(strategy as ConflictStrategy)) {
-    throw new ForkSyncError(`${path}.strategy must be ours, theirs, regenerate, or manual`);
+    throw new ForkSyncError(`${path}.strategy must be ours, regenerate, manual, or reapply`);
   }
   if (strategy === "regenerate") {
     return { glob, strategy, command: requireString(value.command, `${path}.command`) };
   }
-  if (value.command !== undefined) {
-    throw new ForkSyncError(`${path}.command is only valid for regenerate`);
+  if (strategy === "reapply") {
+    return { glob, strategy, patch: requireString(value.patch, `${path}.patch`) };
   }
-  return { glob, strategy: strategy as Exclude<ConflictStrategy, "regenerate"> };
+  if (value.command !== undefined || value.patch !== undefined) {
+    throw new ForkSyncError(`${path}.command/patch are only valid for regenerate/reapply`);
+  }
+  return { glob, strategy: strategy as "ours" | "manual" };
 }
 
 export function parseForkSyncManifest(value: unknown): ForkSyncManifest {
@@ -373,32 +369,15 @@ export function loadManifest(repo: string, manifestPath?: string): ForkSyncManif
   return parseForkSyncManifest(loadJsonFile(path));
 }
 
-export function loadSettingsPolicyFromRoots(
-  roots: ReadonlyArray<string>,
-  relativePath: string,
-): SettingsPolicy {
-  const tried: string[] = [];
-  const seen = new Set<string>();
-  for (const root of roots) {
-    const resolved = NodePath.resolve(root, relativePath);
-    if (seen.has(resolved)) continue;
-    seen.add(resolved);
-    tried.push(resolved);
-    if (NodeFS.existsSync(resolved)) return parseSettingsPolicy(loadJsonFile(resolved));
+export function loadSettingsPolicy(policyFile: string): SettingsPolicy {
+  return parseSettingsPolicy(loadJsonFile(policyFile));
+}
+
+function policyFilePath(args: ForkSyncCliArgs, relativePath: string): string {
+  if (args.manifest !== undefined) {
+    return NodePath.join(NodePath.dirname(NodePath.resolve(args.manifest)), relativePath);
   }
-  throw new ForkSyncError(`could not read ${relativePath} (tried ${tried.join(", ")})`);
-}
-
-export function loadSettingsPolicy(repo: string, relativePath: string): SettingsPolicy {
-  return loadSettingsPolicyFromRoots([repo], relativePath);
-}
-
-function settingsPolicyRoots(args: ForkSyncCliArgs, extra?: string): ReadonlyArray<string> {
-  const roots: string[] = [];
-  if (extra !== undefined) roots.push(extra);
-  roots.push(args.repo);
-  if (args.manifest !== undefined) roots.push(NodePath.dirname(NodePath.resolve(args.manifest)));
-  return roots;
+  return NodePath.join(args.repo, relativePath);
 }
 
 export function forkChangeHeadings(markdown: string): ReadonlyArray<string> {
@@ -407,7 +386,78 @@ export function forkChangeHeadings(markdown: string): ReadonlyArray<string> {
   if (start < 0 || end < 0 || end <= start) {
     throw new ForkSyncError("FORK.md is missing What the fork changes / Keep the customizations");
   }
-  return [...markdown.slice(start, end).matchAll(/^### (.+)$/gm)].map((match) => match[1] ?? "");
+  return [...markdown.slice(start, end).matchAll(/^### (.+)$/gm)]
+    .map((match) => match[1] ?? "")
+    .filter((heading) => heading.length > 0 && !heading.startsWith("Upstream sync audit"));
+}
+
+export function knownSpotPaths(markdown: string): ReadonlyArray<string> {
+  const start = markdown.indexOf("Known spots and how to resolve");
+  const end = markdown.indexOf("\n2. Run the regression");
+  if (start < 0 || end < 0 || end <= start) {
+    throw new ForkSyncError("FORK.md is missing Known spots");
+  }
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const match of markdown.slice(start, end).matchAll(/`([^`]+)`/g)) {
+    const value = match[1];
+    if (value === undefined || seen.has(value) || !looksLikeRepoPath(value)) continue;
+    seen.add(value);
+    paths.push(value);
+  }
+  return paths;
+}
+
+function looksLikeRepoPath(value: string): boolean {
+  if (value.includes(" ") || value.startsWith("http") || value.startsWith("@")) return false;
+  return value.includes("/") || /\.(ts|tsx|js|json|css|swift|kt|kts|md|yaml|yml)$/.test(value);
+}
+
+export function pathCoveredBy(entry: string, filePath: string): boolean {
+  if (entry === filePath) return true;
+  if (filePath.startsWith(`${entry}/`)) return true;
+  if (matchGlob(entry, filePath)) return true;
+  if (entry.endsWith("/**") && matchGlob(entry, filePath)) return true;
+  if (filePath.startsWith(entry.replace(/\/\*\*?$/, "/"))) return true;
+  return false;
+}
+
+export function featureForPath(
+  features: ReadonlyArray<ForkFeature>,
+  filePath: string,
+): ForkFeature | undefined {
+  return features.find((feature) => feature.files.some((file) => pathCoveredBy(file, filePath)));
+}
+
+function namesTheSamePath(entry: string, known: string): boolean {
+  const file = entry.replace(/\\/g, "/");
+  const spot = known.replace(/\\/g, "/").replace(/\/$/, "");
+  if (pathCoveredBy(file, spot) || pathCoveredBy(spot, file)) return true;
+  if (file === spot || file.endsWith(`/${spot}`) || spot.endsWith(`/${NodePath.basename(file)}`)) {
+    return true;
+  }
+  if (file.includes(`/${spot}/`) || file.includes(`/${spot}/**`) || file.endsWith(`/${spot}`)) {
+    return true;
+  }
+  if (spot.includes("*") && file.includes(spot)) return true;
+  const base = NodePath.basename(file);
+  const knownBase = NodePath.basename(spot);
+  if (base === knownBase) return true;
+  if (base.replace(/\.ios\.(tsx|ts)$/, ".$1") === knownBase.replace(/\.ios\.(tsx|ts)$/, ".$1")) {
+    return true;
+  }
+  return matchGlob(file, spot);
+}
+
+export function coversKnownSpot(manifest: ForkSyncManifest, known: string): boolean {
+  if (
+    manifest.features.some((feature) => feature.files.some((file) => namesTheSamePath(file, known)))
+  ) {
+    return true;
+  }
+  return manifest.conflictRules.some(
+    (rule) => namesTheSamePath(rule.glob, known) || matchGlob(rule.glob, known),
+  );
 }
 
 function gitEnv(): NodeJS.ProcessEnv {
@@ -432,6 +482,7 @@ function runGit(repo: string, args: ReadonlyArray<string>): GitResult {
     cwd: repo,
     encoding: "utf8",
     env: gitEnv(),
+    maxBuffer: 50 * 1024 * 1024,
   });
   return {
     status: result.status ?? 1,
@@ -443,9 +494,7 @@ function runGit(repo: string, args: ReadonlyArray<string>): GitResult {
 
 function requireGit(repo: string, args: ReadonlyArray<string>, onFail: string): string {
   const result = runGit(repo, args);
-  if (result.error !== undefined) {
-    throw new ForkSyncError(`${onFail}: ${result.error.message}`);
-  }
+  if (result.error !== undefined) throw new ForkSyncError(`${onFail}: ${result.error.message}`);
   if (result.status !== 0) {
     const detail =
       (result.stderr || result.stdout).trim() ||
@@ -478,8 +527,26 @@ export function resolveMergeBase(repo: string, a: string, b: string): string {
   );
 }
 
-export function utcDateStamp(now = new Date()): string {
-  return now.toISOString().slice(0, 10);
+export function listFilesAtRef(repo: string, ref: string): ReadonlyArray<string> {
+  return requireGit(repo, ["ls-tree", "-r", "--name-only", ref], `could not list ${ref}`)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+export function oursRulesHittingRef(
+  repo: string,
+  ref: string,
+  rules: ReadonlyArray<ConflictRule>,
+): ReadonlyArray<{ readonly glob: string; readonly hits: ReadonlyArray<string> }> {
+  const files = listFilesAtRef(repo, ref);
+  return rules
+    .filter((rule) => rule.strategy === "ours")
+    .map((rule) => ({
+      glob: rule.glob,
+      hits: files.filter((file) => matchGlob(rule.glob, file)),
+    }))
+    .filter((entry) => entry.hits.length > 0);
 }
 
 function skipCommentOrString(source: string, index: number): number | undefined {
@@ -572,8 +639,14 @@ export function extractSettingsFields(source: string): ReadonlyArray<SettingsFie
   const fields: SettingsField[] = [];
   for (const schema of SETTINGS_SCHEMA_NAMES) {
     const body = schemaBody(source, schema);
-    if (body === undefined) continue;
-    for (const field of topLevelFields(body)) {
+    if (body === undefined) {
+      throw new ForkSyncError(`settings schema ${schema} is missing`);
+    }
+    const parsed = topLevelFields(body);
+    if (parsed.length === 0) {
+      throw new ForkSyncError(`settings schema ${schema} has no fields`);
+    }
+    for (const field of parsed) {
       fields.push({ schema, key: field.name, defaultKind: classifySettingsDefault(field.text) });
     }
   }
@@ -614,11 +687,19 @@ export function diffSettingsFields(
   return changes;
 }
 
+function policyEntry(
+  policy: SettingsPolicy,
+  schema: string,
+  key: string,
+): SettingsPolicyEntry | undefined {
+  return policy.keys[`${schema}.${key}`] ?? policy.keys[key];
+}
+
 export function classifySettingsChange(
   change: SettingsChange,
   policy: SettingsPolicy,
 ): SettingsChangeVerdict {
-  const entry = policy.keys[change.key];
+  const entry = policyEntry(policy, change.schema, change.key);
   if (change.kind === "removed") {
     return {
       change,
@@ -638,12 +719,16 @@ export function classifySettingsChange(
         : "settings default changed; unknown to policy",
     };
   }
-  if (change.defaultKind === "off") {
+  if (change.defaultKind === "off" || change.defaultKind === "other") {
     return {
       change,
       blocking: false,
       keepUpstreamDefault: true,
-      reason: entry?.note ?? "standing policy: new default-off keys keep the upstream default",
+      reason:
+        entry?.note ??
+        (change.defaultKind === "off"
+          ? "standing policy: new default-off keys keep the upstream default"
+          : "standing policy: new non-boolean keys keep the upstream default"),
     };
   }
   if (entry?.keepUpstreamDefault === true) {
@@ -705,36 +790,17 @@ export function diffSettingsAtShas(
   );
 }
 
-export function runPresenceChecks(
-  root: string,
-  features: ReadonlyArray<ForkFeature>,
-): ReadonlyArray<FeaturePresenceResult> {
-  return features.map((feature) => {
-    const checks = feature.presence.map((check) => runPresenceCheck(root, check));
-    return {
-      id: feature.id,
-      forkHeading: feature.forkHeading,
-      ok: checks.every((check) => check.ok),
-      checks,
-    };
-  });
-}
-
-function runPresenceCheck(root: string, check: PresenceCheck): PresenceCheckResult {
-  const absolute = NodePath.join(root, check.path);
-  if (!NodeFS.existsSync(absolute)) {
-    return {
-      kind: check.kind,
-      path: check.path,
-      ok: false,
-      detail: `missing ${check.path}`,
-    };
+function presenceFromContents(
+  check: PresenceCheck,
+  contents: string | undefined,
+): PresenceCheckResult {
+  if (contents === undefined) {
+    return { kind: check.kind, path: check.path, ok: false, detail: `missing ${check.path}` };
   }
-  if (check.kind === "file" || check.kind === "test") {
+  if (check.kind === "file") {
     return { kind: check.kind, path: check.path, ok: true, detail: `found ${check.path}` };
   }
-  const contents = NodeFS.readFileSync(absolute, "utf8");
-  const needle = check.kind === "symbol" ? check.symbol : check.route;
+  const needle = check.symbol;
   if (needle === undefined || !contents.includes(needle)) {
     return {
       kind: check.kind,
@@ -751,6 +817,77 @@ function runPresenceCheck(root: string, check: PresenceCheck): PresenceCheckResu
   };
 }
 
+export function runPresenceChecks(
+  root: string,
+  features: ReadonlyArray<ForkFeature>,
+): ReadonlyArray<FeaturePresenceResult> {
+  return features.map((feature) => {
+    const checks = feature.presence.map((check) => {
+      const absolute = NodePath.join(root, check.path);
+      const contents = NodeFS.existsSync(absolute)
+        ? NodeFS.readFileSync(absolute, "utf8")
+        : undefined;
+      return presenceFromContents(check, contents);
+    });
+    return {
+      id: feature.id,
+      forkHeading: feature.forkHeading,
+      ok: checks.every((check) => check.ok),
+      checks,
+    };
+  });
+}
+
+export function runPresenceChecksAtRef(
+  repo: string,
+  ref: string,
+  features: ReadonlyArray<ForkFeature>,
+): ReadonlyArray<FeaturePresenceResult> {
+  return features.map((feature) => {
+    const checks = feature.presence.map((check) => {
+      const shown = runGit(repo, ["show", `${ref}:${check.path}`]);
+      return presenceFromContents(check, shown.status === 0 ? shown.stdout : undefined);
+    });
+    return {
+      id: feature.id,
+      forkHeading: feature.forkHeading,
+      ok: checks.every((check) => check.ok),
+      checks,
+    };
+  });
+}
+
+export function defaultGuardRunner(root: string, testPath: string): GuardTestResult {
+  const absolute = NodePath.join(root, testPath);
+  if (!NodeFS.existsSync(absolute)) {
+    return { path: testPath, ok: false, detail: `missing ${testPath}` };
+  }
+  const command =
+    testPath.endsWith(".test.ts") || testPath.endsWith(".test.tsx")
+      ? (["vp", ["test", "run", testPath]] as const)
+      : ([process.execPath, [absolute]] as const);
+  const result = NodeChildProcess.spawnSync(command[0], command[1], {
+    cwd: root,
+    encoding: "utf8",
+    env: gitEnv(),
+  });
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+  const ok = (result.status ?? 1) === 0;
+  return {
+    path: testPath,
+    ok,
+    detail: ok ? `passed ${testPath}` : output.slice(-500) || `failed ${testPath}`,
+  };
+}
+
+export function runGuardTests(
+  root: string,
+  tests: ReadonlyArray<string>,
+  run: (root: string, testPath: string) => GuardTestResult = defaultGuardRunner,
+): ReadonlyArray<GuardTestResult> {
+  return tests.map((testPath) => run(root, testPath));
+}
+
 export function parseCheckResults(value: unknown): CheckResults {
   if (!isRecord(value)) throw new ForkSyncError("check results must be an object");
   const failures = requireArray(value.failures, "failures").map((failure, index) => {
@@ -764,6 +901,47 @@ export function parseCheckResults(value: unknown): CheckResults {
     };
   });
   return { failures };
+}
+
+export function parseTypecheckOutput(text: string): CheckResults {
+  const failures: CheckFailure[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/^(.+?):(\d+):(\d+) - (?:error|suggestion) (TS\d+): (.+)$/gm)) {
+    const file = match[1];
+    const code = match[4];
+    const message = match[5];
+    if (file === undefined || code === undefined || message === undefined) continue;
+    const id = `${file} ${code} ${message}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    failures.push({ id, detail: match[0] });
+  }
+  return { failures };
+}
+
+export function parseTestOutput(text: string): CheckResults {
+  const failures: CheckFailure[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/^(?: FAIL | × )\s*(.+?\.test\.\w+)\s+>\s+(.+)$/gm)) {
+    const file = match[1];
+    const name = match[2];
+    if (file === undefined || name === undefined) continue;
+    const id = `${file} > ${name}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    failures.push({ id, detail: match[0] });
+  }
+  return { failures };
+}
+
+export function loadBaselineFile(path: string): CheckResults {
+  const text = NodeFS.readFileSync(path, "utf8");
+  try {
+    return parseCheckResults(JSON.parse(text) as unknown);
+  } catch {
+    if (/ - (?:error|suggestion) TS\d+:/.test(text)) return parseTypecheckOutput(text);
+    return parseTestOutput(text);
+  }
 }
 
 export function compareBaselines(main: CheckResults, sync: CheckResults): BaselineComparison {
@@ -782,29 +960,62 @@ function emptyReport(command: string): ForkSyncReport {
     status: "ok",
     exitCode: 0,
     command,
+    failures: [],
     upstream: { ref: "", sha: "" },
     base: { ref: "", sha: "" },
-    branch: { name: "", tip: null },
+    branch: { name: null, tip: null, committed: false },
     worktree: null,
     autoResolved: [],
     unresolved: [],
+    cleanMerges: [],
+    conflictMarkers: [],
     presence: [],
+    guards: [],
     settings: null,
     baseline: null,
-    provenance: null,
     notes: [],
   };
 }
 
+function failureLines(report: ForkSyncReport): ReadonlyArray<string> {
+  const lines: string[] = [];
+  for (const item of report.unresolved) {
+    const feature = item.forkHeading === undefined ? "" : ` (${item.forkHeading})`;
+    lines.push(`unresolved ${item.path} ${item.reason}${feature}`);
+  }
+  for (const feature of report.presence) {
+    if (feature.ok) continue;
+    for (const check of feature.checks) {
+      if (!check.ok) lines.push(`presence ${feature.id}: ${check.detail}`);
+    }
+  }
+  for (const guard of report.guards) {
+    if (!guard.ok) lines.push(`guard ${guard.path}: ${guard.detail.split("\n")[0] ?? "failed"}`);
+  }
+  for (const change of report.settings?.changes ?? []) {
+    if (change.blocking) {
+      lines.push(`settings ${change.change.schema}.${change.change.key}: ${change.reason}`);
+    }
+  }
+  for (const path of report.conflictMarkers) lines.push(`conflict-marker ${path}`);
+  for (const failure of report.baseline?.newFailures ?? []) {
+    lines.push(`baseline ${failure.id}`);
+  }
+  return lines;
+}
+
 function finalizeReport(report: ForkSyncReport): ForkSyncReport {
+  const failures = failureLines(report);
   const needsReview =
+    failures.length > 0 ||
     report.unresolved.length > 0 ||
     report.presence.some((feature) => !feature.ok) ||
+    report.guards.some((guard) => !guard.ok) ||
     report.settings?.blocking === true ||
     (report.baseline !== null && report.baseline.newFailures.length > 0);
-  if (report.status === "error") return report;
-  if (!needsReview) return { ...report, status: "ok", exitCode: 0 };
-  return { ...report, status: "needs_review", exitCode: FORK_SYNC_NEEDS_REVIEW_EXIT };
+  if (report.status === "error") return { ...report, failures };
+  if (!needsReview) return { ...report, failures, status: "ok", exitCode: 0 };
+  return { ...report, failures, status: "needs_review", exitCode: FORK_SYNC_NEEDS_REVIEW_EXIT };
 }
 
 function unmergedPaths(repo: string): ReadonlyArray<string> {
@@ -835,50 +1046,106 @@ function runShellCommand(
   };
 }
 
+function annotateUnresolved(
+  item: UnresolvedConflict,
+  features: ReadonlyArray<ForkFeature>,
+): UnresolvedConflict {
+  const feature = featureForPath(features, item.path);
+  if (feature === undefined) return item;
+  return { ...item, id: feature.id, forkHeading: feature.forkHeading };
+}
+
 export function applyConflictRules(
   repo: string,
   rules: ReadonlyArray<ConflictRule>,
   paths: ReadonlyArray<string>,
+  features: ReadonlyArray<ForkFeature> = [],
 ): {
   readonly autoResolved: ReadonlyArray<AutoResolvedConflict>;
   readonly unresolved: ReadonlyArray<UnresolvedConflict>;
 } {
   const autoResolved: AutoResolvedConflict[] = [];
   const unresolved: UnresolvedConflict[] = [];
+  const regenerate: string[] = [];
+  const rest: string[] = [];
   for (const path of paths) {
     const rule = firstMatchingRule(rules, path);
+    if (rule?.strategy === "regenerate") regenerate.push(path);
+    else rest.push(path);
+  }
+  const applyOne = (path: string): void => {
+    const rule = firstMatchingRule(rules, path);
     if (rule === undefined) {
-      unresolved.push({ path, reason: "no_rule" });
-      continue;
+      unresolved.push(annotateUnresolved({ path, reason: "no_rule" }, features));
+      return;
     }
     if (rule.strategy === "manual") {
-      unresolved.push({ path, reason: "manual", glob: rule.glob });
-      continue;
+      unresolved.push(annotateUnresolved({ path, reason: "manual", glob: rule.glob }, features));
+      return;
     }
     const side = rule.strategy === "ours" ? "--ours" : "--theirs";
-    try {
-      requireGit(repo, ["checkout", side, "--", path], `could not checkout ${side} for ${path}`);
-      if (rule.strategy === "regenerate") {
-        const command = rule.command;
-        if (command === undefined) {
-          unresolved.push({ path, reason: "regenerate_failed", glob: rule.glob });
-          continue;
-        }
-        const regenerated = runShellCommand(repo, command);
-        if (regenerated.status !== 0) {
-          unresolved.push({ path, reason: "regenerate_failed", glob: rule.glob });
-          continue;
-        }
-      }
-      requireGit(repo, ["add", "--", path], `could not stage ${path}`);
-      autoResolved.push({ path, rule: rule.strategy, glob: rule.glob });
-    } catch {
-      unresolved.push({
-        path,
-        reason: rule.strategy === "regenerate" ? "regenerate_failed" : "no_rule",
-        glob: rule.glob,
-      });
+    const checkout = runGit(repo, ["checkout", side, "--", path]);
+    if (checkout.status !== 0) {
+      unresolved.push(
+        annotateUnresolved({ path, reason: "checkout_failed", glob: rule.glob }, features),
+      );
+      return;
     }
+    if (rule.strategy === "regenerate") {
+      const command = rule.command;
+      if (command === undefined) {
+        unresolved.push(
+          annotateUnresolved({ path, reason: "regenerate_failed", glob: rule.glob }, features),
+        );
+        return;
+      }
+      const regenerated = runShellCommand(repo, command);
+      if (regenerated.status !== 0) {
+        unresolved.push(
+          annotateUnresolved({ path, reason: "regenerate_failed", glob: rule.glob }, features),
+        );
+        return;
+      }
+    }
+    if (rule.strategy === "reapply") {
+      const patch = rule.patch === undefined ? undefined : NodePath.join(repo, rule.patch);
+      if (patch === undefined || !NodeFS.existsSync(patch)) {
+        unresolved.push(
+          annotateUnresolved({ path, reason: "reapply_failed", glob: rule.glob }, features),
+        );
+        return;
+      }
+      const applied = runGit(repo, ["apply", "--whitespace=nowarn", patch]);
+      if (applied.status !== 0) {
+        unresolved.push(
+          annotateUnresolved({ path, reason: "reapply_failed", glob: rule.glob }, features),
+        );
+        return;
+      }
+    }
+    const staged = runGit(repo, ["add", "--", path]);
+    if (staged.status !== 0) {
+      unresolved.push(
+        annotateUnresolved({ path, reason: "checkout_failed", glob: rule.glob }, features),
+      );
+      return;
+    }
+    autoResolved.push({ path, rule: rule.strategy, glob: rule.glob });
+  };
+  for (const path of rest) applyOne(path);
+  const packageJsonConflicted = [...unresolved, ...unmergedPaths(repo)].some((item) => {
+    const path = typeof item === "string" ? item : item.path;
+    return NodePath.basename(path) === "package.json";
+  });
+  if (packageJsonConflicted) {
+    for (const path of regenerate) {
+      const rule = firstMatchingRule(rules, path);
+      unresolved.push(
+        annotateUnresolved({ path, reason: "package_json_conflicted", glob: rule?.glob }, features),
+      );
+    }
+  } else {
+    for (const path of regenerate) applyOne(path);
   }
   return { autoResolved, unresolved };
 }
@@ -906,111 +1173,239 @@ function inMerge(repo: string): boolean {
   return runGit(repo, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).status === 0;
 }
 
+function assertSyncBranch(name: string): void {
+  if (!SYNC_BRANCH.test(name) || name === "sync/main") {
+    throw new ForkSyncError(`merge branch must match sync/<name> and cannot be main (got ${name})`);
+  }
+}
+
+function samePath(a: string, b: string): boolean {
+  try {
+    return NodeFS.realpathSync(a) === NodeFS.realpathSync(b);
+  } catch {
+    return NodePath.resolve(a) === NodePath.resolve(b);
+  }
+}
+
+function worktreeForBranch(repo: string, branch: string): string | undefined {
+  const listed = runGit(repo, ["worktree", "list", "--porcelain"]);
+  if (listed.status !== 0) return undefined;
+  let current: string | undefined;
+  for (const line of listed.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+    if (line === `branch refs/heads/${branch}` && current !== undefined) return current;
+  }
+  return undefined;
+}
+
+function removeWorktree(repo: string, worktree: string, deleteBranch?: string): void {
+  runGit(repo, ["worktree", "remove", "--force", worktree]);
+  NodeFS.rmSync(worktree, { recursive: true, force: true });
+  if (deleteBranch !== undefined) runGit(repo, ["branch", "-D", deleteBranch]);
+}
+
+function pruneStaleForkSyncWorktrees(repo: string, keep?: string): void {
+  runGit(repo, ["worktree", "prune"]);
+  const listed = runGit(repo, ["worktree", "list", "--porcelain"]);
+  if (listed.status !== 0) return;
+  let current: string | undefined;
+  for (const line of listed.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+    if (line === "" && current !== undefined) {
+      const path = current;
+      current = undefined;
+      if (keep !== undefined && samePath(path, keep)) continue;
+      if (!path.includes(WORKTREE_PREFIX)) continue;
+      if (samePath(path, repo)) continue;
+      runGit(repo, ["worktree", "remove", "--force", path]);
+    }
+  }
+}
+
+function linkNodeModules(worktree: string, source: string): void {
+  const from = NodePath.join(source, "node_modules");
+  const to = NodePath.join(worktree, "node_modules");
+  if (!NodeFS.existsSync(from) || NodeFS.existsSync(to)) return;
+  NodeFS.symlinkSync(from, to, "dir");
+}
+
+function conflictMarkerPaths(repo: string, paths: ReadonlyArray<string>): ReadonlyArray<string> {
+  const marked: string[] = [];
+  for (const path of paths) {
+    const absolute = NodePath.join(repo, path);
+    if (!NodeFS.existsSync(absolute) || NodeFS.statSync(absolute).isDirectory()) continue;
+    const contents = NodeFS.readFileSync(absolute, "utf8");
+    if (contents.includes("\n<<<<<<< ") || contents.startsWith("<<<<<<< ")) marked.push(path);
+  }
+  return marked;
+}
+
+function cleanMergePaths(
+  repo: string,
+  baseSha: string,
+  upstreamSha: string,
+  unmerged: ReadonlyArray<string>,
+  features: ReadonlyArray<ForkFeature>,
+): ReadonlyArray<CleanMerge> {
+  const changed = new Set(
+    runGit(repo, ["diff", "--name-only", baseSha, upstreamSha])
+      .stdout.split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  );
+  const blocked = new Set(unmerged);
+  const seen = new Set<string>();
+  const result: CleanMerge[] = [];
+  for (const feature of features) {
+    for (const file of feature.files) {
+      for (const path of changed) {
+        if (blocked.has(path) || seen.has(path) || !pathCoveredBy(file, path)) continue;
+        if (unmergedPaths(repo).includes(path)) continue;
+        seen.add(path);
+        result.push({ path, id: feature.id, forkHeading: feature.forkHeading });
+      }
+    }
+  }
+  return result;
+}
+
 export function mergeUpstream(input: {
   readonly repo: string;
   readonly upstreamRef: string;
   readonly baseRef: string;
   readonly branch?: string | undefined;
   readonly worktree?: string | undefined;
-  readonly inPlace: boolean;
   readonly manifest: ForkSyncManifest;
 }): {
   readonly repo: string;
   readonly worktree: string | null;
-  readonly branch: string;
+  readonly branch: string | null;
   readonly upstreamSha: string;
   readonly baseSha: string;
   readonly tip: string | null;
+  readonly committed: boolean;
   readonly autoResolved: ReadonlyArray<AutoResolvedConflict>;
   readonly unresolved: ReadonlyArray<UnresolvedConflict>;
+  readonly cleanMerges: ReadonlyArray<CleanMerge>;
+  readonly conflictMarkers: ReadonlyArray<string>;
   readonly notes: ReadonlyArray<string>;
 } {
   const upstreamSha = resolveCommit(input.repo, input.upstreamRef);
   const baseSha = resolveCommit(input.repo, input.baseRef);
-  const branch = input.branch ?? `sync/${utcDateStamp()}`;
   const notes: string[] = [];
-  let repo = input.repo;
-  let worktree: string | null = null;
-
-  if (!input.inPlace) {
-    worktree =
-      input.worktree ?? NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conn-fork-sync-"));
-    const existing = runGit(input.repo, ["rev-parse", "--verify", `refs/heads/${branch}`]);
-    if (existing.status === 0) {
-      throw new ForkSyncError(`branch ${branch} already exists; pass --branch or delete it`);
-    }
-    requireGit(
-      input.repo,
-      ["worktree", "add", "-b", branch, worktree, baseSha],
-      `could not create worktree at ${worktree}`,
-    );
-    repo = worktree;
-  } else {
-    requireGit(
-      repo,
-      ["checkout", "-B", branch, baseSha],
-      `could not create ${branch} from ${input.baseRef}`,
-    );
-  }
-
-  const ancestor = runGit(repo, ["merge-base", "--is-ancestor", upstreamSha, "HEAD"]);
+  const ancestor = runGit(input.repo, ["merge-base", "--is-ancestor", upstreamSha, baseSha]);
   if (ancestor.status === 0) {
     notes.push(`HEAD already contains ${upstreamSha}`);
+    return {
+      repo: input.repo,
+      worktree: null,
+      branch: null,
+      upstreamSha,
+      baseSha,
+      tip: baseSha,
+      committed: true,
+      autoResolved: [],
+      unresolved: [],
+      cleanMerges: [],
+      conflictMarkers: [],
+      notes,
+    };
+  }
+
+  const branch = input.branch ?? `sync/${upstreamSha}`;
+  assertSyncBranch(branch);
+  pruneStaleForkSyncWorktrees(input.repo, input.worktree);
+  const existingWorktree = worktreeForBranch(input.repo, branch);
+  let worktree =
+    existingWorktree ??
+    input.worktree ??
+    NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), WORKTREE_PREFIX));
+  if (samePath(worktree, input.repo)) {
+    throw new ForkSyncError("merge worktree cannot be the main checkout");
+  }
+  let createdWorktree = false;
+  let createdBranch = false;
+  try {
+    const existingBranch = runGit(input.repo, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+    if (existingWorktree !== undefined) {
+      worktree = existingWorktree;
+    } else if (existingBranch.status === 0) {
+      requireGit(
+        input.repo,
+        ["worktree", "add", worktree, branch],
+        `could not attach worktree at ${worktree}`,
+      );
+      createdWorktree = true;
+    } else {
+      requireGit(
+        input.repo,
+        ["worktree", "add", "-b", branch, worktree, baseSha],
+        `could not create worktree at ${worktree}`,
+      );
+      createdWorktree = true;
+      createdBranch = true;
+    }
+    const repo = worktree;
+    if (
+      !inMerge(repo) &&
+      runGit(repo, ["merge-base", "--is-ancestor", upstreamSha, "HEAD"]).status !== 0
+    ) {
+      const merge = runGit(repo, ["merge", "--no-commit", "--no-ff", upstreamSha]);
+      if (merge.error !== undefined) {
+        throw new ForkSyncError(`merge failed: ${merge.error.message}`, { worktree });
+      }
+      const conflicts = unmergedPaths(repo);
+      if (merge.status !== 0 && conflicts.length === 0) {
+        throw new ForkSyncError(
+          `merge failed: ${(merge.stderr || merge.stdout).trim() || `git merge exited ${String(merge.status)}`}`,
+          { worktree },
+        );
+      }
+    }
+    const conflicts = unmergedPaths(repo);
+    const applied = applyConflictRules(
+      repo,
+      input.manifest.conflictRules,
+      conflicts,
+      input.manifest.features,
+    );
+    let committed = false;
+    if (applied.unresolved.length === 0 && unmergedPaths(repo).length === 0 && inMerge(repo)) {
+      requireGit(
+        repo,
+        [
+          "commit",
+          "--no-edit",
+          "-m",
+          mergeMessage(upstreamSha, applied.autoResolved, applied.unresolved),
+        ],
+        "could not commit merge",
+      );
+      committed = true;
+    }
+    const remaining = unmergedPaths(repo);
+    const markers = conflictMarkerPaths(repo, remaining);
     return {
       repo,
       worktree,
       branch,
       upstreamSha,
       baseSha,
-      tip: resolveCommit(repo, "HEAD"),
-      autoResolved: [],
-      unresolved: [],
+      tip: committed ? resolveCommit(repo, "HEAD") : null,
+      committed,
+      autoResolved: applied.autoResolved,
+      unresolved: applied.unresolved,
+      cleanMerges: cleanMergePaths(repo, baseSha, upstreamSha, remaining, input.manifest.features),
+      conflictMarkers: markers,
       notes,
     };
+  } catch (cause) {
+    if (createdWorktree) removeWorktree(input.repo, worktree, createdBranch ? branch : undefined);
+    if (cause instanceof ForkSyncError) {
+      throw new ForkSyncError(cause.message, { worktree: cause.worktree ?? worktree });
+    }
+    throw new ForkSyncError(forkSyncMessage(cause), { worktree });
   }
-
-  const merge = runGit(repo, ["merge", "--no-commit", "--no-ff", upstreamSha]);
-  if (merge.error !== undefined) {
-    throw new ForkSyncError(`merge failed: ${merge.error.message}`);
-  }
-  const conflicts = unmergedPaths(repo);
-  if (merge.status !== 0 && conflicts.length === 0) {
-    throw new ForkSyncError(
-      `merge failed: ${(merge.stderr || merge.stdout).trim() || `git merge exited ${String(merge.status)}`}`,
-    );
-  }
-  const applied = applyConflictRules(repo, input.manifest.conflictRules, conflicts);
-  if (applied.unresolved.length === 0 && unmergedPaths(repo).length === 0 && inMerge(repo)) {
-    requireGit(
-      repo,
-      [
-        "commit",
-        "--no-edit",
-        "-m",
-        mergeMessage(upstreamSha, applied.autoResolved, applied.unresolved),
-      ],
-      "could not commit merge",
-    );
-  }
-  const tip = runGit(repo, ["rev-parse", "HEAD"]).status === 0 ? resolveCommit(repo, "HEAD") : null;
-  return {
-    repo,
-    worktree,
-    branch,
-    upstreamSha,
-    baseSha,
-    tip,
-    autoResolved: applied.autoResolved,
-    unresolved: applied.unresolved,
-    notes,
-  };
-}
-
-export function provenancePointers(): { readonly publish: string; readonly check: string } {
-  return {
-    publish: "node scripts/publish-sync-branch.ts",
-    check: "node scripts/check-sync-provenance.ts --json",
-  };
 }
 
 export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs {
@@ -1026,7 +1421,6 @@ export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs 
   let base = "main";
   let branch: string | undefined;
   let worktree: string | undefined;
-  let inPlace = false;
   let report: string | undefined;
   let json = false;
   let manifest: string | undefined;
@@ -1034,15 +1428,10 @@ export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs 
   let newSha: string | undefined;
   let mainResults: string | undefined;
   let syncResults: string | undefined;
-  let remote: string | undefined;
   for (let index = 0; index < flags.length; index += 1) {
     const flag = flags[index];
     if (flag === "--json") {
       json = true;
-      continue;
-    }
-    if (flag === "--in-place") {
-      inPlace = true;
       continue;
     }
     const value = flags[index + 1];
@@ -1057,8 +1446,7 @@ export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs 
       flag === "--old" ||
       flag === "--new" ||
       flag === "--main" ||
-      flag === "--sync" ||
-      flag === "--remote";
+      flag === "--sync";
     if (needsValue) {
       if (value === undefined || value.startsWith("--")) {
         throw new ForkSyncError(`missing value for ${flag}`);
@@ -1074,8 +1462,7 @@ export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs 
       else if (flag === "--old") oldSha = value;
       else if (flag === "--new") newSha = value;
       else if (flag === "--main") mainResults = value;
-      else if (flag === "--sync") syncResults = value;
-      else remote = value;
+      else syncResults = value;
       continue;
     }
     throw new ForkSyncError(`unknown argument: ${flag}`);
@@ -1087,7 +1474,6 @@ export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs 
     base,
     branch,
     worktree,
-    inPlace,
     report,
     json,
     manifest,
@@ -1095,32 +1481,23 @@ export function parseForkSyncArgs(argv: ReadonlyArray<string>): ForkSyncCliArgs 
     new: newSha,
     mainResults,
     syncResults,
-    remote,
   };
 }
 
-function attachPresenceAndSettings(
+function attachChecks(
   report: ForkSyncReport,
   repo: string,
-  policyRoots: ReadonlyArray<string>,
+  sourceRepo: string,
   manifest: ForkSyncManifest,
+  policyFile: string,
   oldSha: string,
   newSha: string,
 ): ForkSyncReport {
+  if (repo !== sourceRepo) linkNodeModules(repo, sourceRepo);
   const presence = runPresenceChecks(repo, manifest.features);
-  let settings: SettingsDiffResult | null = null;
-  const notes = [...report.notes];
-  try {
-    settings = diffSettingsAtShas(
-      repo,
-      oldSha,
-      newSha,
-      loadSettingsPolicyFromRoots(policyRoots, manifest.settingsPolicy),
-    );
-  } catch (cause) {
-    notes.push(forkSyncMessage(cause));
-  }
-  return finalizeReport({ ...report, presence, settings, notes });
+  const guards = runGuardTests(repo, manifest.guardTests);
+  const settings = diffSettingsAtShas(repo, oldSha, newSha, loadSettingsPolicy(policyFile));
+  return finalizeReport({ ...report, presence, guards, settings });
 }
 
 export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
@@ -1129,8 +1506,8 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
       throw new ForkSyncError("baseline requires --main <file> and --sync <file>");
     }
     const baseline = compareBaselines(
-      parseCheckResults(loadJsonFile(args.mainResults)),
-      parseCheckResults(loadJsonFile(args.syncResults)),
+      loadBaselineFile(args.mainResults),
+      loadBaselineFile(args.syncResults),
     );
     return finalizeReport({
       ...emptyReport("baseline"),
@@ -1139,24 +1516,12 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
     });
   }
 
-  if (args.command === "provenance") {
-    try {
-      const published = checkPublishedSyncSource({ repo: args.repo, remote: args.remote });
-      return finalizeReport({
-        ...emptyReport("provenance"),
-        provenance: { ...provenancePointers(), published },
-        notes: [`HEAD ${published.commit} is ${published.syncRef} on ${published.remote}`],
-      });
-    } catch (cause) {
-      throw new ForkSyncError(syncSourceProvenanceMessage(cause));
-    }
-  }
-
   const manifest = loadManifest(args.repo, args.manifest);
 
   if (args.command === "guards") {
     const presence = runPresenceChecks(args.repo, manifest.features);
-    return finalizeReport({ ...emptyReport("guards"), presence });
+    const guards = runGuardTests(args.repo, manifest.guardTests);
+    return finalizeReport({ ...emptyReport("guards"), presence, guards });
   }
 
   if (args.command === "settings-diff") {
@@ -1168,8 +1533,12 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
       args.repo,
       args.old ?? resolveMergeBase(args.repo, args.base, newSha),
     );
-    const policy = loadSettingsPolicyFromRoots(settingsPolicyRoots(args), manifest.settingsPolicy);
-    const settings = diffSettingsAtShas(args.repo, oldSha, newSha, policy);
+    const settings = diffSettingsAtShas(
+      args.repo,
+      oldSha,
+      newSha,
+      loadSettingsPolicy(policyFilePath(args, manifest.settingsPolicy)),
+    );
     return finalizeReport({
       ...emptyReport("settings-diff"),
       upstream: { ref: args.new ?? args.upstream ?? manifest.upstream.ref, sha: newSha },
@@ -1180,22 +1549,17 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
 
   if (args.command === "check") {
     const presence = runPresenceChecks(args.repo, manifest.features);
+    const guards = runGuardTests(args.repo, manifest.guardTests);
     const upstreamRef = args.upstream ?? `${manifest.upstream.remote}/${manifest.upstream.ref}`;
-    let settings: SettingsDiffResult | null = null;
-    const notes: string[] = [];
-    try {
-      const newSha = resolveCommit(args.repo, upstreamRef);
-      const oldSha = resolveMergeBase(args.repo, args.base, newSha);
-      settings = diffSettingsAtShas(
-        args.repo,
-        oldSha,
-        newSha,
-        loadSettingsPolicyFromRoots(settingsPolicyRoots(args), manifest.settingsPolicy),
-      );
-    } catch (cause) {
-      notes.push(forkSyncMessage(cause));
-    }
-    return finalizeReport({ ...emptyReport("check"), presence, settings, notes });
+    const newSha = resolveCommit(args.repo, upstreamRef);
+    const oldSha = resolveMergeBase(args.repo, args.base, newSha);
+    const settings = diffSettingsAtShas(
+      args.repo,
+      oldSha,
+      newSha,
+      loadSettingsPolicy(policyFilePath(args, manifest.settingsPolicy)),
+    );
+    return finalizeReport({ ...emptyReport("check"), presence, guards, settings });
   }
 
   if (args.command !== "merge") {
@@ -1208,28 +1572,40 @@ export function runForkSync(args: ForkSyncCliArgs): ForkSyncReport {
     baseRef: args.base,
     branch: args.branch,
     worktree: args.worktree,
-    inPlace: args.inPlace,
     manifest,
   });
   const report: ForkSyncReport = {
     ...emptyReport("merge"),
     upstream: { ref: upstreamRef, sha: merged.upstreamSha },
     base: { ref: args.base, sha: merged.baseSha },
-    branch: { name: merged.branch, tip: merged.tip },
+    branch: { name: merged.branch, tip: merged.tip, committed: merged.committed },
     worktree: merged.worktree,
     autoResolved: merged.autoResolved,
     unresolved: merged.unresolved,
-    provenance: provenancePointers(),
+    cleanMerges: merged.cleanMerges,
+    conflictMarkers: merged.conflictMarkers,
     notes: merged.notes,
   };
-  return attachPresenceAndSettings(
+  if (merged.worktree === null) return finalizeReport(report);
+  const checked = attachChecks(
     report,
     merged.repo,
-    settingsPolicyRoots(args, merged.repo),
+    args.repo,
     manifest,
+    policyFilePath(args, manifest.settingsPolicy),
     resolveMergeBase(merged.repo, merged.baseSha, merged.upstreamSha),
     merged.upstreamSha,
   );
+  if (args.mainResults !== undefined && args.syncResults !== undefined) {
+    return finalizeReport({
+      ...checked,
+      baseline: compareBaselines(
+        loadBaselineFile(args.mainResults),
+        loadBaselineFile(args.syncResults),
+      ),
+    });
+  }
+  return checked;
 }
 
 export function writeReport(report: ForkSyncReport, path: string | undefined, json: boolean): void {
@@ -1254,13 +1630,16 @@ if (isCliEntry()) {
   } catch (error) {
     const message = forkSyncMessage(error);
     console.error(message);
+    const worktree = error instanceof ForkSyncError ? (error.worktree ?? null) : null;
     if (args !== undefined) {
       writeReport(
         {
           ...emptyReport(args.command),
           status: "error",
           exitCode: 1,
+          worktree,
           notes: [message],
+          failures: [message],
         },
         args.report,
         args.json,

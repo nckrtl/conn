@@ -1,11 +1,9 @@
 import type { ProfileSyncRunOptions } from "@t3tools/client-runtime/orbit-gateway";
 
 /**
- * Runs the profile sync one run at a time. A trigger that arrives while a run is in flight does
- * not start a second one (two runs would both PATCH the same section versions and the second
- * would get a 409); it queues a single follow-up that starts when the run ends, so a change made
- * during the run still goes out. Triggers that pile up share that one follow-up, and a forced
- * push or pull among them is kept for it.
+ * Runs the profile sync one run at a time: two runs would PATCH the same section versions and the
+ * second would get a 409. Triggers during a run share one follow-up run, which keeps any forced
+ * push or pull among them.
  */
 export function createSerialRunner(
   task: (options: ProfileSyncRunOptions | undefined) => Promise<void>,

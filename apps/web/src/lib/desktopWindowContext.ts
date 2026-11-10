@@ -95,12 +95,9 @@ export function markChangedRecordKeys(
 }
 
 /**
- * Merges another window's copy of a keyed record into this window's copy.
- * Keys this window changed recently keep the local value; every other key
- * takes the incoming value, and keys the other window removed go away.
- * `local` is this window's persisted form, so equal JSON means "no change".
- * Returns the keys to replace (with their incoming value), the keys to remove,
- * and whether this window holds newer values the other window lacks.
+ * Merges another window's keyed record into ours: recently changed local keys win, others take
+ * the incoming value, and removed keys go. `local` is the persisted form (equal JSON = no change).
+ * Returns keys to replace, keys to remove, and whether this window holds newer values.
  */
 export function diffIncomingRecord<V>(
   local: Readonly<Record<string, V>>,

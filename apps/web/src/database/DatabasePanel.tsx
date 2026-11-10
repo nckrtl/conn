@@ -1,17 +1,7 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { ChevronDown, CircleAlert, Database, KeyRound, Play, Plus, Search } from "lucide-react";
-import {
-  type FormEvent,
-  memo,
-  useCallback,
-  useEffect,
-  useEffectEvent,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type FormEvent, memo, useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { useProjectFileQuery } from "~/components/files/projectFilesQueryState";
 import { Button } from "~/components/ui/button";
@@ -150,7 +140,7 @@ const TableList = memo(function TableList({
       type="button"
       onClick={() => onOpen(name)}
       className={cn(
-        "flex h-7 w-full cursor-pointer items-center rounded-(--control-radius) px-2.5 text-left text-ui outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "flex h-7 w-full cursor-pointer items-center rounded-(--control-radius) px-2.5 text-left text-ui outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
         name === selected
           ? "bg-(--shell-highlight) text-foreground"
           : "text-muted-foreground hover:bg-foreground/4 hover:text-foreground",
@@ -203,6 +193,7 @@ interface LoadState<T> {
 function useKeyedLoad<T>(key: string | null, load: () => Promise<T>) {
   const [state, setState] = useState<LoadState<T> | null>(null);
   const start = useEffectEvent(load);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs the keyed desktop database read and drops stale results
   useEffect(() => {
     if (key === null) return;
     let cancelled = false;
@@ -223,7 +214,7 @@ function useKeyedLoad<T>(key: string | null, load: () => Promise<T>) {
 }
 
 const fieldClass =
-  "h-8 w-full rounded-(--toolbar-radius) border border-(--shell-divider-header)! bg-(--shell-field) px-3 text-ui text-foreground outline-none placeholder:text-muted-foreground/70 focus-visible:ring-1 focus-visible:ring-ring";
+  "h-8 w-full rounded-(--toolbar-radius) border border-(--shell-divider-header)! bg-(--shell-field) px-3 text-ui text-foreground outline-none placeholder:text-muted-foreground/70 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -636,16 +627,10 @@ export function DatabasePanel({
   };
 
   const tables = tablesLoad.data;
-  const visibleTables = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
-    return (tables ?? []).filter((name) => name.toLowerCase().includes(needle));
-  }, [tables, filter]);
+  const needle = filter.trim().toLowerCase();
+  const visibleTables = (tables ?? []).filter((name) => name.toLowerCase().includes(needle));
   // A stable identity for TableList; it always calls the latest `openTable`.
-  const openTableRef = useRef(openTable);
-  useLayoutEffect(() => {
-    openTableRef.current = openTable;
-  });
-  const onOpenTable = useCallback((name: string) => openTableRef.current(name), []);
+  const onOpenTable = useStableCallback((name: string) => openTable(name));
   const store = useDatabaseStore.getState;
 
   return (

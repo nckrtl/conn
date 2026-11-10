@@ -10,14 +10,10 @@ import { DATABASE_RUN_CHANNEL } from "../channels.ts";
 import { openSshTunnel, type SshTunnel } from "./sshTunnel.ts";
 import { vaultCredential, type VaultTls } from "./vault.ts";
 
-// The Database panel's runner. The desktop main process connects directly (no T3 server
-// change) and keeps one open connection per database, so a query costs one round trip instead
-// of a new login each time. A connection closes after IDLE_MS without use. Everything is
-// read-only: only reading statements may run. MySQL sessions are set read-only once; PostgreSQL
-// runs each call in a pipelined read-only transaction that is rolled back, which also undoes any
-// session setting a query changes. SQLite opens the file read-only. A Vault connection carries
-// only its entry id; Vault is asked for its credentials when the connection opens, and they live
-// only as long as that connection.
+// The Database panel's read-only runner: one pooled connection per database, closed after IDLE_MS.
+// MySQL sessions are read-only; PostgreSQL wraps each call in a rolled-back read-only transaction;
+// SQLite opens read-only. Vault credentials are fetched when a connection opens and live only as
+// long as it.
 
 const ROW_LIMIT = 500;
 const TIMEOUT_SECONDS = 30;

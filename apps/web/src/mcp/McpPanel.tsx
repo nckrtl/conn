@@ -10,7 +10,7 @@ import {
   Trash2,
   Unplug,
 } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useProjectFileQuery } from "~/components/files/projectFilesQueryState";
 import { Badge } from "~/components/ui/badge";
@@ -375,9 +375,11 @@ function LogTab({ log }: { log: readonly McpLogEntry[] }) {
   const scroller = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   // Follow new traffic while the view is scrolled to the end.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the log scroller DOM pinned to the end while new traffic arrives
   useLayoutEffect(() => {
     const element = scroller.current;
     if (element && atBottom.current) element.scrollTop = element.scrollHeight;
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- New log entries grow the scroller, so it re-pins to the end.
   }, [log]);
   if (log.length === 0) {
     return <EmptyState>Messages between the panel and the server appear here.</EmptyState>;
@@ -432,6 +434,7 @@ export function McpPanel({
   const mcpJson = useProjectFileQuery(environmentId, cwd, ".mcp.json");
   const projectServers = mcpJson.data ? serversFromMcpJson(mcpJson.data.contents) : [];
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- seeds the persisted server store with a first server for a new project
   useEffect(() => {
     if (servers.length === 0) useMcpServerStore.getState().add(projectKey, newMcpServer(baseUrl));
   }, [baseUrl, projectKey, servers.length]);
@@ -452,42 +455,36 @@ export function McpPanel({
     if (agentRequest) takeAgentRequest(agentRequest);
   }, [agentRequest, takeAgentRequest]);
 
-  const change = useCallback(
-    (patch: Partial<McpServerDraft>) => {
-      if (selected) useMcpServerStore.getState().change(projectKey, selected.id, patch);
-    },
-    [projectKey, selected],
-  );
+  const change = (patch: Partial<McpServerDraft>) => {
+    if (selected) useMcpServerStore.getState().change(projectKey, selected.id, patch);
+  };
 
   const connected = session.status === "connected";
   const connecting = session.status === "connecting";
 
-  const toggle = useCallback(
-    (event?: FormEvent) => {
-      event?.preventDefault();
-      if (!selected || !available) return;
-      if (connected || connecting) {
-        void disconnectMcp(sessionKey);
-        return;
-      }
-      const server = toDesktopMcpServer(selected, cwd);
-      if ("error" in server) {
-        useMcpSessionStore.setState((state) => ({
-          sessions: {
-            ...state.sessions,
-            [sessionKey]: {
-              ...EMPTY_MCP_SESSION,
-              ...state.sessions[sessionKey],
-              error: server.error,
-            },
+  const toggle = (event?: FormEvent) => {
+    event?.preventDefault();
+    if (!selected || !available) return;
+    if (connected || connecting) {
+      void disconnectMcp(sessionKey);
+      return;
+    }
+    const server = toDesktopMcpServer(selected, cwd);
+    if ("error" in server) {
+      useMcpSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [sessionKey]: {
+            ...EMPTY_MCP_SESSION,
+            ...state.sessions[sessionKey],
+            error: server.error,
           },
-        }));
-        return;
-      }
-      void connectMcp(sessionKey, server);
-    },
-    [available, connected, connecting, cwd, selected, sessionKey],
-  );
+        },
+      }));
+      return;
+    }
+    void connectMcp(sessionKey, server);
+  };
 
   if (!selected) return null;
   const capabilities = session.info?.capabilities;

@@ -56,6 +56,7 @@ function TestLoginForm(props: TestLoginDialogProps) {
   const [saving, setSaving] = useState(false);
 
   // Editing loads the stored secrets into the form.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- fetches the saved test login's secret from the server when the dialog opens for it
   useEffect(() => {
     if (!login) return;
     let cancelled = false;

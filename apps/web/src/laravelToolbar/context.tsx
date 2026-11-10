@@ -1,4 +1,4 @@
-import { createContext, type ReactNode, useContext, useEffect, useMemo } from "react";
+import { createContext, type ReactNode, useContext, useEffect } from "react";
 
 import type { OrbitSource } from "./orbit";
 import { type TabToolbar, useLaravelToolbarStore } from "./store";
@@ -35,7 +35,7 @@ export function ToolbarProvider({
   children: ReactNode;
 }) {
   const orbit = useOrbit(source.orbit ?? null);
-  const value = useMemo(() => ({ tabId, source, orbit }), [tabId, source, orbit]);
+  const value = { tabId, source, orbit };
   return <ToolbarContext.Provider value={value}>{children}</ToolbarContext.Provider>;
 }
 
@@ -59,6 +59,7 @@ export function useToolbarTab() {
   const selected = selectedId ? (tab.details[selectedId] ?? null) : null;
 
   // History rows arrive as summaries; load the full payload when one is selected.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- fetches request details from the toolbar source for the selected request
   useEffect(() => {
     if (!selectedId || tab.details[selectedId]) return;
     let cancelled = false;

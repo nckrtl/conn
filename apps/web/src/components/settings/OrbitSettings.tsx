@@ -7,7 +7,7 @@ import {
   type OrbitGatewayProfile,
   type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { setEnvironmentProvider, useEnvironmentProvider } from "~/orbit/environmentProvider";
 import {
@@ -33,6 +33,7 @@ import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
 interface GatewayView {
   readonly node: OrbitGatewayNode;
@@ -64,7 +65,7 @@ function relativeTime(at: number | null): string {
  */
 export function EnvironmentProviderSection() {
   const provider = useEnvironmentProvider((state) => state.provider);
-  const orbitAvailable = useMemo(() => desktopOrbitGatewayClient() !== null, []);
+  const orbitAvailable = !!window.desktopBridge?.orbitGatewaySend;
   if (!orbitAvailable && provider === "default") return null;
 
   return (
@@ -269,7 +270,8 @@ function ProfileSyncSection({ profileName }: { readonly profileName: string | nu
  * and the Gateway's T3 servers. Workspaces are edited on the desktop; pairing is automatic.
  */
 export function OrbitEnvironmentSections() {
-  const client = useMemo(() => desktopOrbitGatewayClient(), []);
+  // One client per mount: the load effect below must not restart on every render.
+  const [client] = useState(desktopOrbitGatewayClient);
   const sync = useOrbitProfileSyncStatus();
   const { environments: savedEnvironments } = useEnvironments();
   const [view, setView] = useState<GatewayView | null>(null);
@@ -277,7 +279,7 @@ export function OrbitEnvironmentSections() {
   const [newProfileName, setNewProfileName] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useStableCallback(async () => {
     if (!client) return;
     try {
       const [node, profiles, environments] = await Promise.all([
@@ -290,10 +292,12 @@ export function OrbitEnvironmentSections() {
     } catch (error) {
       setLoadError(message(error));
     }
-  }, [client]);
+  });
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Orbit Gateway on mount and after each profile sync
   useEffect(() => {
     void load();
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A finished profile sync can change the node and profiles, so the view reloads.
   }, [load, sync.syncedAt]);
 
   const bindProfile = async (profile: { readonly id: number } | { readonly name: string }) => {
@@ -307,9 +311,9 @@ export function OrbitEnvironmentSections() {
       syncOrbitProfileNow();
     } catch (error) {
       toastManager.add({ type: "error", title: "Orbit", description: message(error) });
-    } finally {
-      setBusy(false);
     }
+    // Not in `finally`: the React Compiler cannot compile a finalizer clause.
+    setBusy(false);
   };
 
   const connected = new Set(

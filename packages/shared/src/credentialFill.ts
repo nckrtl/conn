@@ -115,11 +115,9 @@ export const CREDENTIAL_PREPARE_FUNCTION = `function (field) {
 }`;
 
 /**
- * Writes only to the bound input. CDP Input.insertText can reach the host's
- * focused composer when a webview is inactive, so credentials must never use
- * keyboard routing. The native setter also supports controlled React inputs.
- * With `lockDocument`, a password or code first marks the document for
- * `CREDENTIAL_LOCK_EXPRESSION`; no value goes in unless the mark holds.
+ * Writes only to the bound input, never through keyboard routing: CDP Input.insertText can reach
+ * the host's focused composer. The native setter supports controlled React inputs. With
+ * `lockDocument`, a secret goes in only while the `CREDENTIAL_LOCK_EXPRESSION` mark holds.
  */
 export const CREDENTIAL_INSERT_FUNCTION = `function (field, value, expectedOrigin, lockDocument) {
   const element = this;

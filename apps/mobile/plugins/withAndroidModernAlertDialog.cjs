@@ -9,12 +9,9 @@ const {
   withDangerousMod,
 } = require("expo/config-plugins");
 
-// React Native's Alert renders an AppCompat AlertDialog on Android, which
-// inherits the dated framework dialog chrome (square gray panel, teal
-// all-caps buttons) from the app theme. These resources restyle it with the
-// generated default palette: card panel, foreground text, readable primary
-// buttons, system type. Alert exposes no runtime custom-palette API, so these
-// build-time resources use the stock palette for each native appearance.
+// Restyles React Native's Android AlertDialog (dated AppCompat chrome) with the generated default
+// palette. Alert has no runtime palette API, so these build-time resources use the stock palette
+// for each native appearance.
 
 // AppCompat's default dialog window background is an inset rounded rect, so
 // the replacement keeps the same 16dp inset to preserve the dialog's margins.

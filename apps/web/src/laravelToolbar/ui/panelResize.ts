@@ -4,12 +4,13 @@ import {
   type KeyboardEvent,
   type RefObject,
   useLayoutEffect,
-  useRef,
   useState,
 } from "react";
 
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { useResizeDrag } from "~/hooks/useResizeDrag";
+import { observeResize } from "~/lib/observeResize";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
 const STORAGE_KEY = "t3code:laravel-toolbar-panel-height";
 const DEFAULT_HEIGHT = 384;
@@ -41,6 +42,7 @@ export function useToolbarPanelResize(
 ) {
   const [preferredHeight, setPreferredHeight] = useState(readHeight);
   const [availableHeight, setAvailableHeight] = useState(DEFAULT_HEIGHT);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the space above the toolbar and follows DOM resizes
   useLayoutEffect(() => {
     const host = hostRef.current;
     const parent = host?.parentElement;
@@ -56,20 +58,14 @@ export function useToolbarPanelResize(
       );
     };
     measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(parent);
-    observer.observe(page);
-    observer.observe(host);
-    return () => observer.disconnect();
+    return observeResize([parent, page, host], measure);
   }, [hostRef]);
 
   const minHeight = Math.min(MIN_HEIGHT, availableHeight);
   const clamp = (value: number) => Math.max(minHeight, Math.min(availableHeight, value));
   const height = clamp(preferredHeight);
-  const clampRef = useRef(clamp);
-  useLayoutEffect(() => {
-    clampRef.current = clamp;
-  });
+  // The drag handler reads the latest bounds without restarting the drag.
+  const clampLatest = useStableCallback(clamp);
 
   const handlers = useResizeDrag<HTMLDivElement>((event) => {
     if (
@@ -84,7 +80,7 @@ export function useToolbarPanelResize(
       edge: "top",
       bounds: { min: minHeight, max: availableHeight },
       resize(value) {
-        const nextHeight = clampRef.current(value);
+        const nextHeight = clampLatest(value);
         setPreferredHeight(nextHeight);
         return nextHeight;
       },

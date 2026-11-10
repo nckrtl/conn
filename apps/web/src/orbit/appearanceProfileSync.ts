@@ -33,15 +33,9 @@ import {
 } from "../themePalette";
 
 /**
- * What the profile's `appearance` section carries and how this desktop reads and applies it:
- * the light/dark mode, contrast, one theme per appearance (slot) and the custom theme library.
- * The accent travels inside the themes. Everything goes through the public theme functions, so
- * the theme code stays as upstream has it.
- *
- * A slot names a stock or built-in theme by id; a custom or published theme carries its resolved
- * palette, so a device that lacks the theme still renders it. Palettes of themes the device lacks
- * are installed in the read-only "From profile" collection. They never sync back, and the live
- * published theme replaces the copy as soon as the environment publishes it.
+ * The profile's `appearance` section: mode, contrast, one theme per appearance and the custom
+ * library, read and applied through the public theme functions. Custom and published themes carry
+ * their palette; missing ones install read-only in "From profile" and never sync back.
  */
 
 export const PROFILE_THEME_COLLECTION = { id: "orbit-profile", label: "From profile" } as const;
@@ -80,11 +74,9 @@ function readRawTheme(): string {
 }
 
 /**
- * The slot for one appearance, or null when the theme it names cannot be resolved yet. A
- * published theme resolves only after its environment streamed the palette in, and the
- * stored preference reads as unknown until then; sending "stock" for it would overwrite the
- * profile. `last` is the slot the profile last agreed on: it stands in for an unresolved theme
- * it already names.
+ * The slot for one appearance, or null while its theme cannot resolve yet: sending "stock" for an
+ * unstreamed published theme would overwrite the profile. `last`, the slot the profile last agreed
+ * on, stands in for an unresolved theme it already names.
  */
 function slotFor(
   appearance: ThemeAppearance,

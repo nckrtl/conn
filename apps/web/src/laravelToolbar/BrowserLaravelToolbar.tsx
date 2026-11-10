@@ -1,7 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { useMemo } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { RenderErrorBoundary } from "~/components/RenderErrorBoundary";
@@ -43,16 +42,15 @@ function useOrbitSource(threadRef: ScopedThreadRef, pageUrl: string): OrbitSourc
   const domain = hostname(pageUrl);
   const environmentId = project?.environmentId ?? null;
   const cwd = project?.workspaceRoot ?? null;
-  return useMemo(() => {
-    if (!environmentId || !cwd || !domain) return null;
-    const key = `${environmentId}\u0000${cwd}\u0000${domain}`;
-    let source = orbitSources.get(key);
-    if (!source) {
-      source = gatewayOrbitSource(createTerminalOrbitTransport({ environmentId, cwd }), domain);
-      orbitSources.set(key, source);
-    }
-    return source;
-  }, [cwd, domain, environmentId]);
+  if (!environmentId || !cwd || !domain) return null;
+  // The module cache keeps one source per key, so its identity is stable across renders.
+  const key = `${environmentId}\u0000${cwd}\u0000${domain}`;
+  let source = orbitSources.get(key);
+  if (!source) {
+    source = gatewayOrbitSource(createTerminalOrbitTransport({ environmentId, cwd }), domain);
+    orbitSources.set(key, source);
+  }
+  return source;
 }
 
 /**
@@ -81,19 +79,16 @@ export function BrowserLaravelToolbar({
   const projectRoot = useThreadProject(threadRef)?.workspaceRoot ?? null;
   // Source paths come from the server that runs the page; they open when this thread's
   // environment is that machine. The page supplies them, so only paths inside the project open.
-  const source = useMemo(
-    () => ({
-      ...browserToolbarSource(tabId, (target) => {
-        if (projectRoot && isPathInsideProject(target, projectRoot)) {
-          void openInPreferredEditor(target);
-        }
-      }),
-      ...(fetchDetails ? { fetchDetails } : {}),
-      openQuery: (sql: string) => openDatabaseQuery(threadRef, sql),
-      orbit,
+  const source = {
+    ...browserToolbarSource(tabId, (target) => {
+      if (projectRoot && isPathInsideProject(target, projectRoot)) {
+        void openInPreferredEditor(target);
+      }
     }),
-    [fetchDetails, openInPreferredEditor, orbit, projectRoot, tabId, threadRef],
-  );
+    ...(fetchDetails ? { fetchDetails } : {}),
+    openQuery: (sql: string) => openDatabaseQuery(threadRef, sql),
+    orbit,
+  };
   if (!tab?.currentId) return null;
   // The payload comes from the page. Data the bar cannot show hides the bar until new data
   // arrives; it never takes the app down.

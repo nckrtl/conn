@@ -38,6 +38,7 @@ export function VaultwardenSettings() {
   const [message, setMessage] = useState<string | null>(null);
   const [checked, setChecked] = useState(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Vaultwarden connection status from the desktop bridge
   useEffect(() => {
     if (!setup) return;
     let current = true;
@@ -90,9 +91,7 @@ export function VaultwardenSettings() {
       );
       if (result.error) {
         setMessage(result.error);
-        return;
-      }
-      if (save) {
+      } else if (save) {
         setConnection(result.connection);
         close();
         setMessage(
@@ -109,9 +108,9 @@ export function VaultwardenSettings() {
       }
     } catch {
       setMessage("Vaultwarden setup did not finish. Nothing was saved.");
-    } finally {
-      setPendingAction(null);
     }
+    // Not in `finally`: the React Compiler cannot compile a finalizer clause.
+    setPendingAction(null);
   };
   const disconnect = async () => {
     setPendingAction("disconnect");
@@ -119,16 +118,15 @@ export function VaultwardenSettings() {
       const result = await setup({ action: "disconnect" });
       if (result.error) {
         setMessage(result.error);
-        return;
+      } else {
+        setConnection(null);
+        close();
+        setMessage("Local connection removed. Your Vaultwarden account and items were kept.");
       }
-      setConnection(null);
-      close();
-      setMessage("Local connection removed. Your Vaultwarden account and items were kept.");
     } catch {
       setMessage("Could not remove the local connection.");
-    } finally {
-      setPendingAction(null);
     }
+    setPendingAction(null);
   };
 
   return (

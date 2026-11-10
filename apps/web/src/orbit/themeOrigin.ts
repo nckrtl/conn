@@ -1,10 +1,7 @@
 /**
- * Marks theme changes the user did not make. The profile sync shares the user's own picks only,
- * so a theme an environment pushes (`t3 theme set`, applied by `startDefaultThemeAdoption`) must
- * not reach the other devices.
- *
- * `asDefaultThemeAdoption` wraps the change; every tracker registered here is told before and
- * after it, and the profile sync uses that to treat the resulting appearance as not edited.
+ * Marks theme changes the user did not make. The profile sync shares only the user's own picks,
+ * so a theme an environment pushes (`startDefaultThemeAdoption`) must not reach other devices.
+ * `asDefaultThemeAdoption` wraps such a change and tells every registered tracker around it.
  */
 
 type BeginTracking = () => () => void;

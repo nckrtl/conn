@@ -1,6 +1,6 @@
 import type { DesktopApiResponse, ScopedThreadRef } from "@t3tools/contracts";
 import { ChevronDown, List, SendHorizontal } from "lucide-react";
-import { type FormEvent, useCallback, useEffect } from "react";
+import { type FormEvent, useEffect } from "react";
 
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
@@ -213,38 +213,33 @@ export function ApiPanel({
   const toolbarTabId = `api:${projectKey}`;
   const apiSend = typeof window !== "undefined" ? window.desktopBridge?.apiSend : undefined;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- seeds the persisted request store with a first request for a new project
   useEffect(() => {
     if (requests.length === 0)
       useApiRequestStore.getState().add(projectKey, newApiRequest(baseUrl));
   }, [baseUrl, projectKey, requests.length]);
 
-  const change = useCallback(
-    (patch: Partial<ApiRequestDraft>) => {
-      if (selected) useApiRequestStore.getState().change(projectKey, selected.id, patch);
-    },
-    [projectKey, selected],
-  );
+  const change = (patch: Partial<ApiRequestDraft>) => {
+    if (selected) useApiRequestStore.getState().change(projectKey, selected.id, patch);
+  };
 
-  const send = useCallback(
-    async (event?: FormEvent) => {
-      event?.preventDefault();
-      if (!selected || !apiSend || result?.sending) return;
-      const store = useApiRequestStore.getState();
-      const request = selected;
-      store.setResult(request.id, { response: result?.response ?? null, sending: true });
-      const response = await apiSend({
-        method: request.method,
-        url: request.url.trim(),
-        headers: request.headers
-          .filter((row) => row.enabled && row.name.trim())
-          .map((row) => ({ name: row.name.trim(), value: row.value })),
-        body: request.body === "" ? null : request.body,
-      }).catch((error: unknown) => failedResponse(request.url, error));
-      store.setResult(request.id, { response, sending: false });
-      if (!response.error) receiveToolbarData(toolbarTabId, request, response);
-    },
-    [apiSend, result, selected, toolbarTabId],
-  );
+  const send = async (event?: FormEvent) => {
+    event?.preventDefault();
+    if (!selected || !apiSend || result?.sending) return;
+    const store = useApiRequestStore.getState();
+    const request = selected;
+    store.setResult(request.id, { response: result?.response ?? null, sending: true });
+    const response = await apiSend({
+      method: request.method,
+      url: request.url.trim(),
+      headers: request.headers
+        .filter((row) => row.enabled && row.name.trim())
+        .map((row) => ({ name: row.name.trim(), value: row.value })),
+      body: request.body === "" ? null : request.body,
+    }).catch((error: unknown) => failedResponse(request.url, error));
+    store.setResult(request.id, { response, sending: false });
+    if (!response.error) receiveToolbarData(toolbarTabId, request, response);
+  };
 
   if (!selected) return null;
   const sending = result?.sending ?? false;

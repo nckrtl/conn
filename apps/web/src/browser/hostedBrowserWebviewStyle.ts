@@ -50,11 +50,9 @@ export function resolveHostedBrowserWebviewWrapperStyle(input: {
   }
 
   if (renderingActive) {
-    // Electron stops compositing a guest that is fully outside the window, even
-    // when background throttling is disabled. Keep capture-active guests inside
-    // the viewport so recordings receive complete frames. A negative z-index alone
-    // leaks the native guest through translucent shells after a thread switch.
-    // Composite it at zero opacity; guest captures retain their own page pixels.
+    // Electron stops compositing a guest fully outside the window, so capture-active guests stay
+    // in the viewport for complete recording frames. A negative z-index alone leaks the guest
+    // through translucent shells; zero opacity hides it and captures keep their own pixels.
     return {
       left: 0,
       top: 0,

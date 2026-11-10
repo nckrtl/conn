@@ -1,16 +1,8 @@
 /**
- * The desktop app's identity: name, app id, link scheme and user-data folder.
- *
- * Upstream T3 Code is the default. A fork can rename the app by passing its own
- * values to `resolveAppBrand` (the nckrtl fork ships them in `forkBrand.json`),
- * and a build can override single values with the environment variables below.
- * Everything that shows the name or the scheme reads it from here, so a rename
- * stays one file and upstream code keeps its own defaults.
- *
- * `appBrand` is what the running main process uses. The desktop bundle bakes it
- * in at build time (`__T3CODE_APP_BRAND__`, see `vite.config.ts`); anything that
- * is not that bundle, such as unit tests, gets upstream's identity. Build and
- * launcher scripts resolve the brand themselves with `resolveAppBrand`.
+ * The desktop app's identity: name, app id, link scheme and user-data folder. Upstream's is the
+ * default; a fork passes its own to `resolveAppBrand` (Conn: `forkBrand.json`), and env vars below
+ * override single values. The main process uses `appBrand`, baked in at build time
+ * (`__T3CODE_APP_BRAND__`); unit tests get upstream's identity.
  */
 
 export type AppBrandStage = "Alpha" | "Beta" | "Dev" | "Nightly";

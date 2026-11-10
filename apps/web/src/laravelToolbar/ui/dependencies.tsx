@@ -19,6 +19,7 @@ export function useOrbitDependencies() {
     data?: OrbitDependencies;
     error?: string;
   }>();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the Instance's dependency report from Orbit
   useEffect(() => {
     if (!source || instanceId === null) return;
     let cancelled = false;

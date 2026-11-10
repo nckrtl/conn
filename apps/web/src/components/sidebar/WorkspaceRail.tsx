@@ -25,7 +25,7 @@ import {
   SettingsIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { type ComponentProps, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ComponentProps, type ReactNode, useEffect, useState } from "react";
 
 import { canOpenDesktopWindows, openDesktopWorkspaceWindow } from "../../lib/desktopWindowContext";
 import { cn } from "../../lib/utils";
@@ -129,7 +129,7 @@ function RailButton({
             className={cn(
               // Concentric with the badge inside, so the selected ring follows its curve.
               "relative flex size-9.5 shrink-0 items-center justify-center rounded-rail text-muted-foreground",
-              "outline-none hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring",
+              "outline-none hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
               // Selected: a 2px near-white inset ring (no layout shift) over the subtle row fill.
               active &&
                 "bg-sidebar-row-active text-sidebar-foreground ring-2 ring-inset ring-sidebar-foreground/90 hover:bg-sidebar-row-active",
@@ -182,22 +182,14 @@ export function WorkspaceRail({ isElectron }: { isElectron: boolean }) {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const attention = useMemo(
-    () =>
-      new Map(
-        workspaces.map((workspace) => [
-          workspace.id,
-          workspaceAttention(
-            workspaceThreads(
-              threads,
-              workspaceProjectRefs(workspace, projects),
-              delegatedUnderParent,
-            ),
-            visited,
-          ),
-        ]),
+  const attention = new Map(
+    workspaces.map((workspace) => [
+      workspace.id,
+      workspaceAttention(
+        workspaceThreads(threads, workspaceProjectRefs(workspace, projects), delegatedUnderParent),
+        visited,
       ),
-    [delegatedUnderParent, projects, threads, visited, workspaces],
+    ]),
   );
   // The dialog keeps its target while it animates closed; `session` remounts
   // its form each time it opens.
@@ -212,6 +204,7 @@ export function WorkspaceRail({ isElectron }: { isElectron: boolean }) {
   });
   const setEditing = (target: Workspace | "new") =>
     setDialog((current) => ({ target, open: true, session: current.session + 1 }));
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes a document keydown listener for the workspace shortcuts
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -268,7 +261,7 @@ export function WorkspaceRail({ isElectron }: { isElectron: boolean }) {
             <LayersIcon className="size-4" />
           </span>
         </RailButton>
-        <div className="mt-2 flex min-h-0 w-full flex-1 flex-col items-center gap-2 overflow-y-auto pb-2">
+        <div className="mt-2 flex min-h-0 w-full flex-1 flex-col items-center gap-2 overflow-y-auto scrollbar-gutter-both pb-2">
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -428,6 +421,7 @@ function RailProviderUpdate() {
   });
   const viewKey = view?.key;
   const dismissAfterMs = view?.dismissAfterVisibleMs;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- dismisses the notice after a timer
   useEffect(() => {
     if (!viewKey || !dismissAfterMs) return;
     const timeout = window.setTimeout(

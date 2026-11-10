@@ -35,6 +35,7 @@ export default function AnnotationOverlay() {
   const fontSize = resolveToolbarFontSize(data.font_size);
   const { color: accentColor, textColor: accentTextColor } = useAnnotationAccent();
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes the font size onto the overlay root DOM element
   useEffect(() => {
     const root = getAnnotationRootElement();
     root?.setAttribute("data-toolbar-font-size", fontSize);

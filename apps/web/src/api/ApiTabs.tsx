@@ -31,7 +31,7 @@ export function ApiTabs<T extends string>({
           type="button"
           onClick={() => onChange(tab.id)}
           className={cn(
-            "relative flex cursor-pointer items-center gap-1.5 rounded-sm text-ui outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "relative flex cursor-pointer items-center gap-1.5 rounded-sm text-ui outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
             value === tab.id ? "text-foreground" : "text-muted-foreground hover:text-foreground",
           )}
         >

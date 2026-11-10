@@ -1,15 +1,9 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off - a one-off asset generator run by hand.
 /**
- * Builds Conn's iOS custom symbols: one `.symbolset` per entry in
- * apps/mobile/modules/conn-symbols/symbols.json, drawn from the Phosphor icon it
- * names. The conn-symbols module ships them and returns them in place of the SF
- * Symbol of the same name (see ConnSymbols.swift).
- *
- * The Phosphor paths come from @phosphor-icons/react, a dependency of apps/web.
- * Run this after changing symbols.json and commit the output:
- *
- *   node scripts/build-conn-symbols.ts
+ * Builds Conn's iOS custom symbols, one `.symbolset` per `symbols.json` entry, from the Phosphor
+ * icons in @phosphor-icons/react (see ConnSymbols.swift). Run it after changing symbols.json and
+ * commit the output: `node scripts/build-conn-symbols.ts`.
  */
 import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";

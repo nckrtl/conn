@@ -16,15 +16,9 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 /**
- * The client settings that follow the user between desktops through the profile's
- * `devices.desktop` section: how the app looks and reads (fonts, sizes, chat width, glass,
- * motion, diffs, timestamps, environment identification). Appearance contrast travels with the
- * appearance section instead.
- *
- * Machine-bound settings stay out on purpose: browser defaults and profiles, the annotation
- * dictation URLs (they name services on one machine), snapshot shortcuts and sounds,
- * quit and notification behavior, onboarding state, model favorites, sidebar layout, and
- * anything that holds an id or path of one install.
+ * Client settings that follow the user between desktops (`devices.desktop`): how the app looks and
+ * reads. Machine-bound settings stay out: browser profiles, dictation URLs, shortcuts, sounds,
+ * quit and notification behavior, onboarding, favorites, layout, and install ids or paths.
  */
 export const DESKTOP_SYNCED_SETTING_KEYS = [
   "fontFamilySans",

@@ -30,6 +30,7 @@ export function OrbitAppearanceSync() {
     JSON.stringify(readDesktopDeviceSection(settings)),
   );
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the appearance and device channels with the profile sync engine while mounted
   useEffect(() => {
     if (!settingsHydrated) return;
     return setProfileSyncChannels([
@@ -48,12 +49,16 @@ export function OrbitAppearanceSync() {
   }, [settingsHydrated, setTheme, setThemeHalf, setAppearanceMode]);
 
   // A copy of a theme from the profile gives way once the environment publishes it live.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops local profile theme copies once an environment publishes the live theme
   useEffect(() => {
     pruneProfileThemeCopies();
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A newly published environment theme replaces its profile copy.
   }, [environmentThemes]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tells the profile sync engine that a synced setting changed
   useEffect(() => {
     if (settingsHydrated) notifyLocalProfileChange();
+    /* oxlint-disable react/exhaustive-effect-dependencies -- Each listed setting is a trigger: a change to any of them is a local profile edit. */
   }, [
     settingsHydrated,
     theme,
@@ -65,6 +70,7 @@ export function OrbitAppearanceSync() {
     environmentThemes,
     deviceValues,
   ]);
+  /* oxlint-enable react/exhaustive-effect-dependencies */
 
   return null;
 }

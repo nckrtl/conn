@@ -1,9 +1,11 @@
 import type { DiffsHighlighter, ThemedToken } from "@pierre/diffs";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useTheme } from "~/hooks/useTheme";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { getSyntaxHighlighterPromise } from "~/lib/syntaxHighlighting";
+import { observeResize } from "~/lib/observeResize";
+import { useStableCallback } from "~/hooks/useStableCallback";
 
 // Past this size the per-keystroke tokenizing is not worth it; show plain text.
 const MAX_HIGHLIGHTED_CHARS = 20_000;
@@ -15,12 +17,23 @@ const UNDERLINE = 4;
 
 type Tokens = ThemedToken[][];
 
+function highlightSql(
+  highlighter: DiffsHighlighter | null,
+  value: string,
+  themeName: ReturnType<typeof resolveDiffThemeName>,
+): Tokens | null {
+  if (!highlighter || value.length > MAX_HIGHLIGHTED_CHARS) return null;
+  try {
+    return highlighter.codeToTokens(value, { lang: "sql", theme: themeName }).tokens;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The query editor. A transparent-text textarea sits over a `<pre>` that shows
- * the same text highlighted with the shared code highlighter and the theme that
- * file views and code blocks use. The textarea stays the real input; the
- * `<pre>` only mirrors its text, wrapping and scroll position. The SQL grammar
- * loads lazily, and the query shows as plain text until it is ready.
+ * The query editor: a transparent-text textarea, the real input, over a `<pre>` that mirrors its
+ * text, wrapping and scroll with the shared highlighter. The SQL grammar loads lazily, so the
+ * query shows as plain text until it is ready.
  */
 export function SqlEditor({
   value,
@@ -37,6 +50,7 @@ export function SqlEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const overlayRef = useRef<HTMLPreElement>(null);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the shared SQL highlighter module
   useEffect(() => {
     let cancelled = false;
     getSyntaxHighlighterPromise("sql").then(
@@ -50,32 +64,25 @@ export function SqlEditor({
     };
   }, []);
 
-  const tokens = useMemo<Tokens | null>(() => {
-    if (!highlighter || value.length > MAX_HIGHLIGHTED_CHARS) return null;
-    try {
-      return highlighter.codeToTokens(value, { lang: "sql", theme: themeName }).tokens;
-    } catch {
-      return null;
-    }
-  }, [highlighter, value, themeName]);
+  const tokens = highlightSql(highlighter, value, themeName);
 
   // Keep the overlay's content box and scroll position identical to the
   // textarea's, including when the textarea shows a scrollbar.
-  const syncOverlay = useCallback(() => {
+  const syncOverlay = useStableCallback(() => {
     const textarea = textareaRef.current;
     const overlay = overlayRef.current;
     if (!textarea || !overlay) return;
     overlay.style.width = `${textarea.clientWidth}px`;
     overlay.scrollTop = textarea.scrollTop;
     overlay.scrollLeft = textarea.scrollLeft;
-  }, []);
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- copies the textarea's width and scroll onto the overlay DOM after each render
   useLayoutEffect(syncOverlay);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- resubscribes the overlay sync to textarea resizes while mounted
   useEffect(() => {
     const textarea = textareaRef.current;
-    if (!textarea || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(syncOverlay);
-    observer.observe(textarea);
-    return () => observer.disconnect();
+    if (!textarea) return;
+    return observeResize(textarea, syncOverlay);
   }, [syncOverlay]);
 
   return (
@@ -92,7 +99,7 @@ export function SqlEditor({
               <span key={lineIndex}>
                 {line.map((token, tokenIndex) => (
                   <span
-                    // oxlint-disable-next-line react/no-array-index-key
+                    // oxlint-disable-next-line react/no-array-index-key -- highlighted tokens have no stable id
                     key={tokenIndex}
                     style={{
                       color: token.color,

@@ -9,7 +9,7 @@ import {
   type ProfileSectionName,
   type ProfileSyncRunOptions,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import { create } from "zustand";
 
 import { useWorkspaceStore } from "../workspaceStore";
@@ -236,14 +236,13 @@ function profileSyncController(): ProfileSyncController | null {
 }
 
 /**
- * Applies the environment provider and, in Orbit mode, syncs this device with its Orbit profile:
- * the workspace list, and through OrbitAppearanceSync the appearance and this desktop's settings.
- * Mounted once, in the main window of the desktop app; extra windows follow the main window
- * through the workspace and catalog storage. The sync itself is a module-level singleton, so
- * mounting this twice only adds triggers, never a second engine.
+ * Applies the environment provider and, in Orbit mode, syncs workspaces, appearance and desktop
+ * settings with the Orbit profile. Mounted once, in the main desktop window; the sync engine is a
+ * module singleton, so a second mount adds only triggers.
  */
 export function OrbitProfileSync() {
-  const available = useMemo(() => desktopOrbitGatewayClient() !== null, []);
+  const available = !!window.desktopBridge?.orbitGatewaySend;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes the profile sync engine to store changes, focus and a poll timer while mounted
   useEffect(() => {
     const sync = profileSyncController();
     if (!sync) return;

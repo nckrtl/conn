@@ -89,11 +89,9 @@ export type UserDataCopyResult =
   | { readonly status: "failed"; readonly source: string; readonly cause: unknown };
 
 /**
- * Copies the old app's folder to the new one when the new one does not exist yet. The old
- * folder is upstream's display-name folder when that exists, else its scheme folder.
- * The copy lands in a sibling folder first and is renamed into place, so a crash
- * never leaves a half-copied folder that looks complete. A failure leaves the
- * new folder absent, so the next launch tries again.
+ * Copies the old app's folder (upstream's display-name folder, else its scheme folder) to the new
+ * one when that does not exist yet. The copy lands in a sibling and is renamed into place, so a
+ * crash never leaves a half copy; a failure leaves the new folder absent for the next launch.
  */
 export function copyPreviousUserData(input: {
   readonly appDataDirectory: string;

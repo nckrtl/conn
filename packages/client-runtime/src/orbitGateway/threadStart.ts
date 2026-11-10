@@ -166,6 +166,16 @@ function isLostAdmission(error: unknown): boolean {
   );
 }
 
+/**
+ * Another Operation owns the Instance, such as an older build's create or one whose key was lost.
+ * The same create is admitted once that Operation ends.
+ */
+function isTargetBusy(error: unknown): boolean {
+  return (
+    isOrbitGatewayError(error) && error.status === 409 && error.code === "operation.target_busy"
+  );
+}
+
 function stepFailed(message: string, reset: Partial<OrbitThreadStart>): StepFailed {
   return new StepFailed({ message, reset });
 }
@@ -223,13 +233,14 @@ export async function runOrbitThreadStart(
   const admit = async (
     deadline: number,
     start: () => Promise<OrbitGatewayOperation>,
+    repeats: (error: unknown) => boolean = isLostAdmission,
   ): Promise<OrbitGatewayOperation> => {
     for (let attempt = 0; ; attempt++) {
       checkStopped();
       try {
         return await start();
       } catch (error) {
-        if (!isLostAdmission(error) || ports.now() >= deadline) throw error;
+        if (!repeats(error) || ports.now() >= deadline) throw error;
       }
       const wait = operationPollDelayMs(2 ** attempt);
       await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
@@ -243,13 +254,22 @@ export async function runOrbitThreadStart(
       const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
       if (current.createOperationId === null) {
         if (!current.createKey) update({ createKey: newKey("create") });
-        const operation = await admit(createDeadline, () =>
-          ports.client.createThreadInstance(
-            current.projectId,
-            current.instanceName,
-            current.createKey!,
-          ),
-        );
+        let operation;
+        try {
+          operation = await admit(
+            createDeadline,
+            () =>
+              ports.client.createThreadInstance(
+                current.projectId,
+                current.instanceName,
+                current.createKey!,
+              ),
+            (error) => isLostAdmission(error) || isTargetBusy(error),
+          );
+        } catch (error) {
+          if (!isTargetBusy(error)) throw error;
+          throw stepFailed("Orbit is still creating this clone; press Retry in a minute.", {});
+        }
         update({ createOperationId: operation.id, instanceId: operation.targetId });
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew

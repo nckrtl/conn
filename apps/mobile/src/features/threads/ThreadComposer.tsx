@@ -107,6 +107,7 @@ import {
   type ComposerSendPresentation,
 } from "./composerSendPresentation";
 import { compactEditorInsets } from "./compactEditorInsets";
+import { expandedToolbarReserve } from "./expandedToolbarReserve";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
 import { ComposerPopoverAnchor } from "./ComposerPopoverAnchor";
 import { ComposerQueuedEditAttachments } from "./ComposerQueuedEdit";
@@ -147,7 +148,7 @@ function collapsedEditorInset(text: ScaledTextRole): number {
   return Math.max(0, Math.round(COLLAPSED_EDITOR_DEFAULT_INSET - shift));
 }
 
-function useCompactComposerEditor(appText: ScaledTextRole, value: string) {
+function useCompactComposerEditor(appText: ScaledTextRole, value: string, controlsHeight: number) {
   // The iOS editor draws at the system text size, so its measured content height is in those
   // units. Size the box and the 4-line scroll threshold in the same units, or a smaller system
   // text size caps the box at 4 lines with scrolling never switched on.
@@ -176,6 +177,7 @@ function useCompactComposerEditor(appText: ScaledTextRole, value: string) {
     (contentHeight > text.lineHeight * 1.5 ||
       (compactWidth > 0 && contentSize.width > compactWidth));
   const compactRowHeight = Math.max(44, minimum);
+  const toolbarReserve = expandedToolbarReserve(controlsHeight);
   const isRTL = I18nManager.isRTL;
   const editorStyle = useAnimatedStyle(() => ({
     position: "absolute",
@@ -190,11 +192,11 @@ function useCompactComposerEditor(appText: ScaledTextRole, value: string) {
           isRTL,
         })),
     // The full-width editor must move above the controls in the same frame it widens.
-    bottom: isExpanded ? 52 : (compactRowHeight - minimum) / 2,
+    bottom: isExpanded ? toolbarReserve : (compactRowHeight - minimum) / 2,
   }));
   return {
     isExpanded,
-    containerStyle: { height: isExpanded ? height + 52 : compactRowHeight },
+    containerStyle: { height: isExpanded ? height + toolbarReserve : compactRowHeight },
     editorStyle,
     onRowLayout: (event: { nativeEvent: { layout: { width: number } } }) => {
       rowWidth.set(event.nativeEvent.layout.width);
@@ -615,7 +617,8 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const surfacePaddingVertical = usesLargeControls ? 9 : floatingSidebarComposer ? 6 : 2;
   const [compactRowWidth, setCompactRowWidth] = useState(0);
   const compactAttachmentLimit = compactRowWidth >= 500 ? 3 : 1;
-  const compactEditor = useCompactComposerEditor(bodyText, draftMessage);
+  const [controlsHeight, setControlsHeight] = useState(0);
+  const compactEditor = useCompactComposerEditor(bodyText, draftMessage, controlsHeight);
   const showsCompactDictation = isVoiceInputPresented;
   const isToolbarVisible = isVoiceInputPresented;
   const hasEditingAttachments =
@@ -1115,6 +1118,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
               ) : null}
               <View
                 className="min-w-0 shrink flex-row items-center"
+                onLayout={(event) => setControlsHeight(event.nativeEvent.layout.height)}
                 style={
                   compactEditor.isExpanded ? { flex: 1, justifyContent: "flex-end" } : undefined
                 }

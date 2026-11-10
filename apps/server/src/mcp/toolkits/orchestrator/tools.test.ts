@@ -27,16 +27,3 @@ it("refuses a t3_thread_update whose fields do not fit its action", () => {
     true,
   );
 });
-
-it("takes only an Orbit environment id and an access for t3_environment_link_orbit", () => {
-  const tool = OrchestratorToolkit.tools.t3_environment_link_orbit;
-  const schema = Tool.getJsonSchema(tool) as {
-    readonly properties: Readonly<Record<string, unknown>>;
-    readonly required?: ReadonlyArray<string>;
-  };
-  expect(Object.keys(schema.properties).toSorted()).toEqual(["access", "environment"]);
-  expect(schema.required).toEqual(["environment"]);
-  const decode = Schema.decodeUnknownExit(tool.parametersSchema);
-  expect(Exit.isSuccess(decode({ environment: "env-clone" }))).toBe(true);
-  expect(Exit.isFailure(decode({ environment: "env-clone", access: "everything" }))).toBe(true);
-});

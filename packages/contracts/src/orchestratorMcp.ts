@@ -866,50 +866,6 @@ export const OrchestratorMcpEnvironmentLinkResult = Schema.Union([
 ]);
 export type OrchestratorMcpEnvironmentLinkResult = typeof OrchestratorMcpEnvironmentLinkResult.Type;
 
-/** Why `t3_environment_link_orbit` could not link. Each message says what to do. */
-export const OrbitEnvironmentLinkErrorCode = Schema.Literals([
-  "node_access_required",
-  "session_expired",
-  "pairing_pending",
-  "pairing_failed",
-  "environment_not_found",
-  "gateway_unreachable",
-  "links_off",
-  "target_links_off",
-  "link_failed",
-]);
-export type OrbitEnvironmentLinkErrorCode = typeof OrbitEnvironmentLinkErrorCode.Type;
-
-export const OrchestratorMcpEnvironmentLinkOrbitInput = Schema.Struct({
-  environment: TrimmedNonEmptyString.annotate({
-    description: "environment_id from Orbit's conn-environment-list.",
-  }),
-  access: Schema.optional(AuthMcpClientAccess).annotate({
-    description: "What agents here may do there. Default approval-required.",
-  }),
-});
-export type OrchestratorMcpEnvironmentLinkOrbitInput =
-  typeof OrchestratorMcpEnvironmentLinkOrbitInput.Type;
-
-export const OrchestratorMcpEnvironmentLinkOrbitResult = Schema.Union([
-  Schema.Struct({
-    status: Schema.Literal("linked"),
-    environmentId: EnvironmentId.annotate({
-      description: "Act there with this id, never the label: labels can repeat.",
-    }),
-    label: Schema.String,
-    access: AuthMcpClientAccess,
-    expiresAt: Schema.String,
-  }),
-  Schema.Struct({
-    status: Schema.Literal("failed"),
-    code: OrbitEnvironmentLinkErrorCode,
-    message: Schema.String,
-  }),
-]);
-export type OrchestratorMcpEnvironmentLinkOrbitResult =
-  typeof OrchestratorMcpEnvironmentLinkOrbitResult.Type;
-
 export const OrchestratorMcpEnvironmentUnlinkInput = Schema.Struct({
   environmentId: EnvironmentId.annotate({
     description: "The linked environment to forget, from t3_environment_links.",

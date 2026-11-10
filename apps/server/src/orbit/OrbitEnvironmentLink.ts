@@ -1,10 +1,4 @@
-import {
-  type AuthMcpClientAccess,
-  EnvironmentId,
-  type OrchestratorMcpFailure,
-  type PeerLinkError,
-  OrbitEnvironmentLinkErrorCode,
-} from "@t3tools/contracts";
+import { type AuthMcpClientAccess, EnvironmentId, type PeerLinkError } from "@t3tools/contracts";
 import {
   createOrbitGatewayClient,
   DEFAULT_ORBIT_GATEWAY_URL,
@@ -29,6 +23,20 @@ import { OrbitGateway } from "./OrbitGateway.ts";
  * one-time pairing link, takes the code from it and links with `PeerLinks`.
  * The code and the link never reach the result, an error, a log or storage.
  */
+/** Why a link failed. Each message says what to do. */
+export const OrbitEnvironmentLinkErrorCode = Schema.Literals([
+  "node_access_required",
+  "session_expired",
+  "pairing_pending",
+  "pairing_failed",
+  "environment_not_found",
+  "gateway_unreachable",
+  "links_off",
+  "target_links_off",
+  "link_failed",
+]);
+export type OrbitEnvironmentLinkErrorCode = typeof OrbitEnvironmentLinkErrorCode.Type;
+
 export class OrbitEnvironmentLinkError extends Schema.TaggedError<OrbitEnvironmentLinkError>()(
   "OrbitEnvironmentLinkError",
   { code: OrbitEnvironmentLinkErrorCode, message: Schema.String },
@@ -39,8 +47,6 @@ export interface OrbitEnvironmentLinkInput {
   readonly environmentId: string;
   readonly access: AuthMcpClientAccess;
   readonly gatewayUrl?: string;
-  /** Runs just before the link is made, after the Gateway wait, e.g. to check the caller again. */
-  readonly beforeLink?: Effect.Effect<void, OrchestratorMcpFailure>;
 }
 
 export interface OrbitEnvironmentLinked {
@@ -55,7 +61,7 @@ export class OrbitEnvironmentLink extends Context.Service<
   {
     readonly link: (
       input: OrbitEnvironmentLinkInput,
-    ) => Effect.Effect<OrbitEnvironmentLinked, OrbitEnvironmentLinkError | OrchestratorMcpFailure>;
+    ) => Effect.Effect<OrbitEnvironmentLinked, OrbitEnvironmentLinkError>;
   }
 >()("t3/orbit/OrbitEnvironmentLink") {}
 
@@ -197,7 +203,6 @@ export const makeLink = (deps: {
         "Orbit returned a pairing link this version cannot use. Update Orbit, then try again.",
       );
     }
-    if (input.beforeLink) yield* input.beforeLink;
     // Only an address that proves to be this environment receives the code.
     const linked = yield* deps.links
       .link({
@@ -229,8 +234,6 @@ const make = Effect.gen(function* () {
       clientOptions: {
         sleep: (ms) => run(Effect.sleep(ms)),
         now: () => clock.currentTimeMillisUnsafe(),
-        // MCP clients drop a tool call after about 60 s; a dropped call invites a second pairing.
-        operationTimeoutMs: 30_000,
       },
     }),
   });

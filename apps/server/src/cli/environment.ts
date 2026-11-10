@@ -163,11 +163,7 @@ const environmentLinkOrbitCommand = Command.make("link-orbit", {
           );
         }).pipe(
           // Scripts branch on the code, so it leads the message.
-          Effect.tapError((error) =>
-            error._tag === "OrbitEnvironmentLinkError"
-              ? Console.error(`${error.code}: ${error.message}`)
-              : Effect.void,
-          ),
+          Effect.tapError((error) => Console.error(`${error.code}: ${error.message}`)),
           Effect.provide(
             OrbitEnvironmentLink.layer.pipe(
               Layer.provide(Layer.succeed(OrbitGateway.OrbitGateway, gateway)),

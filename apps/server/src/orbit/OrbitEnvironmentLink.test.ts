@@ -2,7 +2,6 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   EnvironmentId,
   type PeerLink,
-  OrchestratorMcpFailure,
   type PeerLinkCreateInput,
   PeerLinkError,
 } from "@t3tools/contracts";
@@ -39,7 +38,6 @@ const run = (options: {
   readonly routes: ReadonlyArray<Route>;
   readonly enabled?: boolean;
   readonly linkError?: PeerLinkError;
-  readonly beforeLink?: Effect.Effect<void, OrchestratorMcpFailure>;
 }) =>
   Effect.gen(function* () {
     const requests: OrbitGatewayRequest[] = [];
@@ -88,7 +86,6 @@ const run = (options: {
     const result = yield* link({
       environmentId: "env-clone",
       access: "full-access",
-      ...(options.beforeLink ? { beforeLink: options.beforeLink } : {}),
     }).pipe(
       Effect.result,
       Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
@@ -260,16 +257,7 @@ describe("OrbitEnvironmentLink", () => {
               : undefined,
         ],
       });
-      assert.strictEqual(
-        result._tag === "Failure" ? result.failure._tag : null,
-        "OrbitEnvironmentLinkError",
-      );
-      assert.strictEqual(
-        result._tag === "Failure" && result.failure._tag === "OrbitEnvironmentLinkError"
-          ? result.failure.code
-          : null,
-        "session_expired",
-      );
+      assert.strictEqual(result._tag === "Failure" ? result.failure.code : null, "session_expired");
       assert.strictEqual(pairingPosts(requests), 1);
     }),
   );
@@ -281,18 +269,6 @@ describe("OrbitEnvironmentLink", () => {
         routes: [listEnvironments(), (r) => (isPairingPost(r) ? ok(other, 201) : undefined)],
       });
       assert.strictEqual(result._tag, "Failure");
-      assert.strictEqual(linkInputs.length, 0);
-    }),
-  );
-
-  it.effect("checks the caller again before it links", () =>
-    Effect.gen(function* () {
-      const denied = new OrchestratorMcpFailure({ code: "capability_denied", message: "no" });
-      const { result, linkInputs } = yield* run({
-        routes: [listEnvironments(), (r) => (isPairingPost(r) ? ok(PAIRING, 201) : undefined)],
-        beforeLink: Effect.fail(denied),
-      });
-      assert.deepStrictEqual(result._tag === "Failure" ? result.failure : null, denied);
       assert.strictEqual(linkInputs.length, 0);
     }),
   );

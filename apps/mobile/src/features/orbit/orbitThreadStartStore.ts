@@ -22,7 +22,7 @@ export interface OrbitThreadStartStore {
   readonly update: (change: (starts: OrbitThreadStart[]) => OrbitThreadStart[]) => void;
   /** Saves a start after a step. A dismissed start stays gone. */
   readonly save: (start: OrbitThreadStart) => void;
-  /** Resolves once every change so far is written. */
+  /** Resolves once every change so far is written; rejects when the last write failed. */
   readonly flush: () => Promise<void>;
 }
 
@@ -53,14 +53,41 @@ export function createOrbitThreadStartStore(
   let isLoaded = false;
   let loading: Promise<void> | null = null;
   let writing: Promise<void> = Promise.resolve();
+  let writeError: unknown = null;
   const listeners = new Set<() => void>();
 
   const emit = () => {
     for (const listener of listeners) listener();
   };
+  const load = () => {
+    loading ??= (async () => {
+      let saved: OrbitThreadStart[] = [];
+      try {
+        saved = parseOrbitThreadStarts(await storage.load());
+      } catch {
+        // An unreadable file starts empty; the next write replaces it.
+      }
+      const savedIds = new Set(saved.map((start) => start.id));
+      starts = [...saved, ...starts.filter((start) => !savedIds.has(start.id))];
+      isLoaded = true;
+      emit();
+    })();
+    return loading;
+  };
+  // Writes wait for the file to load, so a start added early cannot overwrite the saved ones.
+  // Each write takes the list as it is then, so the last one always holds every change.
   const persist = () => {
-    const text = JSON.stringify(starts);
-    writing = writing.then(() => storage.save(text)).catch(() => {});
+    writing = writing
+      .then(load)
+      .then(() => storage.save(JSON.stringify(starts)))
+      .then(
+        () => {
+          writeError = null;
+        },
+        (error: unknown) => {
+          writeError = error;
+        },
+      );
   };
   const update = (change: (current: OrbitThreadStart[]) => OrbitThreadStart[]) => {
     starts = change([...starts]);
@@ -69,21 +96,7 @@ export function createOrbitThreadStartStore(
   };
 
   return {
-    load: () => {
-      loading ??= (async () => {
-        let saved: OrbitThreadStart[] = [];
-        try {
-          saved = parseOrbitThreadStarts(await storage.load());
-        } catch {
-          // An unreadable file starts empty; the next write replaces it.
-        }
-        const savedIds = new Set(saved.map((start) => start.id));
-        starts = [...saved, ...starts.filter((start) => !savedIds.has(start.id))];
-        isLoaded = true;
-        emit();
-      })();
-      return loading;
-    },
+    load,
     loaded: () => isLoaded,
     starts: () => starts,
     subscribe: (listener) => {
@@ -93,7 +106,14 @@ export function createOrbitThreadStartStore(
     update,
     save: (start) =>
       update((current) => current.map((entry) => (entry.id === start.id ? start : entry))),
-    flush: () => writing,
+    flush: async () => {
+      await writing;
+      if (writeError !== null) {
+        throw new Error("Conn could not save the thread start on this phone.", {
+          cause: writeError,
+        });
+      }
+    },
   };
 }
 

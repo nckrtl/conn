@@ -203,6 +203,71 @@ describe("Orbit thread starts on the phone", () => {
     expect(store.starts()).toEqual([]);
   });
 
+  it("puts each key on disk before the Gateway call that uses it", async () => {
+    const file: { text: string | null } = { text: null };
+    // The write lands a tick after it starts, as a file write does; a call that does not wait
+    // for it sees the old file.
+    const slow: OrbitThreadStartStorage = {
+      load: async () => file.text,
+      save: async (text) => {
+        await Promise.resolve();
+        file.text = text;
+      },
+    };
+    const store = createOrbitThreadStartStore(slow);
+    await store.load();
+    const start = beginOrbitThreadStart(store, {
+      project,
+      message: "Fix it",
+      workspaceId: null,
+      uuid: uuids(),
+      now: 0,
+    });
+    const onDisk: string[] = [];
+    const run = ports(store);
+    const gatewayCalls = run.ports.gateway;
+    run.ports = {
+      ...run.ports,
+      gateway: {
+        ...gatewayCalls,
+        createThreadInstance: async (...args) => {
+          onDisk.push(
+            `create key saved: ${file.text?.includes('"createKey":"conn-thread-start') ?? false}`,
+          );
+          return gatewayCalls.createThreadInstance(...args);
+        },
+        startPairing: async (...args) => {
+          onDisk.push(
+            `pairing key saved: ${file.text?.includes('"pairingKey":"conn-thread-start') ?? false}`,
+          );
+          return gatewayCalls.startPairing(...args);
+        },
+      },
+    };
+    expect(await runSavedOrbitThreadStart(start.id, run.ports)).not.toBeNull();
+    expect(onDisk).toEqual(["create key saved: true", "pairing key saved: true"]);
+  });
+
+  it("stops the start when the phone cannot save a step", async () => {
+    const store = createOrbitThreadStartStore({
+      load: async () => null,
+      save: async () => {
+        throw new Error("disk full");
+      },
+    });
+    const start = beginOrbitThreadStart(store, {
+      project,
+      message: "Fix it",
+      workspaceId: null,
+      uuid: uuids(),
+      now: 0,
+    });
+    const run = ports(store);
+    expect(await runSavedOrbitThreadStart(start.id, run.ports)).toBeNull();
+    expect(run.calls).toEqual([]);
+    expect(store.starts()[0]!.error).toBe("Conn could not save the thread start on this phone.");
+  });
+
   it("maps each saved step to its stage", () => {
     const start = newOrbitThreadStart({
       id: "s",

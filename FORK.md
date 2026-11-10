@@ -251,9 +251,9 @@ is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
 The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
 shared state machine and first-message launch (`threadStart.ts`, `threadTurn.ts`); the starts
-live in `orbit-thread-starts.json` in the app's documents folder, written in order after each
-step, so a restart resumes them. Start rows with the stage, Retry and Dismiss sit above the
-thread list. The thread opens once sent if Home still shows. The phone's workspaces are the
+live in `orbit-thread-starts.json` in the app's documents folder. The file write is async, so
+each Gateway call, the pairing and the send first wait for it; a failed write stops the start. Start rows with the stage, Retry and Dismiss sit above the
+thread list. The thread opens once sent if the screen the start returned to still shows. The phone's workspaces are the
 profile's, so a sent start adds the clone's ref to the workspace selected at Start in the
 profile itself (one re-read on a version conflict).
 
@@ -275,7 +275,7 @@ Sources:
 - `packages/client-runtime/src/orbitGateway/environmentProvider.ts`.
 - `packages/client-runtime/src/orbitGateway/threadStart.ts` and `threadTurn.ts`.
 - Mobile (`apps/mobile/src/features/orbit/`): `orbitThreadStart*.ts`, `orbitThreadStarts.ts`,
-  `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`.
+  `orbitWorkspaceRef.ts`, `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`.
 - `apps/web/src/components/sidebar/SidebarThreadHeader.tsx` (`orbitThread` slot).
 
 ### Orbit profile sync

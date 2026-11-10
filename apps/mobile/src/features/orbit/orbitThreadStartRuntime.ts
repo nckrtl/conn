@@ -117,10 +117,17 @@ const ports: MobileOrbitThreadStartPorts = {
   now: Date.now,
 };
 
-/** Starts opened from this app session; a thread opens on send only while Home still shows. */
-const openOnSend = new Set<string>();
+/**
+ * The root route each start returned to in this app session. The thread opens on send only while
+ * that route still shows, as on the desktop; after a restart it stays in the list.
+ */
+const openOnSend = new Map<string, string>();
 
-export function startOrbitThread(project: OrbitGatewayProject, message: string): void {
+export function startOrbitThread(
+  project: OrbitGatewayProject,
+  message: string,
+  returnRouteKey: string | undefined,
+): void {
   const start = beginOrbitThreadStart(orbitThreadStartStore, {
     project,
     message,
@@ -128,7 +135,13 @@ export function startOrbitThread(project: OrbitGatewayProject, message: string):
     uuid: uuidv4,
     now: Date.now(),
   });
-  openOnSend.add(start.id);
+  if (returnRouteKey !== undefined) openOnSend.set(start.id, returnRouteKey);
+}
+
+function shownRootRouteKey(): string | undefined {
+  if (!rootNavigationRef.isReady()) return undefined;
+  const root = rootNavigationRef.getRootState();
+  return root?.routes[root.index]?.key;
 }
 
 function openThread(environmentId: string, threadId: string): void {
@@ -148,14 +161,11 @@ function runReadyStarts(): void {
   for (const start of orbitThreadStartStore.starts()) {
     if (start.error !== null) continue;
     void runSavedOrbitThreadStart(start.id, ports).then((sent) => {
-      // A null result also means "already running": only the run that sent may use the flag.
+      // A null result also means "already running": only the run that sent may use the key.
       if (sent === null) return;
-      const open = openOnSend.delete(start.id);
-      if (
-        open &&
-        rootNavigationRef.isReady() &&
-        rootNavigationRef.getCurrentRoute()?.name === "Home"
-      ) {
+      const returnRouteKey = openOnSend.get(start.id);
+      openOnSend.delete(start.id);
+      if (returnRouteKey !== undefined && shownRootRouteKey() === returnRouteKey) {
         openThread(sent.environmentId, sent.threadId);
       }
     });

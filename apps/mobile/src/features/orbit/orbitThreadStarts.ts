@@ -58,6 +58,28 @@ export function beginOrbitThreadStart(
 const running = new Set<string>();
 
 /**
+ * The state machine saves a step and makes the next call at once; on the phone the save is an
+ * async file write. Each call first waits for the write, so a key or Operation id the call
+ * depends on is on disk before the Gateway sees it. A failed write stops the step.
+ */
+function afterSave(store: OrbitThreadStartStore, gateway: OrbitGatewayClient): OrbitGatewayClient {
+  const saved =
+    <A extends unknown[], R>(call: (...args: A) => Promise<R>) =>
+    async (...args: A) => {
+      await store.flush();
+      return call(...args);
+    };
+  return {
+    ...gateway,
+    createThreadInstance: saved(gateway.createThreadInstance),
+    operation: saved(gateway.operation),
+    environments: saved(gateway.environments),
+    startPairing: saved(gateway.startPairing),
+    readPairing: saved(gateway.readPairing),
+  };
+}
+
+/**
  * Runs a start from its last saved step, once at a time. Resolves the thread it sent the first
  * message in, or null when the start stopped (its `error` says why) or paused.
  */
@@ -77,14 +99,18 @@ export async function runSavedOrbitThreadStart(
     }
     let environmentId: string | null = null;
     const sent = await runOrbitThreadStart(start, {
-      client: ports.gateway,
+      client: afterSave(store, ports.gateway),
       save: store.save,
       sleep: ports.sleep,
       now: ports.now,
       stopped,
       isSaved: ports.isSaved,
-      connect: ports.connect,
+      connect: async (environmentId, pairingUrl) => {
+        await store.flush();
+        await ports.connect(environmentId, pairingUrl);
+      },
       send: async (ready) => {
+        await store.flush();
         environmentId = ready.environmentId;
         const projectId = await sendOrbitFirstMessage(ready, { ...ports.firstMessage, stopped });
         // A clone is a new environment: without its ref the selected workspace hides the thread.

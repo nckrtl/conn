@@ -8,8 +8,6 @@ import {
   recordPaired,
   recordPairingAttempt,
   recordPairingRefused,
-  OrbitGatewayError,
-  SETTINGS_VERSION_CONFLICT,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayEnvironment,
@@ -19,7 +17,6 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AuthAccessWriteScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
@@ -30,10 +27,12 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
-import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
+import { heldOrbitInstanceIds, orbitThreadStartStore } from "./orbitThreadStartStore";
+import { addProjectRefToProfileWorkspace } from "./orbitWorkspaceRef";
 
 /**
- * The phone's view of the Orbit Gateway: Node, profile, workspaces (read-only) and T3 servers.
+ * The phone's view of the Orbit Gateway: Node, profile, workspaces and T3 servers. The phone edits
+ * workspaces only to add a started thread's clone project (keepProjectInOrbitWorkspace).
  * The appearance syncs both ways (orbitProfileSync). In Orbit mode it pairs the Gateway's servers
  * and switches off environments added by hand (see planEnvironmentProvider).
  */
@@ -51,8 +50,6 @@ export interface OrbitGatewayState {
   /** The workspace the thread list is scoped to on this device, or null for all projects. */
   readonly selectedWorkspaceId: string | null;
 }
-
-const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 const PROVIDER_STORAGE_KEY = "t3code.environment-provider.v1";
 
@@ -169,8 +166,9 @@ async function attemptPairing(
 }
 
 /** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
-export function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
-  return updateEnvironmentState((current) => recordPaired(current, environmentId));
+export async function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
+  // The server is saved already; a lost record only means a later sync re-checks it.
+  await updateEnvironmentState((current) => recordPaired(current, environmentId)).catch(() => {});
 }
 
 /**
@@ -230,6 +228,8 @@ async function reconcileEnvironments(
       disabledByOrbit: plan.state.disabledByOrbit,
     }),
   );
+  // Conn: until the saved thread starts load, the sync cannot tell which clones they hold.
+  if (!orbitThreadStartStore.loaded()) return;
   // One server per refresh: pairing waits for a Gateway Operation, and the refresh waits too.
   const environmentId = plan.pair.find((id) => !pairings.has(id));
   const environment = orbit?.find((entry) => entry.environmentId === environmentId);
@@ -304,35 +304,23 @@ export async function syncOrbitAppearanceNow(): Promise<void> {
 }
 
 /**
- * Conn: adds a started thread's clone project to the profile workspace selected at Start, unless
- * it lists the ref already or is gone, so the workspace filter shows the thread. A version
- * conflict reads the profile again once. Failures leave the workspace as it was.
+ * Conn: adds a started thread's clone project to the profile workspace selected at Start, so the
+ * workspace filter shows the thread. Failures leave the workspace as it was.
  */
 export async function keepProjectInOrbitWorkspace(
   workspaceId: string | null,
   projectRef: string,
 ): Promise<void> {
-  const profileId = state.node?.profile?.id;
-  if (workspaceId === null || profileId === undefined) return;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const settings = await client.settings(profileId);
-      const target = settings.workspaces.find((workspace) => workspace.id === workspaceId);
-      if (!target || (target.projectRefs ?? []).includes(projectRef)) return;
-      const saved = await client.replaceWorkspaces(
-        profileId,
-        settings.version,
-        settings.workspaces.map((workspace) =>
-          workspace.id === workspaceId
-            ? { ...workspace, projectRefs: [...(workspace.projectRefs ?? []), projectRef] }
-            : workspace,
-        ),
-      );
-      set({ workspaces: saved.workspaces });
-      return;
-    } catch (error) {
-      if (!isOrbitGatewayError(error) || error.code !== SETTINGS_VERSION_CONFLICT) return;
-    }
+  if (workspaceId === null) return;
+  try {
+    // A start resumed at launch can send before the first refresh read the profile.
+    if (state.node === null) await refreshOrbitGateway();
+    const profileId = state.node?.profile?.id;
+    if (profileId === undefined) return;
+    const saved = await addProjectRefToProfileWorkspace(client, profileId, workspaceId, projectRef);
+    if (saved) set({ workspaces: saved.workspaces });
+  } catch {
+    // The thread is sent; a later Start or the desktop can still add the ref.
   }
 }
 

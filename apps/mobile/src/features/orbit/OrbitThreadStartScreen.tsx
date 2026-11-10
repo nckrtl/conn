@@ -1,6 +1,6 @@
 import type { OrbitGatewayProject } from "@t3tools/client-runtime/orbit-gateway";
 import { StackActions, useNavigation } from "@react-navigation/native";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Platform, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -27,6 +27,7 @@ export function OrbitThreadStartScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [chosenId, setChosenId] = useState<number | null>(null);
   const [text, setText] = useState("");
+  const started = useRef(false);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway's Projects once when the screen opens
   useEffect(() => {
@@ -48,10 +49,15 @@ export function OrbitThreadStartScreen() {
     else navigation.getParent()?.goBack();
   };
   const start = () => {
-    if (project === null || text.trim() === "") return;
-    startOrbitThread(project, text.trim());
-    // The start row waits in the thread list; the thread opens there once the message is sent.
-    navigation.dispatch(StackActions.popTo("Home"));
+    if (started.current || project === null || text.trim() === "") return;
+    started.current = true;
+    // Back past Choose project to where the new thread began; the start row waits there.
+    const state = navigation.getState();
+    const fromPicker = state?.routes[state.index - 1]?.name === "NewTaskProject";
+    const back = fromPicker ? 2 : 1;
+    const returnRoute = state?.routes[state.index - back];
+    startOrbitThread(project, text.trim(), returnRoute?.key);
+    navigation.dispatch(StackActions.pop(back));
   };
 
   return (

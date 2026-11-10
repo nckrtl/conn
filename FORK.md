@@ -706,7 +706,8 @@ The iOS composer editor follows Dynamic Type through JS: `T3ComposerEditor.ios.t
 sends the body size and line height times `fontScale` and re-renders when the text
 size changes. `T3ComposerEditorView.swift` therefore keeps
 `adjustsFontForContentSizeCategory` off, re-applies typography on a content size
-change, uses the system font (also for chips) and supports `singleLineCentered`.
+change, uses the JS font family (default "System"), gives chips the system font and
+supports `singleLineCentered`.
 
 The "Worked for" fold row has 10.5pt on both sides of its divider (`mb-3`). Its
 fixed size is 49 in `ThreadFeed.tsx` and `thread-feed-item-size.ts`. Dividers on
@@ -722,7 +723,8 @@ Sources:
   `lib/fonts.ts`, `features/terminal/TerminalContextSheet.tsx`,
   `native/EdgeBlur*`.
 - `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorModule.swift`,
-  `T3ComposerEditorView.swift` and `apps/mobile/src/native/T3ComposerEditor.ios.tsx`.
+  `apps/mobile/modules/t3-composer-editor/ios/T3ComposerEditorView.swift` and
+  `apps/mobile/src/native/T3ComposerEditor.ios.tsx`.
 
 ### Linked environments (peer links)
 

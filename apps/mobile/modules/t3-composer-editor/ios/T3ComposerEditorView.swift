@@ -561,8 +561,8 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     addSubview(placeholderLabel)
     applyTypography()
     applyTheme()
-    // JS sends the scaled size on a text size change; this re-applies it to chips and the
-    // placeholder in case the layout settles before that prop arrives.
+    // JS sends the new scaled size and line height as props after a text size change; this
+    // only rebuilds the current document in place until those props arrive.
     registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: T3ComposerEditorView, _: UITraitCollection) in
       view.applyTypography()
       view.applyControlledDocument(force: true)

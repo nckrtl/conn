@@ -561,6 +561,12 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     addSubview(placeholderLabel)
     applyTypography()
     applyTheme()
+    // JS sends the scaled size on a text size change; this re-applies it to chips and the
+    // placeholder in case the layout settles before that prop arrives.
+    registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (view: T3ComposerEditorView, _: UITraitCollection) in
+      view.applyTypography()
+      view.applyControlledDocument(force: true)
+    }
   }
 
   @objc private func openContext(_ recognizer: UITapGestureRecognizer) {
@@ -682,14 +688,6 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       height: max(lineHeight, placeholderLabel.font.lineHeight)
     )
     emitContentSizeIfNeeded()
-  }
-
-  public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-    super.traitCollectionDidChange(previousTraitCollection)
-    if previousTraitCollection?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
-      applyTypography()
-      applyControlledDocument(force: true)
-    }
   }
 
   func setClipboardFragment(_ fragment: String) {

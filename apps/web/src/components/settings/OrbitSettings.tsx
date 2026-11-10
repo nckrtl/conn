@@ -328,7 +328,10 @@ export function OrbitEnvironmentSections() {
     savedEnvironments.map((environment) => String(environment.environmentId)),
   );
   const startingInstanceIds = new Set(
-    starts.flatMap((start) => (start.instanceId === null ? [] : [start.instanceId])),
+    // A stopped start waits for Retry; Connect may pair its clone meanwhile.
+    starts.flatMap((start) =>
+      start.instanceId === null || start.error !== null ? [] : [start.instanceId],
+    ),
   );
   const profile = view?.node.profile ?? null;
 

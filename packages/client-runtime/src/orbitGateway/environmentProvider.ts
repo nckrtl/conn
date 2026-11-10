@@ -3,8 +3,8 @@ import type { OrbitGatewayEnvironment } from "./client.ts";
 /**
  * Where a client's environments come from. `default` is T3's own list: environments the user adds by
  * hand. `orbit` replaces it with the T3 servers registered on the Orbit Gateway, paired
- * automatically (Conn: Instance clones only on request). The two lists never show together: switching to Orbit turns the default
- * environments off, and switching back turns them on again.
+ * automatically (Conn: clones only on request). The two lists never show together: switching to
+ * Orbit turns the default environments off, and switching back turns them on again.
  */
 export type EnvironmentProvider = "default" | "orbit";
 

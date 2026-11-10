@@ -98,9 +98,9 @@ async function loadProvider(): Promise<void> {
   }
 }
 
-/** Conn: clones the user asked to connect in Settings; a refresh retries them after a failure. */
+/** Conn: clones the user asked to connect in Settings; refreshes retry them in this session. */
 const requestedEnvironmentIds = new Set<string>();
-const pairingEnvironmentIds = new Set<string>();
+const pairings = new Map<string, Promise<boolean>>();
 
 async function updateEnvironmentState(
   change: (current: OrbitEnvironmentState) => OrbitEnvironmentState,
@@ -110,18 +110,29 @@ async function updateEnvironmentState(
 }
 
 /**
- * Conn: pairs this device with one Orbit server now and records the attempt and its result.
- * Resolves true when the server is saved. A pairing already in flight for the server is not repeated.
+ * Conn: pairs this device with one Orbit server and records the attempt and its result. Resolves
+ * true when the server is saved. A second call while one runs joins it.
  */
-async function pairOne(
+function pairOne(
   environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
   isSaved: boolean,
 ): Promise<boolean> {
   const { environmentId } = environment;
-  if (pairingEnvironmentIds.has(environmentId)) return false;
-  pairingEnvironmentIds.add(environmentId);
+  const running = pairings.get(environmentId);
+  if (running) return running;
+  const pairing = attemptPairing(environment, isSaved).finally(() =>
+    pairings.delete(environmentId),
+  );
+  pairings.set(environmentId, pairing);
+  return pairing;
+}
+
+async function attemptPairing(
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+  isSaved: boolean,
+): Promise<boolean> {
+  const { environmentId } = environment;
   const now = Date.now();
-  let paired = false;
   try {
     // Saved before the attempt, so a restart during the pairing still backs off.
     await updateEnvironmentState((current) =>
@@ -129,27 +140,26 @@ async function pairOne(
         ? recordAccessPairing(current, environmentId, now)
         : recordPairingAttempt(current, environmentId, now),
     );
-    try {
-      const pairing = await client.pair(environmentId);
-      const result = await runAtomCommand(
-        appAtomRegistry,
-        connectPairingUrl,
-        { pairingUrl: pairing.pairingUrl },
-        { reportFailure: false },
+    const pairing = await client.pair(environmentId);
+    const result = await runAtomCommand(
+      appAtomRegistry,
+      connectPairingUrl,
+      { pairingUrl: pairing.pairingUrl },
+      { reportFailure: false },
+    );
+    if (result._tag !== "Success") return false;
+    requestedEnvironmentIds.delete(environmentId);
+    await updateEnvironmentState((current) => recordPaired(current, environmentId));
+    return true;
+  } catch (error) {
+    // An unreachable server pairs on a later refresh; a refused one after it registers again.
+    if (isFinalPairingError(error)) {
+      await updateEnvironmentState((current) => recordPairingRefused(current, environment)).catch(
+        () => {},
       );
-      paired = result._tag === "Success";
-      if (paired) await updateEnvironmentState((current) => recordPaired(current, environmentId));
-    } catch (error) {
-      // An unreachable server pairs on a later refresh; a refused one after it registers again.
-      if (isFinalPairingError(error)) {
-        await updateEnvironmentState((current) => recordPairingRefused(current, environment));
-      }
     }
-  } catch {
-    // The secure store could not save; the next refresh records the pairing again.
+    return false;
   }
-  pairingEnvironmentIds.delete(environmentId);
-  return paired;
 }
 
 /**
@@ -208,7 +218,7 @@ async function reconcileEnvironments(
     }),
   );
   // One server per refresh: pairing waits for a Gateway Operation, and the refresh waits too.
-  const environmentId = plan.pair.find((id) => !pairingEnvironmentIds.has(id));
+  const environmentId = plan.pair.find((id) => !pairings.has(id));
   const environment = orbit?.find((entry) => entry.environmentId === environmentId);
   if (environment) await pairOne(environment, savedIds.has(environment.environmentId));
 }

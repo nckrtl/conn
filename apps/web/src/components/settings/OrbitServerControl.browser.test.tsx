@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 
 import "~/index.css";
+import { connectOrbitEnvironment } from "~/orbit/environmentProvider";
 import { render } from "../../../test/render";
 import { OrbitServerControl } from "./OrbitSettings";
 
@@ -58,8 +59,12 @@ describe("OrbitServerControl", () => {
     await expect.element(page.getByRole("button", { name: "Connect" })).not.toBeInTheDocument();
     expect(pair).toHaveBeenCalledTimes(1);
     expect(pair).toHaveBeenCalledWith("clone-41");
+    // A sync or a second Connect while the pairing runs joins it instead of pairing again.
+    const joined = connectOrbitEnvironment(client, server(41));
+    expect(pair).toHaveBeenCalledTimes(1);
 
     fail(new Error("unreachable"));
+    await expect(joined).resolves.toBe(false);
     await expect.element(page.getByRole("button", { name: "Connect" })).toBeVisible();
     expect(pair).toHaveBeenCalledTimes(1);
   });

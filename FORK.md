@@ -208,9 +208,10 @@ The environment sync lists every server on the Gateway but pairs only host serve
 `instance_id`) by itself. A clone, an Instance's server, pairs only when the user presses Connect
 on its row in the Orbit Servers list, or when a thread start on this device created it. Without
 this every device paired with every new clone within minutes. A failed Connect is retried by the
-sync with the usual back-off. Pairings made before this rule stay; nothing revokes them.
-`planEnvironmentProvider` takes the requested ids; web and mobile share one pairing step
-(`pairOne`) between the sync and Connect.
+sync, with the usual back-off, until the app restarts. Pairings made before this rule stay;
+nothing revokes them. `planEnvironmentProvider` takes the requested ids; web and mobile share one
+pairing step (`pairOne`) between the sync and Connect, and a second call for a server joins the
+one in flight.
 
 Thread-start Orbit registration uses the client RPCs in
 `apps/web/src/orbit/orbitWorkspaces.ts` and the server's

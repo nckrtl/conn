@@ -52,6 +52,37 @@ out=$(sh "$script" --print-cli http://127.0.0.1:1 2>&1)
 out=$(sh "$script" --print-cli http://127.0.0.1:1 "$bin" 2>&1)
 case "$out" in *"versioned runtime path"*) pass "versioned CLI warns" ;; *) fail "versioned CLI warns" "$out" ;; esac
 
+# Registration flow with fake t3 and curl: revoke only when the Gateway answered and refused.
+if command -v jq >/dev/null 2>&1; then
+    mkdir -p "$tmp/fake"
+    cat > "$tmp/fake/curl" <<'EOF'
+#!/bin/sh
+for a in "$@"; do last=$a; done
+case "$last" in */.well-known/*) echo '{"environmentId":"env-1","label":"test"}'; exit 0 ;; esac
+cat > "$FAKE_DIR/body"
+while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+echo '{"data":{"admin_session_expires_at":"later"}}' > "$out"
+[ "$FAKE_STATUS" = 000 ] && exit 28
+printf '%s' "$FAKE_STATUS"
+EOF
+    cat > "$tmp/fake/t3" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$FAKE_DIR/t3.log"
+case "$*" in *"session issue"*) echo '{"sessionId":"s-1","token":"tok-secret"}' ;; esac
+EOF
+    chmod +x "$tmp/fake/curl" "$tmp/fake/t3"
+    for case in 200:keep 409:revoke 000:keep; do
+        st=${case%%:*}; want=${case#*:}
+        rm -f "$tmp/t3.log" "$tmp/body"
+        out=$(FAKE_DIR=$tmp FAKE_STATUS=$st PATH="$tmp/fake:$PATH" sh "$script" http://127.0.0.1:1 2>&1); rc=$?
+        if grep -q 'session revoke s-1' "$tmp/t3.log" 2>/dev/null; then got=revoke; else got=keep; fi
+        [ "$got" = "$want" ] && pass "status $st: session $want" || fail "status $st: session $want" "rc=$rc got=$got $out"
+    done
+    grep -q 'tok-secret' "$tmp/t3.log" && fail "token stays off argv" "seen in t3 argv" || pass "token stays off argv"
+    jq -e '.admin_session == "tok-secret" and .environment_id == "env-1"' "$tmp/body" >/dev/null 2>&1 \
+        && pass "token sent in body" || fail "token sent in body" "$(cat "$tmp/body" 2>/dev/null)"
+fi
+
 sh "$script" >/dev/null 2>&1; rc=$?
 [ "$rc" = 64 ] && pass "no URL exits 64" || fail "no URL exits 64" "rc=$rc"
 

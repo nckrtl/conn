@@ -2,6 +2,7 @@ import type { OrbitInstanceDescriptor } from "@t3tools/contracts";
 import { GlobeIcon } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
+import { isWebUrl } from "../../browser/browserLinkTarget";
 import { cn } from "../../lib/utils";
 import { ComposerContextLabel } from "../ComposerContextLabel";
 import { OrbitLogoIcon } from "../OrbitLogoIcon";
@@ -32,7 +33,8 @@ export function ThreadDetailsOrbitRows({
   ]
     .filter(Boolean)
     .join(", ");
-  const url = orbitInstance.url;
+  // Another server build could send any scheme; only web links render as a link.
+  const url = orbitInstance.url && isWebUrl(orbitInstance.url) ? orbitInstance.url : null;
   return (
     <>
       <span

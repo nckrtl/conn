@@ -29,7 +29,7 @@ it("shows the Orbit Project, Instance, Node and a URL link that opens in Conn", 
   expect(onOpenUrl).toHaveBeenCalledWith("https://t3-1a2b3c4d.hauzer.test", expect.anything());
 });
 
-it("falls back to the slug, then the id, and shows no link without a URL", async () => {
+it("falls back to the slug, then the id, and links only a web URL", async () => {
   await using screen = await render(
     <ThreadDetailsOrbitRows
       orbitInstance={{ projectId: 7, instanceId: 41, projectSlug: "hauzer" }}
@@ -41,7 +41,11 @@ it("falls back to the slug, then the id, and shows no link without a URL", async
   expect(page.getByRole("link").elements()).toHaveLength(0);
 
   await screen.rerender(
-    <ThreadDetailsOrbitRows orbitInstance={{ projectId: 7, instanceId: 41 }} onOpenUrl={vi.fn()} />,
+    <ThreadDetailsOrbitRows
+      orbitInstance={{ projectId: 7, instanceId: 41, url: "javascript:alert(1)" }}
+      onOpenUrl={vi.fn()}
+    />,
   );
   await expect.element(page.getByLabelText("Orbit Project Project 7")).toBeVisible();
+  expect(page.getByRole("link").elements()).toHaveLength(0);
 });

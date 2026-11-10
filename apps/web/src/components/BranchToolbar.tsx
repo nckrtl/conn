@@ -727,7 +727,9 @@ export const BranchToolbar = memo(function BranchToolbar({
               void openLink(url, { event }).catch((error: unknown) => console.error(error));
             }}
           />
-        ) : panelSection !== "branch" ? (
+        ) : null}
+        {/* A draft that can still change machine or workspace keeps its picker below the Orbit row. */}
+        {panelSection !== "branch" && (!orbitInstance || !(envLocked || envModeLocked)) ? (
           <RunContextSelector
             displayMode="panel"
             workspaceRoot={activeProject.workspaceRoot}

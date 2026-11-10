@@ -791,10 +791,19 @@ encrypts this traffic. Upstream allows only HTTPS, loopback and Tailscale. When
 the stack lands on upstream `main`, drop Conn's copy and reconcile the migration
 ID again.
 
+`t3 environment link-orbit <id>` links a server that Orbit lists without a pairing code in
+an agent's transcript. The server asks the Gateway for a pairing as its own Node, follows the
+Operation (one pairing per call), takes the code from the link and calls `PeerLinks.link` with
+the Gateway's URL for that server. It prints only the outcome, or `<code>: <message>`. There is
+no MCP tool for it: agents that orchestrate Orbit clones run `t3` in a shell, and a tool would
+add to every agent's tool list. A peer with Linked environments off refuses with
+`peer_disabled` (`PEER_LINKS_OFF_DESCRIPTION`), shown as `target_links_off`. The server reuses
+the Gateway client from `packages/client-runtime/src/orbitGateway/client.ts`.
+
 Sources:
 
 - Server (`apps/server/src/`): `peer/*`, `persistence/Migrations.ts`,
-  `mcp/toolkits/orchestrator/*`.
+  `mcp/toolkits/orchestrator/*`, `orbit/OrbitEnvironmentLink.ts`, `cli/environment.ts`.
 - `packages/contracts/src/rpc.ts` (`peerLinks*`).
 
 ### Orbit registration

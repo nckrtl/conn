@@ -33,4 +33,22 @@ describe("ExecutionEnvironmentDescriptor", () => {
       ).toBeUndefined();
     }
   });
+
+  it("decodes an Orbit Instance descriptor with or without its facts", () => {
+    const facts = {
+      projectId: 7,
+      instanceId: 41,
+      projectSlug: "hauzer",
+      projectName: "Hauzer App",
+      instanceName: "t3-1a2b3c4d",
+      nodeName: "beast",
+      url: "https://t3-1a2b3c4d.hauzer.test",
+    };
+    expect(decodeDescriptor({ ...descriptor, orbitInstance: facts }).orbitInstance).toEqual(facts);
+    expect(
+      decodeDescriptor({ ...descriptor, orbitInstance: { projectId: 7, instanceId: 41 } })
+        .orbitInstance,
+    ).toEqual({ projectId: 7, instanceId: 41 });
+    expect(decodeDescriptor(descriptor).orbitInstance).toBeUndefined();
+  });
 });

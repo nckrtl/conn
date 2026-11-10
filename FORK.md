@@ -249,6 +249,17 @@ dismissed at any time; a stopped one also offers Retry. The environment sync ski
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
+A server in an Orbit Instance container reads `/etc/orbit/instance` at start
+(`apps/server/src/orbit/OrbitInstanceFile.ts`). Orbit writes it: `KEY=value` lines, `#`
+comments, unquoted values. Conn reads `ORBIT_PROJECT_ID`, `ORBIT_INSTANCE_ID`,
+`ORBIT_PROJECT` (slug), `ORBIT_PROJECT_NAME`, `ORBIT_INSTANCE`, `ORBIT_NODE` and `ORBIT_URL`,
+and ignores other keys. With both ids as positive integers, the environment descriptor gets
+`orbitInstance` with the facts; otherwise it has none, and a missing or unreadable file never
+stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. With the
+descriptor, the thread panel's machine row becomes the Orbit row: Project, Instance and Node,
+and the URL as a link (`ThreadDetailsOrbitRows.tsx`). The sidebar title of the clone's
+`/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
+
 Sources:
 
 - `apps/web/src/orbit/*`.

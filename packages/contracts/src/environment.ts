@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
   ForwardCompatibleOptional,
+  PositiveInt,
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
@@ -192,6 +193,18 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 
+/** Facts about the Orbit Instance a server runs in, from `/etc/orbit/instance`; both ids or no descriptor. */
+export const OrbitInstanceDescriptor = Schema.Struct({
+  projectId: PositiveInt,
+  instanceId: PositiveInt,
+  projectSlug: Schema.optionalKey(TrimmedNonEmptyString),
+  projectName: Schema.optionalKey(TrimmedNonEmptyString),
+  instanceName: Schema.optionalKey(TrimmedNonEmptyString),
+  nodeName: Schema.optionalKey(TrimmedNonEmptyString),
+  url: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type OrbitInstanceDescriptor = typeof OrbitInstanceDescriptor.Type;
+
 export const ExecutionEnvironmentDescriptor = Schema.Struct({
   environmentId: EnvironmentId,
   label: TrimmedNonEmptyString,
@@ -201,6 +214,7 @@ export const ExecutionEnvironmentDescriptor = Schema.Struct({
   /** Highest migration this server's database holds; absent on older servers. */
   databaseMigration: Schema.optionalKey(Schema.Int),
   capabilities: ExecutionEnvironmentCapabilities,
+  orbitInstance: Schema.optionalKey(OrbitInstanceDescriptor),
 });
 export type ExecutionEnvironmentDescriptor = typeof ExecutionEnvironmentDescriptor.Type;
 

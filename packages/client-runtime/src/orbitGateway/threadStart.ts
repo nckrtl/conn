@@ -168,7 +168,7 @@ function isLostAdmission(error: unknown): boolean {
 
 /**
  * Another Operation owns the Instance, such as an older build's create or one whose key was lost.
- * The same create replays it or admits a resume once that Operation ends.
+ * The same create is admitted once that Operation ends.
  */
 function isTargetBusy(error: unknown): boolean {
   return (

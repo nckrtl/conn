@@ -462,6 +462,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   private var fontSize: CGFloat = 14
   private var lineHeight: CGFloat = 20
   private var contentInsetVertical: CGFloat = 0
+  private var singleLineCentered = false
   private var shouldAutoFocus = false
   private var didAutoFocus = false
   private var isReadOnly = false
@@ -639,6 +640,14 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     super.layoutSubviews()
     let previousSize = textView.bounds.size
     textView.frame = bounds
+    // Center the resting line with the toolbar icons; expanded editors retain
+    // their caller's inset.
+    let verticalInset = singleLineCentered
+      ? max(0, (bounds.height - max(lineHeight, textView.font?.lineHeight ?? lineHeight)) / 2)
+      : contentInsetVertical
+    textView.textContainerInset = UIEdgeInsets(
+      top: verticalInset, left: 0, bottom: verticalInset, right: 0
+    )
     if chipsNeedMeasuredWidth, bounds.width > 0 {
       chipsNeedMeasuredWidth = false
       applyControlledDocument(force: true)
@@ -758,6 +767,11 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     self.lineHeight = lineHeight
     applyTypography()
     applyControlledDocument(force: true)
+  }
+
+  func setSingleLineCentered(_ centered: Bool) {
+    singleLineCentered = centered
+    setNeedsLayout()
   }
 
   func setContentInsetVertical(_ contentInsetVertical: CGFloat) {

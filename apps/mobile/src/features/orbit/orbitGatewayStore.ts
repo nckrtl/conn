@@ -8,6 +8,8 @@ import {
   recordPaired,
   recordPairingAttempt,
   recordPairingRefused,
+  OrbitGatewayError,
+  SETTINGS_VERSION_CONFLICT,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayEnvironment,
@@ -17,6 +19,7 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AuthAccessWriteScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
@@ -27,6 +30,7 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
+import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 /**
  * The phone's view of the Orbit Gateway: Node, profile, workspaces (read-only) and T3 servers.
@@ -47,6 +51,8 @@ export interface OrbitGatewayState {
   /** The workspace the thread list is scoped to on this device, or null for all projects. */
   readonly selectedWorkspaceId: string | null;
 }
+
+const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 const PROVIDER_STORAGE_KEY = "t3code.environment-provider.v1";
 
@@ -162,6 +168,11 @@ async function attemptPairing(
   }
 }
 
+/** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
+export function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
+  return updateEnvironmentState((current) => recordPaired(current, environmentId));
+}
+
 /**
  * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets a
  * later refresh retry it if this attempt fails.
@@ -197,6 +208,8 @@ async function reconcileEnvironments(
     orbit,
     state: environmentState,
     lacksAccess,
+    // Conn: a thread start pairs its own clone; the sync must not pair it a second time.
+    heldInstanceIds: heldOrbitInstanceIds(),
     requestedEnvironmentIds: [...requestedEnvironmentIds],
     now: Date.now(),
   });
@@ -290,6 +303,39 @@ export async function syncOrbitAppearanceNow(): Promise<void> {
   }
 }
 
+/**
+ * Conn: adds a started thread's clone project to the profile workspace selected at Start, unless
+ * it lists the ref already or is gone, so the workspace filter shows the thread. A version
+ * conflict reads the profile again once. Failures leave the workspace as it was.
+ */
+export async function keepProjectInOrbitWorkspace(
+  workspaceId: string | null,
+  projectRef: string,
+): Promise<void> {
+  const profileId = state.node?.profile?.id;
+  if (workspaceId === null || profileId === undefined) return;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const settings = await client.settings(profileId);
+      const target = settings.workspaces.find((workspace) => workspace.id === workspaceId);
+      if (!target || (target.projectRefs ?? []).includes(projectRef)) return;
+      const saved = await client.replaceWorkspaces(
+        profileId,
+        settings.version,
+        settings.workspaces.map((workspace) =>
+          workspace.id === workspaceId
+            ? { ...workspace, projectRefs: [...(workspace.projectRefs ?? []), projectRef] }
+            : workspace,
+        ),
+      );
+      set({ workspaces: saved.workspaces });
+      return;
+    } catch (error) {
+      if (!isOrbitGatewayError(error) || error.code !== SETTINGS_VERSION_CONFLICT) return;
+    }
+  }
+}
+
 export function selectOrbitWorkspace(workspaceId: string | null): void {
   set({ selectedWorkspaceId: workspaceId });
 }
@@ -313,9 +359,13 @@ export function selectedWorkspaceProjectRefs(
   });
 }
 
-function subscribe(listener: () => void): () => void {
+export function subscribeOrbitGateway(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+export function orbitGatewayState(): OrbitGatewayState {
+  return state;
 }
 
 let started = false;
@@ -339,5 +389,5 @@ export function useOrbitGateway(): OrbitGatewayState {
       if (AppState.currentState === "active" && !refreshing) void syncOrbitAppearanceNow();
     }, APPEARANCE_PROBE_MS);
   }, []);
-  return useSyncExternalStore(subscribe, () => state);
+  return useSyncExternalStore(subscribeOrbitGateway, () => state);
 }

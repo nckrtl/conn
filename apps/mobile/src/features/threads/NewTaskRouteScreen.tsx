@@ -47,6 +47,7 @@ import {
   resolveNewTaskScratchOption,
 } from "./new-task-project-selection";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
+import { useOrbitGateway } from "../orbit/orbitGatewayStore";
 
 type NewTaskRouteParams = {
   readonly incomingShareId?: string | string[];
@@ -263,6 +264,8 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         })
       : null;
   const canStartScratch = scratchOption?.ready === true;
+  // Conn: in Orbit mode a thread can also start in a clone of an Orbit Project (FORK.md, "Orbit").
+  const orbitMode = useOrbitGateway().provider === "orbit" && reservedDestinationProject === null;
   const scratchStartInFlightRef = useRef(false);
 
   async function selectProject(project: EnvironmentProject): Promise<void> {
@@ -384,6 +387,37 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
               : {}),
           }}
         >
+          {orbitMode ? (
+            <View collapsable={false} className="overflow-hidden rounded-[24px] bg-grouped-card">
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Orbit project"
+                onPress={() => navigation.dispatch(StackActions.push("NewOrbitThread"))}
+                className="flex-row items-center gap-3 bg-grouped-card px-4 py-3.5"
+              >
+                <View className="h-7 w-7 items-center justify-center">
+                  <SymbolView
+                    name="cube"
+                    size={18}
+                    tintColorClassName="accent-icon-muted"
+                    type="monochrome"
+                  />
+                </View>
+                <View className="min-w-0 flex-1">
+                  <Text className="text-base font-t3-medium leading-snug">Orbit project</Text>
+                  <Text className="text-xs leading-snug text-foreground-muted" numberOfLines={1}>
+                    Start a thread in a new clone of a project
+                  </Text>
+                </View>
+                <SymbolView
+                  name="chevron.right"
+                  size={14}
+                  tintColorClassName="accent-chevron"
+                  type="monochrome"
+                />
+              </Pressable>
+            </View>
+          ) : null}
           {scratchOption !== null && listScopes.length > 0 ? (
             Platform.OS === "android" ? (
               <View collapsable={false} className="overflow-hidden rounded-[28px] bg-grouped-card">

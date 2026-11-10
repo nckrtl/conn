@@ -87,6 +87,7 @@ import {
 import { NewTaskFlowProvider } from "./features/threads/new-task-flow-provider";
 import { newTaskFlowKey } from "./features/threads/new-task-flow-state";
 import { NewTaskRouteScreen } from "./features/threads/NewTaskRouteScreen";
+import { OrbitThreadStartScreen } from "./features/orbit/OrbitThreadStartScreen";
 import { SettingsNavigationRouteScreen } from "./features/settings/SettingsNavigationRouteScreen";
 import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppearanceRouteScreen";
 import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
@@ -555,6 +556,11 @@ const RootStackConfig = createWorkspaceStackNavigator({
       screen: NewTaskRouteScreen,
       linking: { path: "new", alias: ["new/project"] },
       options: pageRoute({ title: "Choose project" }),
+    }),
+    NewOrbitThread: createNativeStackScreen({
+      screen: OrbitThreadStartScreen,
+      linking: "new/orbit",
+      options: pageRoute({ title: "Orbit project" }),
     }),
     NewTaskEnvironment: createNativeStackScreen({
       linking: "new/draft/environment",

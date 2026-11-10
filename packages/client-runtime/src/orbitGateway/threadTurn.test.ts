@@ -1,4 +1,3 @@
-import { newOrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
 import { ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -6,7 +5,8 @@ import {
   orbitFirstTurnInput,
   sendOrbitFirstMessage,
   type OrbitFirstMessagePorts,
-} from "./orbitThreadTurn";
+} from "./threadTurn.ts";
+import { newOrbitThreadStart } from "./threadStart.ts";
 
 const start = {
   ...newOrbitThreadStart({

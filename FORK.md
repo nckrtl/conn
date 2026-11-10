@@ -249,6 +249,14 @@ dismissed at any time; a stopped one also offers Retry. The environment sync ski
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
+The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
+shared state machine and first-message launch (`threadStart.ts`, `threadTurn.ts`); the starts
+live in `orbit-thread-starts.json` in the app's documents folder, written in order after each
+step, so a restart resumes them. Start rows with the stage, Retry and Dismiss sit above the
+thread list. The thread opens once sent if Home still shows. The phone's workspaces are the
+profile's, so a sent start adds the clone's ref to the workspace selected at Start in the
+profile itself (one re-read on a version conflict).
+
 A server in an Orbit Instance container reads `/etc/orbit/instance` at start
 (`apps/server/src/orbit/OrbitInstanceFile.ts`). Orbit writes it: `KEY=value` lines, `#`
 comments, unquoted values. Conn reads `ORBIT_PROJECT_ID`, `ORBIT_INSTANCE_ID`,
@@ -265,7 +273,9 @@ Sources:
 - `apps/web/src/orbit/*`.
 - `apps/web/src/components/settings/ConnectionsSettings.tsx`.
 - `packages/client-runtime/src/orbitGateway/environmentProvider.ts`.
-- `packages/client-runtime/src/orbitGateway/threadStart.ts`.
+- `packages/client-runtime/src/orbitGateway/threadStart.ts` and `threadTurn.ts`.
+- Mobile (`apps/mobile/src/features/orbit/`): `orbitThreadStart*.ts`, `orbitThreadStarts.ts`,
+  `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`.
 - `apps/web/src/components/sidebar/SidebarThreadHeader.tsx` (`orbitThread` slot).
 
 ### Orbit profile sync

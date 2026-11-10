@@ -334,6 +334,56 @@ describe("runOrbitThreadStart", () => {
     expect(run.saves.every((start) => start.error === null)).toBe(true);
   });
 
+  it("pairs anew on Retry when reading the link fails, since the Gateway may have handed it out", async () => {
+    const { client } = gateway({
+      readPairing: async () => {
+        throw new OrbitGatewayError({
+          code: "http.502",
+          message: "Bad gateway",
+          status: 502,
+          details: {},
+        });
+      },
+    });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    expect(run.saves.at(-1)).toMatchObject({ pairingOperationId: null, pairingId: null });
+  });
+
+  it("ends without an error when it is stopped mid-step, so it resumes later", async () => {
+    const { client } = gateway({});
+    let stopped = false;
+    const run = ports(client, { stopped: () => stopped });
+    run.ports.send = async () => {
+      stopped = true;
+      throw new Error("The thread start was stopped.");
+    };
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    expect(run.saves.every((start) => start.error === null)).toBe(true);
+  });
+
+  it("stops after a minute of failed Operation reads", async () => {
+    const { client } = gateway({});
+    const down = {
+      ...client,
+      operation: async () => {
+        throw new OrbitGatewayError({
+          code: "gateway.unreachable",
+          message: "down",
+          status: 0,
+          details: {},
+        });
+      },
+    } as OrbitGatewayClient;
+    const run = ports(down);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(60_000);
+    expect(run.saves.at(-1)).toMatchObject({ createOperationId: 100, error: "down" });
+  });
+
   it("does not pair with a server whose registration expired", async () => {
     const { client, calls } = gateway({
       servers: [{ ...server(41), status: "session_expired" }],

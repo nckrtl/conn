@@ -33,6 +33,7 @@ function ports(results: Array<{ ok: true } | { ok: false; error: unknown }>) {
       return results.shift() ?? { ok: true };
     },
     now: () => "2026-11-10T08:00:00.000Z",
+    stopped: () => false,
   };
   return { launches, ports: value };
 }
@@ -73,6 +74,15 @@ describe("sendOrbitFirstMessage", () => {
     ]);
 
     await expect(sendOrbitFirstMessage(start, run)).rejects.toThrow("did not take");
+  });
+
+  it("sends nothing once the start was dismissed", async () => {
+    const { launches, ports: run } = ports([]);
+
+    await expect(sendOrbitFirstMessage(start, { ...run, stopped: () => true })).rejects.toThrow(
+      "stopped",
+    );
+    expect(launches).toEqual([]);
   });
 
   it("stops when the clone's workspace project does not appear", async () => {

@@ -16,7 +16,7 @@ import { environmentProjects } from "../state/projects";
 import { environmentServerConfigsAtom } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
-import { recordOrbitPaired } from "./environmentProvider";
+import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
 import { readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
 import { type OrbitFirstMessagePorts, sendOrbitFirstMessage } from "./orbitThreadTurn";
 
@@ -38,7 +38,7 @@ export function beginOrbitThreadStart(
     id: randomUUID(),
     project,
     message,
-    suffix: randomUUID().slice(0, 4),
+    suffix: randomUUID().slice(0, 6),
     threadId: newThreadId(),
     messageId: newMessageId(),
     commandId: randomUUID(),
@@ -135,6 +135,7 @@ const firstMessagePorts: OrbitFirstMessagePorts = {
       : { ok: false, error: squashAtomCommandFailure(result) };
   },
   now: () => new Date().toISOString(),
+  stopped: () => false,
 };
 
 const running = new Set<string>();
@@ -150,6 +151,10 @@ export async function runSavedOrbitThreadStart(
   const start = readStored().find((entry) => entry.id === id);
   if (start === undefined || start.error !== null || running.has(id)) return null;
   running.add(id);
+  // Dismiss removes the start; a switch to Default pauses it until Orbit mode is back.
+  const stopped = () =>
+    !readStored().some((entry) => entry.id === id) ||
+    useEnvironmentProvider.getState().provider !== "orbit";
   try {
     // Whether the device saved the clone's server is known only once the catalog loaded.
     const catalogReady = await waitForAtomValue({
@@ -168,13 +173,12 @@ export async function runSavedOrbitThreadStart(
       save: saveStart,
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
-      // Dismiss removes the start from the list.
-      stopped: () => !readStored().some((entry) => entry.id === id),
+      stopped,
       isSaved,
       connect,
       send: async (ready) => {
         environmentId = ready.environmentId;
-        await sendOrbitFirstMessage(ready, firstMessagePorts);
+        await sendOrbitFirstMessage(ready, { ...firstMessagePorts, stopped });
       },
     });
     if (!sent || environmentId === null) return null;

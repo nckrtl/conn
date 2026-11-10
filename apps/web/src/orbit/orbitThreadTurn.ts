@@ -62,6 +62,8 @@ export interface OrbitFirstMessagePorts {
     input: ReturnType<typeof orbitFirstTurnInput>,
   ) => Promise<{ readonly ok: true } | { readonly ok: false; readonly error: unknown }>;
   readonly now: () => string;
+  /** True once the start was dismissed; no launch goes out then. */
+  readonly stopped: () => boolean;
 }
 
 /** Sends the first message. Only a launch the server took counts as sent. */
@@ -72,6 +74,7 @@ export async function sendOrbitFirstMessage(
   const clone = await ports.waitForClone(start.environmentId);
   if (clone === null) throw new Error("The clone's T3 project /srv/workspace did not appear.");
   if (clone.modelSelection === null) throw new Error("The clone's T3 server offers no model.");
+  if (ports.stopped()) throw new Error("The thread start was stopped.");
   const result = await ports.startTurn(
     start.environmentId,
     orbitFirstTurnInput({

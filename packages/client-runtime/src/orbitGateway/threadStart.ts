@@ -49,7 +49,7 @@ export interface OrbitThreadStartPorts {
   readonly save: (start: OrbitThreadStart) => void;
   readonly sleep: (ms: number) => Promise<void>;
   readonly now: () => number;
-  /** True once the user dismissed the start; the run ends at the next step. */
+  /** True once the user dismissed the start, or Orbit no longer provides the environments. */
   readonly stopped: () => boolean;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
@@ -62,7 +62,8 @@ export interface OrbitThreadStartPorts {
 /** The longest name the Gateway takes is 63 characters; the slug leaves room for the suffix. */
 const NAME_SLUG_LENGTH = 40;
 const NAME_SLUG_WORDS = 6;
-const MAX_READ_MISSES = 5;
+/** How long Operation reads may keep failing before the start stops. */
+const READ_OUTAGE_MS = 60_000;
 /** A clone's create runs for minutes; a pairing follows #9's `pair` deadline. */
 const CREATE_TIMEOUT_MS = 30 * 60_000;
 const PAIRING_TIMEOUT_MS = OPERATION_TIMEOUT_MS;
@@ -169,16 +170,17 @@ export async function runOrbitThreadStart(
     failed: (code: string) => StepFailed,
   ) => {
     const deadline = ports.now() + timeoutMs;
-    let misses = 0;
+    let outageSince: number | null = null;
     for (;;) {
       checkStopped();
       let operation;
       try {
         operation = await ports.client.operation(operationId);
-        misses = 0;
+        outageSince = null;
       } catch (error) {
         // A create runs for minutes; a short Gateway outage must not stop it.
-        if (!isTransient(error) || ++misses > MAX_READ_MISSES) throw error;
+        outageSince ??= ports.now();
+        if (!isTransient(error) || ports.now() - outageSince >= READ_OUTAGE_MS) throw error;
         operation = null;
       }
       if (operation?.status === "succeeded") return;
@@ -192,6 +194,7 @@ export async function runOrbitThreadStart(
   };
 
   try {
+    checkStopped();
     if (current.environmentId === null) {
       if (current.createOperationId === null) {
         const operation = await ports.client.createThreadInstance(
@@ -248,10 +251,15 @@ export async function runOrbitThreadStart(
           pairingUrl = (await ports.client.readPairing(environmentId, current.pairingId!))
             .pairingUrl;
         } catch (error) {
-          if (isOrbitGatewayError(error) && error.status === 409) {
-            throw stepFailed("The pairing link was already used or expired.", newPairing);
-          }
-          throw error;
+          // The Gateway may have handed the link out before the read failed: Retry pairs anew.
+          throw stepFailed(
+            isOrbitGatewayError(error) && error.status === 409
+              ? "The pairing link was already used or expired."
+              : error instanceof Error
+                ? error.message
+                : String(error),
+            newPairing,
+          );
         }
         // The Gateway hands the link out once: a failed connect needs a new pairing.
         update({ ...newPairing, pairingLinkRead: true });
@@ -270,7 +278,8 @@ export async function runOrbitThreadStart(
     await ports.send({ ...current, environmentId });
     return true;
   } catch (error) {
-    if (isStopped(error)) return false;
+    // A start stopped mid-step ends without an error, so it resumes if it comes back.
+    if (isStopped(error) || ports.stopped()) return false;
     update({
       ...(isStepFailed(error) ? (error.reset as Partial<OrbitThreadStart>) : {}),
       error: error instanceof Error ? error.message : String(error),

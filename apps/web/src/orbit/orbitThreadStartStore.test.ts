@@ -1,7 +1,7 @@
 import { newOrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { heldOrbitInstanceIds, saveStart, updateStarts } from "./orbitThreadStartStore";
+import { heldOrbitInstanceIds, readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
 
 function createLocalStorageStub(): Storage {
   const values = new Map<string, string>();
@@ -43,6 +43,13 @@ describe("orbitThreadStartStore", () => {
     saveStart({ ...start("a"), instanceId: 41 });
 
     expect(heldOrbitInstanceIds()).toEqual([41]);
+  });
+
+  it("drops a start saved without a launch command id, which could not resume safely", () => {
+    const { commandId: _commandId, ...old } = start("old");
+    window.localStorage.setItem("conn:orbit-thread-starts:v1", JSON.stringify([old, start("new")]));
+
+    expect(readStored().map((entry) => entry.id)).toEqual(["new"]);
   });
 
   it("does not bring a dismissed start back when its run saves", () => {

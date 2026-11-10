@@ -3,8 +3,8 @@ import { create } from "zustand";
 
 /**
  * Conn: the threads started in an Orbit Project, kept in localStorage until their first message is
- * sent, so a reload resumes them. Every window reads and writes the list directly, so a start added
- * in one window never overwrites another's progress.
+ * sent, so a reload resumes them. Every window reads the list fresh before it writes; two writes in
+ * the same moment from two windows can still lose one.
  */
 
 const STORAGE_KEY = "conn:orbit-thread-starts:v1";
@@ -12,7 +12,10 @@ export function readStored(): OrbitThreadStart[] {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     const value: unknown = raw === null ? [] : JSON.parse(raw);
-    return Array.isArray(value) ? (value as OrbitThreadStart[]) : [];
+    // A start saved by a build before launch command ids cannot resume safely.
+    return Array.isArray(value)
+      ? (value as OrbitThreadStart[]).filter((start) => typeof start.commandId === "string")
+      : [];
   } catch {
     return [];
   }

@@ -162,6 +162,8 @@ describe("Orbit name check states", () => {
       plusEnabled: false,
       canCreate: false,
     });
+    // Another name is checked again rather than blocked by the old answer.
+    expect(hint("pricing-two", missing)).toMatchObject({ text: ORBIT_NAME_CHECKING });
     for (const error of [new Error("timeout"), { code: "gateway.unreachable" }, null]) {
       const unavailable = orbitNameCheckFailure("pricing", error);
       expect(unavailable.status).toBe("unavailable");

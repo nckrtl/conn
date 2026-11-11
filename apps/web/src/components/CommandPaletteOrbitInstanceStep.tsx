@@ -65,7 +65,11 @@ export function useOrbitInstanceStep(input: {
 }): OrbitInstanceStep {
   const projectId = input.project?.id ?? null;
   const [typed, setTyped] = useState(input.initialTyped ?? { projectId: -1, value: "" });
-  const [submitted, setSubmitted] = useState(false);
+  // A press without a name, kept for the Project and search it was made in.
+  const [submittedFor, setSubmittedFor] = useState<{
+    readonly projectId: number | null;
+    readonly query: string;
+  } | null>(null);
   const [check, setCheck] = useState<{
     readonly projectId: number;
     readonly state: OrbitNameCheckState;
@@ -108,16 +112,16 @@ export function useOrbitInstanceStep(input: {
     name,
     check: check !== null && check.projectId === projectId ? check.state : { status: "idle" },
     projectName: input.project?.name ?? "",
-    submitted,
+    submitted: submittedFor?.projectId === projectId && submittedFor.query === input.query,
   });
   return {
     field,
     hint,
     setTypedName: (value) => {
-      setSubmitted(false);
+      setSubmittedFor(null);
       if (projectId !== null) setTyped({ projectId, value });
     },
-    markSubmitted: () => setSubmitted(true),
+    markSubmitted: () => setSubmittedFor({ projectId, query: input.query }),
   };
 }
 
@@ -148,7 +152,8 @@ export function OrbitNewInstanceSection(props: {
             value={step.field.value}
             onChange={(event) => step.setTypedName(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+              if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229)
+                return;
               event.preventDefault();
               create();
             }}
@@ -205,6 +210,8 @@ function InstanceDot(props: { readonly state: OrbitInstanceRow["state"] }) {
 }
 
 const EXISTING_GROUP = "orbit-existing-instances";
+/** The failed list's Retry row; Enter on it retries instead of creating. */
+export const ORBIT_INSTANCES_RETRY_VALUE = `${EXISTING_GROUP}:retry`;
 const EXISTING_LABEL = "Existing instances";
 const SKELETON_WIDTHS = ["42%", "34%", "48%", "30%"];
 
@@ -258,7 +265,7 @@ export function orbitExistingInstanceGroups(input: {
   if (input.status === "failed") {
     return infoGroup({
       kind: "action",
-      value: `${EXISTING_GROUP}:retry`,
+      value: ORBIT_INSTANCES_RETRY_VALUE,
       searchTerms: [],
       title: (
         <span className="whitespace-normal text-muted-foreground">

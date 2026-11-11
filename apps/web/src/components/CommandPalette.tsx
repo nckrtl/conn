@@ -287,6 +287,7 @@ import {
   type OrbitInstanceRow,
 } from "../orbit/orbitInstanceStepLogic";
 import {
+  ORBIT_INSTANCES_RETRY_VALUE,
   OrbitNewInstanceSection,
   orbitExistingInstanceGroups,
   orbitInstanceListStatus,
@@ -1906,26 +1907,37 @@ function OpenCommandPaletteDialog(props: {
       instanceName: orbitStep.field.value,
       existing: null,
       domainSuffix: orbitStepProject.domainSuffix,
-    });
+    })
+      .then((draftId) => {
+        if (draftId === null) throw new Error("Conn could not open the draft here.");
+      })
+      .catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Unable to open the Orbit draft",
+            description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          }),
+        );
+      });
   };
   const pickOrbitInstance = async (row: OrbitInstanceRow) => {
     if (orbitStepProject === null) return;
     const pick = orbitInstancePick(row);
-    if (pick.kind === "paired") {
-      const cloneProject = orbitCloneProject(projects, pick.environmentId);
-      if (cloneProject === null) {
-        throw new Error(`The project of ${row.name} has not loaded on this device yet.`);
-      }
+    const cloneProject =
+      pick.kind === "paired" ? orbitCloneProject(projects, pick.environmentId) : null;
+    if (cloneProject !== null) {
       await handleNewThread(scopeProjectRef(cloneProject.environmentId, cloneProject.id));
-    } else if (pick.kind === "unpaired") {
+    } else if (pick.kind !== "disabled") {
+      // Unpaired, or paired but its project has not loaded yet: the Orbit draft handles both.
       await openOrbitDraft(router, {
         projectId: orbitStepProject.id,
         projectSlug: orbitStepProject.slug,
         projectName: orbitStepProject.name,
         nodeName: row.nodeName ?? orbitStepProject.nodeName ?? "",
         instanceKind: "existing",
-        instanceName: pick.name,
-        existing: { instanceId: pick.instanceId, environmentId: pick.environmentId },
+        instanceName: row.name,
+        existing: { instanceId: row.instanceId, environmentId: row.environmentId },
         domainSuffix: orbitStepProject.domainSuffix,
       });
     }
@@ -2783,6 +2795,7 @@ function OpenCommandPaletteDialog(props: {
       orbitStepProject !== null &&
       event.key === "Enter" &&
       orbitPickableRowCount === 0 &&
+      highlightedItemValue !== ORBIT_INSTANCES_RETRY_VALUE &&
       !event.nativeEvent.isComposing
     ) {
       // No Instance row to pick: Enter creates the Instance with the name below the search.
@@ -3160,7 +3173,7 @@ function OpenCommandPaletteDialog(props: {
       pendingSelectionRef={remountSelectionRef}
       showBackHint={isSubmenu}
       value={query}
-      {...(orbitPalettePage !== null ? { panelSize: "fixed-list" as const } : {})}
+      {...(orbitStepProject !== null ? { panelSize: "fixed-list" as const } : {})}
     >
       {orbitStepProject !== null ? (
         <OrbitNewInstanceSection

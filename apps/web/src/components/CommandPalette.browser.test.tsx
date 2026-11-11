@@ -36,7 +36,7 @@ vi.mock("../orbit/orbitPaletteProjects", () => ({
     orbit.checkInstanceName(projectId, name),
 }));
 vi.mock("../orbit/openOrbitDraft", () => ({
-  openOrbitDraft: (...args: unknown[]) => orbit.openOrbitDraft(...args),
+  openOrbitDraft: async (...args: unknown[]) => orbit.openOrbitDraft(...args) ?? "draft-1",
 }));
 
 function orbitEnvironment(
@@ -395,5 +395,30 @@ describe("CommandPalette open intents", () => {
     await expect.element(page.getByText("pricing is available.")).toBeVisible();
     // The list is still loading: skeleton rows under the label, the name field already works.
     await expect.element(page.getByText("Existing instances")).toBeVisible();
+  });
+
+  it("retries a failed instance list on Enter instead of creating", async () => {
+    setup({ orbit: { status: "unreachable" } });
+    await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
+
+    await act(() =>
+      openOrbitInstanceStep({
+        projectId: 3,
+        projectSlug: "nckrtl",
+        projectName: "nckrtl",
+        nodeName: "beast",
+        instanceKind: "new",
+        instanceName: "",
+        existing: null,
+        domainSuffix: null,
+      }),
+    );
+    await expect
+      .element(page.getByRole("option", { name: /Could not load the instances of nckrtl/ }))
+      .toBeVisible();
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.keyboard("{Enter}");
+    await vi.waitFor(() => expect(orbit.retry).toHaveBeenCalledOnce());
+    expect(orbit.openOrbitDraft).not.toHaveBeenCalled();
   });
 });

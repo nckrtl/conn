@@ -106,7 +106,8 @@ export function orbitNameHint(input: {
   readonly submitted?: boolean;
 }): OrbitNameHint {
   const { name, check } = input;
-  if (check.status === "cannot-create") {
+  // Counts only for the name it was asked about, so a fixed default clears on the next check.
+  if (check.status === "cannot-create" && check.name === name) {
     return { tone: "bad", text: check.message, plusEnabled: false, canCreate: false };
   }
   if (name === "") {

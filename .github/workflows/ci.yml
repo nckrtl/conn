@@ -134,18 +134,25 @@ jobs:
             !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
           sparse-checkout-cone-mode: false
 
-      - uses: ./.github/actions/setup-apt-mirrors
-        if: needs.changes.outputs.build != 'false'
+      # Fork: GitHub-hosted runners keep their own sources; see FORK.md "Pull request runners".
+      - if: github.repository == 'pingdotgg/t3code' && needs.changes.outputs.build != 'false'
+        uses: ./.github/actions/setup-apt-mirrors
 
       # Runs in the background while Vite+ installs; the step before the build waits for it.
       # Xvfb is for the desktop launch check below.
       - name: Start installing browser secret helper build libraries
         if: needs.changes.outputs.build != 'false'
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          if [ "$GITHUB_REPOSITORY" = pingdotgg/t3code ]; then
+            sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          fi
           (
             set +e
-            sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config xvfb
+            if [ "$GITHUB_REPOSITORY" = pingdotgg/t3code ]; then
+              sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config xvfb
+            else
+              .github/scripts/fork-apt-install.sh libsecret-1-dev pkg-config xvfb
+            fi
             echo "$?" > "$RUNNER_TEMP/apt-status"
           ) > "$RUNNER_TEMP/apt.log" 2>&1 < /dev/null &
 
@@ -183,8 +190,13 @@ jobs:
         if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
         timeout-minutes: 5
         run: |
-          until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done
+          echo "Waiting for the background apt install (see the Start step) to write apt-status"
+          for _ in $(seq 240); do test -s "$RUNNER_TEMP/apt-status" && break; sleep 1; done
           cat "$RUNNER_TEMP/apt.log"
+          if ! test -s "$RUNNER_TEMP/apt-status"; then
+            echo "::error::apt install did not finish within 240 s; its log so far is above"
+            exit 1
+          fi
           exit "$(cat "$RUNNER_TEMP/apt-status")"
 
       - name: Build desktop pipeline
@@ -291,16 +303,24 @@ jobs:
             !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
           sparse-checkout-cone-mode: false
 
-      - uses: ./.github/actions/setup-apt-mirrors
+      # Fork: GitHub-hosted runners keep their own sources; see FORK.md "Pull request runners".
+      - if: github.repository == 'pingdotgg/t3code'
+        uses: ./.github/actions/setup-apt-mirrors
 
       # The desktop tests compile the browser secret helper. The install runs in
       # the background while Vite+ installs; the step before the tests waits for it.
       - name: Start installing browser secret helper build libraries
         run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          if [ "$GITHUB_REPOSITORY" = pingdotgg/t3code ]; then
+            sudo sed -i 's|http://|https://|g' /etc/apt/blacksmith-ubuntu-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources
+          fi
           (
             set +e
-            sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+            if [ "$GITHUB_REPOSITORY" = pingdotgg/t3code ]; then
+              sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+            else
+              .github/scripts/fork-apt-install.sh libsecret-1-dev pkg-config
+            fi
             echo "$?" > "$RUNNER_TEMP/apt-status"
           ) > "$RUNNER_TEMP/apt.log" 2>&1 < /dev/null &
 
@@ -356,8 +376,13 @@ jobs:
       - name: Finish installing browser secret helper build libraries
         timeout-minutes: 5
         run: |
-          until test -s "$RUNNER_TEMP/apt-status"; do sleep 1; done
+          echo "Waiting for the background apt install (see the Start step) to write apt-status"
+          for _ in $(seq 240); do test -s "$RUNNER_TEMP/apt-status" && break; sleep 1; done
           cat "$RUNNER_TEMP/apt.log"
+          if ! test -s "$RUNNER_TEMP/apt-status"; then
+            echo "::error::apt install did not finish within 240 s; its log so far is above"
+            exit 1
+          fi
           exit "$(cat "$RUNNER_TEMP/apt-status")"
 
       # `changes` lists the affected packages, or nothing when all of them are.

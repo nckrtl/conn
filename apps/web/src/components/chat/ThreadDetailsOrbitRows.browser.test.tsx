@@ -1,6 +1,8 @@
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
+import "~/index.css";
+
 import { render } from "../../../test/render";
 import { ThreadDetailsOrbitRows } from "./ThreadDetailsOrbitRows";
 
@@ -48,4 +50,72 @@ it("falls back to the slug, then the id, and links only a web URL", async () => 
   );
   await expect.element(page.getByLabelText("Orbit Project Project 7")).toBeVisible();
   expect(page.getByRole("link").elements()).toHaveLength(0);
+});
+
+// The details card is --thread-details-panel-width (17.5rem) with px-2 section padding.
+const PANEL_ROW_WIDTH = 280 - 16;
+
+const renderAtPanelWidth = (instanceName: string) =>
+  render(
+    <div style={{ width: PANEL_ROW_WIDTH }}>
+      <ThreadDetailsOrbitRows
+        orbitInstance={{
+          projectId: 7,
+          instanceId: 1905,
+          projectSlug: "create-bench",
+          projectName: "create-bench",
+          instanceName,
+          nodeName: "beast",
+          url: `http://${instanceName}.create-bench.test`,
+        }}
+        onOpenUrl={vi.fn()}
+      />
+    </div>,
+    { router: false }, // A leaf row: no route reads it.
+  );
+
+const isClipped = (element: Element) => element.scrollWidth > element.clientWidth;
+
+const isInside = (inner: Element, outer: Element) => {
+  const a = inner.getBoundingClientRect();
+  const b = outer.getBoundingClientRect();
+  return a.width > 0 && a.left >= b.left - 0.5 && a.right <= b.right + 0.5;
+};
+
+it("shortens a long Instance name in the middle so the Node stays visible", async () => {
+  const name = "list-the-files-here-62b311";
+  await using screen = await renderAtPanelWidth(name);
+  const row = screen.container.querySelector("[data-thread-panel-orbit-instance]")!;
+  const head = row.querySelector("[data-orbit-instance-name-head]")!;
+  const tail = row.querySelector("[data-orbit-instance-name-tail]")!;
+  const node = row.querySelector("[data-orbit-node-name]")!;
+
+  expect(head.textContent).toBe("list-the-files-here-");
+  expect(isClipped(head)).toBe(true);
+  expect(tail.textContent).toBe("62b311");
+  expect(isClipped(tail)).toBe(false);
+  expect(node.textContent).toBe(" · beast");
+  expect(isClipped(node)).toBe(false);
+  expect(isInside(tail, row)).toBe(true);
+  expect(isInside(node, row)).toBe(true);
+  // The Project keeps a visible start, cut at its end.
+  const project = row.querySelector("[data-composer-label]")!;
+  expect(project.getBoundingClientRect().width).toBeGreaterThan(24);
+
+  await userEvent.hover(row.querySelector("[data-thread-panel-orbit-placement]")!);
+  await expect
+    .element(page.getByText(`Orbit Project create-bench, Instance ${name}, Node beast`).last())
+    .toBeVisible();
+});
+
+it("shows a short Instance name in full", async () => {
+  await using screen = await renderAtPanelWidth("t3-1a2b");
+  const row = screen.container.querySelector("[data-thread-panel-orbit-instance]")!;
+  const head = row.querySelector("[data-orbit-instance-name-head]")!;
+  expect(row.querySelector("[data-thread-panel-orbit-placement]")!.textContent).toBe(
+    "t3-1a2b · beast",
+  );
+  expect(isClipped(head)).toBe(false);
+  expect(isClipped(row.querySelector("[data-composer-label] > span")!)).toBe(false);
+  expect(isInside(row.querySelector("[data-orbit-node-name]")!, row)).toBe(true);
 });

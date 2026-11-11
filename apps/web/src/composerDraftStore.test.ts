@@ -892,6 +892,38 @@ describe("composerDraftStore Orbit target", () => {
     expect(state.draftsByThreadKey[orbitDraftId]?.prompt).toBe("Add a pricing page");
   });
 
+  it("becomes a normal draft when moved to a T3 project, and keeps its text", () => {
+    const store = useComposerDraftStore.getState();
+    const t3ProjectRef = scopeProjectRef(TEST_ENVIRONMENT_ID, ProjectId.make("project-a"));
+    store.setLogicalProjectDraftThreadId(
+      orbitDraftLogicalProjectKey(71),
+      orbitProjectRef,
+      orbitDraftId,
+      { orbitTarget: target },
+    );
+    store.setPrompt(orbitDraftId, "Add a pricing page");
+    // The hero's project picker remaps the draft without naming a target.
+    store.setLogicalProjectDraftThreadId("project-a-key", t3ProjectRef, orbitDraftId);
+
+    const moved = useComposerDraftStore.getState().getDraftThread(orbitDraftId);
+    expect(moved?.projectId).toBe(t3ProjectRef.projectId);
+    expect(moved?.orbitTarget ?? null).toBeNull();
+    expect(useComposerDraftStore.getState().getComposerDraft(orbitDraftId)?.prompt).toBe(
+      "Add a pricing page",
+    );
+
+    store.setLogicalProjectDraftThreadId(
+      orbitDraftLogicalProjectKey(71),
+      orbitProjectRef,
+      orbitDraftId,
+      { orbitTarget: target },
+    );
+    store.setDraftThreadContext(orbitDraftId, { projectRef: t3ProjectRef });
+    expect(
+      useComposerDraftStore.getState().getDraftThread(orbitDraftId)?.orbitTarget ?? null,
+    ).toBeNull();
+  });
+
   it("drops a saved target it cannot read and keeps the draft", () => {
     const persisted = JSON.parse(
       JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),

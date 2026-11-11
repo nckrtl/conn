@@ -3699,7 +3699,9 @@ export default function ChatView(props: ChatViewProps) {
                                   forceExpandedMobileComposer && isDraftHeroState
                                 }
                                 projectSelectionRequired={
-                                  isLocalDraftThread && activeProject === null
+                                  isLocalDraftThread &&
+                                  activeProject === null &&
+                                  orbitDraftTarget === null
                                 }
                                 phase={phase}
                                 isCompacting={isCompacting}

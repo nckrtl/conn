@@ -76,8 +76,8 @@ export function beginOrbitDraftThreadStart(
 }
 
 /**
- * Where an Orbit draft's start shows its progress: the sidebar's start list, from any route. PR 4
- * replaces this with the pending thread's route.
+ * Where the window goes after an Orbit draft is sent. The index opens a fresh draft, so the runner
+ * offers the thread in a toast and the sidebar's start list shows progress. PR 4: pending route.
  */
 export const ORBIT_START_PROGRESS_ROUTE = "/";
 

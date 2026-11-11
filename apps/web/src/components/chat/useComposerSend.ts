@@ -537,7 +537,7 @@ export function useComposerSend(input: ComposerSendInput) {
         approval.supportsFeedback && approval.requestId === sendCtx.shownPendingApprovalIds[0],
     );
     const multipleModelBlock =
-      multipleModelSelections === null
+      multipleModelSelections === null || orbitDraftTarget !== null
         ? null
         : multipleModelSendBlock({
             selectionCount: multipleModelSelections.length,

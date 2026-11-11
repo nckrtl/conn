@@ -1529,9 +1529,12 @@ function createDraftThreadState(
       : options.startFromOrigin;
   const environmentSelection =
     options?.environmentSelection ?? existingThread?.environmentSelection;
+  // A move to another project, such as the hero's project picker, makes it a normal draft.
   const orbitTarget =
     options?.orbitTarget === undefined
-      ? (existingThread?.orbitTarget ?? null)
+      ? projectChanged
+        ? null
+        : (existingThread?.orbitTarget ?? null)
       : options.orbitTarget;
   return {
     threadId,
@@ -2777,7 +2780,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 ? "manual"
                 : existing.environmentSelection);
             const nextOrbitTarget =
-              options.orbitTarget === undefined ? existing.orbitTarget : options.orbitTarget;
+              options.orbitTarget === undefined
+                ? projectChanged
+                  ? null
+                  : existing.orbitTarget
+                : options.orbitTarget;
             const nextDraftThread: DraftThreadState = {
               threadId: existing.threadId,
               environmentId: nextProjectRef.environmentId,

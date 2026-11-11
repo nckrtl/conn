@@ -2675,6 +2675,8 @@ html {
   /* One step up, for controls on a surface that already uses --shell-control. */
   --shell-control-raised: var(--card);
   --shell-control-raised-border: var(--shell-divider-header);
+  /* The chat composer's fill. Dark mode lifts it off the chat card, which upstream leaves level. */
+  --shell-composer: var(--card);
   /* Shape of toolbar groups and soft search fields, and of the buttons inside groups.
      Pill: 9999px / 9999px. Rounded rectangle: var(--radius) / 6px. */
   --toolbar-radius: 9999px;
@@ -2748,6 +2750,7 @@ html {
   --shell-control: color-mix(in oklab, var(--sidebar) 91%, var(--foreground));
   --shell-control-raised: color-mix(in oklab, var(--sidebar) 86%, var(--foreground));
   --shell-control-raised-border: color-mix(in oklab, var(--sidebar) 74%, var(--foreground));
+  --shell-composer: color-mix(in oklab, var(--sidebar) 95%, var(--foreground));
   --toolbar-group-fill: var(--shell-control);
   --toolbar-group-border: var(--shell-divider-header);
   /* Header buttons sit on the frosted frame, where the theme's toolbar control role alone reads

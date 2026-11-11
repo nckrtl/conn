@@ -45,6 +45,7 @@ import {
   useState,
 } from "react";
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
+import { ToolbarGroup } from "~/components/ToolbarGroup";
 import { Button } from "~/components/ui/button";
 import { PanelTabCloseButton } from "~/components/ui/panel-tab-close-button";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
@@ -1840,9 +1841,7 @@ export default function ThreadTerminalDrawer({
     };
   }, [isPanel, visible]);
 
-  // The single-terminal row and the split sidebar header share these controls,
-  // so neither layout floats them over terminal text.
-  const terminalActions = (
+  const sidebarTerminalActions = (
     <div className="inline-flex h-full items-stretch any-pointer-coarse:relative any-pointer-coarse:z-30">
       <TerminalActionButton
         disabled={!canOperateTerminal}
@@ -1942,14 +1941,39 @@ export default function ThreadTerminalDrawer({
       {resizeHandle}
 
       {!hasTerminalSidebar && (
-        <div
-          className={cn(
-            "flex shrink-0 items-stretch justify-end border-b border-(--shell-divider)!",
-            // The drawer's resize strip covers its top 6px; keep the buttons below it.
-            isPanel ? "h-[22px]" : "h-7 pt-1.5",
-          )}
-        >
-          {terminalActions}
+        <div className="pointer-events-none absolute right-2 top-2 z-20 any-pointer-coarse:z-30">
+          <ToolbarGroup className="pointer-events-auto">
+            <TerminalActionButton
+              unavailable={hasReachedSplitLimit}
+              disabled={!canOperateTerminal}
+              onClick={onSplitTerminalAction}
+              label={splitTerminalActionLabel}
+            >
+              <SquareSplitHorizontal />
+            </TerminalActionButton>
+            <TerminalActionButton
+              unavailable={hasReachedSplitLimit}
+              disabled={!canOperateTerminal}
+              onClick={onSplitTerminalVerticalAction}
+              label={splitTerminalVerticalActionLabel}
+            >
+              <SquareSplitVertical />
+            </TerminalActionButton>
+            <TerminalActionButton
+              disabled={!canOperateTerminal}
+              onClick={onNewTerminalAction}
+              label={newTerminalActionLabel}
+            >
+              <Plus />
+            </TerminalActionButton>
+            <TerminalActionButton
+              disabled={!canOperateTerminal}
+              onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+              label={closeTerminalActionLabel}
+            >
+              <Trash2 />
+            </TerminalActionButton>
+          </ToolbarGroup>
         </div>
       )}
 
@@ -1981,7 +2005,7 @@ export default function ThreadTerminalDrawer({
           {hasTerminalSidebar && (
             <aside className="flex w-36 min-w-36 flex-col border-l border-(--shell-divider)! bg-muted/10">
               <div className="flex h-[22px] items-stretch justify-end border-b border-(--shell-divider)!">
-                {terminalActions}
+                {sidebarTerminalActions}
               </div>
 
               <div className="min-h-0 flex-1 overflow-y-auto px-1 py-1">

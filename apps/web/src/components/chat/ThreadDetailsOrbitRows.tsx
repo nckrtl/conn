@@ -9,6 +9,7 @@ import { OrbitLogoIcon } from "../OrbitLogoIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
+  THREAD_DETAILS_PANEL_LABEL_CLASS,
   THREAD_DETAILS_PANEL_LOCKED_ROW_CLASS,
   THREAD_DETAILS_PANEL_ROW_CLASS,
 } from "./threadDetailsPanelStyles";
@@ -19,6 +20,13 @@ import {
  * the part that tells two clones apart.
  */
 const ORBIT_INSTANCE_NAME_TAIL_LENGTH = 6;
+
+/**
+ * The Project label's trimmed text box, so both sit on one baseline. It clips
+ * only sideways, so descenders still draw; `whitespace-pre` keeps the space
+ * before " · node" that `truncate` would drop.
+ */
+const ORBIT_PLACEMENT_TEXT_CLASS = `whitespace-pre ${THREAD_DETAILS_PANEL_LABEL_CLASS}`;
 
 /** The machine row of a thread whose server runs in an Orbit Instance: Project, Instance, Node and URL. */
 export function ThreadDetailsOrbitRows({
@@ -89,8 +97,8 @@ export function ThreadDetailsOrbitRows({
 /**
  * "<instance> · <node>". CSS can only cut text at the end, so the name is split
  * into a head that truncates and a tail that stays: a long name reads
- * `list-the-files-…62b311 · beast` and the Node always shows. The head gives up
- * its space first; only a Node too long for the row is cut, with its own "…".
+ * `list-the-files-…62b311 · beast` and the Node always shows. Only a Node too
+ * long for the row is cut, with its own "…".
  */
 function OrbitPlacement({
   instanceName,
@@ -104,26 +112,34 @@ function OrbitPlacement({
   const splitAt = Math.max(0, (instanceName?.length ?? 0) - ORBIT_INSTANCE_NAME_TAIL_LENGTH);
   const nodeText = nodeName && (instanceName ? ` · ${nodeName}` : nodeName);
   return (
-    // The trim matches the Project label's text box, so both lines sit on one baseline.
     <span
-      className="flex min-w-0 max-w-[55%] shrink overflow-x-clip whitespace-pre text-muted-foreground *:[text-box:trim-both_cap_alphabetic]"
+      className="flex min-w-0 max-w-[55%] shrink overflow-x-clip whitespace-pre text-muted-foreground"
       data-thread-panel-orbit-placement
     >
       {instanceName ? (
-        <>
-          <span className="min-w-0 shrink-1000 truncate" data-orbit-instance-name-head>
-            {instanceName.slice(0, splitAt)}
-          </span>
-          <span className="shrink-0" data-orbit-instance-name-tail>
-            {instanceName.slice(splitAt)}
-          </span>
-        </>
-      ) : null}
-      {nodeText ? (
-        <span className="min-w-0 truncate" data-orbit-node-name>
-          {nodeText}
+        <span
+          className={cn("min-w-0 truncate", ORBIT_PLACEMENT_TEXT_CLASS)}
+          data-orbit-instance-name-head
+        >
+          {instanceName.slice(0, splitAt)}
         </span>
       ) : null}
+      {/* Never shrinks past the row, so only the head gives up space; a Node too long for the row truncates inside. */}
+      <span className="flex min-w-0 max-w-full shrink-0">
+        {instanceName ? (
+          <span
+            className={cn("shrink-0", ORBIT_PLACEMENT_TEXT_CLASS)}
+            data-orbit-instance-name-tail
+          >
+            {instanceName.slice(splitAt)}
+          </span>
+        ) : null}
+        {nodeText ? (
+          <span className={cn("min-w-0 truncate", ORBIT_PLACEMENT_TEXT_CLASS)} data-orbit-node-name>
+            {nodeText}
+          </span>
+        ) : null}
+      </span>
     </span>
   );
 }

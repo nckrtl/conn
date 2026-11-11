@@ -144,6 +144,18 @@ it("sets the placement text on the Project label's trimmed text box", async () =
   const node = row.querySelector("[data-orbit-node-name]")!.getBoundingClientRect();
   expect(node.height).toBeCloseTo(label.height, 0);
   expect(node.top).toBeCloseTo(label.top, 0);
+  // The box is trimmed to cap height: it may clip sideways only, or "g" and "p" lose their tails.
+  for (const part of row.querySelectorAll(
+    "[data-orbit-instance-name-head], [data-orbit-instance-name-tail], [data-orbit-node-name]",
+  )) {
+    expect(getComputedStyle(part).overflowY).toBe("visible");
+  }
+  // The space before "·" still takes room.
+  const nodeText = row.querySelector("[data-orbit-node-name]")!.firstChild!;
+  const space = document.createRange();
+  space.setStart(nodeText, 0);
+  space.setEnd(nodeText, 1);
+  expect(space.getBoundingClientRect().width).toBeGreaterThan(0);
 });
 
 it("opens the full text from the keyboard", async () => {

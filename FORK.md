@@ -1097,6 +1097,11 @@ Sources:
      the `attachOverlayBridge` effect in
      `apps/web/src/browser/HostedBrowserWebview.tsx`.
    - `pnpm-lock.yaml`: take upstream's, then let `vp i` rewrite it.
+   - `playwright-core` in `apps/server`, `apps/desktop` and `packages/shared`
+     must stay on one version: `@t3tools/shared/previewPage` takes the pages
+     both runners create, so a split fails the server typecheck. Conn pins
+     1.60.0 (1.64.1 breaks `DesktopTabRunner` resize fill); move all three
+     together.
    - Fork Swift and Kotlin files (`apps/mobile/modules/*/ios`, `*/android`):
      CI lints native code but never compiles it, so a merge that takes
      upstream's copy passes CI and breaks the app. The November 7 sync took
@@ -1217,6 +1222,17 @@ annotations on 2026-11-10 and restored with guard tests: the macOS window glass
 fix for the missing space above panel toolbar controls (annotation #264) never
 reached `main` and is restored too. A visual change needs its rule in this file
 and a guard, or a later sync can drop it while every check passes.
+
+### Upstream sync audit: 2026-11-11
+
+The sync merge `954d199524` (upstream `b883156e26`) kept `apps/server` on
+upstream's `playwright-core` 1.64.1, while `b6d0582df6` moved desktop and shared
+back to 1.60.0. The server typecheck failed on `ServerBrowser.ts` and
+`ServerBrowserPage.test.ts`; the server is back on 1.60.0. The fork work of
+November 10–11 (#11–#27) survived: every line those PRs added is still there (one test call follows
+upstream's new `assistantCitationNavigation` signature), `ci.yml`
+and this file are unchanged by the merge, and their tests and the fork guards
+pass.
 
 ### Vendored dependency patches
 

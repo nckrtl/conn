@@ -36,9 +36,12 @@ vi.mock("../orbit/orbitPaletteProjects", () => ({
       },
       () => orbit.state,
     ),
+  useOrbitPairedEnvironmentIds: () => new Set<string>(),
   retryOrbitPaletteProjects: () => {},
   recheckOrbitPaletteProjects: () => orbit.recheck(),
+  checkOrbitInstanceName: async () => ({ available: true }),
 }));
+vi.mock("../orbit/openOrbitDraft", () => ({ openOrbitDraft: async () => {} }));
 
 function project(cloneable: boolean): OrbitGatewayProjectListing {
   const failing = !cloneable;
@@ -120,7 +123,7 @@ describe("Orbit checks page", () => {
     await page.getByRole("option", { name: /Check again/ }).click();
     await expect.element(page.getByText("Threads can start in this project now.")).toBeVisible();
     await page.getByRole("option", { name: /Choose an Instance/ }).click();
-    await expect.element(page.getByText(/Instance step comes in PR 2b/)).toBeVisible();
+    await expect.element(page.getByRole("textbox", { name: "Instance name" })).toBeVisible();
     expect(orbit.recheck).toHaveBeenCalledTimes(2);
   });
 });

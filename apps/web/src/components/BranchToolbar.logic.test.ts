@@ -8,9 +8,12 @@ import {
   resolveEffectiveEnvMode,
   resolveBranchToolbarPrBranch,
   resolveLocalCheckoutBranchMismatch,
+  resolveActiveOrbitDraftTarget,
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
+  shouldShowComposerContextStrip,
 } from "./BranchToolbar.logic";
+import { orbitDraftContextRow, type OrbitDraftTarget } from "../orbit/orbitDraft";
 
 describe("resolveDraftEnvModeAfterBranchChange", () => {
   it("switches to local mode when returning from an existing worktree to the main worktree", () => {
@@ -284,5 +287,61 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
+  });
+});
+
+describe("Orbit draft context row", () => {
+  const target: OrbitDraftTarget = {
+    projectId: 71,
+    projectSlug: "nckrtl",
+    projectName: "nckrtl.com",
+    nodeName: "beast",
+    instanceKind: "new",
+    instanceName: "pricing-page",
+    existing: null,
+    domainSuffix: ".nckrtl.test",
+  };
+  const existing: OrbitDraftTarget = {
+    ...target,
+    instanceKind: "existing",
+    instanceName: "checkout",
+    existing: { instanceId: 2055, environmentId: "env-2055" },
+  };
+
+  it("shows the Node as text and the Instance as <instance> · <project> for new and existing", () => {
+    expect(orbitDraftContextRow(target)).toEqual({
+      nodeLabel: "beast",
+      instanceLabel: "pricing-page · nckrtl",
+      instanceTitle: "New instance pricing-page.nckrtl.test in nckrtl.com. Click to change.",
+    });
+    expect(orbitDraftContextRow(existing)).toMatchObject({
+      nodeLabel: "beast",
+      instanceLabel: "checkout · nckrtl",
+    });
+  });
+
+  it("acts on the target only on a draft and only while the Labs switch is on", () => {
+    expect(
+      resolveActiveOrbitDraftTarget({ enabled: true, isServerThread: false, orbitTarget: target }),
+    ).toBe(target);
+    expect(
+      resolveActiveOrbitDraftTarget({ enabled: false, isServerThread: false, orbitTarget: target }),
+    ).toBeNull();
+    expect(
+      resolveActiveOrbitDraftTarget({ enabled: true, isServerThread: true, orbitTarget: target }),
+    ).toBeNull();
+  });
+
+  it("shows the strip for an Orbit draft without a T3 project, and normal drafts as before", () => {
+    const base = {
+      isDraftHeroState: true,
+      persistInActiveThreads: false,
+      hasActiveProject: false,
+      isGitRepo: false,
+      showEnvironmentIndicator: false,
+    };
+    expect(shouldShowComposerContextStrip({ ...base, hasOrbitDraftTarget: true })).toBe(true);
+    expect(shouldShowComposerContextStrip(base)).toBe(false);
+    expect(shouldShowComposerContextStrip({ ...base, hasActiveProject: true })).toBe(true);
   });
 });

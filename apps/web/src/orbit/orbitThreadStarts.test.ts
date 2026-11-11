@@ -1,9 +1,16 @@
+import { ProviderInstanceId } from "@t3tools/contracts";
 import type { OrbitGatewayClient } from "@t3tools/client-runtime/orbit-gateway";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useWorkspaceStore } from "../workspaceStore";
 import type { Workspace } from "../workspaces.logic";
-import { beginOrbitThreadStart, runSavedOrbitThreadStart } from "./orbitThreadStarts";
+import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import { buildOrbitDraftStart, type OrbitDraftTarget } from "./orbitDraft";
+import {
+  beginOrbitThreadStart,
+  runSavedOrbitThreadStart,
+  sendOrbitDraft,
+} from "./orbitThreadStarts";
 import { readStored } from "./orbitThreadStartStore";
 
 vi.mock("@t3tools/client-runtime/orbit-gateway", async (importOriginal) => ({
@@ -126,5 +133,80 @@ describe("runSavedOrbitThreadStart", () => {
     });
 
     expect((await startAndSend("S"))[0]).toBe(byKey);
+  });
+});
+
+describe("sendOrbitDraft", () => {
+  const target: OrbitDraftTarget = {
+    projectId: 71,
+    projectSlug: "nckrtl",
+    projectName: "nckrtl.com",
+    nodeName: "beast",
+    instanceKind: "new",
+    instanceName: "pricing-page",
+    existing: null,
+    domainSuffix: ".nckrtl.test",
+  };
+  const modelSelection = {
+    instanceId: ProviderInstanceId.make("claude"),
+    model: "claude-opus-5-5",
+  };
+  const send = (draftTarget: OrbitDraftTarget) => {
+    const events: string[] = [];
+    sendOrbitDraft({
+      start: buildOrbitDraftStart({
+        target: draftTarget,
+        message: "Add a pricing page",
+        modelSelection,
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+      }),
+      openProgress: (route) => events.push(`open ${route}`),
+      clearDraft: () => events.push(`clear after ${readStored().length} saved`),
+    });
+    return { start: readStored()[0]!, events };
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal("window", { localStorage: createLocalStorageStub() });
+    useWorkspaceStore.setState({ workspaces: [workspace("S")], activeWorkspaceId: "S" });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("saves a start with the typed name, kind, model and modes, then clears the draft", () => {
+    const { start, events } = send(target);
+
+    expect(start).toMatchObject({
+      projectId: 71,
+      projectSlug: "nckrtl",
+      nodeName: "beast",
+      message: "Add a pricing page",
+      instanceName: "pricing-page",
+      orbitInstanceKind: "new",
+      environmentId: null,
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      workspaceId: "S",
+    });
+    expect(events).toEqual(["open /", "clear after 1 saved"]);
+    // The start machine sends later; nothing goes through a T3 server now.
+    expect(runAtomCommand).not.toHaveBeenCalled();
+  });
+
+  it("starts in an existing, unpaired Instance without a create", () => {
+    const { start } = send({
+      ...target,
+      instanceKind: "existing",
+      instanceName: "checkout",
+      existing: { instanceId: 2055, environmentId: "env-2055" },
+    });
+
+    expect(start).toMatchObject({
+      instanceName: "checkout",
+      orbitInstanceKind: "existing",
+      instanceId: 2055,
+      environmentId: "env-2055",
+    });
   });
 });

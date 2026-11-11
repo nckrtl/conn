@@ -108,6 +108,11 @@ import {
 import { formatTerminalContextReference, type TerminalContextDraft } from "./lib/terminalContext";
 import { createDeferredStorage } from "./lib/storage";
 import { applyPreviewServerSnapshot, resetPreviewStateForTests } from "./previewStateStore";
+import {
+  orbitDraftLogicalProjectKey,
+  orbitDraftProjectId,
+  type OrbitDraftTarget,
+} from "./orbit/orbitDraft";
 
 function makeImage(input: {
   id: string;
@@ -814,6 +819,103 @@ describe("composerDraftStore environment contexts", () => {
     store.addEnvironmentContexts(threadRef, [vps]);
     store.setEnvironmentContexts(threadRef, []);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
+  });
+});
+
+describe("composerDraftStore Orbit target", () => {
+  const orbitProjectRef = scopeProjectRef(TEST_ENVIRONMENT_ID, orbitDraftProjectId(71));
+  const orbitDraftId = DraftId.make("draft-orbit");
+  const target: OrbitDraftTarget = {
+    projectId: 71,
+    projectSlug: "nckrtl",
+    projectName: "nckrtl.com",
+    nodeName: "beast",
+    instanceKind: "new",
+    instanceName: "pricing-page",
+    existing: null,
+    domainSuffix: ".nckrtl.test",
+  };
+  const reload = () =>
+    useComposerDraftStore.persist.getOptions().merge!(
+      JSON.parse(
+        JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+      ),
+      useComposerDraftStore.getInitialState(),
+    );
+
+  beforeEach(resetComposerDraftStore);
+
+  it("keeps the target through persistence, and a normal draft gets none", () => {
+    const store = useComposerDraftStore.getState();
+    store.setLogicalProjectDraftThreadId(
+      orbitDraftLogicalProjectKey(71),
+      orbitProjectRef,
+      orbitDraftId,
+      { threadId: ThreadId.make("thread-orbit"), orbitTarget: target },
+    );
+    store.setProjectDraftThreadId(
+      scopeProjectRef(TEST_ENVIRONMENT_ID, ProjectId.make("project-a")),
+      DraftId.make("draft-normal"),
+      { threadId: ThreadId.make("thread-normal") },
+    );
+    // A later context change (such as plan mode) keeps the target.
+    store.setDraftThreadContext(orbitDraftId, { interactionMode: "plan" });
+
+    const state = reload();
+    expect(state.draftThreadsByThreadKey[orbitDraftId]).toMatchObject({
+      projectId: orbitProjectRef.projectId,
+      interactionMode: "plan",
+      orbitTarget: target,
+    });
+    expect(state.draftThreadsByThreadKey["draft-normal"]).not.toHaveProperty("orbitTarget");
+  });
+
+  it("swaps the target in place and keeps the text when the Instance changes", () => {
+    const store = useComposerDraftStore.getState();
+    const key = orbitDraftLogicalProjectKey(71);
+    store.setLogicalProjectDraftThreadId(key, orbitProjectRef, orbitDraftId, {
+      orbitTarget: target,
+    });
+    store.setPrompt(orbitDraftId, "Add a pricing page");
+    const existing = {
+      ...target,
+      instanceKind: "existing" as const,
+      instanceName: "checkout",
+      existing: { instanceId: 2055, environmentId: "env-2055" },
+    };
+    store.setLogicalProjectDraftThreadId(key, orbitProjectRef, orbitDraftId, {
+      orbitTarget: existing,
+    });
+
+    const state = reload();
+    expect(state.draftThreadsByThreadKey[orbitDraftId]?.orbitTarget).toEqual(existing);
+    expect(state.draftsByThreadKey[orbitDraftId]?.prompt).toBe("Add a pricing page");
+  });
+
+  it("drops a saved target it cannot read and keeps the draft", () => {
+    const persisted = JSON.parse(
+      JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+    );
+    persisted.draftThreadsByThreadKey[orbitDraftId] = {
+      threadId: "thread-orbit",
+      environmentId: TEST_ENVIRONMENT_ID,
+      projectId: orbitProjectRef.projectId,
+      logicalProjectKey: orbitDraftLogicalProjectKey(71),
+      createdAt: "2026-11-11T00:00:00.000Z",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      envMode: "local",
+      startFromOrigin: false,
+      orbitTarget: { ...target, instanceKind: "existing", existing: null },
+    };
+    const state = useComposerDraftStore.persist.getOptions().merge!(
+      persisted,
+      useComposerDraftStore.getInitialState(),
+    );
+    expect(state.draftThreadsByThreadKey[orbitDraftId]?.threadId).toBe("thread-orbit");
+    expect(state.draftThreadsByThreadKey[orbitDraftId]?.orbitTarget).toBeUndefined();
   });
 });
 

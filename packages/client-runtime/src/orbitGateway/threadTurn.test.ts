@@ -11,7 +11,7 @@ import { newOrbitThreadStart } from "./threadStart.ts";
 const start = {
   ...newOrbitThreadStart({
     id: "s1",
-    project: { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" },
+    project: { id: 3, slug: "mealou", nodeName: "beast" },
     message: "Fix the login bug",
     suffix: "k3j9",
     threadId: "thread-1",

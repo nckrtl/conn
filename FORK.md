@@ -371,6 +371,14 @@ thousands. Request rows reformat the bridge's duration (`30168ms`) through
 `parseDuration` and sort on `RequestSummary.durationMs`. `model.test.ts`
 covers both.
 
+The Orbit tool's process status falls back to the Gateway's `status` when
+`runtime_status` is `unknown` or missing, as for container Instances. Without a
+usable answer it shows `unknown`, never `crashed`, and keeps the process's
+actions and log follow. The Processes log pane reads a one-time tail (the
+Gateway can take 8 s or more for container Processes) and must always end in a
+tail, an empty message, or an error with Retry. A non-followed read is not
+repeated, so never swallow its failure.
+
 `ApiPanel.tsx` has a separate toolbar mount. Keeping that mount, the toolbar
 directory, or the preload is not enough to preserve the browser toolbar. The
 November 7 sync removed the browser mount and the guest attachment in

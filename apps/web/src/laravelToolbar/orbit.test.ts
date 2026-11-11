@@ -12,14 +12,28 @@ import {
 } from "./orbit";
 
 describe("laravel toolbar orbit", () => {
-  it("maps systemd and Docker states to four statuses", () => {
-    expect(processStatus("active", "running")).toBe("running");
-    expect(processStatus("running", "running")).toBe("running");
-    expect(processStatus("activating", "running")).toBe("starting");
-    expect(processStatus("inactive", "running")).toBe("crashed");
-    expect(processStatus("failed", "stopped")).toBe("crashed");
-    expect(processStatus("inactive", "stopped")).toBe("stopped");
-    expect(processStatus("exited", "stopped")).toBe("stopped");
+  it("maps systemd and Docker states, and the Gateway status when the runtime is unobserved", () => {
+    const status = (
+      runtime_status: string | undefined,
+      desired_state: string,
+      extra: Record<string, unknown> = {},
+    ) => processStatus({ runtime_status, desired_state, ...extra });
+    expect(status("active", "running")).toBe("running");
+    expect(status("running", "running")).toBe("running");
+    expect(status("activating", "running")).toBe("starting");
+    expect(status("inactive", "running")).toBe("crashed");
+    expect(status("failed", "stopped")).toBe("crashed");
+    expect(status("inactive", "stopped")).toBe("stopped");
+    expect(status("exited", "stopped")).toBe("stopped");
+    expect(status("unknown", "running", { status: "active" })).toBe("running");
+    expect(status(undefined, "running", { status: "active" })).toBe("running");
+    expect(status("unknown", "running")).toBe("unknown");
+    expect(status("", "running", { status: null })).toBe("unknown");
+    expect(status("unknown", "stopped")).toBe("stopped");
+    expect(status("unknown", "running", { status: "failed" })).toBe("crashed");
+    expect(status("unknown", "running", { error_code: "process.start_failed" })).toBe("crashed");
+    expect(status("unknown", "running", { failed_step: "start" })).toBe("crashed");
+    expect(processStatus(null)).toBe("stopped");
   });
 
   it("reads a process from the Gateway's process list", () => {
@@ -44,6 +58,22 @@ describe("laravel toolbar orbit", () => {
     expect(
       parseProcess({ id: 9, name: "db", runtime_config: { image: "mysql:8.4" } })?.command,
     ).toBe("mysql:8.4");
+    // A container Instance: the Gateway cannot observe the runtime yet.
+    expect(
+      parseProcess({
+        id: 12,
+        name: "vp-dev",
+        runtime: "systemd",
+        runtime_config: { command: ["vp", "dev"] },
+        desired_state: "running",
+        status: "active",
+        runtime_status: "unknown",
+        error_code: null,
+        failed_step: null,
+        cpu: 0.4,
+        memory_bytes: 2048,
+      })?.status,
+    ).toBe("running");
     expect(parseProcess({ name: "no id" })).toBeNull();
   });
 

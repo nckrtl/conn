@@ -5,7 +5,8 @@ import { callOrbit, isOrbitApiError, listOrbitNodes } from "~/orbit/orbitApi";
 import type { ToolbarDependency } from "./types";
 import type { OrbitTransport } from "~/orbit/orbitTransport";
 
-export type ProcessStatus = "running" | "starting" | "crashed" | "stopped";
+/** `unknown`: Orbit could not observe the runtime (container Instances, for now). */
+export type ProcessStatus = "running" | "starting" | "crashed" | "stopped" | "unknown";
 export type ProcessAction = "start" | "stop" | "restart";
 
 export interface OrbitProcess {
@@ -19,7 +20,7 @@ export interface OrbitProcess {
 }
 
 export function hasProcessWarning(processes: readonly OrbitProcess[]): boolean {
-  return processes.some((process) => process.status !== "running");
+  return processes.some((process) => process.status === "crashed" || process.status === "stopped");
 }
 
 export interface OrbitPage {
@@ -66,13 +67,27 @@ function finite(value: unknown): number | null {
 const RUNNING = new Set(["active", "running"]);
 const STARTING = new Set(["activating", "reloading", "restarting", "created"]);
 
-/** systemd and Docker report different words; the panel shows four states. */
-export function processStatus(runtimeStatus: unknown, desiredState: unknown): ProcessStatus {
-  const runtime = typeof runtimeStatus === "string" ? runtimeStatus : "";
+const UNOBSERVED = new Set(["", "unknown"]);
+
+/**
+ * systemd and Docker report different words. When the Gateway could not observe the
+ * runtime, its own `status` decides; a missing answer is never shown as a crash.
+ */
+export function processStatus(data: Record<string, unknown> | null): ProcessStatus {
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  const runtime = text(data?.runtime_status);
+  const wanted = data?.desired_state === "running";
   if (RUNNING.has(runtime)) return "running";
   if (STARTING.has(runtime)) return "starting";
-  // Down while it should run: it crashed or failed to start.
-  return desiredState === "running" || runtime === "failed" ? "crashed" : "stopped";
+  const failed =
+    runtime === "failed" || text(data?.error_code) !== "" || text(data?.failed_step) !== "";
+  if (failed) return "crashed";
+  if (!UNOBSERVED.has(runtime)) return wanted ? "crashed" : "stopped";
+  const status = text(data?.status);
+  if (RUNNING.has(status)) return "running";
+  if (STARTING.has(status)) return "starting";
+  if (status === "failed") return wanted ? "crashed" : "stopped";
+  return wanted ? "unknown" : "stopped";
 }
 
 export function parseProcess(value: unknown): OrbitProcess | null {
@@ -88,7 +103,7 @@ export function parseProcess(value: unknown): OrbitProcess | null {
     id,
     name,
     command: command || (typeof config?.image === "string" ? config.image : null),
-    status: processStatus(data?.runtime_status, data?.desired_state),
+    status: processStatus(data),
     cpu: finite(data?.cpu),
     memoryBytes: finite(data?.memory_bytes),
   };
@@ -188,6 +203,9 @@ export function parseDependencies(value: unknown): OrbitDependencies {
   };
 }
 
+/** How long the Gateway may take to return a Process log tail. */
+export const LOG_TIMEOUT_SECONDS = 30;
+
 let nodeNames: Promise<Map<number, string>> | null = null;
 
 /** Orbit for the page on `domain`, through `transport` (which runs on an Orbit Node). */
@@ -257,6 +275,8 @@ export function gatewayOrbitSource(transport: OrbitTransport, domain: string): O
           method: "GET",
           path: `/api/v1/processes/${processId}/logs`,
           query: { lines: String(lines) },
+          // Container Processes answer in about 8 s today.
+          timeoutSeconds: LOG_TIMEOUT_SECONDS,
         }),
       );
       return typeof data?.logs === "string" ? data.logs : "";

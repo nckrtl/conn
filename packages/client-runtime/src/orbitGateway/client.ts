@@ -139,6 +139,30 @@ export interface OrbitGatewayOperation {
   readonly errorCode: string | null;
   /** Seconds to wait before the next read, or null once the Operation ended. */
   readonly pollAfterSeconds: number | null;
+  /**
+   * Step progress. Present only when the Gateway sends it; an Operation without it parses as
+   * before, and a malformed step is dropped.
+   */
+  readonly steps?: readonly OrbitGatewayOperationStep[];
+  readonly currentStep?: string | null;
+  readonly currentStepStartedAt?: string | null;
+  readonly failedStep?: string | null;
+  readonly error?: OrbitGatewayOperationError | null;
+  readonly result?: Readonly<Record<string, unknown>> | null;
+}
+
+export interface OrbitGatewayOperationError {
+  readonly code: string | null;
+  readonly message: string | null;
+}
+
+/** One step of an Operation. `status` is the Gateway's own word; unknown values pass through. */
+export interface OrbitGatewayOperationStep {
+  readonly name: string;
+  readonly job: string | null;
+  readonly status: string;
+  readonly startedAt: string | null;
+  readonly finishedAt: string | null;
 }
 
 export const OPERATION_TERMINAL_STATUSES: ReadonlySet<OrbitGatewayOperation["status"]> = new Set([
@@ -435,7 +459,39 @@ function operation(value: unknown, path: string): OrbitGatewayOperation {
     targetId: data.target_id,
     errorCode: typeof data.error_code === "string" ? data.error_code : null,
     pollAfterSeconds: typeof data.poll_after_seconds === "number" ? data.poll_after_seconds : null,
+    ...(Array.isArray(data.steps) ? { steps: data.steps.flatMap(operationStep) } : {}),
+    ...("current_step" in data ? { currentStep: optionalText(data.current_step) } : {}),
+    ...("current_step_started_at" in data
+      ? { currentStepStartedAt: optionalText(data.current_step_started_at) }
+      : {}),
+    ...("failed_step" in data ? { failedStep: optionalText(data.failed_step) } : {}),
+    ...("error" in data ? { error: operationError(data.error) } : {}),
+    ...("result" in data ? { result: record(data.result) } : {}),
   };
+}
+
+function operationStep(value: unknown): OrbitGatewayOperationStep[] {
+  const data = record(value);
+  const name = optionalText(data?.name);
+  const status = optionalText(data?.status);
+  if (name === null || status === null) return [];
+  return [
+    {
+      name,
+      job: optionalText(data?.job),
+      status,
+      startedAt: optionalText(data?.started_at),
+      finishedAt: optionalText(data?.finished_at),
+    },
+  ];
+}
+
+/** The Operation's error: an object with a code and a message, or a bare message. */
+function operationError(value: unknown): OrbitGatewayOperationError | null {
+  if (typeof value === "string") return { code: null, message: gatewayText(value) };
+  const data = record(value);
+  if (data === null) return null;
+  return { code: optionalText(data.code), message: optionalText(data.message) };
 }
 
 function project(value: unknown, path: string): OrbitGatewayProject {

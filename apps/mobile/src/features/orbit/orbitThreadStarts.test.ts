@@ -205,8 +205,11 @@ describe("Orbit thread starts on the phone", () => {
     // A stopped start does not run again on its own.
     expect(await runSavedOrbitThreadStart(start.id, ports(store).ports)).toBeNull();
 
+    // Retry drops the old error's code too, so a later failure is never read as a taken name.
+    store.save({ ...stopped, errorCode: "instance.name_taken" });
     retryOrbitThreadStart(start.id, store);
     expect(orbitThreadStartRow(store.starts()[0]!).stage).toBe("pairing");
+    expect(store.starts()[0]!.errorCode).toBeNull();
     dismissOrbitThreadStart(start.id, store);
     expect(store.starts()).toEqual([]);
   });

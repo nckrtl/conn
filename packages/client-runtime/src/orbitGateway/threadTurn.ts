@@ -13,7 +13,7 @@ import type { OrbitThreadStart } from "./threadStart.ts";
  * Conn: the launch that starts a thread in a clone with its first message, in the clone's
  * workspace project (Orbit's docs/cli/instance/container/thread.mmd). It reuses the start's
  * command id, so a repeated launch finishes the first one on the server instead of failing on the
- * thread it created.
+ * thread it created. The model and modes the start carries win over the clone's defaults.
  */
 export function orbitFirstTurnInput(input: {
   readonly start: OrbitThreadStart;
@@ -22,6 +22,9 @@ export function orbitFirstTurnInput(input: {
   readonly createdAt: string;
 }) {
   const title = deriveThreadTitleSeed({ text: input.start.message, attachments: [] });
+  const modelSelection = input.start.modelSelection ?? input.modelSelection;
+  const runtimeMode = input.start.runtimeMode ?? "full-access";
+  const interactionMode = input.start.interactionMode ?? "default";
   return {
     commandId: CommandId.make(input.start.commandId),
     threadId: ThreadId.make(input.start.threadId),
@@ -31,17 +34,17 @@ export function orbitFirstTurnInput(input: {
       text: input.start.message,
       attachments: [],
     },
-    modelSelection: input.modelSelection,
+    modelSelection,
     titleSeed: title,
-    runtimeMode: "full-access" as const,
-    interactionMode: "default" as const,
+    runtimeMode,
+    interactionMode,
     bootstrap: {
       createThread: {
         projectId: input.projectId,
         title,
-        modelSelection: input.modelSelection,
-        runtimeMode: "full-access" as const,
-        interactionMode: "default" as const,
+        modelSelection,
+        runtimeMode,
+        interactionMode,
         branch: null,
         worktreePath: null,
         createdAt: input.createdAt,
@@ -74,14 +77,15 @@ export async function sendOrbitFirstMessage(
 ): Promise<ProjectId> {
   const clone = await ports.waitForClone(start.environmentId);
   if (clone === null) throw new Error("The clone's T3 project /srv/workspace did not appear.");
-  if (clone.modelSelection === null) throw new Error("The clone's T3 server offers no model.");
+  const modelSelection = start.modelSelection ?? clone.modelSelection;
+  if (modelSelection === null) throw new Error("The clone's T3 server offers no model.");
   if (ports.stopped()) throw new Error("The thread start was stopped.");
   const result = await ports.startTurn(
     start.environmentId,
     orbitFirstTurnInput({
       start,
       projectId: clone.projectId,
-      modelSelection: clone.modelSelection,
+      modelSelection,
       createdAt: ports.now(),
     }),
   );

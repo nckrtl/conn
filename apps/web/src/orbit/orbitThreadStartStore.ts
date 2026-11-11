@@ -1,4 +1,7 @@
-import type { OrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  readOrbitThreadStarts,
+  type OrbitThreadStart,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { create } from "zustand";
 
 /**
@@ -11,11 +14,7 @@ const STORAGE_KEY = "conn:orbit-thread-starts:v1";
 export function readStored(): OrbitThreadStart[] {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    const value: unknown = raw === null ? [] : JSON.parse(raw);
-    // A start saved by a build before launch command ids cannot resume safely.
-    return Array.isArray(value)
-      ? (value as OrbitThreadStart[]).filter((start) => typeof start.commandId === "string")
-      : [];
+    return readOrbitThreadStarts(raw === null ? [] : JSON.parse(raw));
   } catch {
     return [];
   }

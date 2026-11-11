@@ -119,7 +119,11 @@ export async function runSavedOrbitThreadStart(
   const stopped = () => !store.starts().some((entry) => entry.id === id) || !ports.orbitMode();
   try {
     if (!(await ports.catalogReady())) {
-      store.save({ ...start, error: "Conn's saved environments did not load." });
+      store.save({
+        ...start,
+        error: "Conn's saved environments did not load.",
+        errorCode: null,
+      });
       return null;
     }
     let environmentId: string | null = null;

@@ -1,3 +1,10 @@
+import {
+  ModelSelection,
+  ProviderInteractionMode,
+  RuntimeMode,
+  type ModelSelection as ModelSelectionType,
+} from "@t3tools/contracts";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import {
@@ -50,6 +57,82 @@ export interface OrbitThreadStart {
   readonly connected: boolean;
   /** Why the start stopped. A retry resumes from the last saved step. */
   readonly error: string | null;
+  // Version 2. Rows saved by older builds lack these fields; `readOrbitThreadStarts` loads them.
+  /** "existing": the start begins at a known clone and skips the create. Missing means "new". */
+  readonly orbitInstanceKind?: OrbitInstanceKind;
+  /** The composer's model and modes for the first turn; null or missing uses the clone's defaults. */
+  readonly modelSelection?: ModelSelectionType | null;
+  readonly runtimeMode?: RuntimeMode | null;
+  readonly interactionMode?: ProviderInteractionMode | null;
+  /** The Gateway's error code behind `error`, such as `instance.name_taken`. */
+  readonly errorCode?: string | null;
+  /** Stage times in ms, saved as each stage begins and ends. */
+  readonly createStartedAt?: number | null;
+  readonly createFinishedAt?: number | null;
+  readonly connectStartedAt?: number | null;
+  readonly connectFinishedAt?: number | null;
+  readonly agentStartedAt?: number | null;
+  readonly sentAt?: number | null;
+}
+
+export type OrbitInstanceKind = "new" | "existing";
+
+/** A clone the device knows already; a start in it skips the create. */
+export interface OrbitExistingInstance {
+  readonly instanceId: number;
+  readonly environmentId: string;
+  readonly name: string;
+  readonly nodeName: string;
+}
+
+const STAGE_TIME_FIELDS = [
+  "createStartedAt",
+  "createFinishedAt",
+  "connectStartedAt",
+  "connectFinishedAt",
+  "agentStartedAt",
+  "sentAt",
+] as const;
+
+const decodeModelSelection = Schema.decodeUnknownOption(ModelSelection);
+const isRuntimeMode = Schema.is(RuntimeMode);
+const isInteractionMode = Schema.is(ProviderInteractionMode);
+
+/**
+ * The starts a store saved, from rows of any build. Rows without the ids a resume needs are
+ * dropped; version 2 fields with a wrong type read as missing.
+ */
+export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown): OrbitThreadStart[] => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const row = entry as Record<string, unknown>;
+    if (
+      typeof row.id !== "string" ||
+      typeof row.commandId !== "string" ||
+      typeof row.threadId !== "string" ||
+      typeof row.projectId !== "number"
+    ) {
+      return [];
+    }
+    const times = Object.fromEntries(
+      STAGE_TIME_FIELDS.map((field) => [
+        field,
+        typeof row[field] === "number" ? (row[field] as number) : null,
+      ]),
+    );
+    return [
+      {
+        ...(row as unknown as OrbitThreadStart),
+        ...times,
+        orbitInstanceKind: row.orbitInstanceKind === "existing" ? "existing" : "new",
+        modelSelection: Option.getOrNull(decodeModelSelection(row.modelSelection)),
+        runtimeMode: isRuntimeMode(row.runtimeMode) ? row.runtimeMode : null,
+        interactionMode: isInteractionMode(row.interactionMode) ? row.interactionMode : null,
+        errorCode: typeof row.errorCode === "string" ? row.errorCode : null,
+      },
+    ];
+  });
 }
 
 export interface OrbitThreadStartPorts {
@@ -107,13 +190,22 @@ export function newOrbitThreadStart(input: {
   readonly messageId: string;
   readonly commandId: string;
   readonly now: number;
+  /** The name the user gave the new Instance; without it the name comes from the message. */
+  readonly instanceName?: string;
+  /** Starts in this clone instead of creating one. */
+  readonly existing?: OrbitExistingInstance;
+  readonly modelSelection?: ModelSelectionType | null;
+  readonly runtimeMode?: RuntimeMode | null;
+  readonly interactionMode?: ProviderInteractionMode | null;
 }): OrbitThreadStart {
+  const existing = input.existing;
   return {
     id: input.id,
     projectId: input.project.id,
     projectSlug: input.project.slug,
-    nodeName: input.project.nodeName,
-    instanceName: orbitThreadInstanceName(input.message, input.suffix),
+    nodeName: existing?.nodeName ?? input.project.nodeName,
+    instanceName:
+      existing?.name ?? input.instanceName ?? orbitThreadInstanceName(input.message, input.suffix),
     message: input.message,
     threadId: input.threadId,
     messageId: input.messageId,
@@ -121,14 +213,25 @@ export function newOrbitThreadStart(input: {
     createdAt: input.now,
     createKey: null,
     createOperationId: null,
-    instanceId: null,
-    environmentId: null,
+    instanceId: existing?.instanceId ?? null,
+    environmentId: existing?.environmentId ?? null,
     pairingKey: null,
     pairingOperationId: null,
     pairingId: null,
     pairingLinkRead: false,
     connected: false,
     error: null,
+    orbitInstanceKind: existing ? "existing" : "new",
+    modelSelection: input.modelSelection ?? null,
+    runtimeMode: input.runtimeMode ?? null,
+    interactionMode: input.interactionMode ?? null,
+    errorCode: null,
+    createStartedAt: null,
+    createFinishedAt: null,
+    connectStartedAt: null,
+    connectFinishedAt: null,
+    agentStartedAt: null,
+    sentAt: null,
   };
 }
 
@@ -141,6 +244,7 @@ export function orbitThreadStartStep(start: OrbitThreadStart): "creating" | "pai
 /** A step that stopped the start, with the saved steps a retry must redo. */
 class StepFailed extends Schema.TaggedError<StepFailed>()("OrbitThreadStepFailed", {
   message: Schema.String,
+  code: Schema.NullOr(Schema.String),
   reset: Schema.Record(Schema.String, Schema.Unknown),
 }) {}
 
@@ -178,8 +282,17 @@ function isTargetBusy(error: unknown): boolean {
   );
 }
 
-function stepFailed(message: string, reset: Partial<OrbitThreadStart>): StepFailed {
-  return new StepFailed({ message, reset });
+function stepFailed(
+  message: string,
+  reset: Partial<OrbitThreadStart>,
+  code: string | null = null,
+): StepFailed {
+  return new StepFailed({ message, code, reset });
+}
+
+/** The create was refused because the Project has an Instance with this name. */
+function isNameTaken(error: unknown): error is OrbitGatewayError {
+  return isOrbitGatewayError(error) && error.code === "instance.name_taken";
 }
 
 /**
@@ -190,11 +303,14 @@ export async function runOrbitThreadStart(
   start: OrbitThreadStart,
   ports: OrbitThreadStartPorts,
 ): Promise<boolean> {
-  let current: OrbitThreadStart = { ...start, error: null };
+  let current: OrbitThreadStart = { ...start, error: null, errorCode: null };
   const update = (patch: Partial<OrbitThreadStart>) => {
     current = { ...current, ...patch };
     ports.save(current);
   };
+  /** A stage time, set once: a resume keeps the first. */
+  const stamp = (field: (typeof STAGE_TIME_FIELDS)[number]): Partial<OrbitThreadStart> =>
+    current[field] == null ? { [field]: ports.now() } : {};
   const checkStopped = () => {
     if (ports.stopped()) throw new Stopped();
   };
@@ -255,7 +371,11 @@ export async function runOrbitThreadStart(
     if (current.environmentId === null) {
       const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
       if (current.createOperationId === null) {
-        if (!current.createKey) update({ createKey: newKey("create") });
+        const begin = {
+          ...stamp("createStartedAt"),
+          ...(current.createKey ? {} : { createKey: newKey("create") }),
+        };
+        if (Object.keys(begin).length > 0) update(begin);
         let operation;
         try {
           operation = await admit(
@@ -269,8 +389,14 @@ export async function runOrbitThreadStart(
             (error) => isLostAdmission(error) || isTargetBusy(error),
           );
         } catch (error) {
+          // A refused name admitted nothing: a new name needs a new key.
+          if (isNameTaken(error)) throw stepFailed(error.message, { createKey: null }, error.code);
           if (!isTargetBusy(error)) throw error;
-          throw stepFailed("Orbit is still creating this clone; press Retry in a minute.", {});
+          throw stepFailed(
+            "Orbit is still creating this clone; press Retry in a minute.",
+            {},
+            "operation.target_busy",
+          );
         }
         update({ createOperationId: operation.id, instanceId: operation.targetId });
       }
@@ -280,6 +406,7 @@ export async function runOrbitThreadStart(
         stepFailed(
           `Orbit could not create the clone (${code}).`,
           code === "operation.timeout" ? {} : { createOperationId: null, createKey: null },
+          code,
         ),
       );
       const server = (await ports.client.environments()).find(
@@ -294,13 +421,15 @@ export async function runOrbitThreadStart(
       if (server.powerState === "stopped") {
         throw stepFailed("The clone is asleep. Conn cannot wake it yet.", {});
       }
-      update({ environmentId: server.environmentId });
+      update({ environmentId: server.environmentId, ...stamp("createFinishedAt") });
     }
     const environmentId = current.environmentId!;
 
     checkStopped();
 
     if (!current.connected) {
+      const begin = stamp("connectStartedAt");
+      if (Object.keys(begin).length > 0) update(begin);
       if (!ports.isSaved(environmentId)) {
         // The link was read before a reload or a failed connect: only Retry may pair again.
         if (current.pairingLinkRead) {
@@ -318,7 +447,7 @@ export async function runOrbitThreadStart(
         // A failed pairing needs a new pairing: only a retry starts it, under a new key.
         const newPairing = { pairingOperationId: null, pairingId: null, pairingKey: null };
         await follow(current.pairingOperationId!, PAIRING_TIMEOUT_MS, (code) =>
-          stepFailed(`Orbit could not pair with the clone (${code}).`, newPairing),
+          stepFailed(`Orbit could not pair with the clone (${code}).`, newPairing, code),
         );
         let pairingUrl: string;
         try {
@@ -345,11 +474,14 @@ export async function runOrbitThreadStart(
           });
         }
       }
-      update({ connected: true, pairingLinkRead: false });
+      update({ connected: true, pairingLinkRead: false, ...stamp("connectFinishedAt") });
     }
 
     checkStopped();
+    const begin = stamp("agentStartedAt");
+    if (Object.keys(begin).length > 0) update(begin);
     await ports.send({ ...current, environmentId });
+    update({ sentAt: ports.now() });
     return true;
   } catch (error) {
     // A start stopped mid-step ends without an error, so it resumes if it comes back.
@@ -357,6 +489,7 @@ export async function runOrbitThreadStart(
     update({
       ...(isStepFailed(error) ? (error.reset as Partial<OrbitThreadStart>) : {}),
       error: error instanceof Error ? error.message : String(error),
+      errorCode: isStepFailed(error) ? error.code : isOrbitGatewayError(error) ? error.code : null,
     });
     return false;
   }

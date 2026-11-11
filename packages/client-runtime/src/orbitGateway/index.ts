@@ -6,4 +6,5 @@ export * from "./sectionMerge.ts";
 export * from "./profileSync.ts";
 export * from "./threadStart.ts";
 export * from "./threadTurn.ts";
+export * from "./orbitSetupStages.ts";
 export * from "./orbitInstance.ts";

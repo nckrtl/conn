@@ -677,12 +677,16 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const environmentId of environmentIds) {
       for (const thread of get(environmentThreadsAtom(environmentId))) {
         const parent = thread.delegatedFrom;
+        if (parent === undefined || !environmentIds.has(parent.environmentId)) continue;
+        const parentShell = get(environmentThreadIndexAtom(parent.environmentId)).get(
+          parent.threadId,
+        );
+        // An archived parent leaves navigation, and a subagent or side-chat parent has no
+        // row of its own; either way its task stays listed on its own.
         if (
-          parent !== undefined &&
-          environmentIds.has(parent.environmentId) &&
-          // An archived parent leaves navigation; its task there stays listed on its own.
-          get(environmentThreadIndexAtom(parent.environmentId)).get(parent.threadId)?.archivedAt ===
-            null
+          parentShell !== undefined &&
+          parentShell.archivedAt === null &&
+          isListedThreadLineage(parentShell.lineage)
         ) {
           next.add(threadKey({ environmentId, threadId: thread.id }));
         }

@@ -390,6 +390,27 @@ describe("v2 thread shell lists", () => {
       threads: [{ ...parent, archivedAt: v2Now }],
     });
     expect(listed()).toEqual([`${remoteEnvironmentId}/${task.id}`]);
+    // A parent that is itself a subagent has no row to hold the task, so the task is listed.
+    const orchestrator = { ...parent, id: ThreadId.make("orchestrator") };
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [
+        orchestrator,
+        {
+          ...parent,
+          lineage: {
+            ...parent.lineage,
+            parentThreadId: orchestrator.id,
+            relationshipToParent: "subagent" as const,
+            rootThreadId: orchestrator.id,
+          },
+        },
+      ],
+    });
+    expect(listed()).toEqual([
+      `${environmentId}/${orchestrator.id}`,
+      `${remoteEnvironmentId}/${task.id}`,
+    ]);
     registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [parent] });
     expect(listed()).toEqual([`${environmentId}/${parent.id}`]);
     const catalog = registry.get(catalogValueAtom);

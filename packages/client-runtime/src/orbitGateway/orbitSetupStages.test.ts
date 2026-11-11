@@ -87,6 +87,47 @@ describe("orbitSetupStages", () => {
       createOp("running", { currentStep: "clone-register" }),
       ["create:running Registering with Orbit", "connect:pending", "agent:pending"],
     ],
+    // Conn's Operation show today: current_step and failed_step, but an empty steps[].
+    [
+      "Conn's empty steps[] with current_step",
+      creating,
+      createOp("running", { steps: [], currentStep: "clone-workspace" }),
+      ["create:running Copying the workspace", "connect:pending", "agent:pending"],
+    ],
+    [
+      "Conn's empty steps[] with failed_step",
+      { ...creating, error: "Orbit could not create the clone.", errorCode: "instance.t3_unready" },
+      createOp("failed", { steps: [], currentStep: null, failedStep: "clone-register" }),
+      [
+        "create:failed Registering with Orbit instance.t3_unready",
+        "connect:pending",
+        "agent:pending",
+      ],
+    ],
+    [
+      "Conn's empty steps[] on a succeeded create, before the clone's server is found",
+      creating,
+      createOp("succeeded", { steps: [], currentStep: null }),
+      ["create:done", "connect:pending", "agent:pending"],
+    ],
+    [
+      "a filled steps[] next to current_step",
+      creating,
+      createOp("running", {
+        currentStep: "clone-t3",
+        steps: [
+          {
+            name: "clone-container",
+            job: "clone",
+            status: "succeeded",
+            startedAt: null,
+            finishedAt: null,
+          },
+          { name: "clone-t3", job: "clone", status: "running", startedAt: null, finishedAt: null },
+        ],
+      }),
+      ["create:running Starting the T3 server", "connect:pending", "agent:pending"],
+    ],
     [
       "an unknown step",
       creating,

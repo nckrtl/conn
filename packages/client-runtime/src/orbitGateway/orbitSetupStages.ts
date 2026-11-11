@@ -98,7 +98,7 @@ export function orbitSetupStages(input: {
     const status: OrbitSetupStageStatus =
       failedAt === "create"
         ? "failed"
-        : start.environmentId !== null
+        : start.environmentId !== null || create?.status === "succeeded"
           ? "done"
           : start.createStartedAt != null || start.createOperationId !== null || create !== null
             ? "running"

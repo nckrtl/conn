@@ -3,7 +3,6 @@ import { resolveScopedProjectKeys } from "../workspaces.logic";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
-import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
 import {
   dropThreadContext,
   endThreadContextDrag,
@@ -1826,8 +1825,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     }
     restoreDragScroll();
     const threads = contextDragThreads();
-    const title =
-      threadByKeyRef.current.get(contextDragKeyRef.current ?? "")?.title.trim() || "Thread";
+    const threadRef = parseScopedThreadKey(contextDragKeyRef.current ?? "");
+    const title = (threadRef && readThreadShell(threadRef)?.title.trim()) || "Thread";
     moveThreadContextDragGhost(point, { title, count: threads.length });
     return true;
   };
@@ -3065,7 +3064,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
   return (
     <>
-      <ThreadContextDragGhost />
       <SidebarChromeHeader isElectron={isElectron} />
       {/* The workspace rail holds updates and utilities, so the footer hides them. */}
       <div className="relative z-10 -mt-[calc(var(--workspace-topbar-height)-44px)] mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tl-(--shell-corner) rounded-bl-(--shell-corner) shell-inner-panel">

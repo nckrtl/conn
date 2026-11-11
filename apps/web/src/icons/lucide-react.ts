@@ -172,6 +172,7 @@ import { RecordIcon as PhRecord } from "@phosphor-icons/react/dist/csr/Record";
 import { RobotIcon as PhRobot } from "@phosphor-icons/react/dist/csr/Robot";
 import { RocketIcon as PhRocket } from "@phosphor-icons/react/dist/csr/Rocket";
 import { RowsIcon as PhRows } from "@phosphor-icons/react/dist/csr/Rows";
+import { ScrollIcon as PhScroll } from "@phosphor-icons/react/dist/csr/Scroll";
 import { ScalesIcon as PhScales } from "@phosphor-icons/react/dist/csr/Scales";
 import { ShieldIcon as PhShield } from "@phosphor-icons/react/dist/csr/Shield";
 import { ShieldCheckIcon as PhShieldCheck } from "@phosphor-icons/react/dist/csr/ShieldCheck";
@@ -423,6 +424,7 @@ import {
   RouteIcon as LuRoute,
   Rows3Icon as LuRows3,
   ScaleIcon as LuScale,
+  ScrollTextIcon as LuScrollText,
   SearchIcon as LuSearch,
   SendIcon as LuSend,
   SendHorizontalIcon as LuSendHorizontal,
@@ -461,6 +463,7 @@ import {
   TypeIcon as LuType,
   Undo2Icon as LuUndo2,
   Unlink2Icon as LuUnlink2,
+  UnlinkIcon as LuUnlink,
   UnplugIcon as LuUnplug,
   UploadIcon as LuUpload,
   UserCheckIcon as LuUserCheck,
@@ -987,6 +990,8 @@ export const SmartphoneIcon = connIcon(PhDeviceMobile, LuSmartphone, "smartphone
   Smartphone = SmartphoneIcon;
 export const SmilePlusIcon = connIcon(PhSmiley, LuSmilePlus, "smile-plus"),
   SmilePlus = SmilePlusIcon;
+// Compatibility shim for the lucide-react alias; the rule applies to callers, not this mapping.
+// oxlint-disable-next-line t3code/no-sparkles-icon
 export const SparklesIcon = connIcon(PhSparkle, LuSparkles, "sparkles"),
   Sparkles = SparklesIcon;
 export const SquareIcon = connIcon(PhSquare, LuSquare, "square"),
@@ -1049,6 +1054,10 @@ export const TypeIcon = connIcon(PhTextT, LuType, "type", "bold"),
   Type = TypeIcon;
 export const Undo2Icon = connIcon(PhArrowUUpLeft, LuUndo2, "undo-2"),
   Undo2 = Undo2Icon;
+export const UnlinkIcon = connIcon(PhLinkBreak, LuUnlink, "unlink", "bold"),
+  Unlink = UnlinkIcon;
+export const ScrollTextIcon = connIcon(PhScroll, LuScrollText, "scroll-text"),
+  ScrollText = ScrollTextIcon;
 export const Unlink2Icon = connIcon(PhLinkBreak, LuUnlink2, "unlink-2", "bold"),
   Unlink2 = Unlink2Icon;
 export const UnplugIcon = connIcon(PhPlugs, LuUnplug, "unplug"),

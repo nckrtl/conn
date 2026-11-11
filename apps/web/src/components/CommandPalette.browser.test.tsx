@@ -8,6 +8,7 @@ import { useCommandPaletteStore } from "../commandPaletteStore";
 import { makeThreadFixture } from "../test-fixtures";
 import type { Project, Thread } from "../types";
 import { CommandPalette } from "./CommandPalette";
+import type { OrbitPaletteProjectsState } from "./CommandPalette.logic";
 
 const entities = vi.hoisted(() => ({
   projects: [] as ReadonlyArray<Project>,
@@ -19,10 +20,27 @@ vi.mock("../state/entities", async (original) => ({
   useVisibleThreadShells: () => entities.threads,
 }));
 
-function setup(state: { projects?: ReadonlyArray<Project>; threads?: ReadonlyArray<Thread> } = {}) {
+const orbit = vi.hoisted(() => ({
+  state: { status: "off" } as OrbitPaletteProjectsState,
+  retry: vi.fn(),
+}));
+vi.mock("../orbit/orbitPaletteProjects", () => ({
+  useOrbitPaletteProjects: () => orbit.state,
+  retryOrbitPaletteProjects: () => orbit.retry(),
+}));
+
+function setup(
+  state: {
+    projects?: ReadonlyArray<Project>;
+    threads?: ReadonlyArray<Thread>;
+    orbit?: OrbitPaletteProjectsState;
+  } = {},
+) {
   useCommandPaletteStore.setState(useCommandPaletteStore.getInitialState(), true);
   entities.projects = state.projects ?? [];
   entities.threads = state.threads ?? [];
+  orbit.state = state.orbit ?? { status: "off" };
+  orbit.retry.mockReset();
 }
 
 describe("CommandPalette open intents", () => {
@@ -173,5 +191,86 @@ describe("CommandPalette open intents", () => {
     await page.getByRole("option", { name: /Acme/ }).first().click();
 
     await vi.waitFor(() => expect(screen.router?.state.location.pathname).toBe("/local/parent"));
+  });
+
+  it("lists an Orbit Project with its instance count and offers Retry when Orbit is unreachable", async () => {
+    const localProject: Project = {
+      id: ProjectId.make("acme"),
+      environmentId: EnvironmentId.make("local"),
+      title: "Acme",
+      workspaceRoot: "/work/acme",
+      repositoryIdentity: null,
+      defaultModelSelection: null,
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+      scripts: [],
+    };
+    // A local project with the Orbit Project's name stays its own row: no deduplication.
+    const namesake: Project = {
+      ...localProject,
+      id: ProjectId.make("nckrtl-local"),
+      title: "nckrtl",
+      workspaceRoot: "/work/nckrtl",
+    };
+    setup({
+      projects: [localProject, namesake],
+      orbit: {
+        status: "loaded",
+        projects: [
+          {
+            id: 3,
+            slug: "nckrtl",
+            name: "nckrtl",
+            nodeId: 7,
+            nodeName: "beast",
+            instanceDomainSuffix: null,
+            cloneable: true,
+            cloneableReason: null,
+            checks: null,
+          },
+        ],
+        environments: [
+          { instanceId: 41, projectId: 3, instanceName: "fix" },
+          { instanceId: 42, projectId: 3, instanceName: "login" },
+          { instanceId: 9, projectId: 3, instanceName: "default" },
+        ],
+      },
+    });
+    await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
+
+    openCommandPalette({ open: "new-thread-in" });
+    await expect.element(page.getByRole("option", { name: /nckrtl/ }).nth(1)).toBeVisible();
+    const row = page.getByRole("option", { name: /orbit · 2 instances/ });
+    await expect.element(row).toBeVisible();
+    expect(page.getByRole("option", { name: /nckrtl/ }).all()).toHaveLength(2);
+    expect(row.element().textContent).toContain("orbit · 2 instances");
+    await expect.element(page.getByRole("option", { name: /Acme/ })).toBeVisible();
+    await row.click();
+    await expect.element(page.getByText(/Instance step comes in PR 2b/)).toBeVisible();
+
+    orbit.state = { status: "loading" };
+    await act(() =>
+      useCommandPaletteStore.setState(useCommandPaletteStore.getInitialState(), true),
+    );
+    openCommandPalette({ open: "new-thread-in" });
+    await expect.element(page.getByText("Loading Orbit projects…")).toBeVisible();
+    await expect
+      .element(page.getByRole("option", { name: /orbit · 2 instances/ }))
+      .not.toBeInTheDocument();
+
+    orbit.state = { status: "unreachable" };
+    await act(() =>
+      useCommandPaletteStore.setState(useCommandPaletteStore.getInitialState(), true),
+    );
+    openCommandPalette({ open: "new-thread-in" });
+    await expect.element(page.getByRole("option", { name: /Acme/ })).toBeVisible();
+    await expect
+      .element(page.getByRole("option", { name: /orbit · 2 instances/ }))
+      .not.toBeInTheDocument();
+    const notice = page.getByRole("option", { name: /Orbit projects are not shown/ });
+    await expect.element(notice).toBeVisible();
+    expect(notice.element().textContent).toContain("Retry");
+    await notice.click();
+    expect(orbit.retry).toHaveBeenCalledOnce();
   });
 });

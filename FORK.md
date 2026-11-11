@@ -257,6 +257,17 @@ dismissed at any time; a stopped one also offers Retry. The environment sync ski
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
+Labs › "Orbit threads in the palette" (desktop, Orbit mode, off by default) is the start of the
+flow that replaces this button. With it on, New thread lists the Projects of `GET
+/api/v1/conn/projects` after the local projects, each with the number of its Instances in the
+Gateway's environment list (the default never counts), and the clone rows of those Projects leave
+the list. While the list loads or after it fails, only local projects show, then skeleton rows or
+a notice with Retry. A Project in which threads cannot start yet (`cloneable: false`) stays
+selectable and greyed out with Orbit's reason. The list parser takes the coming `cloneable`,
+`cloneable_reason`, `checks` and `instance_domain_suffix` fields when present; a row without
+`cloneable` can start threads. The pages a row opens are placeholders for now
+(`CommandPaletteOrbitProjects.tsx`).
+
 The new thread flow (Labs › "Orbit threads in the palette", off by default) opens a composer draft
 with an Orbit target (`orbitDraft.ts`, `openOrbitDraft`): the Project, Node, and a new Instance with
 the typed name or an existing one this device has not paired. An Orbit Project is no T3 project, so

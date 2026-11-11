@@ -116,6 +116,12 @@ export function useOrbitInstance(
   return preferredOrbitInstance(gateway, server?.orbitInstance);
 }
 
+/** Conn: thread starts in Orbit Projects need the desktop's Gateway client and the Orbit provider. */
+export function useOrbitThreadsAvailable(): boolean {
+  const provider = useEnvironmentProvider((state) => state.provider);
+  return window.desktopBridge?.orbitGatewaySend !== undefined && provider === "orbit";
+}
+
 export function setEnvironmentProvider(provider: EnvironmentProvider): void {
   useEnvironmentProvider.setState({ provider });
 }

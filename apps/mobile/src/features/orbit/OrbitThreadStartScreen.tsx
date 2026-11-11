@@ -1,4 +1,7 @@
-import type { OrbitGatewayProject } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  startableOrbitProject,
+  type OrbitGatewayProject,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useEffect, useRef, useState } from "react";
 import { Platform, TextInput, View } from "react-native";
@@ -34,7 +37,7 @@ export function OrbitThreadStartScreen() {
   useEffect(() => {
     let current = true;
     orbitGatewayClient.projects().then(
-      (list) => current && setProjects(list),
+      (list) => current && setProjects(list.flatMap((row) => startableOrbitProject(row) ?? [])),
       (error: unknown) =>
         current && setLoadError(error instanceof Error ? error.message : String(error)),
     );

@@ -191,6 +191,8 @@ import {
   buildCommandPaletteRows,
   enumerateCommandPaletteItems,
   newThreadNoProjectIndex,
+  buildOrbitPaletteProjectRows,
+  collapsedOrbitCloneEnvironmentIds,
   findHighlightedCommandPaletteItem,
   type CommandPaletteActionItem,
   type CommandPaletteOpenIntent,
@@ -269,6 +271,14 @@ import { readPullRequestListPreferences } from "~/components/pullRequest/pullReq
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { threadRecentUse } from "@t3tools/shared/paletteSearch";
 import { useActiveWorkspaceProjectRefs, useWorkspaceStore } from "../workspaceStore";
+import { useEnvironmentProvider } from "../orbit/environmentProvider";
+import { retryOrbitPaletteProjects, useOrbitPaletteProjects } from "../orbit/orbitPaletteProjects";
+import {
+  buildOrbitProjectItems,
+  orbitPalettePageGroups,
+  orbitProjectsStateGroups,
+  parseOrbitPalettePage,
+} from "./CommandPaletteOrbitProjects";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
 const ADD_PROJECT_ENTRY_GROUP = "add-project";
@@ -515,6 +525,17 @@ function OpenCommandPaletteDialog(props: {
   const providersByEnvironment = useEnvironmentProviders();
   const { changeThemeItem, changeAppearanceItem, themeEditorItem } = useCommandPaletteThemeItems();
   const currentView = viewStack.at(-1)?.view ?? null;
+  // Conn: Orbit Projects join the New thread list behind a Labs switch (`off` changes nothing).
+  const orbitProjectsState = useOrbitPaletteProjects(
+    currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP,
+  );
+  const orbitClones = useEnvironmentProvider((store) => store.orbitInstances);
+  const collapsedCloneEnvironmentIds = collapsedOrbitCloneEnvironmentIds(
+    orbitProjectsState,
+    orbitClones,
+  );
+  const orbitProjectRows = buildOrbitPaletteProjectRows(orbitProjectsState);
+  const orbitPalettePage = parseOrbitPalettePage(currentView?.groups[0]?.value);
   const threadSearchQuery = currentView === null && !isActionsOnly ? deferredQuery : "";
   const [browseGeneration, setBrowseGeneration] = useState(0);
   const [browseNavigation] = useState(createBrowseNavigationCoordinator);
@@ -844,7 +865,10 @@ function OpenCommandPaletteDialog(props: {
           ? undefined
           : projectPickerEntries.find((entry) => entry.isPreferred);
       const projectItems = buildNewThreadInProjectItems({
-        projects: pickerProjects.filter((project) => !isScratch(project)),
+        projects: pickerProjects.filter(
+          (project) =>
+            !isScratch(project) && !collapsedCloneEnvironmentIds.has(project.environmentId),
+        ),
         currentProjectKey: currentEntry
           ? `${currentEntry.targetProject.environmentId}:${currentEntry.targetProject.id}`
           : null,
@@ -867,17 +891,25 @@ function OpenCommandPaletteDialog(props: {
           );
         },
       });
-      if (scratchTargetEnvironmentId === null) return projectItems;
+      const orbitItems = buildOrbitProjectItems({
+        rows: orbitProjectRows,
+        openPage: (view) => pushPaletteView(view),
+      });
+      if (scratchTargetEnvironmentId === null) return [...projectItems, ...orbitItems];
 
       const noProjectIndex = newThreadNoProjectIndex(
-        projectPickerEntries.map(({ group, targetProject, isPreferred }) => ({
-          isScratch: isScratchProject(
-            targetProject,
-            scratchWorkspaceRootFor(targetProject.environmentId),
-          ),
-          pinned: group.pinned,
-          isPreferred,
-        })),
+        projectPickerEntries
+          .filter(
+            ({ targetProject }) => !collapsedCloneEnvironmentIds.has(targetProject.environmentId),
+          )
+          .map(({ group, targetProject, isPreferred }) => ({
+            isScratch: isScratchProject(
+              targetProject,
+              scratchWorkspaceRootFor(targetProject.environmentId),
+            ),
+            pinned: group.pinned,
+            isPreferred,
+          })),
       );
       return [
         ...projectItems.slice(0, noProjectIndex),
@@ -891,6 +923,7 @@ function OpenCommandPaletteDialog(props: {
           run: () => startScratchThread(scratchTargetEnvironmentId),
         },
         ...projectItems.slice(noProjectIndex),
+        ...orbitItems,
       ];
     })(),
     rowOrderKey("new-thread-in"),
@@ -1779,12 +1812,21 @@ function OpenCommandPaletteDialog(props: {
                 // Every project archived and no "No project" home leaves only adding one.
                 items: projectThreadItems.length > 0 ? projectThreadItems : [addProjectAction],
               },
+              ...orbitProjectsStateGroups({
+                state: orbitProjectsState,
+                retry: retryOrbitPaletteProjects,
+              }),
             ]
-          : currentView?.groups[0]?.value === "themes"
-            ? changeThemeItem.groups
-            : currentView?.groups[0]?.value === "appearance"
-              ? changeAppearanceItem.groups
-              : (currentView?.groups ?? rootGroups);
+          : orbitPalettePage !== null
+            ? orbitPalettePageGroups(
+                orbitPalettePage,
+                orbitProjectRows.find((row) => row.id === orbitPalettePage.projectId) ?? null,
+              )
+            : currentView?.groups[0]?.value === "themes"
+              ? changeThemeItem.groups
+              : currentView?.groups[0]?.value === "appearance"
+                ? changeAppearanceItem.groups
+                : (currentView?.groups ?? rootGroups);
 
   const isLinkedThreadSearch =
     linkedThreadSearch?.linkedThreads !== undefined && deferredQuery === linkedThreadSearch.query;

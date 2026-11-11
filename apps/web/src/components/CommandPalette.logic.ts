@@ -25,11 +25,18 @@ import {
   type EnvironmentMachineKind,
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type OrbitInstanceDescriptor,
   type SourceControlDiscoveryResult,
   type SourceControlRepositoryInfo,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
+import {
+  startableOrbitProject,
+  type OrbitGatewayEnvironment,
+  type OrbitGatewayProjectCheck,
+  type OrbitGatewayProjectListing,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { type ReactNode } from "react";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
@@ -201,6 +208,8 @@ export interface CommandPaletteItem {
   readonly matchHint?: SearchMatchHint;
   readonly icon: ReactNode;
   readonly disabled?: boolean;
+  /** Greyed out but still selectable, e.g. an Orbit Project in which threads cannot start yet. */
+  readonly dimmed?: boolean;
   readonly titleLeadingContent?: ReactNode;
   readonly titleTrailingContent?: ReactNode;
   readonly shortcutCommand?: KeybindingCommand;
@@ -907,4 +916,100 @@ export function newThreadNoProjectIndex(
   }
   const pinnedCount = projects.filter((entry) => entry.pinned).length;
   return Math.min(pinnedCount + 1, projects.length);
+}
+
+/**
+ * Conn: the Orbit Projects of the New thread list, behind the Labs switch. `off` leaves the list
+ * as it was; the others are the states the design shows under the local projects.
+ */
+export type OrbitPaletteProjectsState =
+  | { readonly status: "off" }
+  | { readonly status: "loading" }
+  | { readonly status: "unreachable" }
+  | {
+      readonly status: "loaded";
+      readonly projects: ReadonlyArray<OrbitGatewayProjectListing>;
+      readonly environments: ReadonlyArray<
+        Pick<OrbitGatewayEnvironment, "instanceId" | "projectId" | "instanceName">
+      >;
+    };
+
+export interface OrbitPaletteProjectRow {
+  readonly id: number;
+  readonly slug: string;
+  readonly name: string;
+  readonly instanceCount: number;
+  /** False for a Project in which threads cannot start yet; its row stays selectable. */
+  readonly startable: boolean;
+  /** Why threads cannot start, when Orbit said; null otherwise. */
+  readonly reason: string | null;
+  /** Orbit's start checks in its order; null when the Gateway sent none. */
+  readonly checks: ReadonlyArray<OrbitGatewayProjectCheck> | null;
+}
+
+/** Orbit refuses `default` as a clone name; it is the Project's default Instance, never a target. */
+const ORBIT_DEFAULT_INSTANCE_NAME = "default";
+
+/** The Project's Instances in the Gateway's environment list, the default never counted. */
+export function orbitProjectInstanceCount(
+  projectId: number,
+  environments: Extract<OrbitPaletteProjectsState, { status: "loaded" }>["environments"],
+): number {
+  const instanceIds = new Set<number>();
+  for (const environment of environments) {
+    if (environment.projectId !== projectId || environment.instanceId === null) continue;
+    if (environment.instanceName === ORBIT_DEFAULT_INSTANCE_NAME) continue;
+    instanceIds.add(environment.instanceId);
+  }
+  return instanceIds.size;
+}
+
+/** Projects in which threads can start come first, so many greyed rows do not bury them. */
+export function buildOrbitPaletteProjectRows(
+  state: OrbitPaletteProjectsState,
+): OrbitPaletteProjectRow[] {
+  if (state.status !== "loaded") return [];
+  const rows = state.projects.map((project) => ({
+    id: project.id,
+    slug: project.slug,
+    name: project.name,
+    instanceCount: orbitProjectInstanceCount(project.id, state.environments),
+    startable: startableOrbitProject(project) !== null,
+    reason:
+      project.cloneableReason ??
+      project.checks?.find((check) => check.status === "fail")?.message ??
+      null,
+    checks: project.checks,
+  }));
+  return rows.filter((row) => row.startable).concat(rows.filter((row) => !row.startable));
+}
+
+export function orbitPaletteProjectSubline(row: OrbitPaletteProjectRow): string {
+  if (!row.startable) {
+    return row.reason
+      ? `orbit · cannot start threads: ${row.reason}`
+      : "orbit · cannot start threads yet";
+  }
+  if (row.instanceCount === 0) return "orbit · no instances";
+  return `orbit · ${row.instanceCount} instance${row.instanceCount === 1 ? "" : "s"}`;
+}
+
+/**
+ * The environments whose project rows leave the New thread list: clones collapse into their Orbit
+ * Project's row. While the list loads or fails every clone row goes, since only local projects
+ * show then; once loaded, a clone of a Project the list leaves out keeps its row.
+ */
+export function collapsedOrbitCloneEnvironmentIds(
+  state: OrbitPaletteProjectsState,
+  clones: Readonly<Record<string, Pick<OrbitInstanceDescriptor, "projectId" | "instanceName">>>,
+): ReadonlySet<string> {
+  if (state.status === "off") return new Set();
+  const listed =
+    state.status === "loaded" ? new Set(state.projects.map((project) => project.id)) : null;
+  const collapsed = new Set<string>();
+  for (const [environmentId, clone] of Object.entries(clones)) {
+    if (clone.instanceName === ORBIT_DEFAULT_INSTANCE_NAME) continue;
+    if (listed === null || listed.has(clone.projectId)) collapsed.add(environmentId);
+  }
+  return collapsed;
 }

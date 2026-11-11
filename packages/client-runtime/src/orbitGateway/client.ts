@@ -123,6 +123,48 @@ export interface OrbitGatewayProject {
   readonly nodeName: string;
 }
 
+/** One start check of a Project, in Orbit's order. `code` and `message` come only with a fail. */
+export interface OrbitGatewayProjectCheck {
+  readonly key: string;
+  /** Orbit's display text for the check, when sent. */
+  readonly label: string | null;
+  readonly status: "pass" | "fail" | "not_checked";
+  readonly code: string | null;
+  readonly message: string | null;
+}
+
+/**
+ * A row of `GET /conn/projects`. Orbit is adding Projects in which threads cannot start yet; a
+ * row without `cloneable` is one that can, as every row was before. Node fields are null for a
+ * caller without access to the Node.
+ */
+export interface OrbitGatewayProjectListing {
+  readonly id: number;
+  readonly slug: string;
+  readonly name: string;
+  readonly nodeId: number | null;
+  readonly nodeName: string | null;
+  readonly instanceDomainSuffix: string | null;
+  readonly cloneable: boolean;
+  readonly cloneableReason: string | null;
+  /** Null when the Gateway sent no checks. */
+  readonly checks: readonly OrbitGatewayProjectCheck[] | null;
+}
+
+/** The listing as a Project a thread can start in, or null when it cannot (yet). */
+export function startableOrbitProject(
+  listing: OrbitGatewayProjectListing,
+): OrbitGatewayProject | null {
+  if (!listing.cloneable || listing.nodeId === null || listing.nodeName === null) return null;
+  return {
+    id: listing.id,
+    slug: listing.slug,
+    name: listing.name,
+    nodeId: listing.nodeId,
+    nodeName: listing.nodeName,
+  };
+}
+
 /** The fields of an Orbit Operation that Conn follows. */
 export interface OrbitGatewayOperation {
   readonly id: number;
@@ -204,8 +246,8 @@ export interface OrbitGatewayClient {
    * Operation; this follows the Operation and reads the link, which the Gateway hands out once.
    */
   readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
-  /** The Projects a thread can start in. */
-  readonly projects: () => Promise<readonly OrbitGatewayProject[]>;
+  /** The Projects this device sees; `startableOrbitProject` keeps those a thread can start in. */
+  readonly projects: () => Promise<readonly OrbitGatewayProjectListing[]>;
   /**
    * Admits the clone a thread starts in; the Operation's `targetId` is the new Instance. The
    * Gateway admits it slowly, so the call has a 60 s limit; the same key returns the same Operation.
@@ -494,14 +536,12 @@ function operationError(value: unknown): OrbitGatewayOperationError | null {
   return { code: optionalText(data.code), message: optionalText(data.message) };
 }
 
-function project(value: unknown, path: string): OrbitGatewayProject {
+function project(value: unknown, path: string): OrbitGatewayProjectListing {
   const data = record(value);
   if (
     typeof data?.id !== "number" ||
     typeof data.slug !== "string" ||
-    typeof data.name !== "string" ||
-    typeof data.node_id !== "number" ||
-    typeof data.node_name !== "string"
+    typeof data.name !== "string"
   ) {
     throw invalid(path);
   }
@@ -509,9 +549,32 @@ function project(value: unknown, path: string): OrbitGatewayProject {
     id: data.id,
     slug: data.slug,
     name: data.name,
-    nodeId: data.node_id,
-    nodeName: data.node_name,
+    nodeId: typeof data.node_id === "number" ? data.node_id : null,
+    nodeName: optionalText(data.node_name),
+    instanceDomainSuffix: optionalText(data.instance_domain_suffix),
+    cloneable: data.cloneable !== false,
+    cloneableReason: optionalText(data.cloneable_reason),
+    checks: Array.isArray(data.checks) ? data.checks.flatMap(projectCheck) : null,
   };
+}
+
+const PROJECT_CHECK_STATUSES = new Set(["pass", "fail", "not_checked"]);
+
+/** A check with an unknown status or no key is dropped rather than failing the list. */
+function projectCheck(value: unknown): OrbitGatewayProjectCheck[] {
+  const data = record(value);
+  const key = optionalText(data?.key);
+  const status = data?.status;
+  if (key === null || typeof status !== "string" || !PROJECT_CHECK_STATUSES.has(status)) return [];
+  return [
+    {
+      key,
+      label: optionalText(data?.label),
+      status: status as OrbitGatewayProjectCheck["status"],
+      code: optionalText(data?.code),
+      message: optionalText(data?.message),
+    },
+  ];
 }
 
 /** Whether a `pair` failure is one the Gateway calls final, so the caller must not retry it. */

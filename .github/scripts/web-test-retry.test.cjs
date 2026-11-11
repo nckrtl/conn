@@ -68,6 +68,25 @@ test("summary counts with a failed file or test are a real failure", () => {
   assert.equal(classify(failedTest, 1), "fail");
 });
 
+test("a file that failed before its tests ran is a real failure", () => {
+  const importFailed = " ❯ browser (chromium) src/components/Foo.browser.test.tsx (0 test)\n";
+  assert.equal(classify(importFailed + closedMidRun, 1), "fail");
+  const skipped =
+    " ❯ browser (chromium) src/components/Foo.browser.test.tsx (2 tests | 2 skipped) 40ms\n";
+  assert.equal(classify(skipped + closedMidRun, 1), "fail");
+  assert.equal(classify(`${closedAfterRun}${rule} Failed Suites 1 ${rule}\n`, 1), "fail");
+});
+
+test("an error block without the signature is a real failure", () => {
+  const uncaught = `${closedMidRun}${rule} Uncaught Exception ${rule}\nTypeError: x is not a function\n`;
+  assert.equal(classify(uncaught, 1), "fail");
+  const twiceCoded = closedMidRun.replace(
+    "Caused by: Error: [birpc]",
+    "{ code: 'VITEST_BROWSER_CONNECTION_CLOSED' }\n$&",
+  );
+  assert.equal(classify(`${twiceCoded}${rule} Unhandled Error ${rule}\nTypeError: y\n`, 1), "fail");
+});
+
 test("an extra unhandled error that is not browser-closed is a real failure", () => {
   const extraError = closedAfterRun
     .replace("Errors  1 error", "Errors  2 errors")
@@ -123,5 +142,15 @@ test("browser closed twice fails as an infrastructure failure", async () => {
   assert.equal(await runWithRetry(run.attempt, (line) => lines.push(line)), 1);
   assert.deepEqual(run.calls, [1, 2]);
   assert.ok(lines.includes(`::error::${INFRA_MESSAGE}`));
+  const named = attempts({ code: 1, output: closedMidRun }, { code: 1, output: closedAfterRun });
+  const namedLines = [];
+  await runWithRetry(named.attempt, (line) => namedLines.push(line));
+  assert.ok(
+    namedLines.some((line) =>
+      line.endsWith(
+        "check /home/runner/work/conn/conn/apps/web/src/components/files/FileExplorerPane.browser.test.tsx.",
+      ),
+    ),
+  );
   assert.match(INFRA_MESSAGE, /browser connection closed twice; not a test failure/);
 });

@@ -8,16 +8,16 @@ const fs = require("node:fs");
 const INFRA_MESSAGE =
   "Infrastructure failure: browser connection closed twice; not a test failure.";
 
-const CLOSED_CODE = /VITEST_BROWSER_CONNECTION_CLOSED/g;
-const CLOSED_TEXT = /Browser connection was closed while running tests/;
-// Each unhandled error or rejection gets its own header; the plural
-// "Unhandled Errors" banner above them does not match.
-const UNHANDLED_HEADER = /Unhandled (?:Error|Rejection) ⎯/g;
+const CLOSED = /VITEST_BROWSER_CONNECTION_CLOSED|Browser connection was closed while running tests/;
+// One header per error; the plural "Unhandled Errors" banner does not match.
+const ERROR_HEADER =
+  /(?:Unhandled (?:Error|Rejection)|Uncaught Exception|Browser Error|Test Run Error|Teardown Error) ⎯/g;
 const ERRORS_SUMMARY = /^\s*Errors\s+(\d+) errors?\b/m;
 const FAILURE_MARKERS = [
   /^\s*FAIL\s/m, // failed test file or test in the report
   /^\s*[×✗]\s/m, // failed test line
-  /Failed Tests? \d+/, // "Failed Tests" banner
+  /^\s*❯ .*\(\d+ tests?\b[^)]*\)/m, // file with a failure, also one that failed to import
+  /Failed (?:Tests?|Suites?) \d+/, // report banners
   /^\s*(?:Test Files|Tests)\s.*\b\d+ failed\b/m, // summary counts
   /AssertionError/,
   /Snapshots?\s.*\b\d+ failed\b/,
@@ -31,14 +31,14 @@ function stripAnsi(text) {
 function classify(rawOutput, exitCode) {
   if (exitCode === 0) return "pass";
   const output = stripAnsi(rawOutput);
-  const closedCount = (output.match(CLOSED_CODE) || []).length;
-  if (closedCount === 0 && !CLOSED_TEXT.test(output)) return "fail";
+  if (!CLOSED.test(output)) return "fail";
   if (FAILURE_MARKERS.some((marker) => marker.test(output))) return "fail";
-  // Every unhandled error must be a browser-closed one.
-  const closed = Math.max(closedCount, 1);
-  if ((output.match(UNHANDLED_HEADER) || []).length > closed) return "fail";
+  // Every error block must be a browser-closed one.
+  const starts = [...output.matchAll(ERROR_HEADER)].map((match) => match.index);
+  const blocks = starts.map((start, i) => output.slice(start, starts[i + 1]));
+  if (blocks.some((block) => !CLOSED.test(block))) return "fail";
   const errors = output.match(ERRORS_SUMMARY);
-  if (errors && Number(errors[1]) > closed) return "fail";
+  if (errors && Number(errors[1]) > Math.max(blocks.length, 1)) return "fail";
   return "browser-closed";
 }
 
@@ -89,8 +89,10 @@ async function runWithRetry(attempt, log = console.log) {
   }
   if (secondVerdict === "fail") return second.code;
 
-  log(`::error::${INFRA_MESSAGE}`);
-  summary(`❌ ${INFRA_MESSAGE}`);
+  const file = stripAnsi(second.output).match(/Failed to run the test (\S+?)\.?$/m)?.[1];
+  const where = file ? ` If it repeats, check ${file}.` : "";
+  log(`::error::${INFRA_MESSAGE}${where}`);
+  summary(`❌ ${INFRA_MESSAGE}${where}`);
   return second.code;
 }
 

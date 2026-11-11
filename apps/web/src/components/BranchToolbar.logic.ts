@@ -1,3 +1,4 @@
+import type { OrbitDraftTarget } from "../orbit/orbitDraft";
 import type {
   EnvironmentId,
   EnvironmentMachineKind,
@@ -67,7 +68,10 @@ export function shouldShowComposerContextStrip(input: {
   hasActiveProject: boolean;
   isGitRepo: boolean;
   showEnvironmentIndicator: boolean;
+  /** Conn: an Orbit draft has no T3 project but always shows its Node and Instance. */
+  hasOrbitDraftTarget?: boolean;
 }): boolean {
+  if (input.hasOrbitDraftTarget) return true;
   // A new thread always shows the strip, since it names the permissions the first send uses.
   return (
     input.hasActiveProject &&
@@ -318,4 +322,17 @@ export function shouldIncludeBranchPickerItem(input: {
     sanitizedQuery !== normalizedQuery &&
     lowerItemValue.includes(sanitizedQuery)
   );
+}
+
+/**
+ * Conn: the Orbit target the composer acts on. Only a draft carries one, and only while the Labs
+ * switch "Orbit threads in the palette" is on; with it off the composer is unchanged.
+ */
+export function resolveActiveOrbitDraftTarget(input: {
+  readonly enabled: boolean;
+  readonly isServerThread: boolean;
+  readonly orbitTarget: OrbitDraftTarget | null | undefined;
+}): OrbitDraftTarget | null {
+  if (!input.enabled || input.isServerThread) return null;
+  return input.orbitTarget ?? null;
 }

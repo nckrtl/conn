@@ -45,6 +45,8 @@ import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { useOrbitInstance } from "../orbit/environmentProvider";
 import { isOrbitCheckout, useOrbitCheckout } from "../orbit/orbitWorkspaces";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
+import { BranchToolbarOrbitInstance } from "./BranchToolbarOrbitInstance";
+import type { OrbitDraftTarget } from "../orbit/orbitDraft";
 import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import {
@@ -107,6 +109,8 @@ interface BranchToolbarProps {
   trailing?: ReactNode;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  /** Conn: the draft starts in an Orbit Instance; the row shows its Node and Instance only. */
+  orbitDraftTarget?: OrbitDraftTarget | null;
 }
 
 function showWorkspaceContextMenu(event: ReactMouseEvent, workspacePath: string) {
@@ -640,6 +644,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   availableEnvironments,
   onEnvironmentChange,
   trailing,
+  orbitDraftTarget = null,
 }: BranchToolbarProps) {
   const branchSelectorRef = useRef<BranchToolbarBranchSelectorHandle>(null);
   const threadRef = scopeThreadRef(environmentId, threadId);
@@ -715,6 +720,21 @@ export const BranchToolbar = memo(function BranchToolbar({
   const [attachStrip, labelsOverflow] = useLabelsOverflow();
   const orbitInstance = useOrbitInstance(environmentId);
   const openLink = useOpenLink(threadRef);
+
+  if (orbitDraftTarget) {
+    // No branch control and no domain chip: both wait for Orbit.
+    if (layout === "panel") return null;
+    return (
+      <ComposerSurface.ContextStrip
+        ref={attachStrip}
+        data-compact={labelsOverflow ? "" : undefined}
+        className={cn("gap-1 text-xs font-normal text-foreground/70 dark:text-muted-foreground")}
+      >
+        <BranchToolbarOrbitInstance target={orbitDraftTarget} />
+        {trailing}
+      </ComposerSurface.ContextStrip>
+    );
+  }
 
   if (!activeProject) return null;
 

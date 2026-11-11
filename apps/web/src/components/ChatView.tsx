@@ -300,8 +300,10 @@ import {
   resolveEffectiveEnvMode,
   resolveLocalCheckoutBranchMismatch,
   shouldShowComposerContextStrip,
+  resolveActiveOrbitDraftTarget,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
+import { orbitDraftAttachmentsBlockedReason } from "../orbit/orbitDraft";
 import {
   getProviderStatusBannerKey,
   shouldShowProviderStatusBanner,
@@ -481,6 +483,9 @@ export default function ChatView(props: ChatViewProps) {
       : draftId
         ? store.getDraftSession(draftId)
         : null,
+  );
+  const orbitThreadsInPaletteEnabled = useClientSettings(
+    (clientSettings) => clientSettings.orbitThreadsInPaletteEnabled,
   );
   const serverThreadShell = useQuietThreadShell(routeThreadRef);
   const routeThreadDetailRef = resolveThreadDetailRef(routeThreadRef, {
@@ -1718,6 +1723,11 @@ export default function ChatView(props: ChatViewProps) {
     projectRoot: activeProject?.workspaceRoot ?? null,
     enabled: !isGitRepo && activeProject !== null,
   });
+  const orbitDraftTarget = resolveActiveOrbitDraftTarget({
+    enabled: orbitThreadsInPaletteEnabled,
+    isServerThread,
+    orbitTarget: draftThread?.orbitTarget,
+  });
   const isOrbitProjectFolder =
     !isGitRepo &&
     orbitFolderAvailability !== null &&
@@ -1760,6 +1770,7 @@ export default function ChatView(props: ChatViewProps) {
       hasActiveProject: activeProject !== null && !showProviderSubagentBar,
       isGitRepo: isGitRepo || isOrbitProjectFolder,
       showEnvironmentIndicator: showComposerEnvironmentIndicator,
+      hasOrbitDraftTarget: orbitDraftTarget !== null,
     });
   const terminalShortcutLabelOptions = {
     context: {
@@ -2976,6 +2987,7 @@ export default function ChatView(props: ChatViewProps) {
     isSendBusy,
     sendQueuesBehindSetup,
     isOrbitProjectFolder,
+    orbitDraftTarget,
     isDraftHeroState,
     panelAnimationsActive,
     panelAnimationDurationMs,
@@ -3671,6 +3683,9 @@ export default function ChatView(props: ChatViewProps) {
                                 environmentId={environmentId}
                                 attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
                                 supportsAttachmentUploads={supportsAttachmentUploads}
+                                attachmentsBlockedReason={orbitDraftAttachmentsBlockedReason(
+                                  orbitDraftTarget,
+                                )}
                                 supportsQuestionAttachments={supportsQuestionAttachments}
                                 maxFileAttachmentBytes={maxFileAttachmentBytes}
                                 routeKind={routeKind}
@@ -3684,7 +3699,9 @@ export default function ChatView(props: ChatViewProps) {
                                   forceExpandedMobileComposer && isDraftHeroState
                                 }
                                 projectSelectionRequired={
-                                  isLocalDraftThread && activeProject === null
+                                  isLocalDraftThread &&
+                                  activeProject === null &&
+                                  orbitDraftTarget === null
                                 }
                                 phase={phase}
                                 isCompacting={isCompacting}
@@ -3864,6 +3881,7 @@ export default function ChatView(props: ChatViewProps) {
                                       : undefined
                                   }
                                   availableEnvironments={logicalProjectEnvironments}
+                                  orbitDraftTarget={orbitDraftTarget}
                                   {...(isServerThread
                                     ? {}
                                     : {

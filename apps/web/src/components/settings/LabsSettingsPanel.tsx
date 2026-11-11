@@ -19,6 +19,7 @@ export function LabsSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection id="beta" title="Beta">
         <BoringSidebarRow />
+        <OrbitThreadsInPaletteRow />
         {/* Clerk is only mounted when this build has T3 Connect. */}
         {hasCloudPublicConfig() ? <GuestLinksRowWithSignIn /> : <GuestLinksRow />}
         <LinkedEnvironmentsRow />
@@ -51,6 +52,26 @@ function BoringSidebarRow() {
         </div>
       ) : null}
     </SettingsRow>
+  );
+}
+
+function OrbitThreadsInPaletteRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <SettingsRow
+      {...searchableSetting("orbit-threads-in-palette")}
+      description="Start threads in an Orbit Project's Instance from the new thread palette."
+      control={
+        <Switch
+          checked={settings.orbitThreadsInPaletteEnabled}
+          onCheckedChange={(checked) =>
+            updateSettings({ orbitThreadsInPaletteEnabled: Boolean(checked) })
+          }
+          aria-label="Orbit threads in the palette"
+        />
+      }
+    />
   );
 }
 

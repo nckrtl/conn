@@ -257,6 +257,15 @@ dismissed at any time; a stopped one also offers Retry. The environment sync ski
 start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
 is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
 
+The new thread flow (Labs › "Orbit threads in the palette", off by default) opens a composer draft
+with an Orbit target (`orbitDraft.ts`, `openOrbitDraft`): the Project, Node, and a new Instance with
+the typed name or an existing one this device has not paired. An Orbit Project is no T3 project, so
+the draft uses a placeholder project id and is anchored on a paired clone of the same Project, else
+the primary environment, for its model list. The context row shows the Node and
+`<instance> · <project>`; attachments are off. Send saves a start (typed name, model and modes)
+for the runner above instead of sending through a T3 server, then clears the draft. This is not the
+older worktree env mode `"orbit"`.
+
 The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
 shared state machine and first-message launch (`threadStart.ts`, `threadTurn.ts`); the starts
 live in `orbit-thread-starts.json` in the app's documents folder. The file write is async, so

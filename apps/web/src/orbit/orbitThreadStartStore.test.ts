@@ -20,7 +20,7 @@ function createLocalStorageStub(): Storage {
 const start = (id: string) =>
   newOrbitThreadStart({
     id,
-    project: { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" },
+    project: { id: 3, slug: "mealou", nodeName: "beast" },
     message: "Fix it",
     suffix: "k3j9",
     threadId: `thread-${id}`,

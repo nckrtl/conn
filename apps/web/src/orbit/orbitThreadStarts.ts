@@ -5,6 +5,7 @@ import {
   type OrbitFirstMessagePorts,
   type OrbitGatewayClient,
   type OrbitGatewayProject,
+  type OrbitThreadStart,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
@@ -20,6 +21,7 @@ import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
+import type { OrbitDraftStartInput } from "./orbitDraft";
 import { readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
@@ -32,10 +34,11 @@ const CLONE_READY_TIMEOUT_MS = 60_000;
 const startedOn = new Map<string, string>();
 
 export function beginOrbitThreadStart(
-  project: OrbitGatewayProject,
+  project: Pick<OrbitGatewayProject, "id" | "slug" | "nodeName">,
   message: string,
   pathname: string,
-): void {
+  options: OrbitThreadStartOptions = {},
+): OrbitThreadStart {
   const fresh = newOrbitThreadStart({
     id: randomUUID(),
     project,
@@ -45,10 +48,52 @@ export function beginOrbitThreadStart(
     messageId: newMessageId(),
     commandId: randomUUID(),
     now: Date.now(),
+    ...options,
   });
   const start = { ...fresh, workspaceId: useWorkspaceStore.getState().activeWorkspaceId };
   startedOn.set(start.id, pathname);
   updateStarts((starts) => [...starts, start]);
+  return start;
+}
+
+type OrbitThreadStartOptions = Pick<
+  Parameters<typeof newOrbitThreadStart>[0],
+  "instanceName" | "existing" | "modelSelection" | "runtimeMode" | "interactionMode"
+>;
+
+/** Saves the start an Orbit draft sends: the typed Instance name, kind, model and modes. */
+export function beginOrbitDraftThreadStart(
+  input: OrbitDraftStartInput,
+  pathname: string,
+): OrbitThreadStart {
+  return beginOrbitThreadStart(input.project, input.message, pathname, {
+    instanceName: input.instanceName,
+    ...(input.existing ? { existing: input.existing } : {}),
+    modelSelection: input.modelSelection,
+    runtimeMode: input.runtimeMode,
+    interactionMode: input.interactionMode,
+  });
+}
+
+/**
+ * Where the window goes after an Orbit draft is sent. The index opens a fresh draft, so the runner
+ * offers the thread in a toast and the sidebar's start list shows progress. PR 4: pending route.
+ */
+export const ORBIT_START_PROGRESS_ROUTE = "/";
+
+/**
+ * Sends an Orbit draft: saves the start for the runner (never through a T3 server), opens the
+ * progress route, then clears the draft. The runner opens the thread if the window stayed there.
+ */
+export function sendOrbitDraft(input: {
+  readonly start: OrbitDraftStartInput;
+  readonly openProgress: (route: typeof ORBIT_START_PROGRESS_ROUTE) => void;
+  readonly clearDraft: () => void;
+}): OrbitThreadStart {
+  const start = beginOrbitDraftThreadStart(input.start, ORBIT_START_PROGRESS_ROUTE);
+  input.openProgress(ORBIT_START_PROGRESS_ROUTE);
+  input.clearDraft();
+  return start;
 }
 
 /** Whether the window still shows the route the start began on. */

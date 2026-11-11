@@ -183,7 +183,7 @@ export function orbitThreadInstanceName(message: string, suffix: string): string
 
 export function newOrbitThreadStart(input: {
   readonly id: string;
-  readonly project: OrbitGatewayProject;
+  readonly project: Pick<OrbitGatewayProject, "id" | "slug" | "nodeName">;
   readonly message: string;
   readonly suffix: string;
   readonly threadId: string;

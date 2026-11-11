@@ -702,9 +702,12 @@ export function ComposerQueuedAttachmentRow({
 export function ComposerAttachButton({
   addComposerAttachments,
   focusComposer,
+  blockedReason = null,
 }: {
   readonly addComposerAttachments: (files: File[]) => Promise<boolean>;
   readonly focusComposer: () => void;
+  /** Shown instead of "Attach files"; the button then opens no file picker. */
+  readonly blockedReason?: string | null;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
@@ -733,15 +736,20 @@ export function ComposerAttachButton({
               variant="ghost"
               size="icon-sm"
               onPointerDown={(event) => event.preventDefault()}
-              onClick={() => inputRef.current?.click()}
-              aria-label="Attach files"
+              onClick={() => {
+                if (blockedReason === null) inputRef.current?.click();
+              }}
+              aria-label={blockedReason ?? "Attach files"}
+              aria-disabled={blockedReason !== null ? true : undefined}
             />
           }
         >
           {/* The clip's weight sits in its upper loop; 1px down reads as centered on the row. */}
-          <PaperclipIcon className="translate-y-px" />
+          <PaperclipIcon
+            className={blockedReason === null ? "translate-y-px" : "translate-y-px opacity-64"}
+          />
         </TooltipTrigger>
-        <TooltipPopup>Attach files</TooltipPopup>
+        <TooltipPopup>{blockedReason ?? "Attach files"}</TooltipPopup>
       </Tooltip>
     </>
   );

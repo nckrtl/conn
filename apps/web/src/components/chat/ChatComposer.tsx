@@ -344,6 +344,8 @@ export interface ChatComposerProps {
   canOperateThread: boolean;
   attachmentUploadsCapabilityKnown: boolean;
   supportsAttachmentUploads: boolean;
+  /** Conn: why this draft takes no attachments (a new Orbit Instance), or null. */
+  attachmentsBlockedReason?: string | null;
   supportsQuestionAttachments: boolean;
   maxFileAttachmentBytes: number | null;
   routeKind: "server" | "draft";
@@ -494,6 +496,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     canOperateThread,
     attachmentUploadsCapabilityKnown,
     supportsAttachmentUploads,
+    attachmentsBlockedReason = null,
     supportsQuestionAttachments,
     maxFileAttachmentBytes,
     routeKind,
@@ -2553,31 +2556,40 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     });
   };
 
-  const { addComposerAttachments, removeComposerImage, foldPastedText } =
-    useComposerAttachmentIntake({
-      activeThreadId,
-      activePendingProgress,
-      activePendingIsResponding,
-      pendingUserInputs,
-      supportsQuestionAttachments,
-      isLiteralPendingAnswer,
-      projectSelectionRequired,
-      questionAttachmentTarget,
-      attachmentTargetKey,
-      fileStagingLimit,
-      promptRef,
-      composerImagesRef,
-      composerFilesRef,
-      composerEditorRef,
-      isRevertingCheckpointRef,
-      setThreadError,
-      countReservedAttachments,
-      addComposerImage,
-      addComposerImagesToDraft,
-      addComposerFilesToDraft,
-      removeComposerImageFromDraft,
-      insertAttachmentReferences,
-    });
+  const {
+    addComposerAttachments: addComposerAttachmentsUnguarded,
+    removeComposerImage,
+    foldPastedText,
+  } = useComposerAttachmentIntake({
+    activeThreadId,
+    activePendingProgress,
+    activePendingIsResponding,
+    pendingUserInputs,
+    supportsQuestionAttachments,
+    isLiteralPendingAnswer,
+    projectSelectionRequired,
+    questionAttachmentTarget,
+    attachmentTargetKey,
+    fileStagingLimit,
+    promptRef,
+    composerImagesRef,
+    composerFilesRef,
+    composerEditorRef,
+    isRevertingCheckpointRef,
+    setThreadError,
+    countReservedAttachments,
+    addComposerImage,
+    addComposerImagesToDraft,
+    addComposerFilesToDraft,
+    removeComposerImageFromDraft,
+    insertAttachmentReferences,
+  });
+  // Paste, drop and the attach button all land here.
+  const addComposerAttachments: typeof addComposerAttachmentsUnguarded = (...args) => {
+    if (attachmentsBlockedReason === null) return addComposerAttachmentsUnguarded(...args);
+    toastManager.add({ type: "info", title: attachmentsBlockedReason });
+    return Promise.resolve(false);
+  };
 
   const onComposerCommandKeyStable = useStableCallback(onComposerCommandKey);
   const isPathQueryActiveStable = useStableCallback(
@@ -3202,6 +3214,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     <ComposerAttachButton
       addComposerAttachments={addComposerAttachments}
       focusComposer={focusComposer}
+      blockedReason={attachmentsBlockedReason}
     />
   ) : null;
   return (

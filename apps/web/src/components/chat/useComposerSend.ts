@@ -146,6 +146,12 @@ import { orbitInstanceNameForBranch } from "../../orbit/orbitInstances";
 import { randomUUID } from "~/lib/utils";
 import { readOrbitGatewayUrl, runHiddenShell } from "../../orbit/orbitTransport";
 import { registerOrbitWorkspace } from "../../orbit/orbitWorkspaces";
+import {
+  buildOrbitDraftStart,
+  orbitDraftAttachmentsBlockedReason,
+  type OrbitDraftTarget,
+} from "../../orbit/orbitDraft";
+import { sendOrbitDraft } from "../../orbit/orbitThreadStarts";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -204,6 +210,8 @@ interface ComposerSendInput {
   readonly sendQueuesBehindSetup: boolean;
   /** Conn: an Orbit project folder has no branches; its Instance starts from the default branch. */
   readonly isOrbitProjectFolder: boolean;
+  /** Conn: the draft starts in an Orbit Instance through the start machine, not this server. */
+  readonly orbitDraftTarget: OrbitDraftTarget | null;
   readonly isDraftHeroState: boolean;
   readonly panelAnimationsActive: boolean;
   readonly panelAnimationDurationMs: number;
@@ -299,6 +307,7 @@ export function useComposerSend(input: ComposerSendInput) {
     isSendBusy,
     sendQueuesBehindSetup,
     isOrbitProjectFolder,
+    orbitDraftTarget,
     isDraftHeroState,
     panelAnimationsActive,
     panelAnimationDurationMs,
@@ -528,7 +537,7 @@ export function useComposerSend(input: ComposerSendInput) {
         approval.supportsFeedback && approval.requestId === sendCtx.shownPendingApprovalIds[0],
     );
     const multipleModelBlock =
-      multipleModelSelections === null
+      multipleModelSelections === null || orbitDraftTarget !== null
         ? null
         : multipleModelSendBlock({
             selectionCount: multipleModelSelections.length,
@@ -722,6 +731,48 @@ export function useComposerSend(input: ComposerSendInput) {
           }),
         );
       }
+      return;
+    }
+    if (orbitDraftTarget !== null && draftId !== null) {
+      if (!composerHoldsOnlyText) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Only text can start this thread",
+            description:
+              orbitDraftAttachmentsBlockedReason(orbitDraftTarget) ??
+              "Remove the attached context, then send.",
+          }),
+        );
+        return;
+      }
+      if (multipleModelSelections !== null) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Pick one model",
+            description: "A thread in an Orbit Instance starts with one model.",
+          }),
+        );
+        return;
+      }
+      const composerDraft = useComposerDraftStore.getState().getComposerDraft(draftId);
+      sendOrbitDraft({
+        start: buildOrbitDraftStart({
+          target: orbitDraftTarget,
+          message: trimmed,
+          modelSelection: ctxSelectedModelSelection,
+          runtimeMode,
+          interactionMode:
+            composerDraft?.interactionMode ??
+            draftThread?.interactionMode ??
+            DEFAULT_INTERACTION_MODE,
+        }),
+        openProgress: (to) => void navigate({ to }),
+        clearDraft: () => useComposerDraftStore.getState().clearDraftThread(draftId),
+      });
+      promptRef.current = "";
+      composerRef.current?.resetCursorState();
       return;
     }
     if (!activeProject) {

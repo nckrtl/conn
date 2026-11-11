@@ -1280,6 +1280,18 @@ export interface DesktopOrbitGatewayResponse {
   readonly body: string;
 }
 
+/** Conn: one call of the Laravel toolbar's Orbit tool, from the desktop main process. */
+export interface DesktopOrbitToolRequest {
+  /** The thread's environment; writes go only to its own Orbit Instance. */
+  readonly environmentId: string;
+  readonly method: "GET" | "POST" | "PUT" | "DELETE";
+  readonly path: string;
+  readonly query: Readonly<Record<string, string>>;
+  /** A JSON body, or null. */
+  readonly body: string | null;
+  readonly timeoutMs?: number;
+}
+
 export interface DesktopDatabaseConnection {
   readonly driver: "mysql" | "pgsql" | "sqlite";
   readonly host: string;
@@ -1540,6 +1552,11 @@ export interface DesktopBridge {
    * (the Gateway refuses a page Origin). Optional: other desktop builds lack it.
    */
   orbitGatewaySend?: (request: DesktopOrbitGatewayRequest) => Promise<DesktopOrbitGatewayResponse>;
+  /**
+   * nckrtl fork: one allowlisted call of the Laravel toolbar's Orbit tool, sent by the main process
+   * for a thread in an Orbit Instance. Optional: other desktop builds lack it.
+   */
+  orbitToolSend?: (request: DesktopOrbitToolRequest) => Promise<DesktopOrbitGatewayResponse>;
   /**
    * nckrtl fork: one read-only Database panel call, run by the main process on a direct
    * connection. Optional: other desktop builds lack it.

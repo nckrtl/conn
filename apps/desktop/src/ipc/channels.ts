@@ -10,6 +10,7 @@ export const OPEN_SYSTEM_SETTINGS_CHANNEL = "desktop:open-system-settings";
 export const PROBE_REMOTE_EDITORS_CHANNEL = "desktop:probe-remote-editors";
 export const API_SEND_CHANNEL = "desktop:api-send";
 export const ORBIT_GATEWAY_SEND_CHANNEL = "desktop:orbit-gateway-send";
+export const ORBIT_TOOL_SEND_CHANNEL = "desktop:orbit-tool-send";
 export const DATABASE_RUN_CHANNEL = "desktop:database-run";
 export const VAULT_DATABASES_CHANNEL = "desktop:vault-databases";
 export const MCP_CONNECT_CHANNEL = "desktop:mcp-connect";

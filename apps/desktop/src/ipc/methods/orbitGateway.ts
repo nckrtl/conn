@@ -32,24 +32,29 @@ const OrbitGatewayResponse = Schema.Struct({
   body: Schema.String,
 });
 
+/** True when a path segment is `.` or `..` (also percent-encoded), or holds an encoded slash. */
+export function hasUnsafeSegment(path: string): boolean {
+  for (const segment of path.split("/")) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return true;
+    }
+    if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Builds the Gateway URL for a Conn path, or returns null when the path would leave
  * `/api/v1/conn`. The path is resolved by the URL parser first, so `..` segments (also written
  * `%2e%2e`) cannot climb out of the prefix. They are rejected outright, as is an encoded slash.
  */
 export function resolveConnUrl(path: string): URL | null {
-  const segments = path.split("/");
-  for (const segment of segments) {
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(segment);
-    } catch {
-      return null;
-    }
-    if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")) {
-      return null;
-    }
-  }
+  if (hasUnsafeSegment(path)) return null;
   let url: URL;
   try {
     url = new URL(`${DEFAULT_ORBIT_GATEWAY_URL}${CONN_PREFIX}${path}`);

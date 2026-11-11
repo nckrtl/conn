@@ -265,6 +265,9 @@ thread list. The thread opens once sent if the screen the start returned to stil
 profile's, so a sent start adds the clone's ref to the workspace selected at Start in the
 profile itself (one re-read on a version conflict).
 
+On a clone thread the Laravel toolbar's Orbit tool calls the Gateway from the desktop main
+process, with writes limited to the clone's own Instance; see [Laravel Toolbar](#laravel-toolbar).
+
 The thread panel's machine row becomes the Orbit row for a server in an Orbit Instance:
 Project, Instance and Node, and the URL as a link (`ThreadDetailsOrbitRows.tsx`). Clones run
 the stock T3 server, so the Gateway's environment record is their source: in Orbit mode each
@@ -375,6 +378,36 @@ thousands. Request rows reformat the bridge's duration (`30168ms`) through
 `parseDuration` and sort on `RequestSummary.durationMs`. `model.test.ts`
 covers both.
 
+The Orbit tool reaches the Gateway in one of two ways (`BrowserLaravelToolbar.tsx`,
+`orbit/desktopOrbitTransport.ts`). For a thread whose environment is an Orbit Instance
+(`useOrbitInstance` gives an instance id) the desktop main process sends the calls
+(`orbitToolSend`, `apps/desktop/src/ipc/methods/orbitTool.ts`): in a container `curl` goes through
+the Node's proxy, which refuses `.orbit` names, and the tool would hide. Other threads, and the
+web build, keep the hidden terminal on the thread's server. The page's domain still decides which
+Instance the tool shows. The main process sends only these calls, with integer ids, the listed
+query keys and no others, and the same `..` and encoded-slash checks as the Conn layer:
+
+- GET `/api/v1/instances/resolve` (`domain`), GET `/api/v1/nodes`, GET `/api/v1/realtime`.
+- GET `/api/v1/processes` (`target_type=instance`, `target_id`), GET
+  `/api/v1/processes/{id}/logs` (`lines`), POST `/api/v1/processes/{id}/start|stop|restart`.
+- GET `/api/v1/instances/{id}/dependencies`, GET `/api/v1/instances/{id}/logs` (`lines`).
+- POST `/api/v1/instances/{id}/log-streams`, PUT and DELETE
+  `/api/v1/instances/{id}/log-streams/{stream}`.
+
+Reads follow the page. Writes (process actions and log streams) go only to the thread's own
+Instance: the main process reads `instance_id` of the request's environment from
+`GET /api/v1/conn/environments` (10 s cache) and, for a process action, checks that the Process
+is in that Instance's process list. Without an Instance, or for another Instance, it refuses
+before the write. The application log's realtime WebSocket opens in the renderer, as before.
+
+The Orbit tool's process status falls back to the Gateway's `status` when
+`runtime_status` is `unknown` or missing, as for container Instances. Without a
+usable answer it shows `unknown`, never `crashed`, and keeps the process's
+actions and log follow. The Processes log pane reads a one-time tail (the
+Gateway can take 8 s or more for container Processes) and must always end in a
+tail, an empty message, or an error with Retry. A non-followed read is not
+repeated, so never swallow its failure.
+
 `ApiPanel.tsx` has a separate toolbar mount. Keeping that mount, the toolbar
 directory, or the preload is not enough to preserve the browser toolbar. The
 November 7 sync removed the browser mount and the guest attachment in
@@ -402,6 +435,7 @@ Sources:
 - `apps/web/src/browser/HostedBrowserWebview.tsx`,
   `apps/web/src/api/ApiPanel.tsx`.
 - `apps/desktop/src/preview-pick-preload.ts`.
+- `apps/web/src/orbit/desktopOrbitTransport.ts`, `apps/desktop/src/ipc/methods/orbitTool.ts`.
 - Desktop (`apps/desktop/src/preview/`): `LaravelToolbarPreload.ts`,
   `ResponseHeaderRelay.ts`.
 - `packages/shared/src/laravelToolbarHeaders.ts`.
@@ -1290,3 +1324,5 @@ commit.
 ## Pull request runners
 
 Public forks use GitHub-hosted Ubuntu and macOS runners for the main CI and native fingerprint checks. Upstream keeps its Blacksmith labels. The fork does not register runners or require a Blacksmith installation; server shards run at most four at a time. The 4 vCPU runners are about half as fast as upstream's 8 vCPU ones, so the fork also splits two jobs that fit upstream's 10 minute limit only on 8 vCPU: Test Web runs as two shards, and Test runs as three (`@t3tools/mobile`, `@t3tools/oxlint-plugin-t3code`, and every other package). Upstream's matrix keeps one job each, so on a sync keep the fork's `strategy`, `name` and shard parts of the steps: the `--shard` argument in Test Web, and in Test the `SHARD_ONLY`/`SHARD_SKIP` filters and the `if: matrix.shard.index == 1` steps.
+
+The fork also skips upstream's `setup-apt-mirrors` action and installs the browser secret helper's libraries with `.github/scripts/fork-apt-install.sh`. On 2026-11-11 Canonical's nameservers stopped answering, the runners could not resolve `*.ubuntu.com`, and every Build and Test job hit its limit in apt. The script skips apt when the packages are installed (`libsecret-1-dev` is not on GitHub's image). Otherwise it tries azure.archive.ubuntu.com, mirrors.edge.kernel.org and archive.ubuntu.com in turn. It skips a host that does not resolve and gives each mirror 60 s, with private signed noble main and universe indexes, 5 s network timeouts and no retries. The Finish step waits at most 240 s and always prints the log. On a sync keep the `github.repository` conditions on the `setup-apt-mirrors` step and in both Start steps, and the bounded wait in both Finish steps (it applies upstream too).

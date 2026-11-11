@@ -82,12 +82,16 @@ card, and `APP_ROUTE_MODAL_NAV_CLASS` the inset Settings nav beside the card.
 On a conflict there, take upstream's routing and dismissal logic and keep these
 four pieces.
 
+The terminal's actions float in a `ToolbarGroup` over its top right corner, and
+the dark chat composer is a step lighter than the chat card (`--shell-composer`).
+
 The [nckrtl-shell-design skill][shell] has the full rules.
 
 Sources:
 
 - Web (`apps/web/src/`): `index.css` (shell tokens at the end),
   `components/ui/*` variants, `components/ToolbarGroup.tsx`,
+  `components/ThreadTerminalDrawer.tsx`, `components/chat/ComposerSurface.tsx`,
   `components/settings/*`, `components/AppRouteModal.tsx`,
   `routes/_chat.settings.tsx`, `components/ChatView.tsx`,
   `components/RightPanelTabs.tsx`, `components/Sidebar.tsx`,
@@ -1023,6 +1027,15 @@ Sources:
      in composer files take upstream's composer and re-apply only the listed
      fork features (environment contexts: `composerEnvironmentContexts`, the
      `@` environment chips, `EnvironmentContextChip.tsx`).
+   - Composer fill: `ComposerSurface.tsx` sets
+     `--chat-composer-glass-surface` to `--shell-composer` (`index.css`), so
+     the dark composer sits a step lighter than the chat card (Nick,
+     2026-11-11). Upstream's `--surface-raised` equals the card there.
+   - Terminal actions: with one terminal group, `ThreadTerminalDrawer.tsx`
+     floats the actions in a `ToolbarGroup` at the top right, level with the
+     first terminal line. Upstream #23373 gives them their own row; the
+     November 3 sync took that row. Keep the floating group and take
+     upstream's row only in the split sidebar header.
    - Shell glass and sidebar card: in
      `apps/desktop/src/window/DesktopWindow.ts` keep the macOS `vibrancy`,
      `visualEffectState` and clear background, both at window creation and in

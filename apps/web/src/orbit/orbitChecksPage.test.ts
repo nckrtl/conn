@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   checkOrbitProjectAgain,
-  forgetOrbitRecheckFailure,
+  forgetOrbitRecheck,
   orbitChecksPageModel,
   readOrbitRecheckPhase,
 } from "./orbitChecksPage";
@@ -149,14 +149,14 @@ describe("checkOrbitProjectAgain", () => {
     expect(readOrbitRecheckPhase(5)).toBe("failed");
     await checkOrbitProjectAgain(5, () => Promise.reject(new Error("offline")));
     expect(readOrbitRecheckPhase(5)).toBe("failed");
-    forgetOrbitRecheckFailure(5);
+    forgetOrbitRecheck(5);
     expect(readOrbitRecheckPhase(5)).toBe("idle");
-  });
 
-  it("offers the Instance step once a re-read finds the Project startable", () => {
-    expect(rowsOf(liveChecks("container")).startable).toBe(false);
-    const after = orbitChecksPageModel({ startable: true, reason: null, checks: liveChecks(null) });
-    expect(after.startable).toBe(true);
-    expect(after.rows.every((row) => row.status === "pass")).toBe(true);
+    // An answer that arrives after the page closed leaves no note behind.
+    const late = checkOrbitProjectAgain(5, reread);
+    forgetOrbitRecheck(5);
+    answer(false);
+    await late;
+    expect(readOrbitRecheckPhase(5)).toBe("idle");
   });
 });

@@ -3,7 +3,7 @@ import { useEffect } from "react";
 
 import {
   checkOrbitProjectAgain,
-  forgetOrbitRecheckFailure,
+  forgetOrbitRecheck,
   orbitChecksPageModel,
   useOrbitRecheckPhase,
   type OrbitChecksPageRow,
@@ -42,7 +42,7 @@ function CheckAgainNote(props: { readonly projectId: number }) {
   const phase = useOrbitRecheckPhase(props.projectId);
   const { projectId } = props;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a "did not answer" note belongs to this visit of the page only
-  useEffect(() => () => forgetOrbitRecheckFailure(projectId), [projectId]);
+  useEffect(() => () => forgetOrbitRecheck(projectId), [projectId]);
   if (phase === "checking") return "Asking Orbit…";
   if (phase === "failed") {
     return (

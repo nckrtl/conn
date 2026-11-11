@@ -89,11 +89,10 @@ export function useOrbitRecheckPhase(projectId: number): OrbitRecheckPhase {
   return useOrbitRecheckStore((store) => (store.projectId === projectId ? store.phase : "idle"));
 }
 
-/** Leaving the page drops an old "did not answer" note; a running check finishes on its own. */
-export function forgetOrbitRecheckFailure(projectId: number): void {
-  const current = useOrbitRecheckStore.getState();
-  if (current.projectId === projectId && current.phase === "failed") {
-    useOrbitRecheckStore.setState({ phase: "idle" });
+/** Leaving the page forgets its check: a note or a late answer belongs to that visit only. */
+export function forgetOrbitRecheck(projectId: number): void {
+  if (useOrbitRecheckStore.getState().projectId === projectId) {
+    useOrbitRecheckStore.setState({ projectId: null, phase: "idle" });
   }
 }
 

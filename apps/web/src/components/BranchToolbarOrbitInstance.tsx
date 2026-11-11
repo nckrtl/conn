@@ -34,7 +34,7 @@ export function BranchToolbarOrbitInstance({ target }: { target: OrbitDraftTarge
               size="xs"
               data-composer-context-control
               aria-label={row.instanceTitle}
-              onClick={() => openOrbitInstanceStep(target.projectId)}
+              onClick={() => openOrbitInstanceStep(target)}
             />
           }
         >

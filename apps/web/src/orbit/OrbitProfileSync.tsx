@@ -91,6 +91,7 @@ export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
       method: request.method,
       path: request.path,
       body: request.body === undefined ? null : JSON.stringify(request.body),
+      ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
       ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
     });

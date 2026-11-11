@@ -64,7 +64,7 @@ function OrbitThreadsInPaletteRow() {
   return (
     <SettingsRow
       {...searchableSetting("orbit-threads-in-palette")}
-      description="Start threads in an Orbit Project's Instance from the new thread palette."
+      description="New thread lists your Orbit Projects. Pick one, then name a new Instance or pick an existing one, and the thread starts there."
       control={
         <Switch
           checked={settings.orbitThreadsInPaletteEnabled}

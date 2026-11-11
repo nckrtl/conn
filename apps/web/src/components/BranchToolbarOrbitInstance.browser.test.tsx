@@ -27,6 +27,6 @@ describe("BranchToolbarOrbitInstance", () => {
     await userEvent.click(screen.getByRole("button", { name: /New instance pricing-page/ }));
 
     await expect.element(screen.getByText("pricing-page · nckrtl")).toBeVisible();
-    expect(opener).toHaveBeenCalledWith(71);
+    expect(opener).toHaveBeenCalledWith(target);
   });
 });

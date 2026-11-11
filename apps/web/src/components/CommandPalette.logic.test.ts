@@ -21,7 +21,10 @@ import {
   orbitPaletteProjectSubline,
   orbitProjectInstanceCount,
 } from "./CommandPalette.logic";
-import type { OrbitGatewayProjectListing } from "@t3tools/client-runtime/orbit-gateway";
+import type {
+  OrbitGatewayEnvironment,
+  OrbitGatewayProjectListing,
+} from "@t3tools/client-runtime/orbit-gateway";
 
 describe("linked pull request thread navigation", () => {
   it("keeps archived relations searchable and routes them through the PR environment", async () => {
@@ -985,10 +988,22 @@ describe("Orbit Projects in the New thread list", () => {
     instanceId: number | null,
     projectId: number | null,
     instanceName: string,
-  ) => ({
+  ): OrbitGatewayEnvironment => ({
+    environmentId: `env-${instanceId ?? "host"}-${instanceName}`,
+    label: instanceName,
+    url: "https://example.test",
+    serverVersion: null,
+    registeredBy: null,
+    registeredAt: null,
+    status: "registered",
     instanceId,
+    powerState: "running",
     projectId,
+    projectName: null,
+    projectSlug: null,
     instanceName,
+    nodeName: "beast",
+    instanceUrl: null,
   });
   const loaded = (
     projects: OrbitGatewayProjectListing[],
@@ -1038,6 +1053,15 @@ describe("Orbit Projects in the New thread list", () => {
       [false, "orbit · cannot start threads yet"],
     ]);
     expect(rows[1]!.checks).toEqual([failing]);
+  });
+
+  it("shows a list of only startable Projects (Orbit without include_unavailable) with no greyed rows", () => {
+    const environments = [environment(41, 2, "fix"), environment(42, 4, "login")];
+    const rows = buildOrbitPaletteProjectRows(loaded([project(2), project(4)], environments));
+    expect(rows.map((row) => [row.id, row.startable, orbitPaletteProjectSubline(row)])).toEqual([
+      [2, true, "orbit · 1 instance"],
+      [4, true, "orbit · 1 instance"],
+    ]);
   });
 
   it("lists Projects in which threads can start before the greyed ones", () => {

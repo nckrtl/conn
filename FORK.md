@@ -265,8 +265,19 @@ the list. While the list loads or after it fails, only local projects show, then
 a notice with Retry. A Project in which threads cannot start yet (`cloneable: false`) stays
 selectable and greyed out with Orbit's reason. The list parser takes the coming `cloneable`,
 `cloneable_reason`, `checks` and `instance_domain_suffix` fields when present; a row without
-`cloneable` can start threads. The pages a row opens are placeholders for now
-(`CommandPaletteOrbitProjects.tsx`).
+`cloneable` can start threads. The palette asks with `include_unavailable=1`, since Orbit lists
+only startable Projects without it; the old cube dialog and the phone do not. A greyed row's
+checks page is still a placeholder (`CommandPaletteOrbitProjects.tsx`).
+
+A startable row opens the Instance step (`CommandPaletteOrbitInstanceStep.tsx`,
+`orbitInstanceStepLogic.ts`): a name field with the Project's domain suffix, checked live with
+`GET /api/v1/conn/projects/{id}/instances/check?name=` after the local name rule passes. A failed
+or slow check keeps create possible (Orbit's `instance.name_taken` at create is the guard); 409
+`instance.default_missing` blocks it. A search that finds no Instance fills the field with the
+search text as a slug, unless the user typed a name. "Existing instances" lists every Instance of
+the Project in the Gateway's environment list (no owner filter, never the default); stopped and
+expired ones are disabled. A paired one opens a normal draft in its `/srv/workspace` project, an
+unpaired one an Orbit draft. The desktop IPC lets only these two queries through.
 
 The new thread flow (Labs › "Orbit threads in the palette", off by default) opens a composer draft
 with an Orbit target (`orbitDraft.ts`, `openOrbitDraft`): the Project, Node, and a new Instance with

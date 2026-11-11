@@ -1101,7 +1101,8 @@ Sources:
      must stay on one version: `@t3tools/shared/previewPage` takes the pages
      both runners create, so a split fails the server typecheck. Conn pins
      1.60.0 (1.64.1 breaks `DesktopTabRunner` resize fill); move all three
-     together.
+     together. `scripts` and `apps/web` (`playwright`) stay on upstream's
+     version; they do not share pages with the runners.
    - Fork Swift and Kotlin files (`apps/mobile/modules/*/ios`, `*/android`):
      CI lints native code but never compiles it, so a merge that takes
      upstream's copy passes CI and breaks the app. The November 7 sync took
@@ -1226,13 +1227,13 @@ and a guard, or a later sync can drop it while every check passes.
 ### Upstream sync audit: 2026-11-11
 
 The sync merge `954d199524` (upstream `b883156e26`) kept `apps/server` on
-upstream's `playwright-core` 1.64.1, while `b6d0582df6` moved desktop and shared
-back to 1.60.0. The server typecheck failed on `ServerBrowser.ts` and
+upstream's `playwright-core` 1.64.1, while `b6d0582df6` kept desktop and shared
+on 1.60.0. The server typecheck failed on `ServerBrowser.ts` and
 `ServerBrowserPage.test.ts`; the server is back on 1.60.0. The fork work of
-November 10–11 (#11–#27) survived: every line those PRs added is still there (one test call follows
-upstream's new `assistantCitationNavigation` signature), `ci.yml`
-and this file are unchanged by the merge, and their tests and the fork guards
-pass.
+November 10–11 (#11–#27) survived: every line those PRs added is still there
+(one test call follows upstream's new `assistantCitationNavigation` signature),
+`ci.yml` and this file are unchanged by the merge, and their tests and the fork
+guards pass.
 
 ### Vendored dependency patches
 

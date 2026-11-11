@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, fakeTimers, render } from "../../../test/render";
+import type { DesktopOrbitToolRequest, EnvironmentId } from "@t3tools/contracts";
+
+import { createDesktopOrbitTransport } from "~/orbit/desktopOrbitTransport";
 import { ToolbarProvider } from "../context";
-import type { OrbitProcess, OrbitSource } from "../orbit";
+import { gatewayOrbitSource, type OrbitProcess, type OrbitSource } from "../orbit";
 import { OrbitPanel } from "./orbit";
 
 const crashed: OrbitProcess = {
@@ -108,5 +111,33 @@ describe("Orbit process log pane", () => {
     await expect.element(screen.getByText("status unknown")).toBeVisible();
     await expect.element(screen.getByRole("button", { name: "Restart queue" })).toBeEnabled();
     await expect.element(screen.getByRole("button", { name: "Stop queue" })).toBeEnabled();
+  });
+
+  it("reads the Instance's processes and a log tail through the desktop transport", async () => {
+    const answers: Record<string, unknown> = {
+      "/api/v1/instances/resolve": { instance_id: 2040, node_id: 3 },
+      "/api/v1/nodes": [{ id: 3, name: "beast" }],
+      "/api/v1/processes": [{ id: 51, name: "vp-dev", status: "running" }],
+      "/api/v1/processes/51/logs": { logs: "vite ready in 412 ms\n" },
+    };
+    const send = vi.fn(async (request: DesktopOrbitToolRequest) => ({
+      error: null,
+      status: 200,
+      body: JSON.stringify({ data: answers[request.path] ?? null }),
+    }));
+    const transport = createDesktopOrbitTransport({
+      environmentId: "env-clone" as EnvironmentId,
+      send,
+    });
+    await using screen = await renderPanel(gatewayOrbitSource(transport, "clone.test"));
+    await expect.element(screen.getByText("vite ready in 412 ms")).toBeVisible();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environmentId: "env-clone",
+        method: "GET",
+        path: "/api/v1/processes",
+        query: { target_type: "instance", target_id: "2040" },
+      }),
+    );
   });
 });

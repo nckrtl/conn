@@ -245,6 +245,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   apiSend: (request) => ipcRenderer.invoke(IpcChannels.API_SEND_CHANNEL, request),
   orbitGatewaySend: (request) =>
     ipcRenderer.invoke(IpcChannels.ORBIT_GATEWAY_SEND_CHANNEL, request),
+  orbitToolSend: (request) => ipcRenderer.invoke(IpcChannels.ORBIT_TOOL_SEND_CHANNEL, request),
   databaseRun: (request) => ipcRenderer.invoke(IpcChannels.DATABASE_RUN_CHANNEL, request),
   vaultwardenSetup: (request) => ipcRenderer.invoke(IpcChannels.VAULTWARDEN_SETUP_CHANNEL, request),
   vaultLogins: (request) => ipcRenderer.invoke(IpcChannels.VAULT_LOGINS_CHANNEL, request),

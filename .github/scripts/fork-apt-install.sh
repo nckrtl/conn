@@ -2,10 +2,11 @@
 # Fork-only: installs Ubuntu packages on GitHub-hosted ubuntu-24.04 runners
 # with a hard time bound. See FORK.md "Pull request runners".
 #
-# The image's own apt sources point at azure.archive.ubuntu.com, which can
-# stall index downloads for many minutes. This script skips apt when the
-# packages are already installed. Otherwise it uses private, signed noble
-# indexes with short network timeouts: Azure first, then archive.ubuntu.com.
+# On 2026-11-11 Canonical's nameservers stopped answering, so the runners
+# could not resolve *.ubuntu.com and apt hung on its sources. This script skips
+# apt when the packages are installed. Otherwise it tries mirrors in order,
+# skips any host that does not resolve, and gives each a hard time budget.
+# Indexes stay signed by the Ubuntu archive keyring on every mirror.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
@@ -32,13 +33,17 @@ scratch=$(mktemp -d -t fork-apt.XXXXXXXX)
 trap 'sudo rm -rf -- "$scratch"' EXIT
 chmod 755 "$scratch"
 
-for mirror in azure.archive.ubuntu.com archive.ubuntu.com; do
+for mirror in azure.archive.ubuntu.com/ubuntu mirrors.edge.kernel.org/ubuntu archive.ubuntu.com/ubuntu; do
+  host=${mirror%%/*}
+  if ! timeout 5 getent hosts "$host" > /dev/null; then
+    echo "Skipping $host: it does not resolve" >&2
+    continue
+  fi
   budget=60
-  if [ "$mirror" = archive.ubuntu.com ]; then budget=90; fi
-  attempt="$scratch/$mirror"
+  attempt="$scratch/$host"
   mkdir -m 755 "$attempt" "$attempt/lists" "$attempt/lists/partial"
   for suite in noble noble-updates noble-security; do
-    echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://$mirror/ubuntu $suite main"
+    echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://$mirror $suite main"
   done > "$attempt/ubuntu.list"
   options=(
     -o "Dir::Etc::sourcelist=$attempt/ubuntu.list"
@@ -63,5 +68,5 @@ for mirror in azure.archive.ubuntu.com archive.ubuntu.com; do
   fi
   echo "Could not install from $mirror after $((SECONDS - start))s" >&2
 done
-echo "Still missing after both mirrors: $(missing | tr '\n' ' ')" >&2
+echo "Still missing after every mirror: $(missing | tr '\n' ' ')" >&2
 exit 1

@@ -54,12 +54,13 @@ for mirror in azure.archive.ubuntu.com/ubuntu mirrors.edge.kernel.org/ubuntu arc
     -o 'Acquire::http::Timeout=5'
     -o 'Acquire::https::Timeout=5'
     -o 'APT::Update::Error-Mode=any'
+    -o 'Dpkg::Use-Pty=0'
   )
   # A deadline that hit dpkg mid-unpack would block every later attempt.
-  sudo dpkg --configure -a
+  sudo dpkg --configure -a || echo "dpkg --configure -a failed; trying $mirror anyway" >&2
   echo "Installing from $mirror (update and install budget: ${budget}s)"
   start=$SECONDS
-  # timeout signals its whole process group, so apt's download methods stop too.
+  # timeout signals its whole process group; without a pty dpkg stays in it too.
   if sudo env PACKAGES="$need" timeout -k 5 "$budget" bash -c '
       apt-get "$@" update &&
         DEBIAN_FRONTEND=noninteractive apt-get "$@" install -y --no-install-recommends $PACKAGES

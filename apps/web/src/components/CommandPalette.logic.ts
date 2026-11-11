@@ -964,11 +964,12 @@ export function orbitProjectInstanceCount(
   return instanceIds.size;
 }
 
+/** Projects in which threads can start come first, so many greyed rows do not bury them. */
 export function buildOrbitPaletteProjectRows(
   state: OrbitPaletteProjectsState,
 ): OrbitPaletteProjectRow[] {
   if (state.status !== "loaded") return [];
-  return state.projects.map((project) => ({
+  const rows = state.projects.map((project) => ({
     id: project.id,
     slug: project.slug,
     name: project.name,
@@ -980,6 +981,7 @@ export function buildOrbitPaletteProjectRows(
       null,
     checks: project.checks,
   }));
+  return rows.filter((row) => row.startable).concat(rows.filter((row) => !row.startable));
 }
 
 export function orbitPaletteProjectSubline(row: OrbitPaletteProjectRow): string {

@@ -1040,6 +1040,18 @@ describe("Orbit Projects in the New thread list", () => {
     expect(rows[1]!.checks).toEqual([failing]);
   });
 
+  it("lists Projects in which threads can start before the greyed ones", () => {
+    const rows = buildOrbitPaletteProjectRows(
+      loaded([
+        project(1, { cloneable: false }),
+        project(2),
+        project(3, { cloneable: false }),
+        project(4),
+      ]),
+    );
+    expect(rows.map((row) => row.id)).toEqual([2, 4, 1, 3]);
+  });
+
   it("lists nothing and collapses nothing with the switch off", () => {
     const clones = { "env-clone": { projectId: 3, instanceName: "fix" } };
     expect(buildOrbitPaletteProjectRows({ status: "off" })).toEqual([]);

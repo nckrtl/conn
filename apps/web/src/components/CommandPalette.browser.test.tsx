@@ -205,8 +205,15 @@ describe("CommandPalette open intents", () => {
       updatedAt: "2026-03-01T00:00:00.000Z",
       scripts: [],
     };
+    // A local project with the Orbit Project's name stays its own row: no deduplication.
+    const namesake: Project = {
+      ...localProject,
+      id: ProjectId.make("nckrtl-local"),
+      title: "nckrtl",
+      workspaceRoot: "/work/nckrtl",
+    };
     setup({
-      projects: [localProject],
+      projects: [localProject, namesake],
       orbit: {
         status: "loaded",
         projects: [
@@ -232,12 +239,24 @@ describe("CommandPalette open intents", () => {
     await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
 
     openCommandPalette({ open: "new-thread-in" });
-    const row = page.getByRole("option", { name: /nckrtl/ });
+    await expect.element(page.getByRole("option", { name: /nckrtl/ }).nth(1)).toBeVisible();
+    const row = page.getByRole("option", { name: /orbit · 2 instances/ });
     await expect.element(row).toBeVisible();
+    expect(page.getByRole("option", { name: /nckrtl/ }).all()).toHaveLength(2);
     expect(row.element().textContent).toContain("orbit · 2 instances");
     await expect.element(page.getByRole("option", { name: /Acme/ })).toBeVisible();
     await row.click();
     await expect.element(page.getByText(/Instance step comes in PR 2b/)).toBeVisible();
+
+    orbit.state = { status: "loading" };
+    await act(() =>
+      useCommandPaletteStore.setState(useCommandPaletteStore.getInitialState(), true),
+    );
+    openCommandPalette({ open: "new-thread-in" });
+    await expect.element(page.getByText("Loading Orbit projects…")).toBeVisible();
+    await expect
+      .element(page.getByRole("option", { name: /orbit · 2 instances/ }))
+      .not.toBeInTheDocument();
 
     orbit.state = { status: "unreachable" };
     await act(() =>
@@ -245,7 +264,9 @@ describe("CommandPalette open intents", () => {
     );
     openCommandPalette({ open: "new-thread-in" });
     await expect.element(page.getByRole("option", { name: /Acme/ })).toBeVisible();
-    await expect.element(page.getByRole("option", { name: /nckrtl/ })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("option", { name: /orbit · 2 instances/ }))
+      .not.toBeInTheDocument();
     const notice = page.getByRole("option", { name: /Orbit projects are not shown/ });
     await expect.element(notice).toBeVisible();
     expect(notice.element().textContent).toContain("Retry");

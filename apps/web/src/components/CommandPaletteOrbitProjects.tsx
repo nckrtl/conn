@@ -71,7 +71,25 @@ export function orbitPalettePageGroups(
   project: OrbitPaletteProjectRow | null,
 ): CommandPaletteGroup[] {
   const value = orbitPalettePageValue(page);
-  if (project === null) return [{ value, label: "", items: [] }];
+  if (project === null) {
+    return [
+      {
+        value,
+        label: "",
+        items: [
+          {
+            kind: "action",
+            value: `${value}:gone`,
+            searchTerms: [],
+            title: "This Orbit project is no longer listed.",
+            icon: null,
+            disabled: true,
+            run: async () => {},
+          },
+        ],
+      },
+    ];
+  }
   const Page = ORBIT_PALETTE_PAGES[page.kind];
   return [
     {

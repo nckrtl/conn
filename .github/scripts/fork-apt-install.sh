@@ -55,6 +55,8 @@ for mirror in azure.archive.ubuntu.com/ubuntu mirrors.edge.kernel.org/ubuntu arc
     -o 'Acquire::https::Timeout=5'
     -o 'APT::Update::Error-Mode=any'
   )
+  # A deadline that hit dpkg mid-unpack would block every later attempt.
+  sudo dpkg --configure -a
   echo "Installing from $mirror (update and install budget: ${budget}s)"
   start=$SECONDS
   # timeout signals its whole process group, so apt's download methods stop too.

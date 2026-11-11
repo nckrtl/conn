@@ -43,7 +43,7 @@ for mirror in azure.archive.ubuntu.com/ubuntu mirrors.edge.kernel.org/ubuntu arc
   attempt="$scratch/$host"
   mkdir -m 755 "$attempt" "$attempt/lists" "$attempt/lists/partial"
   for suite in noble noble-updates noble-security; do
-    echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://$mirror $suite main"
+    echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://$mirror $suite main universe"
   done > "$attempt/ubuntu.list"
   options=(
     -o "Dir::Etc::sourcelist=$attempt/ubuntu.list"

@@ -9,6 +9,7 @@ import {
 import {
   newOrbitThreadStart,
   orbitThreadInstanceName,
+  readOrbitThreadStarts,
   runOrbitThreadStart,
   type OrbitThreadStart,
 } from "./threadStart.ts";
@@ -174,6 +175,99 @@ describe("orbitThreadInstanceName", () => {
   });
 });
 
+describe("readOrbitThreadStarts", () => {
+  // As a build before version 2 saved it, mid-create, on a Mac or a phone.
+  const v1Row = {
+    id: "old-1",
+    projectId: 3,
+    projectSlug: "mealou",
+    nodeName: "beast",
+    instanceName: "fix-the-login-bug-k3j9",
+    message: "Fix the login bug",
+    threadId: "thread-old",
+    messageId: "message-old",
+    commandId: "command-old",
+    createdAt: 1762848000000,
+    workspaceId: null,
+    createKey: "conn-thread-start:old-1:create:1762848000000",
+    createOperationId: 100,
+    instanceId: 41,
+    environmentId: null,
+    pairingKey: null,
+    pairingOperationId: null,
+    pairingId: null,
+    pairingLinkRead: false,
+    connected: false,
+    error: null,
+  };
+
+  it("loads rows saved before version 2, and they resume where they stopped", async () => {
+    const [start] = readOrbitThreadStarts(JSON.parse(JSON.stringify([v1Row])));
+    expect(start).toEqual({
+      ...v1Row,
+      orbitInstanceKind: "new",
+      modelSelection: null,
+      runtimeMode: null,
+      interactionMode: null,
+      errorCode: null,
+      createStartedAt: null,
+      createFinishedAt: null,
+      connectStartedAt: null,
+      connectFinishedAt: null,
+      agentStartedAt: null,
+      sentAt: null,
+    });
+
+    const { client, calls } = gateway({});
+    const run = ports(client);
+    expect(await runOrbitThreadStart(start!, run.ports)).toBe(true);
+    expect(calls[0]).toBe("operation 100");
+    expect(calls.some((call) => call.startsWith("create"))).toBe(false);
+    expect(run.sent).toEqual(["env-41 thread-old Fix the login bug"]);
+  });
+
+  it("keeps version 2 fields, reads wrong-typed ones as missing, and drops rows it cannot resume", () => {
+    const v2 = {
+      ...v1Row,
+      id: "new-1",
+      orbitInstanceKind: "existing",
+      modelSelection: { instanceId: "codex", model: "gpt-5" },
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      createStartedAt: 5,
+    };
+    const odd = {
+      ...v1Row,
+      id: "odd-1",
+      orbitInstanceKind: "later",
+      modelSelection: { model: "" },
+      runtimeMode: "yolo",
+      interactionMode: 1,
+      createStartedAt: "5",
+    };
+    const { commandId: _, ...noCommand } = v1Row;
+
+    const starts = readOrbitThreadStarts([v2, odd, noCommand, null, "x"]);
+
+    expect(starts.map((start) => start.id)).toEqual(["new-1", "odd-1"]);
+    expect(starts[0]).toMatchObject({
+      orbitInstanceKind: "existing",
+      modelSelection: { instanceId: "codex", model: "gpt-5" },
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      createStartedAt: 5,
+    });
+    expect(starts[1]).toMatchObject({
+      orbitInstanceKind: "new",
+      modelSelection: null,
+      runtimeMode: null,
+      interactionMode: null,
+      createStartedAt: null,
+    });
+    expect(readOrbitThreadStarts({ starts: [] })).toEqual([]);
+  });
+});
+
 describe("runOrbitThreadStart", () => {
   it("creates the clone, pairs with its server once and sends the first message there", async () => {
     const { client, calls } = gateway({});
@@ -200,7 +294,69 @@ describe("runOrbitThreadStart", () => {
       pairingOperationId: null,
       connected: true,
       error: null,
+      errorCode: null,
+      createStartedAt: expect.any(Number),
+      createFinishedAt: expect.any(Number),
+      connectStartedAt: expect.any(Number),
+      connectFinishedAt: expect.any(Number),
+      agentStartedAt: expect.any(Number),
+      sentAt: expect.any(Number),
     });
+  });
+
+  it("starts in an existing Instance without a create, and pairs with it", async () => {
+    const { client, calls } = gateway({});
+    const run = ports(client);
+    const start = newOrbitThreadStart({
+      id: "s2",
+      project,
+      message: "Add a dark mode",
+      suffix: "unused",
+      threadId: "thread-2",
+      messageId: "message-2",
+      commandId: "command-2",
+      now: 0,
+      existing: { instanceId: 41, environmentId: "env-41", name: "dark-mode", nodeName: "shark" },
+    });
+    expect(start).toMatchObject({
+      orbitInstanceKind: "existing",
+      instanceName: "dark-mode",
+      nodeName: "shark",
+      instanceId: 41,
+      environmentId: "env-41",
+    });
+
+    expect(await runOrbitThreadStart(start, run.ports)).toBe(true);
+
+    expect(calls).toEqual(["pair env-41", "operation 200", "operation 200", "read env-41 9"]);
+    expect(run.sent).toEqual(["env-41 thread-2 Add a dark mode"]);
+    expect(run.saves.at(-1)).toMatchObject({ createStartedAt: null, createKey: null });
+  });
+
+  it("keeps a taken name's code and drops its key, so a new name is created anew", async () => {
+    const taken = new OrbitGatewayError({
+      code: "instance.name_taken",
+      message: "The name fix is taken.",
+      status: 422,
+      details: {},
+    });
+    const { client } = gateway({ createLost: [taken] });
+    const start = { ...fresh(), instanceName: "fix" };
+
+    const run = ports(client);
+    expect(await runOrbitThreadStart(start, run.ports)).toBe(false);
+    const stopped = run.saves.at(-1)!;
+    expect(stopped).toMatchObject({
+      error: "The name fix is taken.",
+      errorCode: "instance.name_taken",
+      createKey: null,
+      createOperationId: null,
+    });
+
+    const retry = gateway({});
+    const renamed = { ...stopped, instanceName: "fix-2", error: null };
+    expect(await runOrbitThreadStart(renamed, ports(retry.client).ports)).toBe(true);
+    expect(retry.calls[0]).toBe("create 3 fix-2");
   });
 
   it("resumes a saved start without a second create or pairing", async () => {

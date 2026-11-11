@@ -458,6 +458,33 @@ describe("createOrbitGatewayClient", () => {
         error_code: null,
         poll_after_seconds: 2,
       },
+      // A failed create as Operation show reports it: steps, the failed step and the error.
+      "GET /operations/100": {
+        id: 100,
+        kind: "instance.create",
+        status: "failed",
+        target_id: 41,
+        error_code: "instance.t3_unready",
+        poll_after_seconds: null,
+        current_step: null,
+        current_step_started_at: null,
+        failed_step: "clone-t3",
+        error: { code: "instance.t3_unready", message: " T3 did not answer. " },
+        result: null,
+        steps: [
+          {
+            name: "clone-container",
+            job: "clone",
+            status: "succeeded",
+            started_at: "2026-11-11T20:37:04.739Z",
+            finished_at: "2026-11-11T20:37:11.045Z",
+          },
+          { name: "clone-t3", job: "clone", status: "failed", started_at: null },
+          { name: "clone-next", status: "paused-by-orbit", job: 3 },
+          { name: 7, status: "running" },
+          "clone-odd",
+        ],
+      },
     };
     const client = createOrbitGatewayClient(async (request) => {
       requests.push(request);
@@ -521,6 +548,37 @@ describe("createOrbitGatewayClient", () => {
       body: { name: "fix-k3j9" },
       timeoutMs: 60_000,
       idempotencyKey: "key-1",
+    });
+    // An unknown step status passes through; a step without a name or status is dropped.
+    await expect(client.operation(100)).resolves.toEqual({
+      id: 100,
+      kind: "instance.create",
+      status: "failed",
+      targetId: 41,
+      errorCode: "instance.t3_unready",
+      pollAfterSeconds: null,
+      currentStep: null,
+      currentStepStartedAt: null,
+      failedStep: "clone-t3",
+      error: { code: "instance.t3_unready", message: "T3 did not answer." },
+      result: null,
+      steps: [
+        {
+          name: "clone-container",
+          job: "clone",
+          status: "succeeded",
+          startedAt: "2026-11-11T20:37:04.739Z",
+          finishedAt: "2026-11-11T20:37:11.045Z",
+        },
+        { name: "clone-t3", job: "clone", status: "failed", startedAt: null, finishedAt: null },
+        {
+          name: "clone-next",
+          job: null,
+          status: "paused-by-orbit",
+          startedAt: null,
+          finishedAt: null,
+        },
+      ],
     });
   });
 });

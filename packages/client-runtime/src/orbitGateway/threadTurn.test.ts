@@ -46,8 +46,43 @@ describe("orbitFirstTurnInput", () => {
       commandId: "command-1",
       threadId: "thread-1",
       message: { messageId: "message-1", role: "user", text: "Fix the login bug", attachments: [] },
+      runtimeMode: "full-access",
+      interactionMode: "default",
       bootstrap: {
-        createThread: { projectId: "project-1", title: "Fix the login bug", modelSelection },
+        createThread: {
+          projectId: "project-1",
+          title: "Fix the login bug",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        },
+      },
+    });
+  });
+
+  it("uses the model and modes the start carries over the clone's defaults", async () => {
+    const carried = { instanceId: ProviderInstanceId.make("claude"), model: "opus" };
+    const v2 = {
+      ...start,
+      modelSelection: carried,
+      runtimeMode: "approval-required" as const,
+      interactionMode: "plan" as const,
+    };
+    const { launches, ports: run } = ports([]);
+    // The carried model is enough even when the clone's server names none yet.
+    const noDefault = { ...run, waitForClone: async () => ({ projectId, modelSelection: null }) };
+
+    await expect(sendOrbitFirstMessage(v2, noDefault)).resolves.toBe(projectId);
+    expect(launches[0]).toMatchObject({
+      modelSelection: carried,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      bootstrap: {
+        createThread: {
+          modelSelection: carried,
+          runtimeMode: "approval-required",
+          interactionMode: "plan",
+        },
       },
     });
   });

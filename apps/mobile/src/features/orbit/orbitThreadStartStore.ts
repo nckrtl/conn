@@ -1,4 +1,8 @@
-import { orbitThreadStartStep, type OrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  orbitThreadStartStep,
+  readOrbitThreadStarts,
+  type OrbitThreadStart,
+} from "@t3tools/client-runtime/orbit-gateway";
 
 import { writeFileAtomically } from "../../lib/atomic-file";
 
@@ -26,21 +30,11 @@ export interface OrbitThreadStartStore {
   readonly flush: () => Promise<void>;
 }
 
-/** Starts the file holds. A start saved without a launch command id cannot resume safely. */
+/** Starts the file holds, saved by this build or an older one. */
 export function parseOrbitThreadStarts(text: string | null): OrbitThreadStart[] {
   if (text === null) return [];
   try {
-    const value: unknown = JSON.parse(text);
-    if (!Array.isArray(value)) return [];
-    return value.filter(
-      (entry): entry is OrbitThreadStart =>
-        typeof entry === "object" &&
-        entry !== null &&
-        typeof entry.id === "string" &&
-        typeof entry.commandId === "string" &&
-        typeof entry.threadId === "string" &&
-        typeof entry.projectId === "number",
-    );
+    return readOrbitThreadStarts(JSON.parse(text));
   } catch {
     return [];
   }

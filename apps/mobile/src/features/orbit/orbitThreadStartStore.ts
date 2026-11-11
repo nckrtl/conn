@@ -128,7 +128,7 @@ export const orbitThreadStartStore = createOrbitThreadStartStore({
 
 export function retryOrbitThreadStart(id: string, store = orbitThreadStartStore): void {
   store.update((starts) =>
-    starts.map((start) => (start.id === id ? { ...start, error: null } : start)),
+    starts.map((start) => (start.id === id ? { ...start, error: null, errorCode: null } : start)),
   );
 }
 

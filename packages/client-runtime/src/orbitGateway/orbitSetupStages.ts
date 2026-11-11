@@ -3,8 +3,7 @@ import type { OrbitThreadStart } from "./threadStart.ts";
 
 /**
  * Conn: the setup stages of a thread started in an Orbit Project, for the setup card shown before
- * the clone's server exists. Later builds add "start-instance" (a stopped Instance, before
- * "connect") and "checkout" and "setup" (after "create").
+ * the clone's server exists.
  */
 export type OrbitSetupStageId = "create" | "connect" | "agent";
 export type OrbitSetupStageStatus = "pending" | "running" | "done" | "failed";
@@ -117,7 +116,13 @@ export function orbitSetupStages(input: {
   stages.push(
     stage(
       "connect",
-      start.connected ? "done" : start.environmentId !== null ? "running" : "pending",
+      start.connected
+        ? "done"
+        : // An existing Instance's start has its server from the outset; it runs once stamped.
+          start.environmentId !== null &&
+            (start.connectStartedAt != null || start.orbitInstanceKind !== "existing")
+          ? "running"
+          : "pending",
       start.connectStartedAt,
       start.connectFinishedAt,
     ),

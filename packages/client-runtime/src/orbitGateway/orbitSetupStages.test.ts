@@ -249,7 +249,11 @@ describe("orbitSetupStages", () => {
       now: 0,
       existing: { instanceId: 41, environmentId: "env-41", name: "dark-mode", nodeName: "beast" },
     });
-    expect(summary(existing)).toEqual(["connect:running", "agent:pending"]);
+    expect(summary(existing)).toEqual(["connect:pending", "agent:pending"]);
+    expect(summary({ ...existing, connectStartedAt: 5 })).toEqual([
+      "connect:running",
+      "agent:pending",
+    ]);
     expect(summary({ ...existing, connected: true })).toEqual(["connect:done", "agent:running"]);
     expect(
       summary({ ...existing, error: "Pairing expired.", errorCode: "operation.timeout" }),

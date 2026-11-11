@@ -60,7 +60,7 @@ export function stillOnStartRoute(id: string, pathname: string): boolean {
 
 export function retryOrbitThreadStart(id: string): void {
   updateStarts((starts) =>
-    starts.map((start) => (start.id === id ? { ...start, error: null } : start)),
+    starts.map((start) => (start.id === id ? { ...start, error: null, errorCode: null } : start)),
   );
 }
 
@@ -167,7 +167,7 @@ export async function runSavedOrbitThreadStart(
       timeoutMs: CLONE_READY_TIMEOUT_MS,
     });
     if (!catalogReady) {
-      saveStart({ ...start, error: "Conn's saved environments did not load." });
+      saveStart({ ...start, error: "Conn's saved environments did not load.", errorCode: null });
       return null;
     }
     let environmentId: string | null = null;

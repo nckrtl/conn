@@ -46,7 +46,8 @@ type CommandPaletteContentProps = Omit<ComponentProps<typeof Command>, "children
   readonly inputAccessory?: ReactNode;
   readonly inputProps: ComponentProps<typeof CommandInput>;
   readonly pendingSelectionRef?: RefObject<PendingInputSelection | null>;
-  readonly panelSize?: "list" | "tall-list" | "fill";
+  /** `fixed-list` keeps the list's full height, so a palette page does not jump as rows change. */
+  readonly panelSize?: "list" | "tall-list" | "fill" | "fixed-list";
   readonly showBackHint?: boolean;
   readonly testId?: string;
 };
@@ -85,7 +86,9 @@ export function CommandPaletteContent({
               ? "flex min-h-0 flex-1 flex-col"
               : panelSize === "tall-list"
                 ? "max-h-[min(34rem,76vh)]"
-                : "flex max-h-[min(28rem,70vh)] min-h-0 flex-col"
+                : panelSize === "fixed-list"
+                  ? "flex h-[min(28rem,70vh)] min-h-0 flex-col"
+                  : "flex max-h-[min(28rem,70vh)] min-h-0 flex-col"
           }
         >
           {children}

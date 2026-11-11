@@ -53,7 +53,7 @@ import {
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
-import { useLocation, useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BugIcon,
@@ -272,10 +272,32 @@ import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { threadRecentUse } from "@t3tools/shared/paletteSearch";
 import { useActiveWorkspaceProjectRefs, useWorkspaceStore } from "../workspaceStore";
 import { useEnvironmentProvider } from "../orbit/environmentProvider";
-import { retryOrbitPaletteProjects, useOrbitPaletteProjects } from "../orbit/orbitPaletteProjects";
+import {
+  retryOrbitPaletteProjects,
+  useOrbitPairedEnvironmentIds,
+  useOrbitPaletteProjects,
+} from "../orbit/orbitPaletteProjects";
+import { openOrbitDraft } from "../orbit/openOrbitDraft";
+import { registerOrbitInstanceStepOpener } from "../orbit/orbitInstanceStep";
+import {
+  buildOrbitInstanceRows,
+  filterOrbitInstanceRows,
+  orbitCloneProject,
+  orbitInstancePick,
+  type OrbitInstanceRow,
+} from "../orbit/orbitInstanceStepLogic";
+import {
+  OrbitNewInstanceSection,
+  orbitExistingInstanceGroups,
+  orbitInstanceListStatus,
+  orbitStepProjectFromTarget,
+  useOrbitInstanceStep,
+  type OrbitStepProject,
+} from "./CommandPaletteOrbitInstanceStep";
 import {
   buildOrbitProjectItems,
   orbitPalettePageGroups,
+  orbitPalettePageView,
   orbitProjectsStateGroups,
   parseOrbitPalettePage,
 } from "./CommandPaletteOrbitProjects";
@@ -302,6 +324,8 @@ function openIntentView(intent: CommandPaletteOpenIntent | null): CommandPalette
         addonIcon: <PaletteIcon className={ADDON_ICON_CLASS} />,
         groups: [{ value: "themes", label: "Change theme", items: [] }],
       };
+    case "orbit-instances":
+      return orbitPalettePageView({ kind: "instances", projectId: intent.target.projectId });
     case "search":
     case undefined:
       return null;
@@ -317,6 +341,14 @@ export function CommandPalette({ children }: { children: ReactNode }) {
   const openChildSearch = (mode: "files" | "content", context: CommandPaletteReturnContext) =>
     dispatchCommandPalette({ _tag: "OpenChildSearch", mode, context });
   const composerHandleRef = useRef<ChatComposerHandle | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the composer chip's way into the Instance step while the palette is mounted
+  useEffect(
+    () =>
+      registerOrbitInstanceStepOpener((target) =>
+        dispatchCommandPalette({ _tag: "OpenOrbitInstances", target }),
+      ),
+    [],
+  );
 
   return (
     <ComposerHandleContext value={composerHandleRef}>
@@ -526,8 +558,9 @@ function OpenCommandPaletteDialog(props: {
   const { changeThemeItem, changeAppearanceItem, themeEditorItem } = useCommandPaletteThemeItems();
   const currentView = viewStack.at(-1)?.view ?? null;
   // Conn: Orbit Projects join the New thread list behind a Labs switch (`off` changes nothing).
+  const orbitPalettePage = parseOrbitPalettePage(currentView?.groups[0]?.value);
   const orbitProjectsState = useOrbitPaletteProjects(
-    currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP,
+    currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP || orbitPalettePage !== null,
   );
   const orbitClones = useEnvironmentProvider((store) => store.orbitInstances);
   const collapsedCloneEnvironmentIds = collapsedOrbitCloneEnvironmentIds(
@@ -535,7 +568,63 @@ function OpenCommandPaletteDialog(props: {
     orbitClones,
   );
   const orbitProjectRows = buildOrbitPaletteProjectRows(orbitProjectsState);
-  const orbitPalettePage = parseOrbitPalettePage(currentView?.groups[0]?.value);
+  const intentTarget =
+    props.openIntent?.kind === "orbit-instances" ? props.openIntent.target : null;
+  // The Project of the step as it opened, so a reload of the list does not drop the step.
+  const [orbitStepSnapshot, setOrbitStepSnapshot] = useState<OrbitStepProject | null>(() =>
+    intentTarget === null ? null : orbitStepProjectFromTarget(intentTarget),
+  );
+  const orbitStepRow =
+    orbitPalettePage?.kind === "instances"
+      ? orbitProjectRows.find((row) => row.id === orbitPalettePage.projectId)
+      : undefined;
+  const orbitStepProject: OrbitStepProject | null =
+    orbitPalettePage?.kind !== "instances"
+      ? null
+      : orbitStepRow !== undefined
+        ? {
+            id: orbitStepRow.id,
+            slug: orbitStepRow.slug,
+            name: orbitStepRow.name,
+            nodeName: orbitStepRow.nodeName,
+            domainSuffix: orbitStepRow.domainSuffix,
+          }
+        : orbitStepSnapshot?.id === orbitPalettePage.projectId
+          ? orbitStepSnapshot
+          : null;
+  const pairedEnvironmentIds = useOrbitPairedEnvironmentIds();
+  const orbitInstanceListState = orbitInstanceListStatus(orbitProjectsState);
+  const orbitInstanceRows =
+    orbitStepProject !== null && orbitProjectsState.status === "loaded"
+      ? buildOrbitInstanceRows({
+          projectId: orbitStepProject.id,
+          environments: orbitProjectsState.environments,
+          threads,
+          pairedEnvironmentIds,
+        })
+      : [];
+  const orbitInstanceMatchCount =
+    orbitInstanceListState === "loading"
+      ? // While the list loads a search cannot tell a match, so it fills in no name.
+        1
+      : filterOrbitInstanceRows(orbitInstanceRows, query).length;
+  // Enter picks a row when one can be picked; otherwise it creates with the name field.
+  const orbitPickableRowCount =
+    orbitInstanceListState === "loaded"
+      ? filterOrbitInstanceRows(orbitInstanceRows, query).filter(
+          (row) => row.disabledReason === null,
+        ).length
+      : 0;
+  const orbitStep = useOrbitInstanceStep({
+    project: orbitStepProject,
+    query,
+    matchCount: orbitInstanceMatchCount,
+    initialTyped:
+      intentTarget?.instanceKind === "new"
+        ? { projectId: intentTarget.projectId, value: intentTarget.instanceName }
+        : null,
+  });
+  const router = useRouter();
   const threadSearchQuery = currentView === null && !isActionsOnly ? deferredQuery : "";
   const [browseGeneration, setBrowseGeneration] = useState(0);
   const [browseNavigation] = useState(createBrowseNavigationCoordinator);
@@ -893,7 +982,16 @@ function OpenCommandPaletteDialog(props: {
       });
       const orbitItems = buildOrbitProjectItems({
         rows: orbitProjectRows,
-        openPage: (view) => pushPaletteView(view),
+        openPage: (view, row) => {
+          setOrbitStepSnapshot({
+            id: row.id,
+            slug: row.slug,
+            name: row.name,
+            nodeName: row.nodeName,
+            domainSuffix: row.domainSuffix,
+          });
+          pushPaletteView(view);
+        },
       });
       if (scratchTargetEnvironmentId === null) return [...projectItems, ...orbitItems];
 
@@ -1792,6 +1890,57 @@ function OpenCommandPaletteDialog(props: {
       });
     },
   }));
+  const createOrbitInstance = () => {
+    if (orbitStepProject === null) return;
+    if (!orbitStep.hint.canCreate) {
+      if (orbitStep.hint.plusEnabled) orbitStep.markSubmitted();
+      return;
+    }
+    setOpen(false);
+    void openOrbitDraft(router, {
+      projectId: orbitStepProject.id,
+      projectSlug: orbitStepProject.slug,
+      projectName: orbitStepProject.name,
+      nodeName: orbitStepProject.nodeName ?? "",
+      instanceKind: "new",
+      instanceName: orbitStep.field.value,
+      existing: null,
+      domainSuffix: orbitStepProject.domainSuffix,
+    });
+  };
+  const pickOrbitInstance = async (row: OrbitInstanceRow) => {
+    if (orbitStepProject === null) return;
+    const pick = orbitInstancePick(row);
+    if (pick.kind === "paired") {
+      const cloneProject = orbitCloneProject(projects, pick.environmentId);
+      if (cloneProject === null) {
+        throw new Error(`The project of ${row.name} has not loaded on this device yet.`);
+      }
+      await handleNewThread(scopeProjectRef(cloneProject.environmentId, cloneProject.id));
+    } else if (pick.kind === "unpaired") {
+      await openOrbitDraft(router, {
+        projectId: orbitStepProject.id,
+        projectSlug: orbitStepProject.slug,
+        projectName: orbitStepProject.name,
+        nodeName: row.nodeName ?? orbitStepProject.nodeName ?? "",
+        instanceKind: "existing",
+        instanceName: pick.name,
+        existing: { instanceId: pick.instanceId, environmentId: pick.environmentId },
+        domainSuffix: orbitStepProject.domainSuffix,
+      });
+    }
+  };
+  const orbitStepGroups =
+    orbitStepProject === null
+      ? null
+      : orbitExistingInstanceGroups({
+          status: orbitInstanceListState,
+          project: orbitStepProject,
+          rows: orbitInstanceRows,
+          query,
+          retry: retryOrbitPaletteProjects,
+          pick: pickOrbitInstance,
+        });
   const sourceSelectionViewValue =
     addProjectEnvironmentId === null ? null : `sources:${addProjectEnvironmentId}`;
   const activeGroups =
@@ -1817,16 +1966,18 @@ function OpenCommandPaletteDialog(props: {
                 retry: retryOrbitPaletteProjects,
               }),
             ]
-          : orbitPalettePage !== null
-            ? orbitPalettePageGroups(
-                orbitPalettePage,
-                orbitProjectRows.find((row) => row.id === orbitPalettePage.projectId) ?? null,
-              )
-            : currentView?.groups[0]?.value === "themes"
-              ? changeThemeItem.groups
-              : currentView?.groups[0]?.value === "appearance"
-                ? changeAppearanceItem.groups
-                : (currentView?.groups ?? rootGroups);
+          : orbitStepGroups !== null
+            ? orbitStepGroups
+            : orbitPalettePage !== null
+              ? orbitPalettePageGroups(
+                  orbitPalettePage,
+                  orbitProjectRows.find((row) => row.id === orbitPalettePage.projectId) ?? null,
+                )
+              : currentView?.groups[0]?.value === "themes"
+                ? changeThemeItem.groups
+                : currentView?.groups[0]?.value === "appearance"
+                  ? changeAppearanceItem.groups
+                  : (currentView?.groups ?? rootGroups);
 
   const isLinkedThreadSearch =
     linkedThreadSearch?.linkedThreads !== undefined && deferredQuery === linkedThreadSearch.query;
@@ -2457,6 +2608,9 @@ function OpenCommandPaletteDialog(props: {
       ...newProjectOptionGroups,
       ...(newProjectExistingGroup ? [newProjectExistingGroup] : []),
     ];
+  } else if (orbitStepGroups !== null) {
+    // Filtered by the step itself: its state rows ("Nothing found.") must survive a search.
+    displayedGroups = orbitStepGroups;
   } else if (addProjectCloneFlow?.step === "repository") {
     displayedGroups = [];
   } else if (addProjectCloneFlow?.step === "confirm") {
@@ -2471,8 +2625,10 @@ function OpenCommandPaletteDialog(props: {
   const inputPlaceholder =
     newProjectFlow !== null
       ? "Project name"
-      : (remoteProjectInputPlaceholder(addProjectCloneFlow) ??
-        getCommandPaletteInputPlaceholder(paletteMode));
+      : orbitStepProject !== null
+        ? "Search instances…"
+        : (remoteProjectInputPlaceholder(addProjectCloneFlow) ??
+          getCommandPaletteInputPlaceholder(paletteMode));
   const isSubmenu = paletteMode === "submenu" || paletteMode === "submenu-browse";
   const hasHighlightedBrowseItem = highlightedItemValue?.startsWith("browse:") ?? false;
   const canWriteSourceControl = useEnvironmentScope(
@@ -2620,6 +2776,19 @@ function OpenCommandPaletteDialog(props: {
           title: "Thread search is unavailable on this server.",
           description: "Update the server to enable it.",
         });
+      return;
+    }
+
+    if (
+      orbitStepProject !== null &&
+      event.key === "Enter" &&
+      orbitPickableRowCount === 0 &&
+      !event.nativeEvent.isComposing
+    ) {
+      // No Instance row to pick: Enter creates the Instance with the name below the search.
+      (event as typeof event & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+      event.preventDefault();
+      createOrbitInstance();
       return;
     }
 
@@ -2901,17 +3070,21 @@ function OpenCommandPaletteDialog(props: {
     ) : null;
 
   const footerActionLabel =
-    newProjectFlow !== null
-      ? highlightedItemValue === null
+    orbitStepProject !== null
+      ? orbitPickableRowCount === 0
         ? "Create"
-        : highlightedItemValue === newProjectPublishToggleValue
-          ? "Toggle"
-          : "Select"
-      : addProjectCloneFlow?.step === "repository"
-        ? (remoteProjectButtonLabel ?? "Continue")
-        : !canSubmitBrowsePath || hasHighlightedBrowseItem
-          ? "Select"
-          : undefined;
+        : "Select"
+      : newProjectFlow !== null
+        ? highlightedItemValue === null
+          ? "Create"
+          : highlightedItemValue === newProjectPublishToggleValue
+            ? "Toggle"
+            : "Select"
+        : addProjectCloneFlow?.step === "repository"
+          ? (remoteProjectButtonLabel ?? "Continue")
+          : !canSubmitBrowsePath || hasHighlightedBrowseItem
+            ? "Select"
+            : undefined;
 
   const footerTrailing = canOpenProjectFromFileManager ? (
     <CommandFooterAction
@@ -2987,7 +3160,15 @@ function OpenCommandPaletteDialog(props: {
       pendingSelectionRef={remountSelectionRef}
       showBackHint={isSubmenu}
       value={query}
+      {...(orbitPalettePage !== null ? { panelSize: "fixed-list" as const } : {})}
     >
+      {orbitStepProject !== null ? (
+        <OrbitNewInstanceSection
+          project={orbitStepProject}
+          step={orbitStep}
+          onCreate={createOrbitInstance}
+        />
+      ) : null}
       {newProjectPathPreview !== null ? (
         <NewProjectSummary
           name={newProjectName}

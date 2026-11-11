@@ -7,8 +7,10 @@ import { openCommandPalette } from "../commandPaletteBus";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { makeThreadFixture } from "../test-fixtures";
 import type { Project, Thread } from "../types";
+import { openOrbitInstanceStep } from "../orbit/orbitInstanceStep";
 import { CommandPalette } from "./CommandPalette";
 import type { OrbitPaletteProjectsState } from "./CommandPalette.logic";
+import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gateway";
 
 const entities = vi.hoisted(() => ({
   projects: [] as ReadonlyArray<Project>,
@@ -23,11 +25,43 @@ vi.mock("../state/entities", async (original) => ({
 const orbit = vi.hoisted(() => ({
   state: { status: "off" } as OrbitPaletteProjectsState,
   retry: vi.fn(),
+  checkInstanceName: vi.fn(),
+  openOrbitDraft: vi.fn(),
 }));
 vi.mock("../orbit/orbitPaletteProjects", () => ({
   useOrbitPaletteProjects: () => orbit.state,
+  useOrbitPairedEnvironmentIds: () => new Set<string>(),
   retryOrbitPaletteProjects: () => orbit.retry(),
+  checkOrbitInstanceName: (projectId: number, name: string) =>
+    orbit.checkInstanceName(projectId, name),
 }));
+vi.mock("../orbit/openOrbitDraft", () => ({
+  openOrbitDraft: (...args: unknown[]) => orbit.openOrbitDraft(...args),
+}));
+
+function orbitEnvironment(
+  instanceId: number,
+  projectId: number,
+  instanceName: string,
+): OrbitGatewayEnvironment {
+  return {
+    environmentId: `env-${instanceId}`,
+    label: instanceName,
+    url: `https://${instanceName}.example.test`,
+    serverVersion: null,
+    registeredBy: null,
+    registeredAt: null,
+    status: "registered",
+    instanceId,
+    powerState: "running",
+    projectId,
+    projectName: "nckrtl",
+    projectSlug: "nckrtl",
+    instanceName,
+    nodeName: "beast",
+    instanceUrl: `https://${instanceName}.nckrtl.test`,
+  };
+}
 
 function setup(
   state: {
@@ -41,6 +75,8 @@ function setup(
   entities.threads = state.threads ?? [];
   orbit.state = state.orbit ?? { status: "off" };
   orbit.retry.mockReset();
+  orbit.checkInstanceName.mockReset();
+  orbit.openOrbitDraft.mockReset();
 }
 
 describe("CommandPalette open intents", () => {
@@ -230,9 +266,9 @@ describe("CommandPalette open intents", () => {
           },
         ],
         environments: [
-          { instanceId: 41, projectId: 3, instanceName: "fix" },
-          { instanceId: 42, projectId: 3, instanceName: "login" },
-          { instanceId: 9, projectId: 3, instanceName: "default" },
+          orbitEnvironment(41, 3, "fix"),
+          orbitEnvironment(42, 3, "login"),
+          orbitEnvironment(9, 3, "default"),
         ],
       },
     });
@@ -246,7 +282,7 @@ describe("CommandPalette open intents", () => {
     expect(row.element().textContent).toContain("orbit · 2 instances");
     await expect.element(page.getByRole("option", { name: /Acme/ })).toBeVisible();
     await row.click();
-    await expect.element(page.getByText(/Instance step comes in PR 2b/)).toBeVisible();
+    await expect.element(page.getByRole("textbox", { name: "Instance name" })).toBeVisible();
 
     orbit.state = { status: "loading" };
     await act(() =>
@@ -272,5 +308,92 @@ describe("CommandPalette open intents", () => {
     expect(notice.element().textContent).toContain("Retry");
     await notice.click();
     expect(orbit.retry).toHaveBeenCalledOnce();
+  });
+
+  it("checks a typed name, fills the name from a search without a match, and creates on Enter", async () => {
+    setup({
+      orbit: {
+        status: "loaded",
+        projects: [
+          {
+            id: 3,
+            slug: "nckrtl",
+            name: "nckrtl",
+            nodeId: 7,
+            nodeName: "beast",
+            instanceDomainSuffix: ".nckrtl.test",
+            cloneable: true,
+            cloneableReason: null,
+            checks: null,
+          },
+        ],
+        environments: [orbitEnvironment(41, 3, "fix"), orbitEnvironment(42, 3, "login")],
+      },
+    });
+    orbit.checkInstanceName.mockImplementation(async (_projectId: number, name: string) =>
+      name === "fix"
+        ? { name, available: false, reason: "taken", domain: null }
+        : { name, available: true, reason: null, domain: `${name}.nckrtl.test` },
+    );
+    await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
+
+    openCommandPalette({ open: "new-thread-in" });
+    await page.getByRole("option", { name: /orbit · 2 instances/ }).click();
+    const nameField = page.getByRole("textbox", { name: "Instance name" });
+    await expect.element(nameField).toBeVisible();
+    await expect.element(page.getByRole("option", { name: /fix/ })).toBeVisible();
+    await expect.element(page.getByText("Becomes the branch and the domain.")).toBeVisible();
+
+    await userEvent.type(nameField, "fix");
+    await expect.element(page.getByText("fix is taken in nckrtl.")).toBeVisible();
+    await userEvent.clear(nameField);
+    await userEvent.type(nameField, "pricing");
+    await expect.element(page.getByText("pricing.nckrtl.test is available.")).toBeVisible();
+    await userEvent.clear(nameField);
+
+    const search = page.getByPlaceholder("Search instances…");
+    await userEvent.type(search, "New Page");
+    await expect.element(page.getByText("Nothing found.")).toBeVisible();
+    await expect.element(nameField).toHaveValue("new-page");
+    await expect.element(page.getByText("new-page.nckrtl.test is available.")).toBeVisible();
+    await userEvent.keyboard("{Enter}");
+    await vi.waitFor(() => expect(orbit.openOrbitDraft).toHaveBeenCalledOnce());
+    expect(orbit.openOrbitDraft.mock.calls[0]![1]).toMatchObject({
+      projectId: 3,
+      instanceKind: "new",
+      instanceName: "new-page",
+      existing: null,
+      domainSuffix: ".nckrtl.test",
+    });
+  });
+
+  it("reopens the Instance step from the composer's chip with the draft's name filled in", async () => {
+    setup({ orbit: { status: "loading" } });
+    orbit.checkInstanceName.mockResolvedValue({
+      name: "pricing",
+      available: true,
+      reason: null,
+      domain: null,
+    });
+    await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
+
+    await act(() =>
+      openOrbitInstanceStep({
+        projectId: 3,
+        projectSlug: "nckrtl",
+        projectName: "nckrtl",
+        nodeName: "beast",
+        instanceKind: "new",
+        instanceName: "pricing",
+        existing: null,
+        domainSuffix: ".nckrtl.test",
+      }),
+    );
+    const nameField = page.getByRole("textbox", { name: "Instance name" });
+    await expect.element(nameField).toHaveValue("pricing");
+    await expect.element(page.getByText(".nckrtl.test")).toBeVisible();
+    await expect.element(page.getByText("pricing is available.")).toBeVisible();
+    // The list is still loading: skeleton rows under the label, the name field already works.
+    await expect.element(page.getByText("Existing instances")).toBeVisible();
   });
 });

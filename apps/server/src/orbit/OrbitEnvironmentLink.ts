@@ -3,6 +3,7 @@ import {
   createOrbitGatewayClient,
   DEFAULT_ORBIT_GATEWAY_URL,
   OrbitGatewayError,
+  orbitGatewayPathWithQuery,
   type OrbitGatewayClientOptions,
   type OrbitGatewayTransport,
 } from "@t3tools/client-runtime/orbit-gateway/client";
@@ -147,7 +148,7 @@ export const orbitGatewayTransport =
       request({
         gatewayUrl,
         method: input.method,
-        path: `/api/v1/conn${input.path}`,
+        path: `/api/v1/conn${orbitGatewayPathWithQuery(input)}`,
         ...(input.body === undefined ? {} : { body: input.body }),
         // curl's own limit already covers the client's admission `timeoutMs`.
         ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),

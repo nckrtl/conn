@@ -1268,6 +1268,8 @@ export interface DesktopOrbitGatewayRequest {
   readonly path: string;
   /** A JSON body, or null. */
   readonly body: string | null;
+  /** Query parameters; the main process allows only a few exact ones. */
+  readonly query?: Readonly<Record<string, string>>;
   /** Overrides the default 15 s limit, up to 120 s. */
   readonly timeoutMs?: number;
   readonly idempotencyKey?: string;

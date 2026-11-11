@@ -17,6 +17,8 @@ const OrbitGatewayRequest = Schema.Struct({
   method: Schema.Literals(["GET", "POST", "PUT", "PATCH"]),
   path: Schema.String.check(Schema.isPattern(/^\/[A-Za-z0-9/_.%-]{0,512}$/)),
   body: Schema.NullOr(Schema.String.check(Schema.isMaxLength(2_000_000))),
+  /** Checked against `CONN_QUERIES`; a path without an entry takes no query. */
+  query: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   /** A longer limit for a call the Gateway answers slowly, such as a clone's create. */
   timeoutMs: Schema.optional(
     Schema.Int.check(Schema.isGreaterThanOrEqualTo(1_000), Schema.isLessThanOrEqualTo(120_000)),
@@ -65,6 +67,43 @@ export function resolveConnUrl(path: string): URL | null {
   return inside && url.origin === new URL(DEFAULT_ORBIT_GATEWAY_URL).origin ? url : null;
 }
 
+/** Orbit's Instance name rule allows at most 63 characters; anything longer is no name to check. */
+const isNameCheckValue = (value: string) => /^[a-z0-9-]{1,63}$/.test(value);
+
+/**
+ * The queries the renderer may send, each kept exact: the method and path, and every key with
+ * its value rule. Any other key, or a query on another path, is refused.
+ */
+const CONN_QUERIES: ReadonlyArray<{
+  readonly method: "GET";
+  readonly pattern: RegExp;
+  readonly query: Readonly<Record<string, (value: string) => boolean>>;
+}> = [
+  // The palette's Project list, with the Projects in which threads cannot start yet.
+  { method: "GET", pattern: /^\/projects$/, query: { include_unavailable: (v) => v === "1" } },
+  // The Instance step's live name check.
+  {
+    method: "GET",
+    pattern: /^\/projects\/[1-9][0-9]{0,15}\/instances\/check$/,
+    query: { name: isNameCheckValue },
+  },
+];
+
+/** Whether the request's query may go to the Gateway; no query always may. */
+export function isAllowedConnQuery(
+  request: Pick<typeof OrbitGatewayRequest.Type, "method" | "path" | "query">,
+): boolean {
+  const keys = Object.keys(request.query ?? {});
+  if (keys.length === 0) return true;
+  const spec = CONN_QUERIES.find(
+    (entry) => entry.method === request.method && entry.pattern.test(request.path),
+  );
+  if (spec === undefined) return false;
+  const wanted = Object.keys(spec.query);
+  if (keys.length !== wanted.length || !keys.every((key) => wanted.includes(key))) return false;
+  return wanted.every((key) => spec.query[key]!(request.query![key]!));
+}
+
 async function send(
   request: typeof OrbitGatewayRequest.Type,
 ): Promise<typeof OrbitGatewayResponse.Type> {
@@ -72,6 +111,10 @@ async function send(
   if (url === null) {
     return { error: "That Gateway path is not allowed.", status: 0, body: "" };
   }
+  if (!isAllowedConnQuery(request)) {
+    return { error: "That Gateway query is not allowed.", status: 0, body: "" };
+  }
+  for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value);
   try {
     const response = await Electron.net.fetch(url.toString(), {
       method: request.method,

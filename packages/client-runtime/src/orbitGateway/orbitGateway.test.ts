@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   createOrbitGatewayClient,
+  orbitGatewayPathWithQuery,
   isFinalPairingError,
   OrbitGatewayError,
   startableOrbitProject,
@@ -279,6 +280,91 @@ describe("createOrbitGatewayClient", () => {
     expect(error).toBeInstanceOf(OrbitGatewayError);
     expect(error).toBeInstanceOf(Error);
     expect(error).toMatchObject({ code: "gateway.unreachable", status: 0 });
+  });
+
+  it("asks for the Projects that cannot start threads only when told to", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    const client = createOrbitGatewayClient(async (request) => {
+      requests.push(request);
+      return { status: 200, body: JSON.stringify({ data: [] }) };
+    });
+    await client.projects();
+    await client.projects({ includeUnavailable: false });
+    await client.projects({ includeUnavailable: true });
+    expect(requests.map((request) => request.query)).toEqual([
+      undefined,
+      undefined,
+      { include_unavailable: "1" },
+    ]);
+    expect(orbitGatewayPathWithQuery(requests[2]!)).toBe("/projects?include_unavailable=1");
+    expect(orbitGatewayPathWithQuery(requests[0]!)).toBe("/projects");
+  });
+
+  describe("checkInstanceName", () => {
+    const check = async (status: number, body: unknown) => {
+      const requests: OrbitGatewayRequest[] = [];
+      const client = createOrbitGatewayClient(async (request) => {
+        requests.push(request);
+        return respond(status, body)();
+      });
+      const result = client.checkInstanceName(66, "pricing");
+      return { result, requests };
+    };
+
+    it("sends the name as the only query and reads each reason", async () => {
+      const { result, requests } = await check(200, {
+        data: { name: "pricing", available: true, reason: null, domain: "pricing.bench.test" },
+      });
+      await expect(result).resolves.toEqual({
+        name: "pricing",
+        available: true,
+        reason: null,
+        domain: "pricing.bench.test",
+      });
+      expect(requests[0]).toMatchObject({
+        method: "GET",
+        path: "/projects/66/instances/check",
+        query: { name: "pricing" },
+      });
+      for (const reason of ["taken", "invalid", "default"] as const) {
+        const answer = await (
+          await check(200, { data: { name: "pricing", available: false, reason, domain: null } })
+        ).result;
+        expect(answer).toEqual({ name: "pricing", available: false, reason, domain: null });
+      }
+    });
+
+    it("tolerates a missing name, an unknown reason and a missing domain", async () => {
+      await expect(
+        (await check(200, { data: { available: false, reason: "reserved" } })).result,
+      ).resolves.toEqual({ name: "pricing", available: false, reason: null, domain: null });
+      await expect(
+        (await check(200, { data: { available: true, reason: "taken", domain: " " } })).result,
+      ).resolves.toEqual({ name: "pricing", available: true, reason: null, domain: null });
+    });
+
+    it("fails on an answer without available, on 409 default_missing and when unreachable", async () => {
+      await expect((await check(200, { data: { name: "pricing" } })).result).rejects.toMatchObject({
+        code: "gateway.response_invalid",
+      });
+      await expect(
+        (
+          await check(409, {
+            error: { code: "instance.default_missing", message: "No ready default Instance." },
+          })
+        ).result,
+      ).rejects.toMatchObject({
+        code: "instance.default_missing",
+        message: "No ready default Instance.",
+        status: 409,
+      });
+      const client = createOrbitGatewayClient(async () => {
+        throw new Error("timed out");
+      });
+      await expect(client.checkInstanceName(66, "pricing")).rejects.toMatchObject({
+        code: "gateway.unreachable",
+      });
+    });
   });
 
   describe("pair", () => {

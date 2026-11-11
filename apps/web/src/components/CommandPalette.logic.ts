@@ -38,6 +38,7 @@ import {
   type OrbitGatewayProjectListing,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { type ReactNode } from "react";
+import type { OrbitDraftTarget } from "../orbit/orbitDraft";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
 import { isSidebarHiddenThread } from "./Sidebar.logic";
@@ -82,6 +83,8 @@ export type SearchOverlayMode = "command" | "files" | "content";
 
 export type CommandPaletteOpenIntent =
   | { readonly kind: "add-project" | "new-thread-in" | "change-theme" }
+  /** Conn: the Instance step of an Orbit draft's Project, from the composer's Instance chip. */
+  | { readonly kind: "orbit-instances"; readonly target: OrbitDraftTarget }
   | {
       readonly kind: "search";
       readonly query: string;
@@ -110,6 +113,7 @@ export type CommandPaletteUiAction =
   | { readonly _tag: "OpenAddProject" }
   | { readonly _tag: "OpenNewThreadIn" }
   | { readonly _tag: "OpenChangeTheme" }
+  | { readonly _tag: "OpenOrbitInstances"; readonly target: OrbitDraftTarget }
   | {
       readonly _tag: "OpenChildSearch";
       readonly mode: "files" | "content";
@@ -167,6 +171,8 @@ export function reduceCommandPaletteUiState(
       return openWithIntent({ kind: "new-thread-in" });
     case "OpenChangeTheme":
       return openWithIntent({ kind: "change-theme" });
+    case "OpenOrbitInstances":
+      return openWithIntent({ kind: "orbit-instances", target: action.target });
   }
 }
 
@@ -929,9 +935,8 @@ export type OrbitPaletteProjectsState =
   | {
       readonly status: "loaded";
       readonly projects: ReadonlyArray<OrbitGatewayProjectListing>;
-      readonly environments: ReadonlyArray<
-        Pick<OrbitGatewayEnvironment, "instanceId" | "projectId" | "instanceName">
-      >;
+      /** The Gateway's environment list: the Instance step's rows and the counts. */
+      readonly environments: ReadonlyArray<OrbitGatewayEnvironment>;
     };
 
 export interface OrbitPaletteProjectRow {
@@ -939,6 +944,9 @@ export interface OrbitPaletteProjectRow {
   readonly slug: string;
   readonly name: string;
   readonly instanceCount: number;
+  readonly nodeName: string | null;
+  /** Such as `.nckrtl.test`; null when Orbit sent none. */
+  readonly domainSuffix: string | null;
   /** False for a Project in which threads cannot start yet; its row stays selectable. */
   readonly startable: boolean;
   /** Why threads cannot start, when Orbit said; null otherwise. */
@@ -953,7 +961,9 @@ const ORBIT_DEFAULT_INSTANCE_NAME = "default";
 /** The Project's Instances in the Gateway's environment list, the default never counted. */
 export function orbitProjectInstanceCount(
   projectId: number,
-  environments: Extract<OrbitPaletteProjectsState, { status: "loaded" }>["environments"],
+  environments: ReadonlyArray<
+    Pick<OrbitGatewayEnvironment, "instanceId" | "projectId" | "instanceName">
+  >,
 ): number {
   const instanceIds = new Set<number>();
   for (const environment of environments) {
@@ -974,6 +984,8 @@ export function buildOrbitPaletteProjectRows(
     slug: project.slug,
     name: project.name,
     instanceCount: orbitProjectInstanceCount(project.id, state.environments),
+    nodeName: project.nodeName,
+    domainSuffix: project.instanceDomainSuffix,
     startable: startableOrbitProject(project) !== null,
     reason:
       project.cloneableReason ??

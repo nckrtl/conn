@@ -237,6 +237,7 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
+import { useOrbitThreadsAvailable } from "../orbit/environmentProvider";
 import { useOrbitThreadUrl } from "../orbit/orbitWorkspaces";
 import { useOrbitAvailability } from "../orbit/useOrbitAvailability";
 import { threadEnvironment } from "../state/threads";
@@ -484,9 +485,11 @@ export default function ChatView(props: ChatViewProps) {
         ? store.getDraftSession(draftId)
         : null,
   );
-  const orbitThreadsInPaletteEnabled = useClientSettings(
+  // Conn: as for the Labs row, the switch counts only in the desktop app in Orbit mode.
+  const orbitThreadsSwitchOn = useClientSettings(
     (clientSettings) => clientSettings.orbitThreadsInPaletteEnabled,
   );
+  const orbitThreadsInPaletteEnabled = useOrbitThreadsAvailable() && orbitThreadsSwitchOn;
   const serverThreadShell = useQuietThreadShell(routeThreadRef);
   const routeThreadDetailRef = resolveThreadDetailRef(routeThreadRef, {
     shellExists: serverThreadShell !== null,
@@ -3622,7 +3625,9 @@ export default function ChatView(props: ChatViewProps) {
                         <DraftHeroHeadline
                           draftId={draftId}
                           activeProjectRef={activeProjectRef}
-                          activeProjectTitle={activeProject?.title ?? null}
+                          activeProjectTitle={
+                            activeProject?.title ?? orbitDraftTarget?.projectName ?? null
+                          }
                         />
                       </div>
                     </div>

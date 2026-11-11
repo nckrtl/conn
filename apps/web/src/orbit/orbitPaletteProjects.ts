@@ -1,8 +1,13 @@
-import type { OrbitGatewayClient } from "@t3tools/client-runtime/orbit-gateway";
+import { useAtomValue } from "@effect/atom-react";
+import type {
+  OrbitGatewayClient,
+  OrbitGatewayInstanceNameCheck,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { useEffect } from "react";
 import { create } from "zustand";
 
 import type { OrbitPaletteProjectsState } from "../components/CommandPalette.logic";
+import { environmentCatalog } from "../connection/catalog";
 import { useClientSettings } from "../hooks/useSettings";
 import { useOrbitThreadsAvailable } from "./environmentProvider";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
@@ -27,7 +32,10 @@ export async function loadOrbitPaletteProjects(client: OrbitGatewayClient): Prom
   });
   let next: LoadState;
   try {
-    const [projects, environments] = await Promise.all([client.projects(), client.environments()]);
+    const [projects, environments] = await Promise.all([
+      client.projects({ includeUnavailable: true }),
+      client.environments(),
+    ]);
     next = { status: "loaded", projects, environments };
   } catch {
     next = { status: "unreachable" };
@@ -55,4 +63,19 @@ export function useOrbitPaletteProjects(listShown: boolean): OrbitPaletteProject
     if (client) void loadOrbitPaletteProjects(client);
   }, [active]);
   return enabled ? state : { status: "off" };
+}
+
+/** Orbit's live check of a new Instance name; fails like any Gateway call, or without the bridge. */
+export async function checkOrbitInstanceName(
+  projectId: number,
+  name: string,
+): Promise<OrbitGatewayInstanceNameCheck> {
+  const client = desktopOrbitGatewayClient();
+  if (client === null) throw new Error("The Orbit Gateway is not available here.");
+  return client.checkInstanceName(projectId, name);
+}
+
+/** The environments this device has paired with (saved in its catalog). */
+export function useOrbitPairedEnvironmentIds(): ReadonlySet<string> {
+  return new Set(useAtomValue(environmentCatalog.catalogValueAtom).entries.keys());
 }

@@ -20,8 +20,9 @@ import { Skeleton } from "./ui/skeleton";
 const ORBIT_PAGE_PREFIX = "orbit-page";
 
 /**
- * The palette pages an Orbit Project row opens. The page resolver below maps each kind to its
- * component: PR 2b replaces the `instances` placeholder, PR 2c the `checks` one.
+ * The palette pages an Orbit Project row opens. The Instance step lives in
+ * `CommandPaletteOrbitInstanceStep.tsx`; the resolver below maps the other kinds to their
+ * component (PR 2c replaces the `checks` placeholder).
  */
 export type OrbitPalettePageKind = "instances" | "checks";
 
@@ -30,19 +31,14 @@ export interface OrbitPalettePage {
   readonly projectId: number;
 }
 
-function OrbitInstancesPagePlaceholder(_props: { readonly project: OrbitPaletteProjectRow }) {
-  return <span className="whitespace-normal">Placeholder: the Instance step comes in PR 2b.</span>;
-}
-
 function OrbitChecksPagePlaceholder(_props: { readonly project: OrbitPaletteProjectRow }) {
   return <span className="whitespace-normal">Placeholder: the start checks come in PR 2c.</span>;
 }
 
 const ORBIT_PALETTE_PAGES = {
-  instances: OrbitInstancesPagePlaceholder,
   checks: OrbitChecksPagePlaceholder,
 } satisfies Record<
-  OrbitPalettePageKind,
+  Exclude<OrbitPalettePageKind, "instances">,
   (props: { readonly project: OrbitPaletteProjectRow }) => ReactNode
 >;
 
@@ -58,14 +54,15 @@ export function parseOrbitPalettePage(value: string | undefined): OrbitPalettePa
   return Number.isInteger(projectId) ? { kind, projectId } : null;
 }
 
-function orbitPalettePageView(page: OrbitPalettePage, project: OrbitPaletteProjectRow) {
+/** The palette view of an Orbit page; its groups resolve while rendering. */
+export function orbitPalettePageView(page: OrbitPalettePage): CommandPaletteView {
   return {
     addonIcon: <OrbitLogoIcon className={ADDON_ICON_CLASS} />,
-    groups: [{ value: orbitPalettePageValue(page), label: project.name, items: [] }],
-  } satisfies CommandPaletteView;
+    groups: [{ value: orbitPalettePageValue(page), label: "", items: [] }],
+  };
 }
 
-/** The live groups of an Orbit page; the project is null once it left the list. */
+/** The live groups of the checks page, or of any Orbit page once its Project left the list. */
 export function orbitPalettePageGroups(
   page: OrbitPalettePage,
   project: OrbitPaletteProjectRow | null,
@@ -90,7 +87,7 @@ export function orbitPalettePageGroups(
       },
     ];
   }
-  const Page = ORBIT_PALETTE_PAGES[page.kind];
+  const Page = ORBIT_PALETTE_PAGES.checks;
   return [
     {
       value,
@@ -131,7 +128,7 @@ function OrbitProjectTrailing(props: { readonly startable: boolean }) {
 /** Orbit Projects as rows of the New thread list, in the same badge style as local projects. */
 export function buildOrbitProjectItems(input: {
   readonly rows: ReadonlyArray<OrbitPaletteProjectRow>;
-  readonly openPage: (view: CommandPaletteView) => void;
+  readonly openPage: (view: CommandPaletteView, row: OrbitPaletteProjectRow) => void;
 }): CommandPaletteActionItem[] {
   return input.rows.map((row) => {
     const identity = deriveProjectIdentity(row.name);
@@ -155,7 +152,7 @@ export function buildOrbitProjectItems(input: {
       titleTrailingContent: <OrbitProjectTrailing startable={row.startable} />,
       ...(row.startable ? {} : { dimmed: true }),
       keepOpen: true,
-      run: async () => input.openPage(orbitPalettePageView(page, row)),
+      run: async () => input.openPage(orbitPalettePageView(page), row),
     };
   });
 }

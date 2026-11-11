@@ -16,6 +16,11 @@ export interface OrbitGatewayRequest {
   /** A path below `/api/v1/conn`, such as `/me`. */
   readonly path: string;
   readonly body?: unknown;
+  /**
+   * Query parameters, kept apart from `path` so each transport can encode them and the desktop
+   * main process can check them against its allow-list.
+   */
+  readonly query?: Readonly<Record<string, string>>;
   /** Overrides the transport's default limit for a call the Gateway answers slowly. */
   readonly timeoutMs?: number;
   /** Sent as `Idempotency-Key`: the same key and input return the same Operation. */
@@ -25,6 +30,14 @@ export interface OrbitGatewayRequest {
 export interface OrbitGatewayResponse {
   readonly status: number;
   readonly body: string;
+}
+
+/** The request's path with its query encoded, for transports that build one URL. */
+export function orbitGatewayPathWithQuery(
+  request: Pick<OrbitGatewayRequest, "path" | "query">,
+): string {
+  const entries = Object.entries(request.query ?? {});
+  return entries.length === 0 ? request.path : `${request.path}?${new URLSearchParams(entries)}`;
 }
 
 export type OrbitGatewayTransport = (request: OrbitGatewayRequest) => Promise<OrbitGatewayResponse>;
@@ -165,6 +178,29 @@ export function startableOrbitProject(
   };
 }
 
+/** Why a name is not available: `taken`, `invalid` (Orbit's name rule) or `default`. */
+export type OrbitGatewayInstanceNameReason = "taken" | "invalid" | "default";
+
+/**
+ * The answer of `GET /conn/projects/{project}/instances/check`. Names are unique per Project
+ * across the fleet, and a create pending elsewhere holds its name. `domain` may be null.
+ */
+export interface OrbitGatewayInstanceNameCheck {
+  readonly name: string;
+  readonly available: boolean;
+  /** Null when available, or when Orbit sent a reason this client does not know. */
+  readonly reason: OrbitGatewayInstanceNameReason | null;
+  readonly domain: string | null;
+}
+
+export interface OrbitGatewayProjectsOptions {
+  /**
+   * Also list the Projects in which threads cannot start yet, with their checks
+   * (`include_unavailable=1`). Without it Orbit lists only the ones that can.
+   */
+  readonly includeUnavailable?: boolean;
+}
+
 /** The fields of an Orbit Operation that Conn follows. */
 export interface OrbitGatewayOperation {
   readonly id: number;
@@ -247,7 +283,17 @@ export interface OrbitGatewayClient {
    */
   readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
   /** The Projects this device sees; `startableOrbitProject` keeps those a thread can start in. */
-  readonly projects: () => Promise<readonly OrbitGatewayProjectListing[]>;
+  readonly projects: (
+    options?: OrbitGatewayProjectsOptions,
+  ) => Promise<readonly OrbitGatewayProjectListing[]>;
+  /**
+   * Asks Orbit whether a new Instance of the Project may take this name. A Project whose default
+   * is not ready fails with 409 `instance.default_missing`, as a create would.
+   */
+  readonly checkInstanceName: (
+    projectId: number,
+    name: string,
+  ) => Promise<OrbitGatewayInstanceNameCheck>;
   /**
    * Admits the clone a thread starts in; the Operation's `targetId` is the new Instance. The
    * Gateway admits it slowly, so the call has a 60 s limit; the same key returns the same Operation.
@@ -277,6 +323,8 @@ export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 export const OPERATION_TIMEOUT_MS = 60_000;
 /** The Gateway copies secrets to Swamp before it admits a create or a pairing: 19-27 s today. */
 const ADMISSION_TIMEOUT_MS = 60_000;
+/** A name check is answered at once; a slow one gives way to the create's own check. */
+const NAME_CHECK_TIMEOUT_MS = 5_000;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 15_000;
 
@@ -426,8 +474,24 @@ export function createOrbitGatewayClient(
       }
       return issuedPairing(data, path);
     },
-    projects: async () =>
-      list(await call({ method: "GET", path: "/projects" }), "/projects", project),
+    projects: async (options) =>
+      list(
+        await call({
+          method: "GET",
+          path: "/projects",
+          ...(options?.includeUnavailable ? { query: { include_unavailable: "1" } } : {}),
+        }),
+        "/projects",
+        project,
+      ),
+    checkInstanceName: async (projectId, name) => {
+      const path = `/projects/${projectId}/instances/check`;
+      return instanceNameCheck(
+        await call({ method: "GET", path, query: { name }, timeoutMs: NAME_CHECK_TIMEOUT_MS }),
+        name,
+        path,
+      );
+    },
     createThreadInstance: async (projectId, name, idempotencyKey) => {
       const path = `/projects/${projectId}/instances`;
       return operation(
@@ -555,6 +619,28 @@ function project(value: unknown, path: string): OrbitGatewayProjectListing {
     cloneable: data.cloneable !== false,
     cloneableReason: optionalText(data.cloneable_reason),
     checks: Array.isArray(data.checks) ? data.checks.flatMap(projectCheck) : null,
+  };
+}
+
+const INSTANCE_NAME_REASONS: ReadonlySet<string> = new Set(["taken", "invalid", "default"]);
+
+/** Only `available` is required; a missing name reads as the one asked about. */
+function instanceNameCheck(
+  value: unknown,
+  requested: string,
+  path: string,
+): OrbitGatewayInstanceNameCheck {
+  const data = record(value);
+  if (typeof data?.available !== "boolean") throw invalid(path);
+  const reason =
+    typeof data.reason === "string" && INSTANCE_NAME_REASONS.has(data.reason)
+      ? (data.reason as OrbitGatewayInstanceNameReason)
+      : null;
+  return {
+    name: optionalText(data.name) ?? requested,
+    available: data.available,
+    reason: data.available ? null : reason,
+    domain: optionalText(data.domain),
   };
 }
 

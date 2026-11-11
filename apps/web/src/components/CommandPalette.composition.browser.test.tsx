@@ -24,6 +24,7 @@ vi.mock("../hooks/useTheme", () => ({
 }));
 vi.mock("../hooks/useCustomThemes", () => ({ useCustomThemes: () => [] }));
 vi.mock("../orbit/orbitPaletteProjects", () => ({
+  recheckOrbitPaletteProjects: async () => false,
   useOrbitPaletteProjects: () => ({ status: "off" }),
   useOrbitPairedEnvironmentIds: () => new Set(),
   retryOrbitPaletteProjects: () => {},

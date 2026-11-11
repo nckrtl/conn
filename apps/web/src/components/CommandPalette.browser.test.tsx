@@ -29,6 +29,7 @@ const orbit = vi.hoisted(() => ({
   openOrbitDraft: vi.fn(),
 }));
 vi.mock("../orbit/orbitPaletteProjects", () => ({
+  recheckOrbitPaletteProjects: async () => false,
   useOrbitPaletteProjects: () => orbit.state,
   useOrbitPairedEnvironmentIds: () => new Set<string>(),
   retryOrbitPaletteProjects: () => orbit.retry(),

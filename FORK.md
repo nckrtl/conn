@@ -266,8 +266,11 @@ a notice with Retry. A Project in which threads cannot start yet (`cloneable: fa
 selectable and greyed out with Orbit's reason. The list parser takes the coming `cloneable`,
 `cloneable_reason`, `checks` and `instance_domain_suffix` fields when present; a row without
 `cloneable` can start threads. The palette asks with `include_unavailable=1`, since Orbit lists
-only startable Projects without it; the old cube dialog and the phone do not. A greyed row's
-checks page is still a placeholder (`CommandPaletteOrbitProjects.tsx`).
+only startable Projects without it; the old cube dialog and the phone do not. A greyed row opens
+its start checks (`CommandPaletteOrbitChecksPage.tsx`): Orbit's five checks in order with Conn's
+own labels, one more row for any other failing check (Orbit's `label`), and "Check again", which
+re-reads the list with `include_unavailable=1` and keeps the last result when the Gateway does not
+answer. Once threads can start there, it offers the Instance step.
 
 A startable row opens the Instance step (`CommandPaletteOrbitInstanceStep.tsx`,
 `orbitInstanceStepLogic.ts`): a name field with the Project's domain suffix, checked live with

@@ -47,6 +47,8 @@ jobs:
           sparse-checkout: |
             /pnpm-workspace.yaml
             /.github/scripts/ci-changes.cjs
+            /.github/scripts/web-test-retry.cjs
+            /.github/scripts/web-test-retry.test.cjs
             /.github/actions/ci-changes/
             /*/package.json
             /*/*/package.json
@@ -56,6 +58,10 @@ jobs:
       - name: Detect affected jobs
         id: detect
         uses: ./.github/actions/ci-changes
+
+      # Cheap and always runs, so a change to the wrapper is tested even when no web test runs.
+      - name: Test the web test retry wrapper
+        run: node --test .github/scripts/web-test-retry.test.cjs
 
   # Lint and the desktop build each get a runner so they run side by side.
   # Typecheck shares the build's install. Lint always runs: it formats every
@@ -431,7 +437,8 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test_web != 'false' }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
-    timeout-minutes: 10
+    # The fork's shards take ~6 minutes, so a retry needs room.
+    timeout-minutes: ${{ github.repository == 'pingdotgg/t3code' && 10 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -476,8 +483,9 @@ jobs:
             node apps/web/node_modules/playwright/cli.js install-deps chromium
           fi
 
+      # Retries once when Chromium drops its vitest connection with no failed test.
       - name: Test
-        run: vp run --filter @t3tools/web test --shard=${{ matrix.shard.index }}/${{ matrix.shard.total }}
+        run: node .github/scripts/web-test-retry.cjs vp run --filter @t3tools/web test --shard=${{ matrix.shard.index }}/${{ matrix.shard.total }}
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
   # one at a time. Sharding spreads them over separate runners instead of

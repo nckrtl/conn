@@ -54,8 +54,8 @@ export function ThreadDetailsOrbitRows({
         </Tooltip>
         <ComposerContextLabel displayMode="panel">{project}</ComposerContextLabel>
         <OrbitPlacement
-          instanceName={orbitInstance.instanceName}
-          nodeName={orbitInstance.nodeName}
+          instanceName={orbitInstance.instanceName || undefined}
+          nodeName={orbitInstance.nodeName || undefined}
           description={description}
         />
       </span>
@@ -89,16 +89,14 @@ function OrbitPlacement({
   nodeName,
   description,
 }: {
+  /** Empty names arrive as undefined. */
   instanceName: string | undefined;
   nodeName: string | undefined;
   description: string;
 }) {
   if (instanceName === undefined && nodeName === undefined) return null;
-  const splitAt =
-    instanceName !== undefined && instanceName.length > ORBIT_INSTANCE_NAME_TAIL_LENGTH
-      ? instanceName.length - ORBIT_INSTANCE_NAME_TAIL_LENGTH
-      : 0;
-  const nodeText = nodeName === undefined ? undefined : instanceName ? ` · ${nodeName}` : nodeName;
+  const splitAt = Math.max(0, (instanceName?.length ?? 0) - ORBIT_INSTANCE_NAME_TAIL_LENGTH);
+  const nodeText = nodeName && (instanceName ? ` · ${nodeName}` : nodeName);
   return (
     <Tooltip>
       <TooltipTrigger

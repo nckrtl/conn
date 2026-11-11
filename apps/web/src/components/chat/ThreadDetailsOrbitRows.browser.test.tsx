@@ -119,3 +119,35 @@ it("shows a short Instance name in full", async () => {
   expect(isClipped(row.querySelector("[data-composer-label] > span")!)).toBe(false);
   expect(isInside(row.querySelector("[data-orbit-node-name]")!, row)).toBe(true);
 });
+
+it("leaves out a missing or empty Instance or Node", async () => {
+  const placement = (instanceName?: string, nodeName?: string) =>
+    render(
+      <ThreadDetailsOrbitRows
+        orbitInstance={{
+          projectId: 7,
+          instanceId: 41,
+          projectName: "create-bench",
+          ...(instanceName === undefined ? {} : { instanceName }),
+          ...(nodeName === undefined ? {} : { nodeName }),
+        }}
+        onOpenUrl={vi.fn()}
+      />,
+      { router: false }, // A leaf row: no route reads it.
+    );
+  const text = (container: HTMLElement) =>
+    container.querySelector("[data-thread-panel-orbit-placement]")?.textContent ?? null;
+
+  {
+    await using screen = await placement(undefined, "beast");
+    expect(text(screen.container)).toBe("beast");
+  }
+  {
+    await using screen = await placement("t3-1a2b", "");
+    expect(text(screen.container)).toBe("t3-1a2b");
+  }
+  {
+    await using screen = await placement("", undefined);
+    expect(text(screen.container)).toBeNull();
+  }
+});

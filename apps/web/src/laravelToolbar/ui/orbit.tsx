@@ -239,6 +239,7 @@ function useProcessLog(
         next.status === "failed" &&
         following &&
         current?.processId === processId &&
+        current.attempt === attempt &&
         current.log.status === "ready"
           ? current
           : { processId, attempt, log: next },
@@ -449,6 +450,12 @@ export function OrbitPanel() {
                 processes.some((process) => process.status === "crashed") ? "danger" : "default"
               }
             />
+            {processes.some((process) => process.status === "unknown") ? (
+              <Stat
+                label="Unknown"
+                value={processes.filter((process) => process.status === "unknown").length}
+              />
+            ) : null}
           </StatStrip>
           <KeyValueRows
             rows={[
@@ -507,7 +514,7 @@ export function OrbitPanel() {
                   )}
                   {following ? "Following" : "Follow"}
                 </button>
-                {following || log.status === "reading" ? null : (
+                {following || log.status !== "ready" ? null : (
                   <>
                     <span className="px-1 text-2xs text-muted-foreground">One-time tail</span>
                     <IconAction label="Read the log again" onClick={retryLog}>

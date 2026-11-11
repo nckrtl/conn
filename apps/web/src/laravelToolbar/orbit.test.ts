@@ -33,6 +33,7 @@ describe("laravel toolbar orbit", () => {
     expect(status("unknown", "running", { status: "failed" })).toBe("crashed");
     expect(status("unknown", "running", { error_code: "process.start_failed" })).toBe("crashed");
     expect(status("unknown", "running", { failed_step: "start" })).toBe("crashed");
+    expect(status("unknown", "stopped", { error_code: "process.start_failed" })).toBe("stopped");
     expect(processStatus(null)).toBe("stopped");
   });
 

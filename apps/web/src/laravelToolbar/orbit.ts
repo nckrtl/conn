@@ -79,9 +79,11 @@ export function processStatus(data: Record<string, unknown> | null): ProcessStat
   const wanted = data?.desired_state === "running";
   if (RUNNING.has(runtime)) return "running";
   if (STARTING.has(runtime)) return "starting";
-  const failed =
-    runtime === "failed" || text(data?.error_code) !== "" || text(data?.failed_step) !== "";
-  if (failed) return "crashed";
+  if (runtime === "failed") return "crashed";
+  // A failed start or step matters only while the process should run.
+  if (wanted && (text(data?.error_code) !== "" || text(data?.failed_step) !== "")) {
+    return "crashed";
+  }
   if (!UNOBSERVED.has(runtime)) return wanted ? "crashed" : "stopped";
   const status = text(data?.status);
   if (RUNNING.has(status)) return "running";

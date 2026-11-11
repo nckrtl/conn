@@ -83,6 +83,24 @@ describe("Orbit process log pane", () => {
     await expect.element(failed.getByRole("button", { name: "Retry" })).toBeVisible();
   });
 
+  it("follows a process whose status Orbit could not read, keeping its tail over a failed read", async () => {
+    const logs = vi
+      .fn<OrbitSource["logs"]>()
+      .mockResolvedValueOnce("first tail line\n")
+      .mockRejectedValue(new Error("Orbit is not reachable from this machine."));
+    await using screen = await renderPanel(
+      orbitSource(logs, { ...crashed, status: "unknown" }),
+      false,
+    );
+    using _timers = fakeTimers();
+    await openProcesses();
+    await expect.element(screen.getByText("first tail line")).toBeVisible();
+    await expect.element(screen.getByRole("button", { name: "Following" })).toBeVisible();
+    await act(() => vi.advanceTimersByTimeAsync(3_000));
+    expect(logs).toHaveBeenCalledTimes(2);
+    await expect.element(screen.getByText("first tail line")).toBeVisible();
+  });
+
   it("keeps actions for a process whose status Orbit could not read", async () => {
     await using screen = await renderPanel(
       orbitSource(async () => "", { ...crashed, status: "unknown" }),

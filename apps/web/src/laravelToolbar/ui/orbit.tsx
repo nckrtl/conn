@@ -12,6 +12,7 @@ import { cn } from "~/lib/utils";
 import { useOrbitTool } from "../context";
 import { formatBytes } from "../model";
 import {
+  LOG_TIMEOUT_SECONDS,
   type OrbitProcess,
   parseLogLines,
   type ProcessAction,
@@ -49,7 +50,12 @@ const STATUS_MARKER = {
   starting: "bg-info",
   crashed: "bg-destructive",
   stopped: "bg-muted-foreground/50",
+  unknown: "bg-muted-foreground",
 } as const;
+
+const UNKNOWN_HINT = "Orbit could not read this process's runtime status";
+/** Processes that may be up: their actions and log follow stay available. */
+const MAY_BE_UP: ReadonlySet<ProcessStatus> = new Set(["running", "starting", "unknown"]);
 
 function IconAction({
   label,
@@ -99,7 +105,7 @@ function ProcessItem({
   onSelect: () => void;
   onAct: (action: ProcessAction) => void;
 }) {
-  const up = process.status === "running" || process.status === "starting";
+  const up = MAY_BE_UP.has(process.status);
   const usage = [
     process.cpu === null ? null : `${process.cpu.toFixed(1)}% CPU`,
     process.memoryBytes === null ? null : formatBytes(process.memoryBytes),
@@ -115,9 +121,18 @@ function ProcessItem({
       <span className={cn("h-8 w-0.5 shrink-0 rounded-full", STATUS_MARKER[process.status])} />
       <div className="min-w-0 flex-1">
         <div className="truncate font-mono">{process.name}</div>
-        <div className={cn("truncate tabular-nums", secondaryLineClass)}>
-          {process.status === "running" && usage.length > 0 ? usage.join(" · ") : process.status}
-        </div>
+        {process.status === "unknown" ? (
+          <Tooltip>
+            <TooltipTrigger render={<div className={cn("truncate", secondaryLineClass)} />}>
+              status unknown
+            </TooltipTrigger>
+            <TooltipPopup side="top">{UNKNOWN_HINT}</TooltipPopup>
+          </Tooltip>
+        ) : (
+          <div className={cn("truncate tabular-nums", secondaryLineClass)}>
+            {process.status === "running" && usage.length > 0 ? usage.join(" · ") : process.status}
+          </div>
+        )}
       </div>
       <div className="flex shrink-0 items-center">
         {up ? (
@@ -172,27 +187,65 @@ function LogLineRow({ time, text }: { time: string | null; text: string }) {
   );
 }
 
+type ProcessLog =
+  | { readonly status: "reading" }
+  | { readonly status: "ready"; readonly text: string }
+  | { readonly status: "failed"; readonly error: string };
+
+// The transport gives up later (curl limit plus the shell wait); the pane never waits longer.
+const LOG_WAIT_MS = (LOG_TIMEOUT_SECONDS + 5) * 1000;
+
+function readLogInTime(read: Promise<string>): Promise<string> {
+  let timer = 0;
+  const late = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(
+      () => reject(new Error("Orbit did not return the log in time.")),
+      LOG_WAIT_MS,
+    );
+  });
+  return Promise.race([read, late]).finally(() => window.clearTimeout(timer));
+}
+
 /**
  * The selected process's log tail. Read again when its status changes (a crash leaves
- * its reason in the log) and every few seconds while following.
+ * its reason in the log), every few seconds while following, and on `retry`.
  */
-function useProcessLog(processId: number | null, status: ProcessStatus | null, following: boolean) {
+function useProcessLog(
+  processId: number | null,
+  status: ProcessStatus | null,
+  following: boolean,
+): { readonly log: ProcessLog; readonly retry: () => void } {
   const { source } = useOrbitTool();
-  const [log, setLog] = useState<{ processId: number; text: string } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [log, setLog] = useState<{ processId: number; attempt: number; log: ProcessLog }>();
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the process log from Orbit on a timer
   useEffect(() => {
     if (!source || processId === null) return;
     let cancelled = false;
     let timer: number | null = null;
     const read = async () => {
+      let next: ProcessLog;
       try {
-        const text = await source.logs(processId, LOG_LINES);
-        if (!cancelled) setLog({ processId, text });
-      } catch {
-        // Keep the last tail; the next read may succeed.
+        next = { status: "ready", text: await readLogInTime(source.logs(processId, LOG_LINES)) };
+      } catch (error) {
+        next = {
+          status: "failed",
+          error: error instanceof Error ? error.message : "Orbit did not return the log.",
+        };
       }
+      if (cancelled) return;
+      // While following, keep the last tail over a failed read; the next read may succeed.
+      setLog((current) =>
+        next.status === "failed" &&
+        following &&
+        current?.processId === processId &&
+        current.attempt === attempt &&
+        current.log.status === "ready"
+          ? current
+          : { processId, attempt, log: next },
+      );
       // A starting process changes fast; check it more often until it settles.
-      if (!cancelled && following) {
+      if (following) {
         timer = window.setTimeout(
           read,
           status === "starting" ? LOG_REFRESH_MS / 2 : LOG_REFRESH_MS,
@@ -204,8 +257,11 @@ function useProcessLog(processId: number | null, status: ProcessStatus | null, f
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [following, processId, source, status]);
-  return log?.processId === processId ? log.text : null;
+  }, [attempt, following, processId, source, status]);
+  return {
+    log: log?.processId === processId && log.attempt === attempt ? log.log : { status: "reading" },
+    retry: () => setAttempt((value) => value + 1),
+  };
 }
 
 function ApplicationLogsPanel() {
@@ -290,13 +346,14 @@ export function OrbitPanel() {
 
   const processes = state.status === "ready" ? state.processes : [];
   const selected = processes.find((process) => process.id === selectedId) ?? processes[0] ?? null;
-  const canFollow = selected?.status === "running" || selected?.status === "starting";
+  const canFollow = selected !== null && MAY_BE_UP.has(selected.status);
   const following = follow && canFollow;
-  const logText = useProcessLog(
+  const { log, retry: retryLog } = useProcessLog(
     tab === "processes" ? (selected?.id ?? null) : null,
     selected?.status ?? null,
     following,
   );
+  const logText = log.status === "ready" ? log.text : null;
   const lines = logText === null ? null : parseLogLines(logText);
 
   // Process states change behind our back (crashes, other clients); refresh while open.
@@ -323,6 +380,7 @@ export function OrbitPanel() {
     setBusy((current) => new Set([...current].filter((id) => !ids.includes(id))));
   };
   const running = processes.filter((process) => process.status === "running");
+  const restartable = processes.filter((process) => MAY_BE_UP.has(process.status));
   const down = processes.filter(
     (process) => process.status === "stopped" || process.status === "crashed",
   );
@@ -352,8 +410,8 @@ export function OrbitPanel() {
                   variant="ghost"
                   size="xs"
                   type="button"
-                  disabled={running.length === 0}
-                  onClick={() => void run(running, "restart")}
+                  disabled={restartable.length === 0}
+                  onClick={() => void run(restartable, "restart")}
                 >
                   <RotateCw />
                   <span className="ml-0.5">Restart all</span>
@@ -392,6 +450,12 @@ export function OrbitPanel() {
                 processes.some((process) => process.status === "crashed") ? "danger" : "default"
               }
             />
+            {processes.some((process) => process.status === "unknown") ? (
+              <Stat
+                label="Unknown"
+                value={processes.filter((process) => process.status === "unknown").length}
+              />
+            ) : null}
           </StatStrip>
           <KeyValueRows
             rows={[
@@ -450,6 +514,14 @@ export function OrbitPanel() {
                   )}
                   {following ? "Following" : "Follow"}
                 </button>
+                {following || log.status !== "ready" ? null : (
+                  <>
+                    <span className="px-1 text-2xs text-muted-foreground">One-time tail</span>
+                    <IconAction label="Read the log again" onClick={retryLog}>
+                      <RotateCw />
+                    </IconAction>
+                  </>
+                )}
                 <IconAction
                   label="Copy log"
                   disabled={!logText}
@@ -466,8 +538,18 @@ export function OrbitPanel() {
             ) : null}
             <ScrollArea radius="none" scrollFade className="min-h-0 flex-1">
               <div className="py-2 font-mono text-xs leading-5">
-                {lines === null ? (
-                  <div className="px-3 text-muted-foreground">Reading the log…</div>
+                {log.status === "failed" ? (
+                  <div className="flex items-center gap-2 px-3">
+                    <span className="text-destructive">{log.error}</span>
+                    <Button variant="ghost" size="xs" onClick={retryLog}>
+                      <RotateCw />
+                      Retry
+                    </Button>
+                  </div>
+                ) : lines === null ? (
+                  <div className="px-3 text-muted-foreground">
+                    Reading the log… Orbit can take a few seconds.
+                  </div>
                 ) : lines.length === 0 ? (
                   <div className="px-3 text-muted-foreground">No log lines yet</div>
                 ) : (

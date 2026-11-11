@@ -20,6 +20,12 @@ const server = (instanceId: number | null): OrbitGatewayEnvironment => ({
   status: "registered",
   instanceId,
   powerState: instanceId === null ? null : "running",
+  projectId: null,
+  projectName: null,
+  projectSlug: null,
+  instanceName: null,
+  nodeName: null,
+  instanceUrl: null,
 });
 
 describe("OrbitServerControl", () => {

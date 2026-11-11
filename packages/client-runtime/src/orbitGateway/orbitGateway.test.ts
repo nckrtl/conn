@@ -6,6 +6,7 @@ import {
   type OrbitGatewayRequest,
   type OrbitGatewayWorkspace,
 } from "./client.ts";
+import { orbitInstanceFromEnvironment, preferredOrbitInstance } from "./orbitInstance.ts";
 import { mergeWorkspaces, sameWorkspaces } from "./workspaceMerge.ts";
 
 const workspace = (id: string, name = id, extra: Partial<OrbitGatewayWorkspace> = {}) =>
@@ -426,8 +427,27 @@ describe("createOrbitGatewayClient", () => {
           status: "registered",
           instance_id: 41,
           power_state: "stopped",
+          project_id: 3,
+          project_name: " Mealou ",
+          project_slug: "mealou",
+          instance_name: "fix",
+          node_name: "beast",
+          instance_url: "https://fix.mealou.test",
         },
         { environment_id: "env-beast", label: "beast", url: "http://x", status: "registered" },
+        {
+          environment_id: "env-odd",
+          label: "odd",
+          url: "http://y",
+          status: "registered",
+          instance_id: 42,
+          project_id: "3",
+          project_name: 5,
+          project_slug: "",
+          instance_name: null,
+          node_name: ["beast"],
+          instance_url: false,
+        },
       ],
       "GET /projects": [{ id: 3, slug: "mealou", name: "Mealou", node_id: 7, node_name: "beast" }],
       "POST /projects/3/instances": {
@@ -451,6 +471,38 @@ describe("createOrbitGatewayClient", () => {
     expect(servers.map(({ instanceId, powerState }) => ({ instanceId, powerState }))).toEqual([
       { instanceId: 41, powerState: "stopped" },
       { instanceId: null, powerState: null },
+      { instanceId: 42, powerState: null },
+    ]);
+    const facts = servers.map(
+      ({ projectId, projectName, projectSlug, instanceName, nodeName, instanceUrl }) => ({
+        projectId,
+        projectName,
+        projectSlug,
+        instanceName,
+        nodeName,
+        instanceUrl,
+      }),
+    );
+    const none = {
+      projectId: null,
+      projectName: null,
+      projectSlug: null,
+      instanceName: null,
+      nodeName: null,
+      instanceUrl: null,
+    };
+    // Missing and wrong-typed facts read as null; they never fail the list.
+    expect(facts).toEqual([
+      {
+        projectId: 3,
+        projectName: "Mealou",
+        projectSlug: "mealou",
+        instanceName: "fix",
+        nodeName: "beast",
+        instanceUrl: "https://fix.mealou.test",
+      },
+      none,
+      none,
     ]);
     await expect(client.projects()).resolves.toEqual([
       { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" },
@@ -470,5 +522,51 @@ describe("createOrbitGatewayClient", () => {
       timeoutMs: 60_000,
       idempotencyKey: "key-1",
     });
+  });
+});
+
+describe("orbitInstanceFromEnvironment", () => {
+  const clone = {
+    instanceId: 41,
+    projectId: 3,
+    projectSlug: "mealou",
+    projectName: "Mealou",
+    instanceName: "fix",
+    nodeName: "beast",
+    instanceUrl: "https://fix.mealou.test",
+  };
+
+  it("builds the descriptor only from a record with both ids", () => {
+    expect(orbitInstanceFromEnvironment(clone)).toEqual({
+      projectId: 3,
+      instanceId: 41,
+      projectSlug: "mealou",
+      projectName: "Mealou",
+      instanceName: "fix",
+      nodeName: "beast",
+      url: "https://fix.mealou.test",
+    });
+    expect(
+      orbitInstanceFromEnvironment({
+        ...clone,
+        projectSlug: null,
+        projectName: null,
+        instanceName: null,
+        nodeName: null,
+        instanceUrl: "javascript:alert(1)",
+      }),
+    ).toEqual({ projectId: 3, instanceId: 41 });
+    expect(orbitInstanceFromEnvironment({ ...clone, projectId: null })).toBeUndefined();
+    expect(orbitInstanceFromEnvironment({ ...clone, instanceId: null })).toBeUndefined();
+    expect(orbitInstanceFromEnvironment({ ...clone, projectId: 0 })).toBeUndefined();
+    expect(orbitInstanceFromEnvironment({ ...clone, instanceId: 4.5 })).toBeUndefined();
+  });
+
+  it("prefers the Gateway's facts over the server's", () => {
+    const gateway = { projectId: 3, instanceId: 41 };
+    const server = { projectId: 3, instanceId: 41, projectName: "From server" };
+    expect(preferredOrbitInstance(gateway, server)).toBe(gateway);
+    expect(preferredOrbitInstance(undefined, server)).toBe(server);
+    expect(preferredOrbitInstance(undefined, undefined)).toBeUndefined();
   });
 });

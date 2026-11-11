@@ -20,6 +20,7 @@ import { connectionAtomRuntime } from "../connection/runtime";
 import { resolveStorage } from "../lib/storage";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironmentQuery } from "../state/query";
+import { useOrbitInstance } from "./environmentProvider";
 
 /**
  * A thread's Orbit workspace. The server registers it with Orbit (see the server's
@@ -113,15 +114,16 @@ export function useOrbitCheckout(
   return legacy ? legacyViewOf(legacy) : null;
 }
 
-/** The Instance URL of the thread's Orbit workspace. */
+/** The Instance URL of the thread's Orbit workspace, else of the clone its server runs in. */
 export function useOrbitThreadUrl(threadRef: ScopedThreadRef | null): string | null {
   const registrations = useOrbitWorkspaces(threadRef?.environmentId ?? null);
+  const orbitInstance = useOrbitInstance(threadRef?.environmentId ?? null);
   const legacyUrl = useLegacyOrbitThreadStore((state) =>
     threadRef ? (state.byThreadKey[scopedThreadKey(threadRef)]?.url ?? null) : null,
   );
   if (threadRef === null) return null;
   const registration = registrations?.find((entry) => entry.threadId === threadRef.threadId);
-  return registration ? registration.url : legacyUrl;
+  return registration ? registration.url : (legacyUrl ?? orbitInstance?.url ?? null);
 }
 
 /** Starts the server's registration of a thread's new worktree, or retries a failed one. */

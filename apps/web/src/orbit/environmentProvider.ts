@@ -1,9 +1,12 @@
 import {
   EMPTY_ORBIT_ENVIRONMENT_STATE,
   isFinalPairingError,
+  orbitInstanceFromEnvironment,
+  orbitInstancesByEnvironment,
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
+  preferredOrbitInstance,
   recordAccessPairing,
   recordPaired,
   recordPairingAttempt,
@@ -14,17 +17,24 @@ import {
   type OrbitGatewayEnvironment,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
-import { AuthAccessWriteScope, type EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthAccessWriteScope,
+  type EnvironmentId,
+  OrbitInstanceDescriptor,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { useServerConfigs } from "../state/entities";
 import { readEnvironmentLacksScope } from "../state/session";
 import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
+const INSTANCES_STORAGE_KEY = "t3code:orbit-instances:v1";
 
 function readJson(key: string): unknown {
   try {
@@ -38,12 +48,38 @@ function readJson(key: string): unknown {
 interface EnvironmentProviderStore {
   readonly provider: EnvironmentProvider;
   readonly state: OrbitEnvironmentState;
+  /** Conn: the Gateway's Orbit facts of each clone, from the last sync, so the row shows at start. */
+  readonly orbitInstances: Readonly<Record<string, OrbitInstanceDescriptor>>;
+}
+
+const decodeOrbitInstance = Schema.decodeUnknownOption(OrbitInstanceDescriptor);
+
+function parseOrbitInstances(value: unknown): Record<string, OrbitInstanceDescriptor> {
+  const result: Record<string, OrbitInstanceDescriptor> = {};
+  if (typeof value !== "object" || value === null) return result;
+  for (const [environmentId, entry] of Object.entries(value)) {
+    const decoded = decodeOrbitInstance(entry);
+    if (decoded._tag === "None") continue;
+    // The Gateway's own rule again, so a stored URL other than http(s) never comes back.
+    const { url, ...facts } = decoded.value;
+    const descriptor = orbitInstanceFromEnvironment({
+      ...facts,
+      projectSlug: facts.projectSlug ?? null,
+      projectName: facts.projectName ?? null,
+      instanceName: facts.instanceName ?? null,
+      nodeName: facts.nodeName ?? null,
+      instanceUrl: url ?? null,
+    });
+    if (descriptor) result[environmentId] = descriptor;
+  }
+  return result;
 }
 
 /** This device's environment provider (see planEnvironmentProvider), kept in localStorage. */
 export const useEnvironmentProvider = create<EnvironmentProviderStore>(() => ({
   provider: parseEnvironmentProvider(readJson(PROVIDER_STORAGE_KEY)),
   state: parseOrbitEnvironmentState(readJson(STATE_STORAGE_KEY) ?? EMPTY_ORBIT_ENVIRONMENT_STATE),
+  orbitInstances: parseOrbitInstances(readJson(INSTANCES_STORAGE_KEY)),
 }));
 
 useEnvironmentProvider.subscribe((next, previous) => {
@@ -53,7 +89,32 @@ useEnvironmentProvider.subscribe((next, previous) => {
   if (next.state !== previous.state) {
     window.localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(next.state));
   }
+  if (next.orbitInstances !== previous.orbitInstances) {
+    window.localStorage.setItem(INSTANCES_STORAGE_KEY, JSON.stringify(next.orbitInstances));
+  }
 });
+
+/** Keeps the old object when nothing changed, so a sync does not re-render the thread panel. */
+function saveOrbitInstances(next: Record<string, OrbitInstanceDescriptor>): void {
+  const { orbitInstances } = useEnvironmentProvider.getState();
+  if (JSON.stringify(next) === JSON.stringify(orbitInstances)) return;
+  useEnvironmentProvider.setState({ orbitInstances: next });
+}
+
+/**
+ * Conn: the Orbit Instance a server runs in. The Gateway's record comes first, because clones run
+ * the stock T3 server; a fork server's own descriptor is the fallback (see FORK.md, "Orbit").
+ */
+export function useOrbitInstance(
+  environmentId: EnvironmentId | null,
+): OrbitInstanceDescriptor | undefined {
+  const gateway = useEnvironmentProvider((store) =>
+    environmentId === null ? undefined : store.orbitInstances[environmentId],
+  );
+  const configs = useServerConfigs();
+  const server = environmentId === null ? undefined : configs.get(environmentId)?.environment;
+  return preferredOrbitInstance(gateway, server?.orbitInstance);
+}
 
 export function setEnvironmentProvider(provider: EnvironmentProvider): void {
   useEnvironmentProvider.setState({ provider });
@@ -160,6 +221,7 @@ export async function reconcileEnvironmentProvider(
 ): Promise<readonly OrbitGatewayEnvironment[] | null> {
   const { provider, state } = useEnvironmentProvider.getState();
   const orbit = provider === "orbit" ? await client.environments() : null;
+  saveOrbitInstances(orbit === null ? {} : orbitInstancesByEnvironment(orbit));
   const catalog = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
   if (!catalog.isReady) return orbit;
 

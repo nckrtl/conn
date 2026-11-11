@@ -74,6 +74,12 @@ function gateway() {
         status: "registered",
         instanceId: 41,
         powerState: "running",
+        projectId: null,
+        projectName: null,
+        projectSlug: null,
+        instanceName: null,
+        nodeName: null,
+        instanceUrl: null,
       },
     ],
     startPairing: async (environmentId: string) => {

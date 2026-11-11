@@ -19,7 +19,7 @@ import { flushSync } from "react-dom";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
-import { useProject, useServerConfigs, useThreadShellsForProjectRefs } from "../state/entities";
+import { useProject, useThreadShellsForProjectRefs } from "../state/entities";
 import { useOpenLink } from "../browser/useOpenLink";
 import { ThreadDetailsOrbitRows } from "./chat/ThreadDetailsOrbitRows";
 import {
@@ -42,6 +42,7 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
+import { useOrbitInstance } from "../orbit/environmentProvider";
 import { isOrbitCheckout, useOrbitCheckout } from "../orbit/orbitWorkspaces";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
 import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
@@ -712,7 +713,7 @@ export const BranchToolbar = memo(function BranchToolbar({
     canPickEnvironment: hasMultipleEnvironments,
   });
   const [attachStrip, labelsOverflow] = useLabelsOverflow();
-  const orbitInstance = useServerConfigs().get(environmentId)?.environment.orbitInstance;
+  const orbitInstance = useOrbitInstance(environmentId);
   const openLink = useOpenLink(threadRef);
 
   if (!activeProject) return null;

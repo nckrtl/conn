@@ -52,12 +52,10 @@ it("falls back to the slug, then the id, and links only a web URL", async () => 
   expect(page.getByRole("link").elements()).toHaveLength(0);
 });
 
-// The details card is --thread-details-panel-width (17.5rem) with px-2 section padding.
-const PANEL_ROW_WIDTH = 280 - 16;
-
-const renderAtPanelWidth = (instanceName: string) =>
+// The details card's real width, read from the CSS variable, minus its px-2 section padding.
+const renderAtPanelWidth = (instanceName: string, nodeName = "beast") =>
   render(
-    <div style={{ width: PANEL_ROW_WIDTH }}>
+    <div className="px-2" style={{ width: "var(--thread-details-panel-width)" }}>
       <ThreadDetailsOrbitRows
         orbitInstance={{
           projectId: 7,
@@ -65,7 +63,7 @@ const renderAtPanelWidth = (instanceName: string) =>
           projectSlug: "create-bench",
           projectName: "create-bench",
           instanceName,
-          nodeName: "beast",
+          nodeName,
           url: `http://${instanceName}.create-bench.test`,
         }}
         onOpenUrl={vi.fn()}
@@ -81,6 +79,17 @@ const isInside = (inner: Element, outer: Element) => {
   const b = outer.getBoundingClientRect();
   return a.width > 0 && a.left >= b.left - 0.5 && a.right <= b.right + 0.5;
 };
+
+it("reads the row width from the panel's CSS variable", async () => {
+  await using screen = await renderAtPanelWidth("t3-1a2b");
+  const row = screen.container.querySelector("[data-thread-panel-orbit-instance]")!;
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  const panel = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue("--thread-details-panel-width"),
+  );
+  expect(panel).toBeGreaterThan(0);
+  expect(row.getBoundingClientRect().width).toBeCloseTo(panel * rem - 16, 0);
+});
 
 it("shortens a long Instance name in the middle so the Node stays visible", async () => {
   const name = "list-the-files-here-62b311";
@@ -103,8 +112,51 @@ it("shortens a long Instance name in the middle so the Node stays visible", asyn
   expect(project.getBoundingClientRect().width).toBeGreaterThan(24);
 
   await userEvent.hover(row.querySelector("[data-thread-panel-orbit-placement]")!);
+  // The row is the only trigger, so exactly one tooltip holds the full text.
   await expect
-    .element(page.getByText(`Orbit Project create-bench, Instance ${name}, Node beast`).last())
+    .element(page.getByText(`Orbit Project create-bench, Instance ${name}, Node beast`))
+    .toBeVisible();
+});
+
+it("cuts a Node too long for the row with an ellipsis and keeps the name's tail", async () => {
+  await using screen = await renderAtPanelWidth(
+    "list-the-files-here-62b311",
+    "beast-production-eu-west-1",
+  );
+  const row = screen.container.querySelector("[data-thread-panel-orbit-instance]")!;
+  const tail = row.querySelector("[data-orbit-instance-name-tail]")!;
+  const node = row.querySelector("[data-orbit-node-name]")!;
+
+  expect(isClipped(tail)).toBe(false);
+  expect(isInside(tail, row)).toBe(true);
+  expect(isClipped(node)).toBe(true);
+  expect(getComputedStyle(node).textOverflow).toBe("ellipsis");
+  expect(isInside(node, row)).toBe(true);
+  expect(node.getBoundingClientRect().right).toBeLessThanOrEqual(
+    row.querySelector("[data-thread-panel-orbit-placement]")!.getBoundingClientRect().right + 0.5,
+  );
+});
+
+it("sets the placement text on the Project label's trimmed text box", async () => {
+  await using screen = await renderAtPanelWidth("t3-1a2b");
+  const row = screen.container.querySelector("[data-thread-panel-orbit-instance]")!;
+  const label = row.querySelector("[data-composer-label] > span")!.getBoundingClientRect();
+  const node = row.querySelector("[data-orbit-node-name]")!.getBoundingClientRect();
+  expect(node.height).toBeCloseTo(label.height, 0);
+  expect(node.top).toBeCloseTo(label.top, 0);
+});
+
+it("opens the full text from the keyboard", async () => {
+  await using _screen = await renderAtPanelWidth("list-the-files-here-62b311");
+  await userEvent.tab();
+  const row = page.getByRole("group", {
+    name: "Orbit Project create-bench, Instance list-the-files-here-62b311, Node beast",
+  });
+  await expect.element(row).toHaveFocus();
+  await expect
+    .element(
+      page.getByText("Orbit Project create-bench, Instance list-the-files-here-62b311, Node beast"),
+    )
     .toBeVisible();
 });
 
@@ -116,6 +168,8 @@ it("shows a short Instance name in full", async () => {
     "t3-1a2b · beast",
   );
   expect(isClipped(head)).toBe(false);
+  expect(isClipped(row.querySelector("[data-orbit-instance-name-tail]")!)).toBe(false);
+  expect(isClipped(row.querySelector("[data-orbit-node-name]")!)).toBe(false);
   expect(isClipped(row.querySelector("[data-composer-label] > span")!)).toBe(false);
   expect(isInside(row.querySelector("[data-orbit-node-name]")!, row)).toBe(true);
 });

@@ -41,24 +41,31 @@ export function ThreadDetailsOrbitRows({
   const url = orbitInstance.url && isWebUrl(orbitInstance.url) ? orbitInstance.url : null;
   return (
     <>
-      <span
-        className={cn("inline-flex items-center", THREAD_DETAILS_PANEL_LOCKED_ROW_CLASS)}
-        aria-label={description}
-        data-thread-panel-orbit-instance
-      >
-        <Tooltip>
-          <TooltipTrigger render={<span className="inline-flex shrink-0" />}>
-            <OrbitLogoIcon className={THREAD_DETAILS_PANEL_ICON_CLASS} />
-          </TooltipTrigger>
-          <TooltipPopup>{description}</TooltipPopup>
-        </Tooltip>
-        <ComposerContextLabel displayMode="panel">{project}</ComposerContextLabel>
-        <OrbitPlacement
-          instanceName={orbitInstance.instanceName || undefined}
-          nodeName={orbitInstance.nodeName || undefined}
-          description={description}
-        />
-      </span>
+      {/* One focusable trigger for the whole row, so the full text also opens from the keyboard. */}
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span
+              role="group"
+              tabIndex={0}
+              className={cn(
+                "inline-flex items-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                THREAD_DETAILS_PANEL_LOCKED_ROW_CLASS,
+              )}
+              aria-label={description}
+              data-thread-panel-orbit-instance
+            />
+          }
+        >
+          <OrbitLogoIcon className={THREAD_DETAILS_PANEL_ICON_CLASS} />
+          <ComposerContextLabel displayMode="panel">{project}</ComposerContextLabel>
+          <OrbitPlacement
+            instanceName={orbitInstance.instanceName || undefined}
+            nodeName={orbitInstance.nodeName || undefined}
+          />
+        </TooltipTrigger>
+        <TooltipPopup>{description}</TooltipPopup>
+      </Tooltip>
       {url ? (
         <a
           href={url}
@@ -82,48 +89,41 @@ export function ThreadDetailsOrbitRows({
 /**
  * "<instance> · <node>". CSS can only cut text at the end, so the name is split
  * into a head that truncates and a tail that stays: a long name reads
- * `list-the-files-…62b311 · beast` and the Node always shows.
+ * `list-the-files-…62b311 · beast` and the Node always shows. The head gives up
+ * its space first; only a Node too long for the row is cut, with its own "…".
  */
 function OrbitPlacement({
   instanceName,
   nodeName,
-  description,
 }: {
   /** Empty names arrive as undefined. */
   instanceName: string | undefined;
   nodeName: string | undefined;
-  description: string;
 }) {
   if (instanceName === undefined && nodeName === undefined) return null;
   const splitAt = Math.max(0, (instanceName?.length ?? 0) - ORBIT_INSTANCE_NAME_TAIL_LENGTH);
   const nodeText = nodeName && (instanceName ? ` · ${nodeName}` : nodeName);
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            className="flex min-w-0 max-w-[55%] shrink overflow-x-clip whitespace-pre text-muted-foreground"
-            data-thread-panel-orbit-placement
-          />
-        }
-      >
-        {instanceName ? (
-          <>
-            <span className="min-w-0 truncate" data-orbit-instance-name-head>
-              {instanceName.slice(0, splitAt)}
-            </span>
-            <span className="shrink-0" data-orbit-instance-name-tail>
-              {instanceName.slice(splitAt)}
-            </span>
-          </>
-        ) : null}
-        {nodeText ? (
-          <span className="shrink-0" data-orbit-node-name>
-            {nodeText}
+    // The trim matches the Project label's text box, so both lines sit on one baseline.
+    <span
+      className="flex min-w-0 max-w-[55%] shrink overflow-x-clip whitespace-pre text-muted-foreground *:[text-box:trim-both_cap_alphabetic]"
+      data-thread-panel-orbit-placement
+    >
+      {instanceName ? (
+        <>
+          <span className="min-w-0 shrink-1000 truncate" data-orbit-instance-name-head>
+            {instanceName.slice(0, splitAt)}
           </span>
-        ) : null}
-      </TooltipTrigger>
-      <TooltipPopup>{description}</TooltipPopup>
-    </Tooltip>
+          <span className="shrink-0" data-orbit-instance-name-tail>
+            {instanceName.slice(splitAt)}
+          </span>
+        </>
+      ) : null}
+      {nodeText ? (
+        <span className="min-w-0 truncate" data-orbit-node-name>
+          {nodeText}
+        </span>
+      ) : null}
+    </span>
   );
 }

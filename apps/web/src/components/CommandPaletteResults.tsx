@@ -267,9 +267,11 @@ function CommandPaletteResultRow(props: {
         props.onExecuteItem(props.item);
       }}
     >
-      <CommandPaletteTitleIcon>{props.item.icon}</CommandPaletteTitleIcon>
+      <CommandPaletteTitleIcon>
+        <span className={cn("flex", props.item.dimmed && "opacity-48")}>{props.item.icon}</span>
+      </CommandPaletteTitleIcon>
       {props.item.description || props.item.threadContentMatch ? (
-        <span className="flex min-w-0 flex-1 flex-col">
+        <span className={cn("flex min-w-0 flex-1 flex-col", props.item.dimmed && "opacity-64")}>
           <span className="flex min-w-0 items-center gap-1.5 text-sm text-foreground">
             {props.item.titleLeadingContent}
             <CommandPaletteTitle item={props.item} />
@@ -286,7 +288,12 @@ function CommandPaletteResultRow(props: {
           ) : null}
         </span>
       ) : (
-        <span className="flex min-w-0 flex-1 items-center gap-1.5 text-sm text-foreground">
+        <span
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-1.5 text-sm text-foreground",
+            props.item.dimmed && "opacity-64",
+          )}
+        >
           {props.item.titleLeadingContent}
           <CommandPaletteTitle item={props.item} />
         </span>

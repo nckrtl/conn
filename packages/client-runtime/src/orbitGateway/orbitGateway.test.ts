@@ -3,6 +3,7 @@ import {
   createOrbitGatewayClient,
   isFinalPairingError,
   OrbitGatewayError,
+  startableOrbitProject,
   type OrbitGatewayRequest,
   type OrbitGatewayWorkspace,
 } from "./client.ts";
@@ -449,7 +450,43 @@ describe("createOrbitGatewayClient", () => {
           instance_url: false,
         },
       ],
-      "GET /projects": [{ id: 3, slug: "mealou", name: "Mealou", node_id: 7, node_name: "beast" }],
+      "GET /projects": [
+        { id: 3, slug: "mealou", name: "Mealou", node_id: 7, node_name: "beast" },
+        {
+          id: 4,
+          slug: "hauzer",
+          name: "Hauzer",
+          node_id: null,
+          node_name: null,
+          instance_domain_suffix: null,
+          cloneable: false,
+          cloneable_reason: " No Node access ",
+          future_field: { ignored: true },
+          checks: [
+            { key: "default_instance", label: "Default Instance", status: "pass" },
+            {
+              key: "node_access",
+              status: "fail",
+              code: "node_access.required",
+              message: "Grant this Node access.",
+            },
+            { key: "source_access", status: "not_checked", label: 7 },
+            { key: "later", status: "unknown" },
+            { status: "pass" },
+          ],
+        },
+        {
+          id: 5,
+          slug: "nckrtl",
+          name: "nckrtl",
+          node_id: 7,
+          node_name: "beast",
+          instance_domain_suffix: ".nckrtl.test",
+          cloneable: true,
+          cloneable_reason: null,
+          checks: "not a list",
+        },
+      ],
       "POST /projects/3/instances": {
         id: 100,
         kind: "instance.create",
@@ -531,8 +568,60 @@ describe("createOrbitGatewayClient", () => {
       none,
       none,
     ]);
-    await expect(client.projects()).resolves.toEqual([
+    const projects = await client.projects();
+    const listing = { instanceDomainSuffix: null, cloneable: true, cloneableReason: null };
+    expect(projects).toEqual([
+      {
+        id: 3,
+        slug: "mealou",
+        name: "Mealou",
+        nodeId: 7,
+        nodeName: "beast",
+        ...listing,
+        checks: null,
+      },
+      {
+        id: 4,
+        slug: "hauzer",
+        name: "Hauzer",
+        nodeId: null,
+        nodeName: null,
+        instanceDomainSuffix: null,
+        cloneable: false,
+        cloneableReason: "No Node access",
+        checks: [
+          {
+            key: "default_instance",
+            label: "Default Instance",
+            status: "pass",
+            code: null,
+            message: null,
+          },
+          {
+            key: "node_access",
+            label: null,
+            status: "fail",
+            code: "node_access.required",
+            message: "Grant this Node access.",
+          },
+          { key: "source_access", label: null, status: "not_checked", code: null, message: null },
+        ],
+      },
+      {
+        id: 5,
+        slug: "nckrtl",
+        name: "nckrtl",
+        nodeId: 7,
+        nodeName: "beast",
+        ...listing,
+        instanceDomainSuffix: ".nckrtl.test",
+        checks: null,
+      },
+    ]);
+    expect(projects.map(startableOrbitProject)).toEqual([
       { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" },
+      null,
+      { id: 5, slug: "nckrtl", name: "nckrtl", nodeId: 7, nodeName: "beast" },
     ]);
     await expect(client.createThreadInstance(3, "fix-k3j9", "key-1")).resolves.toEqual({
       id: 100,

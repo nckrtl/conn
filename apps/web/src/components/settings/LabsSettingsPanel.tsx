@@ -12,6 +12,7 @@ import { searchableSetting } from "./settingsSearch";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { useOptionalSettingsScope, useSettingsScope } from "./SettingsScopeContext";
 import { firstManagedDenial, usePrimaryManagedPolicy } from "~/state/managedPolicy";
+import { useOrbitThreadsAvailable } from "~/orbit/environmentProvider";
 
 /** Features still settling in. */
 export function LabsSettingsPanel() {
@@ -55,9 +56,11 @@ function BoringSidebarRow() {
   );
 }
 
+/** Conn: only in the desktop app in Orbit mode, where the palette can read the Gateway. */
 function OrbitThreadsInPaletteRow() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
+  if (!useOrbitThreadsAvailable()) return null;
   return (
     <SettingsRow
       {...searchableSetting("orbit-threads-in-palette")}

@@ -1,5 +1,5 @@
 import type { OrbitGatewayProject } from "@t3tools/client-runtime/orbit-gateway";
-import { orbitThreadStartStep } from "@t3tools/client-runtime/orbit-gateway";
+import { orbitThreadStartStep, startableOrbitProject } from "@t3tools/client-runtime/orbit-gateway";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { BoxIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -28,7 +28,7 @@ import { toastManager } from "../components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { useEnvironmentProvider } from "./environmentProvider";
+import { useOrbitThreadsAvailable } from "./environmentProvider";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
 import {
   beginOrbitThreadStart,
@@ -38,12 +38,6 @@ import {
   stillOnStartRoute,
 } from "./orbitThreadStarts";
 import { useOrbitThreadStarts } from "./orbitThreadStartStore";
-
-/** Conn: thread starts in Orbit Projects need the desktop's Gateway client and the Orbit provider. */
-function useOrbitThreadsAvailable(): boolean {
-  const provider = useEnvironmentProvider((state) => state.provider);
-  return window.desktopBridge?.orbitGatewaySend !== undefined && provider === "orbit";
-}
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -119,7 +113,10 @@ export function OrbitThreadStartButton() {
     setLoadError(null);
     const client = desktopOrbitGatewayClient();
     if (!client) return;
-    client.projects().then(setProjects, (error: unknown) => setLoadError(message(error)));
+    client.projects().then(
+      (list) => setProjects(list.flatMap((row) => startableOrbitProject(row) ?? [])),
+      (error: unknown) => setLoadError(message(error)),
+    );
   };
   return (
     <>

@@ -222,8 +222,9 @@ one in flight.
 An old worktree-based Instance's checkout sits beside the Project's `default` checkout
 (`<apps>/<project>/t3code-<8 hex>`, older ones `t3-<8 hex>`). `isOrbitCheckout`
 (`apps/web/src/orbit/orbitCheckout.ts`) recognizes that path, so deleting such a thread never
-offers to remove the worktree; Orbit owns it. T3's own `<T3 home>/worktrees/<repo>/` folders never
-match.
+offers to remove the worktree; Orbit owns it. Folders under `<T3 home>/worktrees/<repo>/` or a
+`.t3` folder are T3's own and never match; an Orbit apps path named `worktrees` or inside `.t3`
+would be missed.
 
 In the desktop app in Orbit mode, New thread starts threads in Orbit Projects; there is no other
 switch and no other entry (Orbit's `docs/cli/instance/container/thread.mmd`). Outside Orbit mode,
@@ -329,8 +330,8 @@ clone record of `GET /api/v1/conn/environments` carries `project_id`, `project_n
 `project_slug`, `instance_name`, `node_name` and `instance_url` next to `instance_id`
 (`orbitInstanceFromEnvironment`; both ids or no facts, missing or mistyped fields read as
 null). The desktop keeps the last list's facts in localStorage, so the row shows right after
-start (`useOrbitInstance`). The same URL is the thread's preview URL when it has no Orbit
-workspace (`useOrbitThreadUrl`). The phone has no thread details panel like the desktop's, so it shows none of this; its
+start (`useOrbitInstance`). The same URL is where the thread's API panel starts
+(`useOrbitInstance(...)?.url` in `ChatView.tsx`). The phone has no thread details panel like the desktop's, so it shows none of this; its
 thread lists keep the environment label.
 
 The fallback, for a fork server outside Orbit mode: the server reads `/etc/orbit/instance` at

@@ -113,6 +113,7 @@ describe("workspace navigation", () => {
   ])(
     "waits for %s to close when the selected workspace goes away under it",
     async (_, pathname) => {
+      useUiStateStore.setState({ threadLastVisitedAtById: {} });
       await act(() => {
         renderer = create(<Probe />);
       });

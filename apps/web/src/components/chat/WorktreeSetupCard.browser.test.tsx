@@ -3,6 +3,29 @@ import { EnvironmentId, ThreadId, type WorktreeSetupSnapshot } from "@t3tools/co
 import { expect, it, vi } from "vite-plus/test";
 
 import { act, fakeTimers, render } from "../../../test/render";
+
+const linkMenu = vi.hoisted(() => ({ show: vi.fn(), openExternal: vi.fn(), copy: vi.fn() }));
+vi.mock(import("~/localApi"), async (original) => ({
+  ...(await original()),
+  readLocalApi: () =>
+    ({
+      contextMenu: { show: linkMenu.show },
+      shell: { openExternal: linkMenu.openExternal },
+    }) as never,
+}));
+
+function setupLinkMenu() {
+  linkMenu.show.mockReset().mockResolvedValue(null);
+  linkMenu.openExternal.mockReset().mockResolvedValue(undefined);
+  linkMenu.copy.mockReset().mockResolvedValue(undefined);
+  return vi.spyOn(navigator.clipboard, "writeText").mockImplementation(linkMenu.copy);
+}
+
+function rightClick(element: Element): boolean {
+  return element.dispatchEvent(
+    new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 4, clientY: 4 }),
+  );
+}
 import type { OrbitSetupView } from "~/orbit/orbitSetupView";
 import { OrbitReadyRow, OrbitSetupCard } from "./OrbitSetupCard";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
@@ -306,4 +329,41 @@ it("folds a finished Orbit start to Instance ready with Details open and Conn's 
   );
   await screen.getByRole("button", { name: "Details" }).click();
   expect(screen.getByText("Node").query()).toBeNull();
+});
+
+it("gives the ready line and Preview chip the chat link menu for the Instance address", async () => {
+  using _clipboard = setupLinkMenu();
+  const url = "https://meetup.dlf.test";
+  const threadRef = {
+    environmentId: EnvironmentId.make("env-41"),
+    threadId: ThreadId.make("thread-1"),
+  };
+  const view = {
+    readyMs: 64_000,
+    instanceName: "meetup",
+    nodeName: "beast",
+    url,
+    readyLine: "",
+    modelFallbackLine: null,
+    branch: null,
+    baseBranch: null,
+    dependenciesLine: null,
+  };
+  await using screen = await render(<OrbitReadyRow view={view} threadRef={threadRef} />);
+  const lineLink = screen.container.querySelector<HTMLAnchorElement>("[data-orbit-ready-line] a")!;
+  const chip = screen.container.querySelector<HTMLAnchorElement>(`dd a[href="${url}"]`)!;
+  expect(lineLink.href).toBe(`${url}/`);
+  expect(chip).not.toBeNull();
+
+  linkMenu.show.mockResolvedValue("copy-link");
+  // The native menu only offers Copy Link and text editing; the app's link menu replaces it.
+  expect(await act(async () => rightClick(lineLink))).toBe(false);
+  expect(linkMenu.show.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toContain(
+    "open-external",
+  );
+  await vi.waitFor(() => expect(linkMenu.copy).toHaveBeenCalledWith(url));
+
+  linkMenu.show.mockResolvedValue("open-external");
+  expect(await act(async () => rightClick(chip))).toBe(false);
+  await vi.waitFor(() => expect(linkMenu.openExternal).toHaveBeenCalledWith(url));
 });

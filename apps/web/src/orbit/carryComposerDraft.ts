@@ -15,7 +15,7 @@ export function carryComposerDraft(from: DraftId, to: DraftId): void {
   const store = useComposerDraftStore.getState();
   const source = store.getComposerDraft(from);
   // The move replaces the target's prompt: an empty source must not erase text left there.
-  if (!composerDraftHasUserContent(source)) return;
+  if (source === null || !composerDraftHasUserContent(source)) return;
   // A model the user never picked yields to the Instance project's default.
   const model =
     source.modelSelectionExplicit === true && source.activeProvider !== null

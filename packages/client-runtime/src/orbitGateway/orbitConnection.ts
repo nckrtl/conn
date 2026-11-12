@@ -57,6 +57,15 @@ const isGatewayError = Schema.is(OrbitGatewayError);
 const UNKNOWN_DEVICE =
   "Orbit does not know this WireGuard address as an active Node. Add this device as a Node with the Orbit CLI, then Reload.";
 
+/**
+ * The line under this device's Node name: its WireGuard address, or, when `me` named none, the same
+ * line the Connection page's Device known check shows.
+ */
+export function orbitSignedInText(node: Pick<OrbitGatewayNode, "wireguardIp">): string {
+  const address = gatewayText(node.wireguardIp);
+  return address === null ? UNKNOWN_DEVICE : `Signed in to gateway.orbit as ${address}`;
+}
+
 /** The Gateway answered but failed (HTTP 5xx): its own message, or Conn's when it sent none. */
 function serverErrorMessage(error: OrbitGatewayError): string {
   const text = gatewayText(error.message);
@@ -187,6 +196,8 @@ export function orbitNodeServers(input: {
 }): OrbitNodeServer[] {
   const seen = new Set<string>();
   const nodes: OrbitNodeServer[] = [];
+  // An empty address must not match a server whose URL does not parse to a host.
+  const deviceAddress = gatewayText(input.device?.wireguardIp);
   for (const environment of input.environments) {
     if (
       environment.instanceId !== null ||
@@ -211,7 +222,7 @@ export function orbitNodeServers(input: {
             : "pairing",
       isThisDevice:
         input.device !== null &&
-        (address === input.device.wireguardIp ||
+        ((deviceAddress !== null && address === deviceAddress) ||
           gatewayText(environment.nodeName) === input.device.name),
     });
   }

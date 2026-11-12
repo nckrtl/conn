@@ -803,12 +803,12 @@ export function isFinalPairingError(error: unknown): boolean {
 
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
-/** A string the way the Gateway stores it: trimmed, and null when nothing is left. */
 /** The message of an `OrbitGatewayError` whose reply carried no error envelope message. */
 export function gatewayFallbackMessage(status: number): string {
   return `The Orbit Gateway answered ${status}.`;
 }
 
+/** A string the way the Gateway stores it: trimmed, and null when nothing is left. */
 export function gatewayText(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;

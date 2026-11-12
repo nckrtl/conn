@@ -5,7 +5,7 @@ import {
   type OrbitGatewayEnvironment,
   type OrbitGatewayResponse,
 } from "./client.ts";
-import { orbitConnectionChecks, orbitNodeServers } from "./orbitConnection.ts";
+import { orbitConnectionChecks, orbitNodeServers, orbitSignedInText } from "./orbitConnection.ts";
 
 /** The error `me` throws when the desktop transport fails or the Gateway answers `response`. */
 async function meError(failure: { transport: string } | OrbitGatewayResponse): Promise<unknown> {
@@ -114,9 +114,15 @@ describe("orbitConnectionChecks", () => {
       status: 200,
       body: JSON.stringify({ data: { id: 45, name: "nick", profile: null, ...address } }),
     }));
-    const checks = orbitConnectionChecks({ status: "ok", node: await client.me() });
+    const node = await client.me();
+    const checks = orbitConnectionChecks({ status: "ok", node });
     expect(states(checks)).toEqual(["gateway:pass", "certificate:pass", "device:fail"]);
     expect(checks[2]!.message).toMatch(/not know this WireGuard address as an active Node/);
+    // The other surfaces that show this device say the same, never "… as " with nothing after it.
+    expect(orbitSignedInText(node)).toBe(checks[2]!.message);
+    expect(orbitSignedInText({ wireguardIp: "10.44.0.12" })).toBe(
+      "Signed in to gateway.orbit as 10.44.0.12",
+    );
   });
 
   it("says why a check after a failure did not run", async () => {
@@ -232,6 +238,15 @@ describe("orbitNodeServers", () => {
       device: null,
     });
     expect(node).toMatchObject({ name: "10.44.0.9", address: "10.44.0.9", state: "pairing" });
+  });
+
+  it("never matches this device by an empty address", () => {
+    const [node] = orbitNodeServers({
+      environments: [server("odd", { url: "" })],
+      paired: new Set(),
+      device: { name: "nick", wireguardIp: "" },
+    });
+    expect(node).toMatchObject({ address: "", isThisDevice: false });
   });
 
   it("prefers the Gateway's Node name and reads IPv6 addresses", () => {

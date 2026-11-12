@@ -3,6 +3,7 @@ import {
   DESKTOP_DEVICE_SECTION,
   orbitConnectionChecks,
   orbitNodeServers,
+  orbitSignedInText,
   type EnvironmentProvider,
   type OrbitConnectionCheckState,
   type OrbitConnectionProbe,
@@ -316,10 +317,7 @@ function OrbitDeviceSection(props: {
     <SettingsSection id="orbit-device" title="Orbit Gateway">
       <SettingsRow
         title={view?.node.name ?? (loadError ? "Gateway unreachable" : "Connecting…")}
-        description={
-          loadError ??
-          (view ? `Signed in to gateway.orbit as ${view.node.wireguardIp}` : "gateway.orbit")
-        }
+        description={loadError ?? (view ? orbitSignedInText(view.node) : "gateway.orbit")}
         control={
           <Button size="xs" variant="outline" onClick={props.onReload}>
             Reload
@@ -430,7 +428,7 @@ export function OrbitConnectionPage() {
           title={node?.name ?? "This device"}
           description={
             node
-              ? `Signed in to gateway.orbit as ${node.wireguardIp}`
+              ? orbitSignedInText(node)
               : probe.status === "checking"
                 ? "Connecting to gateway.orbit…"
                 : "The Node name and WireGuard address show once all checks pass."

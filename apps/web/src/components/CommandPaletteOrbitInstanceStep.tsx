@@ -20,7 +20,6 @@ import {
 import { checkOrbitInstanceName } from "../orbit/orbitPaletteProjects";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { ITEM_ICON_CLASS, type CommandPaletteGroup } from "./CommandPalette.logic";
-import { Button } from "./ui/button";
 import { Skeleton } from "./ui/skeleton";
 
 /** The Project the step creates in: a listed row, or the draft's own copy while the list loads. */
@@ -140,7 +139,8 @@ export function OrbitNewInstanceSection(props: {
   return (
     <div className="px-2 pt-2" data-orbit-new-instance>
       <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">New instance</div>
-      <div className="flex items-center gap-2 rounded-sm border border-input bg-background px-2 py-1 focus-within:border-ring">
+      {/* The surface of Conn's Input (a step lighter than the palette in dark), with a calm focus. */}
+      <div className="flex h-10 items-center gap-2 rounded-xl border border-input bg-background ps-2 pe-1.5 not-dark:bg-clip-padding transition-[border-color,box-shadow] focus-within:border-foreground/55 focus-within:ring-3 focus-within:ring-inset focus-within:ring-foreground/8 dark:bg-input/32">
         <span className="flex min-w-0 flex-1 items-baseline">
           <input
             ref={inputRef}
@@ -164,15 +164,15 @@ export function OrbitNewInstanceSection(props: {
             </span>
           ) : null}
         </span>
-        <Button
-          size="icon-xs"
-          variant="ghost"
+        <button
+          type="button"
           aria-label="Create instance"
+          className="flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-md bg-foreground text-background outline-none hover:bg-foreground/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-default disabled:bg-foreground/12 disabled:text-muted-foreground"
           disabled={!step.hint.plusEnabled}
           onClick={create}
         >
-          <PlusIcon />
-        </Button>
+          <PlusIcon className="size-3.5" />
+        </button>
       </div>
       <div
         role="status"

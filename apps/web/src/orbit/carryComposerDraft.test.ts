@@ -48,6 +48,16 @@ describe("carryComposerDraft", () => {
     expect(state.getComposerDraft(orbitDraft)?.prompt ?? "").toBe("");
   });
 
+  it("leaves a model the user never picked to the Instance's project", () => {
+    const store = setup();
+    store.setPrompt(orbitDraft, "Fix the login form");
+    store.setModelSelection(orbitDraft, model);
+    carryComposerDraft(orbitDraft, instanceDraft);
+    expect(
+      useComposerDraftStore.getState().getComposerDraft(instanceDraft)?.modelSelectionByProvider,
+    ).toEqual({});
+  });
+
   it("keeps the prompt where it is when the pick reopened the same draft", () => {
     const store = setup();
     store.setPrompt(orbitDraft, "Fix the login form");

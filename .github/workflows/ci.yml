@@ -294,8 +294,9 @@ jobs:
       id-token: write
     # The fork's 4 vCPU runners need 9-10 minutes to test every package, against a
     # 10 minute limit. Mobile and the lint plugin run longest and hold two of
-    # the four slots for minutes, so the fork gives each its own runner. `only`
-    # runs just those packages; `skip` runs the rest.
+    # the four slots for minutes, so the fork gives each its own runner, and
+    # desktop, shared and client-runtime share a fourth. `only` runs just those
+    # packages; `skip` runs the rest.
     name: Test${{ matrix.shard.total > 1 && format(' {0}', matrix.shard.index) || '' }}
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test != 'false' }}
@@ -304,7 +305,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1,"only":"","skip":""}]' || '[{"index":1,"total":3,"only":"","skip":"@t3tools/mobile @t3tools/oxlint-plugin-t3code"},{"index":2,"total":3,"only":"@t3tools/mobile","skip":""},{"index":3,"total":3,"only":"@t3tools/oxlint-plugin-t3code","skip":""}]') }}
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1,"only":"","skip":""}]' || '[{"index":1,"total":4,"only":"","skip":"@t3tools/mobile @t3tools/oxlint-plugin-t3code @t3tools/desktop @t3tools/shared @t3tools/client-runtime"},{"index":2,"total":4,"only":"@t3tools/mobile","skip":""},{"index":3,"total":4,"only":"@t3tools/oxlint-plugin-t3code","skip":""},{"index":4,"total":4,"only":"@t3tools/desktop @t3tools/shared @t3tools/client-runtime","skip":""}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -446,17 +447,17 @@ jobs:
       contents: read
       id-token: write
     # The fork's 4 vCPU runners take about 9 minutes for the whole web suite,
-    # against a 10 minute limit, so the fork splits it over two runners.
+    # so the fork splits it over four runners to keep each job under 5 minutes.
     name: Test Web${{ matrix.shard.total > 1 && format(' {0}', matrix.shard.index) || '' }}
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test_web != 'false' }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
-    # The fork's shards take ~6 minutes, so a retry needs room.
+    # A retry runs the shard twice, so it needs room.
     timeout-minutes: ${{ github.repository == 'pingdotgg/t3code' && 10 || 20 }}
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1}]' || '[{"index":1,"total":2},{"index":2,"total":2}]') }}
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1}]' || '[{"index":1,"total":4},{"index":2,"total":4},{"index":3,"total":4},{"index":4,"total":4}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -520,7 +521,6 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:

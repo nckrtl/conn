@@ -271,10 +271,16 @@ describe("orbitSetupStages", () => {
 });
 
 describe("orbitSetupReadyMs", () => {
-  it("counts from the first stage to the sent message", () => {
-    expect(orbitSetupReadyMs({ ...connected, sentAt: 60 })).toBe(50);
+  it("adds the create to Connect through the sent message", () => {
+    expect(orbitSetupReadyMs({ ...connected, sentAt: 60 })).toBe(30 + 19);
     expect(orbitSetupReadyMs(connected)).toBeNull();
     const existing = { ...connected, orbitInstanceKind: "existing" as const, sentAt: 60 };
     expect(orbitSetupReadyMs(existing)).toBe(19);
+  });
+
+  it("leaves out the time a failed Connect waited for Retry", () => {
+    // Created by 40; Connect failed, and Retry 1000 later stamped Connect anew.
+    const retried = { ...connected, connectStartedAt: 1_041, sentAt: 1_060 };
+    expect(orbitSetupReadyMs(retried)).toBe(30 + 19);
   });
 });

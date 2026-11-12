@@ -94,4 +94,19 @@ describe("OrbitPendingThreadView", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
+
+  it("Change name keeps the failed start when the draft cannot open", async () => {
+    setup(
+      start({
+        createStartedAt: 1,
+        error: "The name pricing-page is taken.",
+        errorCode: "instance.name_taken",
+      }),
+    );
+    await using screen = await render(view(), { router: "/orbit/s1" });
+    // The Labs switch is off in tests, so the draft does not open.
+    await screen.getByRole("button", { name: "Change name" }).click();
+    await expect.element(screen.getByText("Instance setup failed")).toBeVisible();
+    expect(readStored()).toHaveLength(1);
+  });
 });

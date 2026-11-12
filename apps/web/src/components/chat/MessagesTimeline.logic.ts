@@ -501,6 +501,8 @@ const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 export interface OrbitReadyTimelineInput {
   readonly view: OrbitReadyView;
   readonly threadRef: ScopedThreadRef;
+  /** The start's first message; the row follows it and is left out while it is not loaded. */
+  readonly messageId: string;
 }
 
 export type MessagesTimelineRow = MessagesTimelineRowContent & {
@@ -2236,11 +2238,12 @@ export function deriveMessagesTimelineRows(input: {
   }
 
   if (input.orbitReady) {
-    const firstUserRowIndex = nextRows.findIndex(
-      (row) => row.kind === "message" && row.message.role === "user",
+    const messageId = input.orbitReady.messageId;
+    const firstMessageIndex = nextRows.findIndex(
+      (row) => row.kind === "message" && row.message.id === messageId,
     );
-    if (firstUserRowIndex >= 0) {
-      nextRows.splice(firstUserRowIndex + 1, 0, {
+    if (firstMessageIndex >= 0) {
+      nextRows.splice(firstMessageIndex + 1, 0, {
         kind: "orbit-ready",
         id: ORBIT_READY_ROW_ID,
         createdAt: null,

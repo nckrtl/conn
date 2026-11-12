@@ -18,6 +18,7 @@ export function useOrbitReady(
   if (start === null) return null;
   return {
     view: orbitReadyView(start, url),
+    messageId: start.messageId,
     threadRef: scopeThreadRef(
       EnvironmentId.make(start.environmentId!),
       ThreadId.make(start.threadId),

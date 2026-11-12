@@ -269,4 +269,15 @@ describe("sendOrbitDraft", () => {
     expect(readStored()).toEqual([]);
     expect(runAtomCommand).not.toHaveBeenCalled();
   });
+
+  it("drops an old dialog start whose send finished before a quit, without running it", async () => {
+    beginOrbitThreadStart(project, "List the files", "/");
+    const [old] = readStored();
+    window.localStorage.setItem(
+      "conn:orbit-thread-starts:v1",
+      JSON.stringify([{ ...old, environmentId: "clone", connected: true, sentAt: 4 }]),
+    );
+    expect(await runSavedOrbitThreadStart(client, old!.id)).toBeNull();
+    expect(readStored()).toEqual([]);
+  });
 });

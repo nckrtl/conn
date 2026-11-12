@@ -97,7 +97,13 @@ const orbitStage = (
 
 function orbitCard(
   view: Partial<OrbitSetupView>,
-  actions = { retry: vi.fn(), name: vi.fn(), dismiss: vi.fn() },
+  actions = {
+    retry: vi.fn(),
+    name: vi.fn(),
+    branch: vi.fn(),
+    open: vi.fn(),
+    dismiss: vi.fn(),
+  },
 ) {
   const value: OrbitSetupView = {
     phase: "running",
@@ -111,6 +117,8 @@ function orbitCard(
     ],
     error: null,
     canChangeName: false,
+    canChangeBranch: false,
+    openInstance: null,
     instanceStays: false,
     ...view,
   };
@@ -121,6 +129,8 @@ function orbitCard(
         view={value}
         onRetry={actions.retry}
         onChangeName={actions.name}
+        onChangeBranch={actions.branch}
+        onOpenInstance={actions.open}
         onDismiss={actions.dismiss}
       />
     ),
@@ -204,6 +214,9 @@ it("folds a finished Orbit start to Instance ready with Details open and Conn's 
     url: "https://pricing-page.create-bench.test",
     readyLine: "",
     modelFallbackLine: "This Instance does not offer claude-opus-5-5, so the agent uses gpt-5.5.",
+    branch: "feature/pricing",
+    baseBranch: "develop",
+    dependenciesLine: "Dependencies and build come from the default branch.",
   };
   await using screen = await render(<OrbitReadyRow view={view} threadRef={threadRef} />);
   await expect.element(screen.getByText("Instance ready")).toBeVisible();
@@ -212,6 +225,8 @@ it("folds a finished Orbit start to Instance ready with Details open and Conn's 
     .toHaveAttribute("aria-expanded", "true");
   await expect.element(screen.getByText("pricing-page", { exact: true })).toBeVisible();
   await expect.element(screen.getByText(view.modelFallbackLine)).toBeVisible();
+  await expect.element(screen.getByText("develop", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText(view.dependenciesLine)).toBeVisible();
   const line = screen.container.querySelector("[data-orbit-ready-line]");
   expect(line?.textContent).toBe(
     "Your Instance is ready. You can preview it at https://pricing-page.create-bench.test while I work on your request.",

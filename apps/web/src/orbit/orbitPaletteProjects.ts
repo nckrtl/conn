@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import type {
+  OrbitGatewayBranches,
   OrbitGatewayClient,
+  OrbitGatewayEnvironment,
   OrbitGatewayInstanceNameCheck,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useEffect } from "react";
@@ -83,6 +85,25 @@ export async function checkOrbitInstanceName(
   const client = desktopOrbitGatewayClient();
   if (client === null) throw new Error("The Orbit Gateway is not available here.");
   return client.checkInstanceName(projectId, name);
+}
+
+/** The branch control's read of a Project's branches. */
+export async function readOrbitBranches(
+  projectId: number,
+  query: string,
+): Promise<OrbitGatewayBranches> {
+  const client = desktopOrbitGatewayClient();
+  if (client === null) throw new Error("The Orbit Gateway is not available here.");
+  return client.branches(projectId, query);
+}
+
+/** The Gateway's environment list: the palette's last good read, else a fresh one. */
+export async function readOrbitEnvironments(): Promise<readonly OrbitGatewayEnvironment[]> {
+  const { state } = useOrbitPaletteProjectsStore.getState();
+  if (state.status === "loaded") return state.environments;
+  const client = desktopOrbitGatewayClient();
+  if (client === null) throw new Error("The Orbit Gateway is not available here.");
+  return client.environments();
 }
 
 /** The environments this device has paired with (saved in its catalog). */

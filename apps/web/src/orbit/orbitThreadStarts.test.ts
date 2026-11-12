@@ -111,6 +111,7 @@ async function startAndSend(selected: string | null, between: () => void = () =>
       modelSelection: null,
       runtimeMode: "full-access",
       interactionMode: "default",
+      branchControl: false,
     }),
     openPending: () => {},
     clearDraft: () => {},
@@ -188,7 +189,11 @@ describe("sendOrbitDraft", () => {
     instanceId: ProviderInstanceId.make("claude"),
     model: "claude-opus-5-5",
   };
-  const send = (draftTarget: OrbitDraftTarget, navigation?: Promise<void>) => {
+  const send = (
+    draftTarget: OrbitDraftTarget,
+    navigation?: Promise<void>,
+    branchControl = false,
+  ) => {
     const events: string[] = [];
     const sent = sendOrbitDraft({
       start: buildOrbitDraftStart({
@@ -197,6 +202,7 @@ describe("sendOrbitDraft", () => {
         modelSelection,
         runtimeMode: "approval-required",
         interactionMode: "plan",
+        branchControl,
       }),
       openPending: (route) => {
         events.push(`open ${route}`);
@@ -245,6 +251,22 @@ describe("sendOrbitDraft", () => {
     expect(events).toEqual(["open /orbit/start-1", "clear after 1 saved"]);
     // The start machine sends later; nothing goes through a T3 server now.
     expect(runAtomCommand).not.toHaveBeenCalled();
+  });
+
+  it("saves the branch choice only with branch control on, and the default branch either way", () => {
+    const onBranch: OrbitDraftTarget = {
+      ...target,
+      branch: { mode: "existing", name: "feature/login" },
+      defaultBranch: "main",
+    };
+    expect(send(onBranch).start).toMatchObject({ branch: null, defaultBranch: "main" });
+    window.localStorage.clear();
+    expect(send(onBranch, undefined, true).start).toMatchObject({
+      branch: { mode: "existing", name: "feature/login" },
+      defaultBranch: "main",
+    });
+    window.localStorage.clear();
+    expect(send({ ...onBranch, branch: null }, undefined, true).start.branch).toBeNull();
   });
 
   it("starts in an existing, unpaired Instance without a create", () => {

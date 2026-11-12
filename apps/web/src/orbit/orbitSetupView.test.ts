@@ -1,5 +1,6 @@
 import {
   newOrbitThreadStart,
+  type OrbitGatewayBranchSelection,
   type OrbitGatewayOperation,
   type OrbitThreadStart,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -176,6 +177,121 @@ describe("orbitSetupView", () => {
   });
 });
 
+describe("orbitSetupView for branch refusals", () => {
+  const newBranch = { mode: "new", from: "develop" } as const;
+  const onBranch = { mode: "existing", name: "feature/login" } as const;
+  /** Refused at admission: the HTTP answer to the create, so no Instance exists. */
+  const refused = (
+    branch: OrbitGatewayBranchSelection | null,
+    errorCode: string,
+    errorDetails: Record<string, unknown> = {},
+  ): OrbitThreadStart => ({
+    ...fresh,
+    branch,
+    defaultBranch: "main",
+    createStartedAt: 1,
+    error: "refused",
+    errorCode,
+    errorDetails,
+  });
+  /** Failed as a create step: the Operation's code, and the Instance stays. */
+  const stepFailed = (errorCode: string): OrbitThreadStart => ({
+    ...creating,
+    branch: newBranch,
+    defaultBranch: "main",
+    createOperationId: null,
+    error: `Orbit could not create the clone (${errorCode}).`,
+    errorCode,
+  });
+  const card = (start: OrbitThreadStart) => {
+    const view = orbitSetupView(start);
+    return {
+      error: view.error,
+      changeName: view.canChangeName,
+      changeBranch: view.canChangeBranch,
+      open: view.openInstance?.name ?? null,
+      stays: view.instanceStays,
+    };
+  };
+  const quiet = { changeName: false, changeBranch: false, open: null, stays: false };
+
+  it.each([
+    [
+      "in use, holder known",
+      refused(onBranch, "branch.in_use", { instance: { id: 42, name: "login" } }),
+      {
+        ...quiet,
+        error: "Instance login already works on feature/login.",
+        changeBranch: true,
+        open: "login",
+      },
+    ],
+    [
+      "in use, holder out of reach",
+      refused(onBranch, "branch.in_use"),
+      { ...quiet, error: "Another Instance already works on feature/login.", changeBranch: true },
+    ],
+    [
+      "in use for a new branch named after the Instance",
+      refused(newBranch, "branch.in_use"),
+      { ...quiet, error: "Another Instance already works on pricing-page.", changeBranch: true },
+    ],
+    [
+      "branch gone",
+      refused(onBranch, "branch.not_found", { field: "branch.name" }),
+      { ...quiet, error: "Branch feature/login no longer exists.", changeBranch: true },
+    ],
+    [
+      "base gone",
+      refused(newBranch, "branch.not_found", { field: "branch.from" }),
+      { ...quiet, error: "Branch develop no longer exists.", changeBranch: true },
+    ],
+    [
+      "new branch name exists",
+      refused(newBranch, "branch.exists", { field: "name", branch: "fix-login" }),
+      { ...quiet, error: "A branch named fix-login already exists.", changeName: true },
+    ],
+    [
+      "name used with another branch",
+      refused(newBranch, "instance.placement_conflict"),
+      {
+        ...quiet,
+        error: "This name was already used with another branch. Choose another name.",
+        changeName: true,
+      },
+    ],
+    [
+      "repository unreadable",
+      refused(newBranch, "source.head_unavailable"),
+      { ...quiet, error: "Could not read the repository." },
+    ],
+    [
+      "malformed branch object",
+      refused(newBranch, "validation.failed"),
+      { ...quiet, error: "refused" },
+    ],
+    [
+      "clone step failed",
+      stepFailed("instance.create_clone_failed"),
+      { ...quiet, error: "Orbit could not prepare the branch.", stays: true },
+    ],
+    [
+      "workspace step failed",
+      stepFailed("instance.create_workspace_failed"),
+      { ...quiet, error: "Orbit could not set up the workspace.", stays: true },
+    ],
+  ])("%s", (_name, start, expected) => {
+    expect(card(start)).toEqual(expected);
+  });
+
+  it("offers no Change branch or Change name once the create made an Instance", () => {
+    const made = { ...refused(onBranch, "branch.in_use"), instanceId: 41 };
+    expect(card(made)).toMatchObject({ changeBranch: false, changeName: false, stays: true });
+    const exists = { ...refused(newBranch, "branch.exists"), instanceId: 41 };
+    expect(card(exists)).toMatchObject({ changeName: false, stays: true });
+  });
+});
+
 describe("orbitReadyView", () => {
   it("times the setup from the create to the sent message and builds Conn's ready line", () => {
     expect(orbitReadyView(sent, "https://pricing-page.nckrtl.test")).toEqual({
@@ -186,8 +302,41 @@ describe("orbitReadyView", () => {
       readyLine:
         "Your Instance is ready. You can preview it at https://pricing-page.nckrtl.test while I work on your request.",
       modelFallbackLine: null,
+      branch: null,
+      baseBranch: null,
+      dependenciesLine: null,
     });
     expect(orbitReadyView(sent, null).readyLine).toBe("Your Instance is ready.");
+  });
+
+  it("shows the result's branch and base, and the dependencies line only off the default branch", () => {
+    const ready = (branch: OrbitGatewayBranchSelection | null, result: [string, string | null]) =>
+      orbitReadyView(
+        {
+          ...sent,
+          branch,
+          defaultBranch: "main",
+          resultBranch: result[0],
+          resultBaseBranch: result[1],
+        },
+        null,
+      );
+    const line = "Dependencies and build come from the default branch.";
+    expect(ready(null, ["pricing-page", "main"])).toMatchObject({
+      branch: "pricing-page",
+      baseBranch: "main",
+      dependenciesLine: null,
+    });
+    expect(
+      ready({ mode: "new", from: "main" }, ["pricing-page", "main"]).dependenciesLine,
+    ).toBeNull();
+    expect(ready({ mode: "new", from: "develop" }, ["pricing-page", "develop"])).toMatchObject({
+      baseBranch: "develop",
+      dependenciesLine: line,
+    });
+    expect(
+      ready({ mode: "existing", name: "feature/login" }, ["feature/login", null]),
+    ).toMatchObject({ branch: "feature/login", baseBranch: null, dependenciesLine: line });
   });
 
   it("says when the agent uses the clone's default model", () => {

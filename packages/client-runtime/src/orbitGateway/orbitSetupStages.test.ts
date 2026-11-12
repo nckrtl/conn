@@ -271,16 +271,18 @@ describe("orbitSetupStages", () => {
 });
 
 describe("orbitSetupReadyMs", () => {
-  it("adds the create to Connect through the sent message", () => {
-    expect(orbitSetupReadyMs({ ...connected, sentAt: 60 })).toBe(30 + 19);
+  it("adds up the stages", () => {
+    // Create 10-40, Connect 41-50, Start agent 51-60.
+    expect(orbitSetupReadyMs({ ...connected, sentAt: 60 })).toBe(30 + 9 + 9);
     expect(orbitSetupReadyMs(connected)).toBeNull();
     const existing = { ...connected, orbitInstanceKind: "existing" as const, sentAt: 60 };
-    expect(orbitSetupReadyMs(existing)).toBe(19);
+    expect(orbitSetupReadyMs(existing)).toBe(9 + 9);
   });
 
-  it("leaves out the time a failed Connect waited for Retry", () => {
-    // Created by 40; Connect failed, and Retry 1000 later stamped Connect anew.
-    const retried = { ...connected, connectStartedAt: 1_041, sentAt: 1_060 };
-    expect(orbitSetupReadyMs(retried)).toBe(30 + 19);
+  it("leaves out the time a failed stage waited for Retry", () => {
+    // The send failed; Retry 1000 later stamped Start agent anew.
+    expect(orbitSetupReadyMs({ ...connected, agentStartedAt: 1_051, sentAt: 1_060 })).toBe(
+      30 + 9 + 9,
+    );
   });
 });

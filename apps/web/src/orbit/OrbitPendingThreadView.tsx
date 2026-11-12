@@ -103,7 +103,7 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
       toastManager.add({
         type: "error",
         title: "Could not reopen the draft",
-        description: "Turn on Labs › Orbit threads in the palette, then try again.",
+        description: `Start a new thread in ${start.projectSlug} from the palette instead.`,
       });
       return;
     }

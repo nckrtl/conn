@@ -198,6 +198,27 @@ export function recordPaired(
     : { ...state, pairedByOrbit: [...state.pairedByOrbit, environmentId] };
 }
 
+/** Conn: drops every record of a server Orbit removed, so no sync touches it again. */
+export function forgetOrbitEnvironment(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+): OrbitEnvironmentState {
+  const without = <T>(record: Readonly<Record<string, T>> | undefined) =>
+    record === undefined
+      ? undefined
+      : Object.fromEntries(Object.entries(record).filter(([id]) => id !== environmentId));
+  const accessPairedAt = without(state.accessPairedAt);
+  const pairAttemptedAt = without(state.pairAttemptedAt);
+  const pairRefusedAt = without(state.pairRefusedAt);
+  return {
+    disabledByOrbit: state.disabledByOrbit.filter((id) => id !== environmentId),
+    pairedByOrbit: state.pairedByOrbit.filter((id) => id !== environmentId),
+    ...(accessPairedAt === undefined ? {} : { accessPairedAt }),
+    ...(pairAttemptedAt === undefined ? {} : { pairAttemptedAt }),
+    ...(pairRefusedAt === undefined ? {} : { pairRefusedAt }),
+  };
+}
+
 export function parseEnvironmentProvider(value: unknown): EnvironmentProvider {
   return value === "orbit" ? "orbit" : "default";
 }

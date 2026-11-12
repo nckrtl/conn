@@ -11,3 +11,5 @@ export * from "./orbitInstance.ts";
 export * from "./instanceList.ts";
 export * from "./orbitConnection.ts";
 export * from "./profilePage.ts";
+export * from "./instanceGit.ts";
+export * from "./instanceRemoval.ts";

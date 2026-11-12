@@ -64,6 +64,20 @@ export function saveStart(start: OrbitThreadStart): void {
   updateStarts((starts) => starts.map((entry) => (entry.id === start.id ? start : entry)));
 }
 
+/** Conn: drops the saved starts of an Instance Orbit destroyed, sent or not. */
+export function dropOrbitInstanceStarts(
+  instanceId: number,
+  environmentIds: readonly string[],
+): void {
+  updateStarts((starts) =>
+    starts.filter(
+      (start) =>
+        start.instanceId !== instanceId &&
+        (start.environmentId === null || !environmentIds.includes(start.environmentId)),
+    ),
+  );
+}
+
 /** Instances whose server a start pairs with itself; the environment sync leaves them alone. */
 export function heldOrbitInstanceIds(): number[] {
   return readStored().flatMap((start) =>

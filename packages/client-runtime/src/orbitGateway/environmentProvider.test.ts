@@ -4,6 +4,7 @@ import type { OrbitGatewayEnvironment } from "./client.ts";
 import {
   ACCESS_PAIRING_RETRY_MS,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  forgetOrbitEnvironment,
   PAIRING_RETRY_MS,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
@@ -253,5 +254,26 @@ describe("planEnvironmentProvider", () => {
       state: tried,
     });
     expect(toDefault.state.pairAttemptedAt).toEqual({ spike: 42 });
+  });
+
+  it("forgets a destroyed Instance's server everywhere and keeps the others' records", () => {
+    const both = (state: OrbitEnvironmentState, id: string) =>
+      recordPairingRefused(
+        recordPairingAttempt(recordAccessPairing(recordPaired(state, id), id, 1), id, 2),
+        { environmentId: id, registeredAt: "2026-11-12T08:00:00+00:00" },
+      );
+    const state = both(
+      both({ ...EMPTY_ORBIT_ENVIRONMENT_STATE, disabledByOrbit: ["gone"] }, "gone"),
+      "kept",
+    );
+    const forgotten = forgetOrbitEnvironment(state, "gone");
+    expect(JSON.stringify(forgotten)).not.toContain("gone");
+    expect(forgotten).toEqual({
+      disabledByOrbit: [],
+      pairedByOrbit: ["kept"],
+      accessPairedAt: { kept: 1 },
+      pairAttemptedAt: { kept: 2 },
+      pairRefusedAt: { kept: "2026-11-12T08:00:00+00:00" },
+    });
   });
 });

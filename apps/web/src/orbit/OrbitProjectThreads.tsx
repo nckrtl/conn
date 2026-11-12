@@ -33,6 +33,7 @@ import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
 import {
   beginOrbitThreadStart,
   dismissOrbitThreadStart,
+  orbitPendingThreadPath,
   retryOrbitThreadStart,
   runSavedOrbitThreadStart,
   stillOnStartRoute,
@@ -58,16 +59,21 @@ export function OrbitThreadStartRunner() {
     const client = desktopOrbitGatewayClient();
     if (!available || client === null) return;
     for (const start of starts) {
-      if (start.error !== null) continue;
+      if (start.error !== null || start.sentAt != null) continue;
       void runSavedOrbitThreadStart(client, start.id).then((sent) => {
+        // A pending thread's own view hands over and shows the error; elsewhere a toast does.
+        const onPendingThread =
+          start.pendingThread === true &&
+          router.state.location.pathname === orbitPendingThreadPath(start.id);
         if (sent !== null) {
           const open = () =>
             void navigate({
               to: "/$environmentId/$threadId",
               params: buildThreadRouteParams(scopeThreadRef(sent.environmentId, sent.threadId)),
             });
+          if (onPendingThread) return;
           // Open the thread only when Nick is still where he started it; otherwise offer it.
-          if (stillOnStartRoute(start.id, router.state.location.pathname)) {
+          if (!start.pendingThread && stillOnStartRoute(start.id, router.state.location.pathname)) {
             open();
             return;
           }
@@ -87,7 +93,7 @@ export function OrbitThreadStartRunner() {
         const stopped = useOrbitThreadStarts
           .getState()
           .starts.find((entry) => entry.id === start.id);
-        if (stopped?.error) {
+        if (stopped?.error && !onPendingThread) {
           toastManager.add({
             type: "error",
             title: `Could not start the thread in ${stopped.projectSlug}`,
@@ -239,7 +245,10 @@ const STEP_LABELS = {
 /** The thread starts still on their way, with Dismiss, and Retry for one that stopped. */
 export function OrbitThreadStartList() {
   const available = useOrbitThreadsAvailable();
-  const starts = useOrbitThreadStarts((state) => state.starts);
+  // Palette starts show as pending thread rows instead.
+  const starts = useOrbitThreadStarts((state) => state.starts).filter(
+    (start) => !start.pendingThread,
+  );
   if (!available || starts.length === 0) return null;
   return (
     <ul className="mt-1 grid gap-0.5" aria-label="Orbit thread starts">

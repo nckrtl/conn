@@ -288,6 +288,18 @@ the primary environment, for its model list. The context row shows the Node and
 for the runner above instead of sending through a T3 server, then clears the draft. This is not the
 older worktree env mode `"orbit"`.
 
+Send then opens the start's pending thread at `/orbit/$startId` (`OrbitPendingThreadView.tsx`): the
+message and a setup card built on the client from the saved start and the runner's reads of the
+create Operation (`orbitSetupView.ts`), since the clone's server does not exist yet. The worktree
+setup contract is untouched. A pending start also shows as a sidebar row and survives a reload.
+Once the clone's server took the first message and the thread reached the window, the route is
+replaced by the real thread. A palette start stays saved after the send (the newest 50), so the
+real thread finds it by thread id and Conn draws "Instance ready", its Details and the ready line
+itself; none of it goes to the agent. A failed start offers Retry, Change name (only for
+`instance.name_taken`) and Dismiss, which drops only the saved start; Instances are removed in
+Orbit. If the clone lacks the composer's provider, the first turn uses the clone's default and the
+ready area says so.
+
 The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
 shared state machine and first-message launch (`threadStart.ts`, `threadTurn.ts`); the starts
 live in `orbit-thread-starts.json` in the app's documents folder. The file write is async, so

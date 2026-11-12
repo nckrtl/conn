@@ -148,6 +148,8 @@ export interface OrbitDraftStartInput {
   readonly modelSelection: ModelSelection | null;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly projectName?: string;
+  readonly instanceDomainSuffix?: string | null;
 }
 
 /** What the composer hands to the start machine for an Orbit draft. */
@@ -176,5 +178,7 @@ export function buildOrbitDraftStart(input: {
     modelSelection: input.modelSelection,
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
+    projectName: target.projectName,
+    instanceDomainSuffix: target.domainSuffix,
   };
 }

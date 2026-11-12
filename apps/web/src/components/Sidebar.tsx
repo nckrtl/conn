@@ -254,6 +254,7 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { OrbitThreadStartButton, OrbitThreadStartList } from "../orbit/OrbitProjectThreads";
+import { OrbitPendingThreadList } from "../orbit/OrbitPendingThreadList";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { TooltipProvider } from "./ui/tooltip";
@@ -3301,6 +3302,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 onClearSearch={clearThreadSearch}
               />
               <OrbitThreadStartList />
+              <OrbitPendingThreadList />
             </SidebarGroup>
           }
         >

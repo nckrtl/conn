@@ -4032,6 +4032,35 @@ it("keeps the working header in place across worktree setup handoff", () => {
     "thinking",
   ]);
 
+  // Conn: a finished Orbit start draws its ready row after the user's message; the agent's
+  // messages stay as they are and carry no ready line.
+  const orbitReady = {
+    view: {
+      readyMs: 12_000,
+      instanceName: "pricing-page",
+      nodeName: "beast",
+      url: "https://pricing-page.nckrtl.test",
+      readyLine:
+        "Your Instance is ready. You can preview it at https://pricing-page.nckrtl.test while I work on your request.",
+      modelFallbackLine: null,
+    },
+    threadRef: { environmentId: "env-1" as never, threadId: ThreadId.make("thread-setup") },
+  };
+  const withOrbitReady = deriveMessagesTimelineRows({
+    timelineEntries: [userEntry, assistantEntry],
+    isWorking: false,
+    turnDiffSummaries: [],
+    supportsConversationRollback: false,
+    orbitReady,
+  });
+  expect(withOrbitReady.map((row) => row.kind)).toEqual(["message", "orbit-ready", "message"]);
+  expect(withOrbitReady[1]).toMatchObject({ kind: "orbit-ready", ready: orbitReady });
+  expect(
+    withOrbitReady.flatMap((row) =>
+      row.kind === "message" && row.message.role === "assistant" ? [row.message.text] : [],
+    ),
+  ).toEqual(["On it"]);
+
   const stage = (id: "agent" | "setup-script", status: "done" | "running") =>
     ({
       id,

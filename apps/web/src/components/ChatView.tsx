@@ -386,6 +386,7 @@ const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import { ConnIconScope } from "../icons/connIcon";
 import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
+import { useOrbitReady } from "../orbit/useOrbitReady";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1557,6 +1558,10 @@ export default function ChatView(props: ChatViewProps) {
   const timelineEmpty = timelineEntries.length === 0 && !hasStreamedTimelineRows;
   const displayedTimelineKey = activeThreadKey ?? routeThreadKey;
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
+  const orbitReady = useOrbitReady(
+    isServerThread ? (displayedThreadRef?.environmentId ?? null) : null,
+    isServerThread ? (displayedThreadRef?.threadId ?? null) : null,
+  );
   const {
     worktreeSetup,
     isPreparingWorktree,
@@ -3515,6 +3520,7 @@ export default function ChatView(props: ChatViewProps) {
                     }
                     activeTurnStartedAt={activeWorkStartedAt}
                     worktreeSetup={worktreeSetup}
+                    orbitReady={orbitReady}
                     onCancelWorktreeSetup={onCancelWorktreeSetupStable}
                     retryableWorkspacePreparationRunIds={retryableWorkspacePreparationRunIds}
                     onRetryWorkspacePreparation={onRetryWorkspacePreparationStable}

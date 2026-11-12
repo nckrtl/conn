@@ -178,8 +178,11 @@ export function startableOrbitProject(
   };
 }
 
-/** Why a name is not available: `taken`, `invalid` (Orbit's name rule) or `default`. */
-export type OrbitGatewayInstanceNameReason = "taken" | "invalid" | "default";
+/**
+ * Why a name is not available: `taken`, `invalid` (Orbit's name rule), `default`, or
+ * `domain_invalid` (`<name>.<project domain>` breaks Orbit's address limits; Orbit decides them).
+ */
+export type OrbitGatewayInstanceNameReason = "taken" | "invalid" | "default" | "domain_invalid";
 
 /**
  * The answer of `GET /conn/projects/{project}/instances/check`. Names are unique per Project
@@ -232,6 +235,8 @@ export const ORBIT_BRANCH_EXISTS = "branch.exists";
 export const ORBIT_SOURCE_HEAD_UNAVAILABLE = "source.head_unavailable";
 /** The same name was created before with another branch selection. */
 export const ORBIT_PLACEMENT_CONFLICT = "instance.placement_conflict";
+/** The Instance's address `<name>.<project domain>` breaks Orbit's limits; nothing created. */
+export const ORBIT_ROUTE_DOMAIN_INVALID = "route.domain_invalid";
 /** Failed create steps, after the Instance exists. */
 export const ORBIT_CREATE_CLONE_FAILED = "instance.create_clone_failed";
 export const ORBIT_CREATE_WORKSPACE_FAILED = "instance.create_workspace_failed";
@@ -732,7 +737,12 @@ function branch(value: unknown): OrbitGatewayBranch[] {
   ];
 }
 
-const INSTANCE_NAME_REASONS: ReadonlySet<string> = new Set(["taken", "invalid", "default"]);
+const INSTANCE_NAME_REASONS: ReadonlySet<string> = new Set([
+  "taken",
+  "invalid",
+  "default",
+  "domain_invalid",
+]);
 
 /** Only `available` is required; a missing name reads as the one asked about. */
 function instanceNameCheck(

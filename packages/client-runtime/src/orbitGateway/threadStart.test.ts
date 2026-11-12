@@ -61,6 +61,8 @@ function gateway(script: {
   readonly createResult?: Record<string, unknown>;
   /** Orbit's `error.detail` on a failed Operation. */
   readonly failedDetail?: string;
+  /** Answers each name check with a reason (null: available), or throws for a failed check. */
+  readonly nameCheck?: (name: string) => string | null;
 }) {
   const calls: string[] = [];
   const keys: string[] = [];
@@ -84,7 +86,15 @@ function gateway(script: {
     [100, [...(script.create ?? ["running", "succeeded"])]],
     [200, [...(script.pairing ?? ["queued", "succeeded"])]],
   ]);
+  const nameCheck = script.nameCheck;
   const client = {
+    ...(nameCheck && {
+      checkInstanceName: async (projectId: number, name: string) => {
+        calls.push(`check ${projectId} ${name}`);
+        const reason = nameCheck(name);
+        return { name, available: reason === null, reason, domain: null };
+      },
+    }),
     createThreadInstance: async (
       projectId: number,
       name: string,
@@ -250,6 +260,7 @@ describe("readOrbitThreadStarts", () => {
       errorDetail: null,
       resultBranch: null,
       resultBaseBranch: null,
+      nameSuffix: null,
     });
 
     const { client, calls } = gateway({});
@@ -407,6 +418,123 @@ describe("runOrbitThreadStart", () => {
     const renamed = { ...stopped, instanceName: "fix-2", error: null };
     expect(await runOrbitThreadStart(renamed, ports(retry.client).ports)).toBe(true);
     expect(retry.calls[0]).toBe("create 3 fix-2");
+  });
+
+  describe("a name made from the message", () => {
+    const longStart = () =>
+      newOrbitThreadStart({
+        id: "s9",
+        project,
+        suffix: "k3j9",
+        now: 0,
+        message: "Please refactor the checkout payment flow handlers",
+        threadId: "thread-9",
+        messageId: "message-9",
+        commandId: "command-9",
+      });
+    const tooLong = (limit: number) => (name: string) =>
+      name.length > limit ? "domain_invalid" : null;
+
+    it("shortens the slug while Orbit says the address is too long, keeping the suffix", async () => {
+      const { client, calls } = gateway({ nameCheck: tooLong(20) });
+      const run = ports(client);
+
+      expect(await runOrbitThreadStart(longStart(), run.ports)).toBe(true);
+
+      expect(calls.slice(0, 4)).toEqual([
+        "check 3 please-refactor-the-checkout-payment-flo-k3j9",
+        "check 3 please-refactor-the-chec-k3j9",
+        "check 3 please-refac-k3j9",
+        "create 3 please-refac-k3j9",
+      ]);
+      expect(run.saves.at(-1)).toMatchObject({ instanceName: "please-refac-k3j9" });
+    });
+
+    it("checks only names it made, once per create attempt", async () => {
+      const typed = gateway({ nameCheck: tooLong(20) });
+      const start = newOrbitThreadStart({
+        id: "s9",
+        project,
+        suffix: "k3j9",
+        now: 0,
+        instanceName: "my-own-long-name",
+        message: "Please refactor the checkout payment flow handlers",
+        threadId: "thread-9",
+        messageId: "message-9",
+        commandId: "command-9",
+      });
+      expect(await runOrbitThreadStart(start, ports(typed.client).ports)).toBe(true);
+      expect(typed.calls[0]).toBe("create 3 my-own-long-name");
+
+      const lost = gateway({ nameCheck: () => null, createLost: [0] });
+      expect(await runOrbitThreadStart(longStart(), ports(lost.client).ports)).toBe(true);
+      expect(lost.calls.filter((call) => call.startsWith("check"))).toHaveLength(1);
+    });
+
+    it.each([
+      ["no name fits", tooLong(5)],
+      [
+        "the check fails after Orbit refused a name",
+        (name: string) => {
+          if (name.length < 40) throw new Error("check failed");
+          return "domain_invalid";
+        },
+      ],
+    ])("stops without a create when %s", async (_case, nameCheck) => {
+      const { client, calls } = gateway({ nameCheck });
+      const run = ports(client);
+
+      expect(await runOrbitThreadStart(longStart(), run.ports)).toBe(false);
+
+      expect(calls.some((call) => call.startsWith("create"))).toBe(false);
+      expect(run.saves.at(-1)).toMatchObject({
+        error: "This name makes the address too long. Use a shorter name.",
+        errorCode: "route.domain_invalid",
+        createKey: null,
+        instanceId: null,
+      });
+    });
+
+    it("tries 40, 24 and 12 characters of slug, then thread", async () => {
+      const { client, calls } = gateway({ nameCheck: tooLong(5) });
+      await runOrbitThreadStart(longStart(), ports(client).ports);
+      expect(calls).toEqual([
+        "check 3 please-refactor-the-checkout-payment-flo-k3j9",
+        "check 3 please-refactor-the-chec-k3j9",
+        "check 3 please-refac-k3j9",
+        "check 3 thread-k3j9",
+      ]);
+    });
+
+    it("leaves the name to the create when the first check fails", async () => {
+      const { client, calls } = gateway({
+        nameCheck: () => {
+          throw new Error("check failed");
+        },
+      });
+      expect(await runOrbitThreadStart(longStart(), ports(client).ports)).toBe(true);
+      expect(calls[1]).toBe("create 3 please-refactor-the-checkout-payment-flo-k3j9");
+    });
+  });
+
+  it("shows the address text for a create refused as route.domain_invalid, and drops its key", async () => {
+    const refused = new OrbitGatewayError({
+      code: "route.domain_invalid",
+      message: "The domain is invalid.",
+      status: 422,
+      details: {},
+    });
+    const { client } = gateway({ createLost: [refused] });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart({ ...fresh(), instanceName: "fix" }, run.ports)).toBe(false);
+    expect(run.saves.at(-1)).toMatchObject({
+      error: "This name makes the address too long. Use a shorter name.",
+      errorCode: "route.domain_invalid",
+      createKey: null,
+      createOperationId: null,
+      instanceId: null,
+    });
   });
 
   it("resumes a saved start without a second create or pairing", async () => {

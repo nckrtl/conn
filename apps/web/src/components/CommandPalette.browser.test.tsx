@@ -334,7 +334,9 @@ describe("CommandPalette open intents", () => {
     orbit.checkInstanceName.mockImplementation(async (_projectId: number, name: string) =>
       name === "fix"
         ? { name, available: false, reason: "taken", domain: null }
-        : { name, available: true, reason: null, domain: `${name}.nckrtl.test` },
+        : name.length > 30
+          ? { name, available: false, reason: "domain_invalid", domain: null }
+          : { name, available: true, reason: null, domain: `${name}.nckrtl.test` },
     );
     await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
 
@@ -347,6 +349,11 @@ describe("CommandPalette open intents", () => {
 
     await userEvent.type(nameField, "fix");
     await expect.element(page.getByText("fix is taken in nckrtl.")).toBeVisible();
+    await userEvent.clear(nameField);
+    await userEvent.type(nameField, "a-name-that-makes-the-address-too-long");
+    await expect
+      .element(page.getByText("This name makes the address too long. Use a shorter name."))
+      .toBeVisible();
     await userEvent.clear(nameField);
     await userEvent.type(nameField, "pricing");
     await expect.element(page.getByText("pricing.nckrtl.test is available.")).toBeVisible();

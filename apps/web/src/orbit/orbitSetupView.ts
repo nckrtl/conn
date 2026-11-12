@@ -4,7 +4,9 @@ import {
   ORBIT_BRANCH_NOT_FOUND,
   ORBIT_CREATE_CLONE_FAILED,
   ORBIT_CREATE_WORKSPACE_FAILED,
+  ORBIT_NAME_DOMAIN_INVALID_TEXT,
   ORBIT_PLACEMENT_CONFLICT,
+  ORBIT_ROUTE_DOMAIN_INVALID,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   orbitSetupReadyMs,
   orbitSetupStages,
@@ -38,7 +40,7 @@ export interface OrbitSetupView {
   readonly error: string | null;
   /** Orbit's code and detail line under the error, as `code · detail`, when Orbit sent a detail. */
   readonly errorDetailLine: string | null;
-  /** A refusal that made no Instance: a taken name, or a name that is a branch already. */
+  /** A refusal that made no Instance: a taken name, a name too long for the address, or a branch. */
   readonly canChangeName: boolean;
   /** A branch that is gone or held: reopen the draft with the branch menu. */
   readonly canChangeBranch: boolean;
@@ -124,6 +126,8 @@ export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
         changeName: madeNothing,
       };
     }
+    case ORBIT_ROUTE_DOMAIN_INVALID:
+      return { ...none, message: ORBIT_NAME_DOMAIN_INVALID_TEXT, changeName: madeNothing };
     case ORBIT_PLACEMENT_CONFLICT:
       return {
         ...none,

@@ -1,6 +1,7 @@
-import type {
-  OrbitGatewayEnvironment,
-  OrbitGatewayInstanceNameCheck,
+import {
+  ORBIT_NAME_DOMAIN_INVALID_TEXT,
+  type OrbitGatewayEnvironment,
+  type OrbitGatewayInstanceNameCheck,
 } from "@t3tools/client-runtime/orbit-gateway";
 
 /**
@@ -142,6 +143,14 @@ export function orbitNameHint(input: {
     return {
       tone: "bad",
       text: `${name} is taken in ${input.projectName}.`,
+      plusEnabled: true,
+      canCreate: false,
+    };
+  }
+  if (answer.reason === "domain_invalid") {
+    return {
+      tone: "bad",
+      text: ORBIT_NAME_DOMAIN_INVALID_TEXT,
       plusEnabled: true,
       canCreate: false,
     };

@@ -57,6 +57,8 @@ const routerState = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", async (original) => ({
   ...(await original<object>()),
   useNavigate: () => vi.fn(),
+  useMatches: ({ select }: { select: (matches: Array<{ pathname: string }>) => unknown }) =>
+    select([{ pathname: "/" }]),
   useParams: ({ select }: { select: (params: Record<string, string>) => unknown }) =>
     select(routerState.params),
 }));
@@ -66,6 +68,7 @@ vi.mock("../state/entities", () => ({
   useThreadShells: () => routerState.threads,
   useAllEnvironmentShellsBootstrapped: () => true,
   useDelegatedUnderParent: () => NO_DELEGATED_TASKS,
+  useQuietThreadShell: () => null,
 }));
 
 import { useWorkspaceStore, WORKSPACE_STORAGE_KEY } from "../workspaceStore";

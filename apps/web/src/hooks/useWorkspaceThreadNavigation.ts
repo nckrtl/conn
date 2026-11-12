@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useMatches, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
 import {
@@ -7,6 +7,7 @@ import {
   useDelegatedUnderParent,
   useThreadShells,
 } from "../state/entities";
+import { isAppModalPage } from "../components/sidebar/mainAppLocation";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import { lastWorkspaceThread, workspaceThreads } from "../workspaceActivity.logic";
@@ -21,6 +22,10 @@ export function useWorkspaceThreadNavigation() {
   const ready = useAllEnvironmentShellsBootstrapped();
   const route = useParams({ strict: false, select: resolveThreadRouteRef });
   const navigate = useNavigate();
+  // Matches, not location, so this agrees with the params `route` reads (see _chat.tsx).
+  const modalOpen = useMatches({
+    select: (matches) => matches.some((match) => isAppModalPage(match.pathname)),
+  });
   const previousWorkspace = useRef(workspaceId);
   const pending = useRef<string | null>(null);
   const routeKey = route ? JSON.stringify([route.environmentId, route.threadId]) : null;
@@ -28,7 +33,8 @@ export function useWorkspaceThreadNavigation() {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves the router to the workspace's last thread when the selected workspace changes
   useEffect(() => {
     const changed = previousWorkspace.current !== workspaceId;
-    if (changed && !ready) return;
+    // Settings and Usage stay open: a profile sync can change the selection under them.
+    if (changed && (!ready || modalOpen)) return;
     const candidates = workspaceThreads(threads, projectRefs, delegatedUnderParent);
     if (changed) {
       previousWorkspace.current = workspaceId;
@@ -56,5 +62,15 @@ export function useWorkspaceThreadNavigation() {
       useWorkspaceStore
         .getState()
         .rememberThread(workspaceId, scopeThreadRef(current.environmentId, current.id));
-  }, [delegatedUnderParent, navigate, projectRefs, ready, route, routeKey, threads, workspaceId]);
+  }, [
+    delegatedUnderParent,
+    modalOpen,
+    navigate,
+    projectRefs,
+    ready,
+    route,
+    routeKey,
+    threads,
+    workspaceId,
+  ]);
 }

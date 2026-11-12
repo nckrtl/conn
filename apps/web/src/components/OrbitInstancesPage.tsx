@@ -25,7 +25,7 @@ import { useState } from "react";
 import { cn } from "../lib/utils";
 import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
 import { loadOrbitInstanceList, useOrbitInstanceList } from "../orbit/orbitInstanceList";
-import { readOrbitEnvironments } from "../orbit/orbitPaletteProjects";
+import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
 import { useVisibleThreadShells } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { formatRelativeTimeLabel } from "../timestampFormat";
@@ -98,7 +98,12 @@ function NewThreadButton({ row }: { readonly row: OrbitInstanceWithThreads }) {
         domainSuffix: domainSuffix(row),
       },
       instance: { id: row.id, name: row.name },
-      environments: readOrbitEnvironments,
+      // A fresh read, as the palette's own on open: its cached list can miss this row's state.
+      environments: () => {
+        const client = desktopOrbitGatewayClient();
+        if (client === null) throw new Error("The Orbit Gateway is not available here.");
+        return client.environments();
+      },
     }).catch((error: unknown) => ({
       kind: "unavailable" as const,
       reason: error instanceof Error ? error.message : String(error),
@@ -217,7 +222,6 @@ function InstanceRow({ row }: { readonly row: OrbitInstanceWithThreads }) {
             type="button"
             className="flex min-w-0 flex-1 flex-col gap-0.5 text-start"
             aria-expanded={unfolded}
-            aria-label={`${row.name}: ${unfolded ? "hide" : "show"} threads`}
             onClick={() => setOpen((value) => !value)}
           >
             {body}

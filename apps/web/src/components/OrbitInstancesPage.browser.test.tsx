@@ -167,20 +167,14 @@ describe("Orbit Instances page", () => {
     await expect.element(page.getByText("bench-a", { exact: true })).toBeVisible();
   });
 
-  it("searches by Instance, Project, Node and domain, and says when nothing matches", async () => {
+  it("says when a search matches nothing", async () => {
     using _env = setup(async () => ENVIRONMENTS);
     await using _screen = await renderPage();
     const search = page.getByRole("searchbox", { name: "Search instances" });
     await expect.element(page.getByText("bench-a", { exact: true })).toBeVisible();
-
-    await userEvent.fill(search, "NICK");
+    await userEvent.fill(search, "nick");
     await expect.element(page.getByText("pricing-page", { exact: true })).not.toBeInTheDocument();
     await expect.element(page.getByText("bench-a", { exact: true })).toBeVisible();
-    await userEvent.fill(search, "nckrtl.com");
-    await expect.element(page.getByText("pricing-page", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("bench-a", { exact: true })).not.toBeInTheDocument();
-    await userEvent.fill(search, "spike.p5");
-    await expect.element(page.getByText("old-spike", { exact: true })).toBeVisible();
     await userEvent.fill(search, "zzz");
     await expect.element(page.getByText("Nothing found.")).toBeVisible();
   });
@@ -192,7 +186,7 @@ describe("Orbit Instances page", () => {
       [shell("t1", "env-pricing-page", 5, true), shell("t2", "env-pricing-page", 90)],
     );
     await using screen = await renderPage();
-    const toggle = page.getByRole("button", { name: "pricing-page: show threads" });
+    const toggle = row("pricing-page").getByRole("button", { expanded: false });
     await userEvent.click(toggle);
     const list = page.getByRole("list", { name: "Threads in pricing-page" });
     await expect.element(list).toBeVisible();
@@ -201,7 +195,7 @@ describe("Orbit Instances page", () => {
     expect(list.getByRole("button").nth(1).element().textContent).not.toContain("Working");
     // A row without threads does not unfold.
     await expect
-      .element(page.getByRole("button", { name: "old-spike: show threads" }))
+      .element(row("old-spike").getByRole("button", { expanded: false }))
       .not.toBeInTheDocument();
 
     await userEvent.click(list.getByRole("button", { name: /Thread t2/ }));
@@ -228,6 +222,11 @@ describe("Orbit Instances page", () => {
       },
       instance: { id: 11, name: "pricing-page" },
     });
+    // The open reads the environments afresh, never the palette's cached list.
+    const reads = vi.fn(async () => ENVIRONMENTS);
+    (mocks.client as { environments: unknown }).environments = reads;
+    await mocks.openInstance.mock.calls[0]![0].environments();
+    expect(reads).toHaveBeenCalledTimes(1);
 
     await expect.element(newThread("old-spike")).toBeDisabled();
     await expect

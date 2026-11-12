@@ -9,6 +9,7 @@ import {
   ORBIT_BRANCH_MODE_LABELS,
   createOrbitBranchSearch,
   orbitBranchControlLabel,
+  orbitDefaultBranches,
   orbitBranchListStatus,
   orbitBranchMenuMode,
   orbitBranchMenuRows,
@@ -36,8 +37,8 @@ import { toastManager } from "./ui/toast";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 
 /**
- * Conn: the branch of a new Instance in an Orbit draft's context row. "From main" by default
- * (the create sends no branch); a menu cuts a new branch from another one, or works on an
+ * Conn: the branch of a new Instance in an Orbit draft's context row. "From <default branch>" by
+ * default (the create sends no branch); a menu cuts a new branch from another one, or works on an
  * existing branch. A branch another Instance works on selects that Instance instead.
  */
 export function BranchToolbarOrbitBranch({
@@ -45,6 +46,7 @@ export function BranchToolbarOrbitBranch({
   draftId,
   onTargetChange,
   readBranches = readOrbitBranches,
+  defaultBranches = orbitDefaultBranches,
 }: {
   target: OrbitDraftTarget;
   /** The Orbit draft; picking a paired Instance carries its prompt into that Instance's draft. */
@@ -52,6 +54,7 @@ export function BranchToolbarOrbitBranch({
   /** Applies a change to the draft's current target. */
   onTargetChange: (patch: Partial<OrbitDraftTarget>) => void;
   readBranches?: (projectId: number, query: string) => Promise<OrbitGatewayBranches>;
+  defaultBranches?: typeof orbitDefaultBranches;
 }) {
   const router = useRouter();
   const [openedByChangeBranch] = useState(() => takeOrbitBranchMenuRequest(target.projectId));
@@ -67,10 +70,27 @@ export function BranchToolbarOrbitBranch({
       read: (text) => readBranches(target.projectId, text),
       onState: (state, text) => setList({ state, query: text }),
       onDefaultBranch: (name) => {
+        defaultBranches.remember(target.projectId, name);
         if (name !== target.defaultBranch) onTargetChange({ defaultBranch: name });
       },
     }),
   );
+  const [readDefaultBranch, setReadDefaultBranch] = useState(() =>
+    defaultBranches.known(target.projectId),
+  );
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the default branch's name from Orbit once per Project, so the label names it before the menu opens
+  useEffect(() => {
+    let live = true;
+    void defaultBranches.read(target.projectId, readBranches).then((name) => {
+      if (!live || name === null) return;
+      setReadDefaultBranch(name);
+      if (name !== target.defaultBranch) onTargetChange({ defaultBranch: name });
+    });
+    return () => {
+      live = false;
+    };
+  }, [defaultBranches, readBranches, target.projectId, target.defaultBranch, onTargetChange]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the list when Change branch opened the menu on mount, and drops a pending read on unmount
   useEffect(() => {
@@ -93,7 +113,10 @@ export function BranchToolbarOrbitBranch({
       ? orbitBranchMenuRows({ list: list.state.list, mode, current: target.branch ?? null })
       : [];
   const status = orbitBranchListStatus(list.state, list.query);
-  const label = orbitBranchControlLabel(target);
+  const label = orbitBranchControlLabel({
+    branch: target.branch ?? null,
+    defaultBranch: target.defaultBranch ?? readDefaultBranch,
+  });
 
   const pick = (row: OrbitBranchRow) => {
     if (row.action.kind === "disabled") return;

@@ -9,8 +9,8 @@ import type { OrbitDraftTarget } from "./orbitDraft";
 
 export type OrbitBranchMode = OrbitGatewayBranchSelection["mode"];
 
-/** Shown until the branch list was read; Orbit's own name replaces it then. */
-const FALLBACK_DEFAULT_BRANCH = "main";
+/** Shown until Orbit names the default branch, and when that read fails; never a guessed name. */
+const UNKNOWN_DEFAULT_BRANCH = "default branch";
 /** The desktop IPC refuses a longer search. */
 export const ORBIT_BRANCH_QUERY_MAX_LENGTH = 200;
 export const ORBIT_BRANCH_SEARCH_DEBOUNCE_MS = 300;
@@ -20,16 +20,12 @@ export const ORBIT_BRANCH_MODE_LABELS: Readonly<Record<OrbitBranchMode, string>>
   existing: "Work on branch",
 };
 
-export function orbitDefaultBranchName(target: Pick<OrbitDraftTarget, "defaultBranch">): string {
-  return target.defaultBranch ?? FALLBACK_DEFAULT_BRANCH;
-}
-
-/** The control's label: "From main" by default, "From develop", or "On feature/login". */
+/** The control's label: "From 13.x" by default, "From develop", or "On feature/login". */
 export function orbitBranchControlLabel(
   target: Pick<OrbitDraftTarget, "branch" | "defaultBranch">,
 ): string {
   const branch = target.branch ?? null;
-  if (branch === null) return `From ${orbitDefaultBranchName(target)}`;
+  if (branch === null) return `From ${target.defaultBranch ?? UNKNOWN_DEFAULT_BRANCH}`;
   return branch.mode === "new" ? `From ${branch.from}` : `On ${branch.name}`;
 }
 
@@ -174,6 +170,45 @@ export function orbitBranchListStatus(state: OrbitBranchListState, query: string
   if (state.list.branches.length > 0) return null;
   return query === "" ? ORBIT_BRANCHES_EMPTY : ORBIT_BRANCHES_NO_MATCH;
 }
+
+/**
+ * Each Project's default branch name for the session, so a reopened draft labels at once. One read
+ * per Project at a time; a failed read is not kept, so the next draft tries again.
+ */
+export function createOrbitDefaultBranchCache() {
+  const names = new Map<number, string>();
+  const reads = new Map<number, Promise<string | null>>();
+  return {
+    known: (projectId: number): string | null => names.get(projectId) ?? null,
+    remember: (projectId: number, name: string) => {
+      names.set(projectId, name);
+    },
+    /** The cached name, else the first name an empty search lists; null when it names none or fails. */
+    read: (
+      projectId: number,
+      readBranches: (projectId: number, query: string) => Promise<OrbitGatewayBranches>,
+    ): Promise<string | null> => {
+      const known = names.get(projectId);
+      if (known !== undefined) return Promise.resolve(known);
+      const pending = reads.get(projectId);
+      if (pending) return pending;
+      const read = readBranches(projectId, "")
+        .then(
+          (list) => {
+            const name = orbitListedDefaultBranch(list.branches);
+            if (name !== null) names.set(projectId, name);
+            return name;
+          },
+          () => null,
+        )
+        .finally(() => reads.delete(projectId));
+      reads.set(projectId, read);
+      return read;
+    },
+  };
+}
+
+export const orbitDefaultBranches = createOrbitDefaultBranchCache();
 
 /**
  * The menu asks Change branch to open it once the reopened draft shows. Keyed by Orbit Project,

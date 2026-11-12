@@ -156,8 +156,6 @@ function updateState(change: (state: OrbitEnvironmentState) => OrbitEnvironmentS
   useEnvironmentProvider.setState(({ state }) => ({ state: change(state) }));
 }
 
-/** Conn: clones the user asked to connect in Settings; the sync retries them in this session. */
-const requestedEnvironmentIds = new Set<string>();
 const pairings = new Map<string, Promise<boolean>>();
 
 /**
@@ -202,7 +200,6 @@ async function attemptPairing(
     );
     if (result._tag !== "Success") return false;
     updateState((state) => recordPaired(state, environmentId));
-    requestedEnvironmentIds.delete(environmentId);
     return true;
   } catch (error) {
     // An unreachable server pairs on a later run; a refused one after it registers again.
@@ -211,18 +208,6 @@ async function attemptPairing(
     }
     return false;
   }
-}
-
-/**
- * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets the
- * sync retry it if this attempt fails.
- */
-export function connectOrbitEnvironment(
-  client: OrbitGatewayClient,
-  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
-): Promise<boolean> {
-  requestedEnvironmentIds.add(environment.environmentId);
-  return pairOne(client, environment, false);
 }
 
 /**
@@ -259,7 +244,6 @@ export async function reconcileEnvironmentProvider(
     state,
     lacksAccess,
     heldInstanceIds: heldOrbitInstanceIds(),
-    requestedEnvironmentIds: [...requestedEnvironmentIds],
     now,
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));

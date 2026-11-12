@@ -1,28 +1,28 @@
 import {
   APPEARANCE_SECTION,
   DESKTOP_DEVICE_SECTION,
+  orbitConnectionChecks,
+  orbitNodeServers,
   type EnvironmentProvider,
-  type OrbitGatewayClient,
+  type OrbitConnectionCheckState,
+  type OrbitConnectionProbe,
   type OrbitGatewayEnvironment,
   type OrbitGatewayNode,
   type OrbitGatewayProfile,
+  type OrbitNodeState,
   type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { CheckIcon, XIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
-import {
-  connectOrbitEnvironment,
-  setEnvironmentProvider,
-  useEnvironmentProvider,
-} from "~/orbit/environmentProvider";
+import { setEnvironmentProvider, useEnvironmentProvider } from "~/orbit/environmentProvider";
 import {
   desktopOrbitGatewayClient,
   forceOrbitProfileSync,
   syncOrbitProfileNow,
   useOrbitProfileSyncStatus,
 } from "~/orbit/OrbitProfileSync";
-import { useOrbitThreadStarts } from "~/orbit/orbitThreadStartStore";
 import { backupLocalSections, restoreSectionBackup } from "~/orbit/profileSyncRegistry";
 import {
   setGroupSyncEnabled,
@@ -33,9 +33,13 @@ import {
 } from "~/orbit/profileSyncStorage";
 import { useEnvironments } from "~/state/environments";
 
+import { cn } from "~/lib/utils";
+
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -46,7 +50,6 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 interface GatewayView {
   readonly node: OrbitGatewayNode;
   readonly profiles: readonly OrbitGatewayProfile[];
-  readonly environments: readonly OrbitGatewayEnvironment[];
 }
 
 const PROVIDER_LABELS: Record<EnvironmentProvider, string> = {
@@ -82,7 +85,7 @@ export function EnvironmentProviderSection() {
         title="Environments from"
         description={
           provider === "orbit"
-            ? "The T3 servers registered on the Orbit Gateway. Host servers pair automatically; connect a clone in the Orbit panel. Environments added here are switched off until you choose Default again."
+            ? "The T3 servers registered on the Orbit Gateway. Host servers pair automatically. Instances are managed in the Orbit panel. Environments added here are switched off until you choose Default again."
             : "Environments you add on this device. Orbit uses the servers on the Orbit Gateway instead and syncs workspaces with your profile."
         }
         control={
@@ -274,8 +277,7 @@ function ProfileSyncSection({ profileName }: { readonly profileName: string | nu
 }
 
 /**
- * This device's Node, its profiles and the Gateway's T3 servers, read on mount and after each
- * profile sync. Each Orbit panel page reads its own copy.
+ * This device's Node and its profiles, read on mount and after each profile sync.
  */
 function useOrbitGatewayView() {
   // One client per mount: the load effect below must not restart on every render.
@@ -287,12 +289,8 @@ function useOrbitGatewayView() {
   const load = useStableCallback(async () => {
     if (!client) return;
     try {
-      const [node, profiles, environments] = await Promise.all([
-        client.me(),
-        client.profiles(),
-        client.environments(),
-      ]);
-      setView({ node, profiles, environments });
+      const [node, profiles] = await Promise.all([client.me(), client.profiles()]);
+      setView({ node, profiles });
       setLoadError(null);
     } catch (error) {
       setLoadError(message(error));
@@ -332,61 +330,181 @@ function OrbitDeviceSection(props: {
   );
 }
 
+const CHECK_BADGES: Record<
+  OrbitConnectionCheckState,
+  { readonly label: string; readonly variant: "success" | "error" | "outline" }
+> = {
+  pass: { label: "OK", variant: "success" },
+  fail: { label: "Failed", variant: "error" },
+  checking: { label: "Checking", variant: "outline" },
+  not_checked: { label: "Not checked", variant: "outline" },
+};
+
+function CheckBadge({ state }: { readonly state: OrbitConnectionCheckState }) {
+  const { label, variant } = CHECK_BADGES[state];
+  return (
+    <Badge variant={variant} data-check-state={state}>
+      {state === "pass" ? (
+        <CheckIcon />
+      ) : state === "fail" ? (
+        <XIcon />
+      ) : state === "checking" ? (
+        <Spinner />
+      ) : null}
+      {label}
+    </Badge>
+  );
+}
+
+const NODE_STATES: Record<OrbitNodeState, { readonly label: string; readonly dot: string }> = {
+  connected: { label: "Connected", dot: "bg-success" },
+  pairing: { label: "Pairing…", dot: "bg-muted-foreground/40" },
+  expired: { label: "Registration expired", dot: "bg-warning" },
+};
+
 /**
- * The Orbit panel's Connection page: this device's Node on the Gateway and the Gateway's T3
- * servers. Host servers pair automatically; a clone pairs when the user connects it.
+ * The Gateway's answer to `me` (which runs the three checks) and its server list. Reload runs both
+ * again; an answer to an earlier load that comes late is dropped.
+ */
+function useOrbitConnection() {
+  // One client per mount: the load effect below must not restart on every render.
+  const [client] = useState(desktopOrbitGatewayClient);
+  const [probe, setProbe] = useState<OrbitConnectionProbe>({ status: "checking" });
+  const [environments, setEnvironments] = useState<readonly OrbitGatewayEnvironment[] | null>(null);
+  const latest = useRef(0);
+
+  const load = useStableCallback(async () => {
+    if (!client) return;
+    const run = ++latest.current;
+    setProbe({ status: "checking" });
+    const [me, servers] = await Promise.allSettled([client.me(), client.environments()]);
+    if (run !== latest.current) return;
+    setProbe(
+      me.status === "fulfilled"
+        ? { status: "ok", node: me.value }
+        : { status: "error", error: me.reason },
+    );
+    setEnvironments(servers.status === "fulfilled" ? servers.value : null);
+  });
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Orbit Gateway once on mount; Reload reads it again
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return { probe, environments, load };
+}
+
+/**
+ * The Orbit panel's Connection page: this device's Node, the three checks of its connection to
+ * the Gateway, and the Nodes that run a T3 server. Conn picks up the connection from the machine,
+ * so a failed check says what to fix outside Conn. Instances are on the Instances page.
  */
 export function OrbitConnectionPage() {
-  const { gateway, view, loadError, load } = useOrbitGatewayView();
+  const { probe, environments, load } = useOrbitConnection();
   const { environments: savedEnvironments } = useEnvironments();
-  const starts = useOrbitThreadStarts((state) => state.starts);
   const navigate = useNavigate();
   const m = useMessages();
   const connectionsLabel = m(SETTINGS_SECTION_LABELS["/settings/connections"]);
 
-  const connected = new Set(
-    savedEnvironments.map((environment) => String(environment.environmentId)),
-  );
-  const startingInstanceIds = new Set(
-    // A stopped start waits for Retry; Connect may pair its clone meanwhile.
-    starts.flatMap((start) =>
-      start.instanceId === null || start.error !== null ? [] : [start.instanceId],
-    ),
-  );
+  const node = probe.status === "ok" ? probe.node : null;
+  const checks = orbitConnectionChecks(probe);
+  const nodes =
+    environments === null
+      ? null
+      : orbitNodeServers({
+          environments,
+          paired: new Set(
+            savedEnvironments.map((environment) => String(environment.environmentId)),
+          ),
+          device: node,
+        });
 
   return (
     <SettingsPageContainer width="wide">
-      <OrbitDeviceSection view={view} loadError={loadError} onReload={() => void load()} />
+      <SettingsSection id="orbit-device" title="This device" hideTitle>
+        <SettingsRow
+          title={node?.name ?? "This device"}
+          description={
+            node
+              ? `Signed in to gateway.orbit as ${node.wireguardIp}`
+              : probe.status === "checking"
+                ? "Connecting to gateway.orbit…"
+                : "The Node name and WireGuard address show once all checks pass."
+          }
+          control={
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={probe.status === "checking"}
+              onClick={() => void load()}
+            >
+              Reload
+            </Button>
+          }
+        />
+      </SettingsSection>
 
-      {view ? (
-        <SettingsSection id="orbit-servers" title="Orbit servers">
-          {view.environments.length === 0 ? (
+      <SettingsSection id="orbit-checks" title="Connection checks" hideTitle>
+        {checks.map((check) => (
+          <SettingsRow
+            key={check.key}
+            data-check={check.key}
+            title={check.label}
+            description={check.message}
+            control={<CheckBadge state={check.state} />}
+          />
+        ))}
+      </SettingsSection>
+
+      <section id="orbit-nodes" className="space-y-2.5">
+        <div className="px-3 sm:px-4">
+          <h2 className="flex min-h-7 items-center text-base font-semibold text-foreground">
+            Nodes
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            The Nodes that run a T3 server. Conn pairs with them automatically.
+          </p>
+        </div>
+        <SettingsSection title="Nodes that run a T3 server" hideTitle>
+          {nodes === null ? (
             <SettingsRow
-              title="No servers registered"
-              description="T3 servers register themselves with the Gateway."
+              title={probe.status === "checking" ? "Loading…" : "Nodes not available"}
+              description={
+                probe.status === "checking"
+                  ? "Reading the Nodes from gateway.orbit."
+                  : "The Nodes show once the Gateway answers. Reload to try again."
+              }
+            />
+          ) : nodes.length === 0 ? (
+            <SettingsRow
+              title="No Nodes yet"
+              description="A Node's T3 server registers itself with the Gateway."
             />
           ) : (
-            view.environments.map((environment) => (
+            nodes.map((entry) => (
               <SettingsRow
-                key={environment.environmentId}
-                title={environment.label}
-                description={environment.url.replace(/^https?:\/\//, "")}
+                key={entry.environmentId}
+                title={
+                  <span className="flex items-center gap-2">
+                    <span
+                      aria-hidden
+                      className={cn("size-2 shrink-0 rounded-full", NODE_STATES[entry.state].dot)}
+                    />
+                    {entry.name}
+                  </span>
+                }
+                description={entry.isThisDevice ? `This device · ${entry.address}` : entry.address}
                 control={
-                  <OrbitServerControl
-                    gateway={gateway}
-                    environment={environment}
-                    connected={connected.has(environment.environmentId)}
-                    starting={
-                      environment.instanceId !== null &&
-                      startingInstanceIds.has(environment.instanceId)
-                    }
-                  />
+                  <span className="text-ui text-muted-foreground">
+                    {NODE_STATES[entry.state].label}
+                  </span>
                 }
               />
             ))
           )}
         </SettingsSection>
-      ) : null}
+      </section>
 
       <SettingsSection id="orbit-environments-from" title="Environments from Orbit" hideTitle>
         <SettingsRow
@@ -495,52 +613,5 @@ export function OrbitProfilePage() {
 
       {view ? <ProfileSyncSection profileName={profile?.name ?? null} /> : null}
     </SettingsPageContainer>
-  );
-}
-
-/**
- * Conn: a Gateway server's state on this device. Host servers pair by themselves; a clone (an
- * Instance's server) pairs only when the user connects it here or this device started it.
- */
-export function OrbitServerControl(props: {
-  readonly gateway: OrbitGatewayClient | null;
-  readonly environment: OrbitGatewayEnvironment;
-  readonly connected: boolean;
-  readonly starting: boolean;
-}) {
-  const { environment } = props;
-  const [connecting, setConnecting] = useState(false);
-  const status =
-    environment.status === "session_expired"
-      ? "Registration expired"
-      : environment.powerState === "stopped"
-        ? "Asleep"
-        : props.connected
-          ? "Paired"
-          : environment.instanceId === null || props.starting || connecting
-            ? "Pairing…"
-            : null;
-  if (status !== null) return <span className="text-ui text-muted-foreground">{status}</span>;
-
-  const connect = async () => {
-    if (!props.gateway) return;
-    setConnecting(true);
-    const paired = await connectOrbitEnvironment(props.gateway, environment);
-    if (!paired) {
-      toastManager.add({
-        type: "error",
-        title: "Orbit",
-        description: `Conn could not pair with ${environment.label}.`,
-      });
-    }
-    setConnecting(false);
-  };
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-ui text-muted-foreground">Not connected</span>
-      <Button size="xs" variant="outline" disabled={!props.gateway} onClick={() => void connect()}>
-        Connect
-      </Button>
-    </div>
   );
 }

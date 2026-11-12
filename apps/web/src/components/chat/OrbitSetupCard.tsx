@@ -14,6 +14,7 @@ import { useOpenLink } from "~/browser/useOpenLink";
 import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
+import { useInstanceLinkContextMenu } from "~/orbit/useInstanceLinkContextMenu";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import {
   ORBIT_INSTANCE_STAYS_LINE,
@@ -178,6 +179,7 @@ export function OrbitReadyRow({
 }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
   const openLink = useOpenLink(threadRef);
+  const showLinkMenu = useInstanceLinkContextMenu(threadRef);
   const label = "Instance ready";
   return (
     <section aria-label="Instance setup" data-orbit-ready>
@@ -263,6 +265,7 @@ export function OrbitReadyRow({
                 event.preventDefault();
                 void openLink(view.url!, { event }).catch((error: unknown) => console.error(error));
               }}
+              onContextMenu={(event) => showLinkMenu(event, view.url!)}
             >
               {view.url}
             </a>{" "}

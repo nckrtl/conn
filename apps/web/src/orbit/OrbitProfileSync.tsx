@@ -3,11 +3,9 @@ import {
   createOrbitGatewayClient,
   createProfileSync,
   type OrbitGatewayClient,
-  type OrbitGatewaySectionMeta,
   type OrbitGatewayTransport,
   type OrbitGatewayWorkspace,
   type ProfileSectionName,
-  type ProfileSyncRunOptions,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useEffect } from "react";
 import { create } from "zustand";
@@ -19,9 +17,8 @@ import { pruneWorkspaceCloneRefs } from "./cloneWorkspaceRefs";
 import { OrbitAppearanceSync } from "./OrbitAppearanceSync";
 import { getProfileSyncChannels, onLocalProfileChange } from "./profileSyncRegistry";
 import {
-  isSectionSyncEnabled,
+  forgetRemovedProfileSyncKeys,
   loadSectionState,
-  saveSectionBackup,
   saveSectionState,
 } from "./profileSyncStorage";
 import { createSerialRunner } from "./serialRunner";
@@ -50,8 +47,6 @@ export interface OrbitProfileSyncStatus {
    */
   readonly sections: "unknown" | "supported" | "unsupported";
   readonly sectionsError: string | null;
-  /** Who last changed each section and when, from the Gateway's latest answer. */
-  readonly sectionChanges: Readonly<Record<string, OrbitGatewaySectionMeta>> | null;
 }
 
 const INITIAL_STATUS: OrbitProfileSyncStatus = {
@@ -61,25 +56,20 @@ const INITIAL_STATUS: OrbitProfileSyncStatus = {
   syncedAt: null,
   sections: "unknown",
   sectionsError: null,
-  sectionChanges: null,
 };
 
 /** What the profile sync last did, for Settings. */
 export const useOrbitProfileSyncStatus = create<OrbitProfileSyncStatus>(() => INITIAL_STATUS);
 
-let requestSync: ((options?: ProfileSyncRunOptions) => void) | null = null;
+let requestSync: (() => Promise<void>) | null = null;
 
-/** Runs the profile sync now, as after a profile change in the Orbit panel. A no-op outside the desktop app. */
-export function syncOrbitProfileNow(): void {
-  requestSync?.();
-}
-
-/** Overwrites the profile with this device's value (`push`) or this device with the profile's (`pull`). */
-export function forceOrbitProfileSync(
-  direction: "push" | "pull",
-  sections: readonly ProfileSectionName[],
-): void {
-  requestSync?.({ force: { [direction]: sections } });
+/**
+ * Runs the profile sync now and settles once a run that started after this call has finished, so
+ * a profile switch first sends this device's unsent edits to the profile it leaves. A no-op
+ * outside the desktop app.
+ */
+export function syncOrbitProfileNow(): Promise<void> {
+  return requestSync?.() ?? Promise.resolve();
 }
 
 /** The Gateway client over the desktop main process, or null outside the desktop app. */
@@ -153,7 +143,7 @@ function writeLocal(workspaces: readonly OrbitGatewayWorkspace[]): void {
 }
 
 interface ProfileSyncController {
-  readonly trigger: (options?: ProfileSyncRunOptions) => void;
+  readonly trigger: () => Promise<void>;
   readonly beginNonUserChange: (name: ProfileSectionName) => () => void;
 }
 
@@ -168,6 +158,7 @@ function profileSyncController(): ProfileSyncController | null {
   if (controller) return controller;
   const client = desktopOrbitGatewayClient();
   if (!client) return null;
+  forgetRemovedProfileSyncKeys();
   const ports: WorkspaceProfileSyncPorts = {
     client,
     readLocal: () => useWorkspaceStore.getState().workspaces.map(toGateway),
@@ -180,11 +171,9 @@ function profileSyncController(): ProfileSyncController | null {
     channels: getProfileSyncChannels,
     loadState: loadSectionState,
     saveState: saveSectionState,
-    isEnabled: isSectionSyncEnabled,
-    onAdopt: saveSectionBackup,
   });
 
-  const runOnce = async (options: ProfileSyncRunOptions | undefined): Promise<void> => {
+  const runOnce = async (): Promise<void> => {
     try {
       const listed = await reconcileEnvironmentProvider(client);
       const { provider } = useEnvironmentProvider.getState();
@@ -209,15 +198,11 @@ function profileSyncController(): ProfileSyncController | null {
       if (result.kind === "unbound") return;
       // A failure in the sections must not hide that the workspaces synced.
       try {
-        const synced = await sections.run(me, options);
+        const synced = await sections.run(me);
         if (synced.kind === "unsupported") {
           useOrbitProfileSyncStatus.setState({ sections: "unsupported", sectionsError: null });
         } else if (synced.kind === "synced") {
-          useOrbitProfileSyncStatus.setState((status) => ({
-            sections: "supported",
-            sectionsError: null,
-            sectionChanges: synced.sections ?? status.sectionChanges,
-          }));
+          useOrbitProfileSyncStatus.setState({ sections: "supported", sectionsError: null });
         }
       } catch (error) {
         useOrbitProfileSyncStatus.setState({
@@ -252,7 +237,7 @@ export function OrbitProfileSync() {
   useEffect(() => {
     const sync = profileSyncController();
     if (!sync) return;
-    const run = (): void => sync.trigger();
+    const run = (): void => void sync.trigger();
 
     const unsubscribeProvider = useEnvironmentProvider.subscribe((state, previous) => {
       if (state.provider !== previous.provider) run();

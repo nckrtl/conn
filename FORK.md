@@ -368,7 +368,7 @@ stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. The 
 `/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
 
 The Orbit panel is a modal like Settings, with its own nav: Instances, Connection and Profile
-(the profile and its sync). Instances lists every Instance this device can reach, by Orbit Project,
+(the profile this device follows). Instances lists every Instance this device can reach, by Orbit Project,
 never a default: today from the Gateway's environments named from its Projects, later from Orbit's
 flat `GET /conn/instances`. Only `listOrbitInstances` in `client-runtime/src/orbitGateway/instanceList.ts`
 reads the source; grouping, search, the Project filter and the join with local threads beside it
@@ -418,9 +418,12 @@ The profile also carries:
   glass, motion, diffs and timestamps.
 
 Conn writes each section with `PATCH /profiles/{id}/settings`. Version conflicts
-merge per key or theme. The first sync adopts the profile or seeds an empty one.
-Previous values remain available in the Orbit panel › Profile › Profile sync ›
-Restore previous settings. Each part can be switched off per device.
+merge per key or theme. A profile is one set of settings: every part always syncs, and
+nothing can be switched off, forced or restored per device. The first sync with a profile,
+also after a switch in the Orbit panel › Profile, adopts the profile or seeds an empty one,
+with no confirmation; a switch first sends this device's unsent edits to the profile it
+leaves (`switchOrbitProfile`). "New profile…" in the profile menu makes a profile from
+this device.
 
 An environment's `t3 theme set` is not a user choice and never syncs.
 `orbit/themeOrigin.ts` wraps both calls in `useDefaultTheme.ts`. Themes a device
@@ -443,8 +446,9 @@ Sources:
   `OrbitAppearanceSync.tsx`, `appearanceProfileSync.ts`,
   `deviceSettingsSync.ts`, `profileSync*.ts`, `themeOrigin.ts`,
   `workspaceProfileSync.ts`.
-- Web (`apps/web/src/`): `components/settings/OrbitSettings.tsx` (Profile sync, on the
-  Orbit panel's Profile page), `hooks/useDefaultTheme.ts` (two wrapped calls).
+- Web (`apps/web/src/`): `components/OrbitProfilePage.tsx` (the Orbit panel's Profile
+  page; its logic is `orbitGateway/profilePage.ts`), `hooks/useDefaultTheme.ts` (two
+  wrapped calls).
 - Gateway PATCH IPC: `apps/desktop/src/ipc/methods/orbitGateway.ts`,
   `packages/contracts/src/ipc.ts` (`orbitGatewaySend`).
 - Mobile (`apps/mobile/src/`): `features/orbit/*`,

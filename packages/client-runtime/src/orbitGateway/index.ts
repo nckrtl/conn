@@ -10,3 +10,4 @@ export * from "./orbitSetupStages.ts";
 export * from "./orbitInstance.ts";
 export * from "./instanceList.ts";
 export * from "./orbitConnection.ts";
+export * from "./profilePage.ts";

@@ -1,6 +1,4 @@
 import {
-  APPEARANCE_SECTION,
-  DESKTOP_DEVICE_SECTION,
   orbitConnectionChecks,
   orbitNodeServers,
   orbitSignedInText,
@@ -8,67 +6,31 @@ import {
   type OrbitConnectionCheckState,
   type OrbitConnectionProbe,
   type OrbitGatewayEnvironment,
-  type OrbitGatewayNode,
-  type OrbitGatewayProfile,
   type OrbitNodeState,
-  type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { setEnvironmentProvider, useEnvironmentProvider } from "~/orbit/environmentProvider";
-import {
-  desktopOrbitGatewayClient,
-  forceOrbitProfileSync,
-  syncOrbitProfileNow,
-  useOrbitProfileSyncStatus,
-} from "~/orbit/OrbitProfileSync";
-import { backupLocalSections, restoreSectionBackup } from "~/orbit/profileSyncRegistry";
-import {
-  setGroupSyncEnabled,
-  SYNC_GROUPS,
-  useProfileSyncBackups,
-  useProfileSyncOptOuts,
-  type SyncGroup,
-} from "~/orbit/profileSyncStorage";
+import { desktopOrbitGatewayClient } from "~/orbit/OrbitProfileSync";
 import { useEnvironments } from "~/state/environments";
 
 import { cn } from "~/lib/utils";
 
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
-import { Switch } from "../ui/switch";
-import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting, SETTINGS_SECTION_LABELS } from "./settingsSearch";
 import { useMessages } from "gt-react";
 import { useStableCallback } from "~/hooks/useStableCallback";
 
-interface GatewayView {
-  readonly node: OrbitGatewayNode;
-  readonly profiles: readonly OrbitGatewayProfile[];
-}
-
 const PROVIDER_LABELS: Record<EnvironmentProvider, string> = {
   default: "Default",
   orbit: "Orbit",
 };
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function relativeTime(at: number | null): string {
-  if (at === null) return "not yet";
-  const seconds = Math.round((Date.now() - at) / 1000);
-  if (seconds < 60) return "just now";
-  const minutes = Math.round(seconds / 60);
-  return minutes < 60 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
-}
 
 /**
  * Where this device's environments come from: the ones added here (Default) or the T3 servers on
@@ -106,222 +68,6 @@ export function EnvironmentProviderSection() {
               ) : null}
             </SelectPopup>
           </Select>
-        }
-      />
-    </SettingsSection>
-  );
-}
-
-const SYNC_GROUP_LABELS: Record<SyncGroup, string> = {
-  appearance: "Appearance",
-  device: "This desktop's settings",
-};
-
-function changedLine(
-  label: string,
-  change: { readonly updatedAt: string | null; readonly updatedBy: string | null } | undefined,
-): string | null {
-  if (!change) return null;
-  const at = change.updatedAt === null ? Number.NaN : Date.parse(change.updatedAt);
-  const when = Number.isNaN(at) ? "" : ` ${relativeTime(at)}`;
-  return `${label}: changed${change.updatedBy ? ` by ${change.updatedBy}` : ""}${when}`;
-}
-
-/**
- * What the profile shares beyond workspaces: the appearance on every device, and this desktop's
- * settings with the user's other desktops. Each can be turned off on this device only.
- */
-function ProfileSyncSection({ profileName }: { readonly profileName: string | null }) {
-  const sync = useOrbitProfileSyncStatus();
-  const optOuts = useProfileSyncOptOuts();
-  const backups = useProfileSyncBackups();
-  const unsupported = sync.sections === "unsupported";
-  const disabled = profileName === null;
-
-  const enabledSections = (Object.keys(SYNC_GROUPS) as SyncGroup[])
-    .filter((group) => !optOuts[group])
-    .map((group): ProfileSectionName => SYNC_GROUPS[group]);
-  const backedUp = ([APPEARANCE_SECTION, DESKTOP_DEVICE_SECTION] as const).filter(
-    (name) => backups[name] !== undefined,
-  );
-  const backupTime = Math.max(0, ...backedUp.map((name) => backups[name]?.savedAt ?? 0));
-  const changes = [
-    changedLine("Appearance", sync.sectionChanges?.[APPEARANCE_SECTION]),
-    changedLine("This desktop's settings", sync.sectionChanges?.[DESKTOP_DEVICE_SECTION]),
-  ].filter((line): line is string => line !== null);
-
-  const statusTitle =
-    sync.phase === "error"
-      ? "Sync failed"
-      : profileName === null
-        ? "No profile"
-        : unsupported
-          ? "Workspaces only"
-          : "Synced";
-  const statusDescription =
-    sync.phase === "error"
-      ? sync.error
-      : profileName === null
-        ? "Choose a profile to sync workspaces, appearance and settings."
-        : unsupported
-          ? `Gateway doesn't support profile sync yet. Workspaces still sync with ${profileName}.`
-          : sync.phase === "synced"
-            ? `Synced with ${profileName}. Last synced ${relativeTime(sync.syncedAt)}.`
-            : "Waiting for the first sync.";
-
-  const toggle = (group: SyncGroup, enabled: boolean) => {
-    setGroupSyncEnabled(group, enabled);
-    syncOrbitProfileNow();
-  };
-  const force = (direction: "push" | "pull") => {
-    if (direction === "pull") backupLocalSections(enabledSections);
-    forceOrbitProfileSync(direction, enabledSections);
-    toastManager.add({
-      type: "info",
-      title: "Profile sync",
-      description:
-        direction === "push"
-          ? "Sending this device's settings to the profile."
-          : "Replacing this device's settings with the profile's. Restore previous settings undoes it.",
-    });
-  };
-  const restore = () => {
-    const restored = backedUp.filter((name) => restoreSectionBackup(name));
-    toastManager.add({
-      type: restored.length > 0 ? "success" : "error",
-      title: "Profile sync",
-      description:
-        restored.length > 0
-          ? "Previous settings restored. They replace the profile's at the next sync."
-          : "Nothing to restore yet. Try again in a moment.",
-    });
-  };
-
-  return (
-    <SettingsSection id="orbit-profile-sync" title="Profile sync">
-      <SettingsRow
-        title={statusTitle}
-        description={statusDescription}
-        status={
-          sync.sectionsError ? (
-            `Appearance and settings: ${sync.sectionsError}`
-          ) : changes.length > 0 ? (
-            <ul>
-              {changes.map((line) => (
-                <li key={line}>{line}</li>
-              ))}
-            </ul>
-          ) : undefined
-        }
-        control={
-          <Button size="xs" variant="outline" disabled={disabled} onClick={syncOrbitProfileNow}>
-            Sync now
-          </Button>
-        }
-      />
-      {(Object.keys(SYNC_GROUPS) as SyncGroup[]).map((group) => (
-        <SettingsRow
-          key={group}
-          title={`Sync ${SYNC_GROUP_LABELS[group].toLowerCase()}`}
-          description={
-            group === "appearance"
-              ? "Theme, light or dark mode, contrast and custom themes follow your profile on every device."
-              : "Fonts, text sizes, chat width, glass, motion, diff and timestamp options are shared with your other desktops. Phones keep their own."
-          }
-          control={
-            <Switch
-              aria-label={`Sync ${SYNC_GROUP_LABELS[group].toLowerCase()}`}
-              checked={!optOuts[group]}
-              disabled={disabled || unsupported}
-              onCheckedChange={(enabled) => toggle(group, enabled)}
-            />
-          }
-        />
-      ))}
-      <SettingsRow
-        title="Resolve differences"
-        description="Replace the profile with what this device has, or this device with what the profile has."
-        control={
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={disabled || unsupported || enabledSections.length === 0}
-              onClick={() => force("push")}
-            >
-              Use this device
-            </Button>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={disabled || unsupported || enabledSections.length === 0}
-              onClick={() => force("pull")}
-            >
-              Use the profile
-            </Button>
-          </div>
-        }
-      />
-      {backedUp.length > 0 ? (
-        <SettingsRow
-          title="Restore previous settings"
-          description={`What this device had before the profile's settings replaced them, saved ${relativeTime(backupTime)}.`}
-          control={
-            <Button size="xs" variant="outline" onClick={restore}>
-              Restore
-            </Button>
-          }
-        />
-      ) : null}
-    </SettingsSection>
-  );
-}
-
-/**
- * This device's Node and its profiles, read on mount and after each profile sync.
- */
-function useOrbitGatewayView() {
-  // One client per mount: the load effect below must not restart on every render.
-  const [client] = useState(desktopOrbitGatewayClient);
-  const sync = useOrbitProfileSyncStatus();
-  const [view, setView] = useState<GatewayView | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const load = useStableCallback(async () => {
-    if (!client) return;
-    try {
-      const [node, profiles] = await Promise.all([client.me(), client.profiles()]);
-      setView({ node, profiles });
-      setLoadError(null);
-    } catch (error) {
-      setLoadError(message(error));
-    }
-  });
-
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Orbit Gateway on mount and after each profile sync
-  useEffect(() => {
-    void load();
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A finished profile sync can change the node and profiles, so the view reloads.
-  }, [load, sync.syncedAt]);
-
-  return { gateway: client, view, loadError, load };
-}
-
-function OrbitDeviceSection(props: {
-  readonly view: GatewayView | null;
-  readonly loadError: string | null;
-  readonly onReload: () => void;
-}) {
-  const { view, loadError } = props;
-  return (
-    <SettingsSection id="orbit-device" title="Orbit Gateway">
-      <SettingsRow
-        title={view?.node.name ?? (loadError ? "Gateway unreachable" : "Connecting…")}
-        description={loadError ?? (view ? orbitSignedInText(view.node) : "gateway.orbit")}
-        control={
-          <Button size="xs" variant="outline" onClick={props.onReload}>
-            Reload
-          </Button>
         }
       />
     </SettingsSection>
@@ -528,95 +274,6 @@ export function OrbitConnectionPage() {
           }
         />
       </SettingsSection>
-    </SettingsPageContainer>
-  );
-}
-
-/**
- * The Orbit panel's Profile page: the profile this device shares its workspaces with, and the
- * profile sync. Until the Gateway answers, or when a reload fails, it shows the device row with Reload.
- */
-export function OrbitProfilePage() {
-  const { gateway, view, loadError, load } = useOrbitGatewayView();
-  const [newProfileName, setNewProfileName] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const bindProfile = async (profile: { readonly id: number } | { readonly name: string }) => {
-    if (!gateway) return;
-    setBusy(true);
-    try {
-      const id = "id" in profile ? profile.id : (await gateway.createProfile(profile.name)).id;
-      await gateway.bindProfile(id);
-      setNewProfileName("");
-      await load();
-      syncOrbitProfileNow();
-    } catch (error) {
-      toastManager.add({ type: "error", title: "Orbit", description: message(error) });
-    }
-    // Not in `finally`: the React Compiler cannot compile a finalizer clause.
-    setBusy(false);
-  };
-
-  const profile = view?.node.profile ?? null;
-
-  return (
-    <SettingsPageContainer width="wide">
-      {view && loadError === null ? null : (
-        <OrbitDeviceSection view={view} loadError={loadError} onReload={() => void load()} />
-      )}
-
-      {view ? (
-        <SettingsSection id="orbit-profile" title="Orbit profile">
-          <SettingsRow
-            title="Profile"
-            description="Devices with the same profile share their workspaces."
-            control={
-              <Select
-                value={profile ? String(profile.id) : ""}
-                onValueChange={(next) => {
-                  const chosen = view.profiles.find((entry) => String(entry.id) === next);
-                  if (chosen && chosen.id !== profile?.id) void bindProfile({ id: chosen.id });
-                }}
-              >
-                <SelectTrigger size="sm" aria-label="Profile" disabled={busy}>
-                  <SelectValue>{profile?.name ?? "Choose a profile"}</SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {view.profiles.map((entry) => (
-                    <SelectItem key={entry.id} value={String(entry.id)}>
-                      {entry.name}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            }
-          />
-          <SettingsRow
-            title="New profile"
-            description="Creates a profile and switches this device to it."
-            control={
-              <div className="flex items-center gap-2">
-                <Input
-                  aria-label="New profile name"
-                  placeholder="Name"
-                  value={newProfileName}
-                  onChange={(event) => setNewProfileName(event.target.value)}
-                />
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={newProfileName.trim() === "" || busy}
-                  onClick={() => void bindProfile({ name: newProfileName.trim() })}
-                >
-                  Create
-                </Button>
-              </div>
-            }
-          />
-        </SettingsSection>
-      ) : null}
-
-      {view ? <ProfileSyncSection profileName={profile?.name ?? null} /> : null}
     </SettingsPageContainer>
   );
 }

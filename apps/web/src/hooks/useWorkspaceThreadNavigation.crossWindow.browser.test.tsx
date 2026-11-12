@@ -57,8 +57,8 @@ const routerState = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", async (original) => ({
   ...(await original<object>()),
   useNavigate: () => vi.fn(),
-  useLocation: ({ select }: { select: (location: { pathname: string }) => unknown }) =>
-    select({ pathname: "/" }),
+  useMatches: ({ select }: { select: (matches: Array<{ pathname: string }>) => unknown }) =>
+    select([{ pathname: "/" }]),
   useParams: ({ select }: { select: (params: Record<string, string>) => unknown }) =>
     select(routerState.params),
 }));

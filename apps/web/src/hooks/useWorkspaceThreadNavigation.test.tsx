@@ -11,8 +11,8 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => state.navigate,
-  useLocation: ({ select }: { select: (location: { pathname: string }) => unknown }) =>
-    select({ pathname: state.pathname }),
+  useMatches: ({ select }: { select: (matches: Array<{ pathname: string }>) => unknown }) =>
+    select([{ pathname: state.pathname }]),
   useParams: ({ select }: { select: (params: Record<string, string>) => unknown }) =>
     select(state.params),
 }));
@@ -131,6 +131,7 @@ describe("workspace navigation", () => {
         renderer?.update(<Probe />);
       });
       expect(state.navigate).toHaveBeenCalledTimes(1);
+      expect(state.navigate).toHaveBeenLastCalledWith({ to: "/" });
     },
   );
 });

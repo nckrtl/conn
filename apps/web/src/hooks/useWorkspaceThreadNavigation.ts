@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
+import { useMatches, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
 import {
@@ -22,7 +22,10 @@ export function useWorkspaceThreadNavigation() {
   const ready = useAllEnvironmentShellsBootstrapped();
   const route = useParams({ strict: false, select: resolveThreadRouteRef });
   const navigate = useNavigate();
-  const modalOpen = useLocation({ select: (location) => isAppModalPage(location.pathname) });
+  // Matches, not location, so this agrees with the params `route` reads (see _chat.tsx).
+  const modalOpen = useMatches({
+    select: (matches) => matches.some((match) => isAppModalPage(match.pathname)),
+  });
   const previousWorkspace = useRef(workspaceId);
   const pending = useRef<string | null>(null);
   const routeKey = route ? JSON.stringify([route.environmentId, route.threadId]) : null;

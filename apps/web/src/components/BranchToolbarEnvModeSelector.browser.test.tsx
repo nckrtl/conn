@@ -32,7 +32,8 @@ describe("BranchToolbarEnvModeSelector", () => {
       />,
     );
 
-    await expect.element(screen.getByText("Worktree")).toBeVisible();
+    // Like any worktree, it is named by its folder.
+    await expect.element(screen.getByText("t3code-1a2b3c4d")).toBeVisible();
     expect(screen.getByText(/Orbit/).elements()).toHaveLength(0);
   });
 });

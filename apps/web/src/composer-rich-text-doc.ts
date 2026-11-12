@@ -697,6 +697,7 @@ function listNormalizationPlugin(isComposing: () => boolean) {
         return null;
 
       const tr = state.tr;
+      let convertedActive = false;
       for (const pos of [...pending].sort((a, b) => b - a)) {
         pending.delete(pos);
         if (state.doc.resolve(pos).depth !== 0) continue;
@@ -757,8 +758,14 @@ function listNormalizationPlugin(isComposing: () => boolean) {
         tr.delete(pos + 3, pos + 3 + markerLength);
         joinCompatibleLists(tr, pos + tr.doc.nodeAt(pos)!.nodeSize);
         joinCompatibleLists(tr, pos);
+        if (active) convertedActive = true;
       }
       pending = new Set([...pending].map((pos) => tr.mapping.map(pos, 1)));
+      // Tiptap 3.31.4+ dispatches typed text before its input rule runs, so this can convert first
+      // and the rule is skipped. Record the conversion as the rule would, so Backspace restores it.
+      const inputRules =
+        convertedActive && state.plugins.find((plugin) => plugin.spec.isInputRules);
+      if (inputRules) tr.setMeta(inputRules, { transform: tr, from: 0, to: 0 });
       return tr.docChanged ? tr : null;
     },
   });

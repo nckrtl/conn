@@ -1,6 +1,7 @@
-import type {
-  EnvironmentProvider,
-  OrbitGatewayEnvironment,
+import {
+  orbitSignedInText,
+  type EnvironmentProvider,
+  type OrbitGatewayEnvironment,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useState } from "react";
 import { ActivityIndicator, Pressable, TextInput, View } from "react-native";
@@ -134,9 +135,7 @@ export function OrbitEnvironmentSections() {
                 (gateway.phase === "error" ? "Gateway unreachable" : "Connecting…")}
             </Text>
             <Text className="text-sm text-foreground-muted">
-              {gateway.node
-                ? `Signed in to gateway.orbit as ${gateway.node.wireguardIp}`
-                : "gateway.orbit, over WireGuard"}
+              {gateway.node ? orbitSignedInText(gateway.node) : "gateway.orbit, over WireGuard"}
             </Text>
           </View>
           {gateway.phase === "loading" ? (

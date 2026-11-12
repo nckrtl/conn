@@ -3,6 +3,7 @@ import {
   DESKTOP_DEVICE_SECTION,
   orbitConnectionChecks,
   orbitNodeServers,
+  orbitSignedInText,
   type EnvironmentProvider,
   type OrbitConnectionCheckState,
   type OrbitConnectionProbe,
@@ -316,10 +317,7 @@ function OrbitDeviceSection(props: {
     <SettingsSection id="orbit-device" title="Orbit Gateway">
       <SettingsRow
         title={view?.node.name ?? (loadError ? "Gateway unreachable" : "Connecting…")}
-        description={
-          loadError ??
-          (view ? `Signed in to gateway.orbit as ${view.node.wireguardIp}` : "gateway.orbit")
-        }
+        description={loadError ?? (view ? orbitSignedInText(view.node) : "gateway.orbit")}
         control={
           <Button size="xs" variant="outline" onClick={props.onReload}>
             Reload
@@ -369,7 +367,10 @@ const NODE_STATES: Record<OrbitNodeState, { readonly label: string; readonly dot
 function useOrbitConnection() {
   // One client per mount: the load effect below must not restart on every render.
   const [client] = useState(desktopOrbitGatewayClient);
-  const [probe, setProbe] = useState<OrbitConnectionProbe>({ status: "checking" });
+  // Without a client (outside the desktop app) nothing runs, so the checks settle as not checked.
+  const [probe, setProbe] = useState<OrbitConnectionProbe>(() =>
+    client ? { status: "checking" } : { status: "unavailable" },
+  );
   const [environments, setEnvironments] = useState<readonly OrbitGatewayEnvironment[] | null>(null);
   const latest = useRef(0);
 
@@ -427,7 +428,7 @@ export function OrbitConnectionPage() {
           title={node?.name ?? "This device"}
           description={
             node
-              ? `Signed in to gateway.orbit as ${node.wireguardIp}`
+              ? orbitSignedInText(node)
               : probe.status === "checking"
                 ? "Connecting to gateway.orbit…"
                 : "The Node name and WireGuard address show once all checks pass."
@@ -436,7 +437,7 @@ export function OrbitConnectionPage() {
             <Button
               size="xs"
               variant="outline"
-              disabled={probe.status === "checking"}
+              disabled={probe.status === "checking" || probe.status === "unavailable"}
               onClick={() => void load()}
             >
               Reload
@@ -473,9 +474,11 @@ export function OrbitConnectionPage() {
               description={
                 probe.status === "checking"
                   ? "Reading the Nodes from gateway.orbit."
-                  : probe.status === "ok"
-                    ? "The Gateway did not send its list of servers. Reload to try again."
-                    : "The Nodes show once the Gateway answers. Reload to try again."
+                  : probe.status === "unavailable"
+                    ? undefined
+                    : probe.status === "ok"
+                      ? "The Gateway did not send its list of servers. Reload to try again."
+                      : "The Nodes show once the Gateway answers. Reload to try again."
               }
             />
           ) : nodes.length === 0 ? (

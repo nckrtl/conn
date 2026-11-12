@@ -267,12 +267,11 @@ attachments are off. Send saves a start (typed name, model and modes) for the ru
 sending through a T3 server, opens its pending thread, then clears the draft. This is not the
 older worktree env mode `"orbit"`.
 
-**Branch control.** Behind `ORBIT_BRANCH_CONTROL_ENABLED` (`orbitBranchControl.ts`, off until
-Orbit accepts `branch` on create): off, the control is hidden, no branches are read and no create
-carries a branch. On, a new Instance's context row shows "From <default>" (no choice: the create
+**Branch control** (`orbitBranchControl.ts`). A new Instance's context row shows "From <default>" (no choice: the create
 sends no `branch`) and a menu from `GET /api/v1/conn/projects/{id}/branches?query=` (25 s limit)
 with two modes, "New branch from" and "Work on branch". Under "Work on branch" the default branch
-is disabled, and a branch another Instance works on selects that Instance instead. Admission
+is disabled, and a branch another Instance works on selects that Instance instead; for a paired
+Instance the typed prompt, attachments, modes and a picked model move into its draft. Admission
 refusals (`branch.in_use`, `branch.not_found`, `branch.exists`, `instance.placement_conflict`,
 `source.head_unavailable`) made no Instance and offer Change branch or Change name; the create
 step codes keep Retry only. Retry resends the same choice. The ready card shows Branch and Base,

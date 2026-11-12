@@ -250,7 +250,9 @@ Instance step.
 
 **Instance step.** A startable row opens the Instance step (`CommandPaletteOrbitInstanceStep.tsx`,
 `orbitInstanceStepLogic.ts`): a name field with the Project's domain suffix, checked live with
-`GET /api/v1/conn/projects/{id}/instances/check?name=` after the local name rule passes. A failed
+`GET /api/v1/conn/projects/{id}/instances/check?name=` after the local name rule passes. Reason
+`domain_invalid` (the address `<name>.<project domain>` breaks Orbit's limits; Conn hard-codes no
+length) reads "This name makes the address too long. Use a shorter name." A failed
 or slow check keeps create possible (Orbit's `instance.name_taken` at create is the guard); 409
 `instance.default_missing` blocks it. A search that finds no Instance fills the field with the
 search text as a slug, unless the user typed a name. "Existing instances" lists every Instance of
@@ -317,15 +319,19 @@ the pending route is replaced by the real thread. The start stays saved after th
 ready line itself; none of it goes to the agent. If the clone lacks the composer's provider, the
 first turn uses the clone's default and the ready area says so.
 
-**Failures.** A failed start offers Retry (from the last saved step), Change name (only for
-`instance.name_taken`; reopens the draft with the message and model, then the Instance step) and
+**Failures.** A failed start offers Retry (from the last saved step), Change name (for refusals
+that made no Instance, such as `instance.name_taken` and `route.domain_invalid`; reopens the draft with the message and model, then the Instance step) and
 Dismiss, which drops only the saved start on this device. Conn removes no Instance; Instances are
 removed in Orbit.
 
 Still waiting for Orbit: the Node menu ("Run on") and
 starting a stopped Instance (stopped Instances stay disabled).
 
-The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
+The phone starts the same thread from Choose project › Orbit project in Orbit mode. Its Instance
+name comes from the message (`orbitThreadInstanceName`, saved with `nameSuffix`); before each new
+create the runner checks it and, while Orbit answers `domain_invalid`, tries the slug cut to 24,
+then 12, then `thread`, keeping the suffix. When none fits, or a check fails after such an answer,
+the start stops with `route.domain_invalid` instead of creating. It runs the
 shared state machine and first-message launch (`threadStart.ts`, `threadTurn.ts`); the starts
 live in `orbit-thread-starts.json` in the app's documents folder. The file write is async, so
 each Gateway call, the pairing and the send first wait for it; a failed write stops the start. Start rows with the stage, Retry and Dismiss sit above the

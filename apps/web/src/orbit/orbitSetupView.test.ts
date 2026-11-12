@@ -261,6 +261,15 @@ describe("orbitSetupView for branch refusals", () => {
       },
     ],
     [
+      "address too long",
+      refused(null, "route.domain_invalid"),
+      {
+        ...quiet,
+        error: "This name makes the address too long. Use a shorter name.",
+        changeName: true,
+      },
+    ],
+    [
       "repository unreadable",
       refused(newBranch, "source.head_unavailable"),
       { ...quiet, error: "Could not read the repository." },

@@ -326,7 +326,7 @@ describe("createOrbitGatewayClient", () => {
         path: "/projects/66/instances/check",
         query: { name: "pricing" },
       });
-      for (const reason of ["taken", "invalid", "default"] as const) {
+      for (const reason of ["taken", "invalid", "default", "domain_invalid"] as const) {
         const answer = await (
           await check(200, { data: { name: "pricing", available: false, reason, domain: null } })
         ).result;

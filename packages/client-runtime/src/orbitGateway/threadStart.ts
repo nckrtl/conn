@@ -14,6 +14,7 @@ import {
   ORBIT_BRANCH_IN_USE,
   ORBIT_BRANCH_NOT_FOUND,
   ORBIT_PLACEMENT_CONFLICT,
+  ORBIT_ROUTE_DOMAIN_INVALID,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   OrbitGatewayError,
   operationPollDelayMs,
@@ -103,7 +104,16 @@ export interface OrbitThreadStart {
   /** The create's result: the branch the Instance checked out and the base it was cut from. */
   readonly resultBranch?: string | null;
   readonly resultBaseBranch?: string | null;
+  /**
+   * The random suffix of a name Conn made from the message; null for a typed or existing name.
+   * Before the create the runner may shorten that name's slug, keeping the suffix.
+   */
+  readonly nameSuffix?: string | null;
 }
+
+/** A name whose address `<name>.<project domain>` Orbit refuses (check or create). */
+export const ORBIT_NAME_DOMAIN_INVALID_TEXT =
+  "This name makes the address too long. Use a shorter name.";
 
 export interface OrbitModelFallback {
   readonly requestedModel: string;
@@ -181,6 +191,7 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         errorDetail: typeof row.errorDetail === "string" ? row.errorDetail : null,
         resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
         resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
+        nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
       },
     ];
   });
@@ -272,6 +283,8 @@ export interface OrbitThreadStartPorts {
 
 /** The longest name the Gateway takes is 63 characters; the slug leaves room for the suffix. */
 const NAME_SLUG_LENGTH = 40;
+/** Shorter slugs to try when Orbit says the address of the name is too long, then "thread". */
+const NAME_SLUG_RETRY_LENGTHS = [24, 12, 0];
 const NAME_SLUG_WORDS = 6;
 /** How long Operation reads may keep failing before the start stops. */
 const READ_OUTAGE_MS = 60_000;
@@ -285,7 +298,11 @@ const PAIRING_ADMISSION_MS = 5 * 60_000;
  * The clone's Instance name: the first words of the message as a slug, and a random suffix so two
  * threads with the same opening never name the same Instance.
  */
-export function orbitThreadInstanceName(message: string, suffix: string): string {
+export function orbitThreadInstanceName(
+  message: string,
+  suffix: string,
+  slugLength = NAME_SLUG_LENGTH,
+): string {
   const slug = message
     .toLowerCase()
     .normalize("NFKD")
@@ -295,9 +312,17 @@ export function orbitThreadInstanceName(message: string, suffix: string): string
     .filter((word) => word !== "")
     .slice(0, NAME_SLUG_WORDS)
     .join("-")
-    .slice(0, NAME_SLUG_LENGTH)
+    .slice(0, slugLength)
     .replace(/-+$/, "");
   return `${slug || "thread"}-${suffix}`;
+}
+
+/** The names a derived start tries in order, all with the same suffix: slug cut to 40, 24, 12, then "thread". */
+function orbitThreadInstanceNameTries(message: string, suffix: string): string[] {
+  const names = [NAME_SLUG_LENGTH, ...NAME_SLUG_RETRY_LENGTHS].map((length) =>
+    orbitThreadInstanceName(message, suffix, length),
+  );
+  return [...new Set(names)];
 }
 
 export function newOrbitThreadStart(input: {
@@ -367,6 +392,7 @@ export function newOrbitThreadStart(input: {
     errorDetail: null,
     resultBranch: null,
     resultBaseBranch: null,
+    nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
   };
 }
 
@@ -439,6 +465,7 @@ const ADMISSION_REFUSALS: ReadonlySet<string> = new Set([
   ORBIT_BRANCH_EXISTS,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   ORBIT_PLACEMENT_CONFLICT,
+  ORBIT_ROUTE_DOMAIN_INVALID,
   // A malformed request (such as a branch object Orbit refuses) admits nothing either.
   "validation.failed",
 ]);
@@ -529,11 +556,37 @@ export async function runOrbitThreadStart(
   };
   const newKey = (step: string) => `conn-thread-start:${current.id}:${step}:${ports.now()}`;
 
+  /**
+   * A name Conn made from the message, checked once before a new create attempt: while Orbit
+   * answers `domain_invalid`, the next shorter slug. A check that fails before any such answer
+   * leaves the name to the create; after one, or when no name fits, the start stops.
+   */
+  const fitDerivedName = async (suffix: string) => {
+    let refused = false;
+    for (const name of orbitThreadInstanceNameTries(current.message, suffix)) {
+      checkStopped();
+      let answer;
+      try {
+        answer = await ports.client.checkInstanceName(current.projectId, name);
+      } catch {
+        if (!refused) return;
+        break;
+      }
+      if (answer.reason !== "domain_invalid") {
+        if (name !== current.instanceName) update({ instanceName: name });
+        return;
+      }
+      refused = true;
+    }
+    throw stepFailed(ORBIT_NAME_DOMAIN_INVALID_TEXT, {}, ORBIT_ROUTE_DOMAIN_INVALID);
+  };
+
   try {
     checkStopped();
     if (current.environmentId === null) {
       const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
       if (current.createOperationId === null) {
+        if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
         // A new key is a new attempt (first try, a new name, or after a failed create): its time
         // counts from now. A repeat under the saved key keeps the first time.
         const begin = current.createKey
@@ -557,7 +610,10 @@ export async function runOrbitThreadStart(
           // A refused create admitted nothing: the next attempt needs a new key.
           if (isAdmissionRefusal(error)) {
             throw new StepFailed({
-              message: error.message,
+              message:
+                error.code === ORBIT_ROUTE_DOMAIN_INVALID
+                  ? ORBIT_NAME_DOMAIN_INVALID_TEXT
+                  : error.message,
               code: error.code,
               reset: { createKey: null },
               details: error.details,

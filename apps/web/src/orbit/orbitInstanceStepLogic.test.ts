@@ -81,7 +81,7 @@ describe("Orbit name check states", () => {
     name: string,
     answer: Partial<{
       available: boolean;
-      reason: "taken" | "invalid" | "default" | null;
+      reason: "taken" | "invalid" | "default" | "domain_invalid" | null;
       domain: string | null;
     }>,
   ): OrbitNameCheckState => ({
@@ -123,7 +123,7 @@ describe("Orbit name check states", () => {
     });
   });
 
-  it("reads available with and without a domain, and taken", () => {
+  it("reads available with and without a domain, taken, and an address too long", () => {
     expect(
       hint("pricing", answered("pricing", { available: true, domain: "pricing.nckrtl.test" })),
     ).toMatchObject({
@@ -142,6 +142,13 @@ describe("Orbit name check states", () => {
     });
     expect(hint("fix", answered("fix", { reason: "invalid" }))).toMatchObject({
       text: ORBIT_NAME_FORMAT_ERROR,
+      canCreate: false,
+    });
+    const long = "a-very-long-name-for-this-project";
+    expect(hint(long, answered(long, { reason: "domain_invalid" }))).toEqual({
+      tone: "bad",
+      text: "This name makes the address too long. Use a shorter name.",
+      plusEnabled: true,
       canCreate: false,
     });
   });

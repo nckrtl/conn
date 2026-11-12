@@ -106,6 +106,48 @@ describe("workspace navigation", () => {
     expect(state.navigate).toHaveBeenLastCalledWith({ to: "/" });
     expect(useWorkspaceStore.getState().lastThreadByWorkspace.b).toBeUndefined();
   });
+  it.each([
+    ["a thread All lists, first sync", { environmentId: "local", threadId: "a1" }, "/local/a1"],
+    ["a draft, later sync", { draftId: "d1" }, "/draft/d1"],
+    ["pull requests, first sync", {}, "/pull-requests"],
+    ["a project page, later sync", { projectKey: "p1" }, "/projects/p1"],
+  ])("stays on %s when the selected workspace goes away", async (_, params, pathname) => {
+    state.params = params;
+    state.pathname = pathname;
+    await act(() => {
+      renderer = create(<Probe />);
+    });
+    await act(() => {
+      useWorkspaceStore.setState({ workspaces: [workspace("b")], activeWorkspaceId: null });
+    });
+    expect(state.navigate).not.toHaveBeenCalled();
+    expect(useWorkspaceStore.getState().activeWorkspaceId).toBeNull();
+  });
+  it("still follows a switch to All the user makes", async () => {
+    useWorkspaceStore.setState({ lastThreadByWorkspace: { all: ref("b1") } });
+    await act(() => {
+      renderer = create(<Probe />);
+    });
+    await act(() => {
+      useWorkspaceStore.getState().selectWorkspace(null);
+    });
+    expect(state.navigate).toHaveBeenLastCalledWith({
+      to: "/$environmentId/$threadId",
+      params: { environmentId: "local", threadId: "b1" },
+    });
+  });
+  it("leaves a thread All no longer lists when the selected workspace goes away", async () => {
+    useUiStateStore.setState({ threadLastVisitedAtById: {} });
+    state.params = { environmentId: "local", threadId: "gone" };
+    state.pathname = "/local/gone";
+    await act(() => {
+      renderer = create(<Probe />);
+    });
+    await act(() => {
+      useWorkspaceStore.setState({ workspaces: [workspace("b")], activeWorkspaceId: null });
+    });
+    expect(state.navigate).toHaveBeenLastCalledWith({ to: "/" });
+  });
   // First sync: the profile lacks this device's selection. Later sync: another device removed it.
   it.each([
     ["Settings, first sync", "/settings/connections"],
@@ -126,8 +168,8 @@ describe("workspace navigation", () => {
         useWorkspaceStore.setState({ workspaces: [workspace("b")], activeWorkspaceId: null });
       });
       expect(state.navigate).not.toHaveBeenCalled();
-      state.params = { environmentId: "local", threadId: "a1" };
-      state.pathname = "/local/a1";
+      state.params = { environmentId: "local", threadId: "gone" };
+      state.pathname = "/local/gone";
       await act(() => {
         renderer?.update(<Probe />);
       });

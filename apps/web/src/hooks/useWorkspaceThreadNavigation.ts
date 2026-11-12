@@ -36,28 +36,38 @@ export function useWorkspaceThreadNavigation() {
     // Settings and Usage stay open: a profile sync can change the selection under them.
     if (changed && (!ready || modalOpen)) return;
     const candidates = workspaceThreads(threads, projectRefs, delegatedUnderParent);
-    if (changed) {
-      previousWorkspace.current = workspaceId;
-      useUiStateStore.getState().setSidebarProjectScopeKeys([]);
-      const target = lastWorkspaceThread(
-        candidates,
-        useWorkspaceStore.getState().lastThreadByWorkspace[workspaceId ?? "all"],
-        useUiStateStore.getState().threadLastVisitedAtById,
-      );
-      pending.current = routeKey;
-      if (target)
-        void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(target) });
-      else void navigate({ to: "/" });
-      return;
-    }
-    // The old route can render once more while a workspace switch navigates.
-    if (pending.current !== null) {
-      if (pending.current === routeKey) return;
-      pending.current = null;
-    }
     const current = candidates.find(
       (thread) => thread.environmentId === route?.environmentId && thread.id === route?.threadId,
     );
+    if (changed) {
+      const previous = previousWorkspace.current;
+      previousWorkspace.current = workspaceId;
+      useUiStateStore.getState().setSidebarProjectScopeKeys([]);
+      // A removed selection falls back to All; keep a draft, a page or a thread All still lists.
+      const disappeared =
+        workspaceId === null &&
+        previous !== null &&
+        !useWorkspaceStore.getState().workspaces.some((workspace) => workspace.id === previous);
+      if (!disappeared || (route !== null && !current)) {
+        const target = lastWorkspaceThread(
+          candidates,
+          useWorkspaceStore.getState().lastThreadByWorkspace[workspaceId ?? "all"],
+          useUiStateStore.getState().threadLastVisitedAtById,
+        );
+        pending.current = routeKey;
+        if (target)
+          void navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(target),
+          });
+        else void navigate({ to: "/" });
+        return;
+      }
+    } else if (pending.current !== null) {
+      // The old route can render once more while a workspace switch navigates.
+      if (pending.current === routeKey) return;
+      pending.current = null;
+    }
     if (current)
       useWorkspaceStore
         .getState()

@@ -20,6 +20,8 @@ export function createSerialRunner(task: () => Promise<void>): () => Promise<voi
   };
 
   return () => {
+    // Between a run's end and the queued follow-up's start, `running` is null already.
+    if (followUp) return followUp;
     if (running === null) return launch();
     followUp ??= running.then(() => {
       followUp = null;

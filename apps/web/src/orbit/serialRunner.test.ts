@@ -45,6 +45,18 @@ describe("createSerialRunner", () => {
     expect(log.maxInFlight).toBe(1);
   });
 
+  it("joins the queued follow-up when triggered after a run ends but before the follow-up starts", async () => {
+    const { log, task, release } = slowTask();
+    const trigger = createSerialRunner(task);
+    // This continuation runs once the first run ends, before the follow-up launches.
+    void trigger().then(() => void trigger());
+    void trigger();
+    release();
+    await settle();
+    expect(log.started).toBe(2);
+    expect(log.maxInFlight).toBe(1);
+  });
+
   it("starts nothing extra when no trigger came during a run", async () => {
     const { log, task, release } = slowTask();
     const trigger = createSerialRunner(task);

@@ -522,7 +522,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        # Fork: ten shards keep each GitHub-hosted runner under 5 minutes.
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[1,2,3,4,5,6,7,8]' || '[1,2,3,4,5,6,7,8,9,10]') }}
     steps:
       # Depth 2 brings the base commit the change is diffed against.
       - name: Checkout

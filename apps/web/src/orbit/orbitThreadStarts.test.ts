@@ -8,6 +8,8 @@ import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { buildOrbitDraftStart, type OrbitDraftTarget } from "./orbitDraft";
 import {
   beginOrbitThreadStart,
+  dismissOrbitThreadStart,
+  retryOrbitThreadStart,
   runSavedOrbitThreadStart,
   sendOrbitDraft,
 } from "./orbitThreadStarts";
@@ -24,7 +26,8 @@ vi.mock("@t3tools/client-runtime/orbit-gateway", async (importOriginal) => ({
       typeof import("@t3tools/client-runtime/orbit-gateway").runOrbitThreadStart
     >[1],
   ) => {
-    await ports.send({ ...start, environmentId: "clone" });
+    const sent = await ports.send({ ...start, environmentId: "clone" });
+    ports.save({ ...start, ...sent, environmentId: "clone", sentAt: 1 });
     return true;
   },
   sendOrbitFirstMessage: async () => "ws",
@@ -40,7 +43,10 @@ vi.mock("../lib/utils", () => ({
 }));
 vi.mock("../connection/catalog", () => ({ environmentCatalog: { catalogValueAtom: {} } }));
 vi.mock("../connection/onboarding", () => ({ connectPairing: {} }));
-vi.mock("../providerInstances", () => ({ resolveProjectDefaultProviderModelSelection: vi.fn() }));
+vi.mock("../providerInstances", () => ({
+  providerInstanceEntriesFor: vi.fn(),
+  resolveProjectDefaultProviderModelSelection: vi.fn(),
+}));
 vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: { get: vi.fn() } }));
 vi.mock("../state/projects", () => ({ environmentProjects: { projectsAtom: {} } }));
 vi.mock("../state/server", () => ({ environmentServerConfigsAtom: {} }));
@@ -50,6 +56,16 @@ vi.mock("./environmentProvider", () => ({
   recordOrbitPaired: vi.fn(),
   useEnvironmentProvider: { getState: () => ({ provider: "orbit" }) },
 }));
+
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
 
 function createLocalStorageStub(): Storage {
   const values = new Map<string, string>();
@@ -151,9 +167,9 @@ describe("sendOrbitDraft", () => {
     instanceId: ProviderInstanceId.make("claude"),
     model: "claude-opus-5-5",
   };
-  const send = (draftTarget: OrbitDraftTarget) => {
+  const send = (draftTarget: OrbitDraftTarget, navigation?: Promise<void>) => {
     const events: string[] = [];
-    sendOrbitDraft({
+    const sent = sendOrbitDraft({
       start: buildOrbitDraftStart({
         target: draftTarget,
         message: "Add a pricing page",
@@ -161,20 +177,33 @@ describe("sendOrbitDraft", () => {
         runtimeMode: "approval-required",
         interactionMode: "plan",
       }),
-      openProgress: (route) => events.push(`open ${route}`),
+      openPending: (route) => {
+        events.push(`open ${route}`);
+        return navigation;
+      },
       clearDraft: () => events.push(`clear after ${readStored().length} saved`),
     });
-    return { start: readStored()[0]!, events };
+    return { sent, start: readStored()[0]!, events };
   };
 
   beforeEach(() => {
-    vi.stubGlobal("window", { localStorage: createLocalStorageStub() });
+    vi.stubGlobal("window", {
+      localStorage: createLocalStorageStub(),
+      desktopBridge: { orbitGatewaySend: vi.fn() },
+    });
     useWorkspaceStore.setState({ workspaces: [workspace("S")], activeWorkspaceId: "S" });
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("saves a start with the typed name, kind, model and modes, then clears the draft", () => {
-    const { start, events } = send(target);
+  it("saves a start, opens its pending thread, and clears the draft only after that", async () => {
+    const navigation = deferred();
+    const { start, events } = send(target, navigation.promise);
+    // The draft route redirects home once its draft is gone, so the clear waits for the route.
+    await Promise.resolve();
+    expect(events).toEqual(["open /orbit/start-1"]);
+    navigation.resolve();
+    await navigation.promise;
+    await Promise.resolve();
 
     expect(start).toMatchObject({
       projectId: 71,
@@ -188,8 +217,11 @@ describe("sendOrbitDraft", () => {
       runtimeMode: "approval-required",
       interactionMode: "plan",
       workspaceId: "S",
+      pendingThread: true,
+      projectName: "nckrtl.com",
+      instanceDomainSuffix: ".nckrtl.test",
     });
-    expect(events).toEqual(["open /", "clear after 1 saved"]);
+    expect(events).toEqual(["open /orbit/start-1", "clear after 1 saved"]);
     // The start machine sends later; nothing goes through a T3 server now.
     expect(runAtomCommand).not.toHaveBeenCalled();
   });
@@ -208,5 +240,73 @@ describe("sendOrbitDraft", () => {
       instanceId: 2055,
       environmentId: "env-2055",
     });
+  });
+
+  it("still clears the draft when the navigation fails", async () => {
+    const navigation = deferred();
+    const { events } = send(target, navigation.promise);
+    navigation.reject(new Error("blocked"));
+    await navigation.promise.catch(() => {});
+    await Promise.resolve();
+    expect(events).toEqual(["open /orbit/start-1", "clear after 1 saved"]);
+  });
+
+  it("saves nothing and keeps the draft when the window cannot run a start", () => {
+    vi.stubGlobal("window", { localStorage: createLocalStorageStub() });
+    const { sent, events } = send(target);
+    expect(sent).toBeNull();
+    expect(readStored()).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it("keeps a pending thread's start after the send, for the real thread's ready row", async () => {
+    const { start } = send(target);
+    expect(await runSavedOrbitThreadStart(client, start.id)).toEqual({
+      environmentId: "clone",
+      threadId: "thread-1",
+    });
+    expect(readStored()).toEqual([
+      expect.objectContaining({ id: start.id, sentAt: expect.any(Number), modelFallback: null }),
+    ]);
+    // A sent start never runs again.
+    expect(await runSavedOrbitThreadStart(client, start.id)).toBeNull();
+  });
+
+  it("Retry clears the error and the times of the stages that run again; Dismiss drops only the start", () => {
+    const { start } = send(target);
+    window.localStorage.setItem(
+      "conn:orbit-thread-starts:v1",
+      JSON.stringify([
+        {
+          ...start,
+          environmentId: "env-1",
+          instanceId: 9,
+          createStartedAt: 1,
+          connectStartedAt: 5,
+          error: "Orbit could not pair.",
+        },
+      ]),
+    );
+    retryOrbitThreadStart(start.id);
+    expect(readStored()[0]).toMatchObject({
+      error: null,
+      createStartedAt: 1,
+      connectStartedAt: null,
+    });
+
+    dismissOrbitThreadStart(start.id);
+    expect(readStored()).toEqual([]);
+    expect(runAtomCommand).not.toHaveBeenCalled();
+  });
+
+  it("drops an old dialog start whose send finished before a quit, without running it", async () => {
+    beginOrbitThreadStart(project, "List the files", "/");
+    const [old] = readStored();
+    window.localStorage.setItem(
+      "conn:orbit-thread-starts:v1",
+      JSON.stringify([{ ...old, environmentId: "clone", connected: true, sentAt: 4 }]),
+    );
+    expect(await runSavedOrbitThreadStart(client, old!.id)).toBeNull();
+    expect(readStored()).toEqual([]);
   });
 });

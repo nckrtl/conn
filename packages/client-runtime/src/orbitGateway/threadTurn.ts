@@ -7,7 +7,7 @@ import {
 } from "@t3tools/contracts";
 
 import { deriveThreadTitleSeed } from "../operations/threadTitle.ts";
-import type { OrbitThreadStart } from "./threadStart.ts";
+import type { OrbitModelFallback, OrbitThreadStart } from "./threadStart.ts";
 
 /**
  * Conn: the launch that starts a thread in a clone with its first message, in the clone's
@@ -59,6 +59,8 @@ export interface OrbitFirstMessagePorts {
   readonly waitForClone: (environmentId: string) => Promise<{
     readonly projectId: ProjectId;
     readonly modelSelection: ModelSelection | null;
+    /** Whether the clone's server offers a model's provider; without it every model counts. */
+    readonly offers?: (selection: ModelSelection) => boolean;
   } | null>;
   /** Runs the launch; resolves the failure when the server did not take it. */
   readonly startTurn: (
@@ -68,6 +70,8 @@ export interface OrbitFirstMessagePorts {
   readonly now: () => string;
   /** True once the start was dismissed; no launch goes out then. */
   readonly stopped: () => boolean;
+  /** The clone lacks the start's provider: the first turn uses the clone's default instead. */
+  readonly onModelFallback?: (fallback: OrbitModelFallback) => void;
 }
 
 /** Sends the first message; resolves its clone project. Only a launch the server took counts. */
@@ -77,13 +81,18 @@ export async function sendOrbitFirstMessage(
 ): Promise<ProjectId> {
   const clone = await ports.waitForClone(start.environmentId);
   if (clone === null) throw new Error("The clone's T3 project /srv/workspace did not appear.");
-  const modelSelection = start.modelSelection ?? clone.modelSelection;
+  const requested = start.modelSelection ?? null;
+  const fallBack = requested !== null && clone.offers !== undefined && !clone.offers(requested);
+  const modelSelection = fallBack ? clone.modelSelection : (requested ?? clone.modelSelection);
   if (modelSelection === null) throw new Error("The clone's T3 server offers no model.");
+  if (fallBack) {
+    ports.onModelFallback?.({ requestedModel: requested.model, usedModel: modelSelection.model });
+  }
   if (ports.stopped()) throw new Error("The thread start was stopped.");
   const result = await ports.startTurn(
     start.environmentId,
     orbitFirstTurnInput({
-      start,
+      start: fallBack ? { ...start, modelSelection } : start,
       projectId: clone.projectId,
       modelSelection,
       createdAt: ports.now(),

@@ -987,13 +987,22 @@ export function buildOrbitPaletteProjectRows(
     nodeName: project.nodeName,
     domainSuffix: project.instanceDomainSuffix,
     startable: startableOrbitProject(project) !== null,
-    reason:
-      project.cloneableReason ??
-      project.checks?.find((check) => check.status === "fail")?.message ??
-      null,
+    // `cloneable_reason` is a code such as instance.default_missing; only a check's message reads.
+    reason: oneLineReason(project.checks?.find((check) => check.status === "fail")?.message),
     checks: project.checks,
   }));
   return rows.filter((row) => row.startable).concat(rows.filter((row) => !row.startable));
+}
+
+const REASON_MAX_LENGTH = 80;
+
+function oneLineReason(message: string | null | undefined): string | null {
+  const line = message?.split("\n")[0]?.trim();
+  if (!line) return null;
+  const characters = Array.from(line);
+  return characters.length > REASON_MAX_LENGTH
+    ? `${characters.slice(0, REASON_MAX_LENGTH - 1).join("")}…`
+    : line;
 }
 
 export function orbitPaletteProjectSubline(row: OrbitPaletteProjectRow): string {

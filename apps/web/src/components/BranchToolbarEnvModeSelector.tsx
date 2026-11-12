@@ -31,7 +31,13 @@ import { useAtomValue } from "@effect/atom-react";
 import { shortcutLabelForCommand } from "../keybindings";
 import { primaryServerKeybindingsAtom } from "../state/server";
 
-function OrbitInstanceUrlChip({ url, threadRef }: { url: string; threadRef: ScopedThreadRef }) {
+export function OrbitInstanceUrlChip({
+  url,
+  threadRef,
+}: {
+  url: string;
+  threadRef: ScopedThreadRef;
+}) {
   const openLink = useOpenLink(threadRef);
   const host = url.replace(/^https?:\/\//, "").replace(/\/$/, "");
   return (

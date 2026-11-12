@@ -86,12 +86,14 @@ import {
   timelineTurnFoldRunIdsByEntryId,
   liveAnswerPreview,
   type MessagesTimelineRow,
+  type OrbitReadyTimelineInput,
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
 import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
 import { TooltipScrollDismissArea } from "../ui/tooltip";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
+import { OrbitReadyRow } from "./OrbitSetupCard";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
@@ -229,6 +231,8 @@ interface MessagesTimelineProps {
   runlessWorkActive?: boolean;
   activeTurnStartedAt?: string | null;
   worktreeSetup?: WorktreeSetupSnapshot | null;
+  /** Conn: the finished Orbit start of this thread. */
+  orbitReady?: OrbitReadyTimelineInput | null;
   onCancelWorktreeSetup?: () => void;
   retryableWorkspacePreparationRunIds?: ReadonlySet<RunId>;
   onRetryWorkspacePreparation?: (runId: RunId) => void;
@@ -344,6 +348,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   runlessWorkActive = false,
   activeTurnStartedAt = null,
   worktreeSetup = null,
+  orbitReady = null,
   footer = null,
   onCancelWorktreeSetup,
   retryableWorkspacePreparationRunIds = EMPTY_RUN_IDS,
@@ -668,6 +673,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     threadStartCheckpointReady,
     availableRevertTurnCounts,
     worktreeSetup,
+    orbitReady,
     toolCallVisibility,
     revealedMessageId,
   });
@@ -1456,6 +1462,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
                     row.message.role === "assistant" &&
                     !row.showAssistantMeta) ||
                   row.kind === "worktree-setup" ||
+                  row.kind === "orbit-ready" ||
                   row.kind === "event" ||
                   row.kind === "attempt-fold" ||
                   row.kind === "html-render" ||
@@ -1511,6 +1518,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "mcp-app" ? <McpAppTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
+      {row.kind === "orbit-ready" ? (
+        <OrbitReadyRow view={row.ready.view} threadRef={row.ready.threadRef} />
+      ) : null}
       {row.kind === "event" ? <V2EventTimelineRow row={row} /> : null}
     </div>
   );

@@ -1,4 +1,6 @@
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { OrbitReadyView } from "../../orbit/orbitSetupView";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
 import * as DateTime from "effect/DateTime";
@@ -496,11 +498,25 @@ export type TimelineLatestRun = Pick<
 
 const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 
+export interface OrbitReadyTimelineInput {
+  readonly view: OrbitReadyView;
+  readonly threadRef: ScopedThreadRef;
+  /** The start's first message; the row follows it and is left out while it is not loaded. */
+  readonly messageId: string;
+}
+
 export type MessagesTimelineRow = MessagesTimelineRowContent & {
   readonly continuesWorkLog?: boolean;
 };
 
 type MessagesTimelineRowContent =
+  | {
+      /** Conn: a thread started in an Orbit Project; drawn by Conn, never part of the agent's messages. */
+      kind: "orbit-ready";
+      id: string;
+      createdAt: string | null;
+      ready: OrbitReadyTimelineInput;
+    }
   | {
       kind: "worktree-setup";
       id: string;
@@ -1516,6 +1532,7 @@ export function deriveMessagesTimelineRows(input: {
   threadStartCheckpointReady?: boolean;
   availableRevertTurnCounts?: ReadonlySet<number> | undefined;
   worktreeSetup?: WorktreeSetupSnapshot | null;
+  orbitReady?: OrbitReadyTimelineInput | null;
   toolCallVisibility?: ToolCallVisibility;
   revealedMessageId?: MessageId | null;
 }): MessagesTimelineRow[] {
@@ -2220,6 +2237,21 @@ export function deriveMessagesTimelineRows(input: {
     }
   }
 
+  if (input.orbitReady) {
+    const messageId = input.orbitReady.messageId;
+    const firstMessageIndex = nextRows.findIndex(
+      (row) => row.kind === "message" && row.message.id === messageId,
+    );
+    if (firstMessageIndex >= 0) {
+      nextRows.splice(firstMessageIndex + 1, 0, {
+        kind: "orbit-ready",
+        id: ORBIT_READY_ROW_ID,
+        createdAt: null,
+        ready: input.orbitReady,
+      });
+    }
+  }
+
   const hasWorkingRow = nextRows.some((row) => row.kind === "working");
   if (input.isWorking && !hasWorkingRow && activeTurnHeaderIndex === timelineEntries.length) {
     appendWorkingRow();
@@ -2354,6 +2386,7 @@ function attachCreatedThreadSummaries(
 }
 
 const WORKTREE_SETUP_ROW_ID = "worktree-setup-row";
+const ORBIT_READY_ROW_ID = "orbit-ready-row";
 
 export type MessagesTimelineRowsInput = Parameters<typeof deriveMessagesTimelineRows>[0];
 
@@ -2527,6 +2560,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     }
     case "worktree-setup":
       return a.snapshot === (b as typeof a).snapshot;
+    case "orbit-ready":
+      return a.ready === (b as typeof a).ready;
 
     case "assistant-meta": {
       const bm = b as typeof a;

@@ -9,7 +9,9 @@ import {
 import {
   newOrbitThreadStart,
   orbitThreadInstanceName,
+  orbitThreadStartCreatedInstance,
   readOrbitThreadStarts,
+  retryOrbitThreadStartRecord,
   runOrbitThreadStart,
   type OrbitThreadStart,
 } from "./threadStart.ts";
@@ -216,6 +218,10 @@ describe("readOrbitThreadStarts", () => {
       connectFinishedAt: null,
       agentStartedAt: null,
       sentAt: null,
+      pendingThread: false,
+      projectName: null,
+      instanceDomainSuffix: null,
+      modelFallback: null,
     });
 
     const { client, calls } = gateway({});
@@ -801,5 +807,96 @@ describe("runOrbitThreadStart", () => {
       environmentId: null,
       error: expect.stringContaining("asleep"),
     });
+  });
+
+  it("re-stamps the create time on a new attempt after a taken name", async () => {
+    const taken = new OrbitGatewayError({
+      code: "instance.name_taken",
+      message: "The name fix is taken.",
+      status: 422,
+      details: {},
+    });
+    const { client } = gateway({ createLost: [taken] });
+    const run = ports(client);
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    const failed = run.saves.at(-1)!;
+    expect(failed.createStartedAt).toBe(0);
+
+    // Change name: a new attempt later on the clock.
+    const again = gateway({});
+    const second = ports(again.client);
+    const renamed = retryOrbitThreadStartRecord(failed, { instanceName: "fix-two" });
+    expect(renamed).toMatchObject({ error: null, errorCode: null, createStartedAt: null });
+    const later = { ...second.ports, now: () => 500 };
+    expect(await runOrbitThreadStart(renamed, later)).toBe(true);
+    expect(second.saves.at(-1)).toMatchObject({ createStartedAt: 500, instanceName: "fix-two" });
+  });
+
+  it("hands each read of the create Operation to the setup card", async () => {
+    const { client } = gateway({});
+    const run = ports(client);
+    const reads: string[] = [];
+    const observed = {
+      ...run.ports,
+      onCreateOperation: (operation: OrbitGatewayOperation) => reads.push(operation.status),
+    };
+    expect(await runOrbitThreadStart(fresh(), observed)).toBe(true);
+    expect(reads).toEqual(["running", "succeeded"]);
+  });
+
+  it("saves what the send resolves with the sent start", async () => {
+    const { client } = gateway({});
+    const run = ports(client);
+    const fallback = { modelFallback: { requestedModel: "opus", usedModel: "gpt-5" } };
+    const withFallback = { ...run.ports, send: async () => fallback };
+    expect(await runOrbitThreadStart(fresh(), withFallback)).toBe(true);
+    expect(run.saves.at(-1)).toMatchObject({ ...fallback, sentAt: expect.any(Number) });
+  });
+});
+
+describe("retryOrbitThreadStartRecord", () => {
+  const failedConnect = {
+    ...fresh(),
+    environmentId: "env-41",
+    instanceId: 41,
+    createStartedAt: 1,
+    createFinishedAt: 9,
+    connectStartedAt: 10,
+    error: "Orbit could not pair.",
+    errorCode: "conn.server_unreachable",
+  };
+
+  it("clears the error and the times of the stages that run again", () => {
+    expect(retryOrbitThreadStartRecord(failedConnect)).toMatchObject({
+      error: null,
+      errorCode: null,
+      createStartedAt: 1,
+      createFinishedAt: 9,
+      connectStartedAt: null,
+      agentStartedAt: null,
+    });
+  });
+
+  it("keeps a running create's time when its Operation is still followed", () => {
+    const busy = { ...fresh(), createStartedAt: 3, createOperationId: 100, error: "timeout" };
+    expect(retryOrbitThreadStartRecord(busy).createStartedAt).toBe(3);
+    const refused = { ...busy, createOperationId: null };
+    expect(retryOrbitThreadStartRecord(refused).createStartedAt).toBeNull();
+  });
+});
+
+describe("orbitThreadStartCreatedInstance", () => {
+  it("is true once the create was admitted or finished, never for an existing Instance", () => {
+    expect(orbitThreadStartCreatedInstance(fresh())).toBe(false);
+    expect(orbitThreadStartCreatedInstance({ ...fresh(), instanceId: 41 })).toBe(true);
+    expect(orbitThreadStartCreatedInstance({ ...fresh(), environmentId: "env-41" })).toBe(true);
+    expect(
+      orbitThreadStartCreatedInstance({
+        ...fresh(),
+        orbitInstanceKind: "existing",
+        instanceId: 41,
+        environmentId: "env-41",
+      }),
+    ).toBe(false);
   });
 });

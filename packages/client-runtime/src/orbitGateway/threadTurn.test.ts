@@ -127,4 +127,42 @@ describe("sendOrbitFirstMessage", () => {
     await expect(sendOrbitFirstMessage(start, missing)).rejects.toThrow("/srv/workspace");
     expect(launches).toEqual([]);
   });
+
+  it("falls back to the clone's default when the clone lacks the start's provider", async () => {
+    const carried = { instanceId: ProviderInstanceId.make("claude"), model: "opus" };
+    const { launches, ports: run } = ports([]);
+    const fallbacks: unknown[] = [];
+    const lacking = {
+      ...run,
+      waitForClone: async () => ({
+        projectId,
+        modelSelection,
+        offers: (selection: { instanceId: string }) => selection.instanceId === "codex",
+      }),
+      onModelFallback: (fallback: unknown) => fallbacks.push(fallback),
+    };
+
+    await expect(
+      sendOrbitFirstMessage({ ...start, modelSelection: carried }, lacking),
+    ).resolves.toBe(projectId);
+    expect(launches[0]).toMatchObject({
+      modelSelection,
+      bootstrap: { createThread: { modelSelection } },
+    });
+    expect(fallbacks).toEqual([{ requestedModel: "opus", usedModel: "gpt-5" }]);
+  });
+
+  it("keeps the start's model when the clone offers it", async () => {
+    const carried = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" };
+    const { launches, ports: run } = ports([]);
+    const fallbacks: unknown[] = [];
+    const offering = {
+      ...run,
+      waitForClone: async () => ({ projectId, modelSelection, offers: () => true }),
+      onModelFallback: (fallback: unknown) => fallbacks.push(fallback),
+    };
+    await sendOrbitFirstMessage({ ...start, modelSelection: carried }, offering);
+    expect(launches[0]).toMatchObject({ modelSelection: carried });
+    expect(fallbacks).toEqual([]);
+  });
 });

@@ -3722,8 +3722,8 @@ export default function ChatView(props: ChatViewProps) {
                                 canResume={resumableRunId !== null || hasHeldQueuedRuns}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
                                 sendDisabledReason={
-                                  // An Orbit draft starts through the Gateway, never on its anchor.
                                   orbitDraftBlockedReason ??
+                                  // An Orbit draft starts through the Gateway, never on its anchor.
                                   (!canOperateThread && orbitDraftTarget === null
                                     ? "This connection cannot change threads."
                                     : isEnvironmentChanging
@@ -3779,6 +3779,7 @@ export default function ChatView(props: ChatViewProps) {
                                 lockedProvider={modelPickerLockedProvider}
                                 providerStatuses={providerStatuses as ServerProvider[]}
                                 providerCatalogKnown={serverConfig !== null}
+                                startsThroughOrbit={orbitDraftTarget !== null}
                                 usesInstanceDefaultModel={
                                   orbitDraftTarget !== null &&
                                   isOrbitDraftWithoutEnvironment(environmentId)

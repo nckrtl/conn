@@ -129,6 +129,8 @@ export function OrbitNewInstanceSection(props: {
   readonly project: OrbitStepProject;
   readonly step: OrbitInstanceStep;
   readonly onCreate: () => void;
+  /** No Instance row is highlighted, so Enter creates this one. */
+  readonly selected: boolean;
 }) {
   const { step } = props;
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -139,8 +141,11 @@ export function OrbitNewInstanceSection(props: {
   return (
     <div className="px-2 pt-2" data-orbit-new-instance>
       <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">New instance</div>
-      {/* The surface of Conn's Input (a step lighter than the palette in dark), with a calm focus. */}
-      <div className="flex h-10 items-center gap-2 rounded-xl border border-input bg-background ps-2 pe-1.5 not-dark:bg-clip-padding transition-[border-color,box-shadow] focus-within:border-foreground/55 focus-within:ring-3 focus-within:ring-inset focus-within:ring-foreground/8 dark:bg-input/32">
+      {/* A step lighter than the palette, as in the design; brighter while it is Enter's target. */}
+      <div
+        data-selected={props.selected || undefined}
+        className="flex h-10 items-center gap-2 rounded-xl border border-foreground/9 bg-foreground/4 ps-2 pe-1.5 transition-[border-color,box-shadow] focus-within:border-foreground/55 focus-within:ring-3 focus-within:ring-foreground/8 focus-within:ring-inset data-selected:border-foreground/30 data-selected:focus-within:border-foreground/55"
+      >
         <span className="flex min-w-0 flex-1 items-baseline">
           <input
             ref={inputRef}
@@ -167,7 +172,7 @@ export function OrbitNewInstanceSection(props: {
         <button
           type="button"
           aria-label="Create instance"
-          className="flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-md bg-foreground text-background outline-none hover:bg-foreground/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-default disabled:bg-foreground/12 disabled:text-muted-foreground"
+          className="relative flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-md bg-foreground/8 text-muted-foreground outline-none hover:bg-foreground/12 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-default disabled:opacity-64 pointer-coarse:after:absolute pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11"
           disabled={!step.hint.plusEnabled}
           onClick={create}
         >

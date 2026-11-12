@@ -133,9 +133,12 @@ export function orbitListedDefaultBranch(branches: readonly OrbitGatewayBranch[]
   return branches.find((branch) => branch.default)?.name ?? null;
 }
 
-/** The search as sent: trimmed and cut to what the desktop IPC lets through. */
+/** The search as sent: without control characters, trimmed, and cut to what the IPC lets through. */
 export function orbitBranchQuery(text: string): string {
-  return text.trim().slice(0, ORBIT_BRANCH_QUERY_MAX_LENGTH);
+  return text
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, ORBIT_BRANCH_QUERY_MAX_LENGTH);
 }
 
 export type OrbitBranchListState =

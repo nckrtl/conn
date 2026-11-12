@@ -1,10 +1,8 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { PencilIcon, RotateCcwIcon, XIcon } from "lucide-react";
-import { ChevronDown, ChevronRight } from "lucide";
+import { ChevronDownIcon, ChevronRightIcon, PencilIcon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 
 import { useOpenLink } from "~/browser/useOpenLink";
-import { MorphIcon } from "~/components/MorphIcon";
 import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
@@ -159,7 +157,7 @@ export function OrbitReadyRow({
           aria-expanded={detailsOpen}
           onClick={() => setDetailsOpen((open) => !open)}
         >
-          <MorphIcon aria-hidden icon={detailsOpen ? ChevronDown : ChevronRight} />
+          {detailsOpen ? <ChevronDownIcon aria-hidden /> : <ChevronRightIcon aria-hidden />}
           Details
         </Button>
       </div>

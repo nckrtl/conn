@@ -1,7 +1,7 @@
 /**
- * The web tsconfig and Vite config map `lucide` here. Upstream passes these to
- * `MorphIcon`: outside the thread it morphs the original Lucide shapes
- * (`lucideNodes`), inside it crossfades Conn's Phosphor icons.
+ * The web tsconfig and Vite config map `lucide` here. Upstream removed icon morphing
+ * and `MorphIcon` with it; the original Lucide shapes (`lucideNodes`) stay
+ * available for any `lucide` import.
  */
 import type { IconNode } from "lucide-original";
 import {

@@ -24,7 +24,7 @@ export function ConnIconScope(props: { readonly children: ReactNode }) {
   return <ConnIconScopeContext value={true}>{props.children}</ConnIconScopeContext>;
 }
 
-export function useConnIconScope() {
+function useConnIconScope() {
   return use(ConnIconScopeContext);
 }
 

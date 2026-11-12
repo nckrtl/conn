@@ -115,15 +115,16 @@ stay unchanged. A new upstream icon fails typecheck until it gets an entry. Both
 mappings are needed: the dev server ignores tsconfig paths for pre-bundled
 packages.
 
-`MorphIcon` morphs original Lucide shapes outside the thread (`lucideNodes` from
-`lucide-original`) and crossfades inside it. Project and workspace icons use
+Upstream removed icon morphing and `MorphIcon` (#33985); the 2026-11-12 sync took
+that removal, so toggles swap icons instantly through `lucide-react`. The `lucide`
+alias and `lucideNodes` (from `lucide-original`) remain for any `lucide` import. Project and workspace icons use
 `lucide-react/dynamic` and `lucide-react-original`.
 
 Sources:
 
 - Web (`apps/web/`): `src/icons/` (`lucide-react.ts`, `lucide.ts`,
   `connIcon.tsx`), `tsconfig.json` (`paths`), `vite.config.ts`.
-- Components (`apps/web/src/components/`): `MorphIcon.tsx`, `ChatView.tsx`,
+- Components (`apps/web/src/components/`): `ChatView.tsx`,
   `sidebar/workspaceVisuals.tsx`.
 
 ### iOS icons
@@ -1327,6 +1328,28 @@ November 10–11 (#11–#27) survived: every line those PRs added is still there
 (one test call follows upstream's new `assistantCitationNavigation` signature),
 `ci.yml` and this file are unchanged by the merge, and their tests and the fork
 guards pass.
+
+### Upstream sync: 2026-11-12
+
+Merge of upstream `4ae66e2e86` (427 commits). Decisions worth keeping in mind:
+
+- Upstream removed icon morphing and `MorphIcon` (#33985) and the vanilla
+  `lucide` dependency. The sync took the removal: toggles swap icons through
+  `lucide-react` (Phosphor inside `ConnIconScope`). The `lucide` alias and
+  `icons/lucide.ts` stay for the `connIcons` guard.
+- Upstream dropped the `@betteroffice/fonts-cjk` alias and its stub module for
+  the real package; the alias is gone from `vite.config.ts` here too.
+- `apps/desktop/scripts/dev-electron.mjs` keeps the fork's dev-runner/orphan
+  lifecycle (`dev-electron-lifecycle.mjs`, `T3CODE_DEV_RUNNER_PID`); upstream's
+  simpler parent-pid watch was not taken.
+- `Migrations.ts` keeps the Conn reconcile for a PeerLinks record at 61-69.
+  Upstream now ships `70_PeerLinks` itself, and `hasPendingMigrations` also
+  treats a legacy PeerLinks row below 70 as pending so the fast path never
+  skips the reconcile.
+- The snapshot size bounder keeps the fork's balancing of page text against the
+  ARIA tree, now above upstream's 2,000 character floor.
+- `agentContextBudget.json` `mcpToolListJsonBytes` is 57,796 with the fork's
+  toolkits.
 
 ### Vendored dependency patches
 

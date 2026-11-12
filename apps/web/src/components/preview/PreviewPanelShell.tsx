@@ -1,6 +1,7 @@
 import {
   type CSSProperties,
   type FocusEvent,
+  type MouseEventHandler,
   type ReactNode,
   useLayoutEffect,
   useRef,
@@ -31,6 +32,8 @@ interface PreviewPanelShellProps {
   defaultWidth?: number;
   /** Leaves the shell transparent so a glass header can sit above a card body. */
   splitHeader?: boolean;
+  onMouseDown?: MouseEventHandler<HTMLDivElement>;
+  onMouseUp?: MouseEventHandler<HTMLDivElement>;
   children: ReactNode;
 }
 
@@ -155,6 +158,8 @@ function PreviewPanelShellFrame(
       {...(props.workspaceArea ? panelArea : {})}
       data-workspace-focus-key={props.workspaceFocusKey}
       data-workspace-unavailable={collapsible && !open ? "true" : undefined}
+      onMouseDown={props.onMouseDown}
+      onMouseUp={props.onMouseUp}
       className={cn(
         "relative flex h-full min-h-0 min-w-0 max-w-full flex-col self-stretch",
         // A split header leaves the shell transparent; the caller paints the body card.

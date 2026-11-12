@@ -95,6 +95,7 @@ function InputGroupAddon({
       data-align={align}
       data-slot="input-group-addon"
       onMouseDown={(e) => {
+        if (e.button !== 0) return;
         const target = e.target as HTMLElement;
         // React portals bubble through this addon, but their menu/dialog controls
         // must not focus the input and unmount the surface before its click runs.

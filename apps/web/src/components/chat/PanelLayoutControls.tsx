@@ -1,6 +1,10 @@
-import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
-import { Maximize2, Minimize2 } from "lucide";
-import { MorphIcon } from "~/components/MorphIcon";
+import {
+  PanelBottomIcon,
+  PanelRightIcon,
+  SquareMenuIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+} from "lucide-react";
 import { memo, type ReactNode } from "react";
 
 import { isElectron } from "~/env";
@@ -8,6 +12,7 @@ import { cn } from "~/lib/utils";
 
 import type { ThreadPanelPresentation } from "../../rightPanelLayout";
 import { PopoverCreateHandle, PopoverTrigger } from "../ui/popover";
+import { useMobileSidebarSheetMounted } from "../ui/sidebar";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
@@ -153,7 +158,11 @@ export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl
             variant="ghost"
             size="sm"
           >
-            <MorphIcon className="size-4" icon={maximized ? Minimize2 : Maximize2} />
+            {maximized ? (
+              <Minimize2Icon className="size-4" />
+            ) : (
+              <Maximize2Icon className="size-4" />
+            )}
           </Toggle>
         }
       />
@@ -164,6 +173,7 @@ export const RightPanelMaximizeControl = memo(function RightPanelMaximizeControl
 
 /** The thread panel toggle on a header whose right side the inline right panel covers. */
 export function ThreadPanelHeaderControl(props: PanelLayoutControlsProps) {
+  const mobileSidebarSheetMounted = useMobileSidebarSheetMounted();
   return (
     <div
       // Inset from the chat header's edge, not the window's: --workspace-controls-right also
@@ -173,6 +183,7 @@ export function ThreadPanelHeaderControl(props: PanelLayoutControlsProps) {
         isElectron
           ? "top-[var(--workspace-controls-top)] h-(--shell-header-height)"
           : "top-[8px] h-7",
+        mobileSidebarSheetMounted && "hidden",
       )}
       data-workspace-titlebar-controls
     >
@@ -190,6 +201,7 @@ export function WorkspaceTitlebarControls(props: {
   readonly onToggleMaximized: () => void;
   readonly children: ReactNode;
 }) {
+  const mobileSidebarSheetMounted = useMobileSidebarSheetMounted();
   return (
     <div
       className={cn(
@@ -199,6 +211,7 @@ export function WorkspaceTitlebarControls(props: {
         isElectron
           ? "top-[var(--workspace-controls-top)] h-(--shell-header-height)"
           : "top-[8px] h-7",
+        mobileSidebarSheetMounted && "hidden",
       )}
       data-workspace-titlebar-controls
     >

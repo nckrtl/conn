@@ -2,6 +2,7 @@ import {
   ORBIT_BRANCH_EXISTS,
   ORBIT_BRANCH_IN_USE,
   ORBIT_BRANCH_NOT_FOUND,
+  ORBIT_CONTAINER_PROCESS_INACTIVE,
   ORBIT_CREATE_CLONE_FAILED,
   ORBIT_CREATE_WORKSPACE_FAILED,
   ORBIT_NAME_DOMAIN_INVALID_TEXT,
@@ -10,6 +11,7 @@ import {
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   orbitSetupReadyMs,
   orbitSetupStages,
+  orbitThreadStartCanRetry,
   orbitThreadStartCreatedInstance,
   type OrbitGatewayOperation,
   type OrbitSetupStageId,
@@ -40,13 +42,15 @@ export interface OrbitSetupView {
   readonly error: string | null;
   /** Orbit's code and detail line under the error, as `code · detail`, when Orbit sent a detail. */
   readonly errorDetailLine: string | null;
+  /** Retry can succeed; a process that did not stay up fails the same way again. */
+  readonly canRetry: boolean;
   /** A refusal that made no Instance: a taken name, a name too long for the address, or a branch. */
   readonly canChangeName: boolean;
   /** A branch that is gone or held: reopen the draft with the branch menu. */
   readonly canChangeBranch: boolean;
   /** The Instance that works on the branch, which the user can open instead. */
   readonly openInstance: { readonly id: number; readonly name: string } | null;
-  /** The start made an Instance: Dismiss leaves it, and the card says so. */
+  /** The start made an Instance: Dismiss leaves it, and the card says so unless the error does. */
   readonly instanceStays: boolean;
 }
 
@@ -143,6 +147,13 @@ export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
       };
     case ORBIT_CREATE_WORKSPACE_FAILED:
       return { ...none, message: "Orbit could not set up the workspace." };
+    case ORBIT_CONTAINER_PROCESS_INACTIVE: {
+      const unit = start.errorProcessUnit?.trim();
+      return {
+        ...none,
+        message: `A process of this Project did not start${unit ? `: ${unit}` : ""}. Fix the Project, remove this Instance in Orbit, then create it again.`,
+      };
+    }
     default:
       return { ...none, message: start.error };
   }
@@ -186,10 +197,14 @@ export function orbitSetupView(
     stages,
     error: failure?.message ?? start.error,
     errorDetailLine: failed ? orbitErrorDetailLine(start) : null,
+    canRetry: failed && orbitThreadStartCanRetry(start),
     canChangeName: newInstance && (failure?.changeName ?? false),
     canChangeBranch: newInstance && (failure?.changeBranch ?? false),
     openInstance: failure?.openInstance ?? null,
-    instanceStays: failed && orbitThreadStartCreatedInstance(start),
+    instanceStays:
+      failed &&
+      orbitThreadStartCreatedInstance(start) &&
+      start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE,
   };
 }
 

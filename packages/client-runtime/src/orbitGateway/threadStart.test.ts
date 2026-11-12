@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  ORBIT_CONTAINER_PROCESS_INACTIVE,
   OrbitGatewayError,
   type OrbitGatewayBranchSelection,
   type OrbitGatewayClient,
@@ -10,6 +11,7 @@ import {
 import {
   newOrbitThreadStart,
   orbitThreadInstanceName,
+  orbitThreadStartCanRetry,
   orbitThreadStartCreatedInstance,
   readOrbitThreadStarts,
   retryOrbitThreadStartRecord,
@@ -61,6 +63,9 @@ function gateway(script: {
   readonly createResult?: Record<string, unknown>;
   /** Orbit's `error.detail` on a failed Operation. */
   readonly failedDetail?: string;
+  /** The failed create's error code and its `result.process_failure.unit`. */
+  readonly failedCode?: string;
+  readonly failedUnit?: string;
   /** Answers each name check with a reason (null: available), or throws for a failed check. */
   readonly nameCheck?: (name: string) => string | null;
 }) {
@@ -117,8 +122,11 @@ function gateway(script: {
         id,
         id === 100 ? 41 : 9,
         status,
-        status === "failed" ? "instance.t3_unready" : null,
+        status === "failed" ? (script.failedCode ?? "instance.t3_unready") : null,
       );
+      if (status === "failed" && script.failedUnit) {
+        return { ...read, processFailureUnit: script.failedUnit };
+      }
       if (status === "failed" && script.failedDetail) {
         return {
           ...read,
@@ -258,6 +266,7 @@ describe("readOrbitThreadStarts", () => {
       defaultBranch: null,
       errorDetails: null,
       errorDetail: null,
+      errorProcessUnit: null,
       resultBranch: null,
       resultBaseBranch: null,
       nameSuffix: null,
@@ -594,6 +603,40 @@ describe("runOrbitThreadStart", () => {
     expect(retryRun.saves[0]!.errorDetail).toBeNull();
     expect(retry.calls[0]).toBe(`create 3 ${stopped.instanceName}`);
     expect(calls.filter((call) => call.startsWith("pair"))).toEqual([]);
+  });
+
+  it("keeps the process that did not stay up, offers no Retry for it, and clears it on a new attempt", async () => {
+    const { client } = gateway({
+      create: ["running", "failed"],
+      failedCode: ORBIT_CONTAINER_PROCESS_INACTIVE,
+      failedUnit: "conn-web.service",
+    });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    const stopped = run.saves.at(-1)!;
+    expect(stopped).toMatchObject({
+      errorCode: ORBIT_CONTAINER_PROCESS_INACTIVE,
+      errorProcessUnit: "conn-web.service",
+    });
+    const [reloaded] = readOrbitThreadStarts(JSON.parse(JSON.stringify([stopped])));
+    expect(reloaded!.errorProcessUnit).toBe("conn-web.service");
+    expect(orbitThreadStartCanRetry(reloaded!)).toBe(false);
+    expect(retryOrbitThreadStartRecord(stopped).errorProcessUnit).toBeNull();
+
+    const again = ports(gateway({}).client);
+    expect(await runOrbitThreadStart(stopped, again.ports)).toBe(true);
+    expect(again.saves[0]!.errorProcessUnit).toBeNull();
+  });
+
+  it("offers Retry for every other failed or cancelled create", async () => {
+    for (const status of ["failed", "cancelled"] as const) {
+      const run = ports(gateway({ create: ["running", status] }).client);
+      expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+      const stopped = run.saves.at(-1)!;
+      expect(stopped.errorProcessUnit).toBeNull();
+      expect(orbitThreadStartCanRetry(stopped)).toBe(true);
+    }
   });
 
   it("repeats a create whose answer was lost with the same name and key, and follows its Operation", async () => {

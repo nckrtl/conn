@@ -211,9 +211,16 @@ describe("orbitSetupView for branch refusals", () => {
       changeBranch: view.canChangeBranch,
       open: view.openInstance?.name ?? null,
       stays: view.instanceStays,
+      retry: view.canRetry,
     };
   };
-  const quiet = { changeName: false, changeBranch: false, open: null, stays: false };
+  const quiet = {
+    changeName: false,
+    changeBranch: false,
+    open: null,
+    stays: false,
+    retry: true,
+  };
 
   it.each([
     [
@@ -292,6 +299,34 @@ describe("orbitSetupView for branch refusals", () => {
       "workspace step failed",
       stepFailed("instance.create_workspace_failed"),
       { ...quiet, error: "Orbit could not set up the workspace.", stays: true },
+    ],
+    [
+      "a Project process did not start",
+      {
+        ...stepFailed("instance.container_process_inactive"),
+        errorProcessUnit: "conn-web.service",
+      },
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start: conn-web.service. Fix the Project, remove this Instance in Orbit, then create it again.",
+        retry: false,
+      },
+    ],
+    [
+      "a Project process did not start, unit unknown",
+      stepFailed("instance.container_process_inactive"),
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start. Fix the Project, remove this Instance in Orbit, then create it again.",
+        retry: false,
+      },
+    ],
+    [
+      "create cancelled",
+      stepFailed("operation.cancelled"),
+      { ...quiet, error: "Orbit could not create the clone (operation.cancelled).", stays: true },
     ],
   ])("%s", (_name, start, expected) => {
     expect(card(start)).toEqual(expected);

@@ -118,6 +118,7 @@ function orbitCard(
     ],
     error: null,
     errorDetailLine: null,
+    canRetry: true,
     canChangeName: false,
     canChangeBranch: false,
     openInstance: null,
@@ -228,6 +229,30 @@ it("shows a failed clone's text and Orbit's detail line, truncated on one line",
   expect(line.hasAttribute("title")).toBe(false);
   expect(line.scrollWidth).toBeGreaterThan(line.clientWidth);
   expect(line.getBoundingClientRect().height).toBeLessThan(24);
+});
+
+it("offers only Dismiss when a Project process did not start, and names the process", async () => {
+  const text =
+    "A process of this Project did not start: conn-web.service. Fix the Project, remove this Instance in Orbit, then create it again.";
+  const failed = orbitCard({
+    phase: "failed",
+    stages: [
+      orbitStage("create", "Create Instance", "failed", { detail: "beast" }),
+      orbitStage("connect", "Connect", "pending"),
+      orbitStage("agent", "Start agent", "pending"),
+    ],
+    error: text,
+    errorDetailLine: "instance.container_process_inactive · conn-web.service exited with status 1",
+    canRetry: false,
+  });
+  await using screen = await render(<div style={{ width: 480 }}>{failed.element}</div>);
+  await expect.element(screen.getByText(text)).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Dismiss" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Retry" }).query()).toBeNull();
+  expect(screen.container.textContent).not.toContain("The Instance stays");
+  expect(screen.container.querySelector("[data-orbit-setup-error-detail]")?.textContent).toContain(
+    "instance.container_process_inactive",
+  );
 });
 
 it("folds a finished Orbit start to Instance ready with Details open and Conn's ready line", async () => {

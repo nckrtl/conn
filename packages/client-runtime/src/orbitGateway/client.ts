@@ -240,6 +240,11 @@ export const ORBIT_ROUTE_DOMAIN_INVALID = "route.domain_invalid";
 /** Failed create steps, after the Instance exists. */
 export const ORBIT_CREATE_CLONE_FAILED = "instance.create_clone_failed";
 export const ORBIT_CREATE_WORKSPACE_FAILED = "instance.create_workspace_failed";
+/**
+ * A Project process of the new Instance did not stay up. The kept Instance keeps the broken
+ * process, so a Retry fails the same way; only remove and create again works.
+ */
+export const ORBIT_CONTAINER_PROCESS_INACTIVE = "instance.container_process_inactive";
 
 export interface OrbitGatewayProjectsOptions {
   /**
@@ -275,6 +280,8 @@ export interface OrbitGatewayOperation {
   readonly failedStep?: string | null;
   readonly error?: OrbitGatewayOperationError | null;
   readonly result?: Readonly<Record<string, unknown>> | null;
+  /** `result.process_failure.unit`: the Project process that did not stay up, when Orbit names it. */
+  readonly processFailureUnit?: string | null;
 }
 
 export interface OrbitGatewayOperationError {
@@ -650,7 +657,13 @@ function operation(value: unknown, path: string): OrbitGatewayOperation {
     ...("failed_step" in data ? { failedStep: optionalText(data.failed_step) } : {}),
     ...("error" in data ? { error: operationError(data.error) } : {}),
     ...("result" in data ? { result: record(data.result) } : {}),
+    ...processFailure(data.result),
   };
+}
+
+function processFailure(result: unknown): { processFailureUnit?: string | null } {
+  const failure = record(record(result)?.process_failure);
+  return failure === null ? {} : { processFailureUnit: optionalText(failure.unit) };
 }
 
 function operationStep(value: unknown): OrbitGatewayOperationStep[] {

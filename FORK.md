@@ -194,8 +194,10 @@ Sources:
 
 ### Orbit
 
-New threads can start an Orbit instance. Conn also looks up projects by
-repository and registers with Orbit.
+Orbit in Conn means container Instances: Conn pairs with the servers the Gateway lists, shows
+them, and starts threads in a Project's Instance container. Conn no longer makes worktree-based
+Instances. Old ones and their threads are settled in Orbit; Conn keeps showing such a thread as a
+plain worktree thread and never removes it.
 
 In Orbit mode, Settings › Connections shows the per-environment Linked
 environments, Load balancing and GitHub routing sections under Orbit's sections.
@@ -217,19 +219,11 @@ nothing revokes them. `planEnvironmentProvider` takes the requested ids; web and
 pairing step (`pairOne`) between the sync and Connect, and a second call for a server joins the
 one in flight.
 
-Thread-start Orbit registration uses the client RPCs in
-`apps/web/src/orbit/orbitWorkspaces.ts` and the server's
-`OrbitWorkspaceRegistrar.ts`. The client is not a replacement for the server
-registrar. Conn mounts `orbitWorkspaces.{subscribe,register,remove}` through
-`wsFork.ts` and provides `OrbitWorkspaceRegistrar` with `OrbitGateway` at
-server startup. Official upstream servers do not implement this fork group.
-See [Fork RPC group](#fork-rpc-group).
-
-An Orbit project folder can contain checkouts without being a Git repository
-itself. `ChatView.tsx` must pass `showGitControls={isGitRepo ||
-isOrbitProjectFolder}`, `orbitProjectFolder={isOrbitProjectFolder}` and the
-effective Orbit mode to `BranchToolbar`. Otherwise the composer hides the
-Orbit instance selector for this kind of project.
+An old worktree-based Instance's checkout sits beside the Project's `default` checkout
+(`<apps>/<project>/t3code-<8 hex>`, older ones `t3-<8 hex>`). `isOrbitCheckout`
+(`apps/web/src/orbit/orbitCheckout.ts`) recognizes that path, so deleting such a thread never
+offers to remove the worktree; Orbit owns it. T3's own `<T3 home>/worktrees/<repo>/` folders never
+match.
 
 In the desktop app in Orbit mode, New thread starts threads in Orbit Projects; there is no other
 switch and no other entry (Orbit's `docs/cli/instance/container/thread.mmd`). Outside Orbit mode,
@@ -1040,19 +1034,19 @@ Sources under `apps/mobile/src/features/`:
 ### Fork RPC group
 
 Conn's fork contracts live in `ForkWsRpcGroup`. On November 8, Nick authorized
-restoring the RPCs required by annotation queues and Orbit registration:
-`annotations.{subscribe,create,remove}` and
-`orbitWorkspaces.{subscribe,register,remove}`. `wsFork.ts` mounts only these six
-methods; `ws.ts` merges them into the production socket group. Keep their
+restoring the RPCs required by annotation queues and Orbit registration. The
+Orbit registration RPCs (`orbitWorkspaces.*`) left with the worktree-based Orbit
+mode, so the group is `annotations.{subscribe,create,remove}`. `wsFork.ts` mounts
+only these three methods; `ws.ts` merges them into the production socket group. Keep their
 handler layer separate from the large upstream groups to avoid TypeScript's
 handler-type expansion limit.
 
 Subscriptions require `orchestration:read`. Annotation mutations require
-`preview:operate`; Orbit mutations require `orchestration:operate`. Both the
+`preview:operate`. Both the
 scope authorization and instrumentation middleware apply to the fork group.
 `wsFork.test.ts` exercises the handlers through RPC, including rejected
 mutations and the real annotation store. `wsMountedRpc.test.ts` checks the
-production mount against the explicit six-method allowlist.
+production mount against the explicit three-method allowlist.
 
 `serverRestart`, `credentials*`, `testLogins*` and `panels.*` remain unmounted.
 Do not broaden this allowlist during an upstream sync without a new decision.
@@ -1061,7 +1055,7 @@ Typed contracts alone do not prove a method is available on a server.
 Sources:
 
 - `packages/contracts/src/rpc.ts` (`OfficialWsRpcGroup`, `ForkWsRpcGroup`).
-- `apps/server/src/wsFork.ts`, `ws.ts`, `server.ts`.
+- `apps/server/src/wsFork.ts`, `ws.ts`.
 
 ### Codex MCP network wait
 
@@ -1284,13 +1278,12 @@ this repair. Preserve these connections when adapting future upstream changes:
 | Mobile workspace filtering              | `HomeScreen.tsx` and `ThreadNavigationSidebar.tsx` no longer call `selectedWorkspaceProjectRefs`. The phone filter could select a workspace, but the thread list did not use it. Sidebar and Android filter consumers also lost the workspace choices. |
 | Browser and device annotation queues    | `PreviewView.tsx` lost `BrowserAnnotationControl`; `DeviceWorkspace.tsx` lost its queue hook, annotation props and `AnnotationQueuePopover`. The upstream picker remains, but Conn's queue controls are disconnected.                                  |
 | Operator mobile dictation               | `VoiceInputProvider.tsx` stopped selecting `getOperatorVoiceTranscriber`. Settings and authentication remain, but neither the provider nor its replacement `voiceDestination.ts` reads that selection.                                                 |
-| Orbit project-folder controls           | `ChatView.tsx` now passes only `isGitRepo` to `BranchToolbar.showGitControls` and omits `orbitProjectFolder` and the forced Orbit mode. Non-Git Orbit project folders lose the instance selector even though send-time Orbit detection remains.        |
 
 The same sync removed the fork server RPC handlers. `3ab777b7c8` briefly
 restored a separate group, then `6bf5145e37` removed it again and `e5053317cb`
 added tests enforcing the exclusion. Nick's November 8 decision restores the
-six annotation and Orbit RPCs needed by these features. The other fork RPCs
-remain excluded; see [Fork RPC group](#fork-rpc-group).
+annotation and Orbit RPCs needed by these features; the Orbit ones later left with the
+worktree-based Orbit mode. The other fork RPCs remain excluded; see [Fork RPC group](#fork-rpc-group).
 
 Validation in `nick-vm`: the stock Laravel container spike renders its toolbar
 in a fresh native desktop tab; request details open, and navigation to a

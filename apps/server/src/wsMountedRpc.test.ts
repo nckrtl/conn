@@ -8,9 +8,6 @@ const restoredFeatureRpcs = [
   WS_METHODS.annotationsSubscribe,
   WS_METHODS.annotationsCreate,
   WS_METHODS.annotationsRemove,
-  WS_METHODS.orbitWorkspacesSubscribe,
-  WS_METHODS.orbitWorkspacesRegister,
-  WS_METHODS.orbitWorkspacesRemove,
 ] as const;
 
 const connMainAlreadyMountedExtras = [
@@ -20,7 +17,7 @@ const connMainAlreadyMountedExtras = [
 ] as const;
 
 describe("mounted server WS RPCs", () => {
-  it("mounts official RPCs and only the authorized annotation and Orbit fork RPCs", () => {
+  it("mounts official RPCs and only the authorized annotation fork RPCs", () => {
     const mounted = new Set(mountedServerWsRpcTags);
     const official = new Set(OfficialWsRpcGroup.requests.keys());
     const splitAndOther = new Set([...mountedSplitWsRpcTags, ...mountedOtherWsRpcTags]);

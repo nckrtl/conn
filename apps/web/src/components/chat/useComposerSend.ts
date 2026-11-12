@@ -139,13 +139,6 @@ import type { useQueuedRunEdit } from "./useQueuedRunEdit";
 import type { useTimelineFollow } from "./useTimelineFollow";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
-import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
-import { createOrbitWorktree } from "../../orbit/orbitInstances";
-import { getOrbitAvailability } from "../../orbit/useOrbitAvailability";
-import { orbitInstanceNameForBranch } from "../../orbit/orbitInstances";
-import { randomUUID } from "~/lib/utils";
-import { readOrbitGatewayUrl, runHiddenShell } from "../../orbit/orbitTransport";
-import { registerOrbitWorkspace } from "../../orbit/orbitWorkspaces";
 import {
   buildOrbitDraftStart,
   orbitDraftAttachmentsBlockedReason,
@@ -208,8 +201,6 @@ interface ComposerSendInput {
   readonly activeEnvironmentUnavailable: boolean;
   readonly isSendBusy: boolean;
   readonly sendQueuesBehindSetup: boolean;
-  /** Conn: an Orbit project folder has no branches; its Instance starts from the default branch. */
-  readonly isOrbitProjectFolder: boolean;
   /** Conn: the draft starts in an Orbit Instance through the start machine, not this server. */
   readonly orbitDraftTarget: OrbitDraftTarget | null;
   readonly isDraftHeroState: boolean;
@@ -306,7 +297,6 @@ export function useComposerSend(input: ComposerSendInput) {
     activeEnvironmentUnavailable,
     isSendBusy,
     sendQueuesBehindSetup,
-    isOrbitProjectFolder,
     orbitDraftTarget,
     isDraftHeroState,
     panelAnimationsActive,
@@ -348,10 +338,6 @@ export function useComposerSend(input: ComposerSendInput) {
   const handleNewThread = useNewThreadHandler();
   const navigate = useNavigate();
   const clientSettingsHydrated = useClientSettingsHydrated();
-  // Conn: a New Orbit instance send records the instance's branch and worktree on the thread.
-  const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
-    reportFailure: false,
-  });
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
@@ -842,20 +828,6 @@ export function useComposerSend(input: ComposerSendInput) {
       setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
       return;
     }
-    const isFirstMessage = !sendQueuesBehindSetup && (!isServerThread || activeMessageCount === 0);
-    const shouldCreateOrbitInstance =
-      isFirstMessage &&
-      sendEnvMode === "orbit" &&
-      !activeThread.worktreePath &&
-      multipleModelSelections === null;
-    // An Orbit project folder has no branches; the Instance starts from the Project's default branch.
-    if (shouldCreateOrbitInstance && !activeThreadBranch && !isOrbitProjectFolder) {
-      setThreadError(
-        threadIdForSend,
-        "Select a base branch before sending in New Orbit instance mode.",
-      );
-      return;
-    }
     // Records bind attachments by the id each side knows: the local id for the optimistic
     // row, the upload id (or local id on the data-URL path) on the wire; the server
     // rebinds them to the persisted id.
@@ -1134,10 +1106,7 @@ export function useComposerSend(input: ComposerSendInput) {
       setSetupQueueSendThreadKey(activeThreadKey);
     } else {
       beginLocalDispatch({
-        preparingWorktree:
-          multipleModelSelections !== null ||
-          Boolean(baseBranchForWorktree) ||
-          shouldCreateOrbitInstance,
+        preparingWorktree: multipleModelSelections !== null || Boolean(baseBranchForWorktree),
         submissionIntent:
           submissionIntent === "background" && !isLocalDraftThread
             ? "foreground"
@@ -1266,73 +1235,6 @@ export function useComposerSend(input: ComposerSendInput) {
       failure = turnAttachmentsResult;
     }
 
-    // New Orbit instance: a worktree of the project's repository in Orbit's
-    // managed path, on a temporary branch the thread starts on at once. T3's
-    // server renames the branch after this message, then registers the worktree
-    // as an Orbit Instance with a matching route, with or without this client.
-    let orbitWorkspace: { readonly branch: string; readonly worktreePath: string } | null = null;
-    if (failure === null && turnAttachmentsResult._tag === "Success" && shouldCreateOrbitInstance) {
-      const projectRoot = activeProject.workspaceRoot;
-      const orbitResult = await settlePromise(async () => {
-        const availability = await getOrbitAvailability(environmentId, projectRoot);
-        if (!availability.available) {
-          throw new Error(
-            `Cannot create an Orbit instance: ${
-              "reason" in availability
-                ? availability.reason
-                : "Orbit does not manage this repository"
-            }.`,
-          );
-        }
-        const { source } = availability;
-        const temporaryBranch = buildTemporaryWorktreeBranchName(() => randomUUID());
-        const instanceName = orbitInstanceNameForBranch(temporaryBranch);
-        const worktreePath = `${source.projectAppsPath}/${instanceName}`;
-        await createOrbitWorktree(
-          (script, timeoutSeconds) =>
-            runHiddenShell({ environmentId, cwd: projectRoot, script, timeoutSeconds }),
-          {
-            // The worktree belongs to the `default` Instance's repository, so
-            // Orbit's setup steps find that Instance as its upstream.
-            projectRoot: source.checkoutPath,
-            baseBranch: activeThreadBranch ?? source.defaultBranch ?? "main",
-            temporaryBranch,
-            worktreePath,
-          },
-        );
-        // The worktree exists either way, so a failed hand-over only warns.
-        await registerOrbitWorkspace(environmentId, {
-          threadId: threadIdForSend,
-          instanceName,
-          orbitProjectId: source.projectId,
-          projectSlug: source.projectSlug,
-          tld: source.tld,
-          checkoutPath: worktreePath,
-          temporaryBranch,
-          gatewayUrl: readOrbitGatewayUrl(),
-        }).catch((error: unknown) => {
-          toastManager.add({
-            type: "error",
-            title: "Orbit could not register the worktree",
-            description: `${instanceName}: ${error instanceof Error ? error.message : String(error)}`,
-          });
-        });
-        return { branch: temporaryBranch, worktreePath };
-      });
-      if (orbitResult._tag === "Failure") {
-        failure = orbitResult;
-      } else {
-        orbitWorkspace = orbitResult.value;
-        if (!isLocalDraftThread) {
-          const metaResult = await updateThreadMetadata({
-            environmentId,
-            input: { threadId: threadIdForSend, ...orbitWorkspace },
-          });
-          if (metaResult._tag === "Failure") failure = metaResult;
-        }
-      }
-    }
-
     if (failure === null && compactBeforeSend) {
       const compactResult = await startThreadTurn({
         environmentId,
@@ -1369,8 +1271,8 @@ export function useComposerSend(input: ComposerSendInput) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode: DEFAULT_INTERACTION_MODE,
-                      branch: orbitWorkspace?.branch ?? activeThreadBranch,
-                      worktreePath: orbitWorkspace?.worktreePath ?? activeThread.worktreePath,
+                      branch: activeThreadBranch,
+                      worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
                     },
                   }

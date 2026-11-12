@@ -2301,6 +2301,61 @@ describe("composerDraftStore model seed migration", () => {
     }
   });
 
+  it("loads drafts saved in the removed Orbit worktree mode as worktree or local drafts", async () => {
+    vi.useFakeTimers();
+    try {
+      const pendingDraftId = DraftId.make("draft-orbit-pending");
+      const checkoutDraftId = DraftId.make("draft-orbit-checkout");
+      const worktreePath = "/fast/apps/acme/t3code-1a2b3c4d";
+      const storage = useComposerDraftStore.persist.getOptions().storage;
+      expect(storage).toBeDefined();
+      storage?.setItem(COMPOSER_DRAFT_STORAGE_KEY, {
+        version: 9,
+        state: {
+          draftsByThreadKey: {},
+          draftThreadsByThreadKey: {
+            [pendingDraftId]: {
+              ...draftThread(ThreadId.make("thread-orbit-pending")),
+              branch: "main",
+              envMode: "orbit",
+            },
+            [checkoutDraftId]: {
+              ...draftThread(ThreadId.make("thread-orbit-checkout")),
+              branch: "t3code/1a2b3c4d",
+              worktreePath,
+              envMode: "orbit",
+            },
+          },
+          logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+          stickyModelSelectionByProvider: {},
+          stickyActiveProvider: null,
+        },
+      } as never);
+      await vi.advanceTimersByTimeAsync(300);
+
+      await useComposerDraftStore.persist.rehydrate();
+
+      const loaded = useComposerDraftStore.getState().draftThreadsByThreadKey;
+      expect(loaded[pendingDraftId]).toMatchObject({ envMode: "local", branch: "main" });
+      expect(loaded[checkoutDraftId]).toMatchObject({ envMode: "worktree", worktreePath });
+
+      useComposerDraftStore.getState().setPrompt(pendingDraftId, "Still here");
+      useComposerDraftStore.getState().setPrompt(checkoutDraftId, "Also here");
+      await vi.advanceTimersByTimeAsync(300);
+      const saved = await storage?.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+      expect(JSON.stringify(saved)).not.toContain('"orbit"');
+
+      resetComposerDraftStore();
+      await useComposerDraftStore.persist.rehydrate();
+      const reloaded = useComposerDraftStore.getState();
+      expect(reloaded.draftThreadsByThreadKey[pendingDraftId]?.envMode).toBe("local");
+      expect(reloaded.draftThreadsByThreadKey[checkoutDraftId]?.envMode).toBe("worktree");
+      expect(reloaded.draftsByThreadKey[pendingDraftId]?.prompt).toBe("Still here");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps v8 file-only draft sessions and their seeded models", async () => {
     vi.useFakeTimers();
     try {

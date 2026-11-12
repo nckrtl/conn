@@ -52,6 +52,9 @@ describe("isAllowedConnQuery", () => {
     );
     expect(isAllowedConnQuery(get("/projects/66/instances/check", { name: "default" }))).toBe(true);
     expect(isAllowedConnQuery(get("/projects", { include_unavailable: "1" }))).toBe(true);
+    expect(isAllowedConnQuery(get("/projects/66/branches", { query: "feature/Login" }))).toBe(true);
+    expect(isAllowedConnQuery(get("/projects/66/branches", { query: "a".repeat(200) }))).toBe(true);
+    expect(isAllowedConnQuery(get("/projects/66/branches"))).toBe(true);
   });
 
   it.each([
@@ -68,6 +71,15 @@ describe("isAllowedConnQuery", () => {
       get("/projects", { include_unavailable: "1", a: "b" }),
     ],
     ["a query on another path", get("/environments", { include_unavailable: "1" })],
+    [
+      "a branch search over 200 characters",
+      get("/projects/66/branches", { query: "a".repeat(201) }),
+    ],
+    ["an empty branch search", get("/projects/66/branches", { query: "" })],
+    ["a branch search with a control character", get("/projects/66/branches", { query: "a\nb" })],
+    ["another key on branches", get("/projects/66/branches", { name: "main" })],
+    ["an extra key on branches", get("/projects/66/branches", { query: "a", limit: "5" })],
+    ["branches of a non-numeric project", get("/projects/x/branches", { query: "a" })],
     ["a POST", { method: "POST" as const, path: "/projects", query: { include_unavailable: "1" } }],
   ])("refuses %s", (_label, request) => {
     expect(isAllowedConnQuery(request)).toBe(false);

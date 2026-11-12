@@ -70,6 +70,13 @@ export function resolveConnUrl(path: string): URL | null {
 /** Orbit's Instance name rule allows at most 63 characters; anything longer is no name to check. */
 const isNameCheckValue = (value: string) => /^[a-z0-9-]{1,63}$/.test(value);
 
+/** A branch search: a bounded, printable substring; Orbit itself answers an invalid ref with 502. */
+const ORBIT_BRANCH_QUERY_MAX_LENGTH = 200;
+const isBranchQueryValue = (value: string) =>
+  value.length >= 1 &&
+  value.length <= ORBIT_BRANCH_QUERY_MAX_LENGTH &&
+  !/[\u0000-\u001f\u007f]/.test(value);
+
 /**
  * The queries the renderer may send, each kept exact: the method and path, and every key with
  * its value rule. Any other key, or a query on another path, is refused.
@@ -86,6 +93,12 @@ const CONN_QUERIES: ReadonlyArray<{
     method: "GET",
     pattern: /^\/projects\/[1-9][0-9]{0,15}\/instances\/check$/,
     query: { name: isNameCheckValue },
+  },
+  // The branch control's search.
+  {
+    method: "GET",
+    pattern: /^\/projects\/[1-9][0-9]{0,15}\/branches$/,
+    query: { query: isBranchQueryValue },
   },
 ];
 

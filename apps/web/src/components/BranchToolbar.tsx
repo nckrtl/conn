@@ -707,15 +707,25 @@ export const BranchToolbar = memo(function BranchToolbar({
   const openLink = useOpenLink(threadRef);
 
   if (orbitDraftTarget) {
-    // No branch control and no domain chip: both wait for Orbit.
+    // No domain chip; the branch control shows for a new Instance.
     if (layout === "panel") return null;
+    const updateOrbitTarget = draftId
+      ? (patch: Partial<OrbitDraftTarget>) => {
+          const current = useComposerDraftStore.getState().getDraftSession(draftId)?.orbitTarget;
+          if (current) setDraftThreadContext(draftId, { orbitTarget: { ...current, ...patch } });
+        }
+      : undefined;
     return (
       <ComposerSurface.ContextStrip
         ref={attachStrip}
         data-compact={labelsOverflow ? "" : undefined}
         className={cn("gap-1 text-xs font-normal text-foreground/70 dark:text-muted-foreground")}
       >
-        <BranchToolbarOrbitInstance target={orbitDraftTarget} />
+        <BranchToolbarOrbitInstance
+          target={orbitDraftTarget}
+          draftId={draftId}
+          onTargetChange={updateOrbitTarget}
+        />
         {trailing}
       </ComposerSurface.ContextStrip>
     );

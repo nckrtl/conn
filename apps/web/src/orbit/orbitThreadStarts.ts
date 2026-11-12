@@ -58,6 +58,8 @@ function saveOrbitDraftStart(input: OrbitDraftStartInput): OrbitThreadStart {
     pendingThread: true,
     projectName: input.projectName ?? null,
     instanceDomainSuffix: input.instanceDomainSuffix ?? null,
+    branch: input.branch,
+    defaultBranch: input.defaultBranch,
   });
   const start = { ...fresh, workspaceId: useWorkspaceStore.getState().activeWorkspaceId };
   updateStarts((starts) => [...starts, start]);

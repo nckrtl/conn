@@ -37,6 +37,17 @@ export async function openOrbitDraft(
   const store = useComposerDraftStore.getState();
   const existing = store.getDraftSessionByLogicalProjectKey(logicalProjectKey);
   const draftId = existing?.draftId ?? newDraftId();
+  // A new Instance keeps the branch chosen for the Project's draft unless the target sets one.
+  const previous = existing?.orbitTarget;
+  const keptBranch =
+    target.instanceKind === "new" &&
+    target.branch === undefined &&
+    previous?.projectId === target.projectId
+      ? {
+          ...(previous.branch ? { branch: previous.branch } : {}),
+          ...(previous.defaultBranch ? { defaultBranch: previous.defaultBranch } : {}),
+        }
+      : {};
   store.setLogicalProjectDraftThreadId(
     logicalProjectKey,
     scopeProjectRef(anchor, orbitDraftProjectId(target.projectId)),
@@ -46,7 +57,7 @@ export async function openOrbitDraft(
       envMode: "local",
       branch: null,
       worktreePath: null,
-      orbitTarget: target,
+      orbitTarget: { ...target, ...keptBranch },
     },
   );
   await router.navigate({ to: "/draft/$draftId", params: { draftId } });

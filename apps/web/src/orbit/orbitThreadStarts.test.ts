@@ -247,6 +247,23 @@ describe("sendOrbitDraft", () => {
     expect(runAtomCommand).not.toHaveBeenCalled();
   });
 
+  it("saves a new Instance's branch choice and the default branch", () => {
+    const onBranch: OrbitDraftTarget = {
+      ...target,
+      branch: { mode: "existing", name: "feature/login" },
+      defaultBranch: "main",
+    };
+    expect(send(onBranch).start).toMatchObject({
+      branch: { mode: "existing", name: "feature/login" },
+      defaultBranch: "main",
+    });
+    window.localStorage.clear();
+    expect(send({ ...onBranch, branch: null }).start).toMatchObject({
+      branch: null,
+      defaultBranch: "main",
+    });
+  });
+
   it("starts in an existing, unpaired Instance without a create", () => {
     const { start } = send({
       ...target,

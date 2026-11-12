@@ -1,6 +1,8 @@
 import { ServerIcon } from "lucide-react";
 
+import type { DraftId } from "../composerDraftStore";
 import { orbitDraftContextRow, type OrbitDraftTarget } from "../orbit/orbitDraft";
+import { BranchToolbarOrbitBranch } from "./BranchToolbarOrbitBranch";
 import { openOrbitInstanceStep } from "../orbit/orbitInstanceStep";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
@@ -10,9 +12,18 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 /**
  * Conn: the left side of the context row for an Orbit draft. Node as plain text (its menu waits
- * for Orbit), then the Instance, which reopens the palette's Instance step for the Project.
+ * for Orbit), then the Instance, which reopens the palette's Instance step for the Project, then
+ * for a new Instance the branch control when `onTargetChange` is given (a draft can be edited).
  */
-export function BranchToolbarOrbitInstance({ target }: { target: OrbitDraftTarget }) {
+export function BranchToolbarOrbitInstance({
+  target,
+  draftId,
+  onTargetChange,
+}: {
+  target: OrbitDraftTarget;
+  draftId?: DraftId | undefined;
+  onTargetChange?: ((patch: Partial<OrbitDraftTarget>) => void) | undefined;
+}) {
   const row = orbitDraftContextRow(target);
   return (
     <div
@@ -43,6 +54,20 @@ export function BranchToolbarOrbitInstance({ target }: { target: OrbitDraftTarge
         </TooltipTrigger>
         <TooltipPopup>{row.instanceTitle}</TooltipPopup>
       </Tooltip>
+      {onTargetChange && target.instanceKind === "new" ? (
+        <>
+          <Separator
+            orientation="vertical"
+            className="mx-0.5 h-3.5!"
+            data-composer-context-control
+          />
+          <BranchToolbarOrbitBranch
+            target={target}
+            draftId={draftId}
+            onTargetChange={onTargetChange}
+          />
+        </>
+      ) : null}
     </div>
   );
 }

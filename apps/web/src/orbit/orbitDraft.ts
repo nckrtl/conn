@@ -101,26 +101,38 @@ export function orbitDraftLogicalProjectKey(orbitProjectId: number): string {
   return `orbit-project:${orbitProjectId}`;
 }
 
+/** No saved environment lends a model list: the start sends no model and the Instance's default runs. */
+export const ORBIT_DRAFT_NO_ENVIRONMENT_ID = EnvironmentId.make("orbit-draft:no-environment");
+
+export function isOrbitDraftWithoutEnvironment(environmentId: string): boolean {
+  return environmentId === ORBIT_DRAFT_NO_ENVIRONMENT_ID;
+}
+
 /**
- * The environment the draft is anchored on before the Instance exists: a paired clone of the same
- * Orbit Project if this device has one (its providers match best), else the primary environment.
- * The start carries the chosen model; if the new clone lacks that provider, PR 4 falls back.
+ * The environment that lends the draft its model list; the start itself runs through the Gateway.
+ * A Project with no Instances must open with no primary environment (local environment off), so
+ * after a paired clone and the primary come this app's host server, then any saved environment.
  */
 export function chooseOrbitDraftAnchor(input: {
   readonly orbitProjectId: number;
   readonly orbitInstances: Readonly<Record<string, OrbitInstanceDescriptor>>;
-  readonly savedEnvironmentIds: ReadonlySet<string>;
+  readonly savedEnvironments: ReadonlyMap<string, { readonly enabled: boolean }>;
   readonly primaryEnvironmentId: string | null;
-}): EnvironmentId | null {
-  const clone = Object.entries(input.orbitInstances)
-    .filter(
-      ([environmentId, instance]) =>
-        instance.projectId === input.orbitProjectId && input.savedEnvironmentIds.has(environmentId),
-    )
-    .map(([environmentId]) => environmentId)
-    .toSorted()[0];
-  const anchor = clone ?? input.primaryEnvironmentId;
-  return anchor ? EnvironmentId.make(anchor) : null;
+  readonly hostEnvironmentId: string | null;
+}): EnvironmentId {
+  const saved = [...input.savedEnvironments.keys()].toSorted();
+  const clone = saved.find(
+    (environmentId) => input.orbitInstances[environmentId]?.projectId === input.orbitProjectId,
+  );
+  const host =
+    input.hostEnvironmentId !== null && input.savedEnvironments.has(input.hostEnvironmentId)
+      ? input.hostEnvironmentId
+      : undefined;
+  const enabled = saved.find(
+    (environmentId) => input.savedEnvironments.get(environmentId)?.enabled,
+  );
+  const anchor = clone ?? input.primaryEnvironmentId ?? host ?? enabled ?? saved[0];
+  return anchor ? EnvironmentId.make(anchor) : ORBIT_DRAFT_NO_ENVIRONMENT_ID;
 }
 
 export interface OrbitDraftContextRow {

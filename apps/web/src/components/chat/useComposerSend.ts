@@ -143,6 +143,7 @@ import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
 import {
   buildOrbitDraftStart,
+  isOrbitDraftWithoutEnvironment,
   orbitDraftAttachmentsBlockedReason,
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
@@ -774,7 +775,9 @@ export function useComposerSend(input: ComposerSendInput) {
         start: buildOrbitDraftStart({
           target: orbitDraftTarget,
           message: trimmed,
-          modelSelection: ctxSelectedModelSelection,
+          modelSelection: isOrbitDraftWithoutEnvironment(environmentId)
+            ? null
+            : ctxSelectedModelSelection,
           runtimeMode,
           interactionMode:
             composerDraft?.interactionMode ??

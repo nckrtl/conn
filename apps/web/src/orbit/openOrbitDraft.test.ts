@@ -10,6 +10,9 @@ import type { OrbitDraftTarget } from "./orbitDraft";
 
 const mocks = vi.hoisted(() => ({
   enabled: true,
+  catalog: new Map<string, { enabled: boolean }>([["clone-71", { enabled: true }]]),
+  primary: "env-primary" as string | null,
+  host: null as string | null,
   existingDraft: null as {
     draftId: string;
     threadId: string;
@@ -34,15 +37,25 @@ vi.mock("../hooks/useHandleNewThread", () => ({ createNewThreadHandler: () => mo
 vi.mock("../state/entities", () => ({ readProjects: () => mocks.projects }));
 vi.mock("../lib/utils", () => ({ newDraftId: () => "draft-new", newThreadId: () => "thread-new" }));
 vi.mock("../connection/catalog", () => ({ environmentCatalog: { catalogValueAtom: "catalog" } }));
-vi.mock("../state/primaryEnvironment", () => ({ primaryEnvironmentIdAtom: "primary" }));
+vi.mock("../state/primaryEnvironment", () => ({
+  primaryEnvironmentIdAtom: "primary",
+  hostEnvironmentIdAtom: "host",
+}));
 vi.mock("../rpc/atomRegistry", () => ({
   appAtomRegistry: {
     get: (atom: string) =>
-      atom === "catalog" ? { entries: new Map([["clone-71", {}]]) } : "env-primary",
+      atom === "catalog"
+        ? { entries: mocks.catalog }
+        : atom === "host"
+          ? mocks.host
+          : mocks.primary,
   },
 }));
-vi.mock("./environmentProvider", () => ({
+vi.mock("./orbitThreadStarts", () => ({
   // The desktop app in Orbit mode; there is no other switch.
+  orbitThreadStartBlockedReason: () => (mocks.enabled ? null : "Turn on Orbit."),
+}));
+vi.mock("./environmentProvider", () => ({
   orbitThreadsAvailableNow: () => mocks.enabled,
   useEnvironmentProvider: {
     getState: () => ({ orbitInstances: { "clone-71": { projectId: 71, instanceId: 5 } } }),
@@ -64,8 +77,16 @@ function setup(input: {
   enabled: boolean;
   existingDraft?: typeof mocks.existingDraft;
   projects?: typeof mocks.projects;
+  catalog?: Array<[string, boolean]>;
+  primary?: string | null;
+  host?: string | null;
 }) {
   mocks.enabled = input.enabled;
+  mocks.catalog = new Map(
+    (input.catalog ?? [["clone-71", true]]).map(([id, enabled]) => [id, { enabled }]),
+  );
+  mocks.primary = input.primary === undefined ? "env-primary" : input.primary;
+  mocks.host = input.host ?? null;
   mocks.existingDraft = input.existingDraft ?? null;
   mocks.projects = input.projects ?? [];
   mocks.setLogicalProjectDraftThreadId.mockClear();
@@ -90,6 +111,39 @@ describe("openOrbitDraft", () => {
       to: "/draft/$draftId",
       params: { draftId: "draft-new" },
     });
+  });
+
+  it("opens for a Project with no Instances when the local environment is off (no primary)", async () => {
+    const { router, navigate } = setup({
+      enabled: true,
+      catalog: [
+        ["beast", true],
+        ["nick", true],
+      ],
+      primary: null,
+      host: "nick",
+    });
+
+    expect(await openOrbitDraft(router, target)).toBe("draft-new");
+    expect(mocks.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "orbit-project:71",
+      { environmentId: "nick", projectId: "orbit-project:71" },
+      "draft-new",
+      expect.objectContaining({ orbitTarget: target }),
+    );
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("opens with no environment at all, so the new Instance's default model runs", async () => {
+    const { router } = setup({ enabled: true, catalog: [], primary: null });
+
+    expect(await openOrbitDraft(router, target)).toBe("draft-new");
+    expect(mocks.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "orbit-project:71",
+      { environmentId: "orbit-draft:no-environment", projectId: "orbit-project:71" },
+      "draft-new",
+      expect.anything(),
+    );
   });
 
   it("reuses the Project's open draft, so its text stays", async () => {

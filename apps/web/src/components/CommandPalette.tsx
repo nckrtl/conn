@@ -285,6 +285,7 @@ import {
   useOrbitPaletteProjects,
 } from "../orbit/orbitPaletteProjects";
 import { openOrbitDraft } from "../orbit/openOrbitDraft";
+import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
 import { registerOrbitInstanceStepOpener } from "../orbit/orbitInstanceStep";
 import {
   buildOrbitInstanceRows,
@@ -1925,7 +1926,10 @@ function OpenCommandPaletteDialog(props: {
       stackedThreadToast({
         type: "error",
         title: "Unable to open the Orbit draft",
-        description: error instanceof Error ? error.message : "Conn could not open the draft here.",
+        description:
+          error instanceof Error
+            ? error.message
+            : (orbitThreadStartBlockedReason() ?? "Open New thread and pick the Project again."),
       }),
     );
   const createOrbitInstance = () => {

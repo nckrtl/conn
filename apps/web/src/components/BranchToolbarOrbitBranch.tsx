@@ -3,7 +3,7 @@ import { useRouter } from "@tanstack/react-router";
 import { GitBranchIcon, RotateCcwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { openOrbitInstanceById } from "../orbit/openOrbitDraft";
+import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
 import {
   ORBIT_BRANCH_MODE_LABELS,
   createOrbitBranchSearch,

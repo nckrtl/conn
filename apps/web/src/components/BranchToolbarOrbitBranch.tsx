@@ -3,6 +3,7 @@ import { useRouter } from "@tanstack/react-router";
 import { GitBranchIcon, RotateCcwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import type { DraftId } from "../composerDraftStore";
 import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
 import {
   ORBIT_BRANCH_MODE_LABELS,
@@ -41,10 +42,13 @@ import { Toggle, ToggleGroup } from "./ui/toggle-group";
  */
 export function BranchToolbarOrbitBranch({
   target,
+  draftId,
   onTargetChange,
   readBranches = readOrbitBranches,
 }: {
   target: OrbitDraftTarget;
+  /** The Orbit draft; picking a paired Instance carries its prompt into that Instance's draft. */
+  draftId?: DraftId | undefined;
   /** Applies a change to the draft's current target. */
   onTargetChange: (patch: Partial<OrbitDraftTarget>) => void;
   readBranches?: (projectId: number, query: string) => Promise<OrbitGatewayBranches>;
@@ -111,6 +115,7 @@ export function BranchToolbarOrbitBranch({
       },
       instance,
       environments: readOrbitEnvironments,
+      carryDraftFrom: draftId,
     })
       .then((result) => {
         if (result.kind === "unavailable") {

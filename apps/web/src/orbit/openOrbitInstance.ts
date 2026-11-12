@@ -7,6 +7,7 @@ import { environmentCatalog } from "../connection/catalog";
 import { createNewThreadHandler } from "../hooks/useHandleNewThread";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readProjects } from "../state/entities";
+import { carryComposerDraft } from "./carryComposerDraft";
 import { openOrbitDraft } from "./openOrbitDraft";
 import {
   buildOrbitInstanceRows,
@@ -65,12 +66,14 @@ export type OrbitInstanceByIdResult =
 /**
  * Selects the Instance a branch belongs to (the branch menu's "in instance" row, or the card of a
  * create refused with `branch.in_use`), with the same outcome as its row in the Instance step.
+ * With `carryDraftFrom`, a different draft that opens receives that draft's prompt, model and modes.
  */
 export async function openOrbitInstanceById(input: {
   readonly router: AnyRouter;
   readonly project: OrbitInstanceDraftProject;
   readonly instance: { readonly id: number; readonly name: string };
   readonly environments: () => Promise<readonly OrbitGatewayEnvironment[]>;
+  readonly carryDraftFrom?: DraftId | undefined;
 }): Promise<OrbitInstanceByIdResult> {
   const environments = await input.environments();
   const row = buildOrbitInstanceRows({
@@ -91,6 +94,9 @@ export async function openOrbitInstanceById(input: {
     return { kind: "unavailable", reason: `Instance ${row.name}: ${row.disabledReason}` };
   }
   const draftId = await openOrbitInstanceRow(input.router, input.project, row);
+  if (draftId !== null && input.carryDraftFrom !== undefined) {
+    carryComposerDraft(input.carryDraftFrom, draftId);
+  }
   return draftId !== null
     ? { kind: "opened", draftId }
     : { kind: "unavailable", reason: `Conn could not open Instance ${row.name} here.` };

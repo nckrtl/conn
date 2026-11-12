@@ -34,7 +34,7 @@ export interface OrbitChecksPageModel {
  * even if a Gateway sent more. A failing check outside the five adds one row with Orbit's label.
  */
 export function orbitChecksPageModel(
-  project: Pick<OrbitPaletteProjectRow, "startable" | "reason" | "checks">,
+  project: Pick<OrbitPaletteProjectRow, "startable" | "checks">,
 ): OrbitChecksPageModel {
   const checks = project.checks ?? [];
   const failIndex = checks.findIndex((check) => check.status === "fail");
@@ -57,10 +57,11 @@ export function orbitChecksPageModel(
   }
   return {
     rows,
+    // A row's reason is its failing check's message, so with no failing check Orbit said nothing.
     reason:
       project.startable || firstFail !== null
         ? null
-        : (project.reason ?? "Orbit did not say why threads cannot start here yet."),
+        : "Orbit did not say why threads cannot start here yet.",
     startable: project.startable,
   };
 }
@@ -70,7 +71,9 @@ export type OrbitRecheckPhase = "idle" | "checking" | "failed";
 const useOrbitRecheckStore = create<{
   readonly projectId: number | null;
   readonly phase: OrbitRecheckPhase;
-}>(() => ({ projectId: null, phase: "idle" }));
+  /** Bumped by each check, so only the latest one's answer counts. */
+  readonly token: number;
+}>(() => ({ projectId: null, phase: "idle", token: 0 }));
 
 /** "Check again": re-reads the project list; a failed read keeps the last result and says so. */
 export async function checkOrbitProjectAgain(
@@ -79,9 +82,10 @@ export async function checkOrbitProjectAgain(
 ): Promise<void> {
   const current = useOrbitRecheckStore.getState();
   if (current.projectId === projectId && current.phase === "checking") return;
-  useOrbitRecheckStore.setState({ projectId, phase: "checking" });
+  const token = current.token + 1;
+  useOrbitRecheckStore.setState({ projectId, phase: "checking", token });
   const answered = await reread().catch(() => false);
-  if (useOrbitRecheckStore.getState().projectId !== projectId) return;
+  if (useOrbitRecheckStore.getState().token !== token) return;
   useOrbitRecheckStore.setState({ phase: answered ? "idle" : "failed" });
 }
 
@@ -92,7 +96,11 @@ export function useOrbitRecheckPhase(projectId: number): OrbitRecheckPhase {
 /** Leaving the page forgets its check: a note or a late answer belongs to that visit only. */
 export function forgetOrbitRecheck(projectId: number): void {
   if (useOrbitRecheckStore.getState().projectId === projectId) {
-    useOrbitRecheckStore.setState({ projectId: null, phase: "idle" });
+    useOrbitRecheckStore.setState(({ token }) => ({
+      projectId: null,
+      phase: "idle",
+      token: token + 1,
+    }));
   }
 }
 

@@ -7,7 +7,6 @@ import type { Workspace } from "../workspaces.logic";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { buildOrbitDraftStart, type OrbitDraftTarget } from "./orbitDraft";
 import {
-  beginOrbitThreadStart,
   dismissOrbitThreadStart,
   retryOrbitThreadStart,
   runSavedOrbitThreadStart,
@@ -81,7 +80,16 @@ function createLocalStorageStub(): Storage {
   };
 }
 
-const project = { id: 3, slug: "bench", name: "Bench", nodeId: 7, nodeName: "beast" };
+const projectTarget: OrbitDraftTarget = {
+  projectId: 3,
+  projectSlug: "bench",
+  projectName: "Bench",
+  nodeName: "beast",
+  instanceKind: "new",
+  instanceName: "",
+  existing: null,
+  domainSuffix: null,
+};
 const client = {} as OrbitGatewayClient;
 const workspace = (id: string, extra: Partial<Workspace> = {}): Workspace => ({
   id,
@@ -96,7 +104,17 @@ const workspace = (id: string, extra: Partial<Workspace> = {}): Workspace => ({
 /** Starts a thread with `selected` chosen, lets `between` run, then sends the first message. */
 async function startAndSend(selected: string | null, between: () => void = () => {}) {
   useWorkspaceStore.setState({ activeWorkspaceId: selected });
-  beginOrbitThreadStart(project, "List the files", "/env/thread-a");
+  sendOrbitDraft({
+    start: buildOrbitDraftStart({
+      target: { ...projectTarget, instanceName: "list-files" },
+      message: "List the files",
+      modelSelection: null,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    }),
+    openPending: () => {},
+    clearDraft: () => {},
+  });
   const id = readStored()[0]!.id;
   between();
   expect(await runSavedOrbitThreadStart(client, id)).toEqual({
@@ -108,7 +126,10 @@ async function startAndSend(selected: string | null, between: () => void = () =>
 
 describe("runSavedOrbitThreadStart", () => {
   beforeEach(() => {
-    vi.stubGlobal("window", { localStorage: createLocalStorageStub() });
+    vi.stubGlobal("window", {
+      localStorage: createLocalStorageStub(),
+      desktopBridge: { orbitGatewaySend: vi.fn() },
+    });
     useWorkspaceStore.setState({
       workspaces: [workspace("S"), workspace("U")],
       activeWorkspaceId: null,
@@ -299,14 +320,35 @@ describe("sendOrbitDraft", () => {
     expect(runAtomCommand).not.toHaveBeenCalled();
   });
 
+  it("resumes an unsent start of the old sidebar dialog as a pending thread", async () => {
+    const { start } = send(target);
+    const {
+      pendingThread: _pending,
+      projectName: _name,
+      instanceDomainSuffix: _suffix,
+      sentAt: _sentAt,
+      ...dialogRow
+    } = start;
+    window.localStorage.setItem("conn:orbit-thread-starts:v1", JSON.stringify([dialogRow]));
+
+    expect(await runSavedOrbitThreadStart(client, start.id)).toEqual({
+      environmentId: "clone",
+      threadId: "thread-1",
+    });
+    // Kept like any pending thread's start, for the real thread's ready row.
+    expect(readStored()).toEqual([
+      expect.objectContaining({ id: start.id, pendingThread: true, sentAt: expect.any(Number) }),
+    ]);
+  });
+
   it("drops an old dialog start whose send finished before a quit, without running it", async () => {
-    beginOrbitThreadStart(project, "List the files", "/");
-    const [old] = readStored();
+    const { start } = send(target);
+    const { pendingThread: _pending, ...dialogRow } = start;
     window.localStorage.setItem(
       "conn:orbit-thread-starts:v1",
-      JSON.stringify([{ ...old, environmentId: "clone", connected: true, sentAt: 4 }]),
+      JSON.stringify([{ ...dialogRow, environmentId: "clone", connected: true, sentAt: 4 }]),
     );
-    expect(await runSavedOrbitThreadStart(client, old!.id)).toBeNull();
+    expect(await runSavedOrbitThreadStart(client, start.id)).toBeNull();
     expect(readStored()).toEqual([]);
   });
 });

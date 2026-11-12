@@ -925,7 +925,7 @@ export function newThreadNoProjectIndex(
 }
 
 /**
- * Conn: the Orbit Projects of the New thread list, behind the Labs switch. `off` leaves the list
+ * Conn: the Orbit Projects of the New thread list in the desktop app in Orbit mode. `off` leaves the list
  * as it was; the others are the states the design shows under the local projects.
  */
 export type OrbitPaletteProjectsState =

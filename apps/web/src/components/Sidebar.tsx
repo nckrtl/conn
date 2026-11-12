@@ -253,7 +253,6 @@ import {
   useComboboxFilter,
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
-import { OrbitThreadStartButton, OrbitThreadStartList } from "../orbit/OrbitProjectThreads";
 import { OrbitPendingThreadList } from "../orbit/OrbitPendingThreadList";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
@@ -3075,7 +3074,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             <SidebarGroup className="z-[1]">
               <SidebarThreadHeader
                 hasProjects={projectGroups.length > 0}
-                orbitThread={<OrbitThreadStartButton />}
                 projectScope={
                   <Combobox
                     items={projectScopeItems}
@@ -3301,7 +3299,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 activeSearchResultIndex={activeSearchResultIndex}
                 onClearSearch={clearThreadSearch}
               />
-              <OrbitThreadStartList />
               <OrbitPendingThreadList />
             </SidebarGroup>
           }

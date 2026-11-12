@@ -320,7 +320,7 @@ describe("Orbit draft context row", () => {
     });
   });
 
-  it("acts on the target only on a draft and only while the Labs switch is on", () => {
+  it("acts on the target only on a draft and only in Orbit mode", () => {
     expect(
       resolveActiveOrbitDraftTarget({ enabled: true, isServerThread: false, orbitTarget: target }),
     ).toBe(target);

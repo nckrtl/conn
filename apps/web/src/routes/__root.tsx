@@ -33,7 +33,7 @@ import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepA
 import { AnnotationWatchCoordinator } from "../annotations/AnnotationWatchCoordinator";
 import { OrbitProfileSync } from "../orbit/OrbitProfileSync";
 import { OrbitRegistrationSync } from "../orbit/OrbitRegistrationSync";
-import { OrbitThreadStartRunner } from "../orbit/OrbitProjectThreads";
+import { OrbitThreadStartRunner } from "../orbit/OrbitThreadStartRunner";
 import { isAdditionalDesktopWindow } from "../lib/desktopWindowContext";
 import { ReopenClosedViewShortcut } from "../components/ReopenClosedViewShortcut";
 import { ProjectCloneToastCoordinator } from "../components/ProjectCloneToastCoordinator";

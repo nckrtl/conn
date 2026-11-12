@@ -184,11 +184,12 @@ export interface OrbitDraftStartInput {
 }
 
 /**
- * What the composer hands to the start machine for an Orbit draft. Only a new Instance carries a
- * branch choice.
+ * What the composer hands to the start machine for an Orbit draft. With branch control off the
+ * start carries no branch, so no request can send one.
  */
 export function buildOrbitDraftStart(input: {
   readonly target: OrbitDraftTarget;
+  readonly branchControl: boolean;
   readonly message: string;
   readonly modelSelection: ModelSelection | null;
   readonly runtimeMode: RuntimeMode;
@@ -214,7 +215,7 @@ export function buildOrbitDraftStart(input: {
     interactionMode: input.interactionMode,
     projectName: target.projectName,
     instanceDomainSuffix: target.domainSuffix,
-    branch: target.instanceKind === "new" ? (target.branch ?? null) : null,
+    branch: input.branchControl && target.instanceKind === "new" ? (target.branch ?? null) : null,
     defaultBranch: target.defaultBranch ?? null,
   };
 }

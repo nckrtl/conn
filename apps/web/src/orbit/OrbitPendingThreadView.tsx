@@ -2,16 +2,17 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { OrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigate, useRouter } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 
 import { OrbitSetupCard } from "../components/chat/OrbitSetupCard";
 import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
 import { toastManager } from "../components/ui/toast";
-import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { isElectron } from "../env";
+import { cn } from "../lib/utils";
+import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "../workspaceTitlebar";
 import { useThreadShell } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { openOrbitDraft } from "./openOrbitDraft";
@@ -81,22 +82,17 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
 
   if (start === null) {
     return (
-      <SidebarInset className="h-dvh">
-        <div className="flex min-h-0 flex-1 flex-col bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate)">
-          <WorkspacePageHeader electron={isElectron} />
-          <div className="flex min-h-0 flex-1 flex-col bg-background">
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle>This thread start is gone</EmptyTitle>
-                <EmptyDescription>It was dismissed on this device.</EmptyDescription>
-              </EmptyHeader>
-              <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
-                New thread
-              </Button>
-            </Empty>
-          </div>
-        </div>
-      </SidebarInset>
+      <PendingThreadShell header={null}>
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>This thread start is gone</EmptyTitle>
+            <EmptyDescription>It was dismissed on this device.</EmptyDescription>
+          </EmptyHeader>
+          <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
+            New thread
+          </Button>
+        </Empty>
+      </PendingThreadShell>
     );
   }
 
@@ -122,36 +118,73 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
   };
 
   return (
-    <SidebarInset className="h-dvh" data-orbit-pending-thread={start.id}>
-      <div className="flex min-h-0 flex-1 flex-col bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate)">
-        <WorkspacePageHeader electron={isElectron}>
+    <PendingThreadShell
+      startId={start.id}
+      header={
+        <>
           <span className="min-w-0 truncate text-sm font-medium text-foreground">
             {start.message.split("\n")[0]}
           </span>
           <span className="shrink-0 text-xs text-muted-foreground">
             {start.instanceName} · {start.projectSlug}
           </span>
-        </WorkspacePageHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
-          <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
-            <div className="flex justify-end pb-4">
-              <div
-                data-orbit-pending-message
-                className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"
-              >
-                {start.message}
-              </div>
+        </>
+      }
+    >
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
+        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
+          <div className="flex justify-end pb-4">
+            <div
+              data-orbit-pending-message
+              className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"
+            >
+              {start.message}
             </div>
-            <OrbitSetupCard
-              view={orbitSetupView(start, create)}
-              onRetry={() => retryOrbitThreadStart(start.id)}
-              onChangeName={() => void changeName()}
-              onDismiss={() => {
-                dismissOrbitThreadStart(start.id);
-                void navigate({ to: "/", replace: true });
-              }}
-            />
           </div>
+          <OrbitSetupCard
+            view={orbitSetupView(start, create)}
+            onRetry={() => retryOrbitThreadStart(start.id)}
+            onChangeName={() => void changeName()}
+            onDismiss={() => {
+              dismissOrbitThreadStart(start.id);
+              void navigate({ to: "/", replace: true });
+            }}
+          />
+        </div>
+      </div>
+    </PendingThreadShell>
+  );
+}
+
+/** ChatView's frame: the shell fill, its header height and its card, so the handover keeps them. */
+function PendingThreadShell({
+  startId,
+  header,
+  children,
+}: {
+  startId?: string;
+  header: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <SidebarInset className="h-dvh" data-orbit-pending-thread={startId}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate)">
+        <header
+          className={cn(
+            "flex h-(--shell-header-height) min-h-(--shell-header-height) shrink-0 items-center gap-3",
+            isElectron
+              ? "drag-region px-3 sm:px-5"
+              : "pl-(--workspace-gutter-start) pr-(--workspace-gutter-end)",
+            COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+          )}
+        >
+          {header}
+        </header>
+        <div
+          data-shell-sidebar-edge=""
+          className="relative z-0 mr-(--shell-inset) mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tr-(--shell-corner) rounded-br-(--shell-corner) shell-inner-panel [--background:var(--shell-card)]"
+        >
+          {children}
         </div>
       </div>
     </SidebarInset>

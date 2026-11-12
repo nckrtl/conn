@@ -1,7 +1,7 @@
 import type { OrbitGatewayBranches } from "@t3tools/client-runtime/orbit-gateway";
 import { useRouter } from "@tanstack/react-router";
 import { GitBranchIcon, RotateCcwIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 
 import type { DraftId } from "../composerDraftStore";
 import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
@@ -79,18 +79,21 @@ export function BranchToolbarOrbitBranch({
     defaultBranches.known(target.projectId),
   );
 
+  const onDefaultBranchRead = useEffectEvent((name: string) => {
+    setReadDefaultBranch(name);
+    if (name !== target.defaultBranch) onTargetChange({ defaultBranch: name });
+  });
+
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the default branch's name from Orbit once per Project, so the label names it before the menu opens
   useEffect(() => {
     let live = true;
     void defaultBranches.read(target.projectId, readBranches).then((name) => {
-      if (!live || name === null) return;
-      setReadDefaultBranch(name);
-      if (name !== target.defaultBranch) onTargetChange({ defaultBranch: name });
+      if (live && name !== null) onDefaultBranchRead(name);
     });
     return () => {
       live = false;
     };
-  }, [defaultBranches, readBranches, target.projectId, target.defaultBranch, onTargetChange]);
+  }, [defaultBranches, readBranches, target.projectId]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the list when Change branch opened the menu on mount, and drops a pending read on unmount
   useEffect(() => {
@@ -115,7 +118,7 @@ export function BranchToolbarOrbitBranch({
   const status = orbitBranchListStatus(list.state, list.query);
   const label = orbitBranchControlLabel({
     branch: target.branch ?? null,
-    defaultBranch: target.defaultBranch ?? readDefaultBranch,
+    defaultBranch: readDefaultBranch ?? target.defaultBranch ?? null,
   });
 
   const pick = (row: OrbitBranchRow) => {

@@ -55,7 +55,7 @@ export const ORBIT_DEFAULT_BRANCH_IN_USE_NOTE = "default · the default Instance
 
 /**
  * The menu's rows for a mode. "New branch from": every branch is a base; the default one means no
- * choice ("From main"), so the create sends no branch. "Work on branch": the default branch is
+ * choice ("From <default>"), so the create sends no branch. "Work on branch": the default branch is
  * disabled (Orbit would answer branch.in_use with the default Instance), and a branch another
  * Instance works on picks that Instance, so two Instances never work on one branch.
  */

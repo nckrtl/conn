@@ -104,7 +104,7 @@ describe("OrbitPendingThreadView", () => {
       }),
     );
     await using screen = await render(view(), { router: "/orbit/s1" });
-    // The Labs switch is off in tests, so the draft does not open.
+    // Tests are not the desktop app in Orbit mode, so the draft does not open.
     await screen.getByRole("button", { name: "Change name" }).click();
     await expect.element(screen.getByText("Instance setup failed")).toBeVisible();
     expect(readStored()).toHaveLength(1);

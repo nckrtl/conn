@@ -239,9 +239,7 @@ import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/
 import { useEnvironmentQueryRefresh } from "../state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
-import { useOrbitThreadsAvailable } from "../orbit/environmentProvider";
-import { useOrbitThreadUrl } from "../orbit/orbitWorkspaces";
-import { useOrbitAvailability } from "../orbit/useOrbitAvailability";
+import { useOrbitInstance, useOrbitThreadsAvailable } from "../orbit/environmentProvider";
 import { hostEnvironmentIdAtom } from "../state/primaryEnvironment";
 import { threadEnvironment } from "../state/threads";
 import {
@@ -492,11 +490,8 @@ export default function ChatView(props: ChatViewProps) {
         ? store.getDraftSession(draftId)
         : null,
   );
-  // Conn: as for the Labs row, the switch counts only in the desktop app in Orbit mode.
-  const orbitThreadsSwitchOn = useClientSettings(
-    (clientSettings) => clientSettings.orbitThreadsInPaletteEnabled,
-  );
-  const orbitThreadsInPaletteEnabled = useOrbitThreadsAvailable() && orbitThreadsSwitchOn;
+  // Conn: Orbit drafts exist only in the desktop app in Orbit mode.
+  const orbitThreadsAvailable = useOrbitThreadsAvailable();
   const serverThreadShell = useQuietThreadShell(routeThreadRef);
   const routeThreadDetailRef = resolveThreadDetailRef(routeThreadRef, {
     shellExists: serverThreadShell !== null,
@@ -1736,24 +1731,11 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
   const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
-  // Conn: a project rooted at Orbit's folder for a Project (e.g. `/fast/apps/orbit`) is no
-  // repository; its threads start in a new Orbit Instance of the `default` checkout.
-  const orbitFolderAvailability = useOrbitAvailability({
-    environmentId,
-    projectRoot: activeProject?.workspaceRoot ?? null,
-    enabled: !isGitRepo && activeProject !== null,
-  });
   const orbitDraftTarget = resolveActiveOrbitDraftTarget({
-    enabled: orbitThreadsInPaletteEnabled,
+    enabled: orbitThreadsAvailable,
     isServerThread,
     orbitTarget: draftThread?.orbitTarget,
   });
-  const isOrbitProjectFolder =
-    !isGitRepo &&
-    orbitFolderAvailability !== null &&
-    !("status" in orbitFolderAvailability) &&
-    orbitFolderAvailability.hidden !== true &&
-    orbitFolderAvailability.projectFolder === true;
   // A provider-native subagent cannot take messages: a status bar replaces the
   // composer and its strips. Its approvals and questions are asked on the
   // top-level parent thread.
@@ -1788,7 +1770,7 @@ export default function ChatView(props: ChatViewProps) {
       isDraftHeroState,
       persistInActiveThreads: settings.persistComposerContextStrip,
       hasActiveProject: activeProject !== null && !showProviderSubagentBar,
-      isGitRepo: isGitRepo || isOrbitProjectFolder,
+      isGitRepo,
       showEnvironmentIndicator: showComposerEnvironmentIndicator,
       hasOrbitDraftTarget: orbitDraftTarget !== null,
     });
@@ -2256,17 +2238,10 @@ export default function ChatView(props: ChatViewProps) {
       ? (pendingServerThreadStartFromOriginByThreadId[activeThread?.id ?? ""] ??
         activeProjectSettings.settings.newWorktreesStartFromOrigin)
       : false;
-  // Conn: Orbit mode passes through like worktree; upstream's helper knows only local/worktree.
-  const sendEnvMode = isOrbitProjectFolder
-    ? "orbit"
-    : envMode === "orbit"
-      ? isGitRepo
-        ? "orbit"
-        : "local"
-      : resolveSendEnvMode({
-          requestedEnvMode: envMode,
-          isGitRepo,
-        });
+  const sendEnvMode = resolveSendEnvMode({
+    requestedEnvMode: envMode,
+    isGitRepo,
+  });
   const localCheckoutBranchMismatch = isServerThread
     ? resolveLocalCheckoutBranchMismatch({
         effectiveEnvMode: envMode,
@@ -2440,7 +2415,8 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !apiAvailable) return;
     useRightPanelStore.getState().open(activeThreadRef, "api");
   };
-  const orbitInstanceUrl = useOrbitThreadUrl(activeThreadRef);
+  // Conn: on a server in an Orbit Instance container, the API panel starts at that Instance's URL.
+  const orbitInstanceUrl = useOrbitInstance(activeThreadRef?.environmentId ?? null)?.url ?? null;
   const apiBaseUrl = orbitInstanceUrl ?? configuredPreviewUrls[0] ?? null;
   // nckrtl fork: the Database panel connects from the desktop shell.
   const databaseAvailable =
@@ -3004,7 +2980,6 @@ export default function ChatView(props: ChatViewProps) {
     activeEnvironmentUnavailable,
     isSendBusy,
     sendQueuesBehindSetup,
-    isOrbitProjectFolder,
     orbitDraftTarget,
     isDraftHeroState,
     panelAnimationsActive,
@@ -3871,13 +3846,12 @@ export default function ChatView(props: ChatViewProps) {
                                   projectId={activeThread.projectId}
                                   worktreePath={activeThread.worktreePath}
                                   isServerThread={isServerThread}
-                                  showGitControls={isGitRepo || isOrbitProjectFolder}
-                                  orbitProjectFolder={isOrbitProjectFolder}
+                                  showGitControls={isGitRepo}
                                   {...(routeKind === "draft" && draftId ? { draftId } : {})}
                                   onEnvModeChange={onEnvModeChangeStable}
                                   startFromOrigin={startFromOrigin}
                                   onStartFromOriginChange={onStartFromOriginChange}
-                                  envMode={isOrbitProjectFolder ? "orbit" : envMode}
+                                  envMode={envMode}
                                   {...(canOverrideServerThreadEnvMode
                                     ? {
                                         activeThreadBranchOverride: activeThreadBranch,

@@ -122,6 +122,14 @@ export function useOrbitThreadsAvailable(): boolean {
   return window.desktopBridge?.orbitGatewaySend !== undefined && provider === "orbit";
 }
 
+/** `useOrbitThreadsAvailable` outside React: the desktop app in Orbit mode right now. */
+export function orbitThreadsAvailableNow(): boolean {
+  return (
+    window.desktopBridge?.orbitGatewaySend !== undefined &&
+    useEnvironmentProvider.getState().provider === "orbit"
+  );
+}
+
 export function setEnvironmentProvider(provider: EnvironmentProvider): void {
   useEnvironmentProvider.setState({ provider });
 }

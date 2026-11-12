@@ -1,347 +1,54 @@
-// @effect-diagnostics nodeBuiltinImport:off - runs the generated shell scripts with real sh, git and curl.
+// @effect-diagnostics nodeBuiltinImport:off - runs the generated shell scripts with real sh and curl.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import type * as NodeNet from "node:net";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
-import {
-  checkOrbitAvailability,
-  createOrbitWorktree,
-  type HiddenShellRunner,
-  normalizeRepositoryUrl,
-  orbitInstanceNameForBranch,
-  readOrbitLocalFacts,
-} from "./orbitInstances";
-import { isOrbitCheckout } from "./orbitWorkspaces";
+import { isOrbitCheckout } from "./orbitCheckout";
 import {
   buildHiddenShellLine,
   buildOrbitCurlScript,
   buildOrbitRequestUrl,
   type OrbitHttpRequest,
-  type OrbitTransport,
-  OrbitTransportError,
   parseHiddenShellOutput,
   parseOrbitCurlOutput,
 } from "./orbitTransport";
-
-const BEAST = {
-  id: 9,
-  name: "beast",
-  roles: ["router", "app-dev"],
-  tld: "test",
-  settings: { apps: { path: "/fast/apps" } },
-};
-
-function fakeTransport(
-  handle: (request: OrbitHttpRequest) => { status: number; body: unknown },
-): OrbitTransport & { readonly requests: OrbitHttpRequest[] } {
-  const requests: OrbitHttpRequest[] = [];
-  const transport = async (request: OrbitHttpRequest) => {
-    requests.push(request);
-    return handle(request);
-  };
-  return Object.assign(transport, { requests });
-}
-
-const ok = (data: unknown) => ({ status: 200, body: { data } });
-const fail = (status: number, code: string, message = code) => ({
-  status,
-  body: { error: { code, message, details: {} } },
-});
-
-// Keep the developer's git config (signing, hooks) out of the temporary repositories.
-// Auto-maintenance runs detached and would hold the captured output open for seconds.
-const GIT_ENV = {
-  ...process.env,
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_NOSYSTEM: "1",
-  GIT_CONFIG_COUNT: "1",
-  GIT_CONFIG_KEY_0: "maintenance.auto",
-  GIT_CONFIG_VALUE_0: "false",
-};
 
 /** Runs a hidden-shell line the way the terminal does, through a real `sh`. */
 function runLine(line: string): Promise<string> {
   const command = line.replace(/; exit\r$/, "").trim();
   return new Promise((resolve, reject) => {
-    NodeChildProcess.execFile("sh", ["-c", command], { env: GIT_ENV }, (error, stdout) =>
+    NodeChildProcess.execFile("sh", ["-c", command], (error, stdout) =>
       error ? reject(error) : resolve(stdout),
     );
   });
 }
 
-/** A HiddenShellRunner backed by a real `sh`, through the same line and parser. */
-const realShell: HiddenShellRunner = async (script) => {
+/** Runs a script through a real `sh`, through the same line and parser. */
+const realShell = async (script: string, _timeoutSeconds: number) => {
   const output = await runLine(buildHiddenShellLine({ requestId: "t1", script }));
   const parsed = parseHiddenShellOutput(output, "t1");
   if (parsed._tag !== "done") throw new Error(`shell output: ${parsed._tag}`);
   return parsed;
 };
 
-function git(cwd: string, ...args: string[]): string {
-  return NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV }).trim();
-}
-
-describe("Orbit names", () => {
-  it("names the worktree folder and Instance after the temporary branch", () => {
-    expect(orbitInstanceNameForBranch("t3/1a2b3c4d")).toBe("t3-1a2b3c4d");
-  });
-});
-
 describe("isOrbitCheckout", () => {
-  it("recognizes worktrees made for Orbit, even unregistered", () => {
-    expect(isOrbitCheckout("/fast/apps/hauzer/t3-7234a69d")).toBe(true);
-    expect(isOrbitCheckout("/fast/apps/dlf/t3code-1a2b3c4d")).toBe(true);
-    expect(isOrbitCheckout("/fast/apps/dlf/t3code-1a2b3c4d/")).toBe(true);
+  it("recognizes checkouts the old Orbit mode made beside a Project's default checkout", () => {
+    expect(isOrbitCheckout("/fast/apps/acme/t3-7234a69d")).toBe(true);
+    expect(isOrbitCheckout("/fast/apps/acme/t3code-1a2b3c4d")).toBe(true);
+    expect(isOrbitCheckout("/fast/apps/acme/t3code-1a2b3c4d/")).toBe(true);
+    expect(isOrbitCheckout("/home/orbit/apps/acme-site/t3code-0f9e8d7c")).toBe(true);
   });
 
   it("leaves T3's own worktrees and other folders alone", () => {
-    expect(isOrbitCheckout("/home/nick/.t3/worktrees/orbit/t3-1a2b3c4d")).toBe(false);
-    expect(isOrbitCheckout("/fast/apps/dlf/main")).toBe(false);
+    expect(isOrbitCheckout("/home/nick/.t3/worktrees/acme/t3-1a2b3c4d")).toBe(false);
+    expect(isOrbitCheckout("/Users/nick/.t3/headless/worktrees/acme/t3-ea0f3c11")).toBe(false);
+    expect(isOrbitCheckout("/Users/nick/.t3/userdata/worktrees/acme/t3code-1a2b3c4d")).toBe(false);
+    expect(isOrbitCheckout("/srv/t3home/worktrees/acme/t3code-1a2b3c4d")).toBe(false);
+    expect(isOrbitCheckout("/fast/apps/acme/default")).toBe(false);
+    expect(isOrbitCheckout("/fast/apps/acme/t3code-feature")).toBe(false);
     expect(isOrbitCheckout(null)).toBe(false);
-  });
-});
-
-describe("normalizeRepositoryUrl", () => {
-  it("matches the HTTPS, SSH and scp forms of one repository", () => {
-    for (const url of [
-      "https://github.com/nckrtl/orbit-website.git",
-      "https://github.com/nckrtl/orbit-website",
-      "git@github.com:nckrtl/orbit-website.git",
-      "ssh://git@github.com/NCKRTL/orbit-website.git/",
-    ]) {
-      expect(normalizeRepositoryUrl(url)).toBe("github.com/nckrtl/orbit-website");
-    }
-    expect(normalizeRepositoryUrl("")).toBeNull();
-  });
-});
-
-describe("checkOrbitAvailability", () => {
-  const PROJECTS = [
-    {
-      id: 33,
-      slug: "orbit-website",
-      repository_url: "https://github.com/nckrtl/orbit-website.git",
-      default_branch: "main",
-    },
-    { id: 46, slug: "orbit", repository_url: "https://github.com/nckrtl/orbit.git" },
-  ];
-  const DEFAULT_INSTANCE = {
-    id: 4,
-    name: "default",
-    project_id: 33,
-    node_id: 9,
-    status: "active",
-    checkout_path: "/fast/apps/orbit-website/default",
-  };
-  const BEAST_NODE = { ...BEAST, wireguard_ip: "10.44.0.7" };
-  const shell =
-    (remote: string, addresses = "127.0.0.1\n10.44.0.7", defaultCheckout = ""): HiddenShellRunner =>
-    async () => ({ exitCode: 0, output: `${remote}\n---\n${addresses}\n---\n${defaultCheckout}` });
-  const orbit = (overrides: { nodes?: unknown[]; instances?: unknown[] } = {}) =>
-    fakeTransport((request) => {
-      if (request.path === "/api/v1/projects") return ok(PROJECTS);
-      if (request.path === "/api/v1/nodes") return ok(overrides.nodes ?? [BEAST_NODE]);
-      if (request.path === "/api/v1/instances")
-        return ok(overrides.instances ?? [DEFAULT_INSTANCE]);
-      throw new Error(`unexpected ${request.path}`);
-    });
-
-  it("offers worktrees of the Project's default Instance on this machine", async () => {
-    await expect(
-      checkOrbitAvailability(
-        orbit(),
-        shell("git@github.com:nckrtl/orbit-website.git"),
-        "/home/nick/projects/orbit-website",
-      ),
-    ).resolves.toEqual({
-      available: true,
-      source: {
-        instanceId: 4,
-        instanceName: "default",
-        checkoutPath: "/fast/apps/orbit-website/default",
-        projectId: 33,
-        projectSlug: "orbit-website",
-        nodeId: 9,
-        nodeName: "beast",
-        tld: "test",
-        projectAppsPath: "/fast/apps/orbit-website",
-        defaultBranch: "main",
-      },
-    });
-  });
-
-  it("treats Orbit's folder for a Project as that Project", async () => {
-    await expect(
-      checkOrbitAvailability(orbit(), shell("", undefined, "yes"), "/fast/apps/orbit-website/"),
-    ).resolves.toMatchObject({
-      available: true,
-      projectFolder: true,
-      source: { projectSlug: "orbit-website", checkoutPath: "/fast/apps/orbit-website/default" },
-    });
-    await expect(
-      checkOrbitAvailability(
-        orbit({ instances: [{ ...DEFAULT_INSTANCE, status: "stopped" }] }),
-        shell("", undefined, "yes"),
-        "/fast/apps/orbit-website",
-      ),
-    ).resolves.toEqual({
-      available: false,
-      projectFolder: true,
-      reason: "The default instance of orbit-website on beast is stopped",
-    });
-  });
-
-  it("hides the option for a folder that is no checkout and no Orbit folder", async () => {
-    const untouched = fakeTransport(() => {
-      throw new Error("no Gateway call expected");
-    });
-    await expect(checkOrbitAvailability(untouched, shell(""), "/tmp/notes")).resolves.toEqual({
-      available: false,
-      hidden: true,
-    });
-    await expect(
-      checkOrbitAvailability(orbit(), shell("", undefined, "yes"), "/srv/other"),
-    ).resolves.toEqual({ available: false, hidden: true });
-  });
-
-  it("hides the option for repositories Orbit does not manage", async () => {
-    await expect(
-      checkOrbitAvailability(orbit(), shell("https://github.com/someone/else.git"), "/x"),
-    ).resolves.toEqual({ available: false, hidden: true });
-    await expect(checkOrbitAvailability(orbit(), shell(""), "/x")).resolves.toEqual({
-      available: false,
-      hidden: true,
-    });
-    const offline = fakeTransport(() => fail(403, "peer.identity_unknown"));
-    await expect(
-      checkOrbitAvailability(offline, shell("https://github.com/nckrtl/orbit.git"), "/x"),
-    ).resolves.toEqual({ available: false, hidden: true });
-  });
-
-  it("explains a failed check instead of hiding the option", async () => {
-    const remote = shell("https://github.com/nckrtl/orbit.git");
-    const unreachable = fakeTransport(() => {
-      throw new OrbitTransportError({
-        message: "Orbit is not reachable from this machine: timeout",
-      });
-    });
-    await expect(checkOrbitAvailability(unreachable, remote, "/x")).resolves.toEqual({
-      available: false,
-      reason: "Orbit is not reachable from this machine: timeout",
-    });
-    const broken = fakeTransport(() => ok({ not: "a list" }));
-    await expect(checkOrbitAvailability(broken, remote, "/x")).resolves.toEqual({
-      available: false,
-      reason: "Orbit sent an invalid list. (orbit.response_invalid)",
-    });
-    const noShell: HiddenShellRunner = async () => {
-      throw new OrbitTransportError({ message: "Could not open a shell on this machine." });
-    };
-    await expect(checkOrbitAvailability(orbit(), noShell, "/x")).resolves.toEqual({
-      available: false,
-      reason: "Could not check Orbit on this machine: Could not open a shell on this machine.",
-    });
-  });
-
-  it("explains a Project without a default Instance on this machine", async () => {
-    await expect(
-      checkOrbitAvailability(
-        orbit(),
-        shell("https://github.com/nckrtl/orbit.git"),
-        "/home/nick/orbit",
-      ),
-    ).resolves.toEqual({
-      available: false,
-      reason: "Orbit project orbit has no default instance on beast",
-    });
-  });
-
-  it("explains a machine that is not an app-dev Node", async () => {
-    await expect(
-      checkOrbitAvailability(
-        orbit({ nodes: [{ ...BEAST_NODE, roles: ["router"] }] }),
-        shell("https://github.com/nckrtl/orbit-website"),
-        "/x",
-      ),
-    ).resolves.toEqual({ available: false, reason: "This machine has no app-dev role" });
-    await expect(
-      checkOrbitAvailability(
-        orbit(),
-        shell("https://github.com/nckrtl/orbit-website", "127.0.0.1\n10.44.0.6"),
-        "/x",
-      ),
-    ).resolves.toEqual({ available: false, reason: "This machine is not an Orbit Node" });
-  });
-});
-
-describe("createOrbitWorktree", () => {
-  let root: string;
-  let origin: string;
-  let source: string;
-
-  beforeAll(() => {
-    root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "orbit-worktree-"));
-    origin = NodePath.join(root, "origin");
-    source = NodePath.join(root, "apps", "site", "default");
-    const commit = (cwd: string, message: string) =>
-      git(
-        cwd,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@t",
-        "commit",
-        "--quiet",
-        "--allow-empty",
-        "-m",
-        message,
-      );
-    git(root, "init", "--quiet", "--initial-branch=main", origin);
-    commit(origin, "one");
-    NodeFS.mkdirSync(NodePath.dirname(source), { recursive: true });
-    git(root, "clone", "--quiet", origin, source);
-    // A newer commit on origin that the source's local `main` does not have yet.
-    commit(origin, "two");
-  });
-
-  afterAll(() => {
-    NodeFS.rmSync(root, { recursive: true, force: true });
-  });
-
-  it("creates the worktree in the apps folder from the fetched base branch", async () => {
-    const worktreePath = NodePath.join(NodePath.dirname(source), "t3code-1a2b3c4d");
-    await createOrbitWorktree(realShell, {
-      projectRoot: source,
-      baseBranch: "main",
-      temporaryBranch: "t3code/1a2b3c4d",
-      worktreePath,
-    });
-    expect(git(worktreePath, "branch", "--show-current")).toBe("t3code/1a2b3c4d");
-    expect(git(worktreePath, "log", "-1", "--format=%s")).toBe("two");
-    expect(git(source, "config", "branch.t3code/1a2b3c4d.gh-merge-base")).toBe("main");
-    expect(NodeFS.readFileSync(NodePath.join(worktreePath, ".git"), "utf8")).toContain("gitdir:");
-  });
-
-  it("reads the project's origin and this machine's addresses", async () => {
-    const facts = await readOrbitLocalFacts(realShell, source);
-    expect(facts.remote).toBe(origin);
-    expect(facts.addresses).toContain("127.0.0.1");
-  });
-
-  it("reports why git refused", async () => {
-    await expect(
-      createOrbitWorktree(realShell, {
-        projectRoot: source,
-        baseBranch: "main",
-        temporaryBranch: "t3code/1a2b3c4d",
-        worktreePath: NodePath.join(NodePath.dirname(source), "t3code-again"),
-      }),
-    ).rejects.toThrow(/Could not create the worktree: .*already exists/);
   });
 });
 

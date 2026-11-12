@@ -12,7 +12,6 @@ import { searchableSetting } from "./settingsSearch";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { useOptionalSettingsScope, useSettingsScope } from "./SettingsScopeContext";
 import { firstManagedDenial, usePrimaryManagedPolicy } from "~/state/managedPolicy";
-import { useOrbitThreadsAvailable } from "~/orbit/environmentProvider";
 
 /** Features still settling in. */
 export function LabsSettingsPanel() {
@@ -20,7 +19,6 @@ export function LabsSettingsPanel() {
     <SettingsPageContainer>
       <SettingsSection id="beta" title="Beta">
         <BoringSidebarRow />
-        <OrbitThreadsInPaletteRow />
         {/* Clerk is only mounted when this build has T3 Connect. */}
         {hasCloudPublicConfig() ? <GuestLinksRowWithSignIn /> : <GuestLinksRow />}
         <LinkedEnvironmentsRow />
@@ -53,28 +51,6 @@ function BoringSidebarRow() {
         </div>
       ) : null}
     </SettingsRow>
-  );
-}
-
-/** Conn: only in the desktop app in Orbit mode, where the palette can read the Gateway. */
-function OrbitThreadsInPaletteRow() {
-  const settings = useScopedSettings();
-  const updateSettings = useUpdateScopedSettings();
-  if (!useOrbitThreadsAvailable()) return null;
-  return (
-    <SettingsRow
-      {...searchableSetting("orbit-threads-in-palette")}
-      description="New thread lists your Orbit Projects. Pick one, then name a new Instance or pick an existing one, and the thread starts there."
-      control={
-        <Switch
-          checked={settings.orbitThreadsInPaletteEnabled}
-          onCheckedChange={(checked) =>
-            updateSettings({ orbitThreadsInPaletteEnabled: Boolean(checked) })
-          }
-          aria-label="Orbit threads in the palette"
-        />
-      }
-    />
   );
 }
 

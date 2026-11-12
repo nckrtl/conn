@@ -118,6 +118,8 @@ describe("sidebar header new thread", () => {
       routeThreadRef: null,
     });
     vi.mocked(openCommandPalette).mockClear();
+    // Orbit mode: New thread is the only way in; the old cube button is gone.
+    vi.mocked(useOrbitThreadsAvailable).mockReturnValue(true);
     await using screen = await render(
       <SidebarProvider>
         <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
@@ -127,6 +129,9 @@ describe("sidebar header new thread", () => {
     await vi.waitFor(() =>
       expect(useWorkspaceStore.getState().availableProjects).toHaveLength(scenario.count),
     );
+    expect(
+      screen.getByRole("button", { name: "New thread in an Orbit project" }).query(),
+    ).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "New thread", exact: true }), {
       modifiers: scenario.shift ? ["Shift"] : [],
     });
@@ -162,6 +167,7 @@ describe("sidebar pending Orbit threads", () => {
       base("running", "Add a pricing page"),
       { ...base("failed", "Fix the login"), error: "The name is taken." },
       { ...base("sent", "Already handed over"), sentAt: 5 },
+      // A start of the removed sidebar dialog shows as a pending thread too.
       { ...base("dialog", "Old dialog start"), pendingThread: false },
     ]);
     await using screen = await render(<OrbitPendingThreadList />, { router: "/orbit/running" });
@@ -170,6 +176,7 @@ describe("sidebar pending Orbit threads", () => {
     expect(rows.all().map((row) => row.element().getAttribute("data-orbit-pending-row"))).toEqual([
       "running",
       "failed",
+      "running",
     ]);
     await expect.element(screen.getByText("Setup failed")).toBeVisible();
     window.localStorage.clear();

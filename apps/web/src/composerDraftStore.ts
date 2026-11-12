@@ -119,9 +119,11 @@ const isPreviewAnnotationPayload = Schema.is(PreviewAnnotationPayloadSchema);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
 const COMPOSER_DRAFT_STORAGE_VERSION = 9;
-// "orbit": the first message creates an Orbit Instance copy for the thread.
-const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree", "orbit"]);
+const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
+// Conn: drafts saved before the worktree-based Orbit mode was removed can still hold "orbit".
+// Decoding accepts it so those profiles still load; normalizeDraftThreadEnvMode maps it away.
+const PersistedDraftThreadEnvModeSchema = Schema.Literals(["local", "worktree", "orbit"]);
 
 export const DraftId = Schema.String.pipe(Schema.brand("DraftId"));
 export type DraftId = typeof DraftId.Type;
@@ -328,7 +330,7 @@ const PersistedDraftThreadState = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
-  envMode: DraftThreadEnvModeSchema,
+  envMode: PersistedDraftThreadEnvModeSchema,
   startFromOrigin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   orbitTarget: Schema.optionalKey(Schema.NullOr(OrbitDraftTarget)),
   checkoutPullRequest: Schema.optionalKey(
@@ -1384,9 +1386,10 @@ function normalizeDraftThreadEnvMode(
   value: unknown,
   fallbackWorktreePath: string | null,
 ): DraftThreadEnvMode {
-  if (value === "local" || value === "worktree" || value === "orbit") {
+  if (value === "local" || value === "worktree") {
     return value;
   }
+  // Anything else, including the removed "orbit" mode, follows the draft's worktree.
   return fallbackWorktreePath ? "worktree" : "local";
 }
 
@@ -2573,7 +2576,10 @@ function toHydratedDraftThreadState(
     interactionMode: persistedDraftThread.interactionMode,
     branch: persistedDraftThread.branch,
     worktreePath: persistedDraftThread.worktreePath,
-    envMode: persistedDraftThread.envMode,
+    envMode: normalizeDraftThreadEnvMode(
+      persistedDraftThread.envMode,
+      persistedDraftThread.worktreePath,
+    ),
     startFromOrigin: persistedDraftThread.startFromOrigin,
     ...(persistedDraftThread.orbitTarget ? { orbitTarget: persistedDraftThread.orbitTarget } : {}),
     ...(persistedDraftThread.environmentSelection

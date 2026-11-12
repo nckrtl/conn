@@ -6,7 +6,6 @@ import {
   sendOrbitFirstMessage,
   type OrbitFirstMessagePorts,
   type OrbitGatewayClient,
-  type OrbitGatewayProject,
   type OrbitThreadStart,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -40,50 +39,17 @@ import {
 const ORBIT_CLONE_WORKSPACE = "/srv/workspace";
 const CLONE_READY_TIMEOUT_MS = 60_000;
 
-/** The route each start began on in this window; the runner opens the thread only if it is still there. */
-const startedOn = new Map<string, string>();
-
-export function beginOrbitThreadStart(
-  project: Pick<OrbitGatewayProject, "id" | "slug" | "nodeName">,
-  message: string,
-  pathname: string,
-  options: OrbitThreadStartOptions = {},
-): OrbitThreadStart {
+/** Saves the start an Orbit draft sends: the typed Instance name, kind, model and modes. */
+function saveOrbitDraftStart(input: OrbitDraftStartInput): OrbitThreadStart {
   const fresh = newOrbitThreadStart({
     id: randomUUID(),
-    project,
-    message,
+    project: input.project,
+    message: input.message,
     suffix: randomUUID().slice(0, 6),
     threadId: newThreadId(),
     messageId: newMessageId(),
     commandId: randomUUID(),
     now: Date.now(),
-    ...options,
-  });
-  const start = { ...fresh, workspaceId: useWorkspaceStore.getState().activeWorkspaceId };
-  startedOn.set(start.id, pathname);
-  updateStarts((starts) => [...starts, start]);
-  return start;
-}
-
-type OrbitThreadStartOptions = Pick<
-  Parameters<typeof newOrbitThreadStart>[0],
-  | "instanceName"
-  | "existing"
-  | "modelSelection"
-  | "runtimeMode"
-  | "interactionMode"
-  | "pendingThread"
-  | "projectName"
-  | "instanceDomainSuffix"
->;
-
-/** Saves the start an Orbit draft sends: the typed Instance name, kind, model and modes. */
-export function beginOrbitDraftThreadStart(
-  input: OrbitDraftStartInput,
-  pathname: string,
-): OrbitThreadStart {
-  return beginOrbitThreadStart(input.project, input.message, pathname, {
     instanceName: input.instanceName,
     ...(input.existing ? { existing: input.existing } : {}),
     modelSelection: input.modelSelection,
@@ -93,6 +59,9 @@ export function beginOrbitDraftThreadStart(
     projectName: input.projectName ?? null,
     instanceDomainSuffix: input.instanceDomainSuffix ?? null,
   });
+  const start = { ...fresh, workspaceId: useWorkspaceStore.getState().activeWorkspaceId };
+  updateStarts((starts) => [...starts, start]);
+  return start;
 }
 
 /** The pending thread of a start, shown until the clone's server took the first message. */
@@ -122,20 +91,11 @@ export function sendOrbitDraft(input: {
   readonly clearDraft: () => void;
 }): OrbitThreadStart | null {
   if (orbitThreadStartBlockedReason() !== null) return null;
-  const start = beginOrbitDraftThreadStart(input.start, "");
-  const path = orbitPendingThreadPath(start.id);
-  startedOn.set(start.id, path);
-  void Promise.resolve(input.openPending(path))
+  const start = saveOrbitDraftStart(input.start);
+  void Promise.resolve(input.openPending(orbitPendingThreadPath(start.id)))
     .finally(input.clearDraft)
     .catch(() => {});
   return start;
-}
-
-/** Whether the window still shows the route the start began on. */
-export function stillOnStartRoute(id: string, pathname: string): boolean {
-  const route = startedOn.get(id);
-  startedOn.delete(id);
-  return route === pathname;
 }
 
 export function retryOrbitThreadStart(id: string): void {
@@ -237,7 +197,7 @@ export async function runSavedOrbitThreadStart(
 ): Promise<{ readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null> {
   const start = readStored().find((entry) => entry.id === id);
   if (start !== undefined && start.sentAt != null && !start.pendingThread) {
-    // An old dialog start whose send finished before a quit: only its dismiss is left.
+    // A start of the removed sidebar dialog whose send finished before a quit: only its dismiss is left.
     dismissOrbitThreadStart(id);
     return null;
   }
@@ -287,8 +247,7 @@ export async function runSavedOrbitThreadStart(
       },
     });
     if (!sent || environmentId === null) return null;
-    // A pending thread's start stays for the real thread's "Instance ready" row.
-    if (!start.pendingThread) dismissOrbitThreadStart(id);
+    // The start stays for the real thread's "Instance ready" row.
     return {
       environmentId: environmentId as EnvironmentId,
       threadId: ThreadId.make(start.threadId),

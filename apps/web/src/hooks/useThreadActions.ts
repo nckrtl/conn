@@ -53,7 +53,7 @@ import { useRightPanelStore } from "../rightPanelStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
-import { forgetOrbitWorkspace, isOrbitCheckout } from "../orbit/orbitWorkspaces";
+import { isOrbitCheckout } from "../orbit/orbitCheckout";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { useClientSettings } from "./useSettings";
 import * as ThreadUndo from "@t3tools/client-runtime/state/thread-undo";
@@ -602,7 +602,6 @@ export function useThreadActions() {
     refreshArchivedThreadsForEnvironment(threadRef.environmentId);
     releaseComposerDraftUploads(threadRef);
     clearComposerDraftForThread(threadRef);
-    forgetOrbitWorkspace(threadRef);
     // The server deletes the thread's side chats with it.
     for (const entry of threads) {
       if (entry.lineage.sideChat !== true || entry.lineage.parentThreadId !== threadRef.threadId) {

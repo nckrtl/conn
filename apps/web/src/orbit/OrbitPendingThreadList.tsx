@@ -19,7 +19,7 @@ export function OrbitPendingThreadList() {
   );
   if (!available || starts.length === 0) return null;
   return (
-    <ul className="mt-1 grid gap-0.5" aria-label="Threads being set up">
+    <ul className="mt-1 grid grid-cols-1 gap-0.5" aria-label="Threads being set up">
       {starts.map((start) => {
         const active = pathname === `/orbit/${start.id}`;
         return (

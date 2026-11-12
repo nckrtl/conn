@@ -1,6 +1,5 @@
 import * as WsFork from "./wsFork.ts";
 import * as AnnotationStore from "./annotations/AnnotationStore.ts";
-import * as OrbitWorkspaceRegistrar from "./orbit/OrbitWorkspaceRegistrar.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -3551,7 +3550,6 @@ export const layer = Layer.unwrap(
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const desktopTabRelay = yield* DesktopTabRelay.DesktopTabRelay;
     const annotations = yield* AnnotationStore.AnnotationStore;
-    const orbit = yield* OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
@@ -3627,9 +3625,6 @@ export const layer = Layer.unwrap(
               Layer.merge(
                 WsFork.layer.pipe(
                   Layer.provide(Layer.succeed(AnnotationStore.AnnotationStore, annotations)),
-                  Layer.provide(
-                    Layer.succeed(OrbitWorkspaceRegistrar.OrbitWorkspaceRegistrar, orbit),
-                  ),
                 ),
               ),
               Layer.provideMerge(RpcSerialization.layerJson),

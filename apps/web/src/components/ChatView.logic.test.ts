@@ -7,7 +7,8 @@ import {
   withMessageContext,
   deriveAvailableRevertTurnCounts,
 } from "./ChatView.logic";
-import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
+import { recallCheckoutIsRepo, rememberCheckoutIsRepo, resolveSendEnvMode } from "./ChatView.logic";
+import { resolveEffectiveEnvMode } from "./BranchToolbar.logic";
 import { ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import { deriveProviderInstanceEntries } from "../providerInstances";
 import { ensureInlineContextReferences } from "../lib/composerContextReferences";
@@ -1092,6 +1093,36 @@ describe("planComposerTurn", () => {
       missingWorktreeBaseBranch: true,
       baseBranchForWorktree: null,
     });
+  });
+
+  it("sends in an old Orbit checkout like any worktree thread, without a new worktree", () => {
+    const worktreePath = "/fast/apps/acme/t3code-1a2b3c4d";
+    const sendEnvMode = resolveSendEnvMode({
+      requestedEnvMode: resolveEffectiveEnvMode({
+        activeWorktreePath: worktreePath,
+        hasServerThread: true,
+        draftThreadEnvMode: undefined,
+      }),
+      isGitRepo: true,
+    });
+    expect(sendEnvMode).toBe("worktree");
+    for (const activeMessageCount of [0, 4]) {
+      expect(
+        planComposerTurn({
+          ...base,
+          isServerThread: true,
+          activeMessageCount,
+          sendEnvMode,
+          worktreePath,
+          activeThreadBranch: "feature/login",
+        }),
+      ).toMatchObject({
+        missingWorktreeBaseBranch: false,
+        baseBranchForWorktree: null,
+        turnDispatchMode: "auto",
+        shouldQueueBehindActiveRun: false,
+      });
+    }
   });
 
   it("queues behind a compaction of a stale session, except for /compact itself", () => {

@@ -1,4 +1,3 @@
-import type { EnvironmentId } from "@t3tools/contracts";
 import { FolderGit2Icon, FolderGitIcon, FolderIcon } from "lucide-react";
 import { type ReactNode } from "react";
 
@@ -7,8 +6,6 @@ import {
   resolveEnvModeLabel,
   type EnvMode,
 } from "./BranchToolbar.logic";
-import { useOrbitAvailability } from "../orbit/useOrbitAvailability";
-import { OrbitLogoIcon } from "./OrbitLogoIcon";
 import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
 import { MiddleTruncate } from "./ui/middle-truncate";
 
@@ -22,71 +19,23 @@ export interface WorkspaceOption {
   readonly disabled: boolean;
 }
 
-function OrbitInstanceItemContent({ note }: { note: string | null }) {
-  const label = resolveEnvModeLabel("orbit");
-  if (!note) {
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        <OrbitLogoIcon className="size-3" />
-        {label}
-      </span>
-    );
-  }
-  return (
-    <span className="flex min-w-0 items-start gap-1.5">
-      <OrbitLogoIcon className="mt-1 size-3" />
-      <span className="flex min-w-0 flex-col">
-        <span>{label}</span>
-        <span className="min-w-0 truncate text-xs text-muted-foreground">{note}</span>
-      </span>
-    </span>
-  );
-}
-
 /**
  * The workspace choices every workspace menu offers. The wide composer strip,
  * the compact one, and the thread details panel all render this list, so a
  * choice can never depend on which layout is showing.
  */
-export function useWorkspaceOptions({
+export function buildWorkspaceOptions({
   activeWorktreePath,
-  effectiveEnvMode,
   forceNewWorktree,
-  orbitTarget,
   previousWorktreeLabel,
   previousWorktreeBranch,
 }: {
   activeWorktreePath: string | null;
-  effectiveEnvMode: EnvMode;
   forceNewWorktree: boolean;
-  /** Where the hidden Orbit check runs; null hides the Orbit option. */
-  orbitTarget: { readonly environmentId: EnvironmentId; readonly projectRoot: string } | null;
   /** Null hides the previous-worktree option. */
   previousWorktreeLabel: string | null;
   previousWorktreeBranch: string | null;
-}): { readonly options: readonly WorkspaceOption[]; readonly orbitNote: string | null } {
-  // Checked up front (and cached), so the option never pops in or out while the picker is open.
-  const orbitAvailability = useOrbitAvailability({
-    environmentId: orbitTarget?.environmentId ?? ("" as EnvironmentId),
-    projectRoot: orbitTarget?.projectRoot ?? null,
-    enabled: orbitTarget !== null,
-  });
-  const orbitChecking = orbitAvailability !== null && "status" in orbitAvailability;
-  const orbitResult = orbitAvailability === null || orbitChecking ? null : orbitAvailability;
-  // Repositories Orbit does not manage never show the option.
-  const showOrbit =
-    orbitTarget !== null &&
-    (effectiveEnvMode === "orbit" || (orbitResult !== null && orbitResult.hidden !== true));
-  const orbitDisabled = orbitResult === null || !orbitResult.available;
-  const orbitNote = orbitChecking
-    ? "Checking Orbit…"
-    : orbitResult !== null && !orbitResult.available && orbitResult.hidden !== true
-      ? orbitResult.reason
-      : null;
-  // Orbit's folder for a Project is no checkout: a thread there can only start in a new Instance.
-  const orbitOnly =
-    orbitResult !== null && orbitResult.hidden !== true && orbitResult.projectFolder === true;
-
+}): readonly WorkspaceOption[] {
   const currentLabel = resolveCurrentWorkspaceLabel(activeWorktreePath);
   const list: WorkspaceOption[] = [
     {
@@ -116,16 +65,7 @@ export function useWorkspaceOptions({
       disabled: false,
     },
   ];
-  if (orbitOnly) list.length = 0;
-  if (showOrbit || orbitOnly) {
-    list.push({
-      value: "orbit",
-      label: resolveEnvModeLabel("orbit"),
-      content: <OrbitInstanceItemContent note={orbitNote} />,
-      disabled: orbitDisabled && effectiveEnvMode !== "orbit",
-    });
-  }
-  if (previousWorktreeLabel && !orbitOnly) {
+  if (previousWorktreeLabel) {
     list.push({
       value: PREVIOUS_WORKTREE_OPTION,
       label: previousWorktreeLabel,
@@ -133,5 +73,5 @@ export function useWorkspaceOptions({
       disabled: false,
     });
   }
-  return { options: list, orbitNote };
+  return list;
 }

@@ -46,13 +46,6 @@ import {
   AnnotationRemovedError,
   AnnotationStoreError,
 } from "./annotations.ts";
-import {
-  OrbitWorkspaceList,
-  OrbitWorkspaceRegisterInput,
-  OrbitWorkspaceRegistration,
-  OrbitWorkspaceStoreError,
-  OrbitWorkspaceThreadInput,
-} from "./orbitWorkspaces.ts";
 import { AgentPanelRequest, AgentPanelResponse, AgentPanelSubscribeInput } from "./agentPanels.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -557,9 +550,6 @@ export const WS_METHODS = {
   annotationsSubscribe: "annotations.subscribe",
   annotationsCreate: "annotations.create",
   annotationsRemove: "annotations.remove",
-  orbitWorkspacesSubscribe: "orbitWorkspaces.subscribe",
-  orbitWorkspacesRegister: "orbitWorkspaces.register",
-  orbitWorkspacesRemove: "orbitWorkspaces.remove",
   agentPanelRequests: "panels.requests",
   agentPanelRespond: "panels.respond",
 
@@ -1903,27 +1893,6 @@ const WsAnnotationsRemoveRpc = Rpc.make(WS_METHODS.annotationsRemove, {
   ]),
 });
 
-/** Streams the environment's Orbit workspace registrations: all of them, again after every change. */
-const WsOrbitWorkspacesSubscribeRpc = Rpc.make(WS_METHODS.orbitWorkspacesSubscribe, {
-  payload: Schema.Struct({}),
-  success: OrbitWorkspaceList,
-  error: Schema.Union([OrbitWorkspaceStoreError, EnvironmentAuthorizationError]),
-  stream: true,
-});
-
-/** Hands a thread's new Orbit worktree to the server, or retries a failed registration. */
-const WsOrbitWorkspacesRegisterRpc = Rpc.make(WS_METHODS.orbitWorkspacesRegister, {
-  payload: OrbitWorkspaceRegisterInput,
-  success: OrbitWorkspaceRegistration,
-  error: Schema.Union([OrbitWorkspaceStoreError, EnvironmentAuthorizationError]),
-});
-
-/** Forgets a deleted thread's registration. The Orbit Instance stays; Orbit owns it. */
-const WsOrbitWorkspacesRemoveRpc = Rpc.make(WS_METHODS.orbitWorkspacesRemove, {
-  payload: OrbitWorkspaceThreadInput,
-  error: Schema.Union([OrbitWorkspaceStoreError, EnvironmentAuthorizationError]),
-});
-
 const WsSubscribePreviewEventsRpc = Rpc.make(WS_METHODS.subscribePreviewEvents, {
   payload: Schema.Struct({}),
   success: PreviewEvent,
@@ -2333,9 +2302,6 @@ export const ForkWsRpcGroup = RpcGroup.make(
   WsAnnotationsRemoveRpc,
   WsAgentPanelRequestsRpc,
   WsAgentPanelRespondRpc,
-  WsOrbitWorkspacesSubscribeRpc,
-  WsOrbitWorkspacesRegisterRpc,
-  WsOrbitWorkspacesRemoveRpc,
 );
 
 export const OfficialWsRpcGroup = RpcGroup.make(

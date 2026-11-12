@@ -1,5 +1,3 @@
-import * as OrbitGateway from "./orbit/OrbitGateway.ts";
-import * as OrbitWorkspaceRegistrar from "./orbit/OrbitWorkspaceRegistrar.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -857,7 +855,6 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(CredentialAutofill.layer.pipe(Layer.provide(TestLoginStore.layer))),
   Layer.provide(AgentPanelBroker.layer),
   Layer.provide(AnnotationStore.layer),
-  Layer.provide(OrbitWorkspaceRegistrar.layer.pipe(Layer.provide(OrbitGateway.layer))),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),

@@ -43,11 +43,10 @@ import { openAddProjectToMachine } from "./AddProjectToMachineDialog";
 import { type AddProjectTarget, useAddProjectTargets } from "../hooks/useAddProjectTargets";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { useOrbitInstance } from "../orbit/environmentProvider";
-import { isOrbitCheckout, useOrbitCheckout } from "../orbit/orbitWorkspaces";
-import { OrbitLogoIcon } from "./OrbitLogoIcon";
+import { isOrbitCheckout } from "../orbit/orbitCheckout";
 import { BranchToolbarOrbitInstance } from "./BranchToolbarOrbitInstance";
 import type { OrbitDraftTarget } from "../orbit/orbitDraft";
-import { PREVIOUS_WORKTREE_OPTION, useWorkspaceOptions } from "./workspaceOptions";
+import { buildWorkspaceOptions, PREVIOUS_WORKTREE_OPTION } from "./workspaceOptions";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -91,8 +90,6 @@ interface BranchToolbarProps {
   worktreePath: string | null;
   isServerThread: boolean;
   showGitControls: boolean;
-  /** Orbit's folder for a Project: no branches, only new Orbit Instances. */
-  orbitProjectFolder?: boolean;
   draftId?: DraftId;
   onEnvModeChange: (mode: EnvMode) => void;
   envMode: EnvMode;
@@ -168,7 +165,6 @@ interface RunContextSelectorProps {
   previousWorktreeLabel: string | null;
   previousWorktreeBranch: string | null;
   onUsePreviousWorktree: () => void;
-  orbitTarget: { readonly environmentId: EnvironmentId; readonly projectRoot: string } | null;
   addTargets: readonly AddProjectTarget[];
   onAddToMachine: (environmentId: EnvironmentId) => void;
 }
@@ -192,34 +188,29 @@ const RunContextSelector = memo(function RunContextSelector({
   previousWorktreeLabel,
   previousWorktreeBranch,
   onUsePreviousWorktree,
-  orbitTarget,
   addTargets,
   onAddToMachine,
 }: RunContextSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
-  const { options: workspaceOptions } = useWorkspaceOptions({
+  const workspaceOptions = buildWorkspaceOptions({
     activeWorktreePath,
-    effectiveEnvMode,
     forceNewWorktree,
-    orbitTarget,
     previousWorktreeLabel,
     previousWorktreeBranch,
   });
   const activeEnvironment =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
   const WorkspaceIcon =
-    effectiveEnvMode === "orbit"
-      ? OrbitLogoIcon
-      : effectiveEnvMode === "worktree"
-        ? FolderGit2Icon
-        : activeWorktreePath
-          ? FolderGitIcon
-          : FolderIcon;
+    effectiveEnvMode === "worktree"
+      ? FolderGit2Icon
+      : activeWorktreePath
+        ? FolderGitIcon
+        : FolderIcon;
   const workspaceLabel = forceNewWorktree
     ? resolveEnvModeLabel("worktree")
     : envModeLocked
       ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)
-      : effectiveEnvMode === "worktree" || effectiveEnvMode === "orbit"
+      : effectiveEnvMode === "worktree"
         ? resolveEnvModeLabel(effectiveEnvMode)
         : resolveCurrentWorkspaceLabel(activeWorktreePath);
   const isPanel = displayMode === "panel";
@@ -628,7 +619,6 @@ export const BranchToolbar = memo(function BranchToolbar({
   worktreePath,
   isServerThread,
   showGitControls,
-  orbitProjectFolder = false,
   draftId,
   onEnvModeChange,
   envMode,
@@ -655,18 +645,13 @@ export const BranchToolbar = memo(function BranchToolbar({
   const activeWorktreePath = forceNewWorktree ? null : worktreePath;
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (isServerThread && activeWorktreePath !== null);
-  const orbitThread = useOrbitCheckout(environmentId, activeWorktreePath);
-  const orbitTarget =
-    activeProject && !forceNewWorktree
-      ? { environmentId: activeProject.environmentId, projectRoot: activeProject.workspaceRoot }
-      : null;
 
   const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
   const projectRefsForWorktreeLookup = canUsePreviousWorktree ? [activeProjectRef] : [];
   const projectThreads = useThreadShellsForProjectRefs(projectRefsForWorktreeLookup);
   const previousWorktreeSeed = canUsePreviousWorktree
     ? resolvePreviousWorktreeSeed({
-        // Orbit checkouts are not T3 worktrees; they come back through Orbit.
+        // Orbit checkouts are not T3 worktrees; never offer one for reuse.
         threads: projectThreads.filter((thread) => !isOrbitCheckout(thread.worktreePath)),
         currentWorktreePath: activeWorktreePath,
       })
@@ -770,12 +755,11 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
-            orbitTarget={orbitTarget}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
         ) : null}
-        {panelSection !== "workspace" && !orbitProjectFolder ? (
+        {panelSection !== "workspace" ? (
           <BranchToolbarBranchSelector
             displayMode="panel"
             className="w-full"
@@ -821,7 +805,6 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
-            orbitTarget={orbitTarget}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
@@ -865,15 +848,12 @@ export const BranchToolbar = memo(function BranchToolbar({
               previousWorktreeLabel={previousWorktreeLabel}
               previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
               onUsePreviousWorktree={onUsePreviousWorktree}
-              orbitTarget={orbitTarget}
-              orbitThread={orbitThread}
-              threadRef={threadRef}
             />
           ) : null}
         </div>
       ) : null}
 
-      {showGitControls && !orbitProjectFolder ? (
+      {showGitControls ? (
         <BranchToolbarBranchSelector
           forceNewWorktree={forceNewWorktree}
           ref={branchSelectorRef}

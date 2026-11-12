@@ -32,7 +32,6 @@ import { DesktopWebLinkCoordinator } from "../components/desktop/DesktopWebLinkC
 import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
 import { AnnotationWatchCoordinator } from "../annotations/AnnotationWatchCoordinator";
 import { OrbitProfileSync } from "../orbit/OrbitProfileSync";
-import { OrbitRegistrationSync } from "../orbit/OrbitRegistrationSync";
 import { OrbitThreadStartRunner } from "../orbit/OrbitThreadStartRunner";
 import { isAdditionalDesktopWindow } from "../lib/desktopWindowContext";
 import { ReopenClosedViewShortcut } from "../components/ReopenClosedViewShortcut";
@@ -199,7 +198,6 @@ function RootRouteBranch() {
       <SshPasswordPromptDialog />
       {isMainWindow ? <SnapShotCoordinator /> : null}
       {isMainWindow ? <AnnotationWatchCoordinator /> : null}
-      {isMainWindow ? <OrbitRegistrationSync /> : null}
       {isMainWindow ? <OrbitProfileSync /> : null}
       {isMainWindow ? <OrbitThreadStartRunner /> : null}
       <ReopenClosedViewShortcut />

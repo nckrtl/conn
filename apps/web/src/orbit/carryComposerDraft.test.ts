@@ -58,6 +58,16 @@ describe("carryComposerDraft", () => {
     ).toEqual({});
   });
 
+  it("keeps text left in the Instance's draft when nothing was typed in the Orbit draft", () => {
+    const store = setup();
+    store.setPrompt(instanceDraft, "Earlier note");
+    store.setRuntimeMode(orbitDraft, "approval-required");
+    carryComposerDraft(orbitDraft, instanceDraft);
+    expect(useComposerDraftStore.getState().getComposerDraft(instanceDraft)?.prompt).toBe(
+      "Earlier note",
+    );
+  });
+
   it("keeps the prompt where it is when the pick reopened the same draft", () => {
     const store = setup();
     store.setPrompt(orbitDraft, "Fix the login form");

@@ -1,8 +1,4 @@
-import {
-  composerDraftHasUserContent,
-  type DraftId,
-  useComposerDraftStore,
-} from "../composerDraftStore";
+import { type DraftId, useComposerDraftStore } from "../composerDraftStore";
 
 /**
  * Conn: moves what the user typed in one draft into another, when a pick in an Orbit draft opens a
@@ -14,8 +10,14 @@ export function carryComposerDraft(from: DraftId, to: DraftId): void {
   if (from === to) return;
   const store = useComposerDraftStore.getState();
   const source = store.getComposerDraft(from);
-  // The move replaces the target's prompt: an empty source must not erase text left there.
-  if (source === null || !composerDraftHasUserContent(source)) return;
+  // The move replaces the target's prompt and moves only the prompt, images and files: without
+  // one of those it would erase text left in the target.
+  if (
+    source === null ||
+    (source.prompt.trim().length === 0 && source.images.length === 0 && source.files.length === 0)
+  ) {
+    return;
+  }
   // A model the user never picked yields to the Instance project's default.
   const model =
     source.modelSelectionExplicit === true && source.activeProvider !== null

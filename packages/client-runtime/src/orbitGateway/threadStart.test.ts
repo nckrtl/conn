@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   OrbitGatewayError,
+  type OrbitGatewayBranchSelection,
   type OrbitGatewayClient,
   type OrbitGatewayEnvironment,
   type OrbitGatewayOperation,
@@ -56,9 +57,13 @@ function gateway(script: {
   /** Answers each admission's first tries with these HTTP statuses (0: no answer), then admits. */
   readonly createLost?: ReadonlyArray<number | OrbitGatewayError>;
   readonly pairingLost?: ReadonlyArray<number>;
+  /** The succeeded create Operation's result. */
+  readonly createResult?: Record<string, unknown>;
 }) {
   const calls: string[] = [];
   const keys: string[] = [];
+  /** The branch argument of each create, as sent. */
+  const branches: unknown[] = [];
   const createLost = [...(script.createLost ?? [])];
   const pairingLost = [...(script.pairingLost ?? [])];
   /** A bare status is a proxy's answer without the Gateway's error envelope. */
@@ -78,9 +83,15 @@ function gateway(script: {
     [200, [...(script.pairing ?? ["queued", "succeeded"])]],
   ]);
   const client = {
-    createThreadInstance: async (projectId: number, name: string, key: string) => {
+    createThreadInstance: async (
+      projectId: number,
+      name: string,
+      key: string,
+      branch?: unknown,
+    ) => {
       calls.push(`create ${projectId} ${name}`);
       keys.push(key);
+      branches.push(branch ?? null);
       // The Gateway admits it even when the answer is lost.
       statuses.set(100, [...(script.create ?? ["running", "succeeded"])]);
       lose(createLost);
@@ -90,12 +101,15 @@ function gateway(script: {
       calls.push(`operation ${id}`);
       const queue = statuses.get(id)!;
       const status = queue.length > 1 ? queue.shift()! : queue[0]!;
-      return op(
+      const read = op(
         id,
         id === 100 ? 41 : 9,
         status,
         status === "failed" ? "instance.t3_unready" : null,
       );
+      return id === 100 && status === "succeeded" && script.createResult
+        ? { ...read, result: script.createResult }
+        : read;
     },
     environments: async () => {
       calls.push("environments");
@@ -114,7 +128,7 @@ function gateway(script: {
         : { environmentId, pairingUrl: "http://10.44.0.7:3800/pair#token=t", expiresAt: "" };
     },
   } as unknown as OrbitGatewayClient;
-  return { client, calls, keys };
+  return { client, calls, keys, branches };
 }
 
 function ports(
@@ -222,6 +236,11 @@ describe("readOrbitThreadStarts", () => {
       projectName: null,
       instanceDomainSuffix: null,
       modelFallback: null,
+      branch: null,
+      defaultBranch: null,
+      errorDetails: null,
+      resultBranch: null,
+      resultBaseBranch: null,
     });
 
     const { client, calls } = gateway({});
@@ -241,6 +260,11 @@ describe("readOrbitThreadStarts", () => {
       runtimeMode: "approval-required",
       interactionMode: "plan",
       createStartedAt: 5,
+      branch: { mode: "existing", name: "feature/login" },
+      defaultBranch: "main",
+      errorDetails: { instance: { id: 42, name: "login" } },
+      resultBranch: "feature/login",
+      resultBaseBranch: null,
     };
     const odd = {
       ...v1Row,
@@ -250,6 +274,9 @@ describe("readOrbitThreadStarts", () => {
       runtimeMode: "yolo",
       interactionMode: 1,
       createStartedAt: "5",
+      branch: { mode: "new" },
+      defaultBranch: 3,
+      errorDetails: ["x"],
     };
     const { commandId: _, ...noCommand } = v1Row;
 
@@ -262,6 +289,11 @@ describe("readOrbitThreadStarts", () => {
       runtimeMode: "approval-required",
       interactionMode: "plan",
       createStartedAt: 5,
+      branch: { mode: "existing", name: "feature/login" },
+      defaultBranch: "main",
+      errorDetails: { instance: { id: 42, name: "login" } },
+      resultBranch: "feature/login",
+      resultBaseBranch: null,
     });
     expect(starts[1]).toMatchObject({
       orbitInstanceKind: "new",
@@ -269,6 +301,9 @@ describe("readOrbitThreadStarts", () => {
       runtimeMode: null,
       interactionMode: null,
       createStartedAt: null,
+      branch: null,
+      defaultBranch: null,
+      errorDetails: null,
     });
     expect(readOrbitThreadStarts({ starts: [] })).toEqual([]);
   });
@@ -851,6 +886,130 @@ describe("runOrbitThreadStart", () => {
     const withFallback = { ...run.ports, send: async () => fallback };
     expect(await runOrbitThreadStart(fresh(), withFallback)).toBe(true);
     expect(run.saves.at(-1)).toMatchObject({ ...fallback, sentAt: expect.any(Number) });
+  });
+});
+
+describe("runOrbitThreadStart with a branch", () => {
+  const onBranch = (branch: OrbitGatewayBranchSelection | null): OrbitThreadStart => ({
+    ...fresh(),
+    instanceName: "fix",
+    branch,
+    defaultBranch: "main",
+  });
+  const refusal = (code: string, status: number, details: Record<string, unknown> = {}) =>
+    new OrbitGatewayError({ code, message: `refused ${code}`, status, details });
+
+  it("never sends the branch with the gate off, and sends it as saved with the gate on", async () => {
+    for (const branch of [
+      { mode: "new", from: "develop" },
+      { mode: "existing", name: "feature/login" },
+    ] as const) {
+      const off = gateway({});
+      expect(await runOrbitThreadStart(onBranch(branch), ports(off.client).ports)).toBe(true);
+      const offAgain = gateway({});
+      const gateOff = { ...ports(offAgain.client).ports, branchOnCreate: false };
+      expect(await runOrbitThreadStart(onBranch(branch), gateOff)).toBe(true);
+      expect([...off.branches, ...offAgain.branches]).toEqual([null, null]);
+
+      const on = gateway({});
+      const gateOn = { ...ports(on.client).ports, branchOnCreate: true };
+      expect(await runOrbitThreadStart(onBranch(branch), gateOn)).toBe(true);
+      expect(on.branches).toEqual([branch]);
+    }
+    // No choice ("From main") sends none, also with the gate on.
+    const none = gateway({});
+    expect(
+      await runOrbitThreadStart(onBranch(null), {
+        ...ports(none.client).ports,
+        branchOnCreate: true,
+      }),
+    ).toBe(true);
+    expect(none.branches).toEqual([null]);
+  });
+
+  it.each([
+    ["branch.in_use", 409, { instance: { id: 42, name: "login" } }],
+    ["branch.in_use", 409, {}],
+    ["branch.not_found", 422, { field: "branch.from" }],
+    ["branch.exists", 422, { field: "name", branch: "fix" }],
+    ["source.head_unavailable", 502, {}],
+    ["instance.placement_conflict", 409, {}],
+  ])(
+    "keeps an admission refusal %s with its details, made no Instance, and drops the key",
+    async (code, status, details) => {
+      const { client } = gateway({ createLost: [refusal(code, status, details)] });
+      const run = { ...ports(client), branchOnCreate: true };
+      expect(await runOrbitThreadStart(onBranch({ mode: "new", from: "develop" }), run.ports)).toBe(
+        false,
+      );
+      const stopped = run.saves.at(-1)!;
+      expect(stopped).toMatchObject({
+        errorCode: code,
+        errorDetails: details,
+        createKey: null,
+        createOperationId: null,
+        instanceId: null,
+      });
+      expect(orbitThreadStartCreatedInstance(stopped)).toBe(false);
+    },
+  );
+
+  it("resends exactly the same branch on Retry after a refusal", async () => {
+    const branch = { mode: "existing", name: "feature/login" } as const;
+    const first = gateway({ createLost: [refusal("source.head_unavailable", 502)] });
+    const run = ports(first.client);
+    expect(
+      await runOrbitThreadStart(onBranch(branch), { ...run.ports, branchOnCreate: true }),
+    ).toBe(false);
+    const retried = retryOrbitThreadStartRecord(run.saves.at(-1)!);
+    expect(retried).toMatchObject({ branch, errorCode: null, errorDetails: null });
+    const second = gateway({});
+    expect(
+      await runOrbitThreadStart(retried, { ...ports(second.client).ports, branchOnCreate: true }),
+    ).toBe(true);
+    expect([...first.branches, ...second.branches]).toEqual([branch, branch]);
+  });
+
+  it("keeps a failed create step's code with the Instance it made", async () => {
+    const { client } = gateway({ create: ["running", "failed"] });
+    const run = ports(client);
+    expect(await runOrbitThreadStart(onBranch({ mode: "new", from: "develop" }), run.ports)).toBe(
+      false,
+    );
+    expect(run.saves.at(-1)).toMatchObject({ errorCode: "instance.t3_unready", instanceId: 41 });
+    expect(orbitThreadStartCreatedInstance(run.saves.at(-1)!)).toBe(true);
+  });
+
+  it("saves the branch and base from the create's result", async () => {
+    const { client } = gateway({ createResult: { branch: "fix", base_branch: "develop" } });
+    const run = ports(client);
+    expect(await runOrbitThreadStart(onBranch({ mode: "new", from: "develop" }), run.ports)).toBe(
+      true,
+    );
+    expect(run.saves.at(-1)).toMatchObject({ resultBranch: "fix", resultBaseBranch: "develop" });
+    const plain = gateway({ createResult: { branch: "feature/login", base_branch: null } });
+    const plainRun = ports(plain.client);
+    expect(await runOrbitThreadStart(fresh(), plainRun.ports)).toBe(true);
+    expect(plainRun.saves.at(-1)).toMatchObject({
+      resultBranch: "feature/login",
+      resultBaseBranch: null,
+    });
+  });
+
+  it("never gives a start in an existing Instance a branch", () => {
+    const start = newOrbitThreadStart({
+      id: "s9",
+      project,
+      message: "m",
+      suffix: "x",
+      threadId: "t",
+      messageId: "m",
+      commandId: "c",
+      now: 0,
+      existing: { instanceId: 41, environmentId: "env-41", name: "dark-mode", nodeName: "shark" },
+      branch: { mode: "new", from: "main" },
+    });
+    expect(start.branch).toBeNull();
   });
 });
 

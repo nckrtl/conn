@@ -1,10 +1,13 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gateway";
 import type { AnyRouter } from "@tanstack/react-router";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { environmentCatalog } from "../connection/catalog";
+import { createNewThreadHandler } from "../hooks/useHandleNewThread";
 import { newDraftId, newThreadId } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { readProjects } from "../state/entities";
 import { primaryEnvironmentIdAtom } from "../state/primaryEnvironment";
 import { orbitThreadsAvailableNow, useEnvironmentProvider } from "./environmentProvider";
 import {
@@ -13,6 +16,12 @@ import {
   orbitDraftProjectId,
   type OrbitDraftTarget,
 } from "./orbitDraft";
+import {
+  buildOrbitInstanceRows,
+  orbitCloneProject,
+  orbitInstancePick,
+  type OrbitInstanceRow,
+} from "./orbitInstanceStepLogic";
 
 /**
  * Opens the draft for a thread in a new Instance or an unpaired one; a paired Instance uses a normal
@@ -37,6 +46,17 @@ export async function openOrbitDraft(
   const store = useComposerDraftStore.getState();
   const existing = store.getDraftSessionByLogicalProjectKey(logicalProjectKey);
   const draftId = existing?.draftId ?? newDraftId();
+  // A new Instance keeps the branch chosen for the Project's draft unless the target sets one.
+  const previous = existing?.orbitTarget;
+  const keptBranch =
+    target.instanceKind === "new" &&
+    target.branch === undefined &&
+    previous?.projectId === target.projectId
+      ? {
+          ...(previous.branch ? { branch: previous.branch } : {}),
+          ...(previous.defaultBranch ? { defaultBranch: previous.defaultBranch } : {}),
+        }
+      : {};
   store.setLogicalProjectDraftThreadId(
     logicalProjectKey,
     scopeProjectRef(anchor, orbitDraftProjectId(target.projectId)),
@@ -46,9 +66,90 @@ export async function openOrbitDraft(
       envMode: "local",
       branch: null,
       worktreePath: null,
-      orbitTarget: target,
+      orbitTarget: { ...target, ...keptBranch },
     },
   );
   await router.navigate({ to: "/draft/$draftId", params: { draftId } });
   return draftId;
+}
+
+/** The Project facts an existing Instance's draft needs, from a draft target or a palette row. */
+export interface OrbitInstanceDraftProject {
+  readonly id: number;
+  readonly slug: string;
+  readonly name: string;
+  readonly nodeName: string | null;
+  readonly domainSuffix: string | null;
+}
+
+/**
+ * Opens a thread in an existing Instance, as its row in the Instance step does: a paired one with a
+ * loaded project gets a normal draft there, any other one an Orbit draft of kind existing. Null
+ * for a row that cannot be picked or a draft that could not open.
+ */
+async function openOrbitInstanceRow(
+  router: AnyRouter,
+  project: OrbitInstanceDraftProject,
+  row: OrbitInstanceRow,
+): Promise<DraftId | null> {
+  const pick = orbitInstancePick(row);
+  if (pick.kind === "disabled") return null;
+  const cloneProject =
+    pick.kind === "paired" ? orbitCloneProject(readProjects(), pick.environmentId) : null;
+  if (cloneProject !== null) {
+    const opened = await createNewThreadHandler(router)(
+      scopeProjectRef(cloneProject.environmentId, cloneProject.id),
+    );
+    return opened?.draftId ?? null;
+  }
+  // Unpaired, or paired but its project has not loaded yet: the Orbit draft handles both.
+  return openOrbitDraft(router, {
+    projectId: project.id,
+    projectSlug: project.slug,
+    projectName: project.name,
+    nodeName: row.nodeName ?? project.nodeName ?? "",
+    instanceKind: "existing",
+    instanceName: row.name,
+    existing: { instanceId: row.instanceId, environmentId: row.environmentId },
+    domainSuffix: project.domainSuffix,
+  });
+}
+
+export type OrbitInstanceByIdResult =
+  | { readonly kind: "opened"; readonly draftId: DraftId }
+  /** The Instance has no T3 server this device can reach, or cannot be picked now. */
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+/**
+ * Selects the Instance a branch belongs to (the branch menu's "in instance" row, or the card of a
+ * create refused with `branch.in_use`), with the same outcome as its row in the Instance step.
+ */
+export async function openOrbitInstanceById(input: {
+  readonly router: AnyRouter;
+  readonly project: OrbitInstanceDraftProject;
+  readonly instance: { readonly id: number; readonly name: string };
+  readonly environments: () => Promise<readonly OrbitGatewayEnvironment[]>;
+}): Promise<OrbitInstanceByIdResult> {
+  const environments = await input.environments();
+  const row = buildOrbitInstanceRows({
+    projectId: input.project.id,
+    environments,
+    threads: [],
+    pairedEnvironmentIds: new Set(
+      appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.keys(),
+    ),
+  }).find((entry) => entry.instanceId === input.instance.id);
+  if (row === undefined) {
+    return {
+      kind: "unavailable",
+      reason: `Instance ${input.instance.name} has no T3 server this device can reach.`,
+    };
+  }
+  if (row.disabledReason !== null) {
+    return { kind: "unavailable", reason: `Instance ${row.name}: ${row.disabledReason}` };
+  }
+  const draftId = await openOrbitInstanceRow(input.router, input.project, row);
+  return draftId !== null
+    ? { kind: "opened", draftId }
+    : { kind: "unavailable", reason: `Conn could not open Instance ${row.name} here.` };
 }

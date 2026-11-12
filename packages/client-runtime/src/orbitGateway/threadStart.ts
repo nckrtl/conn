@@ -10,8 +10,14 @@ import * as Schema from "effect/Schema";
 import {
   OPERATION_TERMINAL_STATUSES,
   OPERATION_TIMEOUT_MS,
+  ORBIT_BRANCH_EXISTS,
+  ORBIT_BRANCH_IN_USE,
+  ORBIT_BRANCH_NOT_FOUND,
+  ORBIT_PLACEMENT_CONFLICT,
+  ORBIT_SOURCE_HEAD_UNAVAILABLE,
   OrbitGatewayError,
   operationPollDelayMs,
+  type OrbitGatewayBranchSelection,
   type OrbitGatewayClient,
   type OrbitGatewayOperation,
   type OrbitGatewayProject,
@@ -83,6 +89,18 @@ export interface OrbitThreadStart {
   readonly instanceDomainSuffix?: string | null;
   /** The clone did not offer the composer's model; the first turn used the clone's default. */
   readonly modelFallback?: OrbitModelFallback | null;
+  /**
+   * The branch the new Instance works on; null or missing clones the default branch as before.
+   * Retry sends the same one: Orbit refuses the same name with another selection.
+   */
+  readonly branch?: OrbitGatewayBranchSelection | null;
+  /** The Project's default branch as the draft knew it at send, or null. */
+  readonly defaultBranch?: string | null;
+  /** The Gateway's `details` behind `errorCode`, such as the Instance holding a branch. */
+  readonly errorDetails?: Readonly<Record<string, unknown>> | null;
+  /** The create's result: the branch the Instance checked out and the base it was cut from. */
+  readonly resultBranch?: string | null;
+  readonly resultBaseBranch?: string | null;
 }
 
 export interface OrbitModelFallback {
@@ -150,9 +168,32 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         instanceDomainSuffix:
           typeof row.instanceDomainSuffix === "string" ? row.instanceDomainSuffix : null,
         modelFallback: readModelFallback(row.modelFallback),
+        branch: readBranchSelection(row.branch),
+        defaultBranch: typeof row.defaultBranch === "string" ? row.defaultBranch : null,
+        errorDetails:
+          typeof row.errorDetails === "object" &&
+          row.errorDetails !== null &&
+          !Array.isArray(row.errorDetails)
+            ? (row.errorDetails as Record<string, unknown>)
+            : null,
+        resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
+        resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
       },
     ];
   });
+}
+
+/** A saved branch choice, or null for none or a broken one. */
+function readBranchSelection(value: unknown): OrbitGatewayBranchSelection | null {
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  if (row.mode === "new" && typeof row.from === "string" && row.from !== "") {
+    return { mode: "new", from: row.from };
+  }
+  if (row.mode === "existing" && typeof row.name === "string" && row.name !== "") {
+    return { mode: "existing", name: row.name };
+  }
+  return null;
 }
 
 function readModelFallback(value: unknown): OrbitModelFallback | null {
@@ -172,7 +213,7 @@ export function retryOrbitThreadStartRecord(
   start: OrbitThreadStart,
   patch: Partial<OrbitThreadStart> = {},
 ): OrbitThreadStart {
-  const next = { ...start, ...patch, error: null, errorCode: null };
+  const next = { ...start, ...patch, error: null, errorCode: null, errorDetails: null };
   const createAgain = next.environmentId === null;
   return {
     ...next,
@@ -204,6 +245,11 @@ export interface OrbitThreadStartPorts {
   readonly now: () => number;
   /** True once the user dismissed the start, or Orbit no longer provides the environments. */
   readonly stopped: () => boolean;
+  /**
+   * Whether a create may carry the start's branch (the Labs gate). Off or missing: the request
+   * never has a `branch` field, whatever the start saved.
+   */
+  readonly branchOnCreate?: boolean;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
   /** Each read of the create Operation, for the setup card's clone step. */
@@ -268,6 +314,9 @@ export function newOrbitThreadStart(input: {
   readonly pendingThread?: boolean;
   readonly projectName?: string | null;
   readonly instanceDomainSuffix?: string | null;
+  /** A new Instance only; ignored for an existing one. */
+  readonly branch?: OrbitGatewayBranchSelection | null;
+  readonly defaultBranch?: string | null;
 }): OrbitThreadStart {
   const existing = input.existing;
   return {
@@ -307,6 +356,11 @@ export function newOrbitThreadStart(input: {
     projectName: input.projectName ?? null,
     instanceDomainSuffix: input.instanceDomainSuffix ?? null,
     modelFallback: null,
+    branch: existing ? null : (input.branch ?? null),
+    defaultBranch: input.defaultBranch ?? null,
+    errorDetails: null,
+    resultBranch: null,
+    resultBaseBranch: null,
   };
 }
 
@@ -321,6 +375,7 @@ class StepFailed extends Schema.TaggedError<StepFailed>()("OrbitThreadStepFailed
   message: Schema.String,
   code: Schema.NullOr(Schema.String),
   reset: Schema.Record(Schema.String, Schema.Unknown),
+  details: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 }) {}
 
 /** The user dismissed the start. */
@@ -365,9 +420,21 @@ function stepFailed(
   return new StepFailed({ message, code, reset });
 }
 
-/** The create was refused because the Project has an Instance with this name. */
-function isNameTaken(error: unknown): error is OrbitGatewayError {
-  return isOrbitGatewayError(error) && error.code === "instance.name_taken";
+/**
+ * Refusals of a create at admission: Orbit made no Instance, so a retry or another name or branch
+ * is a new attempt under a new key.
+ */
+const ADMISSION_REFUSALS: ReadonlySet<string> = new Set([
+  "instance.name_taken",
+  ORBIT_BRANCH_IN_USE,
+  ORBIT_BRANCH_NOT_FOUND,
+  ORBIT_BRANCH_EXISTS,
+  ORBIT_SOURCE_HEAD_UNAVAILABLE,
+  ORBIT_PLACEMENT_CONFLICT,
+]);
+
+function isAdmissionRefusal(error: unknown): error is OrbitGatewayError {
+  return isOrbitGatewayError(error) && ADMISSION_REFUSALS.has(error.code);
 }
 
 /**
@@ -378,7 +445,7 @@ export async function runOrbitThreadStart(
   start: OrbitThreadStart,
   ports: OrbitThreadStartPorts,
 ): Promise<boolean> {
-  let current: OrbitThreadStart = { ...start, error: null, errorCode: null };
+  let current: OrbitThreadStart = { ...start, error: null, errorCode: null, errorDetails: null };
   const update = (patch: Partial<OrbitThreadStart>) => {
     current = { ...current, ...patch };
     ports.save(current);
@@ -395,7 +462,7 @@ export async function runOrbitThreadStart(
     timeoutMs: number,
     failed: (code: string) => StepFailed,
     observe?: (operation: OrbitGatewayOperation) => void,
-  ) => {
+  ): Promise<OrbitGatewayOperation> => {
     const deadline = ports.now() + timeoutMs;
     let outageSince: number | null = null;
     for (;;) {
@@ -411,7 +478,7 @@ export async function runOrbitThreadStart(
         if (!isTransient(error) || ports.now() - outageSince >= READ_OUTAGE_MS) throw error;
         operation = null;
       }
-      if (operation?.status === "succeeded") return;
+      if (operation?.status === "succeeded") return operation;
       if (operation && OPERATION_TERMINAL_STATUSES.has(operation.status)) {
         throw failed(operation.errorCode ?? `operation.${operation.status}`);
       }
@@ -463,12 +530,20 @@ export async function runOrbitThreadStart(
                 current.projectId,
                 current.instanceName,
                 current.createKey!,
+                ports.branchOnCreate === true ? (current.branch ?? null) : null,
               ),
             (error) => isLostAdmission(error) || isTargetBusy(error),
           );
         } catch (error) {
-          // A refused name admitted nothing: a new name needs a new key.
-          if (isNameTaken(error)) throw stepFailed(error.message, { createKey: null }, error.code);
+          // A refused create admitted nothing: the next attempt needs a new key.
+          if (isAdmissionRefusal(error)) {
+            throw new StepFailed({
+              message: error.message,
+              code: error.code,
+              reset: { createKey: null },
+              details: error.details,
+            });
+          }
           if (!isTargetBusy(error)) throw error;
           throw stepFailed(
             "Orbit is still creating this clone; press Retry in a minute.",
@@ -480,7 +555,7 @@ export async function runOrbitThreadStart(
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
-      await follow(
+      const created = await follow(
         current.createOperationId!,
         createDeadline - ports.now(),
         (code) =>
@@ -503,7 +578,13 @@ export async function runOrbitThreadStart(
       if (server.powerState === "stopped") {
         throw stepFailed("The clone is asleep. Conn cannot wake it yet.", {});
       }
-      update({ environmentId: server.environmentId, ...stamp("createFinishedAt") });
+      const result = created.result ?? null;
+      update({
+        environmentId: server.environmentId,
+        resultBranch: typeof result?.branch === "string" ? result.branch : null,
+        resultBaseBranch: typeof result?.base_branch === "string" ? result.base_branch : null,
+        ...stamp("createFinishedAt"),
+      });
     }
     const environmentId = current.environmentId!;
 
@@ -572,6 +653,11 @@ export async function runOrbitThreadStart(
       ...(isStepFailed(error) ? (error.reset as Partial<OrbitThreadStart>) : {}),
       error: error instanceof Error ? error.message : String(error),
       errorCode: isStepFailed(error) ? error.code : isOrbitGatewayError(error) ? error.code : null,
+      errorDetails: isStepFailed(error)
+        ? (error.details ?? null)
+        : isOrbitGatewayError(error)
+          ? error.details
+          : null,
     });
     return false;
   }

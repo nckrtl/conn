@@ -803,3 +803,109 @@ describe("orbitInstanceFromEnvironment", () => {
     expect(preferredOrbitInstance(undefined, undefined)).toBeUndefined();
   });
 });
+
+describe("Orbit branches and branch on create", () => {
+  const recording = (
+    answer: (request: OrbitGatewayRequest) => { status: number; body: unknown },
+  ) => {
+    const requests: OrbitGatewayRequest[] = [];
+    const client = createOrbitGatewayClient(async (request) => {
+      requests.push(request);
+      const { status, body } = answer(request);
+      return { status, body: JSON.stringify(body) };
+    });
+    return { client, requests };
+  };
+
+  it("parses the branch list tolerantly, with the PR flag, and sends the query with a 25 s limit", async () => {
+    const { client, requests } = recording(() => ({
+      status: 200,
+      body: {
+        data: [
+          { name: "main", default: true, pull_request: null, instance: { id: 9, name: "default" } },
+          {
+            name: "feature/login",
+            default: false,
+            pull_request: { number: 482, title: "Login", url: "https://github.com/o/r/pull/482" },
+            instance: { id: 42, name: "login" },
+          },
+          { name: "odd", pull_request: { title: "no number" }, instance: { id: "x" } },
+          { default: false },
+          "garbage",
+        ],
+        meta: { pull_requests_unavailable: false },
+      },
+    }));
+    await expect(client.branches(66, " Log ")).resolves.toEqual({
+      branches: [
+        { name: "main", default: true, pullRequest: null, instance: { id: 9, name: "default" } },
+        {
+          name: "feature/login",
+          default: false,
+          pullRequest: { number: 482, title: "Login", url: "https://github.com/o/r/pull/482" },
+          instance: { id: 42, name: "login" },
+        },
+        { name: "odd", default: false, pullRequest: null, instance: null },
+      ],
+      pullRequestsUnavailable: false,
+    });
+    expect(requests.at(-1)).toEqual({
+      method: "GET",
+      path: "/projects/66/branches",
+      query: { query: "Log" },
+      timeoutMs: 25_000,
+    });
+    // An empty search sends no query at all.
+    await client.branches(66, "  ");
+    expect(requests.at(-1)?.query).toBeUndefined();
+  });
+
+  it("reads pull_requests_unavailable and fails on a list that is no array", async () => {
+    const unavailable = recording(() => ({
+      status: 200,
+      body: { data: [{ name: "main", default: true }], meta: { pull_requests_unavailable: true } },
+    }));
+    await expect(unavailable.client.branches(1, "")).resolves.toMatchObject({
+      pullRequestsUnavailable: true,
+    });
+    const broken = recording(() => ({ status: 200, body: { data: { name: "main" } } }));
+    await expect(broken.client.branches(1, "")).rejects.toMatchObject({
+      code: "gateway.response_invalid",
+    });
+  });
+
+  it("keeps the Gateway's code for a refused branch read", async () => {
+    for (const [status, code] of [
+      [409, "instance.default_missing"],
+      [502, "source.head_unavailable"],
+    ] as const) {
+      const { client } = recording(() => ({
+        status,
+        body: { status, error: { code, message: "no", details: {} } },
+      }));
+      await expect(client.branches(1, "a..b")).rejects.toMatchObject({ code, status });
+    }
+  });
+
+  it("sends a branch on create only when one is chosen, with only the mode's keys", async () => {
+    const { client, requests } = recording(() => ({
+      status: 202,
+      body: { data: { id: 1, kind: "instance.create", status: "queued", target_id: 2 } },
+    }));
+    await client.createThreadInstance(3, "fix", "k");
+    await client.createThreadInstance(3, "fix", "k", null);
+    await client.createThreadInstance(3, "fix", "k", { mode: "new", from: "develop" });
+    await client.createThreadInstance(3, "fix", "k", {
+      mode: "existing",
+      name: "feature/login",
+      // A stray key from a widened object never reaches Orbit, which refuses extra keys.
+      ...({ from: "main" } as object),
+    });
+    expect(requests.map((request) => request.body)).toEqual([
+      { name: "fix" },
+      { name: "fix" },
+      { name: "fix", branch: { mode: "new", from: "develop" } },
+      { name: "fix", branch: { mode: "existing", name: "feature/login" } },
+    ]);
+  });
+});

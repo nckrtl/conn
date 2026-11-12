@@ -15,7 +15,10 @@ import { cn } from "../lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "../workspaceTitlebar";
 import { useThreadShell } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
-import { openOrbitDraft } from "./openOrbitDraft";
+import type { DraftId } from "../composerDraftStore";
+import { openOrbitDraft, openOrbitInstanceById } from "./openOrbitDraft";
+import { requestOrbitBranchMenu, takeOrbitBranchMenuRequest } from "./orbitBranchControl";
+import { readOrbitEnvironments } from "./orbitPaletteProjects";
 import type { OrbitDraftTarget } from "./orbitDraft";
 import { openOrbitInstanceStep } from "./orbitInstanceStep";
 import { orbitSetupView } from "./orbitSetupView";
@@ -36,6 +39,8 @@ export function orbitStartDraftTarget(start: OrbitThreadStart): OrbitDraftTarget
     instanceName: start.instanceName,
     existing: null,
     domainSuffix: start.instanceDomainSuffix ?? null,
+    branch: start.branch ?? null,
+    defaultBranch: start.defaultBranch ?? null,
   };
 }
 
@@ -96,7 +101,17 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
     );
   }
 
-  const changeName = async () => {
+  /** Carries the message, model and modes into the reopened draft, then drops the saved start. */
+  const moveToDraft = (draftId: DraftId) => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(draftId, start.message);
+    if (start.modelSelection) store.setModelSelection(draftId, start.modelSelection);
+    if (start.runtimeMode) store.setRuntimeMode(draftId, start.runtimeMode);
+    if (start.interactionMode) store.setInteractionMode(draftId, start.interactionMode);
+    // Offered only when the create made no Instance, so only the saved start goes.
+    dismissOrbitThreadStart(start.id);
+  };
+  const reopenDraft = async (): Promise<OrbitDraftTarget | null> => {
     const target = orbitStartDraftTarget(start);
     const draftId = await openOrbitDraft(router, target);
     if (draftId === null) {
@@ -105,16 +120,46 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
         title: "Could not reopen the draft",
         description: `Start a new thread in ${start.projectSlug} from the palette instead.`,
       });
+      return null;
+    }
+    moveToDraft(draftId);
+    return target;
+  };
+  const changeName = async () => {
+    const target = await reopenDraft();
+    if (target) openOrbitInstanceStep(target);
+  };
+  const changeBranch = async () => {
+    // The menu opens once the draft's context row shows.
+    requestOrbitBranchMenu(start.projectId);
+    if ((await reopenDraft()) === null) takeOrbitBranchMenuRequest(start.projectId);
+  };
+  const openHolder = async (instance: { readonly id: number; readonly name: string }) => {
+    const target = orbitStartDraftTarget(start);
+    const result = await openOrbitInstanceById({
+      router,
+      project: {
+        id: target.projectId,
+        slug: target.projectSlug,
+        name: target.projectName,
+        nodeName: target.nodeName,
+        domainSuffix: target.domainSuffix,
+      },
+      instance,
+      environments: readOrbitEnvironments,
+    }).catch((error: unknown) => ({
+      kind: "unavailable" as const,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    if (result.kind === "opened") {
+      moveToDraft(result.draftId);
       return;
     }
-    const store = useComposerDraftStore.getState();
-    store.setPrompt(draftId, start.message);
-    if (start.modelSelection) store.setModelSelection(draftId, start.modelSelection);
-    if (start.runtimeMode) store.setRuntimeMode(draftId, start.runtimeMode);
-    if (start.interactionMode) store.setInteractionMode(draftId, start.interactionMode);
-    // The taken name made no Instance, so only the saved start goes.
-    dismissOrbitThreadStart(start.id);
-    openOrbitInstanceStep(target);
+    toastManager.add({
+      type: "error",
+      title: `Could not open Instance ${instance.name}`,
+      description: result.reason,
+    });
   };
 
   return (
@@ -145,6 +190,8 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
             view={orbitSetupView(start, create)}
             onRetry={() => retryOrbitThreadStart(start.id)}
             onChangeName={() => void changeName()}
+            onChangeBranch={() => void changeBranch()}
+            onOpenInstance={(instance) => void openHolder(instance)}
             onDismiss={() => {
               dismissOrbitThreadStart(start.id);
               void navigate({ to: "/", replace: true });

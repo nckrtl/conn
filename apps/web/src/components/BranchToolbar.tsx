@@ -46,6 +46,7 @@ import { useOrbitInstance } from "../orbit/environmentProvider";
 import { isOrbitCheckout } from "../orbit/orbitCheckout";
 import { BranchToolbarOrbitInstance } from "./BranchToolbarOrbitInstance";
 import type { OrbitDraftTarget } from "../orbit/orbitDraft";
+import { ORBIT_BRANCH_CONTROL_ENABLED } from "../orbit/orbitBranchControl";
 import { buildWorkspaceOptions, PREVIOUS_WORKTREE_OPTION } from "./workspaceOptions";
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
 import {
@@ -707,15 +708,22 @@ export const BranchToolbar = memo(function BranchToolbar({
   const openLink = useOpenLink(threadRef);
 
   if (orbitDraftTarget) {
-    // No branch control and no domain chip: both wait for Orbit.
+    // No domain chip; the branch control waits behind its gate until Orbit takes the field.
     if (layout === "panel") return null;
+    const updateOrbitTarget =
+      ORBIT_BRANCH_CONTROL_ENABLED && draftId
+        ? (patch: Partial<OrbitDraftTarget>) => {
+            const current = useComposerDraftStore.getState().getDraftSession(draftId)?.orbitTarget;
+            if (current) setDraftThreadContext(draftId, { orbitTarget: { ...current, ...patch } });
+          }
+        : undefined;
     return (
       <ComposerSurface.ContextStrip
         ref={attachStrip}
         data-compact={labelsOverflow ? "" : undefined}
         className={cn("gap-1 text-xs font-normal text-foreground/70 dark:text-muted-foreground")}
       >
-        <BranchToolbarOrbitInstance target={orbitDraftTarget} />
+        <BranchToolbarOrbitInstance target={orbitDraftTarget} onTargetChange={updateOrbitTarget} />
         {trailing}
       </ComposerSurface.ContextStrip>
     );

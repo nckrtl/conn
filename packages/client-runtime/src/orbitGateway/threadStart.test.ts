@@ -478,6 +478,13 @@ describe("runOrbitThreadStart", () => {
       const lost = gateway({ nameCheck: () => null, createLost: [0] });
       expect(await runOrbitThreadStart(longStart(), ports(lost.client).ports)).toBe(true);
       expect(lost.calls.filter((call) => call.startsWith("check"))).toHaveLength(1);
+
+      // A repeat under the saved key keeps the name it already checked.
+      const repeat = gateway({ nameCheck: tooLong(20) });
+      const saved = { ...longStart(), instanceName: "saved-name", createKey: "create-saved" };
+      expect(await runOrbitThreadStart(saved, ports(repeat.client).ports)).toBe(true);
+      expect(repeat.calls.filter((call) => call.startsWith("check"))).toEqual([]);
+      expect(repeat.calls[0]).toBe("create 3 saved-name");
     });
 
     it.each([

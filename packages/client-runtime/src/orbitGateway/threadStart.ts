@@ -251,16 +251,16 @@ export function retryOrbitThreadStartRecord(
   };
 }
 
-/**
- * Whether the start made an Instance that stays when the start is dismissed: its create was
- * admitted (Orbit holds the Instance, also after a failed create) or it finished. A start in an
- * existing Instance made none.
- */
 /** Retry runs the start again; a process that did not stay up fails the same way on the kept Instance. */
 export function orbitThreadStartCanRetry(start: OrbitThreadStart): boolean {
   return start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE;
 }
 
+/**
+ * Whether the start made an Instance that stays when the start is dismissed: its create was
+ * admitted (Orbit holds the Instance, also after a failed create) or it finished. A start in an
+ * existing Instance made none.
+ */
 export function orbitThreadStartCreatedInstance(start: OrbitThreadStart): boolean {
   return (
     start.orbitInstanceKind !== "existing" &&
@@ -474,7 +474,6 @@ const ADMISSION_REFUSALS: ReadonlySet<string> = new Set([
   ORBIT_BRANCH_IN_USE,
   ORBIT_BRANCH_NOT_FOUND,
   ORBIT_BRANCH_EXISTS,
-  ORBIT_CONTAINER_PROCESS_INACTIVE,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   ORBIT_PLACEMENT_CONFLICT,
   ORBIT_ROUTE_DOMAIN_INVALID,

@@ -105,7 +105,7 @@ export function OrbitSetupCard({
         ))}
       </div>
       {failed && view.error ? (
-        <p className="mt-1 ml-8 text-xs text-muted-foreground">{view.error}</p>
+        <p className="mt-1 ml-8 text-xs break-words text-muted-foreground">{view.error}</p>
       ) : null}
       {failed && view.errorDetailLine ? (
         <Tooltip>

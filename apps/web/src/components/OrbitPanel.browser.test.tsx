@@ -78,9 +78,7 @@ describe("Orbit rail icon", () => {
     expect(railLabels(screen.container).slice(-2)).toEqual(["Orbit", "Settings"]);
 
     await userEvent.click(screen.getByRole("button", { name: "Orbit" }));
-    await vi.waitFor(() =>
-      expect(screen.router?.state.location.pathname).toBe("/orbit/connection"),
-    );
+    await vi.waitFor(() => expect(screen.router?.state.location.pathname).toBe("/orbit/instances"));
     await expect
       .element(screen.getByRole("button", { name: "Orbit" }))
       .toHaveAttribute("aria-pressed", "true");
@@ -102,7 +100,7 @@ describe("Orbit rail icon", () => {
 });
 
 describe("Orbit panel", () => {
-  it("opens on Connection, with Profile next and the moved sections", async () => {
+  it("lists Instances, Connection and Profile, with the moved sections on Connection", async () => {
     using _env = setup("orbit");
     await using screen = await render(
       <SidebarProvider>
@@ -113,14 +111,14 @@ describe("Orbit panel", () => {
       { router: "/orbit/connection" },
     );
     const nav = page.getByRole("navigation", { name: "Orbit sections" });
-    await expect.element(nav.getByRole("button").first()).toHaveTextContent("Connection");
+    await expect.element(nav.getByRole("button").first()).toHaveTextContent("Instances");
     expect(
       nav
         .getByRole("button")
         .elements()
         .map((item) => item.textContent),
-    ).toEqual(["Connection", "Profile"]);
-    await expect.element(nav.getByRole("button").first()).toHaveAttribute("aria-current", "page");
+    ).toEqual(["Instances", "Connection", "Profile"]);
+    await expect.element(nav.getByRole("button").nth(1)).toHaveAttribute("aria-current", "page");
 
     await expect.element(page.getByText("Signed in to gateway.orbit as 10.44.0.12")).toBeVisible();
     await expect.element(page.getByRole("heading", { name: "Orbit servers" })).toBeVisible();

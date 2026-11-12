@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import { PlugIcon, UserRoundIcon } from "lucide-react";
+import { PlugIcon, ServerIcon, UserRoundIcon } from "lucide-react";
 import { useEffect, type ComponentType, type ReactNode } from "react";
 
 import { workspaceAreaProps } from "../lib/workspaceFocus";
@@ -29,6 +29,7 @@ import {
 } from "./WorkspaceBreadcrumb";
 
 const PAGE_ICONS: Record<OrbitPanelPath, ComponentType<{ className?: string }>> = {
+  "/orbit/instances": ServerIcon,
   "/orbit/connection": PlugIcon,
   "/orbit/profile": UserRoundIcon,
 };

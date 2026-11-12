@@ -118,9 +118,8 @@ export function orbitSetupStages(input: {
       "connect",
       start.connected
         ? "done"
-        : // An existing Instance's start has its server from the outset; it runs once stamped.
-          start.environmentId !== null &&
-            (start.connectStartedAt != null || start.orbitInstanceKind !== "existing")
+        : // Runs once the runner stamped it: after a Retry it waits until the runner gets there.
+          start.environmentId !== null && start.connectStartedAt != null
           ? "running"
           : "pending",
       start.connectStartedAt,
@@ -134,4 +133,17 @@ export function orbitSetupStages(input: {
     ),
   );
   return stages;
+}
+
+/**
+ * How long the setup took, for "Instance ready <N>s": from the first stage's start to the sent
+ * first message. Null until the message is sent or when a time is missing (older rows).
+ */
+export function orbitSetupReadyMs(start: OrbitThreadStart): number | null {
+  const from =
+    start.orbitInstanceKind === "existing"
+      ? (start.connectStartedAt ?? null)
+      : (start.createStartedAt ?? null);
+  if (from === null || start.sentAt == null) return null;
+  return Math.max(0, start.sentAt - from);
 }

@@ -9,11 +9,16 @@ import { __setClientSettingsForTests, getClientSettings } from "../hooks/useSett
 import { useProjects } from "../state/entities";
 import type { Project } from "../types";
 import { useWorkspaceStore } from "../workspaceStore";
+import { newOrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
+import { useOrbitThreadsAvailable } from "../orbit/environmentProvider";
+import { OrbitPendingThreadList } from "../orbit/OrbitPendingThreadList";
+import { updateStarts } from "../orbit/orbitThreadStartStore";
 import Sidebar from "./Sidebar";
 import { SidebarProvider } from "./ui/sidebar";
 
 vi.mock("../state/entities", { spy: true });
 vi.mock("../hooks/useHandleNewThread", { spy: true });
+vi.mock("../orbit/environmentProvider", { spy: true });
 vi.mock("../commandPaletteBus", () => ({
   openCommandPalette: vi.fn(),
   isCommandPaletteOpen: () => false,
@@ -108,5 +113,41 @@ describe("sidebar header new thread", () => {
       expect(openCommandPalette).not.toHaveBeenCalled();
       expect(startThread).toHaveBeenCalledExactlyOnceWith(currentProjectRef);
     }
+  });
+});
+
+describe("sidebar pending Orbit threads", () => {
+  it("lists palette starts until the clone took the message, and links to their pending thread", async () => {
+    vi.mocked(useOrbitThreadsAvailable).mockReturnValue(true);
+    const base = (id: string, message: string) =>
+      newOrbitThreadStart({
+        id,
+        project: { id: 66, slug: "create-bench", nodeName: "beast" },
+        message,
+        suffix: "x",
+        threadId: `thread-${id}`,
+        messageId: `message-${id}`,
+        commandId: `command-${id}`,
+        now: 0,
+        instanceName: id,
+        pendingThread: true,
+      });
+    window.localStorage.clear();
+    updateStarts(() => [
+      base("running", "Add a pricing page"),
+      { ...base("failed", "Fix the login"), error: "The name is taken." },
+      { ...base("sent", "Already handed over"), sentAt: 5 },
+      { ...base("dialog", "Old dialog start"), pendingThread: false },
+    ]);
+    await using screen = await render(<OrbitPendingThreadList />, { router: "/orbit/running" });
+    const rows = screen.getByRole("link");
+    await expect.element(rows.first()).toHaveAttribute("href", "/orbit/running");
+    expect(rows.all().map((row) => row.element().getAttribute("data-orbit-pending-row"))).toEqual([
+      "running",
+      "failed",
+    ]);
+    await expect.element(screen.getByText("Setup failed")).toBeVisible();
+    window.localStorage.clear();
+    updateStarts(() => []);
   });
 });

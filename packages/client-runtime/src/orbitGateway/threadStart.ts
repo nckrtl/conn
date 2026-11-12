@@ -73,6 +73,21 @@ export interface OrbitThreadStart {
   readonly connectFinishedAt?: number | null;
   readonly agentStartedAt?: number | null;
   readonly sentAt?: number | null;
+  /**
+   * The start opened a pending thread (the palette flow). It stays saved after the send, so the
+   * real thread finds it by `threadId` for its "Instance ready" row. Older and dialog starts lack it.
+   */
+  readonly pendingThread?: boolean;
+  /** Display facts for the pending thread and Change name; null on older rows. */
+  readonly projectName?: string | null;
+  readonly instanceDomainSuffix?: string | null;
+  /** The clone did not offer the composer's model; the first turn used the clone's default. */
+  readonly modelFallback?: OrbitModelFallback | null;
+}
+
+export interface OrbitModelFallback {
+  readonly requestedModel: string;
+  readonly usedModel: string;
 }
 
 export type OrbitInstanceKind = "new" | "existing";
@@ -130,9 +145,55 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         runtimeMode: isRuntimeMode(row.runtimeMode) ? row.runtimeMode : null,
         interactionMode: isInteractionMode(row.interactionMode) ? row.interactionMode : null,
         errorCode: typeof row.errorCode === "string" ? row.errorCode : null,
+        pendingThread: row.pendingThread === true,
+        projectName: typeof row.projectName === "string" ? row.projectName : null,
+        instanceDomainSuffix:
+          typeof row.instanceDomainSuffix === "string" ? row.instanceDomainSuffix : null,
+        modelFallback: readModelFallback(row.modelFallback),
       },
     ];
   });
+}
+
+function readModelFallback(value: unknown): OrbitModelFallback | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { requestedModel, usedModel } = value as Record<string, unknown>;
+  return typeof requestedModel === "string" && typeof usedModel === "string"
+    ? { requestedModel, usedModel }
+    : null;
+}
+
+/**
+ * The start Retry runs again: no error, and the times of each stage that runs again cleared, so
+ * the stage shows pending until the runner reaches it and its time counts from the new attempt.
+ * `patch` applies first, such as a new Instance name.
+ */
+export function retryOrbitThreadStartRecord(
+  start: OrbitThreadStart,
+  patch: Partial<OrbitThreadStart> = {},
+): OrbitThreadStart {
+  const next = { ...start, ...patch, error: null, errorCode: null };
+  const createAgain = next.environmentId === null;
+  return {
+    ...next,
+    ...(createAgain && next.createOperationId === null
+      ? { createStartedAt: null, createFinishedAt: null }
+      : {}),
+    ...(next.connected ? {} : { connectStartedAt: null, connectFinishedAt: null }),
+    ...(next.sentAt == null ? { agentStartedAt: null } : {}),
+  };
+}
+
+/**
+ * Whether the start made an Instance that stays when the start is dismissed: its create was
+ * admitted (Orbit holds the Instance, also after a failed create) or it finished. A start in an
+ * existing Instance made none.
+ */
+export function orbitThreadStartCreatedInstance(start: OrbitThreadStart): boolean {
+  return (
+    start.orbitInstanceKind !== "existing" &&
+    (start.instanceId !== null || start.environmentId !== null)
+  );
 }
 
 export interface OrbitThreadStartPorts {
@@ -145,10 +206,17 @@ export interface OrbitThreadStartPorts {
   readonly stopped: () => boolean;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
+  /** Each read of the create Operation, for the setup card's clone step. */
+  readonly onCreateOperation?: (operation: OrbitGatewayOperation) => void;
   /** Opens a one-time pairing link and saves the server. */
   readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
-  /** Starts the thread with the first message in the clone's workspace project. */
-  readonly send: (start: OrbitThreadStart & { readonly environmentId: string }) => Promise<void>;
+  /**
+   * Starts the thread with the first message in the clone's workspace project. It may resolve facts
+   * to save with the sent start, such as a model fallback.
+   */
+  readonly send: (
+    start: OrbitThreadStart & { readonly environmentId: string },
+  ) => Promise<void | Partial<OrbitThreadStart>>;
 }
 
 /** The longest name the Gateway takes is 63 characters; the slug leaves room for the suffix. */
@@ -197,6 +265,9 @@ export function newOrbitThreadStart(input: {
   readonly modelSelection?: ModelSelectionType | null;
   readonly runtimeMode?: RuntimeMode | null;
   readonly interactionMode?: ProviderInteractionMode | null;
+  readonly pendingThread?: boolean;
+  readonly projectName?: string | null;
+  readonly instanceDomainSuffix?: string | null;
 }): OrbitThreadStart {
   const existing = input.existing;
   return {
@@ -232,6 +303,10 @@ export function newOrbitThreadStart(input: {
     connectFinishedAt: null,
     agentStartedAt: null,
     sentAt: null,
+    pendingThread: input.pendingThread ?? false,
+    projectName: input.projectName ?? null,
+    instanceDomainSuffix: input.instanceDomainSuffix ?? null,
+    modelFallback: null,
   };
 }
 
@@ -319,6 +394,7 @@ export async function runOrbitThreadStart(
     operationId: number,
     timeoutMs: number,
     failed: (code: string) => StepFailed,
+    observe?: (operation: OrbitGatewayOperation) => void,
   ) => {
     const deadline = ports.now() + timeoutMs;
     let outageSince: number | null = null;
@@ -328,6 +404,7 @@ export async function runOrbitThreadStart(
       try {
         operation = await ports.client.operation(operationId);
         outageSince = null;
+        observe?.(operation);
       } catch (error) {
         // A create runs for minutes; a short Gateway outage must not stop it.
         outageSince ??= ports.now();
@@ -371,10 +448,11 @@ export async function runOrbitThreadStart(
     if (current.environmentId === null) {
       const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
       if (current.createOperationId === null) {
-        const begin = {
-          ...stamp("createStartedAt"),
-          ...(current.createKey ? {} : { createKey: newKey("create") }),
-        };
+        // A new key is a new attempt (first try, a new name, or after a failed create): its time
+        // counts from now. A repeat under the saved key keeps the first time.
+        const begin = current.createKey
+          ? stamp("createStartedAt")
+          : { createKey: newKey("create"), createStartedAt: ports.now(), createFinishedAt: null };
         if (Object.keys(begin).length > 0) update(begin);
         let operation;
         try {
@@ -402,12 +480,16 @@ export async function runOrbitThreadStart(
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
-      await follow(current.createOperationId!, createDeadline - ports.now(), (code) =>
-        stepFailed(
-          `Orbit could not create the clone (${code}).`,
-          code === "operation.timeout" ? {} : { createOperationId: null, createKey: null },
-          code,
-        ),
+      await follow(
+        current.createOperationId!,
+        createDeadline - ports.now(),
+        (code) =>
+          stepFailed(
+            `Orbit could not create the clone (${code}).`,
+            code === "operation.timeout" ? {} : { createOperationId: null, createKey: null },
+            code,
+          ),
+        ports.onCreateOperation,
       );
       const server = (await ports.client.environments()).find(
         (environment) => environment.instanceId === current.instanceId,
@@ -480,8 +562,8 @@ export async function runOrbitThreadStart(
     checkStopped();
     const begin = stamp("agentStartedAt");
     if (Object.keys(begin).length > 0) update(begin);
-    await ports.send({ ...current, environmentId });
-    update({ sentAt: ports.now() });
+    const sent = await ports.send({ ...current, environmentId });
+    update({ ...sent, sentAt: ports.now() });
     return true;
   } catch (error) {
     // A start stopped mid-step ends without an error, so it resumes if it comes back.

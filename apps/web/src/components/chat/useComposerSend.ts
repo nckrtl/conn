@@ -151,7 +151,7 @@ import {
   orbitDraftAttachmentsBlockedReason,
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
-import { sendOrbitDraft } from "../../orbit/orbitThreadStarts";
+import { orbitThreadStartBlockedReason, sendOrbitDraft } from "../../orbit/orbitThreadStarts";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -756,6 +756,17 @@ export function useComposerSend(input: ComposerSendInput) {
         );
         return;
       }
+      const blocked = orbitThreadStartBlockedReason();
+      if (blocked !== null) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "This thread cannot start here",
+            description: blocked,
+          }),
+        );
+        return;
+      }
       const composerDraft = useComposerDraftStore.getState().getComposerDraft(draftId);
       sendOrbitDraft({
         start: buildOrbitDraftStart({
@@ -768,7 +779,7 @@ export function useComposerSend(input: ComposerSendInput) {
             draftThread?.interactionMode ??
             DEFAULT_INTERACTION_MODE,
         }),
-        openProgress: (to) => void navigate({ to }),
+        openPending: (to) => void navigate({ to }),
         clearDraft: () => useComposerDraftStore.getState().clearDraftThread(draftId),
       });
       promptRef.current = "";

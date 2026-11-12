@@ -1,6 +1,8 @@
 import {
   newOrbitThreadStart,
+  retryOrbitThreadStartRecord,
   runOrbitThreadStart,
+  type OrbitModelFallback,
   sendOrbitFirstMessage,
   type OrbitFirstMessagePorts,
   type OrbitGatewayClient,
@@ -13,7 +15,10 @@ import { type EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
 import { newMessageId, newThreadId, randomUUID } from "../lib/utils";
-import { resolveProjectDefaultProviderModelSelection } from "../providerInstances";
+import {
+  providerInstanceEntriesFor,
+  resolveProjectDefaultProviderModelSelection,
+} from "../providerInstances";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentProjects } from "../state/projects";
 import { environmentServerConfigsAtom } from "../state/server";
@@ -22,7 +27,12 @@ import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
 import type { OrbitDraftStartInput } from "./orbitDraft";
-import { readStored, saveStart, updateStarts } from "./orbitThreadStartStore";
+import {
+  readStored,
+  recordCreateOperation,
+  saveStart,
+  updateStarts,
+} from "./orbitThreadStartStore";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
 
@@ -58,7 +68,14 @@ export function beginOrbitThreadStart(
 
 type OrbitThreadStartOptions = Pick<
   Parameters<typeof newOrbitThreadStart>[0],
-  "instanceName" | "existing" | "modelSelection" | "runtimeMode" | "interactionMode"
+  | "instanceName"
+  | "existing"
+  | "modelSelection"
+  | "runtimeMode"
+  | "interactionMode"
+  | "pendingThread"
+  | "projectName"
+  | "instanceDomainSuffix"
 >;
 
 /** Saves the start an Orbit draft sends: the typed Instance name, kind, model and modes. */
@@ -72,26 +89,42 @@ export function beginOrbitDraftThreadStart(
     modelSelection: input.modelSelection,
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
+    pendingThread: true,
+    projectName: input.projectName ?? null,
+    instanceDomainSuffix: input.instanceDomainSuffix ?? null,
   });
 }
 
-/**
- * Where the window goes after an Orbit draft is sent. The index opens a fresh draft, so the runner
- * offers the thread in a toast and the sidebar's start list shows progress. PR 4: pending route.
- */
-export const ORBIT_START_PROGRESS_ROUTE = "/";
+/** The pending thread of a start, shown until the clone's server took the first message. */
+export function orbitPendingThreadPath(startId: string): string {
+  return `/orbit/${startId}`;
+}
+
+/** Why a start cannot run in this window, or null: it needs the desktop's Gateway client and Orbit mode. */
+export function orbitThreadStartBlockedReason(): string | null {
+  if (window.desktopBridge?.orbitGatewaySend === undefined) {
+    return "Threads in an Orbit Project start only in the Conn desktop app.";
+  }
+  if (useEnvironmentProvider.getState().provider !== "orbit") {
+    return "Turn on Orbit in Settings › Connections, then send again.";
+  }
+  return null;
+}
 
 /**
- * Sends an Orbit draft: saves the start for the runner (never through a T3 server), opens the
- * progress route, then clears the draft. The runner opens the thread if the window stayed there.
+ * Sends an Orbit draft: saves the start for the runner (never through a T3 server), opens its
+ * pending thread, then clears the draft. Null, with the draft kept, when the start cannot run.
  */
 export function sendOrbitDraft(input: {
   readonly start: OrbitDraftStartInput;
-  readonly openProgress: (route: typeof ORBIT_START_PROGRESS_ROUTE) => void;
+  readonly openPending: (path: string) => void;
   readonly clearDraft: () => void;
-}): OrbitThreadStart {
-  const start = beginOrbitDraftThreadStart(input.start, ORBIT_START_PROGRESS_ROUTE);
-  input.openProgress(ORBIT_START_PROGRESS_ROUTE);
+}): OrbitThreadStart | null {
+  if (orbitThreadStartBlockedReason() !== null) return null;
+  const path = (id: string) => orbitPendingThreadPath(id);
+  const start = beginOrbitDraftThreadStart(input.start, "");
+  startedOn.set(start.id, path(start.id));
+  input.openPending(path(start.id));
   input.clearDraft();
   return start;
 }
@@ -105,7 +138,7 @@ export function stillOnStartRoute(id: string, pathname: string): boolean {
 
 export function retryOrbitThreadStart(id: string): void {
   updateStarts((starts) =>
-    starts.map((start) => (start.id === id ? { ...start, error: null, errorCode: null } : start)),
+    starts.map((start) => (start.id === id ? retryOrbitThreadStartRecord(start) : start)),
   );
 }
 
@@ -161,11 +194,16 @@ async function waitForClone(environmentId: string) {
   const config = appAtomRegistry.get(environmentServerConfigsAtom).get(id);
   if (!ready || !configured || project === undefined || config === undefined) return null;
   const projectId = ProjectId.make(project.id);
+  const entries = providerInstanceEntriesFor(config.providers, config.settings, projectId);
   return {
     projectId,
     modelSelection:
       config.settings.defaultModelSelection ??
       resolveProjectDefaultProviderModelSelection(config.providers, config.settings, projectId),
+    offers: (selection: { readonly instanceId: string }) =>
+      entries.some(
+        (entry) => entry.instanceId === selection.instanceId && entry.enabled && entry.isAvailable,
+      ),
   };
 }
 
@@ -197,7 +235,9 @@ export async function runSavedOrbitThreadStart(
   id: string,
 ): Promise<{ readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null> {
   const start = readStored().find((entry) => entry.id === id);
-  if (start === undefined || start.error !== null || running.has(id)) return null;
+  if (start === undefined || start.error !== null || start.sentAt != null || running.has(id)) {
+    return null;
+  }
   running.add(id);
   // Dismiss removes the start; a switch to Default pauses it until Orbit mode is back.
   const stopped = () =>
@@ -224,15 +264,25 @@ export async function runSavedOrbitThreadStart(
       stopped,
       isSaved,
       connect,
+      onCreateOperation: (operation) => recordCreateOperation(id, operation),
       send: async (ready) => {
         environmentId = ready.environmentId;
-        const projectId = await sendOrbitFirstMessage(ready, { ...firstMessagePorts, stopped });
+        let modelFallback: OrbitModelFallback | null = null;
+        const projectId = await sendOrbitFirstMessage(ready, {
+          ...firstMessagePorts,
+          stopped,
+          onModelFallback: (fallback) => {
+            modelFallback = fallback;
+          },
+        });
         // A clone is a new environment: without its ref the workspace would hide the thread.
         keepProjectInWorkspace(start.workspaceId ?? null, `${ready.environmentId}:${projectId}`);
+        return { modelFallback };
       },
     });
     if (!sent || environmentId === null) return null;
-    dismissOrbitThreadStart(id);
+    // A pending thread's start stays for the real thread's "Instance ready" row.
+    if (!start.pendingThread) dismissOrbitThreadStart(id);
     return {
       environmentId: environmentId as EnvironmentId,
       threadId: ThreadId.make(start.threadId),

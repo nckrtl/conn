@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { OrbitGatewayOperation } from "./client.ts";
-import { orbitSetupStages } from "./orbitSetupStages.ts";
+import { orbitSetupReadyMs, orbitSetupStages } from "./orbitSetupStages.ts";
 import { newOrbitThreadStart, type OrbitThreadStart } from "./threadStart.ts";
 
 const project = { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" };
@@ -258,5 +258,23 @@ describe("orbitSetupStages", () => {
     expect(
       summary({ ...existing, error: "Pairing expired.", errorCode: "operation.timeout" }),
     ).toEqual(["connect:failed operation.timeout", "agent:pending"]);
+  });
+
+  it("keeps Connect pending after the create until the runner stamps it", () => {
+    expect(summary(created)).toEqual(["create:done", "connect:pending", "agent:pending"]);
+    expect(summary({ ...created, connectStartedAt: 41 })).toEqual([
+      "create:done",
+      "connect:running",
+      "agent:pending",
+    ]);
+  });
+});
+
+describe("orbitSetupReadyMs", () => {
+  it("counts from the first stage to the sent message", () => {
+    expect(orbitSetupReadyMs({ ...connected, sentAt: 60 })).toBe(50);
+    expect(orbitSetupReadyMs(connected)).toBeNull();
+    const existing = { ...connected, orbitInstanceKind: "existing" as const, sentAt: 60 };
+    expect(orbitSetupReadyMs(existing)).toBe(19);
   });
 });

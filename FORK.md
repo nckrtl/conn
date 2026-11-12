@@ -385,6 +385,13 @@ the desktop app with "Environments from" set to Orbit, and the panel closes when
 A profile sync that drops the selected workspace leaves the panel open, as it does Settings
 (`isAppModalPage`). Settings search has no entries for the panel's sections.
 
+The phone has no rail: Settings starts with an "Orbit" row while the provider is Orbit, which
+opens Settings › Orbit (`SettingsOrbitRouteScreen.tsx`). It lists Connection only for now;
+Instances and Profile follow. The phone's Connection page (`SettingsOrbitConnectionRouteScreen.tsx`)
+uses the shared `orbitConnection.ts`. React Native's fetch reports every transport failure as
+"Network request failed", so `orbitPhoneConnection.ts` fails the Gateway check with both causes
+(tunnel, untrusted root CA) and leaves the certificate check unchecked.
+
 Sources:
 
 - `apps/web/src/orbit/*`.
@@ -399,7 +406,8 @@ Sources:
 - `packages/client-runtime/src/orbitGateway/environmentProvider.ts`.
 - `packages/client-runtime/src/orbitGateway/threadStart.ts` and `threadTurn.ts`.
 - Mobile (`apps/mobile/src/features/orbit/`): `orbitThreadStart*.ts`, `orbitThreadStarts.ts`,
-  `orbitWorkspaceRef.ts`, `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`.
+  `orbitWorkspaceRef.ts`, `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`,
+  `SettingsOrbit*RouteScreen.tsx`, `orbitPhoneConnection.ts`.
 
 ### Orbit profile sync
 

@@ -119,22 +119,27 @@ function NewThreadButton({ row }: { readonly row: OrbitInstanceWithThreads }) {
       });
     }
   };
-  const button = (
-    <Button
-      size="icon-sm"
-      variant="outline"
-      aria-label="New thread in this Instance"
-      aria-description={blockedReason ?? undefined}
-      disabled={blockedReason !== null || opening}
-      onClick={() => void open()}
-    >
-      {opening ? <Spinner /> : <SquarePenIcon />}
-    </Button>
-  );
+  // Blocked stays focusable (aria-disabled, not disabled) so keyboard focus opens the reason.
+  const blocked = blockedReason !== null;
   return (
     <Tooltip>
-      <TooltipTrigger delay={200} render={<span className="inline-flex" />}>
-        {button}
+      <TooltipTrigger
+        delay={200}
+        render={
+          <Button
+            size="icon-sm"
+            variant="outline"
+            aria-label="New thread in this Instance"
+            aria-description={blockedReason ?? undefined}
+            aria-disabled={blocked || undefined}
+            disabled={!blocked && opening}
+            onClick={() => {
+              if (!blocked) void open();
+            }}
+          />
+        }
+      >
+        {opening ? <Spinner /> : <SquarePenIcon />}
       </TooltipTrigger>
       <TooltipPopup side="top">{blockedReason ?? "New thread in this Instance"}</TooltipPopup>
     </Tooltip>
@@ -368,7 +373,7 @@ export function OrbitInstancesPage() {
         </p>
       </header>
       <div className="flex flex-wrap items-center gap-2 px-3 sm:px-4">
-        <InputGroup className="min-w-0 flex-1">
+        <InputGroup className="min-w-48 flex-1">
           <InputGroupAddon>
             <SearchIcon aria-hidden className="size-3.5" />
           </InputGroupAddon>

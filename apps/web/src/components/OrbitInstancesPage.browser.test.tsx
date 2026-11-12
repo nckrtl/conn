@@ -232,14 +232,25 @@ describe("Orbit Instances page", () => {
       ENVIRONMENTS,
     );
 
-    await expect.element(newThread("old-spike")).toBeDisabled();
+    await expect.element(newThread("old-spike")).toHaveAttribute("aria-disabled", "true");
     await expect
       .element(newThread("old-spike"))
       .toHaveAttribute("aria-description", "Orbit cannot start a stopped Instance yet");
-    await expect.element(newThread("lost")).toBeDisabled();
+    await expect.element(newThread("lost")).toHaveAttribute("aria-disabled", "true");
     await expect
       .element(newThread("lost"))
       .toHaveAttribute("aria-description", "Must register with Orbit again");
+
+    // A blocked button stays in the tab order, shows its reason on keyboard focus and does nothing.
+    await userEvent.keyboard("{Shift}");
+    (newThread("old-spike").element() as HTMLElement).focus();
+    expect(document.activeElement).toBe(newThread("old-spike").element());
+    await expect
+      .element(page.getByText("Orbit cannot start a stopped Instance yet", { exact: true }))
+      .toBeVisible();
+    await userEvent.keyboard("{Enter}");
+    await userEvent.click(newThread("lost"), { force: true });
+    expect(mocks.openInstance).toHaveBeenCalledTimes(1);
   });
 
   it("shows skeleton rows while loading, then the Gateway notice with a working Retry", async () => {
@@ -270,5 +281,18 @@ describe("Orbit Instances page", () => {
     await expect
       .element(page.getByText("To make one, choose New thread, then an Orbit Project."))
       .toBeVisible();
+  });
+
+  it("keeps the search field usable when the row is narrow", async () => {
+    using _env = setup(async () => ENVIRONMENTS);
+    await page.viewport(360, 720);
+    await using _screen = await renderPage();
+    const search = page.getByRole("searchbox", { name: "Search instances" });
+    await expect.element(search).toBeVisible();
+    const field = search.element().closest('[data-slot="input-group"]')!.getBoundingClientRect();
+    const filter = page.getByRole("button", { name: "Project filter" }).element();
+    // The filter wraps under the field instead of squeezing it.
+    expect(field.width).toBeGreaterThanOrEqual(192);
+    expect(filter.getBoundingClientRect().top).toBeGreaterThanOrEqual(field.bottom);
   });
 });

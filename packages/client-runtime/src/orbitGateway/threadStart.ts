@@ -431,6 +431,8 @@ const ADMISSION_REFUSALS: ReadonlySet<string> = new Set([
   ORBIT_BRANCH_EXISTS,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   ORBIT_PLACEMENT_CONFLICT,
+  // A malformed request (such as a branch object Orbit refuses) admits nothing either.
+  "validation.failed",
 ]);
 
 function isAdmissionRefusal(error: unknown): error is OrbitGatewayError {

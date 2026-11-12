@@ -3,6 +3,7 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { describe, expect, it } from "vite-plus/test";
 
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { formatInlineContextReference } from "../lib/composerContextReferences";
 import { carryComposerDraft } from "./carryComposerDraft";
 
 const orbitDraft = DraftId.make("draft-orbit");
@@ -62,6 +63,12 @@ describe("carryComposerDraft", () => {
     const store = setup();
     store.setPrompt(instanceDraft, "Earlier note");
     store.setRuntimeMode(orbitDraft, "approval-required");
+    carryComposerDraft(orbitDraft, instanceDraft);
+    // A context chip alone is no typed text either.
+    store.setPrompt(
+      orbitDraft,
+      formatInlineContextReference({ kind: "thread", contextId: "thread_1", label: "Login" }),
+    );
     carryComposerDraft(orbitDraft, instanceDraft);
     expect(useComposerDraftStore.getState().getComposerDraft(instanceDraft)?.prompt).toBe(
       "Earlier note",

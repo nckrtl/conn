@@ -3,6 +3,7 @@
  * Settings stays close to upstream (see FORK.md, "Orbit panel"). It opens on the first page.
  */
 export const ORBIT_PANEL_PAGES = [
+  { path: "/orbit/instances", label: "Instances" },
   { path: "/orbit/connection", label: "Connection" },
   { path: "/orbit/profile", label: "Profile" },
 ] as const;

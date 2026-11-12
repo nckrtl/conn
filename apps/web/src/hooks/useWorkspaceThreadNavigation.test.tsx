@@ -157,6 +157,7 @@ describe("workspace navigation", () => {
     ["Usage, later sync", "/usage", "gone"],
     ["Settings, back to a listed thread", "/settings/connections", "a1"],
     ["Orbit panel, profile switch", "/orbit/profile", "gone"],
+    ["Orbit panel Instances, profile switch", "/orbit/instances", "gone"],
     ["Orbit panel, back to a listed thread", "/orbit/connection", "a1"],
   ])(
     "waits for %s to close when the selected workspace goes away under it",

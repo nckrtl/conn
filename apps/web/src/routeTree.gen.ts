@@ -56,6 +56,7 @@ import { Route as ChatSettingsVoiceRouteImport } from './routes/_chat.settings.v
 import { Route as ChatSettingsWorktreesRouteImport } from './routes/_chat.settings.worktrees'
 import { Route as ThreadsEnvironmentIdThreadIdRouteImport } from './routes/threads.$environmentId.$threadId'
 import { Route as ChatOrbitPanelOrbitConnectionRouteImport } from './routes/_chat._orbitPanel.orbit.connection'
+import { Route as ChatOrbitPanelOrbitInstancesRouteImport } from './routes/_chat._orbitPanel.orbit.instances'
 import { Route as ChatOrbitPanelOrbitProfileRouteImport } from './routes/_chat._orbitPanel.orbit.profile'
 
 const ChatRoute = ChatRouteImport.update({
@@ -298,6 +299,12 @@ const ChatOrbitPanelOrbitConnectionRoute =
     path: '/orbit/connection',
     getParentRoute: () => ChatOrbitPanelRoute,
   } as any)
+const ChatOrbitPanelOrbitInstancesRoute =
+  ChatOrbitPanelOrbitInstancesRouteImport.update({
+    id: '/orbit/instances',
+    path: '/orbit/instances',
+    getParentRoute: () => ChatOrbitPanelRoute,
+  } as any)
 const ChatOrbitPanelOrbitProfileRoute =
   ChatOrbitPanelOrbitProfileRouteImport.update({
     id: '/orbit/profile',
@@ -351,6 +358,7 @@ export interface FileRoutesByFullPath {
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
   '/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
+  '/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
   '/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
 }
 export interface FileRoutesByTo {
@@ -399,6 +407,7 @@ export interface FileRoutesByTo {
   '/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
   '/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
+  '/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
   '/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
 }
 export interface FileRoutesById {
@@ -450,6 +459,7 @@ export interface FileRoutesById {
   '/_chat/settings/worktrees': typeof ChatSettingsWorktreesRoute
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
   '/_chat/_orbitPanel/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
+  '/_chat/_orbitPanel/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
   '/_chat/_orbitPanel/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
 }
 export interface FileRouteTypes {
@@ -500,6 +510,7 @@ export interface FileRouteTypes {
     | '/settings/worktrees'
     | '/threads/$environmentId/$threadId'
     | '/orbit/connection'
+    | '/orbit/instances'
     | '/orbit/profile'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -548,6 +559,7 @@ export interface FileRouteTypes {
     | '/settings/worktrees'
     | '/threads/$environmentId/$threadId'
     | '/orbit/connection'
+    | '/orbit/instances'
     | '/orbit/profile'
   id:
     | '__root__'
@@ -598,6 +610,7 @@ export interface FileRouteTypes {
     | '/_chat/settings/worktrees'
     | '/threads/$environmentId/$threadId'
     | '/_chat/_orbitPanel/orbit/connection'
+    | '/_chat/_orbitPanel/orbit/instances'
     | '/_chat/_orbitPanel/orbit/profile'
   fileRoutesById: FileRoutesById
 }
@@ -944,6 +957,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatOrbitPanelOrbitConnectionRouteImport
       parentRoute: typeof ChatOrbitPanelRoute
     }
+    '/_chat/_orbitPanel/orbit/instances': {
+      id: '/_chat/_orbitPanel/orbit/instances'
+      path: '/orbit/instances'
+      fullPath: '/orbit/instances'
+      preLoaderRoute: typeof ChatOrbitPanelOrbitInstancesRouteImport
+      parentRoute: typeof ChatOrbitPanelRoute
+    }
     '/_chat/_orbitPanel/orbit/profile': {
       id: '/_chat/_orbitPanel/orbit/profile'
       path: '/orbit/profile'
@@ -956,11 +976,13 @@ declare module '@tanstack/react-router' {
 
 interface ChatOrbitPanelRouteChildren {
   ChatOrbitPanelOrbitConnectionRoute: typeof ChatOrbitPanelOrbitConnectionRoute
+  ChatOrbitPanelOrbitInstancesRoute: typeof ChatOrbitPanelOrbitInstancesRoute
   ChatOrbitPanelOrbitProfileRoute: typeof ChatOrbitPanelOrbitProfileRoute
 }
 
 const ChatOrbitPanelRouteChildren: ChatOrbitPanelRouteChildren = {
   ChatOrbitPanelOrbitConnectionRoute: ChatOrbitPanelOrbitConnectionRoute,
+  ChatOrbitPanelOrbitInstancesRoute: ChatOrbitPanelOrbitInstancesRoute,
   ChatOrbitPanelOrbitProfileRoute: ChatOrbitPanelOrbitProfileRoute,
 }
 

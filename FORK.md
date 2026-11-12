@@ -358,9 +358,16 @@ and ignores other keys. With both ids as positive integers, the environment desc
 stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. The sidebar title of the clone's
 `/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
 
-The Orbit panel is a modal like Settings, with its own nav: Connection (this device's Node
-and the Gateway's servers, with a link back to "Environments from") and Profile (the profile
-and its sync). An Orbit icon above Settings in the workspace rail opens it; it shows only in
+The Orbit panel is a modal like Settings, with its own nav: Instances, Connection (this device's
+Node and the Gateway's servers, with a link back to "Environments from") and Profile (the profile
+and its sync). Instances lists every Instance this device can reach, by Orbit Project, never a
+default: today from the Gateway's environments named from its Projects, later from Orbit's flat
+`GET /conn/instances`. Only `listOrbitInstances` in `client-runtime/src/orbitGateway/instanceList.ts`
+reads the source; grouping, search, the Project filter and the join with local threads beside it
+are pure, so mobile reuses them. "New thread in this Instance" does what the palette's Instance
+step does (`openOrbitInstanceById`). Removing an Instance and its Git state wait for Orbit (a
+destroy handle for Conn and Git state per Instance). An Orbit icon above Settings in the
+workspace rail opens the panel on Instances; it shows only in
 the desktop app with "Environments from" set to Orbit, and the panel closes when that changes.
 A profile sync that drops the selected workspace leaves the panel open, as it does Settings
 (`isAppModalPage`). Settings search has no entries for the panel's sections.
@@ -368,7 +375,8 @@ A profile sync that drops the selected workspace leaves the panel open, as it do
 Sources:
 
 - `apps/web/src/orbit/*`.
-- Orbit panel: `apps/web/src/components/OrbitPanel.tsx`, `orbit/orbitPanelPages.ts`,
+- Orbit panel: `apps/web/src/components/OrbitPanel.tsx`, `OrbitInstancesPage.tsx`,
+  `orbit/orbitPanelPages.ts`, `orbit/orbitInstanceList.ts`,
   `routes/_chat._orbitPanel*.tsx`, the rail button in `components/sidebar/WorkspaceRail.tsx`,
   `components/sidebar/mainAppLocation.ts` (`isAppModalPage`).
 - Settings files the fork touches for Orbit: `components/settings/OrbitSettings.tsx` (the

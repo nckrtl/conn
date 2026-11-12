@@ -82,17 +82,19 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
   if (start === null) {
     return (
       <SidebarInset className="h-dvh">
-        <div className="flex min-h-0 flex-1 flex-col bg-background">
+        <div className="flex min-h-0 flex-1 flex-col bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate)">
           <WorkspacePageHeader electron={isElectron} />
-          <Empty>
-            <EmptyHeader>
-              <EmptyTitle>This thread start is gone</EmptyTitle>
-              <EmptyDescription>It was dismissed on this device.</EmptyDescription>
-            </EmptyHeader>
-            <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
-              New thread
-            </Button>
-          </Empty>
+          <div className="flex min-h-0 flex-1 flex-col bg-background">
+            <Empty>
+              <EmptyHeader>
+                <EmptyTitle>This thread start is gone</EmptyTitle>
+                <EmptyDescription>It was dismissed on this device.</EmptyDescription>
+              </EmptyHeader>
+              <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
+                New thread
+              </Button>
+            </Empty>
+          </div>
         </div>
       </SidebarInset>
     );
@@ -121,7 +123,7 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
 
   return (
     <SidebarInset className="h-dvh" data-orbit-pending-thread={start.id}>
-      <div className="flex min-h-0 flex-1 flex-col bg-background">
+      <div className="flex min-h-0 flex-1 flex-col bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate)">
         <WorkspacePageHeader electron={isElectron}>
           <span className="min-w-0 truncate text-sm font-medium text-foreground">
             {start.message.split("\n")[0]}
@@ -130,7 +132,7 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
             {start.instanceName} · {start.projectSlug}
           </span>
         </WorkspacePageHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both">
+        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
           <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
             <div className="flex justify-end pb-4">
               <div

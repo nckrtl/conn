@@ -546,7 +546,7 @@ export async function runOrbitThreadStart(
         outageSince = null;
         observe?.(operation);
       } catch (error) {
-        // A create runs for minutes; a short Gateway outage must not stop it.
+        // A create runs for minutes; a short Gateway outage must not stop it (CI proof).
         outageSince ??= ports.now();
         if (!isTransient(error) || ports.now() - outageSince >= READ_OUTAGE_MS) throw error;
         operation = null;

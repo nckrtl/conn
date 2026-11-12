@@ -112,7 +112,7 @@ export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
       };
     }
     case ORBIT_BRANCH_NOT_FOUND: {
-      // Mode new names only a base (field branch.from), mode existing only a branch (branch.name).
+      // Mode new names only a base (field branch.from), mode existing only a branch (branch.name) (CI proof).
       const branch = start.branch ?? null;
       const name =
         branch === null

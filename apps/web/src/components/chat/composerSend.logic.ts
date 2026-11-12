@@ -79,3 +79,11 @@ export function approvalRedirectNotice(input: {
   }
   return null;
 }
+
+/** An Orbit draft starts through the Gateway, so its anchor environment's grants do not matter. */
+export function sendNeedsEnvironmentOperateScope(input: {
+  readonly hasOperateScope: boolean;
+  readonly isOrbitDraft: boolean;
+}): boolean {
+  return !input.isOrbitDraft && !input.hasOperateScope;
+}

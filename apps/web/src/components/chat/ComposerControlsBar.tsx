@@ -5,6 +5,7 @@ import { type AppModelOption } from "../../modelSelection";
 import { CircleAlertIcon } from "lucide-react";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerControl } from "./ComposerControl";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   ComposerFooterModeControls,
   ComposerModelPicker,
@@ -65,6 +66,7 @@ export function ComposerControlsBar(props: {
   restingHiddenBlockCount: number;
   iconOnlyBlockCount: number;
   showProviderUnavailable: boolean;
+  usesInstanceDefaultModel: boolean;
   providerSetupInstanceId: ProviderInstanceId | undefined;
   onOpenProviderSetup: ChatComposerProps["onOpenProviderSetup"];
   providerCatalogPending: boolean;
@@ -109,6 +111,7 @@ export function ComposerControlsBar(props: {
     restingHiddenBlockCount: measuredHiddenBlockCount,
     iconOnlyBlockCount,
     showProviderUnavailable,
+    usesInstanceDefaultModel,
     providerSetupInstanceId,
     onOpenProviderSetup,
     providerCatalogPending,
@@ -262,7 +265,27 @@ export function ComposerControlsBar(props: {
     </ComposerControl>
   ) : (
     <>
-      {composerModelPicker}
+      {usesInstanceDefaultModel ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                tabIndex={0}
+                data-orbit-instance-default-model="true"
+                className="inline-flex h-7 shrink-0 items-center rounded-sm px-2 text-muted-foreground text-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              />
+            }
+          >
+            Instance default model
+          </TooltipTrigger>
+          <TooltipPopup>
+            No connected environment lends a model list here. The new Instance starts this thread
+            with its own default model.
+          </TooltipPopup>
+        </Tooltip>
+      ) : (
+        composerModelPicker
+      )}
 
       <>
         {restingBlockDefs.map((def, index) => {

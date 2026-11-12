@@ -96,6 +96,7 @@ import {
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
+  sendNeedsEnvironmentOperateScope,
 } from "./composerSend.logic";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
@@ -143,6 +144,7 @@ import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
 import {
   buildOrbitDraftStart,
+  isOrbitDraftWithoutEnvironment,
   orbitDraftAttachmentsBlockedReason,
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
@@ -437,7 +439,10 @@ export function useComposerSend(input: ComposerSendInput) {
       );
     };
     if (
-      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
+      sendNeedsEnvironmentOperateScope({
+        hasOperateScope: readEnvironmentScope(environmentId, AuthOrchestrationOperateScope),
+        isOrbitDraft: orbitDraftTarget !== null,
+      }) ||
       !activeThread ||
       (isSendBusy && !sendQueuesBehindSetup) ||
       isRevertingCheckpoint ||
@@ -774,7 +779,9 @@ export function useComposerSend(input: ComposerSendInput) {
         start: buildOrbitDraftStart({
           target: orbitDraftTarget,
           message: trimmed,
-          modelSelection: ctxSelectedModelSelection,
+          modelSelection: isOrbitDraftWithoutEnvironment(environmentId)
+            ? null
+            : ctxSelectedModelSelection,
           runtimeMode,
           interactionMode:
             composerDraft?.interactionMode ??

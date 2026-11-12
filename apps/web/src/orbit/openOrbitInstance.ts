@@ -9,6 +9,7 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readProjects } from "../state/entities";
 import { carryComposerDraft } from "./carryComposerDraft";
 import { openOrbitDraft } from "./openOrbitDraft";
+import { orbitThreadStartBlockedReason } from "./orbitThreadStarts";
 import {
   buildOrbitInstanceRows,
   orbitCloneProject,
@@ -99,5 +100,10 @@ export async function openOrbitInstanceById(input: {
   }
   return draftId !== null
     ? { kind: "opened", draftId }
-    : { kind: "unavailable", reason: `Conn could not open Instance ${row.name} here.` };
+    : {
+        kind: "unavailable",
+        reason:
+          orbitThreadStartBlockedReason() ??
+          `Conn could not open Instance ${row.name} here. Pick it again in the palette.`,
+      };
 }

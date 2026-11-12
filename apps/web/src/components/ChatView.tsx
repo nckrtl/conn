@@ -308,7 +308,10 @@ import {
   resolveActiveOrbitDraftTarget,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
-import { orbitDraftAttachmentsBlockedReason } from "../orbit/orbitDraft";
+import {
+  isOrbitDraftWithoutEnvironment,
+  orbitDraftAttachmentsBlockedReason,
+} from "../orbit/orbitDraft";
 import {
   getProviderStatusBannerKey,
   shouldShowProviderStatusBanner,
@@ -3713,7 +3716,8 @@ export default function ChatView(props: ChatViewProps) {
                                 canResume={resumableRunId !== null || hasHeldQueuedRuns}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
                                 sendDisabledReason={
-                                  !canOperateThread
+                                  // An Orbit draft starts through the Gateway, never on its anchor.
+                                  !canOperateThread && orbitDraftTarget === null
                                     ? "This connection cannot change threads."
                                     : isEnvironmentChanging
                                       ? "Preparing machine"
@@ -3764,6 +3768,10 @@ export default function ChatView(props: ChatViewProps) {
                                 lockedProvider={modelPickerLockedProvider}
                                 providerStatuses={providerStatuses as ServerProvider[]}
                                 providerCatalogKnown={serverConfig !== null}
+                                usesInstanceDefaultModel={
+                                  orbitDraftTarget !== null &&
+                                  isOrbitDraftWithoutEnvironment(environmentId)
+                                }
                                 activeProjectDefaultModelSelection={
                                   activeProjectDefaultModelSelection
                                 }

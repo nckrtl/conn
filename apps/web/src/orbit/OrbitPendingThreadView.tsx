@@ -23,7 +23,11 @@ import { readOrbitEnvironments } from "./orbitPaletteProjects";
 import type { OrbitDraftTarget } from "./orbitDraft";
 import { openOrbitInstanceStep } from "./orbitInstanceStep";
 import { orbitSetupView } from "./orbitSetupView";
-import { dismissOrbitThreadStart, retryOrbitThreadStart } from "./orbitThreadStarts";
+import {
+  dismissOrbitThreadStart,
+  orbitThreadStartBlockedReason,
+  retryOrbitThreadStart,
+} from "./orbitThreadStarts";
 import { useOrbitCreateOperations, useOrbitThreadStarts } from "./orbitThreadStartStore";
 
 /** How long the handover waits for the thread to reach this window before it opens it anyway. */
@@ -119,7 +123,9 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
       toastManager.add({
         type: "error",
         title: "Could not reopen the draft",
-        description: `Start a new thread in ${start.projectSlug} from the palette instead.`,
+        description:
+          orbitThreadStartBlockedReason() ??
+          `Start a new thread in ${start.projectSlug} from the palette instead.`,
       });
       return null;
     }

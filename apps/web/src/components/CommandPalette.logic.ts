@@ -999,7 +999,10 @@ const REASON_MAX_LENGTH = 80;
 function oneLineReason(message: string | null | undefined): string | null {
   const line = message?.split("\n")[0]?.trim();
   if (!line) return null;
-  return line.length > REASON_MAX_LENGTH ? `${line.slice(0, REASON_MAX_LENGTH - 1)}…` : line;
+  const characters = Array.from(line);
+  return characters.length > REASON_MAX_LENGTH
+    ? `${characters.slice(0, REASON_MAX_LENGTH - 1).join("")}…`
+    : line;
 }
 
 export function orbitPaletteProjectSubline(row: OrbitPaletteProjectRow): string {

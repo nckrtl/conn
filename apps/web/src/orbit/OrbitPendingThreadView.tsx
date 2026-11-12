@@ -82,16 +82,18 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
   if (start === null) {
     return (
       <SidebarInset className="h-dvh">
-        <WorkspacePageHeader electron={isElectron} />
-        <Empty>
-          <EmptyHeader>
-            <EmptyTitle>This thread start is gone</EmptyTitle>
-            <EmptyDescription>It was dismissed on this device.</EmptyDescription>
-          </EmptyHeader>
-          <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
-            New thread
-          </Button>
-        </Empty>
+        <div className="flex min-h-0 flex-1 flex-col bg-background">
+          <WorkspacePageHeader electron={isElectron} />
+          <Empty>
+            <EmptyHeader>
+              <EmptyTitle>This thread start is gone</EmptyTitle>
+              <EmptyDescription>It was dismissed on this device.</EmptyDescription>
+            </EmptyHeader>
+            <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
+              New thread
+            </Button>
+          </Empty>
+        </div>
       </SidebarInset>
     );
   }
@@ -119,33 +121,35 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
 
   return (
     <SidebarInset className="h-dvh" data-orbit-pending-thread={start.id}>
-      <WorkspacePageHeader electron={isElectron}>
-        <span className="min-w-0 truncate text-sm font-medium text-foreground">
-          {start.message.split("\n")[0]}
-        </span>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {start.instanceName} · {start.projectSlug}
-        </span>
-      </WorkspacePageHeader>
-      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both">
-        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
-          <div className="flex justify-end pb-4">
-            <div
-              data-orbit-pending-message
-              className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"
-            >
-              {start.message}
+      <div className="flex min-h-0 flex-1 flex-col bg-background">
+        <WorkspacePageHeader electron={isElectron}>
+          <span className="min-w-0 truncate text-sm font-medium text-foreground">
+            {start.message.split("\n")[0]}
+          </span>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {start.instanceName} · {start.projectSlug}
+          </span>
+        </WorkspacePageHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both">
+          <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
+            <div className="flex justify-end pb-4">
+              <div
+                data-orbit-pending-message
+                className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"
+              >
+                {start.message}
+              </div>
             </div>
+            <OrbitSetupCard
+              view={orbitSetupView(start, create)}
+              onRetry={() => retryOrbitThreadStart(start.id)}
+              onChangeName={() => void changeName()}
+              onDismiss={() => {
+                dismissOrbitThreadStart(start.id);
+                void navigate({ to: "/", replace: true });
+              }}
+            />
           </div>
-          <OrbitSetupCard
-            view={orbitSetupView(start, create)}
-            onRetry={() => retryOrbitThreadStart(start.id)}
-            onChangeName={() => void changeName()}
-            onDismiss={() => {
-              dismissOrbitThreadStart(start.id);
-              void navigate({ to: "/", replace: true });
-            }}
-          />
         </div>
       </div>
     </SidebarInset>

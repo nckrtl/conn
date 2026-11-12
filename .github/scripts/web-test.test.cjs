@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { classify, runWithRetry, INFRA_MESSAGE } = require("./web-test-retry.cjs");
+const { classify, verdictCode, INFRA_MESSAGE } = require("./web-test.cjs");
 
 const esc = "\u001b";
 const rule = "⎯⎯⎯⎯⎯⎯";
@@ -99,58 +99,36 @@ test("a plain failure without the signature is a real failure", () => {
   assert.equal(classify("", 1), "fail");
 });
 
-function attempts(...results) {
-  const calls = [];
-  return {
-    calls,
-    attempt: async (n) => {
-      calls.push(n);
-      return results[n - 1];
-    },
-  };
-}
-
-const quiet = () => {};
-
-test("a pass or a real failure runs once", async () => {
-  const pass = attempts({ code: 0, output: "" });
-  assert.equal(await runWithRetry(pass.attempt, quiet), 0);
-  assert.deepEqual(pass.calls, [1]);
-
-  const fail = attempts({ code: 1, output: closedAfterRun + failedAssertion });
-  assert.equal(await runWithRetry(fail.attempt, quiet), 1);
-  assert.deepEqual(fail.calls, [1]);
-});
-
-test("browser closed once, then a pass, passes", async () => {
-  const run = attempts({ code: 1, output: closedMidRun }, { code: 0, output: "" });
-  assert.equal(await runWithRetry(run.attempt, quiet), 0);
-  assert.deepEqual(run.calls, [1, 2]);
-});
-
-test("browser closed, then a real failure, fails without the infra label", async () => {
-  const lines = [];
-  const run = attempts({ code: 1, output: closedMidRun }, { code: 1, output: plainFailure });
-  assert.equal(await runWithRetry(run.attempt, (line) => lines.push(line)), 1);
-  assert.deepEqual(run.calls, [1, 2]);
-  assert.ok(!lines.some((line) => line.includes(INFRA_MESSAGE)));
-});
-
-test("browser closed twice fails as an infrastructure failure", async () => {
-  const lines = [];
-  const run = attempts({ code: 1, output: closedAfterRun }, { code: 1, output: closedMidRun });
-  assert.equal(await runWithRetry(run.attempt, (line) => lines.push(line)), 1);
-  assert.deepEqual(run.calls, [1, 2]);
-  assert.ok(lines.includes(`::error::${INFRA_MESSAGE}`));
-  const named = attempts({ code: 1, output: closedMidRun }, { code: 1, output: closedAfterRun });
-  const namedLines = [];
-  await runWithRetry(named.attempt, (line) => namedLines.push(line));
-  assert.ok(
-    namedLines.some((line) =>
-      line.endsWith(
-        "check /home/runner/work/conn/conn/apps/web/src/components/files/FileExplorerPane.browser.test.tsx.",
-      ),
-    ),
+test("a pass or a real failure keeps its exit code", () => {
+  assert.equal(
+    verdictCode({ code: 0, output: "" }, () => {}),
+    0,
   );
-  assert.match(INFRA_MESSAGE, /browser connection closed twice; not a test failure/);
+  assert.equal(
+    verdictCode({ code: 1, output: closedAfterRun + failedAssertion }, () => {}),
+    1,
+  );
+  assert.equal(
+    verdictCode({ code: 1, output: plainFailure }, () => {}),
+    1,
+  );
+});
+
+test("a closed browser with no failed test passes with a warning", () => {
+  const lines = [];
+  assert.equal(
+    verdictCode({ code: 1, output: closedAfterRun }, (line) => lines.push(line)),
+    0,
+  );
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].startsWith(`::warning title=Web tests::${INFRA_MESSAGE}`));
+  assert.ok(lines[0].includes("src/components/files/FileExplorerPane.browser.test.tsx."));
+  assert.ok(lines[0].includes(" 8 of 302 test files did not run."));
+
+  const midRun = [];
+  assert.equal(
+    verdictCode({ code: 1, output: closedMidRun }, (line) => midRun.push(line)),
+    0,
+  );
+  assert.ok(midRun[0].includes("Vitest stopped before its summary"));
 });

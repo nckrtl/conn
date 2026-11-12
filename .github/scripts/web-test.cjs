@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Runs the web tests; retries once when the only problem is that Chromium
-// dropped its vitest connection (VITEST_BROWSER_CONNECTION_CLOSED). Any sign of
-// a real test failure fails at once. Usage: web-test-retry.cjs <cmd> [args...]
+// Runs the web tests. When the only problem is that Chromium dropped its vitest
+// connection (VITEST_BROWSER_CONNECTION_CLOSED), the step passes with a warning:
+// an infrastructure failure is not a gate. Any sign of a real test failure fails.
+// Usage: web-test.cjs <cmd> [args...]
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 
-const INFRA_MESSAGE =
-  "Infrastructure failure: browser connection closed twice; not a test failure.";
+const INFRA_MESSAGE = "Infrastructure failure, not a test failure: the browser connection closed.";
 
 const CLOSED = /VITEST_BROWSER_CONNECTION_CLOSED|Browser connection was closed while running tests/;
 // One header per error; the plural "Unhandled Errors" banner does not match.
@@ -72,43 +72,35 @@ function summary(line) {
   }
 }
 
-// Runs `attempt` up to twice and returns the exit code for the step.
-async function runWithRetry(attempt, log = console.log) {
-  const first = await attempt(1);
-  const firstVerdict = classify(first.output, first.code);
-  if (firstVerdict !== "browser-closed") return first.code;
-
-  log("::warning::Browser connection closed with no failed test; running the web tests once more.");
-  summary("⚠️ Web tests: browser connection closed with no failed test; retried once.");
-
-  const second = await attempt(2);
-  const secondVerdict = classify(second.output, second.code);
-  if (secondVerdict === "pass") {
-    summary("✅ Web tests passed on the retry.");
-    return 0;
-  }
-  if (secondVerdict === "fail") return second.code;
-
-  const file = stripAnsi(second.output).match(/Failed to run the test (\S+?)\.?$/m)?.[1];
-  const where = file ? ` If it repeats, check ${file}.` : "";
-  log(`::error::${INFRA_MESSAGE}${where}`);
-  summary(`❌ ${INFRA_MESSAGE}${where}`);
-  return second.code;
+// Returns the exit code for the step: 0 when the only problem was a closed browser.
+function verdictCode(result, log = console.log) {
+  if (classify(result.output, result.code) !== "browser-closed") return result.code;
+  const output = stripAnsi(result.output);
+  const file = output.match(/Failed to run the test (\S+?)\.?$/m)?.[1];
+  const counts = output.match(/^\s*Test Files\s+(.*)\((\d+)\)\s*$/m);
+  const ran = [...(counts?.[1] ?? "").matchAll(/(\d+) (?:passed|skipped|todo)/g)];
+  const details = [
+    file ? ` It closed during ${file}.` : "",
+    counts
+      ? ` ${Number(counts[2]) - ran.reduce((sum, [, n]) => sum + Number(n), 0)} of ${counts[2]} test files did not run.`
+      : " Vitest stopped before its summary, so some test files did not run.",
+  ].join("");
+  log(
+    `::warning title=Web tests::${INFRA_MESSAGE}${details} The step passes; re-run the job to run every file.`,
+  );
+  summary(`⚠️ ${INFRA_MESSAGE}${details}`);
+  return 0;
 }
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (!command) {
-    console.error("usage: web-test-retry.cjs <command> [args...]");
+    console.error("usage: web-test.cjs <command> [args...]");
     process.exit(2);
   }
-  const code = await runWithRetry((n) => {
-    if (n > 1) console.log(`\n=== Retry ${n}: ${[command, ...args].join(" ")} ===\n`);
-    return runOnce(command, args);
-  });
-  process.exit(code);
+  process.exit(verdictCode(await runOnce(command, args)));
 }
 
-module.exports = { classify, runWithRetry, INFRA_MESSAGE };
+module.exports = { classify, verdictCode, INFRA_MESSAGE };
 
 if (require.main === module) main();

@@ -2,10 +2,16 @@ import { useNavigate, type AnyRouter } from "@tanstack/react-router";
 
 import { GUEST_PAGE_PATH } from "../../guestPage";
 import { withoutAssistantCitationHash } from "../../lib/assistantCitationNavigation";
+import { isOrbitPanelPage } from "../../orbit/orbitPanelPages";
 
-/** Settings and Usage open as modals over the last main-app view. */
+/** Settings, Usage and the Orbit panel (Conn) open as modals over the last main-app view. */
 export function isAppModalPage(pathname: string) {
-  return pathname === "/settings" || pathname.startsWith("/settings/") || pathname === "/usage";
+  return (
+    pathname === "/settings" ||
+    pathname.startsWith("/settings/") ||
+    pathname === "/usage" ||
+    isOrbitPanelPage(pathname)
+  );
 }
 
 export function isSidebarUtilityPage(pathname: string) {
@@ -39,7 +45,7 @@ export function useNavigateToMainApp() {
 }
 
 /** Leaves Settings or Usage for the page that opened it. */
-export function useCloseAppModal() {
+export function useCloseAppModal({ replace = false }: { readonly replace?: boolean } = {}) {
   const navigate = useNavigate();
-  return () => navigate({ href: appModalReturnHref ?? mainAppHref ?? "/" });
+  return () => navigate({ href: appModalReturnHref ?? mainAppHref ?? "/", replace });
 }

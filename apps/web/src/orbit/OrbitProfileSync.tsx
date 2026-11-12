@@ -69,7 +69,7 @@ export const useOrbitProfileSyncStatus = create<OrbitProfileSyncStatus>(() => IN
 
 let requestSync: ((options?: ProfileSyncRunOptions) => void) | null = null;
 
-/** Runs the profile sync now, as after a profile change in Settings. A no-op outside the desktop app. */
+/** Runs the profile sync now, as after a profile change in the Orbit panel. A no-op outside the desktop app. */
 export function syncOrbitProfileNow(): void {
   requestSync?.();
 }

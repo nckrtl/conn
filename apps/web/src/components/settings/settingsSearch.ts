@@ -1014,36 +1014,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["orbit default environments source gateway servers manage"],
   },
   {
-    id: "orbit-device",
-    title: "Orbit Gateway",
-    to: "/settings/connections",
-    desktopOnly: true,
-    searchTerms: ["orbit gateway wireguard node device sign in"],
-  },
-  {
-    id: "orbit-profile",
-    title: "Orbit profile",
-    to: "/settings/connections",
-    desktopOnly: true,
-    searchTerms: ["profile share workspaces phone desktop devices"],
-  },
-  {
-    id: "orbit-profile-sync",
-    title: "Profile sync",
-    to: "/settings/connections",
-    desktopOnly: true,
-    searchTerms: [
-      "sync workspaces appearance theme fonts settings orbit profile gateway restore previous",
-    ],
-  },
-  {
-    id: "orbit-servers",
-    title: "Orbit servers",
-    to: "/settings/connections",
-    desktopOnly: true,
-    searchTerms: ["pair servers environments gateway beast mini shark"],
-  },
-  {
     id: "providers",
     title: "Providers",
     to: "/settings/providers",

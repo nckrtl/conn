@@ -47,11 +47,11 @@ beforeEach(() => {
   state.navigate.mockClear();
   state.params = { environmentId: "local", threadId: "a1" };
   state.pathname = "/local/a1";
-  state.threads = ["a1", "b1"].map((id) => ({
+  state.threads = ["a1", "b1", "c1"].map((id) => ({
     environmentId: "local",
     id,
     projectId: "p1",
-    archivedAt: null,
+    archivedAt: id === "c1" ? "2026-01-01T00:00:00.000Z" : null,
     lineage: { relationshipToParent: null, parentThreadId: null },
   }));
   useWorkspaceStore.setState({
@@ -108,6 +108,7 @@ describe("workspace navigation", () => {
   });
   it.each([
     ["a thread All lists, first sync", { environmentId: "local", threadId: "a1" }, "/local/a1"],
+    ["an archived thread, later sync", { environmentId: "local", threadId: "c1" }, "/local/c1"],
     ["a draft, later sync", { draftId: "d1" }, "/draft/d1"],
     ["pull requests, first sync", {}, "/pull-requests"],
     ["a project page, later sync", { projectKey: "p1" }, "/projects/p1"],
@@ -122,6 +123,8 @@ describe("workspace navigation", () => {
     });
     expect(state.navigate).not.toHaveBeenCalled();
     expect(useWorkspaceStore.getState().activeWorkspaceId).toBeNull();
+    if (pathname === "/local/a1")
+      expect(useWorkspaceStore.getState().lastThreadByWorkspace.all).toEqual(ref("a1"));
   });
   it("still follows a switch to All the user makes", async () => {
     useWorkspaceStore.setState({ lastThreadByWorkspace: { all: ref("b1") } });
@@ -150,11 +153,12 @@ describe("workspace navigation", () => {
   });
   // First sync: the profile lacks this device's selection. Later sync: another device removed it.
   it.each([
-    ["Settings, first sync", "/settings/connections"],
-    ["Usage, later sync", "/usage"],
+    ["Settings, first sync", "/settings/connections", "gone"],
+    ["Usage, later sync", "/usage", "gone"],
+    ["Settings, back to a listed thread", "/settings/connections", "a1"],
   ])(
     "waits for %s to close when the selected workspace goes away under it",
-    async (_, pathname) => {
+    async (_, pathname, closesTo) => {
       useUiStateStore.setState({ threadLastVisitedAtById: {} });
       await act(() => {
         renderer = create(<Probe />);
@@ -168,13 +172,13 @@ describe("workspace navigation", () => {
         useWorkspaceStore.setState({ workspaces: [workspace("b")], activeWorkspaceId: null });
       });
       expect(state.navigate).not.toHaveBeenCalled();
-      state.params = { environmentId: "local", threadId: "gone" };
-      state.pathname = "/local/gone";
+      state.params = { environmentId: "local", threadId: closesTo };
+      state.pathname = `/local/${closesTo}`;
       await act(() => {
         renderer?.update(<Probe />);
       });
-      expect(state.navigate).toHaveBeenCalledTimes(1);
-      expect(state.navigate).toHaveBeenLastCalledWith({ to: "/" });
+      if (closesTo === "a1") expect(state.navigate).not.toHaveBeenCalled();
+      else expect(state.navigate.mock.calls).toEqual([[{ to: "/" }]]);
     },
   );
 });

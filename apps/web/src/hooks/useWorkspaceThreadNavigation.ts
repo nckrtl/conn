@@ -48,7 +48,13 @@ export function useWorkspaceThreadNavigation() {
         workspaceId === null &&
         previous !== null &&
         !useWorkspaceStore.getState().workspaces.some((workspace) => workspace.id === previous);
-      if (!disappeared || (route !== null && !current)) {
+      // All has no project filter, so a child or archived thread the route shows is still reachable.
+      const reachable =
+        route === null ||
+        threads.some(
+          (thread) => thread.environmentId === route.environmentId && thread.id === route.threadId,
+        );
+      if (!disappeared || !reachable) {
         const target = lastWorkspaceThread(
           candidates,
           useWorkspaceStore.getState().lastThreadByWorkspace[workspaceId ?? "all"],

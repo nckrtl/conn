@@ -59,6 +59,8 @@ function gateway(script: {
   readonly pairingLost?: ReadonlyArray<number>;
   /** The succeeded create Operation's result. */
   readonly createResult?: Record<string, unknown>;
+  /** Orbit's `error.detail` on a failed Operation. */
+  readonly failedDetail?: string;
 }) {
   const calls: string[] = [];
   const keys: string[] = [];
@@ -107,6 +109,12 @@ function gateway(script: {
         status,
         status === "failed" ? "instance.t3_unready" : null,
       );
+      if (status === "failed" && script.failedDetail) {
+        return {
+          ...read,
+          error: { code: read.errorCode, message: null, detail: script.failedDetail },
+        };
+      }
       return id === 100 && status === "succeeded" && script.createResult
         ? { ...read, result: script.createResult }
         : read;
@@ -239,6 +247,7 @@ describe("readOrbitThreadStarts", () => {
       branch: null,
       defaultBranch: null,
       errorDetails: null,
+      errorDetail: null,
       resultBranch: null,
       resultBaseBranch: null,
     });
@@ -430,8 +439,11 @@ describe("runOrbitThreadStart", () => {
     expect(run.sent).toHaveLength(1);
   });
 
-  it("stops on a failed create, and a retry creates the same name again", async () => {
-    const { client, calls } = gateway({ create: ["running", "failed"] });
+  it("stops on a failed create with Orbit's detail, and a retry creates the same name again", async () => {
+    const { client, calls } = gateway({
+      create: ["running", "failed"],
+      failedDetail: "Argument list too long",
+    });
     const run = ports(client);
 
     expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
@@ -439,12 +451,19 @@ describe("runOrbitThreadStart", () => {
     expect(stopped).toMatchObject({
       createOperationId: null,
       error: expect.stringContaining("instance.t3_unready"),
+      errorDetail: "Argument list too long",
     });
 
     expect(stopped.createKey).toBeNull();
+    // The saved record keeps the detail across a reload.
+    const [reloaded] = readOrbitThreadStarts(JSON.parse(JSON.stringify([stopped])));
+    expect(reloaded!.errorDetail).toBe("Argument list too long");
+    expect(retryOrbitThreadStartRecord(stopped).errorDetail).toBeNull();
 
     const retry = gateway({});
-    expect(await runOrbitThreadStart(stopped, ports(retry.client).ports)).toBe(true);
+    const retryRun = ports(retry.client);
+    expect(await runOrbitThreadStart(stopped, retryRun.ports)).toBe(true);
+    expect(retryRun.saves[0]!.errorDetail).toBeNull();
     expect(retry.calls[0]).toBe(`create 3 ${stopped.instanceName}`);
     expect(calls.filter((call) => call.startsWith("pair"))).toEqual([]);
   });
@@ -1007,12 +1026,14 @@ describe("retryOrbitThreadStartRecord", () => {
     connectStartedAt: 10,
     error: "Orbit could not pair.",
     errorCode: "conn.server_unreachable",
+    errorDetail: "connection refused",
   };
 
   it("clears the error and the times of the stages that run again", () => {
     expect(retryOrbitThreadStartRecord(failedConnect)).toMatchObject({
       error: null,
       errorCode: null,
+      errorDetail: null,
       createStartedAt: 1,
       createFinishedAt: 9,
       connectStartedAt: null,

@@ -275,6 +275,8 @@ export interface OrbitGatewayOperation {
 export interface OrbitGatewayOperationError {
   readonly code: string | null;
   readonly message: string | null;
+  /** Orbit's own detail line for the failure, such as the tool's stderr; often absent. */
+  readonly detail: string | null;
 }
 
 /** One step of an Operation. `status` is the Gateway's own word; unknown values pass through. */
@@ -664,10 +666,14 @@ function operationStep(value: unknown): OrbitGatewayOperationStep[] {
 
 /** The Operation's error: an object with a code and a message, or a bare message. */
 function operationError(value: unknown): OrbitGatewayOperationError | null {
-  if (typeof value === "string") return { code: null, message: gatewayText(value) };
+  if (typeof value === "string") return { code: null, message: gatewayText(value), detail: null };
   const data = record(value);
   if (data === null) return null;
-  return { code: optionalText(data.code), message: optionalText(data.message) };
+  return {
+    code: optionalText(data.code),
+    message: optionalText(data.message),
+    detail: optionalText(data.detail),
+  };
 }
 
 function project(value: unknown, path: string): OrbitGatewayProjectListing {

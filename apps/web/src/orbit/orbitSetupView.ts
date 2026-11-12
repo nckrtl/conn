@@ -36,6 +36,8 @@ export interface OrbitSetupView {
   readonly phase: "running" | "done" | "failed";
   readonly stages: readonly OrbitSetupViewStage[];
   readonly error: string | null;
+  /** Orbit's code and detail line under the error, as `code · detail`, when Orbit sent a detail. */
+  readonly errorDetailLine: string | null;
   /** A refusal that made no Instance: a taken name, or a name that is a branch already. */
   readonly canChangeName: boolean;
   /** A branch that is gone or held: reopen the draft with the branch menu. */
@@ -131,12 +133,21 @@ export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
     case ORBIT_SOURCE_HEAD_UNAVAILABLE:
       return { ...none, message: "Could not read the repository." };
     case ORBIT_CREATE_CLONE_FAILED:
-      return { ...none, message: "Orbit could not prepare the branch." };
+      return {
+        ...none,
+        message: `Orbit could not create ${start.instanceName}: the clone operation failed on ${start.nodeName}.`,
+      };
     case ORBIT_CREATE_WORKSPACE_FAILED:
       return { ...none, message: "Orbit could not set up the workspace." };
     default:
       return { ...none, message: start.error };
   }
+}
+
+function orbitErrorDetailLine(start: OrbitThreadStart): string | null {
+  const detail = start.errorDetail?.trim();
+  if (!detail) return null;
+  return start.errorCode ? `${start.errorCode} · ${detail}` : detail;
 }
 
 const STAGE_LABELS: Readonly<Record<OrbitSetupStageId, string>> = {
@@ -170,6 +181,7 @@ export function orbitSetupView(
     phase,
     stages,
     error: failure?.message ?? start.error,
+    errorDetailLine: failed ? orbitErrorDetailLine(start) : null,
     canChangeName: newInstance && (failure?.changeName ?? false),
     canChangeBranch: newInstance && (failure?.changeBranch ?? false),
     openInstance: failure?.openInstance ?? null,

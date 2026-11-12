@@ -1,3 +1,4 @@
+import "~/index.css";
 import { EnvironmentId, ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 
@@ -116,6 +117,7 @@ function orbitCard(
       orbitStage("agent", "Start agent", "pending"),
     ],
     error: null,
+    errorDetailLine: null,
     canChangeName: false,
     canChangeBranch: false,
     openInstance: null,
@@ -200,6 +202,32 @@ it("says the Instance stays after a created Instance and offers no Change name",
   await expect.element(screen.getByText("The Instance stays; remove it in Orbit.")).toBeVisible();
   expect(screen.getByRole("button", { name: "Change name" }).query()).toBeNull();
   expect(screen.container.textContent).not.toMatch(/Discard|Destroy|Remove instance/i);
+});
+
+it("shows a failed clone's text and Orbit's detail line, truncated on one line", async () => {
+  const detail = `instance.create_clone_failed · Argument list too long${" /srv/x".repeat(40)}`;
+  const failed = orbitCard({
+    phase: "failed",
+    stages: [
+      orbitStage("create", "Create Instance", "failed", { detail: "beast" }),
+      orbitStage("connect", "Connect", "pending"),
+      orbitStage("agent", "Start agent", "pending"),
+    ],
+    error: "Orbit could not create pricing-page: the clone operation failed on beast.",
+    errorDetailLine: detail,
+    instanceStays: true,
+  });
+  await using screen = await render(<div style={{ width: 480 }}>{failed.element}</div>);
+  await expect
+    .element(
+      screen.getByText("Orbit could not create pricing-page: the clone operation failed on beast."),
+    )
+    .toBeVisible();
+  const line = screen.container.querySelector<HTMLElement>("[data-orbit-setup-error-detail]")!;
+  expect(line.textContent).toBe(detail);
+  expect(line.hasAttribute("title")).toBe(false);
+  expect(line.scrollWidth).toBeGreaterThan(line.clientWidth);
+  expect(line.getBoundingClientRect().height).toBeLessThan(24);
 });
 
 it("folds a finished Orbit start to Instance ready with Details open and Conn's ready line", async () => {

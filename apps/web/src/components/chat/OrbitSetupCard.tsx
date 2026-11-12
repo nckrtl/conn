@@ -12,6 +12,7 @@ import { useState } from "react";
 
 import { useOpenLink } from "~/browser/useOpenLink";
 import { Button } from "~/components/ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import {
@@ -105,6 +106,23 @@ export function OrbitSetupCard({
       </div>
       {failed && view.error ? (
         <p className="mt-1 ml-8 text-xs text-muted-foreground">{view.error}</p>
+      ) : null}
+      {failed && view.errorDetailLine ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <p
+                className="mt-0.5 ml-8 truncate font-mono text-xs text-muted-foreground/70"
+                data-orbit-setup-error-detail
+              />
+            }
+          >
+            {view.errorDetailLine}
+          </TooltipTrigger>
+          <TooltipPopup side="top" className="max-w-96">
+            <span className="break-words font-mono">{view.errorDetailLine}</span>
+          </TooltipPopup>
+        </Tooltip>
       ) : null}
       {view.instanceStays ? (
         <p className="mt-1 ml-8 text-xs text-muted-foreground">{ORBIT_INSTANCE_STAYS_LINE}</p>

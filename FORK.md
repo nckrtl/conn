@@ -268,7 +268,8 @@ sending through a T3 server, opens its pending thread, then clears the draft. Th
 older worktree env mode `"orbit"`.
 
 **Branch control** (`orbitBranchControl.ts`). A new Instance's context row shows "From <default>" (no choice: the create
-sends no `branch`) and a menu from `GET /api/v1/conn/projects/{id}/branches?query=` (25 s limit)
+sends no `branch`); the draft reads the name once per Project per session and shows "From default
+branch" until it is known or when the read fails, never a guessed `main`; and a menu from `GET /api/v1/conn/projects/{id}/branches?query=` (25 s limit)
 with two modes, "New branch from" and "Work on branch". Under "Work on branch" the default branch
 is disabled, and a branch another Instance works on selects that Instance instead; for a paired
 Instance a typed prompt moves into its draft with attachments, modes and a picked model. Admission
@@ -320,7 +321,7 @@ first turn uses the clone's default and the ready area says so.
 Dismiss, which drops only the saved start on this device. Conn removes no Instance; Instances are
 removed in Orbit.
 
-Still waiting for Orbit: the Node menu ("Run on"), the branch control in the context row, and
+Still waiting for Orbit: the Node menu ("Run on") and
 starting a stopped Instance (stopped Instances stay disabled; Settings › Connections shows a clone
 whose container is stopped as Asleep).
 

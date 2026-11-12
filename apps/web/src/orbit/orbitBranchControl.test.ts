@@ -11,6 +11,7 @@ import {
   ORBIT_BRANCHES_NO_MATCH,
   ORBIT_BRANCHES_READ_FAILED,
   createOrbitBranchSearch,
+  createOrbitDefaultBranchCache,
   orbitBranchControlLabel,
   orbitBranchListFailure,
   orbitBranchListStatus,
@@ -88,15 +89,64 @@ describe("orbitBranchMenuRows", () => {
 });
 
 describe("orbitBranchControlLabel", () => {
-  it("reads From main until the list named the default, then the real names", () => {
-    expect(orbitBranchControlLabel({})).toBe("From main");
-    expect(orbitBranchControlLabel({ defaultBranch: "trunk", branch: null })).toBe("From trunk");
+  it("reads From default branch until Orbit names it, then the real names", () => {
+    expect(orbitBranchControlLabel({})).toBe("From default branch");
+    expect(orbitBranchControlLabel({ defaultBranch: null, branch: null })).toBe(
+      "From default branch",
+    );
+    expect(orbitBranchControlLabel({ defaultBranch: "13.x", branch: null })).toBe("From 13.x");
     expect(orbitBranchControlLabel({ branch: { mode: "new", from: "develop" } })).toBe(
       "From develop",
     );
     expect(orbitBranchControlLabel({ branch: { mode: "existing", name: "feature/login" } })).toBe(
       "On feature/login",
     );
+  });
+});
+
+describe("createOrbitDefaultBranchCache", () => {
+  const named = (name: string): OrbitGatewayBranches => ({
+    pullRequestsUnavailable: false,
+    branches: [{ name, default: true, pullRequest: null, instance: null }],
+  });
+
+  it("reads each Project's default once with an empty search, and shares a pending read", async () => {
+    const cache = createOrbitDefaultBranchCache();
+    const read = vi.fn(async (projectId: number, _query: string) =>
+      named(projectId === 66 ? "13.x" : "main"),
+    );
+    expect(cache.known(66)).toBeNull();
+    const [first, second] = await Promise.all([cache.read(66, read), cache.read(66, read)]);
+    expect([first, second]).toEqual(["13.x", "13.x"]);
+    expect(await cache.read(66, read)).toBe("13.x");
+    expect(cache.known(66)).toBe("13.x");
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledWith(66, "");
+
+    expect(await cache.read(7, read)).toBe("main");
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("answers null for a failed read or a list without a default, and tries again next time", async () => {
+    const cache = createOrbitDefaultBranchCache();
+    const read = vi
+      .fn<(projectId: number, query: string) => Promise<OrbitGatewayBranches>>()
+      .mockRejectedValueOnce(new Error("timeout"))
+      .mockResolvedValueOnce({ pullRequestsUnavailable: false, branches: [] })
+      .mockResolvedValueOnce(named("13.x"));
+    expect(await cache.read(66, read)).toBeNull();
+    expect(cache.known(66)).toBeNull();
+    expect(await cache.read(66, read)).toBeNull();
+    expect(await cache.read(66, read)).toBe("13.x");
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a name the menu's read learned", async () => {
+    const cache = createOrbitDefaultBranchCache();
+    const read = vi.fn(async () => named("main"));
+    cache.remember(66, "13.x");
+    expect(await cache.read(66, read)).toBe("13.x");
+    expect(read).not.toHaveBeenCalled();
   });
 });
 

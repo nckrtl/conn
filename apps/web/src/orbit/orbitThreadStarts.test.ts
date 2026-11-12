@@ -262,6 +262,12 @@ describe("sendOrbitDraft", () => {
       branch: null,
       defaultBranch: "main",
     });
+    // The default branch's name could not be read: the start still goes, with no branch.
+    window.localStorage.clear();
+    expect(send({ ...onBranch, branch: null, defaultBranch: null }).start).toMatchObject({
+      branch: null,
+      defaultBranch: null,
+    });
   });
 
   it("starts in an existing, unpaired Instance without a create", () => {

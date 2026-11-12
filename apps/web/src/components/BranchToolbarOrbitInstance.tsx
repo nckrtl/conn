@@ -62,6 +62,7 @@ export function BranchToolbarOrbitInstance({
             data-composer-context-control
           />
           <BranchToolbarOrbitBranch
+            key={target.projectId}
             target={target}
             draftId={draftId}
             onTargetChange={onTargetChange}

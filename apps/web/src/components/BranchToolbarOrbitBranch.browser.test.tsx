@@ -4,6 +4,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 import { render } from "../../test/render";
+import { createOrbitDefaultBranchCache } from "../orbit/orbitBranchControl";
 import type { OrbitDraftTarget } from "../orbit/orbitDraft";
 import { BranchToolbarOrbitBranch } from "./BranchToolbarOrbitBranch";
 
@@ -33,7 +34,36 @@ const LIST: OrbitGatewayBranches = {
 };
 
 describe("BranchToolbarOrbitBranch", () => {
-  it("reads From main, learns the default, and offers both modes with their rules", async () => {
+  it("names a default that is not main before the menu opens, never guessing main", async () => {
+    let answer: (list: OrbitGatewayBranches) => void = () => {};
+    const readBranches = vi.fn(
+      (_projectId: number, _query: string) =>
+        new Promise<OrbitGatewayBranches>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const onTargetChange = vi.fn();
+    await using screen = await render(
+      <BranchToolbarOrbitBranch
+        target={target}
+        onTargetChange={onTargetChange}
+        readBranches={readBranches}
+        defaultBranches={createOrbitDefaultBranchCache()}
+      />,
+    );
+
+    await expect.element(screen.getByText("From default branch")).toBeVisible();
+    expect(readBranches).toHaveBeenCalledWith(66, "");
+    answer({
+      pullRequestsUnavailable: false,
+      branches: [{ name: "13.x", default: true, pullRequest: null, instance: null }],
+    });
+    await expect.element(screen.getByText("From 13.x")).toBeVisible();
+    expect(onTargetChange).toHaveBeenCalledWith({ defaultBranch: "13.x" });
+    expect(screen.container.textContent).not.toContain("From main");
+  });
+
+  it("learns the default and offers both modes with their rules", async () => {
     const readBranches = vi.fn(async (_projectId: number, _query: string) => LIST);
     const onTargetChange = vi.fn();
     await using screen = await render(
@@ -41,14 +71,15 @@ describe("BranchToolbarOrbitBranch", () => {
         target={target}
         onTargetChange={onTargetChange}
         readBranches={readBranches}
+        defaultBranches={createOrbitDefaultBranchCache()}
       />,
     );
 
-    await expect.element(screen.getByText("From main")).toBeVisible();
+    await expect.element(screen.getByText("From trunk")).toBeVisible();
+    expect(onTargetChange).toHaveBeenCalledWith({ defaultBranch: "trunk" });
     await userEvent.click(screen.getByRole("combobox"));
     await expect.element(page.getByRole("option", { name: /develop/ })).toBeVisible();
-    expect(readBranches).toHaveBeenCalledWith(66, "");
-    expect(onTargetChange).toHaveBeenCalledWith({ defaultBranch: "trunk" });
+    expect(readBranches).toHaveBeenCalledTimes(2);
     await expect.element(page.getByText("PR #482")).toBeVisible();
 
     await userEvent.click(page.getByRole("button", { name: "Work on branch" }));

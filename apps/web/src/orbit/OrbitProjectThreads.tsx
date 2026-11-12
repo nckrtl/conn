@@ -59,7 +59,8 @@ export function OrbitThreadStartRunner() {
     const client = desktopOrbitGatewayClient();
     if (!available || client === null) return;
     for (const start of starts) {
-      if (start.error !== null || start.sentAt != null) continue;
+      // A sent palette start is kept for its ready row; a sent dialog start only needs its dismiss.
+      if (start.error !== null || (start.sentAt != null && start.pendingThread)) continue;
       void runSavedOrbitThreadStart(client, start.id).then((sent) => {
         // A pending thread's own view hands over and shows the error; elsewhere a toast does.
         const onPendingThread =

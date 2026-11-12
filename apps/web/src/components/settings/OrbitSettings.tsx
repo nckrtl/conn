@@ -357,7 +357,7 @@ function CheckBadge({ state }: { readonly state: OrbitConnectionCheckState }) {
 }
 
 const NODE_STATES: Record<OrbitNodeState, { readonly label: string; readonly dot: string }> = {
-  connected: { label: "Connected", dot: "bg-success" },
+  paired: { label: "Paired", dot: "bg-success" },
   pairing: { label: "Pairing…", dot: "bg-muted-foreground/40" },
   expired: { label: "Registration expired", dot: "bg-warning" },
 };
@@ -473,7 +473,9 @@ export function OrbitConnectionPage() {
               description={
                 probe.status === "checking"
                   ? "Reading the Nodes from gateway.orbit."
-                  : "The Nodes show once the Gateway answers. Reload to try again."
+                  : probe.status === "ok"
+                    ? "The Gateway did not send its list of servers. Reload to try again."
+                    : "The Nodes show once the Gateway answers. Reload to try again."
               }
             />
           ) : nodes.length === 0 ? (

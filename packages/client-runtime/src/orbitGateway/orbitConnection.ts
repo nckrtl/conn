@@ -62,17 +62,19 @@ function isCertificateFailure(message: string): boolean {
 function failedCheck(error: unknown): { key: OrbitConnectionCheckKey; message: string } {
   if (!isGatewayError(error) || error.code === "gateway.unreachable") {
     const text = error instanceof Error ? error.message : String(error);
-    return isCertificateFailure(text)
-      ? {
-          key: "certificate",
-          message:
-            "The Orbit root CA is not trusted on this device. Add it to the keychain with the Orbit CLI, then Reload.",
-        }
-      : {
-          key: "gateway",
-          message:
-            "gateway.orbit does not answer. Check that the WireGuard tunnel to Orbit is up, then Reload.",
-        };
+    if (!isCertificateFailure(text)) {
+      return {
+        key: "gateway",
+        message:
+          "gateway.orbit does not answer. Check that the WireGuard tunnel to Orbit is up, then Reload.",
+      };
+    }
+    return {
+      key: "certificate",
+      message: /\bnet::ERR_CERT_AUTHORITY_INVALID\b/.test(text)
+        ? "The Orbit root CA is not trusted on this device. Add it to the keychain with the Orbit CLI, then Reload."
+        : `gateway.orbit's certificate is not valid (${text.match(/net::ERR_[A-Z_]+/)?.[0]}). Check the certificate and this device's clock, then Reload.`,
+    };
   }
   if (error.code === PEER_IDENTITY_UNKNOWN) {
     return {
@@ -124,7 +126,7 @@ export function orbitConnectionChecks(probe: OrbitConnectionProbe): OrbitConnect
   });
 }
 
-export type OrbitNodeState = "connected" | "pairing" | "expired";
+export type OrbitNodeState = "paired" | "pairing" | "expired";
 
 export interface OrbitNodeServer {
   readonly environmentId: string;
@@ -175,11 +177,12 @@ export function orbitNodeServers(input: {
         environment.status === "session_expired"
           ? "expired"
           : input.paired.has(environment.environmentId)
-            ? "connected"
+            ? "paired"
             : "pairing",
       isThisDevice:
         input.device !== null &&
-        (address === input.device.wireguardIp || name === input.device.name),
+        (address === input.device.wireguardIp ||
+          gatewayText(environment.nodeName) === input.device.name),
     });
   }
   return nodes.sort(

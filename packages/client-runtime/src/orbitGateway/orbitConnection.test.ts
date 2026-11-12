@@ -87,6 +87,19 @@ describe("orbitConnectionChecks", () => {
     expect(certificate[2]!.message).toBe("Not checked: the Gateway's certificate is not trusted.");
   });
 
+  it("names the certificate error that is not an untrusted CA", async () => {
+    const [untrusted, expired] = await Promise.all([
+      meError({ transport: "net::ERR_CERT_AUTHORITY_INVALID" }),
+      meError({ transport: "net::ERR_CERT_DATE_INVALID" }),
+    ]);
+    expect(orbitConnectionChecks({ status: "error", error: untrusted })[1]!.message).toMatch(
+      /root CA is not trusted/,
+    );
+    expect(orbitConnectionChecks({ status: "error", error: expired })[1]!.message).toBe(
+      "gateway.orbit's certificate is not valid (net::ERR_CERT_DATE_INVALID). Check the certificate and this device's clock, then Reload.",
+    );
+  });
+
   it("tells an unknown peer from a Node without access", async () => {
     const [unknown, noAccess] = await Promise.all([
       meError(gatewayError(403, "peer.identity_unknown")),
@@ -143,7 +156,7 @@ describe("orbitNodeServers", () => {
         environmentId: "nick",
         name: "nick",
         address: "10.44.0.12",
-        state: "connected",
+        state: "paired",
         isThisDevice: true,
       },
       {
@@ -157,7 +170,7 @@ describe("orbitNodeServers", () => {
         environmentId: "mini",
         name: "mini",
         address: "10.44.0.3",
-        state: "connected",
+        state: "paired",
         isThisDevice: false,
       },
     ]);

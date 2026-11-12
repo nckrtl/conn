@@ -191,7 +191,7 @@ describe("Orbit panel", () => {
     await act(() => useOrbitProfileSyncStatus.setState({ syncedAt: null }));
   });
 
-  it("shows each check's state on Connection, and Reload runs the checks again", async () => {
+  it("shows a failed check and the ones after it, and Reload runs the checks again", async () => {
     using _env = setup("orbit");
     let calls = 0;
     let answer: { resolve: (node: OrbitGatewayNode) => void; reject: (error: unknown) => void };
@@ -239,39 +239,16 @@ describe("Orbit panel", () => {
     await expect.element(page.getByText(/WireGuard tunnel to Orbit is up/)).toBeVisible();
     await expect.element(page.getByText("Nodes not available")).toBeVisible();
 
-    await userEvent.click(reload);
-    await expectStates("checking", "checking", "checking");
-    await act(() =>
-      answer.reject(
-        unreachable("The Orbit Gateway did not answer: net::ERR_CERT_AUTHORITY_INVALID"),
-      ),
-    );
-    await expectStates("pass", "fail", "not_checked");
-    await expect.element(page.getByText(/Orbit root CA is not trusted/)).toBeVisible();
-
-    await userEvent.click(reload);
-    await act(() =>
-      answer.reject(
-        new OrbitGatewayError({
-          code: "peer.identity_unknown",
-          message: "Unknown peer.",
-          status: 403,
-          details: {},
-        }),
-      ),
-    );
-    await expectStates("pass", "pass", "fail");
-    await expect.element(page.getByText(/not know this WireGuard address/)).toBeVisible();
-
     client.environments = servers;
     await userEvent.click(reload);
+    await expectStates("checking", "checking", "checking");
     await act(() =>
       answer.resolve({ id: 45, name: "nick", wireguardIp: "10.44.0.12", profile: null }),
     );
     await expectStates("pass", "pass", "pass");
     await expect.element(page.getByText("Signed in to gateway.orbit as 10.44.0.12")).toBeVisible();
     await expect.element(page.getByText("10.44.0.3", { exact: true })).toBeVisible();
-    expect(calls).toBe(4);
+    expect(calls).toBe(2);
   });
 
   it("closes when environments stop coming from Orbit", async () => {

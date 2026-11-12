@@ -65,18 +65,19 @@ export function BranchToolbarOrbitBranch({
     state: { status: "loading" },
     query: "",
   });
+  const [readDefaultBranch, setReadDefaultBranch] = useState(() =>
+    defaultBranches.known(target.projectId),
+  );
   const [search] = useState(() =>
     createOrbitBranchSearch({
       read: (text) => readBranches(target.projectId, text),
       onState: (state, text) => setList({ state, query: text }),
       onDefaultBranch: (name) => {
         defaultBranches.remember(target.projectId, name);
+        setReadDefaultBranch(name);
         if (name !== target.defaultBranch) onTargetChange({ defaultBranch: name });
       },
     }),
-  );
-  const [readDefaultBranch, setReadDefaultBranch] = useState(() =>
-    defaultBranches.known(target.projectId),
   );
 
   const onDefaultBranchRead = useEffectEvent((name: string) => {

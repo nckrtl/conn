@@ -138,6 +138,7 @@ describe("branch list states", () => {
 
   it("trims a search and cuts it to what the desktop IPC lets through", () => {
     expect(orbitBranchQuery("  login ")).toBe("login");
+    expect(orbitBranchQuery("log\tin\n")).toBe("login");
     expect(orbitBranchQuery("a".repeat(250))).toHaveLength(200);
   });
 });

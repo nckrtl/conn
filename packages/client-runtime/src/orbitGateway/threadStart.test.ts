@@ -934,6 +934,7 @@ describe("runOrbitThreadStart with a branch", () => {
     ["branch.exists", 422, { field: "name", branch: "fix" }],
     ["source.head_unavailable", 502, {}],
     ["instance.placement_conflict", 409, {}],
+    ["validation.failed", 422, { field: "branch.from" }],
   ])(
     "keeps an admission refusal %s with its details, made no Instance, and drops the key",
     async (code, status, details) => {

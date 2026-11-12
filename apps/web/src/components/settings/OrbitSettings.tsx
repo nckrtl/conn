@@ -355,7 +355,7 @@ export function OrbitConnectionPage() {
   );
 
   return (
-    <SettingsPageContainer>
+    <SettingsPageContainer width="wide">
       <OrbitDeviceSection view={view} loadError={loadError} onReload={() => void load()} />
 
       {view ? (
@@ -411,7 +411,7 @@ export function OrbitConnectionPage() {
 
 /**
  * The Orbit panel's Profile page: the profile this device shares its workspaces with, and the
- * profile sync. Until the Gateway answers it shows the device row, so a failure has its Reload.
+ * profile sync. Until the Gateway answers, or when a reload fails, it shows the device row with Reload.
  */
 export function OrbitProfilePage() {
   const { gateway, view, loadError, load } = useOrbitGatewayView();
@@ -437,8 +437,8 @@ export function OrbitProfilePage() {
   const profile = view?.node.profile ?? null;
 
   return (
-    <SettingsPageContainer>
-      {view ? null : (
+    <SettingsPageContainer width="wide">
+      {view && loadError === null ? null : (
         <OrbitDeviceSection view={view} loadError={loadError} onReload={() => void load()} />
       )}
 

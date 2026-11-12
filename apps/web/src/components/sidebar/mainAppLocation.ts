@@ -45,7 +45,7 @@ export function useNavigateToMainApp() {
 }
 
 /** Leaves Settings or Usage for the page that opened it. */
-export function useCloseAppModal() {
+export function useCloseAppModal({ replace = false }: { readonly replace?: boolean } = {}) {
   const navigate = useNavigate();
-  return () => navigate({ href: appModalReturnHref ?? mainAppHref ?? "/" });
+  return () => navigate({ href: appModalReturnHref ?? mainAppHref ?? "/", replace });
 }

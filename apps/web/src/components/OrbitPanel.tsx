@@ -75,7 +75,8 @@ function OrbitPanelNav({ pathname }: { pathname: string }) {
 
 /** Leaves the panel once Orbit is off: its pages read the Gateway, which Default mode never uses. */
 function CloseOrbitPanel() {
-  const closeAppModal = useCloseAppModal();
+  // Replace, so Back past a closed panel does not land on it and bounce forward again.
+  const closeAppModal = useCloseAppModal({ replace: true });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the router leaves the panel when the environment provider (a store outside the route) stops being Orbit
   useEffect(() => {
     void closeAppModal();

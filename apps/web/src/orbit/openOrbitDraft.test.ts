@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gateway";
 
-import { openOrbitDraft, openOrbitInstanceById } from "./openOrbitDraft";
+import { openOrbitDraft } from "./openOrbitDraft";
+import { openOrbitInstanceById } from "./openOrbitInstance";
 import type { OrbitDraftTarget } from "./orbitDraft";
 
 const mocks = vi.hoisted(() => ({

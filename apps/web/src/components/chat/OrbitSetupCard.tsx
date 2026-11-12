@@ -1,5 +1,13 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { ChevronDownIcon, ChevronRightIcon, PencilIcon, RotateCcwIcon, XIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ExternalLinkIcon,
+  GitBranchIcon,
+  PencilIcon,
+  RotateCcwIcon,
+  XIcon,
+} from "lucide-react";
 import { useState } from "react";
 
 import { useOpenLink } from "~/browser/useOpenLink";
@@ -62,11 +70,15 @@ export function OrbitSetupCard({
   view,
   onRetry,
   onChangeName,
+  onChangeBranch,
+  onOpenInstance,
   onDismiss,
 }: {
   view: OrbitSetupView;
   onRetry: () => void;
   onChangeName: () => void;
+  onChangeBranch: () => void;
+  onOpenInstance: (instance: { readonly id: number; readonly name: string }) => void;
   onDismiss: () => void;
 }) {
   const failed = view.phase === "failed";
@@ -107,6 +119,23 @@ export function OrbitSetupCard({
             <Button type="button" size="xs" variant="ghost-muted" onClick={onChangeName}>
               <PencilIcon aria-hidden />
               Change name
+            </Button>
+          ) : null}
+          {view.canChangeBranch ? (
+            <Button type="button" size="xs" variant="ghost-muted" onClick={onChangeBranch}>
+              <GitBranchIcon aria-hidden />
+              Change branch
+            </Button>
+          ) : null}
+          {view.openInstance ? (
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost-muted"
+              onClick={() => onOpenInstance(view.openInstance!)}
+            >
+              <ExternalLinkIcon aria-hidden />
+              Open {view.openInstance.name}
             </Button>
           ) : null}
           <Button type="button" size="xs" variant="ghost-muted" onClick={onDismiss}>
@@ -175,7 +204,24 @@ export function OrbitReadyRow({
           <dd className="min-w-0 truncate font-mono">{view.instanceName}</dd>
           <dt className="text-foreground/80">Node</dt>
           <dd className="min-w-0 truncate font-mono">{view.nodeName}</dd>
+          {view.branch ? (
+            <>
+              <dt className="text-foreground/80">Branch</dt>
+              <dd className="min-w-0 truncate font-mono">{view.branch}</dd>
+            </>
+          ) : null}
+          {view.baseBranch ? (
+            <>
+              <dt className="text-foreground/80">Base</dt>
+              <dd className="min-w-0 truncate font-mono">{view.baseBranch}</dd>
+            </>
+          ) : null}
         </dl>
+      ) : null}
+      {view.dependenciesLine ? (
+        <p className="mb-1 ml-8 text-xs text-muted-foreground" data-orbit-dependencies-line>
+          {view.dependenciesLine}
+        </p>
       ) : null}
       {view.modelFallbackLine ? (
         <p className="mb-1 ml-8 text-xs text-muted-foreground" data-orbit-model-fallback>

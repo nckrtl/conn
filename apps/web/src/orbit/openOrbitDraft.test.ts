@@ -1,13 +1,21 @@
 import type { AnyRouter } from "@tanstack/react-router";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { openOrbitDraft } from "./openOrbitDraft";
+import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gateway";
+
+import { openOrbitDraft, openOrbitInstanceById } from "./openOrbitDraft";
 import type { OrbitDraftTarget } from "./orbitDraft";
 
 const mocks = vi.hoisted(() => ({
   enabled: true,
-  existingDraft: null as { draftId: string; threadId: string } | null,
+  existingDraft: null as {
+    draftId: string;
+    threadId: string;
+    orbitTarget?: OrbitDraftTarget;
+  } | null,
   setLogicalProjectDraftThreadId: vi.fn(),
+  newThread: vi.fn(async () => ({ draftId: "draft-clone", threadId: "thread-clone" })),
+  projects: [] as Array<{ environmentId: string; id: string; workspaceRoot: string }>,
 }));
 
 vi.mock("../composerDraftStore", () => ({
@@ -18,6 +26,8 @@ vi.mock("../composerDraftStore", () => ({
     }),
   },
 }));
+vi.mock("../hooks/useHandleNewThread", () => ({ createNewThreadHandler: () => mocks.newThread }));
+vi.mock("../state/entities", () => ({ readProjects: () => mocks.projects }));
 vi.mock("../lib/utils", () => ({ newDraftId: () => "draft-new", newThreadId: () => "thread-new" }));
 vi.mock("../connection/catalog", () => ({ environmentCatalog: { catalogValueAtom: "catalog" } }));
 vi.mock("../state/primaryEnvironment", () => ({ primaryEnvironmentIdAtom: "primary" }));
@@ -46,10 +56,16 @@ const target: OrbitDraftTarget = {
   domainSuffix: null,
 };
 
-function setup(input: { enabled: boolean; existingDraft?: typeof mocks.existingDraft }) {
+function setup(input: {
+  enabled: boolean;
+  existingDraft?: typeof mocks.existingDraft;
+  projects?: typeof mocks.projects;
+}) {
   mocks.enabled = input.enabled;
   mocks.existingDraft = input.existingDraft ?? null;
+  mocks.projects = input.projects ?? [];
   mocks.setLogicalProjectDraftThreadId.mockClear();
+  mocks.newThread.mockClear();
   const navigate = vi.fn(async () => {});
   return { router: { navigate } as unknown as AnyRouter, navigate };
 }
@@ -92,5 +108,102 @@ describe("openOrbitDraft", () => {
     expect(await openOrbitDraft(router, target)).toBeNull();
     expect(mocks.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("openOrbitDraft keeps the Project draft's branch", () => {
+  it("keeps the chosen branch for a new Instance target without one, and takes a target's own", async () => {
+    const branch = { mode: "existing", name: "feature/login" } as const;
+    const { router } = setup({
+      enabled: true,
+      existingDraft: {
+        draftId: "draft-old",
+        threadId: "thread-old",
+        orbitTarget: { ...target, branch, defaultBranch: "main" },
+      },
+    });
+    await openOrbitDraft(router, { ...target, instanceName: "other" });
+    expect(mocks.setLogicalProjectDraftThreadId.mock.lastCall?.[3]).toMatchObject({
+      orbitTarget: { instanceName: "other", branch, defaultBranch: "main" },
+    });
+    await openOrbitDraft(router, { ...target, branch: null });
+    expect(mocks.setLogicalProjectDraftThreadId.mock.lastCall?.[3].orbitTarget.branch).toBeNull();
+  });
+});
+
+describe("openOrbitInstanceById", () => {
+  const project = {
+    id: 71,
+    slug: "nckrtl",
+    name: "nckrtl.com",
+    nodeName: "beast",
+    domainSuffix: null,
+  };
+  const environment = (
+    environmentId: string,
+    extra: Partial<OrbitGatewayEnvironment> = {},
+  ): OrbitGatewayEnvironment => ({
+    environmentId,
+    label: environmentId,
+    url: "http://10.44.0.7:3800",
+    serverVersion: null,
+    registeredBy: null,
+    registeredAt: null,
+    status: "registered",
+    instanceId: 42,
+    powerState: "running",
+    projectId: 71,
+    projectName: "nckrtl.com",
+    projectSlug: "nckrtl",
+    instanceName: "login",
+    nodeName: "shark",
+    instanceUrl: null,
+    ...extra,
+  });
+  const open = (environments: OrbitGatewayEnvironment[]) =>
+    openOrbitInstanceById({
+      router: setup({
+        enabled: true,
+        projects: [{ environmentId: "clone-71", id: "ws", workspaceRoot: "/srv/workspace" }],
+      }).router,
+      project,
+      instance: { id: 42, name: "login" },
+      environments: async () => environments,
+    });
+
+  it("opens a normal draft in a paired Instance's workspace project", async () => {
+    expect(await open([environment("clone-71")])).toEqual({
+      kind: "opened",
+      draftId: "draft-clone",
+    });
+    expect(mocks.newThread).toHaveBeenCalledWith({ environmentId: "clone-71", projectId: "ws" });
+    expect(mocks.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
+  });
+
+  it("opens an Orbit draft of kind existing for an Instance this device has not paired", async () => {
+    expect(await open([environment("env-42")])).toEqual({ kind: "opened", draftId: "draft-new" });
+    expect(mocks.newThread).not.toHaveBeenCalled();
+    expect(mocks.setLogicalProjectDraftThreadId.mock.lastCall?.[3].orbitTarget).toEqual({
+      projectId: 71,
+      projectSlug: "nckrtl",
+      projectName: "nckrtl.com",
+      nodeName: "shark",
+      instanceKind: "existing",
+      instanceName: "login",
+      existing: { instanceId: 42, environmentId: "env-42" },
+      domainSuffix: null,
+    });
+  });
+
+  it("creates nothing when the Instance has no reachable server or cannot be picked", async () => {
+    expect(await open([environment("env-9", { instanceId: 9 })])).toEqual({
+      kind: "unavailable",
+      reason: "Instance login has no T3 server this device can reach.",
+    });
+    expect(await open([environment("env-42", { powerState: "stopped" })])).toMatchObject({
+      kind: "unavailable",
+    });
+    expect(mocks.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
+    expect(mocks.newThread).not.toHaveBeenCalled();
   });
 });

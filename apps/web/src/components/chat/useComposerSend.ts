@@ -147,6 +147,7 @@ import {
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
 import { orbitThreadStartBlockedReason, sendOrbitDraft } from "../../orbit/orbitThreadStarts";
+import { ORBIT_BRANCH_CONTROL_ENABLED } from "../../orbit/orbitBranchControl";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -773,6 +774,7 @@ export function useComposerSend(input: ComposerSendInput) {
       sendOrbitDraft({
         start: buildOrbitDraftStart({
           target: orbitDraftTarget,
+          branchControl: ORBIT_BRANCH_CONTROL_ENABLED,
           message: trimmed,
           modelSelection: ctxSelectedModelSelection,
           runtimeMode,

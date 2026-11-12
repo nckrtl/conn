@@ -193,6 +193,49 @@ export interface OrbitGatewayInstanceNameCheck {
   readonly domain: string | null;
 }
 
+/** A pull request on a branch: the open one, newest first, when there are several. */
+export interface OrbitGatewayBranchPullRequest {
+  readonly number: number;
+  readonly title: string | null;
+  readonly url: string | null;
+}
+
+/** One branch of a Project's repository, as `GET /conn/projects/{id}/branches` lists it. */
+export interface OrbitGatewayBranch {
+  readonly name: string;
+  readonly default: boolean;
+  readonly pullRequest: OrbitGatewayBranchPullRequest | null;
+  /** The Instance of the Project that works on this branch (lowest id when several), or null. */
+  readonly instance: { readonly id: number; readonly name: string } | null;
+}
+
+export interface OrbitGatewayBranches {
+  /** At most 100 matches, the default branch first, then by name. */
+  readonly branches: readonly OrbitGatewayBranch[];
+  /** No PR data for the repository (GitHub failed or is not connected): show no PR badges. */
+  readonly pullRequestsUnavailable: boolean;
+}
+
+/**
+ * The branch a new Instance works on. Without one Orbit clones as before. `new`: the Instance gets
+ * its own branch, named after it, cut from `from`. `existing`: it checks out and pushes to `name`.
+ */
+export type OrbitGatewayBranchSelection =
+  | { readonly mode: "new"; readonly from: string }
+  | { readonly mode: "existing"; readonly name: string };
+
+/** Create refusals for a branch, all at admission (nothing created). */
+export const ORBIT_BRANCH_IN_USE = "branch.in_use";
+export const ORBIT_BRANCH_NOT_FOUND = "branch.not_found";
+/** A new branch named after the Instance already exists on the remote. */
+export const ORBIT_BRANCH_EXISTS = "branch.exists";
+export const ORBIT_SOURCE_HEAD_UNAVAILABLE = "source.head_unavailable";
+/** The same name was created before with another branch selection. */
+export const ORBIT_PLACEMENT_CONFLICT = "instance.placement_conflict";
+/** Failed create steps, after the Instance exists. */
+export const ORBIT_CREATE_CLONE_FAILED = "instance.create_clone_failed";
+export const ORBIT_CREATE_WORKSPACE_FAILED = "instance.create_workspace_failed";
+
 export interface OrbitGatewayProjectsOptions {
   /**
    * Also list the Projects in which threads cannot start yet, with their checks
@@ -302,7 +345,15 @@ export interface OrbitGatewayClient {
     projectId: number,
     name: string,
     idempotencyKey: string,
+    /** Sent only when given; a create without it behaves as before. */
+    branch?: OrbitGatewayBranchSelection | null,
   ) => Promise<OrbitGatewayOperation>;
+  /**
+   * The Project's branches whose name contains `query` (ignoring case). The Gateway bounds one
+   * read at 20 s, so the call waits 25 s. An unreadable source, or a query that is no valid ref
+   * name, fails with 502 `source.head_unavailable`.
+   */
+  readonly branches: (projectId: number, query: string) => Promise<OrbitGatewayBranches>;
   /** Reads an Operation this device started through the Conn layer. */
   readonly operation: (operationId: number) => Promise<OrbitGatewayOperation>;
   /**
@@ -325,6 +376,8 @@ export const OPERATION_TIMEOUT_MS = 60_000;
 const ADMISSION_TIMEOUT_MS = 60_000;
 /** A name check is answered at once; a slow one gives way to the create's own check. */
 const NAME_CHECK_TIMEOUT_MS = 5_000;
+/** The Gateway bounds a branch read at 20 s (source 10 s, PR listing 10 s). */
+const BRANCHES_TIMEOUT_MS = 25_000;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 15_000;
 
@@ -358,7 +411,9 @@ export function createOrbitGatewayClient(
   const sleep =
     options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = options.now ?? Date.now;
-  const call = async (request: OrbitGatewayRequest): Promise<unknown> => {
+  const call = async (request: OrbitGatewayRequest): Promise<unknown> =>
+    (await callEnvelope(request)).data;
+  const callEnvelope = async (request: OrbitGatewayRequest): Promise<Record<string, unknown>> => {
     let response: OrbitGatewayResponse;
     try {
       response = await transport(request);
@@ -387,7 +442,7 @@ export function createOrbitGatewayClient(
     if (!envelope || !("data" in envelope)) {
       throw invalid(request.path);
     }
-    return envelope.data;
+    return envelope;
   };
 
   /** Polls a Conn Operation until it ends, and returns it when it succeeded. */
@@ -492,18 +547,33 @@ export function createOrbitGatewayClient(
         path,
       );
     },
-    createThreadInstance: async (projectId, name, idempotencyKey) => {
+    createThreadInstance: async (projectId, name, idempotencyKey, branch) => {
       const path = `/projects/${projectId}/instances`;
       return operation(
         await call({
           method: "POST",
           path,
-          body: { name },
+          body: branch ? { name, branch: branchBody(branch) } : { name },
           timeoutMs: ADMISSION_TIMEOUT_MS,
           idempotencyKey,
         }),
         path,
       );
+    },
+    branches: async (projectId, query) => {
+      const path = `/projects/${projectId}/branches`;
+      const trimmed = query.trim();
+      const envelope = await callEnvelope({
+        method: "GET",
+        path,
+        ...(trimmed === "" ? {} : { query: { query: trimmed } }),
+        timeoutMs: BRANCHES_TIMEOUT_MS,
+      });
+      if (!Array.isArray(envelope.data)) throw invalid(path);
+      return {
+        branches: envelope.data.flatMap(branch),
+        pullRequestsUnavailable: record(envelope.meta)?.pull_requests_unavailable === true,
+      };
     },
     operation: async (operationId) => {
       const path = `/operations/${operationId}`;
@@ -620,6 +690,40 @@ function project(value: unknown, path: string): OrbitGatewayProjectListing {
     cloneableReason: optionalText(data.cloneable_reason),
     checks: Array.isArray(data.checks) ? data.checks.flatMap(projectCheck) : null,
   };
+}
+
+/** Only the keys Orbit takes for each mode: it refuses extra keys. */
+function branchBody(selection: OrbitGatewayBranchSelection): OrbitGatewayBranchSelection {
+  return selection.mode === "new"
+    ? { mode: "new", from: selection.from }
+    : { mode: "existing", name: selection.name };
+}
+
+/** A branch without a name is dropped; a malformed PR or Instance reads as none. */
+function branch(value: unknown): OrbitGatewayBranch[] {
+  const data = record(value);
+  const name = optionalText(data?.name);
+  if (data === null || name === null) return [];
+  const pullRequest = record(data.pull_request);
+  const instance = record(data.instance);
+  return [
+    {
+      name,
+      default: data.default === true,
+      pullRequest:
+        typeof pullRequest?.number === "number"
+          ? {
+              number: pullRequest.number,
+              title: optionalText(pullRequest.title),
+              url: optionalText(pullRequest.url),
+            }
+          : null,
+      instance:
+        typeof instance?.id === "number" && optionalText(instance.name) !== null
+          ? { id: instance.id, name: optionalText(instance.name)! }
+          : null,
+    },
+  ];
 }
 
 const INSTANCE_NAME_REASONS: ReadonlySet<string> = new Set(["taken", "invalid", "default"]);

@@ -255,7 +255,8 @@ or slow check keeps create possible (Orbit's `instance.name_taken` at create is 
 search text as a slug, unless the user typed a name. "Existing instances" lists every Instance of
 the Project in the Gateway's environment list (no owner filter, never the default); stopped and
 expired ones are disabled. A paired one opens a normal draft in its `/srv/workspace` project, an
-unpaired one an Orbit draft. The desktop IPC lets only these two queries through.
+unpaired one an Orbit draft. The desktop IPC lets only these queries through (with the branch
+search below).
 
 **Orbit draft.** The composer draft carries an Orbit target (`orbitDraft.ts`, `openOrbitDraft`):
 the Project, Node, and a new Instance with the typed name or an existing one this device has not
@@ -265,6 +266,17 @@ The context row shows the Node and `<instance> · <project>`, which reopens the 
 attachments are off. Send saves a start (typed name, model and modes) for the runner instead of
 sending through a T3 server, opens its pending thread, then clears the draft. This is not the
 older worktree env mode `"orbit"`.
+
+**Branch control.** Behind `ORBIT_BRANCH_CONTROL_ENABLED` (`orbitBranchControl.ts`, off until
+Orbit accepts `branch` on create): off, the control is hidden, no branches are read and no create
+carries a branch. On, a new Instance's context row shows "From <default>" (no choice: the create
+sends no `branch`) and a menu from `GET /api/v1/conn/projects/{id}/branches?query=` (25 s limit)
+with two modes, "New branch from" and "Work on branch". Under "Work on branch" the default branch
+is disabled, and a branch another Instance works on selects that Instance instead. Admission
+refusals (`branch.in_use`, `branch.not_found`, `branch.exists`, `instance.placement_conflict`,
+`source.head_unavailable`) made no Instance and offer Change branch or Change name; the create
+step codes keep Retry only. Retry resends the same choice. The ready card shows Branch and Base,
+and says dependencies come from the default branch when the code is not that branch.
 
 **Pending thread and setup card.** The pending thread at `/orbit/$startId`
 (`OrbitPendingThreadView.tsx`) shows the message and a setup card built on the client from the

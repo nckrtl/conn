@@ -4284,6 +4284,9 @@ it("keeps the working header in place across worktree setup handoff", () => {
       readyLine:
         "Your Instance is ready. You can preview it at https://pricing-page.nckrtl.test while I work on your request.",
       modelFallbackLine: null,
+      branch: null,
+      baseBranch: null,
+      dependenciesLine: null,
     },
     threadRef: { environmentId: "env-1" as never, threadId: ThreadId.make("thread-setup") },
     messageId: "user-1",

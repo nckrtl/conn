@@ -632,6 +632,17 @@ describe("createOrbitGatewayClient", () => {
         error_code: "instance.container_process_inactive",
         result: { process_failure: { unit: 7 } },
       },
+      "GET /operations/103": {
+        id: 103,
+        kind: "instance.create",
+        status: "failed",
+        target_id: 41,
+        error_code: "instance.container_process_inactive",
+        result: {
+          process_failure: { unit: "conn-web.service" },
+          recovery: { state: "retained_for_retry", requires: "project_process_definition" },
+        },
+      },
     };
     const client = createOrbitGatewayClient(async (request) => {
       requests.push(request);
@@ -751,8 +762,13 @@ describe("createOrbitGatewayClient", () => {
     await expect(client.operation(101)).resolves.toMatchObject({
       errorCode: "instance.container_process_inactive",
       processFailureUnit: "conn-web.service",
+      recoveryRequires: null,
     });
     await expect(client.operation(102)).resolves.toMatchObject({ processFailureUnit: null });
+    await expect(client.operation(102)).resolves.not.toHaveProperty("recoveryRequires");
+    await expect(client.operation(103)).resolves.toMatchObject({
+      recoveryRequires: "project_process_definition",
+    });
     // An unknown step status passes through; a step without a name or status is dropped.
     await expect(client.operation(100)).resolves.toEqual({
       id: 100,

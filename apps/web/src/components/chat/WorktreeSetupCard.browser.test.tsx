@@ -255,6 +255,26 @@ it("offers only Dismiss when a Project process did not start, and names the proc
   );
 });
 
+it("offers Retry when Orbit retries a Project process with its current definitions", async () => {
+  const text =
+    "A process of this Project did not start: conn-web.service. Change or remove this process in the Project's Orbit settings, then retry.";
+  const failed = orbitCard({
+    phase: "failed",
+    stages: [
+      orbitStage("create", "Create Instance", "failed", { detail: "beast" }),
+      orbitStage("connect", "Connect", "pending"),
+      orbitStage("agent", "Start agent", "pending"),
+    ],
+    error: text,
+    errorDetailLine: "instance.container_process_inactive · conn-web.service exited with status 1",
+    canRetry: true,
+  });
+  await using screen = await render(<div style={{ width: 480 }}>{failed.element}</div>);
+  await expect.element(screen.getByText(text)).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Dismiss" })).toBeVisible();
+});
+
 it("folds a finished Orbit start to Instance ready with Details open and Conn's ready line", async () => {
   const threadRef = {
     environmentId: EnvironmentId.make("env-41"),

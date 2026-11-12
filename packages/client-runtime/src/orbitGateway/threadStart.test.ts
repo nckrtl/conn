@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   ORBIT_CONTAINER_PROCESS_INACTIVE,
+  ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION,
   OrbitGatewayError,
   type OrbitGatewayBranchSelection,
   type OrbitGatewayClient,
@@ -66,6 +67,8 @@ function gateway(script: {
   /** The failed create's error code and its `result.process_failure.unit`. */
   readonly failedCode?: string;
   readonly failedUnit?: string;
+  /** The failed create's `result.recovery.requires`. */
+  readonly failedRequires?: string;
   /** Answers each name check with a reason (null: available), or throws for a failed check. */
   readonly nameCheck?: (name: string) => string | null;
 }) {
@@ -125,7 +128,11 @@ function gateway(script: {
         status === "failed" ? (script.failedCode ?? "instance.t3_unready") : null,
       );
       if (status === "failed" && script.failedUnit) {
-        return { ...read, processFailureUnit: script.failedUnit };
+        return {
+          ...read,
+          processFailureUnit: script.failedUnit,
+          ...(script.failedRequires ? { recoveryRequires: script.failedRequires } : {}),
+        };
       }
       if (status === "failed" && script.failedDetail) {
         return {
@@ -267,6 +274,7 @@ describe("readOrbitThreadStarts", () => {
       errorDetails: null,
       errorDetail: null,
       errorProcessUnit: null,
+      errorRecoveryRequires: null,
       resultBranch: null,
       resultBaseBranch: null,
       nameSuffix: null,
@@ -628,6 +636,7 @@ describe("runOrbitThreadStart", () => {
     });
     const [reloaded] = readOrbitThreadStarts(JSON.parse(JSON.stringify([stopped])));
     expect(reloaded!.errorProcessUnit).toBe("conn-web.service");
+    expect(reloaded!.errorRecoveryRequires).toBeNull();
     expect(orbitThreadStartCanRetry(reloaded!)).toBe(false);
     expect(retryOrbitThreadStartRecord(stopped).errorProcessUnit).toBeNull();
 
@@ -636,12 +645,35 @@ describe("runOrbitThreadStart", () => {
     expect(again.saves[0]!.errorProcessUnit).toBeNull();
   });
 
+  it("offers Retry for a process that did not stay up when Orbit retries with the current definitions", async () => {
+    const { client } = gateway({
+      create: ["running", "failed"],
+      failedCode: ORBIT_CONTAINER_PROCESS_INACTIVE,
+      failedUnit: "conn-web.service",
+      failedRequires: ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION,
+    });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
+    const stopped = run.saves.at(-1)!;
+    expect(stopped.errorRecoveryRequires).toBe(ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION);
+    const [reloaded] = readOrbitThreadStarts(JSON.parse(JSON.stringify([stopped])));
+    expect(reloaded!.errorRecoveryRequires).toBe(ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION);
+    expect(orbitThreadStartCanRetry(reloaded!)).toBe(true);
+    expect(retryOrbitThreadStartRecord(stopped).errorRecoveryRequires).toBeNull();
+
+    const again = ports(gateway({}).client);
+    expect(await runOrbitThreadStart(stopped, again.ports)).toBe(true);
+    expect(again.saves[0]!.errorRecoveryRequires).toBeNull();
+  });
+
   it("offers Retry for every other failed or cancelled create", async () => {
     for (const status of ["failed", "cancelled"] as const) {
       const run = ports(gateway({ create: ["running", status] }).client);
       expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(false);
       const stopped = run.saves.at(-1)!;
       expect(stopped.errorProcessUnit).toBeNull();
+      expect(stopped.errorRecoveryRequires).toBeNull();
       expect(orbitThreadStartCanRetry(stopped)).toBe(true);
     }
   });

@@ -149,9 +149,12 @@ export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
       return { ...none, message: "Orbit could not set up the workspace." };
     case ORBIT_CONTAINER_PROCESS_INACTIVE: {
       const unit = start.errorProcessUnit?.trim();
+      const next = orbitThreadStartCanRetry(start)
+        ? "Change or remove this process in the Project's Orbit settings, then retry."
+        : "Fix the Project, remove this Instance in Orbit, then create it again.";
       return {
         ...none,
-        message: `A process of this Project did not start${unit ? `: ${unit}` : ""}. Fix the Project, remove this Instance in Orbit, then create it again.`,
+        message: `A process of this Project did not start${unit ? `: ${unit}` : ""}. ${next}`,
       };
     }
     default:

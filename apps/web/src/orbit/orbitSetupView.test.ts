@@ -324,6 +324,45 @@ describe("orbitSetupView for branch refusals", () => {
       },
     ],
     [
+      "a Project process did not start, Orbit retries with the current definitions",
+      {
+        ...stepFailed("instance.container_process_inactive"),
+        errorProcessUnit: "conn-web.service",
+        errorRecoveryRequires: "project_process_definition",
+      },
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start: conn-web.service. Change or remove this process in the Project's Orbit settings, then retry.",
+      },
+    ],
+    [
+      "a Project process did not start, Orbit retries, unit unknown",
+      {
+        ...stepFailed("instance.container_process_inactive"),
+        errorRecoveryRequires: "project_process_definition",
+      },
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start. Change or remove this process in the Project's Orbit settings, then retry.",
+      },
+    ],
+    [
+      "a Project process did not start, Orbit names an unknown requirement",
+      {
+        ...stepFailed("instance.container_process_inactive"),
+        errorProcessUnit: "conn-web.service",
+        errorRecoveryRequires: "something_new",
+      },
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start: conn-web.service. Fix the Project, remove this Instance in Orbit, then create it again.",
+        retry: false,
+      },
+    ],
+    [
       "create cancelled",
       stepFailed("operation.cancelled"),
       { ...quiet, error: "Orbit could not create the clone (operation.cancelled).", stays: true },

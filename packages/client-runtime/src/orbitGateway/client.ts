@@ -241,10 +241,13 @@ export const ORBIT_ROUTE_DOMAIN_INVALID = "route.domain_invalid";
 export const ORBIT_CREATE_CLONE_FAILED = "instance.create_clone_failed";
 export const ORBIT_CREATE_WORKSPACE_FAILED = "instance.create_workspace_failed";
 /**
- * A Project process of the new Instance did not stay up. The kept Instance keeps the broken
- * process, so a Retry fails the same way; only remove and create again works.
+ * A Project process of the new Instance did not stay up. Older Gateways keep the broken process
+ * on the kept Instance, so a Retry fails the same way; newer ones retry with the Project's current
+ * process definitions and say so with `ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION`.
  */
 export const ORBIT_CONTAINER_PROCESS_INACTIVE = "instance.container_process_inactive";
+/** `result.recovery.requires` of a failed create that a Retry fixes after the Project's process changes. */
+export const ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION = "project_process_definition";
 
 export interface OrbitGatewayProjectsOptions {
   /**
@@ -282,6 +285,8 @@ export interface OrbitGatewayOperation {
   readonly result?: Readonly<Record<string, unknown>> | null;
   /** `result.process_failure.unit`: the Project process that did not stay up, when Orbit names it. */
   readonly processFailureUnit?: string | null;
+  /** `result.recovery.requires`: what must change before a Retry of a retained create works. */
+  readonly recoveryRequires?: string | null;
 }
 
 export interface OrbitGatewayOperationError {
@@ -658,12 +663,18 @@ function operation(value: unknown, path: string): OrbitGatewayOperation {
     ...("error" in data ? { error: operationError(data.error) } : {}),
     ...("result" in data ? { result: record(data.result) } : {}),
     ...processFailure(data.result),
+    ...recovery(data.result),
   };
 }
 
 function processFailure(result: unknown): { processFailureUnit?: string | null } {
   const failure = record(record(result)?.process_failure);
   return failure === null ? {} : { processFailureUnit: optionalText(failure.unit) };
+}
+
+function recovery(result: unknown): { recoveryRequires?: string | null } {
+  const value = record(record(result)?.recovery);
+  return value === null ? {} : { recoveryRequires: optionalText(value.requires) };
 }
 
 function operationStep(value: unknown): OrbitGatewayOperationStep[] {

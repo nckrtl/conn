@@ -4045,6 +4045,7 @@ it("keeps the working header in place across worktree setup handoff", () => {
       modelFallbackLine: null,
     },
     threadRef: { environmentId: "env-1" as never, threadId: ThreadId.make("thread-setup") },
+    messageId: "user-1",
   };
   const withOrbitReady = deriveMessagesTimelineRows({
     timelineEntries: [userEntry, assistantEntry],
@@ -4055,6 +4056,15 @@ it("keeps the working header in place across worktree setup handoff", () => {
   });
   expect(withOrbitReady.map((row) => row.kind)).toEqual(["message", "orbit-ready", "message"]);
   expect(withOrbitReady[1]).toMatchObject({ kind: "orbit-ready", ready: orbitReady });
+  // Only the start's own first message anchors the row; without it loaded, no row.
+  const laterHistoryOnly = deriveMessagesTimelineRows({
+    timelineEntries: [userEntry, assistantEntry],
+    isWorking: false,
+    turnDiffSummaries: [],
+    supportsConversationRollback: false,
+    orbitReady: { ...orbitReady, messageId: "user-0" },
+  });
+  expect(laterHistoryOnly.map((row) => row.kind)).toEqual(["message", "message"]);
   expect(
     withOrbitReady.flatMap((row) =>
       row.kind === "message" && row.message.role === "assistant" ? [row.message.text] : [],

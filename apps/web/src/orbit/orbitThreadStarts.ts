@@ -201,9 +201,8 @@ async function waitForClone(environmentId: string) {
       config.settings.defaultModelSelection ??
       resolveProjectDefaultProviderModelSelection(config.providers, config.settings, projectId),
     offers: (selection: { readonly instanceId: string }) =>
-      entries.some(
-        (entry) => entry.instanceId === selection.instanceId && entry.enabled && entry.isAvailable,
-      ),
+      // Only an enabled provider counts; one still being checked is not a reason to fall back.
+      entries.some((entry) => entry.instanceId === selection.instanceId && entry.enabled),
   };
 }
 
@@ -235,6 +234,11 @@ export async function runSavedOrbitThreadStart(
   id: string,
 ): Promise<{ readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null> {
   const start = readStored().find((entry) => entry.id === id);
+  if (start !== undefined && start.sentAt != null && !start.pendingThread) {
+    // An old dialog start whose send finished before a quit: only its dismiss is left.
+    dismissOrbitThreadStart(id);
+    return null;
+  }
   if (start === undefined || start.error !== null || start.sentAt != null || running.has(id)) {
     return null;
   }

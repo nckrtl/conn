@@ -136,14 +136,14 @@ export function orbitSetupStages(input: {
 }
 
 /**
- * How long the setup took, for "Instance ready <N>s": from the first stage's start to the sent
- * first message. Null until the message is sent or when a time is missing (older rows).
+ * How long the setup took, for "Instance ready <N>s": the create, then Connect to the sent first
+ * message. Time a failed start waited for Retry between them does not count. Null until the
+ * message is sent or when a time is missing (older rows).
  */
 export function orbitSetupReadyMs(start: OrbitThreadStart): number | null {
-  const from =
-    start.orbitInstanceKind === "existing"
-      ? (start.connectStartedAt ?? null)
-      : (start.createStartedAt ?? null);
-  if (from === null || start.sentAt == null) return null;
-  return Math.max(0, start.sentAt - from);
+  if (start.sentAt == null || start.connectStartedAt == null) return null;
+  const connectToSent = Math.max(0, start.sentAt - start.connectStartedAt);
+  if (start.orbitInstanceKind === "existing") return connectToSent;
+  if (start.createStartedAt == null || start.createFinishedAt == null) return null;
+  return Math.max(0, start.createFinishedAt - start.createStartedAt) + connectToSent;
 }

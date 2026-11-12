@@ -8,6 +8,7 @@ import { OrbitSetupCard } from "../components/chat/OrbitSetupCard";
 import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
+import { toastManager } from "../components/ui/toast";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { isElectron } from "../env";
@@ -97,12 +98,22 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
 
   const changeName = async () => {
     const target = orbitStartDraftTarget(start);
-    dismissOrbitThreadStart(start.id);
     const draftId = await openOrbitDraft(router, target);
-    if (draftId === null) return;
+    if (draftId === null) {
+      toastManager.add({
+        type: "error",
+        title: "Could not reopen the draft",
+        description: "Turn on Labs › Orbit threads in the palette, then try again.",
+      });
+      return;
+    }
     const store = useComposerDraftStore.getState();
     store.setPrompt(draftId, start.message);
     if (start.modelSelection) store.setModelSelection(draftId, start.modelSelection);
+    if (start.runtimeMode) store.setRuntimeMode(draftId, start.runtimeMode);
+    if (start.interactionMode) store.setInteractionMode(draftId, start.interactionMode);
+    // The taken name made no Instance, so only the saved start goes.
+    dismissOrbitThreadStart(start.id);
     openOrbitInstanceStep(target);
   };
 

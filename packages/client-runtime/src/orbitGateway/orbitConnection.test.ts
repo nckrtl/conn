@@ -56,7 +56,7 @@ describe("orbitConnectionChecks", () => {
     ["TLS failure", { transport: "net::ERR_SSL_PROTOCOL_ERROR" }, "certificate"],
     ["unknown peer", gatewayError(403, "peer.identity_unknown"), "device"],
     ["no node access", gatewayError(403, "node_access.required"), "device"],
-    ["server error", gatewayError(500, "server.error", "Boom."), "device"],
+    ["refused request", gatewayError(422, "request.invalid", "Bad."), "device"],
     ["garbled reply", { status: 200, body: "<html>" }, "device"],
   ] as const)("maps %s to a failed %s check", async (_name, failure, failed) => {
     const checks = orbitConnectionChecks({ status: "error", error: await meError(failure) });
@@ -68,6 +68,55 @@ describe("orbitConnectionChecks", () => {
       ),
     );
     expect(checks[at]!.message).toMatch(/Reload/);
+  });
+
+  it("does not blame the device when the Gateway answers with a server error", async () => {
+    const checks = orbitConnectionChecks({
+      status: "error",
+      error: await meError(gatewayError(503, "server.unavailable", "Gateway is restarting.")),
+    });
+    expect(states(checks)).toEqual(["gateway:pass", "certificate:pass", "device:not_checked"]);
+    expect(checks[2]!.message).toBe("Gateway is restarting.");
+
+    const [bare, html] = await Promise.all([
+      meError({ status: 500, body: JSON.stringify({ status: 500 }) }),
+      meError({ status: 502, body: "<html>Bad Gateway</html>" }),
+    ]);
+    expect(states(orbitConnectionChecks({ status: "error", error: bare }))).toEqual([
+      "gateway:pass",
+      "certificate:pass",
+      "device:not_checked",
+    ]);
+    expect(orbitConnectionChecks({ status: "error", error: bare })[2]!.message).toBe(
+      "gateway.orbit answered with an error (HTTP 500). Try Reload later.",
+    );
+    expect(orbitConnectionChecks({ status: "error", error: html })[2]!.message).toBe(
+      "gateway.orbit answered with an error (HTTP 502). Try Reload later.",
+    );
+  });
+
+  it("shows nothing as checked when there is no Orbit client", () => {
+    const checks = orbitConnectionChecks({ status: "unavailable" });
+    expect(states(checks)).toEqual([
+      "gateway:not_checked",
+      "certificate:not_checked",
+      "device:not_checked",
+    ]);
+  });
+
+  it.each([
+    ["empty", { wireguard_ip: "" }],
+    ["blank", { wireguard_ip: "  " }],
+    ["null", { wireguard_ip: null }],
+    ["missing", {}],
+  ])("fails the device check when `me` names no WireGuard address (%s)", async (_name, address) => {
+    const client = createOrbitGatewayClient(async () => ({
+      status: 200,
+      body: JSON.stringify({ data: { id: 45, name: "nick", profile: null, ...address } }),
+    }));
+    const checks = orbitConnectionChecks({ status: "ok", node: await client.me() });
+    expect(states(checks)).toEqual(["gateway:pass", "certificate:pass", "device:fail"]);
+    expect(checks[2]!.message).toMatch(/not know this WireGuard address as an active Node/);
   });
 
   it("says why a check after a failure did not run", async () => {

@@ -447,7 +447,7 @@ export function createOrbitGatewayClient(
         message:
           typeof error?.message === "string"
             ? error.message
-            : `The Orbit Gateway answered ${response.status}.`,
+            : gatewayFallbackMessage(response.status),
         status: response.status,
         details: record(error?.details) ?? {},
       });
@@ -804,6 +804,11 @@ export function isFinalPairingError(error: unknown): boolean {
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 /** A string the way the Gateway stores it: trimmed, and null when nothing is left. */
+/** The message of an `OrbitGatewayError` whose reply carried no error envelope message. */
+export function gatewayFallbackMessage(status: number): string {
+  return `The Orbit Gateway answered ${status}.`;
+}
+
 export function gatewayText(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -880,14 +885,17 @@ function node(value: unknown, path: string): OrbitGatewayNode {
   if (
     typeof data?.id !== "number" ||
     typeof data.name !== "string" ||
-    typeof data.wireguard_ip !== "string"
+    (data.wireguard_ip !== undefined &&
+      data.wireguard_ip !== null &&
+      typeof data.wireguard_ip !== "string")
   ) {
     throw invalid(path);
   }
   return {
     id: data.id,
     name: data.name,
-    wireguardIp: data.wireguard_ip,
+    // A Node without an address reads as "" so the Connection page can say the device is not known.
+    wireguardIp: gatewayText(data.wireguard_ip) ?? "",
     profile:
       data.profile === null || data.profile === undefined ? null : profile(data.profile, path),
   };

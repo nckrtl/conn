@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 import {
   OrbitGatewayError,
+  gatewayFallbackMessage,
   gatewayText,
   type OrbitGatewayEnvironment,
   type OrbitGatewayNode,
@@ -21,8 +22,12 @@ export interface OrbitConnectionCheck {
   readonly message: string;
 }
 
-/** The result of the Gateway's `me` call, which runs all three checks at once. */
+/**
+ * The result of the Gateway's `me` call, which runs all three checks at once. `unavailable`: there
+ * is no Orbit client (outside the desktop app), so nothing is checked.
+ */
 export type OrbitConnectionProbe =
+  | { readonly status: "unavailable" }
   | { readonly status: "checking" }
   | { readonly status: "ok"; readonly node: OrbitGatewayNode }
   | { readonly status: "error"; readonly error: unknown };
@@ -48,6 +53,17 @@ const PEER_IDENTITY_UNKNOWN = "peer.identity_unknown";
 const NODE_ACCESS_REQUIRED = "node_access.required";
 
 const isGatewayError = Schema.is(OrbitGatewayError);
+
+const UNKNOWN_DEVICE =
+  "Orbit does not know this WireGuard address as an active Node. Add this device as a Node with the Orbit CLI, then Reload.";
+
+/** The Gateway answered but failed (HTTP 5xx): its own message, or Conn's when it sent none. */
+function serverErrorMessage(error: OrbitGatewayError): string {
+  const text = gatewayText(error.message);
+  return text && text !== gatewayFallbackMessage(error.status)
+    ? text
+    : `gateway.orbit answered with an error (HTTP ${error.status}). Try Reload later.`;
+}
 
 /**
  * Chromium's TLS failures (`net::ERR_CERT_AUTHORITY_INVALID`, `net::ERR_SSL_PROTOCOL_ERROR`, …)
@@ -77,11 +93,7 @@ function failedCheck(error: unknown): { key: OrbitConnectionCheckKey; message: s
     };
   }
   if (error.code === PEER_IDENTITY_UNKNOWN) {
-    return {
-      key: "device",
-      message:
-        "Orbit does not know this WireGuard address as an active Node. Add this device as a Node with the Orbit CLI, then Reload.",
-    };
+    return { key: "device", message: UNKNOWN_DEVICE };
   }
   if (error.code === NODE_ACCESS_REQUIRED) {
     return {
@@ -107,14 +119,32 @@ export function orbitConnectionChecks(probe: OrbitConnectionProbe): OrbitConnect
     message: string,
   ): OrbitConnectionCheck => ({ key, label: LABELS[key], state, message });
 
+  if (probe.status === "unavailable") {
+    return ORDER.map((key) => check(key, "not_checked", ""));
+  }
   if (probe.status === "checking") {
     return ORDER.map((key) => check(key, "checking", "Checking…"));
   }
   if (probe.status === "ok") {
+    if (gatewayText(probe.node.wireguardIp) === null) {
+      return [
+        check("gateway", "pass", PASSED.gateway),
+        check("certificate", "pass", PASSED.certificate),
+        check("device", "fail", UNKNOWN_DEVICE),
+      ];
+    }
     return [
       check("gateway", "pass", PASSED.gateway),
       check("certificate", "pass", PASSED.certificate),
       check("device", "pass", `Orbit knows this WireGuard address as the Node ${probe.node.name}.`),
+    ];
+  }
+  if (isGatewayError(probe.error) && probe.error.status >= 500) {
+    // The Gateway answered over trusted TLS, so it could not check the device: not the device's fault.
+    return [
+      check("gateway", "pass", PASSED.gateway),
+      check("certificate", "pass", PASSED.certificate),
+      check("device", "not_checked", serverErrorMessage(probe.error)),
     ];
   }
   const failed = failedCheck(probe.error);

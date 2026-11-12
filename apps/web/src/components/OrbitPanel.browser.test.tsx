@@ -251,6 +251,28 @@ describe("Orbit panel", () => {
     expect(calls).toBe(2);
   });
 
+  it("settles the checks as not checked when there is no Orbit client", async () => {
+    using _env = setup("orbit");
+    gateway.client = null;
+    await using _screen = await render(
+      <SidebarProvider>
+        <OrbitPanelLayout>
+          <OrbitConnectionPage />
+        </OrbitPanelLayout>
+      </SidebarProvider>,
+      { router: "/orbit/connection" },
+    );
+    await vi.waitFor(() =>
+      expect(
+        [...document.querySelectorAll("[data-check] [data-check-state]")].map((badge) =>
+          badge.getAttribute("data-check-state"),
+        ),
+      ).toEqual(["not_checked", "not_checked", "not_checked"]),
+    );
+    await expect.element(page.getByRole("button", { name: "Reload" })).toBeDisabled();
+    await expect.element(page.getByText("Nodes not available")).toBeVisible();
+  });
+
   it("closes when environments stop coming from Orbit", async () => {
     using _env = setup("orbit");
     await using screen = await render(

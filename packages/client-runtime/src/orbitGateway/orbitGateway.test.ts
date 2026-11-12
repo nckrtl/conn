@@ -592,7 +592,11 @@ describe("createOrbitGatewayClient", () => {
         current_step: null,
         current_step_started_at: null,
         failed_step: "clone-t3",
-        error: { code: "instance.t3_unready", message: " T3 did not answer. " },
+        error: {
+          code: "instance.t3_unready",
+          message: " T3 did not answer. ",
+          detail: " Argument list too long ",
+        },
         result: null,
         steps: [
           {
@@ -735,7 +739,11 @@ describe("createOrbitGatewayClient", () => {
       currentStep: null,
       currentStepStartedAt: null,
       failedStep: "clone-t3",
-      error: { code: "instance.t3_unready", message: "T3 did not answer." },
+      error: {
+        code: "instance.t3_unready",
+        message: "T3 did not answer.",
+        detail: "Argument list too long",
+      },
       result: null,
       steps: [
         {

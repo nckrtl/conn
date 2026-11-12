@@ -98,6 +98,8 @@ export interface OrbitThreadStart {
   readonly defaultBranch?: string | null;
   /** The Gateway's `details` behind `errorCode`, such as the Instance holding a branch. */
   readonly errorDetails?: Readonly<Record<string, unknown>> | null;
+  /** Orbit's detail line from the failed Operation behind `errorCode`; null on older rows. */
+  readonly errorDetail?: string | null;
   /** The create's result: the branch the Instance checked out and the base it was cut from. */
   readonly resultBranch?: string | null;
   readonly resultBaseBranch?: string | null;
@@ -176,6 +178,7 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
           !Array.isArray(row.errorDetails)
             ? (row.errorDetails as Record<string, unknown>)
             : null,
+        errorDetail: typeof row.errorDetail === "string" ? row.errorDetail : null,
         resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
         resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
       },
@@ -213,7 +216,14 @@ export function retryOrbitThreadStartRecord(
   start: OrbitThreadStart,
   patch: Partial<OrbitThreadStart> = {},
 ): OrbitThreadStart {
-  const next = { ...start, ...patch, error: null, errorCode: null, errorDetails: null };
+  const next = {
+    ...start,
+    ...patch,
+    error: null,
+    errorCode: null,
+    errorDetails: null,
+    errorDetail: null,
+  };
   const createAgain = next.environmentId === null;
   return {
     ...next,
@@ -354,6 +364,7 @@ export function newOrbitThreadStart(input: {
     branch: existing ? null : (input.branch ?? null),
     defaultBranch: input.defaultBranch ?? null,
     errorDetails: null,
+    errorDetail: null,
     resultBranch: null,
     resultBaseBranch: null,
   };
@@ -371,6 +382,7 @@ class StepFailed extends Schema.TaggedError<StepFailed>()("OrbitThreadStepFailed
   code: Schema.NullOr(Schema.String),
   reset: Schema.Record(Schema.String, Schema.Unknown),
   details: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  detail: Schema.optional(Schema.NullOr(Schema.String)),
 }) {}
 
 /** The user dismissed the start. */
@@ -411,8 +423,9 @@ function stepFailed(
   message: string,
   reset: Partial<OrbitThreadStart>,
   code: string | null = null,
+  detail: string | null = null,
 ): StepFailed {
-  return new StepFailed({ message, code, reset });
+  return new StepFailed({ message, code, reset, detail });
 }
 
 /**
@@ -442,7 +455,13 @@ export async function runOrbitThreadStart(
   start: OrbitThreadStart,
   ports: OrbitThreadStartPorts,
 ): Promise<boolean> {
-  let current: OrbitThreadStart = { ...start, error: null, errorCode: null, errorDetails: null };
+  let current: OrbitThreadStart = {
+    ...start,
+    error: null,
+    errorCode: null,
+    errorDetails: null,
+    errorDetail: null,
+  };
   const update = (patch: Partial<OrbitThreadStart>) => {
     current = { ...current, ...patch };
     ports.save(current);
@@ -457,7 +476,7 @@ export async function runOrbitThreadStart(
   const follow = async (
     operationId: number,
     timeoutMs: number,
-    failed: (code: string) => StepFailed,
+    failed: (code: string, detail: string | null) => StepFailed,
     observe?: (operation: OrbitGatewayOperation) => void,
   ): Promise<OrbitGatewayOperation> => {
     const deadline = ports.now() + timeoutMs;
@@ -477,9 +496,12 @@ export async function runOrbitThreadStart(
       }
       if (operation?.status === "succeeded") return operation;
       if (operation && OPERATION_TERMINAL_STATUSES.has(operation.status)) {
-        throw failed(operation.errorCode ?? `operation.${operation.status}`);
+        throw failed(
+          operation.errorCode ?? `operation.${operation.status}`,
+          operation.error?.detail ?? null,
+        );
       }
-      if (ports.now() >= deadline) throw failed("operation.timeout");
+      if (ports.now() >= deadline) throw failed("operation.timeout", null);
       const wait = operationPollDelayMs(operation?.pollAfterSeconds ?? null);
       await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
     }
@@ -555,11 +577,12 @@ export async function runOrbitThreadStart(
       const created = await follow(
         current.createOperationId!,
         createDeadline - ports.now(),
-        (code) =>
+        (code, detail) =>
           stepFailed(
             `Orbit could not create the clone (${code}).`,
             code === "operation.timeout" ? {} : { createOperationId: null, createKey: null },
             code,
+            detail,
           ),
         ports.onCreateOperation,
       );
@@ -606,8 +629,8 @@ export async function runOrbitThreadStart(
         }
         // A failed pairing needs a new pairing: only a retry starts it, under a new key.
         const newPairing = { pairingOperationId: null, pairingId: null, pairingKey: null };
-        await follow(current.pairingOperationId!, PAIRING_TIMEOUT_MS, (code) =>
-          stepFailed(`Orbit could not pair with the clone (${code}).`, newPairing, code),
+        await follow(current.pairingOperationId!, PAIRING_TIMEOUT_MS, (code, detail) =>
+          stepFailed(`Orbit could not pair with the clone (${code}).`, newPairing, code, detail),
         );
         let pairingUrl: string;
         try {
@@ -655,6 +678,7 @@ export async function runOrbitThreadStart(
         : isOrbitGatewayError(error)
           ? error.details
           : null,
+      errorDetail: isStepFailed(error) ? (error.detail ?? null) : null,
     });
     return false;
   }

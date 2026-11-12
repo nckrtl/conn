@@ -273,7 +273,11 @@ describe("orbitSetupView for branch refusals", () => {
     [
       "clone step failed",
       stepFailed("instance.create_clone_failed"),
-      { ...quiet, error: "Orbit could not prepare the branch.", stays: true },
+      {
+        ...quiet,
+        error: "Orbit could not create pricing-page: the clone operation failed on beast.",
+        stays: true,
+      },
     ],
     [
       "workspace step failed",
@@ -282,6 +286,20 @@ describe("orbitSetupView for branch refusals", () => {
     ],
   ])("%s", (_name, start, expected) => {
     expect(card(start)).toEqual(expected);
+  });
+
+  it("shows Orbit's code and detail line under the text when the failed Operation sent one", () => {
+    const failed = stepFailed("instance.create_clone_failed");
+    expect(orbitSetupView(failed).errorDetailLine).toBeNull();
+    const withDetail = { ...failed, errorDetail: " Argument list too long " };
+    expect(orbitSetupView(withDetail).errorDetailLine).toBe(
+      "instance.create_clone_failed · Argument list too long",
+    );
+    const pairing = { ...withDetail, errorCode: "conn.server_unreachable" };
+    expect(orbitSetupView(pairing).errorDetailLine).toBe(
+      "conn.server_unreachable · Argument list too long",
+    );
+    expect(orbitSetupView({ ...withDetail, error: null }).errorDetailLine).toBeNull();
   });
 
   it("offers no Change branch or Change name once the create made an Instance", () => {

@@ -779,7 +779,7 @@ export function useComposerSend(input: ComposerSendInput) {
             draftThread?.interactionMode ??
             DEFAULT_INTERACTION_MODE,
         }),
-        openPending: (to) => void navigate({ to }),
+        openPending: (to) => navigate({ to }),
         clearDraft: () => useComposerDraftStore.getState().clearDraftThread(draftId),
       });
       promptRef.current = "";

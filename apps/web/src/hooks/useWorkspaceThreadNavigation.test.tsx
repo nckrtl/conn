@@ -5,11 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 const state = vi.hoisted(() => ({
   params: {} as Record<string, string>,
+  pathname: "/local/a1",
   threads: [] as Array<Record<string, unknown>>,
   navigate: vi.fn(),
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => state.navigate,
+  useLocation: ({ select }: { select: (location: { pathname: string }) => unknown }) =>
+    select({ pathname: state.pathname }),
   useParams: ({ select }: { select: (params: Record<string, string>) => unknown }) =>
     select(state.params),
 }));
@@ -43,6 +46,7 @@ const workspace = (id: string) => ({
 beforeEach(() => {
   state.navigate.mockClear();
   state.params = { environmentId: "local", threadId: "a1" };
+  state.pathname = "/local/a1";
   state.threads = ["a1", "b1"].map((id) => ({
     environmentId: "local",
     id,
@@ -102,4 +106,31 @@ describe("workspace navigation", () => {
     expect(state.navigate).toHaveBeenLastCalledWith({ to: "/" });
     expect(useWorkspaceStore.getState().lastThreadByWorkspace.b).toBeUndefined();
   });
+  // First sync: the profile lacks this device's selection. Later sync: another device removed it.
+  it.each([
+    ["Settings, first sync", "/settings/connections"],
+    ["Usage, later sync", "/usage"],
+  ])(
+    "waits for %s to close when the selected workspace goes away under it",
+    async (_, pathname) => {
+      await act(() => {
+        renderer = create(<Probe />);
+      });
+      state.params = {};
+      state.pathname = pathname;
+      await act(() => {
+        renderer?.update(<Probe />);
+      });
+      await act(() => {
+        useWorkspaceStore.setState({ workspaces: [workspace("b")], activeWorkspaceId: null });
+      });
+      expect(state.navigate).not.toHaveBeenCalled();
+      state.params = { environmentId: "local", threadId: "a1" };
+      state.pathname = "/local/a1";
+      await act(() => {
+        renderer?.update(<Probe />);
+      });
+      expect(state.navigate).toHaveBeenCalledTimes(1);
+    },
+  );
 });

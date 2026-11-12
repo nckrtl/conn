@@ -245,11 +245,6 @@ export interface OrbitThreadStartPorts {
   readonly now: () => number;
   /** True once the user dismissed the start, or Orbit no longer provides the environments. */
   readonly stopped: () => boolean;
-  /**
-   * Whether a create may carry the start's branch (the Labs gate). Off or missing: the request
-   * never has a `branch` field, whatever the start saved.
-   */
-  readonly branchOnCreate?: boolean;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
   /** Each read of the create Operation, for the setup card's clone step. */
@@ -532,7 +527,7 @@ export async function runOrbitThreadStart(
                 current.projectId,
                 current.instanceName,
                 current.createKey!,
-                ports.branchOnCreate === true ? (current.branch ?? null) : null,
+                current.branch ?? null,
               ),
             (error) => isLostAdmission(error) || isTargetBusy(error),
           );

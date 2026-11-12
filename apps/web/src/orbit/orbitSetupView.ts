@@ -200,11 +200,13 @@ export const ORBIT_DEPENDENCIES_LINE = "Dependencies and build come from the def
 /**
  * Orbit reruns no setup after the checkout yet, so the code differs from what dependencies and the
  * build came from when the Instance works on another branch, or cut its own from another base.
+ * The base is the create result's when Orbit sent one, else the one asked for.
  */
 function checksOutOtherCode(start: OrbitThreadStart): boolean {
   const branch = start.branch ?? null;
   if (branch === null) return false;
-  return branch.mode === "existing" || branch.from !== start.defaultBranch;
+  if (branch.mode === "existing") return true;
+  return (start.resultBaseBranch ?? branch.from) !== start.defaultBranch;
 }
 
 export function orbitReadyView(start: OrbitThreadStart, url: string | null): OrbitReadyView {

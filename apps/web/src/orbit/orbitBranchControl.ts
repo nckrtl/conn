@@ -7,13 +7,6 @@ import {
 
 import type { OrbitDraftTarget } from "./orbitDraft";
 
-/**
- * Conn: the gate for branch on create. Until Orbit accepts the `branch` field no
- * build may send it: off, the branch control is hidden, no branches are read and no create
- * carries a branch. Flip to `true` once branch on create is live.
- */
-export const ORBIT_BRANCH_CONTROL_ENABLED = false;
-
 export type OrbitBranchMode = OrbitGatewayBranchSelection["mode"];
 
 /** Shown until the branch list was read; Orbit's own name replaces it then. */
@@ -133,10 +126,10 @@ export function orbitListedDefaultBranch(branches: readonly OrbitGatewayBranch[]
   return branches.find((branch) => branch.default)?.name ?? null;
 }
 
-/** The search as sent: without control characters, trimmed, and cut to what the IPC lets through. */
+/** The search as sent: control characters as spaces, trimmed, and cut to what the IPC lets through. */
 export function orbitBranchQuery(text: string): string {
   return text
-    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
     .trim()
     .slice(0, ORBIT_BRANCH_QUERY_MAX_LENGTH);
 }

@@ -1040,17 +1040,27 @@ describe("Orbit Projects in the New thread list", () => {
     };
     const rows = buildOrbitPaletteProjectRows(
       loaded([
-        project(1, { cloneable: false, cloneableReason: "No Node access" }),
-        project(2, { cloneable: false, checks: [failing] }),
+        project(1, { cloneable: false, cloneableReason: "instance.default_missing" }),
+        project(2, {
+          cloneable: false,
+          cloneableReason: "instance.default_missing",
+          checks: [failing],
+        }),
         project(3, { cloneable: false }),
         project(4, { nodeId: null, nodeName: null }),
+        project(5, {
+          cloneable: false,
+          checks: [{ ...failing, message: `${"x".repeat(120)}\nsecond line` }],
+        }),
       ]),
     );
+    // Never the raw code in cloneable_reason; a long message keeps one short line.
     expect(rows.map((row) => [row.startable, orbitPaletteProjectSubline(row)])).toEqual([
-      [false, "orbit · cannot start threads: No Node access"],
+      [false, "orbit · cannot start threads yet"],
       [false, "orbit · cannot start threads: its default Instance has no seed yet"],
       [false, "orbit · cannot start threads yet"],
       [false, "orbit · cannot start threads yet"],
+      [false, `orbit · cannot start threads: ${"x".repeat(79)}…`],
     ]);
     expect(rows[1]!.checks).toEqual([failing]);
   });

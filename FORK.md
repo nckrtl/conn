@@ -200,9 +200,11 @@ them, and starts threads in a Project's Instance container. Conn no longer makes
 Instances. Old ones and their threads are settled in Orbit; Conn keeps showing such a thread as a
 plain worktree thread and never removes it.
 
-In Orbit mode, Settings › Connections shows the per-environment Linked
-environments, Load balancing and GitHub routing sections under Orbit's sections.
-`ConnectionsSettings.tsx` renders them for both providers. Reading linked
+Orbit's configuration lives in the Orbit panel, not in Settings, so Settings stays close to
+upstream. Settings › Environments (`ConnectionsSettings.tsx`) keeps only the fork's
+"Environments from" row (`EnvironmentProviderSection`); in Orbit mode it hides the
+Environments list and keeps the per-environment Linked environments, Load balancing and
+GitHub routing sections. Reading linked
 environments needs `access:read` on that server; answering a link card needs
 `access:write`.
 
@@ -322,7 +324,7 @@ Dismiss, which drops only the saved start on this device. Conn removes no Instan
 removed in Orbit.
 
 Still waiting for Orbit: the Node menu ("Run on") and
-starting a stopped Instance (stopped Instances stay disabled; Settings › Connections shows a clone
+starting a stopped Instance (stopped Instances stay disabled; the Orbit panel's Connection page shows a clone
 whose container is stopped as Asleep).
 
 The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
@@ -356,10 +358,23 @@ and ignores other keys. With both ids as positive integers, the environment desc
 stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. The sidebar title of the clone's
 `/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
 
+The Orbit panel is a modal like Settings, with its own nav: Connection (this device's Node
+and the Gateway's servers, with a link back to "Environments from") and Profile (the profile
+and its sync). An Orbit icon above Settings in the workspace rail opens it; it shows only in
+the desktop app with "Environments from" set to Orbit, and the panel closes when that changes.
+A profile sync that drops the selected workspace leaves the panel open, as it does Settings
+(`isAppModalPage`). Settings search has no entries for the panel's sections.
+
 Sources:
 
 - `apps/web/src/orbit/*`.
-- `apps/web/src/components/settings/ConnectionsSettings.tsx`.
+- Orbit panel: `apps/web/src/components/OrbitPanel.tsx`, `orbit/orbitPanelPages.ts`,
+  `routes/_chat._orbitPanel*.tsx`, the rail button in `components/sidebar/WorkspaceRail.tsx`,
+  `components/sidebar/mainAppLocation.ts` (`isAppModalPage`).
+- Settings files the fork touches for Orbit: `components/settings/OrbitSettings.tsx` (the
+  panel pages and `EnvironmentProviderSection`), `components/settings/ConnectionsSettings.tsx`
+  (the "Environments from" row only), `components/settings/settingsSearch.ts`
+  (`environment-provider`).
 - `packages/client-runtime/src/orbitGateway/environmentProvider.ts`.
 - `packages/client-runtime/src/orbitGateway/threadStart.ts` and `threadTurn.ts`.
 - Mobile (`apps/mobile/src/features/orbit/`): `orbitThreadStart*.ts`, `orbitThreadStarts.ts`,
@@ -380,7 +395,7 @@ The profile also carries:
 
 Conn writes each section with `PATCH /profiles/{id}/settings`. Version conflicts
 merge per key or theme. The first sync adopts the profile or seeds an empty one.
-Previous values remain available in Settings › Connections › Profile sync ›
+Previous values remain available in the Orbit panel › Profile › Profile sync ›
 Restore previous settings. Each part can be switched off per device.
 
 An environment's `t3 theme set` is not a user choice and never syncs.
@@ -404,9 +419,8 @@ Sources:
   `OrbitAppearanceSync.tsx`, `appearanceProfileSync.ts`,
   `deviceSettingsSync.ts`, `profileSync*.ts`, `themeOrigin.ts`,
   `workspaceProfileSync.ts`.
-- Web (`apps/web/src/`): `components/settings/OrbitSettings.tsx` (Profile sync),
-  `components/settings/settingsSearch.ts` (`orbit-profile-sync`),
-  `hooks/useDefaultTheme.ts` (two wrapped calls).
+- Web (`apps/web/src/`): `components/settings/OrbitSettings.tsx` (Profile sync, on the
+  Orbit panel's Profile page), `hooks/useDefaultTheme.ts` (two wrapped calls).
 - Gateway PATCH IPC: `apps/desktop/src/ipc/methods/orbitGateway.ts`,
   `packages/contracts/src/ipc.ts` (`orbitGatewaySend`).
 - Mobile (`apps/mobile/src/`): `features/orbit/*`,

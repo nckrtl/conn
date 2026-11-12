@@ -39,6 +39,9 @@ import {
   type Workspace,
 } from "../../workspaces.logic";
 import { useWorkspaceThreadNavigation } from "../../hooks/useWorkspaceThreadNavigation";
+import { useOrbitThreadsAvailable } from "../../orbit/environmentProvider";
+import { isOrbitPanelPage, ORBIT_PANEL_HOME } from "../../orbit/orbitPanelPages";
+import { OrbitLogoIcon } from "../OrbitLogoIcon";
 import { useDelegatedUnderParent, useThreadShells } from "../../state/entities";
 import { useUiStateStore } from "../../uiStateStore";
 import { workspaceAttention, workspaceThreads } from "../../workspaceActivity.logic";
@@ -339,10 +342,10 @@ export function WorkspaceRail({ isElectron }: { isElectron: boolean }) {
 /**
  * The app's utility actions at the bottom of the rail, top to bottom: a provider
  * update (only while there is one), the app update button (always there in the
- * desktop app, so an update never shifts the rest), usage, pull requests and
- * settings. They replace the thread sidebar's footer row.
+ * desktop app, so an update never shifts the rest), usage, pull requests, Orbit
+ * (Conn: only while environments come from Orbit) and settings. They replace the thread sidebar's footer row.
  */
-function RailActions() {
+export function RailActions() {
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
   const page = useLocation({
@@ -351,8 +354,11 @@ function RailActions() {
         ? "usage"
         : location.pathname === "/pull-requests"
           ? "pull-requests"
-          : null,
+          : isOrbitPanelPage(location.pathname)
+            ? "orbit"
+            : null,
   });
+  const orbitAvailable = useOrbitThreadsAvailable();
   const { environments } = useEnvironments();
   const pullRequestsSupported = environments.some(
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
@@ -382,6 +388,15 @@ function RailActions() {
           )}
         >
           <PullRequestGlyph.pullRequest className="size-4" />
+        </RailButton>
+      ) : null}
+      {orbitAvailable ? (
+        <RailButton
+          label="Orbit"
+          active={page === "orbit"}
+          onClick={go(() => void navigate({ to: ORBIT_PANEL_HOME }))}
+        >
+          <OrbitLogoIcon className="size-4" />
         </RailButton>
       ) : null}
       <RailButton label="Settings" onClick={go(() => void navigate({ to: "/settings" }))}>

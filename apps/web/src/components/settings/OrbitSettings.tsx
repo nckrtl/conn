@@ -8,6 +8,7 @@ import {
   type OrbitGatewayProfile,
   type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
 import {
@@ -37,8 +38,9 @@ import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
-import { SettingsRow, SettingsSection } from "./settingsLayout";
-import { searchableSetting } from "./settingsSearch";
+import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import { searchableSetting, SETTINGS_SECTION_LABELS } from "./settingsSearch";
+import { useMessages } from "gt-react";
 import { useStableCallback } from "~/hooks/useStableCallback";
 
 interface GatewayView {
@@ -192,7 +194,7 @@ function ProfileSyncSection({ profileName }: { readonly profileName: string | nu
   };
 
   return (
-    <SettingsSection {...searchableSetting("orbit-profile-sync")}>
+    <SettingsSection id="orbit-profile-sync" title="Profile sync">
       <SettingsRow
         title={statusTitle}
         description={statusDescription}
@@ -272,20 +274,15 @@ function ProfileSyncSection({ profileName }: { readonly profileName: string | nu
 }
 
 /**
- * The Orbit side of Connections: this device's Node and profile on the Gateway, the workspace sync,
- * and the Gateway's T3 servers. Workspaces are edited on the desktop. Host servers pair
- * automatically; a clone pairs when the user connects it.
+ * This device's Node, its profiles and the Gateway's T3 servers, read on mount and after each
+ * profile sync. Each Orbit panel page reads its own copy.
  */
-export function OrbitEnvironmentSections() {
+function useOrbitGatewayView() {
   // One client per mount: the load effect below must not restart on every render.
   const [client] = useState(desktopOrbitGatewayClient);
   const sync = useOrbitProfileSyncStatus();
-  const { environments: savedEnvironments } = useEnvironments();
   const [view, setView] = useState<GatewayView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [newProfileName, setNewProfileName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const starts = useOrbitThreadStarts((state) => state.starts);
 
   const load = useStableCallback(async () => {
     if (!client) return;
@@ -308,21 +305,44 @@ export function OrbitEnvironmentSections() {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A finished profile sync can change the node and profiles, so the view reloads.
   }, [load, sync.syncedAt]);
 
-  const bindProfile = async (profile: { readonly id: number } | { readonly name: string }) => {
-    if (!client) return;
-    setBusy(true);
-    try {
-      const id = "id" in profile ? profile.id : (await client.createProfile(profile.name)).id;
-      await client.bindProfile(id);
-      setNewProfileName("");
-      await load();
-      syncOrbitProfileNow();
-    } catch (error) {
-      toastManager.add({ type: "error", title: "Orbit", description: message(error) });
-    }
-    // Not in `finally`: the React Compiler cannot compile a finalizer clause.
-    setBusy(false);
-  };
+  return { gateway: client, view, loadError, load };
+}
+
+function OrbitDeviceSection(props: {
+  readonly view: GatewayView | null;
+  readonly loadError: string | null;
+  readonly onReload: () => void;
+}) {
+  const { view, loadError } = props;
+  return (
+    <SettingsSection id="orbit-device" title="Orbit Gateway">
+      <SettingsRow
+        title={view?.node.name ?? (loadError ? "Gateway unreachable" : "Connecting…")}
+        description={
+          loadError ??
+          (view ? `Signed in to gateway.orbit as ${view.node.wireguardIp}` : "gateway.orbit")
+        }
+        control={
+          <Button size="xs" variant="outline" onClick={props.onReload}>
+            Reload
+          </Button>
+        }
+      />
+    </SettingsSection>
+  );
+}
+
+/**
+ * The Orbit panel's Connection page: this device's Node on the Gateway and the Gateway's T3
+ * servers. Host servers pair automatically; a clone pairs when the user connects it.
+ */
+export function OrbitConnectionPage() {
+  const { gateway, view, loadError, load } = useOrbitGatewayView();
+  const { environments: savedEnvironments } = useEnvironments();
+  const starts = useOrbitThreadStarts((state) => state.starts);
+  const navigate = useNavigate();
+  const m = useMessages();
+  const connectionsLabel = m(SETTINGS_SECTION_LABELS["/settings/connections"]);
 
   const connected = new Set(
     savedEnvironments.map((environment) => String(environment.environmentId)),
@@ -333,27 +353,97 @@ export function OrbitEnvironmentSections() {
       start.instanceId === null || start.error !== null ? [] : [start.instanceId],
     ),
   );
-  const profile = view?.node.profile ?? null;
 
   return (
-    <>
-      <SettingsSection {...searchableSetting("orbit-device")}>
+    <SettingsPageContainer>
+      <OrbitDeviceSection view={view} loadError={loadError} onReload={() => void load()} />
+
+      {view ? (
+        <SettingsSection id="orbit-servers" title="Orbit servers">
+          {view.environments.length === 0 ? (
+            <SettingsRow
+              title="No servers registered"
+              description="T3 servers register themselves with the Gateway."
+            />
+          ) : (
+            view.environments.map((environment) => (
+              <SettingsRow
+                key={environment.environmentId}
+                title={environment.label}
+                description={environment.url.replace(/^https?:\/\//, "")}
+                control={
+                  <OrbitServerControl
+                    gateway={gateway}
+                    environment={environment}
+                    connected={connected.has(environment.environmentId)}
+                    starting={
+                      environment.instanceId !== null &&
+                      startingInstanceIds.has(environment.instanceId)
+                    }
+                  />
+                }
+              />
+            ))
+          )}
+        </SettingsSection>
+      ) : null}
+
+      <SettingsSection id="orbit-environments-from" title="Environments from Orbit" hideTitle>
         <SettingsRow
-          title={view?.node.name ?? (loadError ? "Gateway unreachable" : "Connecting…")}
-          description={
-            loadError ??
-            (view ? `Signed in to gateway.orbit as ${view.node.wireguardIp}` : "gateway.orbit")
-          }
+          title="Environments from Orbit"
+          description={`Orbit is turned on and off in Settings > ${connectionsLabel}, with "Environments from". While it is off, the Orbit icon is hidden.`}
           control={
-            <Button size="xs" variant="outline" onClick={() => void load()}>
-              Reload
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() =>
+                void navigate({ to: "/settings/connections", hash: "environment-provider" })
+              }
+            >
+              Open {connectionsLabel}
             </Button>
           }
         />
       </SettingsSection>
+    </SettingsPageContainer>
+  );
+}
+
+/**
+ * The Orbit panel's Profile page: the profile this device shares its workspaces with, and the
+ * profile sync. Until the Gateway answers it shows the device row, so a failure has its Reload.
+ */
+export function OrbitProfilePage() {
+  const { gateway, view, loadError, load } = useOrbitGatewayView();
+  const [newProfileName, setNewProfileName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const bindProfile = async (profile: { readonly id: number } | { readonly name: string }) => {
+    if (!gateway) return;
+    setBusy(true);
+    try {
+      const id = "id" in profile ? profile.id : (await gateway.createProfile(profile.name)).id;
+      await gateway.bindProfile(id);
+      setNewProfileName("");
+      await load();
+      syncOrbitProfileNow();
+    } catch (error) {
+      toastManager.add({ type: "error", title: "Orbit", description: message(error) });
+    }
+    // Not in `finally`: the React Compiler cannot compile a finalizer clause.
+    setBusy(false);
+  };
+
+  const profile = view?.node.profile ?? null;
+
+  return (
+    <SettingsPageContainer>
+      {view ? null : (
+        <OrbitDeviceSection view={view} loadError={loadError} onReload={() => void load()} />
+      )}
 
       {view ? (
-        <SettingsSection {...searchableSetting("orbit-profile")}>
+        <SettingsSection id="orbit-profile" title="Orbit profile">
           <SettingsRow
             title="Profile"
             description="Devices with the same profile share their workspaces."
@@ -404,37 +494,7 @@ export function OrbitEnvironmentSections() {
       ) : null}
 
       {view ? <ProfileSyncSection profileName={profile?.name ?? null} /> : null}
-
-      {view ? (
-        <SettingsSection {...searchableSetting("orbit-servers")}>
-          {view.environments.length === 0 ? (
-            <SettingsRow
-              title="No servers registered"
-              description="T3 servers register themselves with the Gateway."
-            />
-          ) : (
-            view.environments.map((environment) => (
-              <SettingsRow
-                key={environment.environmentId}
-                title={environment.label}
-                description={environment.url.replace(/^https?:\/\//, "")}
-                control={
-                  <OrbitServerControl
-                    gateway={client}
-                    environment={environment}
-                    connected={connected.has(environment.environmentId)}
-                    starting={
-                      environment.instanceId !== null &&
-                      startingInstanceIds.has(environment.instanceId)
-                    }
-                  />
-                }
-              />
-            ))
-          )}
-        </SettingsSection>
-      ) : null}
-    </>
+    </SettingsPageContainer>
   );
 }
 

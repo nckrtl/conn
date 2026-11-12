@@ -12,6 +12,7 @@ import {
   OPERATION_TIMEOUT_MS,
   ORBIT_BRANCH_EXISTS,
   ORBIT_CONTAINER_PROCESS_INACTIVE,
+  ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION,
   ORBIT_BRANCH_IN_USE,
   ORBIT_BRANCH_NOT_FOUND,
   ORBIT_PLACEMENT_CONFLICT,
@@ -104,6 +105,8 @@ export interface OrbitThreadStart {
   readonly errorDetail?: string | null;
   /** The Project process that did not stay up, from a failed create's `result.process_failure`. */
   readonly errorProcessUnit?: string | null;
+  /** What a failed create needs before a Retry works (`result.recovery.requires`); null when unsaid. */
+  readonly errorRecoveryRequires?: string | null;
   /** The create's result: the branch the Instance checked out and the base it was cut from. */
   readonly resultBranch?: string | null;
   readonly resultBaseBranch?: string | null;
@@ -193,6 +196,8 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
             : null,
         errorDetail: typeof row.errorDetail === "string" ? row.errorDetail : null,
         errorProcessUnit: typeof row.errorProcessUnit === "string" ? row.errorProcessUnit : null,
+        errorRecoveryRequires:
+          typeof row.errorRecoveryRequires === "string" ? row.errorRecoveryRequires : null,
         resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
         resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
         nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
@@ -239,6 +244,7 @@ export function retryOrbitThreadStartRecord(
     errorDetails: null,
     errorDetail: null,
     errorProcessUnit: null,
+    errorRecoveryRequires: null,
   };
   const createAgain = next.environmentId === null;
   return {
@@ -251,9 +257,15 @@ export function retryOrbitThreadStartRecord(
   };
 }
 
-/** Retry runs the start again; a process that did not stay up fails the same way on the kept Instance. */
+/**
+ * Retry runs the start again. A process that did not stay up fails the same way on the kept
+ * Instance, unless Orbit says the retry takes the Project's current process definitions.
+ */
 export function orbitThreadStartCanRetry(start: OrbitThreadStart): boolean {
-  return start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE;
+  return (
+    start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE ||
+    start.errorRecoveryRequires === ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION
+  );
 }
 
 /**
@@ -401,6 +413,7 @@ export function newOrbitThreadStart(input: {
     errorDetails: null,
     errorDetail: null,
     errorProcessUnit: null,
+    errorRecoveryRequires: null,
     resultBranch: null,
     resultBaseBranch: null,
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
@@ -500,6 +513,7 @@ export async function runOrbitThreadStart(
     errorDetails: null,
     errorDetail: null,
     errorProcessUnit: null,
+    errorRecoveryRequires: null,
   };
   const update = (patch: Partial<OrbitThreadStart>) => {
     current = { ...current, ...patch };
@@ -656,6 +670,7 @@ export async function runOrbitThreadStart(
             {
               ...(code === "operation.timeout" ? {} : { createOperationId: null, createKey: null }),
               errorProcessUnit: operation?.processFailureUnit ?? null,
+              errorRecoveryRequires: operation?.recoveryRequires ?? null,
             },
             code,
             detail,

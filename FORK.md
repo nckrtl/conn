@@ -323,8 +323,11 @@ first turn uses the clone's default and the ready area says so.
 that made no Instance, such as `instance.name_taken` and `route.domain_invalid`; reopens the draft with the message and model, then the Instance step) and
 Dismiss, which drops only the saved start on this device. Conn removes no Instance; Instances are
 removed in Orbit. A create that failed with `instance.container_process_inactive` (a Project process
-did not stay up, named by `result.process_failure.unit`) offers no Retry on the desktop or the
-phone: the kept Instance keeps the broken process, so only remove and create again works.
+did not stay up, named by `result.process_failure.unit`) offers Retry on the desktop and the phone
+only when the Operation's `result.recovery.requires` is `project_process_definition`: Orbit then
+retries with the Project's current process definitions, and the card says to change or remove the
+process first. Without it (older Gateways) the kept Instance keeps the broken process, so the card
+offers no Retry and says to remove the Instance and create it again.
 
 Still waiting for Orbit: the Node menu ("Run on") and
 starting a stopped Instance (stopped Instances stay disabled).

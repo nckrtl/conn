@@ -22,8 +22,12 @@ const useOrbitPaletteProjectsStore = create<{
 /**
  * Conn: reads the Orbit Projects and the Gateway's environment list (for the instance counts).
  * A refresh after a good read keeps showing it; a later answer replaces an earlier one.
+ * Resolves whether the Gateway answered.
  */
-export async function loadOrbitPaletteProjects(client: OrbitGatewayClient): Promise<void> {
+export async function loadOrbitPaletteProjects(
+  client: OrbitGatewayClient,
+  options?: { readonly keepLoadedOnFailure?: boolean },
+): Promise<boolean> {
   const { state, generation } = useOrbitPaletteProjectsStore.getState();
   const current = generation + 1;
   useOrbitPaletteProjectsStore.setState({
@@ -38,16 +42,24 @@ export async function loadOrbitPaletteProjects(client: OrbitGatewayClient): Prom
     ]);
     next = { status: "loaded", projects, environments };
   } catch {
+    if (options?.keepLoadedOnFailure && state.status === "loaded") return false;
     next = { status: "unreachable" };
   }
   if (useOrbitPaletteProjectsStore.getState().generation === current) {
     useOrbitPaletteProjectsStore.setState({ state: next });
   }
+  return next.status === "loaded";
 }
 
 export function retryOrbitPaletteProjects(): void {
   const client = desktopOrbitGatewayClient();
   if (client) void loadOrbitPaletteProjects(client);
+}
+
+/** The checks page's "Check again": a failed read keeps the last good list. */
+export async function recheckOrbitPaletteProjects(): Promise<boolean> {
+  const client = desktopOrbitGatewayClient();
+  return client ? loadOrbitPaletteProjects(client, { keepLoadedOnFailure: true }) : false;
 }
 
 /** `off` unless the Labs switch is on and this is the desktop app in Orbit mode. */

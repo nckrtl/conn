@@ -1,6 +1,5 @@
 import { deriveProjectIdentity } from "@t3tools/shared/projectIdentity";
 import { ChevronRightIcon, TriangleAlertIcon } from "lucide-react";
-import type { ReactNode } from "react";
 
 import {
   ADDON_ICON_CLASS,
@@ -12,6 +11,7 @@ import {
   type OrbitPaletteProjectRow,
   type OrbitPaletteProjectsState,
 } from "./CommandPalette.logic";
+import { orbitChecksPageGroups } from "./CommandPaletteOrbitChecksPage";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
 import { ProjectMonogram } from "./ProjectMonogram";
 import { COMMAND_PALETTE_META_ICON_CLASS } from "./ThreadCommandSubtitle";
@@ -20,9 +20,9 @@ import { Skeleton } from "./ui/skeleton";
 const ORBIT_PAGE_PREFIX = "orbit-page";
 
 /**
- * The palette pages an Orbit Project row opens. The Instance step lives in
- * `CommandPaletteOrbitInstanceStep.tsx`; the resolver below maps the other kinds to their
- * component (PR 2c replaces the `checks` placeholder).
+ * The palette pages an Orbit Project row opens: the Instance step
+ * (`CommandPaletteOrbitInstanceStep.tsx`) and the start checks of a Project in which threads
+ * cannot start yet (`CommandPaletteOrbitChecksPage.tsx`).
  */
 export type OrbitPalettePageKind = "instances" | "checks";
 
@@ -30,17 +30,6 @@ export interface OrbitPalettePage {
   readonly kind: OrbitPalettePageKind;
   readonly projectId: number;
 }
-
-function OrbitChecksPagePlaceholder(_props: { readonly project: OrbitPaletteProjectRow }) {
-  return <span className="whitespace-normal">Placeholder: the start checks come in PR 2c.</span>;
-}
-
-const ORBIT_PALETTE_PAGES = {
-  checks: OrbitChecksPagePlaceholder,
-} satisfies Record<
-  Exclude<OrbitPalettePageKind, "instances">,
-  (props: { readonly project: OrbitPaletteProjectRow }) => ReactNode
->;
 
 function orbitPalettePageValue(page: OrbitPalettePage): string {
   return `${ORBIT_PAGE_PREFIX}:${page.kind}:${page.projectId}`;
@@ -87,24 +76,8 @@ export function orbitPalettePageGroups(
       },
     ];
   }
-  const Page = ORBIT_PALETTE_PAGES.checks;
-  return [
-    {
-      value,
-      label: project.name,
-      items: [
-        {
-          kind: "action",
-          value: `${value}:body`,
-          searchTerms: [],
-          title: <Page project={project} />,
-          icon: null,
-          disabled: true,
-          run: async () => {},
-        },
-      ],
-    },
-  ];
+  const instancesView = orbitPalettePageView({ kind: "instances", projectId: project.id });
+  return orbitChecksPageGroups({ value, project, instancesView });
 }
 
 function OrbitProjectDescription(props: { readonly row: OrbitPaletteProjectRow }) {

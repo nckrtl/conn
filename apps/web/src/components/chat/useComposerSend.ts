@@ -96,6 +96,7 @@ import {
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
+  sendNeedsConnectedEnvironment,
   sendNeedsEnvironmentOperateScope,
 } from "./composerSend.logic";
 import { useMultipleModelSend } from "./useMultipleModelSend";
@@ -469,7 +470,12 @@ export function useComposerSend(input: ComposerSendInput) {
       });
       return;
     }
-    if (activeEnvironmentUnavailable) {
+    if (
+      sendNeedsConnectedEnvironment({
+        environmentUnavailable: activeEnvironmentUnavailable,
+        isOrbitDraft: orbitDraftTarget !== null,
+      })
+    ) {
       const toastSlot = environmentUnavailableSendToastSlotRef.current;
       environmentUnavailableSendToastSlotRef.current =
         (toastSlot + 1) % ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE;

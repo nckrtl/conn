@@ -393,6 +393,7 @@ const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import { ConnIconScope } from "../icons/connIcon";
 import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
+import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
 import { useOrbitReady } from "../orbit/useOrbitReady";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
@@ -1739,6 +1740,11 @@ export default function ChatView(props: ChatViewProps) {
     isServerThread,
     orbitTarget: draftThread?.orbitTarget,
   });
+  // An Orbit draft kept open after leaving Orbit mode (or the desktop app) says how to send it.
+  const orbitDraftBlockedReason =
+    !isServerThread && draftThread?.orbitTarget && orbitDraftTarget === null
+      ? orbitThreadStartBlockedReason()
+      : null;
   // A provider-native subagent cannot take messages: a status bar replaces the
   // composer and its strips. Its approvals and questions are asked on the
   // top-level parent thread.
@@ -3716,8 +3722,9 @@ export default function ChatView(props: ChatViewProps) {
                                 canResume={resumableRunId !== null || hasHeldQueuedRuns}
                                 isRevertingCheckpoint={isRevertingCheckpoint}
                                 sendDisabledReason={
+                                  orbitDraftBlockedReason ??
                                   // An Orbit draft starts through the Gateway, never on its anchor.
-                                  !canOperateThread && orbitDraftTarget === null
+                                  (!canOperateThread && orbitDraftTarget === null
                                     ? "This connection cannot change threads."
                                     : isEnvironmentChanging
                                       ? "Preparing machine"
@@ -3729,7 +3736,7 @@ export default function ChatView(props: ChatViewProps) {
                                             ? "Messages loading"
                                             : worktreeSetupBlocksSend
                                               ? "Preparing worktree"
-                                              : projectCloneSendBlockReason
+                                              : projectCloneSendBlockReason)
                                 }
                                 isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                                 bannerItems={
@@ -3752,7 +3759,11 @@ export default function ChatView(props: ChatViewProps) {
                                     ? openUsageLimits
                                     : undefined
                                 }
-                                environmentUnavailable={activeEnvironmentUnavailableState}
+                                environmentUnavailable={
+                                  orbitDraftTarget === null
+                                    ? activeEnvironmentUnavailableState
+                                    : null
+                                }
                                 activePendingApproval={activePendingApproval}
                                 pendingApprovals={pendingApprovals}
                                 onHeldRequestIdsChange={onHeldRequestIdsChange}
@@ -3768,6 +3779,7 @@ export default function ChatView(props: ChatViewProps) {
                                 lockedProvider={modelPickerLockedProvider}
                                 providerStatuses={providerStatuses as ServerProvider[]}
                                 providerCatalogKnown={serverConfig !== null}
+                                startsThroughOrbit={orbitDraftTarget !== null}
                                 usesInstanceDefaultModel={
                                   orbitDraftTarget !== null &&
                                   isOrbitDraftWithoutEnvironment(environmentId)

@@ -3247,6 +3247,9 @@ function OpenCommandPaletteDialog(props: {
           project={orbitStepProject}
           step={orbitStep}
           onCreate={createOrbitInstance}
+          selected={
+            orbitPickableRowCount === 0 && highlightedItemValue !== ORBIT_INSTANCES_RETRY_VALUE
+          }
         />
       ) : null}
       {newProjectPathPreview !== null ? (

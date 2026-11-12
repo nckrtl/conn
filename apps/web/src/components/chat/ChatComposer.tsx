@@ -1,4 +1,5 @@
 import { VoiceInputSetup } from "./VoiceInputSetup";
+import { sendNeedsEnvironmentOperateScope } from "./composerSend.logic";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
@@ -418,6 +419,8 @@ export interface ChatComposerProps {
   providerCatalogKnown: boolean;
   /** Conn: an Orbit draft with no environment to lend a model list; the new Instance picks. */
   usesInstanceDefaultModel?: boolean | undefined;
+  /** Conn: an Orbit draft starts through the Gateway, so its anchor's grants do not gate the send. */
+  startsThroughOrbit?: boolean | undefined;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
   reportedModelSelection?: ModelSelection | null;
@@ -539,6 +542,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerStatuses,
     providerCatalogKnown,
     usesInstanceDefaultModel = false,
+    startsThroughOrbit = false,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     reportedModelSelection,
@@ -2115,7 +2119,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       submitAfterDictation(() => submitComposerRef.current(dispatchMode, submissionIntent));
       return false;
     }
-    if (submissionBlocked || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
+    if (
+      submissionBlocked ||
+      sendNeedsEnvironmentOperateScope({
+        hasOperateScope: readEnvironmentScope(environmentId, AuthOrchestrationOperateScope),
+        isOrbitDraft: startsThroughOrbit,
+      })
+    ) {
       event?.preventDefault();
       return false;
     }

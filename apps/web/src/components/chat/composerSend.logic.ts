@@ -87,3 +87,11 @@ export function sendNeedsEnvironmentOperateScope(input: {
 }): boolean {
   return !input.isOrbitDraft && !input.hasOperateScope;
 }
+
+/** A disconnected environment blocks a send, except an Orbit draft's anchor, which the send never uses. */
+export function sendNeedsConnectedEnvironment(input: {
+  readonly environmentUnavailable: boolean;
+  readonly isOrbitDraft: boolean;
+}): boolean {
+  return input.environmentUnavailable && !input.isOrbitDraft;
+}

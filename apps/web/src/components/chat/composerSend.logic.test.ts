@@ -5,6 +5,7 @@ import { formatInlineContextReference } from "../../lib/composerContextReference
 import { threadContextReference } from "../../lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
+  sendNeedsConnectedEnvironment,
   sendNeedsEnvironmentOperateScope,
   approvalRedirectNotice,
   loadBalancingSendWarning,
@@ -138,5 +139,19 @@ describe("sendNeedsEnvironmentOperateScope", () => {
     expect(sendNeedsEnvironmentOperateScope({ hasOperateScope: false, isOrbitDraft: true })).toBe(
       false,
     );
+  });
+});
+
+describe("sendNeedsConnectedEnvironment", () => {
+  it("blocks a send while the environment is down, except an Orbit draft, whose anchor the send never uses", () => {
+    expect(
+      sendNeedsConnectedEnvironment({ environmentUnavailable: true, isOrbitDraft: false }),
+    ).toBe(true);
+    expect(
+      sendNeedsConnectedEnvironment({ environmentUnavailable: true, isOrbitDraft: true }),
+    ).toBe(false);
+    expect(
+      sendNeedsConnectedEnvironment({ environmentUnavailable: false, isOrbitDraft: false }),
+    ).toBe(false);
   });
 });

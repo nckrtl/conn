@@ -57,6 +57,16 @@ vi.mock("./environmentProvider", () => ({
   useEnvironmentProvider: { getState: () => ({ provider: "orbit" }) },
 }));
 
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function createLocalStorageStub(): Storage {
   const values = new Map<string, string>();
   return {
@@ -157,7 +167,7 @@ describe("sendOrbitDraft", () => {
     instanceId: ProviderInstanceId.make("claude"),
     model: "claude-opus-5-5",
   };
-  const send = (draftTarget: OrbitDraftTarget) => {
+  const send = (draftTarget: OrbitDraftTarget, navigation?: Promise<void>) => {
     const events: string[] = [];
     const sent = sendOrbitDraft({
       start: buildOrbitDraftStart({
@@ -169,6 +179,7 @@ describe("sendOrbitDraft", () => {
       }),
       openPending: (route) => {
         events.push(`open ${route}`);
+        return navigation;
       },
       clearDraft: () => events.push(`clear after ${readStored().length} saved`),
     });
@@ -185,9 +196,13 @@ describe("sendOrbitDraft", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("saves a start, opens its pending thread, and clears the draft only after that", async () => {
-    const { start, events } = send(target);
+    const navigation = deferred();
+    const { start, events } = send(target, navigation.promise);
     // The draft route redirects home once its draft is gone, so the clear waits for the route.
+    await Promise.resolve();
     expect(events).toEqual(["open /orbit/start-1"]);
+    navigation.resolve();
+    await navigation.promise;
     await Promise.resolve();
 
     expect(start).toMatchObject({
@@ -225,6 +240,15 @@ describe("sendOrbitDraft", () => {
       instanceId: 2055,
       environmentId: "env-2055",
     });
+  });
+
+  it("still clears the draft when the navigation fails", async () => {
+    const navigation = deferred();
+    const { events } = send(target, navigation.promise);
+    navigation.reject(new Error("blocked"));
+    await navigation.promise.catch(() => {});
+    await Promise.resolve();
+    expect(events).toEqual(["open /orbit/start-1", "clear after 1 saved"]);
   });
 
   it("saves nothing and keeps the draft when the window cannot run a start", () => {

@@ -125,7 +125,9 @@ export function sendOrbitDraft(input: {
   const start = beginOrbitDraftThreadStart(input.start, "");
   const path = orbitPendingThreadPath(start.id);
   startedOn.set(start.id, path);
-  void Promise.resolve(input.openPending(path)).finally(input.clearDraft);
+  void Promise.resolve(input.openPending(path))
+    .finally(input.clearDraft)
+    .catch(() => {});
   return start;
 }
 

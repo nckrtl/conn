@@ -111,7 +111,7 @@ export function isOrbitDraftWithoutEnvironment(environmentId: string): boolean {
 /**
  * The environment that lends the draft its model list; the start itself runs through the Gateway.
  * A Project with no Instances must open with no primary environment (local environment off), so
- * after a paired clone and the primary come this app's host server, then any saved environment.
+ * after a paired clone and the primary come this app's host server, then any enabled environment.
  */
 export function chooseOrbitDraftAnchor(input: {
   readonly orbitProjectId: number;
@@ -124,14 +124,14 @@ export function chooseOrbitDraftAnchor(input: {
   const clone = saved.find(
     (environmentId) => input.orbitInstances[environmentId]?.projectId === input.orbitProjectId,
   );
-  const host =
-    input.hostEnvironmentId !== null && input.savedEnvironments.has(input.hostEnvironmentId)
-      ? input.hostEnvironmentId
-      : undefined;
-  const enabled = saved.find(
-    (environmentId) => input.savedEnvironments.get(environmentId)?.enabled,
-  );
-  const anchor = clone ?? input.primaryEnvironmentId ?? host ?? enabled ?? saved[0];
+  const enabled = (environmentId: string | null | undefined) =>
+    environmentId != null && input.savedEnvironments.get(environmentId)?.enabled === true;
+  // A switched-off environment lends no model list and no session, so it never anchors.
+  const anchor =
+    clone ??
+    input.primaryEnvironmentId ??
+    (enabled(input.hostEnvironmentId) ? input.hostEnvironmentId : null) ??
+    saved.find(enabled);
   return anchor ? EnvironmentId.make(anchor) : ORBIT_DRAFT_NO_ENVIRONMENT_ID;
 }
 

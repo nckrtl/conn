@@ -96,6 +96,7 @@ import {
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
+  sendNeedsEnvironmentOperateScope,
 } from "./composerSend.logic";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
@@ -438,7 +439,10 @@ export function useComposerSend(input: ComposerSendInput) {
       );
     };
     if (
-      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
+      sendNeedsEnvironmentOperateScope({
+        hasOperateScope: readEnvironmentScope(environmentId, AuthOrchestrationOperateScope),
+        isOrbitDraft: orbitDraftTarget !== null,
+      }) ||
       !activeThread ||
       (isSendBusy && !sendQueuesBehindSetup) ||
       isRevertingCheckpoint ||

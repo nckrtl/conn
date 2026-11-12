@@ -134,18 +134,6 @@ describe("openOrbitDraft", () => {
     expect(navigate).toHaveBeenCalledOnce();
   });
 
-  it("opens with no environment at all, so the new Instance's default model runs", async () => {
-    const { router } = setup({ enabled: true, catalog: [], primary: null });
-
-    expect(await openOrbitDraft(router, target)).toBe("draft-new");
-    expect(mocks.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
-      "orbit-project:71",
-      { environmentId: "orbit-draft:no-environment", projectId: "orbit-project:71" },
-      "draft-new",
-      expect.anything(),
-    );
-  });
-
   it("reuses the Project's open draft, so its text stays", async () => {
     const { router } = setup({
       enabled: true,

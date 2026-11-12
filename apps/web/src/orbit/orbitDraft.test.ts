@@ -26,7 +26,7 @@ describe("chooseOrbitDraftAnchor", () => {
     "clone-a": { projectId: 71, instanceId: 5 },
   };
 
-  it("anchors on a paired clone, the primary, the host server, any saved environment, else none", () => {
+  it("anchors on a paired clone, the primary, the host server, any enabled environment, else none", () => {
     const anchor = (
       saved: Array<[string, boolean]>,
       primary: string | null = "primary",
@@ -67,9 +67,11 @@ describe("chooseOrbitDraftAnchor", () => {
           ["beast", true],
         ],
         null,
+        "off",
       ),
     ).toBe("beast");
-    expect(anchor([["off", false]], null, "gone")).toBe("off");
+    // A switched-off environment never anchors: no model list, no session.
+    expect(anchor([["off", false]], null, "off")).toBe(ORBIT_DRAFT_NO_ENVIRONMENT_ID);
     expect(anchor([], null)).toBe(ORBIT_DRAFT_NO_ENVIRONMENT_ID);
   });
 });

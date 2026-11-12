@@ -5,6 +5,7 @@ import { formatInlineContextReference } from "../../lib/composerContextReference
 import { threadContextReference } from "../../lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
+  sendNeedsEnvironmentOperateScope,
   approvalRedirectNotice,
   loadBalancingSendWarning,
   multipleModelSendBlock,
@@ -122,5 +123,20 @@ describe("approvalRedirectNotice", () => {
   it("stays quiet when the decline failed or the user left the thread", () => {
     expect(approvalRedirectNotice({ ...settled, declined: false })).toBeNull();
     expect(approvalRedirectNotice(settled)).toBeNull();
+  });
+});
+
+describe("sendNeedsEnvironmentOperateScope", () => {
+  it("blocks a send without the operate scope, except an Orbit draft, which starts through the Gateway", () => {
+    expect(sendNeedsEnvironmentOperateScope({ hasOperateScope: false, isOrbitDraft: false })).toBe(
+      true,
+    );
+    expect(sendNeedsEnvironmentOperateScope({ hasOperateScope: true, isOrbitDraft: false })).toBe(
+      false,
+    );
+    // An Orbit draft anchored on no environment has no session at all.
+    expect(sendNeedsEnvironmentOperateScope({ hasOperateScope: false, isOrbitDraft: true })).toBe(
+      false,
+    );
   });
 });

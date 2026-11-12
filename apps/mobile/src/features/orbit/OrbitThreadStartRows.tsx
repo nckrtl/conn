@@ -1,3 +1,4 @@
+import { orbitThreadStartCanRetry } from "@t3tools/client-runtime/orbit-gateway";
 import { useSyncExternalStore } from "react";
 import { Pressable, View } from "react-native";
 
@@ -14,7 +15,8 @@ import {
 
 /**
  * Conn: the thread starts in Orbit Projects still on their way, above the thread list. Each shows
- * its stage; a stopped one offers Retry, and every one can be dismissed.
+ * its stage; a stopped one offers Retry unless a Retry would fail the same way, and every one can
+ * be dismissed.
  */
 export function OrbitThreadStartRows() {
   const gateway = useOrbitGateway();
@@ -59,7 +61,7 @@ export function OrbitThreadStartRows() {
                 {row.detail}
               </Text>
             </View>
-            {row.stage === "stopped" ? (
+            {row.stage === "stopped" && orbitThreadStartCanRetry(start) ? (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Retry"

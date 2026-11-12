@@ -322,7 +322,9 @@ first turn uses the clone's default and the ready area says so.
 **Failures.** A failed start offers Retry (from the last saved step), Change name (for refusals
 that made no Instance, such as `instance.name_taken` and `route.domain_invalid`; reopens the draft with the message and model, then the Instance step) and
 Dismiss, which drops only the saved start on this device. Conn removes no Instance; Instances are
-removed in Orbit.
+removed in Orbit. A create that failed with `instance.container_process_inactive` (a Project process
+did not stay up, named by `result.process_failure.unit`) offers no Retry on the desktop or the
+phone: the kept Instance keeps the broken process, so only remove and create again works.
 
 Still waiting for Orbit: the Node menu ("Run on") and
 starting a stopped Instance (stopped Instances stay disabled).

@@ -129,10 +129,12 @@ export function OrbitSetupCard({
       ) : null}
       {failed ? (
         <div className="mt-1 ml-[calc(--spacing(6)+2px-(--spacing(2)-1px))] flex flex-wrap items-center gap-0.5">
-          <Button type="button" size="xs" variant="ghost-muted" onClick={onRetry}>
-            <RotateCcwIcon aria-hidden />
-            Retry
-          </Button>
+          {view.canRetry ? (
+            <Button type="button" size="xs" variant="ghost-muted" onClick={onRetry}>
+              <RotateCcwIcon aria-hidden />
+              Retry
+            </Button>
+          ) : null}
           {view.canChangeName ? (
             <Button type="button" size="xs" variant="ghost-muted" onClick={onChangeName}>
               <PencilIcon aria-hidden />

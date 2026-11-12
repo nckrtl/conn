@@ -11,6 +11,7 @@ import {
   OPERATION_TERMINAL_STATUSES,
   OPERATION_TIMEOUT_MS,
   ORBIT_BRANCH_EXISTS,
+  ORBIT_CONTAINER_PROCESS_INACTIVE,
   ORBIT_BRANCH_IN_USE,
   ORBIT_BRANCH_NOT_FOUND,
   ORBIT_PLACEMENT_CONFLICT,
@@ -101,6 +102,8 @@ export interface OrbitThreadStart {
   readonly errorDetails?: Readonly<Record<string, unknown>> | null;
   /** Orbit's detail line from the failed Operation behind `errorCode`; null on older rows. */
   readonly errorDetail?: string | null;
+  /** The Project process that did not stay up, from a failed create's `result.process_failure`. */
+  readonly errorProcessUnit?: string | null;
   /** The create's result: the branch the Instance checked out and the base it was cut from. */
   readonly resultBranch?: string | null;
   readonly resultBaseBranch?: string | null;
@@ -189,6 +192,7 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
             ? (row.errorDetails as Record<string, unknown>)
             : null,
         errorDetail: typeof row.errorDetail === "string" ? row.errorDetail : null,
+        errorProcessUnit: typeof row.errorProcessUnit === "string" ? row.errorProcessUnit : null,
         resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
         resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
         nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
@@ -234,6 +238,7 @@ export function retryOrbitThreadStartRecord(
     errorCode: null,
     errorDetails: null,
     errorDetail: null,
+    errorProcessUnit: null,
   };
   const createAgain = next.environmentId === null;
   return {
@@ -251,6 +256,11 @@ export function retryOrbitThreadStartRecord(
  * admitted (Orbit holds the Instance, also after a failed create) or it finished. A start in an
  * existing Instance made none.
  */
+/** Retry runs the start again; a process that did not stay up fails the same way on the kept Instance. */
+export function orbitThreadStartCanRetry(start: OrbitThreadStart): boolean {
+  return start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE;
+}
+
 export function orbitThreadStartCreatedInstance(start: OrbitThreadStart): boolean {
   return (
     start.orbitInstanceKind !== "existing" &&
@@ -390,6 +400,7 @@ export function newOrbitThreadStart(input: {
     defaultBranch: input.defaultBranch ?? null,
     errorDetails: null,
     errorDetail: null,
+    errorProcessUnit: null,
     resultBranch: null,
     resultBaseBranch: null,
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
@@ -463,6 +474,7 @@ const ADMISSION_REFUSALS: ReadonlySet<string> = new Set([
   ORBIT_BRANCH_IN_USE,
   ORBIT_BRANCH_NOT_FOUND,
   ORBIT_BRANCH_EXISTS,
+  ORBIT_CONTAINER_PROCESS_INACTIVE,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   ORBIT_PLACEMENT_CONFLICT,
   ORBIT_ROUTE_DOMAIN_INVALID,
@@ -488,6 +500,7 @@ export async function runOrbitThreadStart(
     errorCode: null,
     errorDetails: null,
     errorDetail: null,
+    errorProcessUnit: null,
   };
   const update = (patch: Partial<OrbitThreadStart>) => {
     current = { ...current, ...patch };
@@ -503,7 +516,11 @@ export async function runOrbitThreadStart(
   const follow = async (
     operationId: number,
     timeoutMs: number,
-    failed: (code: string, detail: string | null) => StepFailed,
+    failed: (
+      code: string,
+      detail: string | null,
+      operation: OrbitGatewayOperation | null,
+    ) => StepFailed,
     observe?: (operation: OrbitGatewayOperation) => void,
   ): Promise<OrbitGatewayOperation> => {
     const deadline = ports.now() + timeoutMs;
@@ -526,9 +543,10 @@ export async function runOrbitThreadStart(
         throw failed(
           operation.errorCode ?? `operation.${operation.status}`,
           operation.error?.detail ?? null,
+          operation,
         );
       }
-      if (ports.now() >= deadline) throw failed("operation.timeout", null);
+      if (ports.now() >= deadline) throw failed("operation.timeout", null, null);
       const wait = operationPollDelayMs(operation?.pollAfterSeconds ?? null);
       await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
     }
@@ -633,10 +651,13 @@ export async function runOrbitThreadStart(
       const created = await follow(
         current.createOperationId!,
         createDeadline - ports.now(),
-        (code, detail) =>
+        (code, detail, operation) =>
           stepFailed(
             `Orbit could not create the clone (${code}).`,
-            code === "operation.timeout" ? {} : { createOperationId: null, createKey: null },
+            {
+              ...(code === "operation.timeout" ? {} : { createOperationId: null, createKey: null }),
+              errorProcessUnit: operation?.processFailureUnit ?? null,
+            },
             code,
             detail,
           ),

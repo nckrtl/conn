@@ -214,13 +214,12 @@ pairs it again at most once every 6 hours. The shared `lacksAccess` and
 `accessPairedAt` logic is wired into the web and mobile Orbit providers.
 
 The environment sync lists every server on the Gateway but pairs only host servers (no
-`instance_id`) by itself. A clone, an Instance's server, pairs only when the user presses Connect
-on its row in the Orbit Servers list, or when a thread start on this device created it. Without
-this every device paired with every new clone within minutes. A failed Connect is retried by the
-sync, with the usual back-off, until the app restarts. Pairings made before this rule stay;
-nothing revokes them. `planEnvironmentProvider` takes the requested ids; web and mobile share one
-pairing step (`pairOne`) between the sync and Connect, and a second call for a server joins the
-one in flight.
+`instance_id`) by itself. A clone, an Instance's server, pairs only when a thread starts in it on
+this device (a new Instance or an existing one). Without this every device paired with every new
+clone within minutes. The desktop has no manual Connect; the phone's Connect button is retried by
+the sync, with the usual back-off, until the app restarts. Pairings made before this rule stay;
+nothing revokes them. `planEnvironmentProvider` takes the phone's requested ids; web and mobile
+share one pairing step (`pairOne`), and a second call for a server joins the one in flight.
 
 An old worktree-based Instance's checkout sits beside the Project's `default` checkout
 (`<apps>/<project>/t3code-<8 hex>`, older ones `t3-<8 hex>`). `isOrbitCheckout`
@@ -324,8 +323,7 @@ Dismiss, which drops only the saved start on this device. Conn removes no Instan
 removed in Orbit.
 
 Still waiting for Orbit: the Node menu ("Run on") and
-starting a stopped Instance (stopped Instances stay disabled; the Orbit panel's Connection page shows a clone
-whose container is stopped as Asleep).
+starting a stopped Instance (stopped Instances stay disabled).
 
 The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
 shared state machine and first-message launch (`threadStart.ts`, `threadTurn.ts`); the starts
@@ -358,15 +356,22 @@ and ignores other keys. With both ids as positive integers, the environment desc
 stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. The sidebar title of the clone's
 `/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
 
-The Orbit panel is a modal like Settings, with its own nav: Instances, Connection (this device's
-Node and the Gateway's servers, with a link back to "Environments from") and Profile (the profile
-and its sync). Instances lists every Instance this device can reach, by Orbit Project, never a
-default: today from the Gateway's environments named from its Projects, later from Orbit's flat
-`GET /conn/instances`. Only `listOrbitInstances` in `client-runtime/src/orbitGateway/instanceList.ts`
+The Orbit panel is a modal like Settings, with its own nav: Instances, Connection and Profile
+(the profile and its sync). Instances lists every Instance this device can reach, by Orbit Project,
+never a default: today from the Gateway's environments named from its Projects, later from Orbit's
+flat `GET /conn/instances`. Only `listOrbitInstances` in `client-runtime/src/orbitGateway/instanceList.ts`
 reads the source; grouping, search, the Project filter and the join with local threads beside it
 are pure, so mobile reuses them. "New thread in this Instance" does what the palette's Instance
 step does (`openOrbitInstanceById`). Removing an Instance and its Git state wait for Orbit (a
-destroy handle for Conn and Git state per Instance). An Orbit icon above Settings in the
+destroy handle for Conn and Git state per Instance). Conn picks up the Orbit connection from the
+machine (tunnel, root CA and Node are set up outside Conn), so Connection has no Gateway address
+field and no set-up flow. It shows this device's Node name and WireGuard address with Reload,
+three checks read from one `me` call (Gateway reachable, certificate trusted, device known), the
+Nodes that run a T3 server (host servers only; Instance servers never show here) and a link back
+to "Environments from". The desktop transport passes Chromium's `net::ERR_*` text on, which is how
+a TLS failure is told from a connection failure; `orbitConnectionChecks` and `orbitNodeServers`
+(`packages/client-runtime/src/orbitGateway/orbitConnection.ts`) map them for web and, later,
+mobile. A check after a failed one shows "Not checked". An Orbit icon above Settings in the
 workspace rail opens the panel on Instances; it shows only in
 the desktop app with "Environments from" set to Orbit, and the panel closes when that changes.
 A profile sync that drops the selected workspace leaves the panel open, as it does Settings

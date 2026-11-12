@@ -1086,7 +1086,7 @@ describe("Orbit Projects in the New thread list", () => {
     expect(rows.map((row) => row.id)).toEqual([2, 4, 1, 3]);
   });
 
-  it("lists nothing and collapses nothing with the switch off", () => {
+  it("lists nothing and collapses nothing outside Orbit mode", () => {
     const clones = { "env-clone": { projectId: 3, instanceName: "fix" } };
     expect(buildOrbitPaletteProjectRows({ status: "off" })).toEqual([]);
     expect(collapsedOrbitCloneEnvironmentIds({ status: "off" }, clones).size).toBe(0);

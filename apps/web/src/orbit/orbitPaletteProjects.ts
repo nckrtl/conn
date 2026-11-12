@@ -8,7 +8,6 @@ import { create } from "zustand";
 
 import type { OrbitPaletteProjectsState } from "../components/CommandPalette.logic";
 import { environmentCatalog } from "../connection/catalog";
-import { useClientSettings } from "../hooks/useSettings";
 import { useOrbitThreadsAvailable } from "./environmentProvider";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
 
@@ -62,10 +61,9 @@ export async function recheckOrbitPaletteProjects(): Promise<boolean> {
   return client ? loadOrbitPaletteProjects(client, { keepLoadedOnFailure: true }) : false;
 }
 
-/** `off` unless the Labs switch is on and this is the desktop app in Orbit mode. */
+/** `off` unless this is the desktop app in Orbit mode. */
 export function useOrbitPaletteProjects(listShown: boolean): OrbitPaletteProjectsState {
-  const switchOn = useClientSettings((settings) => settings.orbitThreadsInPaletteEnabled);
-  const enabled = useOrbitThreadsAvailable() && switchOn;
+  const enabled = useOrbitThreadsAvailable();
   const state = useOrbitPaletteProjectsStore((store) => store.state);
   const active = enabled && listShown;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway each time the New thread list opens

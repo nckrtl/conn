@@ -231,48 +231,27 @@ isOrbitProjectFolder}`, `orbitProjectFolder={isOrbitProjectFolder}` and the
 effective Orbit mode to `BranchToolbar`. Otherwise the composer hides the
 Orbit instance selector for this kind of project.
 
-In Orbit mode the desktop sidebar header has a button that starts a thread in an Orbit
-Project (Orbit's `docs/cli/instance/container/thread.mmd`). Orbit creates a clone of the
-Project's default Instance, Conn pairs with the clone's T3 server once, and launches a new
-thread with the first message in its `/srv/workspace` project. Each start is saved in
-localStorage after every step, with a fixed launch command id, so a reload resumes it and a
-repeated launch finishes the first one. The Gateway admits a create or a pairing only after it
-copies secrets to Swamp (19-27 s), so those two calls get a 60 s limit instead of the desktop's
-15 s default, and carry a saved `Idempotency-Key`. A lost answer (none, or a proxy's 502 or
-504 without the Gateway's error envelope) repeats the same request with a clamped back-off, so
-the Gateway returns the Operation it may already have admitted. A create refused with 409
-`operation.target_busy` (another Operation owns the Instance: an older build's create, a lost
-key, or a second caller) repeats the same way until the create's deadline, then stops with
-"press Retry in a minute"; the pairing admission takes no target lock, so it cannot be busy.
-Any other Gateway error stops the start. Only the main window runs starts. A start saves the
-workspace selected at Start (null for all). Once the first message is sent, that workspace gets the
-clone's `<environmentId>:<projectId>` ref unless it already lists the project or no longer exists,
-so the sidebar shows the thread (a clone is a new environment). The profile sync then drops the
-refs of clones that are gone (`cloneWorkspaceRefs.ts`). A gone record no longer says it was a clone,
-so each device remembers the clone ids it saw in the Gateway list (with an `instance_id`), and drops
-only refs of those ids that a later fresh, non-empty list in Orbit mode leaves out. A clone gone
-before any list showed it keeps its ref.
-Host and manual environments' refs are never touched. A row can be
-dismissed at any time; a stopped one also offers Retry. The environment sync skips a clone a
-start is pairing with, and an asleep one. Settings › Connections shows a clone whose container
-is stopped as Asleep; Conn does not wake it yet (Orbit's PR 13).
+In the desktop app in Orbit mode, New thread starts threads in Orbit Projects; there is no other
+switch and no other entry (Orbit's `docs/cli/instance/container/thread.mmd`). Outside Orbit mode,
+and in the web app, the palette and composer are unchanged.
 
-Labs › "Orbit threads in the palette" (desktop, Orbit mode, off by default) is the start of the
-flow that replaces this button. With it on, New thread lists the Projects of `GET
-/api/v1/conn/projects` after the local projects, each with the number of its Instances in the
-Gateway's environment list (the default never counts), and the clone rows of those Projects leave
-the list. While the list loads or after it fails, only local projects show, then skeleton rows or
-a notice with Retry. A Project in which threads cannot start yet (`cloneable: false`) stays
-selectable and greyed out with Orbit's reason. The list parser takes the coming `cloneable`,
-`cloneable_reason`, `checks` and `instance_domain_suffix` fields when present; a row without
-`cloneable` can start threads. The palette asks with `include_unavailable=1`, since Orbit lists
-only startable Projects without it; the old cube dialog and the phone do not. A greyed row opens
-its start checks (`CommandPaletteOrbitChecksPage.tsx`): Orbit's five checks in order with Conn's
-own labels, one more row for any other failing check (Orbit's `label`), and "Check again", which
-re-reads the list with `include_unavailable=1` and keeps the last result when the Gateway does not
-answer. Once threads can start there, it offers the Instance step.
+**Project rows.** The New thread palette lists the Projects of `GET /api/v1/conn/projects` after
+the local projects, asked with `include_unavailable=1` (Orbit lists only startable Projects without
+it; the phone does not ask). Each row shows the number of the Project's Instances in the Gateway's
+environment list (the default never counts), and the clone rows of those Projects leave the list.
+While the list loads or after it fails, only local projects show, then skeleton rows or a notice
+with Retry. A Project that is also a normal Conn project shows as two rows. A Project in which
+threads cannot start yet (`cloneable: false`) stays selectable, greyed out with its failing check's
+message. The parser tolerates missing `cloneable`, `cloneable_reason`, `checks` and
+`instance_domain_suffix`; a row without `cloneable` can start threads.
 
-A startable row opens the Instance step (`CommandPaletteOrbitInstanceStep.tsx`,
+**Checks page.** A greyed row opens its start checks (`CommandPaletteOrbitChecksPage.tsx`): Orbit's
+five checks in order with Conn's own labels, one more row for any other failing check (Orbit's
+`label`), and "Check again", which re-reads the list and keeps the last result when the Gateway
+does not answer. Only the latest check's answer counts. Once threads can start there, it offers the
+Instance step.
+
+**Instance step.** A startable row opens the Instance step (`CommandPaletteOrbitInstanceStep.tsx`,
 `orbitInstanceStepLogic.ts`): a name field with the Project's domain suffix, checked live with
 `GET /api/v1/conn/projects/{id}/instances/check?name=` after the local name rule passes. A failed
 or slow check keeps create possible (Orbit's `instance.name_taken` at create is the guard); 409
@@ -282,26 +261,61 @@ the Project in the Gateway's environment list (no owner filter, never the defaul
 expired ones are disabled. A paired one opens a normal draft in its `/srv/workspace` project, an
 unpaired one an Orbit draft. The desktop IPC lets only these two queries through.
 
-The new thread flow (Labs › "Orbit threads in the palette", off by default) opens a composer draft
-with an Orbit target (`orbitDraft.ts`, `openOrbitDraft`): the Project, Node, and a new Instance with
-the typed name or an existing one this device has not paired. An Orbit Project is no T3 project, so
-the draft uses a placeholder project id and is anchored on a paired clone of the same Project, else
-the primary environment, for its model list. The context row shows the Node and
-`<instance> · <project>`; attachments are off. Send saves a start (typed name, model and modes)
-for the runner above instead of sending through a T3 server, then clears the draft. This is not the
+**Orbit draft.** The composer draft carries an Orbit target (`orbitDraft.ts`, `openOrbitDraft`):
+the Project, Node, and a new Instance with the typed name or an existing one this device has not
+paired. An Orbit Project is no T3 project, so the draft uses a placeholder project id and is
+anchored on a paired clone of the same Project, else the primary environment, for its model list.
+The context row shows the Node and `<instance> · <project>`, which reopens the Instance step;
+attachments are off. Send saves a start (typed name, model and modes) for the runner instead of
+sending through a T3 server, opens its pending thread, then clears the draft. This is not the
 older worktree env mode `"orbit"`.
 
-Send then opens the start's pending thread at `/orbit/$startId` (`OrbitPendingThreadView.tsx`): the
-message and a setup card built on the client from the saved start and the runner's reads of the
-create Operation (`orbitSetupView.ts`), since the clone's server does not exist yet. The worktree
-setup contract is untouched. A pending start also shows as a sidebar row and survives a reload.
-Once the clone's server took the first message and the thread reached the window, the route is
-replaced by the real thread. A palette start stays saved after the send (the newest 50), so the
-real thread finds it by thread id and Conn draws "Instance ready", its Details and the ready line
-itself; none of it goes to the agent. A failed start offers Retry, Change name (only for
-`instance.name_taken`) and Dismiss, which drops only the saved start; Instances are removed in
-Orbit. If the clone lacks the composer's provider, the first turn uses the clone's default and the
-ready area says so.
+**Pending thread and setup card.** The pending thread at `/orbit/$startId`
+(`OrbitPendingThreadView.tsx`) shows the message and a setup card built on the client from the
+saved start and the runner's reads of the create Operation (`orbitSetupView.ts`), since the clone's
+server does not exist yet. The worktree setup contract is untouched. A pending start also shows as
+a sidebar row (`OrbitPendingThreadList.tsx`) and survives a reload.
+
+**Runner.** `OrbitThreadStartRunner`, mounted once in the main window's root route, runs every
+saved start (`orbitThreadStarts.ts` on the shared `runOrbitThreadStart`): Orbit creates a clone of
+the Project's default Instance (or the start uses the picked one), Conn pairs with the clone's T3
+server once, and sends the first message in its `/srv/workspace` project (`sendOrbitFirstMessage`).
+Each start is saved in localStorage after every step, with a fixed launch command id, so a reload
+resumes it and a repeated launch finishes the first one. The Gateway admits a create or a pairing
+only after it copies secrets to Swamp (19-27 s), so those two calls get a 60 s limit instead of
+the desktop's 15 s default, and carry a saved `Idempotency-Key`. A lost answer (none, or a proxy's
+502 or 504 without the Gateway's error envelope) repeats the same request with a clamped back-off,
+so the Gateway returns the Operation it may already have admitted. A create refused with 409
+`operation.target_busy` (another Operation owns the Instance) repeats the same way until the
+create's deadline, then stops with "press Retry in a minute"; the pairing admission takes no
+target lock, so it cannot be busy. Any other Gateway error stops the start. The environment sync
+skips a clone a start is pairing with (`heldOrbitInstanceIds`), and an asleep one. Away from the
+pending thread, a toast reports the result. Starts saved by the removed sidebar dialog load as
+pending threads, so they resume or can be dismissed; one whose send finished is dropped.
+
+**Workspaces.** A start saves the workspace selected at Start (null for all). Once the first
+message is sent, that workspace gets the clone's `<environmentId>:<projectId>` ref unless it
+already lists the project or no longer exists, so the sidebar shows the thread (a clone is a new
+environment). The profile sync then drops the refs of clones that are gone
+(`cloneWorkspaceRefs.ts`). A gone record no longer says it was a clone, so each device remembers
+the clone ids it saw in the Gateway list (with an `instance_id`), and drops only refs of those ids
+that a later fresh, non-empty list in Orbit mode leaves out. A clone gone before any list showed it
+keeps its ref. Host and manual environments' refs are never touched.
+
+**Handover.** Once the clone's server took the first message and the thread reached the window,
+the pending route is replaced by the real thread. The start stays saved after the send (the newest
+50), so the real thread finds it by thread id and Conn draws "Instance ready", its Details and the
+ready line itself; none of it goes to the agent. If the clone lacks the composer's provider, the
+first turn uses the clone's default and the ready area says so.
+
+**Failures.** A failed start offers Retry (from the last saved step), Change name (only for
+`instance.name_taken`; reopens the draft with the message and model, then the Instance step) and
+Dismiss, which drops only the saved start on this device. Conn removes no Instance; Instances are
+removed in Orbit.
+
+Still waiting for Orbit: the Node menu ("Run on"), the branch control in the context row, and
+starting a stopped Instance (stopped Instances stay disabled; Settings › Connections shows a clone
+whose container is stopped as Asleep).
 
 The phone starts the same thread from Choose project › Orbit project in Orbit mode. It runs the
 shared state machine and first-message launch (`threadStart.ts`, `threadTurn.ts`); the starts
@@ -342,7 +356,6 @@ Sources:
 - `packages/client-runtime/src/orbitGateway/threadStart.ts` and `threadTurn.ts`.
 - Mobile (`apps/mobile/src/features/orbit/`): `orbitThreadStart*.ts`, `orbitThreadStarts.ts`,
   `orbitWorkspaceRef.ts`, `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`.
-- `apps/web/src/components/sidebar/SidebarThreadHeader.tsx` (`orbitThread` slot).
 
 ### Orbit profile sync
 

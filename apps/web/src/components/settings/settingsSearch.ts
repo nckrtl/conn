@@ -530,13 +530,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
-    id: "orbit-threads-in-palette",
-    title: "Orbit threads in the palette",
-    to: "/settings/labs",
-    desktopOnly: true,
-    searchTerms: ["beta orbit project instance container new thread palette"],
-  },
-  {
     id: "guest-links",
     title: "Guest links",
     to: "/settings/labs",

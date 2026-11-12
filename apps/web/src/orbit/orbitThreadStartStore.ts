@@ -15,10 +15,18 @@ const STORAGE_KEY = "conn:orbit-thread-starts:v1";
 export function readStored(): OrbitThreadStart[] {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    return readOrbitThreadStarts(raw === null ? [] : JSON.parse(raw));
+    return readOrbitThreadStarts(raw === null ? [] : JSON.parse(raw)).map(adoptDialogStart);
   } catch {
     return [];
   }
+}
+
+/**
+ * An unsent start of the removed sidebar dialog becomes a pending thread, so its sidebar row and
+ * view resume, retry or dismiss it. A sent one stays as it is; the runner drops it.
+ */
+function adoptDialogStart(start: OrbitThreadStart): OrbitThreadStart {
+  return start.pendingThread || start.sentAt != null ? start : { ...start, pendingThread: true };
 }
 
 export const useOrbitThreadStarts = create<{ readonly starts: readonly OrbitThreadStart[] }>(
@@ -41,7 +49,7 @@ function pruneSent(starts: OrbitThreadStart[]): OrbitThreadStart[] {
 }
 
 export function updateStarts(change: (starts: OrbitThreadStart[]) => OrbitThreadStart[]): void {
-  const next = pruneSent(change(readStored()));
+  const next = pruneSent(change(readStored()).map(adoptDialogStart));
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   useOrbitThreadStarts.setState({ starts: next });
 }

@@ -48,10 +48,9 @@ function liveChecks(failKey: string | null, extra: ReadonlyArray<string> = []) {
   });
 }
 
-const rowsOf = (
-  checks: ReadonlyArray<OrbitGatewayProjectCheck> | null,
-  reason = "Orbit says no.",
-) => orbitChecksPageModel({ startable: false, reason, checks });
+const rowsOf = (checks: ReadonlyArray<OrbitGatewayProjectCheck> | null) =>
+  orbitChecksPageModel({ startable: false, checks });
+const UNEXPLAINED = "Orbit did not say why threads cannot start here yet.";
 
 describe("orbitChecksPageModel", () => {
   it("shows the five checks in order with Conn's text and stops at the first fail", () => {
@@ -115,20 +114,15 @@ describe("orbitChecksPageModel", () => {
     ]);
   });
 
-  it("shows the five as not checked yet without checks, with the reason alone", () => {
+  it("shows the five as not checked yet without checks, and says Orbit gave no reason", () => {
     const model = rowsOf(null);
     expect(model.rows.every((row) => row.status === "not_checked")).toBe(true);
-    expect(model.reason).toBe("Orbit says no.");
+    expect(model.reason).toBe(UNEXPLAINED);
   });
 
-  it("shows cloneable_reason alone when no check fails", () => {
-    expect(rowsOf(liveChecks(null)).reason).toBe("Orbit says no.");
-    expect(orbitChecksPageModel({ startable: false, reason: null, checks: null }).reason).toBe(
-      "Orbit did not say why threads cannot start here yet.",
-    );
-    expect(
-      orbitChecksPageModel({ startable: true, reason: null, checks: liveChecks(null) }).reason,
-    ).toBeNull();
+  it("says Orbit gave no reason when threads cannot start and no check fails", () => {
+    expect(rowsOf(liveChecks(null)).reason).toBe(UNEXPLAINED);
+    expect(orbitChecksPageModel({ startable: true, checks: liveChecks(null) }).reason).toBeNull();
   });
 });
 
@@ -157,6 +151,18 @@ describe("checkOrbitProjectAgain", () => {
     forgetOrbitRecheck(5);
     answer(false);
     await late;
+    expect(readOrbitRecheckPhase(5)).toBe("idle");
+
+    // Back on the page with a new check: the older read's answer does not end it.
+    let older: (value: boolean) => void = () => {};
+    const first = checkOrbitProjectAgain(5, () => new Promise<boolean>((done) => (older = done)));
+    forgetOrbitRecheck(5);
+    const second = checkOrbitProjectAgain(5, reread);
+    older(false);
+    await first;
+    expect(readOrbitRecheckPhase(5)).toBe("checking");
+    answer(true);
+    await second;
     expect(readOrbitRecheckPhase(5)).toBe("idle");
   });
 });

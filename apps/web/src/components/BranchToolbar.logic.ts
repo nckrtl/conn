@@ -325,8 +325,8 @@ export function shouldIncludeBranchPickerItem(input: {
 }
 
 /**
- * Conn: the Orbit target the composer acts on. Only a draft carries one, and only while the Labs
- * switch "Orbit threads in the palette" is on; with it off the composer is unchanged.
+ * Conn: the Orbit target the composer acts on. Only a draft carries one, and only in the desktop app
+ * in Orbit mode; elsewhere the composer is unchanged.
  */
 export function resolveActiveOrbitDraftTarget(input: {
   readonly enabled: boolean;

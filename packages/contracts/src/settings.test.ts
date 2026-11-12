@@ -201,6 +201,18 @@ describe("ClientSettings removed annotation server keys", () => {
   });
 });
 
+describe("ClientSettings removed Orbit palette switch", () => {
+  it("still decodes settings and patches saved with the Labs switch and drops it", () => {
+    const settings = decodeClientSettings({
+      orbitThreadsInPaletteEnabled: true,
+      boringSidebarEnabled: true,
+    });
+    expect(settings.boringSidebarEnabled).toBe(true);
+    expect(Object.hasOwn(settings, "orbitThreadsInPaletteEnabled")).toBe(false);
+    expect(decodeClientSettingsPatch({ orbitThreadsInPaletteEnabled: false })).toEqual({});
+  });
+});
+
 describe("ServerSettings default permissions", () => {
   it("keeps full access for settings saved before a default was configured", () => {
     expect(decodeServerSettings({}).defaultRuntimeMode).toBe("full-access");

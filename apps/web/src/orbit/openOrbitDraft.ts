@@ -3,11 +3,10 @@ import type { AnyRouter } from "@tanstack/react-router";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { environmentCatalog } from "../connection/catalog";
-import { getClientSettings } from "../hooks/useSettings";
 import { newDraftId, newThreadId } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { primaryEnvironmentIdAtom } from "../state/primaryEnvironment";
-import { useEnvironmentProvider } from "./environmentProvider";
+import { orbitThreadsAvailableNow, useEnvironmentProvider } from "./environmentProvider";
 import {
   chooseOrbitDraftAnchor,
   orbitDraftLogicalProjectKey,
@@ -16,17 +15,15 @@ import {
 } from "./orbitDraft";
 
 /**
- * Opens the composer draft for a thread in an Orbit Instance: a new Instance, or an existing one
- * this device has not paired yet. A paired, running Instance needs no Orbit draft; open a normal
- * draft in its `/srv/workspace` project instead. Called by the palette's Instance step.
- *
- * Reopening the same Orbit Project keeps its draft and text and only swaps the target.
+ * Opens the draft for a thread in a new Instance or an unpaired one; a paired Instance uses a normal
+ * draft in its `/srv/workspace` project. Reopening a Project keeps its draft and swaps the target.
+ * Null outside the desktop app in Orbit mode, or when no environment can anchor the draft.
  */
 export async function openOrbitDraft(
   router: AnyRouter,
   target: OrbitDraftTarget,
 ): Promise<DraftId | null> {
-  if (!getClientSettings().orbitThreadsInPaletteEnabled) return null;
+  if (!orbitThreadsAvailableNow()) return null;
   const anchor = chooseOrbitDraftAnchor({
     orbitProjectId: target.projectId,
     orbitInstances: useEnvironmentProvider.getState().orbitInstances,

@@ -558,7 +558,7 @@ function OpenCommandPaletteDialog(props: {
   const providersByEnvironment = useEnvironmentProviders();
   const { changeThemeItem, changeAppearanceItem, themeEditorItem } = useCommandPaletteThemeItems();
   const currentView = viewStack.at(-1)?.view ?? null;
-  // Conn: Orbit Projects join the New thread list behind a Labs switch (`off` changes nothing).
+  // Conn: Orbit Projects join the New thread list in Orbit mode (`off` changes nothing).
   const orbitPalettePage = parseOrbitPalettePage(currentView?.groups[0]?.value);
   const orbitProjectsState = useOrbitPaletteProjects(
     currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP || orbitPalettePage !== null,
@@ -1891,6 +1891,14 @@ function OpenCommandPaletteDialog(props: {
       });
     },
   }));
+  const showOrbitDraftError = (error?: unknown) =>
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Unable to open the Orbit draft",
+        description: error instanceof Error ? error.message : "Conn could not open the draft here.",
+      }),
+    );
   const createOrbitInstance = () => {
     if (orbitStepProject === null) return;
     if (!orbitStep.hint.canCreate) {
@@ -1909,17 +1917,9 @@ function OpenCommandPaletteDialog(props: {
       domainSuffix: orbitStepProject.domainSuffix,
     })
       .then((draftId) => {
-        if (draftId === null) throw new Error("Conn could not open the draft here.");
+        if (draftId === null) showOrbitDraftError();
       })
-      .catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Unable to open the Orbit draft",
-            description: error instanceof Error ? error.message : "An unexpected error occurred.",
-          }),
-        );
-      });
+      .catch(showOrbitDraftError);
   };
   const pickOrbitInstance = async (row: OrbitInstanceRow) => {
     if (orbitStepProject === null) return;
@@ -1930,7 +1930,7 @@ function OpenCommandPaletteDialog(props: {
       await handleNewThread(scopeProjectRef(cloneProject.environmentId, cloneProject.id));
     } else if (pick.kind !== "disabled") {
       // Unpaired, or paired but its project has not loaded yet: the Orbit draft handles both.
-      await openOrbitDraft(router, {
+      const draftId = await openOrbitDraft(router, {
         projectId: orbitStepProject.id,
         projectSlug: orbitStepProject.slug,
         projectName: orbitStepProject.name,
@@ -1940,6 +1940,7 @@ function OpenCommandPaletteDialog(props: {
         existing: { instanceId: row.instanceId, environmentId: row.environmentId },
         domainSuffix: orbitStepProject.domainSuffix,
       });
+      if (draftId === null) showOrbitDraftError();
     }
   };
   const orbitStepGroups =
@@ -3084,7 +3085,7 @@ function OpenCommandPaletteDialog(props: {
 
   const footerActionLabel =
     orbitStepProject !== null
-      ? orbitPickableRowCount === 0
+      ? orbitPickableRowCount === 0 && highlightedItemValue !== ORBIT_INSTANCES_RETRY_VALUE
         ? "Create"
         : "Select"
       : newProjectFlow !== null

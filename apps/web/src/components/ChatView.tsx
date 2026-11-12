@@ -486,11 +486,8 @@ export default function ChatView(props: ChatViewProps) {
         ? store.getDraftSession(draftId)
         : null,
   );
-  // Conn: as for the Labs row, the switch counts only in the desktop app in Orbit mode.
-  const orbitThreadsSwitchOn = useClientSettings(
-    (clientSettings) => clientSettings.orbitThreadsInPaletteEnabled,
-  );
-  const orbitThreadsInPaletteEnabled = useOrbitThreadsAvailable() && orbitThreadsSwitchOn;
+  // Conn: Orbit drafts exist only in the desktop app in Orbit mode.
+  const orbitThreadsAvailable = useOrbitThreadsAvailable();
   const serverThreadShell = useQuietThreadShell(routeThreadRef);
   const routeThreadDetailRef = resolveThreadDetailRef(routeThreadRef, {
     shellExists: serverThreadShell !== null,
@@ -1732,7 +1729,7 @@ export default function ChatView(props: ChatViewProps) {
     enabled: !isGitRepo && activeProject !== null,
   });
   const orbitDraftTarget = resolveActiveOrbitDraftTarget({
-    enabled: orbitThreadsInPaletteEnabled,
+    enabled: orbitThreadsAvailable,
     isServerThread,
     orbitTarget: draftThread?.orbitTarget,
   });

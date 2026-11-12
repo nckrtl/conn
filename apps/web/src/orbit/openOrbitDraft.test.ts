@@ -10,9 +10,6 @@ const mocks = vi.hoisted(() => ({
   setLogicalProjectDraftThreadId: vi.fn(),
 }));
 
-vi.mock("../hooks/useSettings", () => ({
-  getClientSettings: () => ({ orbitThreadsInPaletteEnabled: mocks.enabled }),
-}));
 vi.mock("../composerDraftStore", () => ({
   useComposerDraftStore: {
     getState: () => ({
@@ -31,6 +28,8 @@ vi.mock("../rpc/atomRegistry", () => ({
   },
 }));
 vi.mock("./environmentProvider", () => ({
+  // The desktop app in Orbit mode; there is no other switch.
+  orbitThreadsAvailableNow: () => mocks.enabled,
   useEnvironmentProvider: {
     getState: () => ({ orbitInstances: { "clone-71": { projectId: 71, instanceId: 5 } } }),
   },
@@ -87,7 +86,7 @@ describe("openOrbitDraft", () => {
     );
   });
 
-  it("does nothing while the Labs switch is off", async () => {
+  it("does nothing outside the desktop app in Orbit mode", async () => {
     const { router, navigate } = setup({ enabled: false });
 
     expect(await openOrbitDraft(router, target)).toBeNull();

@@ -52,6 +52,49 @@ describe("orbitThreadStartStore", () => {
     expect(readStored().map((entry) => entry.id)).toEqual(["new"]);
   });
 
+  it("turns an unsent start of the old sidebar dialog into a pending thread, so it stays visible", () => {
+    // A row as the removed dialog saved it before version 2: no pendingThread, no stage times.
+    const dialogRow = {
+      id: "dialog",
+      projectId: 3,
+      projectSlug: "mealou",
+      nodeName: "beast",
+      instanceName: "fix-it-k3j9",
+      message: "Fix it",
+      threadId: "thread-dialog",
+      messageId: "message-dialog",
+      commandId: "command-dialog",
+      createdAt: 0,
+      createKey: "key-1",
+      createOperationId: 17,
+      instanceId: null,
+      environmentId: null,
+      pairingKey: null,
+      pairingOperationId: null,
+      pairingId: null,
+      pairingLinkRead: false,
+      connected: false,
+      error: "Orbit could not create the clone.",
+    };
+    const sentDialogRow = { ...dialogRow, id: "sent", environmentId: "clone", sentAt: 4 };
+    window.localStorage.setItem(
+      "conn:orbit-thread-starts:v1",
+      JSON.stringify([dialogRow, sentDialogRow]),
+    );
+
+    expect(readStored()).toEqual([
+      expect.objectContaining({
+        id: "dialog",
+        pendingThread: true,
+        createOperationId: 17,
+        error: "Orbit could not create the clone.",
+        projectName: null,
+      }),
+      // Its send finished; the runner drops it rather than showing it.
+      expect.objectContaining({ id: "sent", pendingThread: false }),
+    ]);
+  });
+
   it("does not bring a dismissed start back when its run saves", () => {
     updateStarts(() => [start("a")]);
     updateStarts(() => []);

@@ -20,6 +20,7 @@ import {
   SquarePenIcon,
   TriangleAlertIcon,
 } from "lucide-react";
+import { deriveProjectIdentity } from "@t3tools/shared/projectIdentity";
 import { useState } from "react";
 
 import { cn } from "../lib/utils";
@@ -29,6 +30,7 @@ import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
 import { useVisibleThreadShells } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { formatRelativeTimeLabel } from "../timestampFormat";
+import { ProjectMonogram } from "./ProjectMonogram";
 import { isSidebarHiddenThread } from "./Sidebar.logic";
 import { SettingsPageContainer, SettingsSection } from "./settings/settingsLayout";
 import { Button } from "./ui/button";
@@ -139,18 +141,23 @@ function NewThreadButton({ row }: { readonly row: OrbitInstanceWithThreads }) {
   );
 }
 
+function ProjectBadge({ name }: { readonly name: string }) {
+  const identity = deriveProjectIdentity(name);
+  return <ProjectMonogram text={identity.monogram} color={identity.color} className="size-5" />;
+}
+
 function InstanceThreads({ row }: { readonly row: OrbitInstanceWithThreads }) {
   const navigate = useNavigate();
   return (
     <ul
-      className="mt-2 ms-5 rounded-md border border-border/70 bg-muted/30 p-1"
+      className="mt-2 ms-5 divide-y divide-border/70 overflow-hidden rounded-md border border-border/70 bg-muted/30"
       aria-label={`Threads in ${row.name}`}
     >
       {row.threads.map((thread) => (
         <li key={thread.id}>
           <button
             type="button"
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-start text-ui hover:bg-accent"
+            className="flex w-full items-center gap-2 px-3 py-2 text-start text-ui hover:bg-accent"
             onClick={() =>
               void navigate({
                 to: "/$environmentId/$threadId",
@@ -361,7 +368,7 @@ export function OrbitInstancesPage() {
         </p>
       </header>
       <div className="flex flex-wrap items-center gap-2 px-3 sm:px-4">
-        <InputGroup className="w-56 max-sm:flex-1">
+        <InputGroup className="min-w-0 flex-1">
           <InputGroupAddon>
             <SearchIcon aria-hidden className="size-3.5" />
           </InputGroupAddon>
@@ -394,6 +401,7 @@ export function OrbitInstancesPage() {
           <SettingsSection
             key={group.projectId}
             title={group.projectName}
+            icon={<ProjectBadge name={group.projectName} />}
             titleAction={
               <span className="ms-1 text-muted-foreground text-xs tabular-nums">
                 {group.rows.length}

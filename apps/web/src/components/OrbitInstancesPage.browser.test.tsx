@@ -9,6 +9,7 @@ import "~/index.css";
 import { render, stubGlobal } from "../../test/render";
 import { setEnvironmentProvider } from "../orbit/environmentProvider";
 import { useOrbitInstanceListStore } from "../orbit/orbitInstanceList";
+import { loadOrbitPaletteProjects } from "../orbit/orbitPaletteProjects";
 import { OrbitInstancesPage } from "./OrbitInstancesPage";
 import { OrbitPanelLayout } from "./OrbitPanel";
 import { SidebarProvider } from "./ui/sidebar";
@@ -138,7 +139,7 @@ describe("Orbit Instances page", () => {
     await expect.element(page.getByRole("heading", { name: "nckrtl.com" })).toBeVisible();
     expect(
       [...document.querySelectorAll("section h2")].map((heading) => heading.textContent),
-    ).toEqual(["create-bench", "nckrtl.com"]);
+    ).toEqual(["CBcreate-bench", "NCnckrtl.com"]);
     expect(document.querySelector('[data-orbit-instance="1"]')).toBeNull();
     await expect.element(page.getByText(": 4 in 2 projects", { exact: false })).toBeVisible();
 
@@ -222,11 +223,14 @@ describe("Orbit Instances page", () => {
       },
       instance: { id: 11, name: "pricing-page" },
     });
-    // The open reads the environments afresh, never the palette's cached list.
-    const reads = vi.fn(async () => ENVIRONMENTS);
-    (mocks.client as { environments: unknown }).environments = reads;
-    await mocks.openInstance.mock.calls[0]![0].environments();
-    expect(reads).toHaveBeenCalledTimes(1);
+    // The open reads the environments afresh, never the palette's cached list (here stale).
+    await loadOrbitPaletteProjects({
+      projects: async () => PROJECTS,
+      environments: async () => [],
+    } as unknown as OrbitGatewayClient);
+    await expect(mocks.openInstance.mock.calls[0]![0].environments()).resolves.toEqual(
+      ENVIRONMENTS,
+    );
 
     await expect.element(newThread("old-spike")).toBeDisabled();
     await expect

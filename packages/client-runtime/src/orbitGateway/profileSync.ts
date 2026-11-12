@@ -17,7 +17,7 @@ const isOrbitGatewayError = Schema.is(OrbitGatewayError);
  * Syncs sections of this device's Orbit profile, one channel per section. Per section it keeps
  * the profile version, the agreed `base` and the raw `remote`; local and remote edits together
  * merge and retry (`MAX_ATTEMPTS`). Applying sets `base` from a read-back, so pulls never echo;
- * the first sync adopts the profile (or seeds it); `beginNonUserChange` marks non-user writes.
+ * the first sync with a profile adopts it (or seeds it); `beginNonUserChange` marks non-user writes.
  */
 
 export interface ProfileSyncChannel {
@@ -60,10 +60,6 @@ export interface ProfileSyncPorts {
   readonly channels: () => readonly ProfileSyncChannel[];
   readonly loadState: () => ProfileSyncState | null;
   readonly saveState: (state: ProfileSyncState) => void;
-  /** Opt-outs are local: a channel that is not enabled is skipped entirely. */
-  readonly isEnabled?: (name: ProfileSectionName) => boolean;
-  /** Called before the profile's value replaces the device's on a first sync, with the old value. */
-  readonly onAdopt?: (name: ProfileSectionName, previousLocal: JsonObject) => void;
   readonly now?: () => number;
 }
 
@@ -81,14 +77,6 @@ export type ProfileSyncResult =
       readonly sections: Readonly<Record<string, OrbitGatewaySectionMeta>> | null;
     };
 
-export interface ProfileSyncRunOptions {
-  /** Overwrite the profile with this device's value (`push`) or this device with the profile's (`pull`). */
-  readonly force?: {
-    readonly push?: readonly ProfileSectionName[];
-    readonly pull?: readonly ProfileSectionName[];
-  };
-}
-
 /** Attempts at a PATCH before giving up on a run, when other devices keep writing in between. */
 const MAX_ATTEMPTS = 3;
 /** How long an old Gateway is left alone before the next probe. */
@@ -96,16 +84,6 @@ const UNSUPPORTED_RETRY_MS = 10 * 60_000;
 
 function emptyProfileSyncState(profileId = -1): ProfileSyncState {
   return { profileId, profileVersion: -1, sections: {}, ignored: {} };
-}
-
-/** The state without one section, so enabling it again is a first sync (profile wins, with a backup). */
-export function withoutSection(
-  state: ProfileSyncState,
-  name: ProfileSectionName,
-): ProfileSyncState {
-  const { [name]: _section, ...sections } = state.sections;
-  const { [name]: _ignored, ...ignored } = state.ignored;
-  return { ...state, sections, ignored };
 }
 
 interface Remote {
@@ -149,15 +127,11 @@ export function createProfileSync(ports: ProfileSyncPorts) {
     return { ...emptyProfileSyncState(profileId), ignored: saved?.ignored ?? {} };
   };
 
-  async function runOnce(
-    me: OrbitGatewayNode,
-    options: ProfileSyncRunOptions = {},
-  ): Promise<ProfileSyncResult> {
+  async function runOnce(me: OrbitGatewayNode): Promise<ProfileSyncResult> {
     const profile = me.profile;
     if (profile === null) return { kind: "unbound" };
-    const forced = options.force !== undefined;
-    if (!forced && now() < unsupportedUntil) return { kind: "unsupported" };
-    const channels = ports.channels().filter((channel) => ports.isEnabled?.(channel.name) ?? true);
+    if (now() < unsupportedUntil) return { kind: "unsupported" };
+    const channels = ports.channels();
 
     let state = load(profile.id);
     const sections: Partial<Record<ProfileSectionName, ProfileSyncSectionState>> = {
@@ -180,7 +154,6 @@ export function createProfileSync(ports: ProfileSyncPorts) {
 
       const mustFetch =
         attempt > 1 ||
-        forced ||
         profile.settingsVersion !== state.profileVersion ||
         readable.some((channel) => sections[channel.name] === undefined);
       let remote: OrbitGatewaySettings | null = null;
@@ -208,8 +181,6 @@ export function createProfileSync(ports: ProfileSyncPorts) {
             : null;
         if (profileSide === null) continue;
 
-        const forcePull = options.force?.pull?.includes(name) === true;
-        const forcePush = options.force?.push?.includes(name) === true;
         const pull = (value: JsonObject): void => {
           channel.applyRemote(value, known?.base ?? null);
           sections[name] = {
@@ -221,21 +192,8 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         };
 
         if (known === undefined) {
-          // First sync of this section.
-          if (forcePush && !jsonEqual(rejected.get(name), local)) {
-            pushes.push({
-              channel,
-              version: profileSide.version,
-              value: toGatewayForm(
-                profileSide.value === null
-                  ? local
-                  : channel.merge(profileSide.value, toGatewayForm(local), profileSide.value),
-              ),
-              local,
-              kind: "push",
-            });
-          } else if (profileSide.value !== null) {
-            if (!jsonEqual(toGatewayForm(local), profileSide.value)) ports.onAdopt?.(name, local);
+          // First sync of this section, also after a switch to another profile: the profile wins.
+          if (profileSide.value !== null) {
             pull(profileSide.value);
             outcomes[name] = "adopted";
           } else if (ignored[name] && jsonEqual(local, ignored[name])) {
@@ -257,15 +215,9 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         // A section another device cleared has no value to agree on any more.
         const base = remoteChanged && profileSide.value === null ? null : known.base;
         const dirty =
-          forcePush ||
-          (!jsonEqual(local, base ?? undefined) &&
-            !(ignored[name] !== undefined && jsonEqual(local, ignored[name])));
+          !jsonEqual(local, base ?? undefined) &&
+          !(ignored[name] !== undefined && jsonEqual(local, ignored[name]));
 
-        if (forcePull && profileSide.value !== null) {
-          pull(profileSide.value);
-          outcomes[name] = "pulled";
-          continue;
-        }
         if (!dirty) {
           if (remoteChanged && profileSide.value !== null) {
             pull(profileSide.value);
@@ -283,13 +235,11 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         const value = toGatewayForm(
           profileSide.value === null
             ? local
-            : forcePush
-              ? channel.merge(profileSide.value, sendable, profileSide.value)
-              : channel.merge(
-                  base === null ? null : toGatewayForm(base),
-                  sendable,
-                  profileSide.value,
-                ),
+            : channel.merge(
+                base === null ? null : toGatewayForm(base),
+                sendable,
+                profileSide.value,
+              ),
         );
         if (profileSide.value !== null && jsonEqual(value, profileSide.value)) {
           // The profile already holds the result: nothing to send.
@@ -400,11 +350,8 @@ export function createProfileSync(ports: ProfileSyncPorts) {
    * flight waits for it and then reads the state it saved, so it sends only what is still dirty.
    */
   let lastRun: Promise<unknown> = Promise.resolve();
-  function run(
-    me: OrbitGatewayNode,
-    options: ProfileSyncRunOptions = {},
-  ): Promise<ProfileSyncResult> {
-    const result = lastRun.then(() => runOnce(me, options));
+  function run(me: OrbitGatewayNode): Promise<ProfileSyncResult> {
+    const result = lastRun.then(() => runOnce(me));
     lastRun = result.catch(() => undefined);
     return result;
   }

@@ -1,6 +1,4 @@
-import type { ProfileSectionName, ProfileSyncChannel } from "@t3tools/client-runtime/orbit-gateway";
-
-import { saveSectionBackup, useProfileSyncBackups } from "./profileSyncStorage";
+import type { ProfileSyncChannel } from "@t3tools/client-runtime/orbit-gateway";
 
 /**
  * The meeting point between the components that can read and write this device's appearance and
@@ -34,26 +32,4 @@ export function onLocalProfileChange(listener: () => void): () => void {
   return () => {
     changeListeners.delete(listener);
   };
-}
-
-/**
- * Puts back what this device had before the profile replaced it. Counts as the user's own
- * change, so the restored values replace the profile's at the next sync.
- */
-export function restoreSectionBackup(name: ProfileSectionName): boolean {
-  const backup = useProfileSyncBackups.getState()[name];
-  const channel = channels.find((entry) => entry.name === name);
-  if (!backup || !channel) return false;
-  channel.applyRemote(backup.value, null);
-  notifyLocalProfileChange();
-  return true;
-}
-
-/** Keeps what these sections hold on this device now, before a forced pull replaces it. */
-export function backupLocalSections(names: readonly ProfileSectionName[]): void {
-  for (const channel of channels) {
-    if (!names.includes(channel.name)) continue;
-    const value = channel.readLocal(null);
-    if (value !== null) saveSectionBackup(channel.name, value);
-  }
 }

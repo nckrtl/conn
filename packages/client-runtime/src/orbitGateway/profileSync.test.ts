@@ -7,10 +7,9 @@ import {
   type OrbitGatewaySectionPatch,
   type OrbitGatewaySettings,
 } from "./client.ts";
-import type { JsonObject, ProfileSectionName } from "./profileDocument.ts";
+import type { JsonObject } from "./profileDocument.ts";
 import {
   createProfileSync,
-  withoutSection,
   type ProfileSyncChannel,
   type ProfileSyncState,
 } from "./profileSync.ts";
@@ -42,7 +41,8 @@ function storedLikeTheGateway(value: unknown): unknown {
 }
 
 /** An in-memory Gateway that checks section versions the way the real one is specified to. */
-function fakeGateway(options: { sections?: boolean } = {}) {
+function fakeGateway(options: { sections?: boolean; profile?: { id: number; name: string } } = {}) {
+  const profile = options.profile ?? { id: 1, name: "Nick" };
   const gateway = {
     version: 1,
     supportsSections: options.sections ?? true,
@@ -65,7 +65,7 @@ function fakeGateway(options: { sections?: boolean } = {}) {
     }
     if (Object.keys(devices).length > 0) document.devices = devices;
     return {
-      profileId: 1,
+      profileId: profile.id,
       version: gateway.version,
       workspaces: [],
       updatedAt: "",
@@ -120,7 +120,7 @@ function fakeGateway(options: { sections?: boolean } = {}) {
     id: 8,
     name: gateway.caller,
     wireguardIp: "10.44.0.6",
-    profile: { id: 1, name: "Nick", settingsVersion: gateway.version, updatedAt: "" },
+    profile: { ...profile, settingsVersion: gateway.version, updatedAt: "" },
   });
   return { gateway, client, me };
 }
@@ -128,14 +128,13 @@ function fakeGateway(options: { sections?: boolean } = {}) {
 /** One device with a desktop-settings channel and an appearance channel kept in memory. */
 function makeDevice(
   fake: ReturnType<typeof fakeGateway>,
-  initial: { settings?: Values; appearance?: JsonObject | null } = {},
-  extra: { enabled?: (name: ProfileSectionName) => boolean; now?: () => number } = {},
+  initial: { settings?: Values; appearance?: JsonObject | null; state?: ProfileSyncState } = {},
+  extra: { now?: () => number } = {},
 ) {
   const memory = {
     settings: { ...(initial.settings ?? { font: "Inter", size: 15 }) } as Values,
     appearance: (initial.appearance ?? { schema: 1, mode: "system", contrast: 100 }) as JsonObject,
-    state: null as ProfileSyncState | null,
-    backups: [] as { name: string; value: JsonObject }[],
+    state: (initial.state ?? null) as ProfileSyncState | null,
     writes: [] as string[],
   };
   const channels: ProfileSyncChannel[] = [
@@ -174,13 +173,11 @@ function makeDevice(
     saveState: (state) => {
       memory.state = state;
     },
-    onAdopt: (name, value) => memory.backups.push({ name, value }),
-    ...(extra.enabled ? { isEnabled: extra.enabled } : {}),
     ...(extra.now ? { now: extra.now } : {}),
   });
-  const sync = async (options?: Parameters<typeof engine.run>[1]) => {
+  const sync = async () => {
     fake.gateway.caller = "device";
-    return engine.run(fake.me(), options);
+    return engine.run(fake.me());
   };
   return { memory, engine, sync };
 }
@@ -204,20 +201,33 @@ describe("profile sync engine", () => {
       outcomes: { "devices.desktop": "adopted", appearance: "adopted" },
     });
     expect(other.memory.settings).toEqual({ font: "Inter", size: 15 });
-    // The profile wins, and what the device had is kept for "Restore previous settings".
-    expect(other.memory.backups).toContainEqual({
-      name: "devices.desktop",
-      value: device({ font: "Menlo", size: 12 }),
-    });
     expect(fake.gateway.patches).toHaveLength(1);
   });
 
-  it("adopts without a backup when the device already matches the profile", async () => {
-    const fake = fakeGateway();
-    await makeDevice(fake).sync();
-    const twin = makeDevice(fake);
-    await twin.sync();
-    expect(twin.memory.backups).toEqual([]);
+  it("copies the new profile's settings to the device on a switch, and back", async () => {
+    const nick = fakeGateway();
+    const work = fakeGateway({ profile: { id: 2, name: "Work" } });
+    await makeDevice(work, { settings: { font: "Menlo", size: 12 } }).sync();
+    const mac = makeDevice(nick, { settings: { font: "Inter", size: 15 } });
+    await mac.sync();
+
+    const switched = makeDevice(work, { settings: mac.memory.settings, state: mac.memory.state! });
+    expect(await switched.sync()).toMatchObject({
+      kind: "synced",
+      outcomes: { "devices.desktop": "adopted", appearance: "adopted" },
+    });
+    expect(switched.memory.settings).toEqual({ font: "Menlo", size: 12 });
+    // The profile the device left keeps its own settings; the switch writes to neither profile.
+    expect(nick.gateway.patches).toHaveLength(1);
+    expect(work.gateway.patches).toHaveLength(1);
+
+    const back = makeDevice(nick, {
+      settings: switched.memory.settings,
+      state: switched.memory.state!,
+    });
+    await back.sync();
+    expect(back.memory.settings).toEqual({ font: "Inter", size: 15 });
+    expect(nick.gateway.patches).toHaveLength(1);
   });
 
   it("sends nothing after a pull and reads nothing while the profile is unchanged", async () => {
@@ -339,44 +349,6 @@ describe("profile sync engine", () => {
     expect(fake.gateway.sections.get("devices.desktop")!.value.schema).toBe(2);
   });
 
-  it("skips a section the user opted out of, and re-adopts the profile when it is turned back on", async () => {
-    const fake = fakeGateway();
-    const mac = makeDevice(fake, { settings: { font: "Inter", size: 15 } });
-    await mac.sync();
-
-    let appearanceOn = false;
-    const mini = makeDevice(
-      fake,
-      { settings: { font: "Inter", size: 15 } },
-      { enabled: (name) => name !== "appearance" || appearanceOn },
-    );
-    await mini.sync();
-    expect(mini.memory.state?.sections.appearance).toBeUndefined();
-    expect(mini.memory.writes).not.toContain("appearance");
-
-    mini.memory.appearance = { schema: 1, mode: "dark", contrast: 100 };
-    await mini.sync();
-    expect(fake.gateway.sections.get("appearance")!.value.mode).toBe("system");
-
-    appearanceOn = true;
-    await mini.sync();
-    // First sync again: the profile wins and the device's own value is kept as a backup.
-    expect(mini.memory.appearance.mode).toBe("system");
-    expect(mini.memory.backups.at(-1)).toEqual({
-      name: "appearance",
-      value: { schema: 1, mode: "dark", contrast: 100 },
-    });
-  });
-
-  it("forgets a section so it syncs from scratch", async () => {
-    const fake = fakeGateway();
-    const mac = makeDevice(fake);
-    await mac.sync();
-    const state = withoutSection(mac.memory.state!, "appearance");
-    expect(state.sections.appearance).toBeUndefined();
-    expect(state.sections["devices.desktop"]).toBeDefined();
-  });
-
   it("leaves everything alone on a Gateway without sections", async () => {
     const fake = fakeGateway({ sections: false });
     const mac = makeDevice(fake);
@@ -444,24 +416,6 @@ describe("profile sync engine", () => {
     expect(mac.memory.settings.size).toBe(41);
     await mac.sync();
     expect(valuesOf(fake.gateway.sections.get("devices.desktop")!.value).size).toBe(41);
-  });
-
-  it("forces a push or a pull of chosen sections", async () => {
-    const fake = fakeGateway();
-    const mac = makeDevice(fake, { settings: { font: "Inter", size: 15 } });
-    const mini = makeDevice(fake, { settings: { font: "Inter", size: 15 } });
-    await mac.sync();
-    await mini.sync();
-    mac.memory.settings.size = 18;
-    await mac.sync();
-
-    // The mini has not pulled yet; "use the profile's settings" does so for one section.
-    await mini.sync({ force: { pull: ["devices.desktop"] } });
-    expect(mini.memory.settings.size).toBe(18);
-
-    mini.memory.settings.size = 25;
-    await mini.sync({ force: { push: ["devices.desktop"] } });
-    expect(valuesOf(fake.gateway.sections.get("devices.desktop")!.value).size).toBe(25);
   });
 
   it("returns who changed what when it read the profile", async () => {

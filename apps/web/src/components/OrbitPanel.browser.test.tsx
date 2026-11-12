@@ -10,9 +10,8 @@ import { page, userEvent } from "vite-plus/test/browser";
 import "~/index.css";
 import { act, render, stubGlobal } from "../../test/render";
 import { setEnvironmentProvider } from "../orbit/environmentProvider";
-import { useOrbitProfileSyncStatus } from "../orbit/OrbitProfileSync";
 import { OrbitPanelLayout } from "./OrbitPanel";
-import { OrbitConnectionPage, OrbitProfilePage } from "./settings/OrbitSettings";
+import { OrbitConnectionPage } from "./settings/OrbitSettings";
 import { RailActions } from "./sidebar/WorkspaceRail";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -150,45 +149,6 @@ describe("Orbit panel", () => {
       expect(screen.router?.state.location.pathname).toBe("/settings/connections"),
     );
     expect(screen.router?.state.location.hash).toBe("environment-provider");
-  });
-
-  it("shows the profile and its sync on Profile", async () => {
-    using _env = setup("orbit");
-    await using _screen = await render(
-      <SidebarProvider>
-        <OrbitPanelLayout>
-          <OrbitProfilePage />
-        </OrbitPanelLayout>
-      </SidebarProvider>,
-      { router: "/orbit/profile" },
-    );
-    await expect.element(page.getByRole("combobox", { name: "Profile" })).toHaveTextContent("Work");
-    await expect.element(page.getByRole("heading", { name: "Profile sync" })).toBeVisible();
-    await expect.element(page.getByRole("textbox", { name: "New profile name" })).toBeVisible();
-    await expect
-      .element(page.getByRole("heading", { name: "Nodes", exact: true }))
-      .not.toBeInTheDocument();
-  });
-
-  it("shows a failed reload on Profile, with Reload", async () => {
-    using _env = setup("orbit");
-    await using _screen = await render(
-      <SidebarProvider>
-        <OrbitPanelLayout>
-          <OrbitProfilePage />
-        </OrbitPanelLayout>
-      </SidebarProvider>,
-      { router: "/orbit/profile" },
-    );
-    await expect.element(page.getByRole("heading", { name: "Profile sync" })).toBeVisible();
-    await expect.element(page.getByRole("button", { name: "Reload" })).not.toBeInTheDocument();
-    (gateway.client as { me: () => Promise<never> }).me = async () => {
-      throw new Error("gateway.orbit timed out");
-    };
-    await act(() => useOrbitProfileSyncStatus.setState({ syncedAt: 1 }));
-    await expect.element(page.getByText("gateway.orbit timed out")).toBeVisible();
-    await expect.element(page.getByRole("button", { name: "Reload" })).toBeVisible();
-    await act(() => useOrbitProfileSyncStatus.setState({ syncedAt: null }));
   });
 
   it("shows a failed check and the ones after it, and Reload runs the checks again", async () => {

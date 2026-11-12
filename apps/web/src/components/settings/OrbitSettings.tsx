@@ -82,7 +82,7 @@ export function EnvironmentProviderSection() {
         title="Environments from"
         description={
           provider === "orbit"
-            ? "The T3 servers registered on the Orbit Gateway. Host servers pair automatically; connect a clone in the server list. Environments added here are switched off until you choose Default again."
+            ? "The T3 servers registered on the Orbit Gateway. Host servers pair automatically; connect a clone in the Orbit panel. Environments added here are switched off until you choose Default again."
             : "Environments you add on this device. Orbit uses the servers on the Orbit Gateway instead and syncs workspaces with your profile."
         }
         control={

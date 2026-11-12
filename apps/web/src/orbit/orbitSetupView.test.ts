@@ -334,6 +334,13 @@ describe("orbitReadyView", () => {
       baseBranch: "develop",
       dependenciesLine: line,
     });
+    // The result's base wins over the one asked for.
+    expect(
+      ready({ mode: "new", from: "develop" }, ["pricing-page", "main"]).dependenciesLine,
+    ).toBeNull();
+    expect(ready({ mode: "new", from: "main" }, ["pricing-page", "develop"]).dependenciesLine).toBe(
+      line,
+    );
     expect(
       ready({ mode: "existing", name: "feature/login" }, ["feature/login", null]),
     ).toMatchObject({ branch: "feature/login", baseBranch: null, dependenciesLine: line });

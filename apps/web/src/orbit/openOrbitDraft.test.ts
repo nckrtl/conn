@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gateway";
 
+import type { DraftId } from "../composerDraftStore";
 import { openOrbitDraft } from "./openOrbitDraft";
 import { openOrbitInstanceById } from "./openOrbitInstance";
 import type { OrbitDraftTarget } from "./orbitDraft";
@@ -17,7 +18,9 @@ const mocks = vi.hoisted(() => ({
   setLogicalProjectDraftThreadId: vi.fn(),
   newThread: vi.fn(async () => ({ draftId: "draft-clone", threadId: "thread-clone" })),
   projects: [] as Array<{ environmentId: string; id: string; workspaceRoot: string }>,
+  carry: vi.fn(),
 }));
+vi.mock("./carryComposerDraft", () => ({ carryComposerDraft: mocks.carry }));
 
 vi.mock("../composerDraftStore", () => ({
   useComposerDraftStore: {
@@ -67,6 +70,7 @@ function setup(input: {
   mocks.projects = input.projects ?? [];
   mocks.setLogicalProjectDraftThreadId.mockClear();
   mocks.newThread.mockClear();
+  mocks.carry.mockClear();
   const navigate = vi.fn(async () => {});
   return { router: { navigate } as unknown as AnyRouter, navigate };
 }
@@ -170,6 +174,7 @@ describe("openOrbitInstanceById", () => {
       project,
       instance: { id: 42, name: "login" },
       environments: async () => environments,
+      carryDraftFrom: "draft-orbit" as DraftId,
     });
 
   it("opens a normal draft in a paired Instance's workspace project", async () => {
@@ -179,6 +184,8 @@ describe("openOrbitInstanceById", () => {
     });
     expect(mocks.newThread).toHaveBeenCalledWith({ environmentId: "clone-71", projectId: "ws" });
     expect(mocks.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
+    // What the user typed in the Orbit draft goes with them.
+    expect(mocks.carry).toHaveBeenCalledWith("draft-orbit", "draft-clone");
   });
 
   it("opens an Orbit draft of kind existing for an Instance this device has not paired", async () => {

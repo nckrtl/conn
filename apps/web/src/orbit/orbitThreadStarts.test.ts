@@ -167,7 +167,9 @@ describe("sendOrbitDraft", () => {
         runtimeMode: "approval-required",
         interactionMode: "plan",
       }),
-      openPending: (route) => events.push(`open ${route}`),
+      openPending: (route) => {
+        events.push(`open ${route}`);
+      },
       clearDraft: () => events.push(`clear after ${readStored().length} saved`),
     });
     return { sent, start: readStored()[0]!, events };
@@ -182,8 +184,11 @@ describe("sendOrbitDraft", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("saves a start with the typed name, kind, model and modes, then clears the draft", () => {
+  it("saves a start, opens its pending thread, and clears the draft only after that", async () => {
     const { start, events } = send(target);
+    // The draft route redirects home once its draft is gone, so the clear waits for the route.
+    expect(events).toEqual(["open /orbit/start-1"]);
+    await Promise.resolve();
 
     expect(start).toMatchObject({
       projectId: 71,

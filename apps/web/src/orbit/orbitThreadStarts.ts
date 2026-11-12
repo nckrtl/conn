@@ -114,18 +114,18 @@ export function orbitThreadStartBlockedReason(): string | null {
 /**
  * Sends an Orbit draft: saves the start for the runner (never through a T3 server), opens its
  * pending thread, then clears the draft. Null, with the draft kept, when the start cannot run.
+ * The draft goes only once the route left it: a draft route without its draft redirects home.
  */
 export function sendOrbitDraft(input: {
   readonly start: OrbitDraftStartInput;
-  readonly openPending: (path: string) => void;
+  readonly openPending: (path: string) => Promise<void> | void;
   readonly clearDraft: () => void;
 }): OrbitThreadStart | null {
   if (orbitThreadStartBlockedReason() !== null) return null;
-  const path = (id: string) => orbitPendingThreadPath(id);
   const start = beginOrbitDraftThreadStart(input.start, "");
-  startedOn.set(start.id, path(start.id));
-  input.openPending(path(start.id));
-  input.clearDraft();
+  const path = orbitPendingThreadPath(start.id);
+  startedOn.set(start.id, path);
+  void Promise.resolve(input.openPending(path)).finally(input.clearDraft);
   return start;
 }
 

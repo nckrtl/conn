@@ -899,31 +899,18 @@ describe("runOrbitThreadStart with a branch", () => {
   const refusal = (code: string, status: number, details: Record<string, unknown> = {}) =>
     new OrbitGatewayError({ code, message: `refused ${code}`, status, details });
 
-  it("never sends the branch with the gate off, and sends it as saved with the gate on", async () => {
+  it("sends the branch as saved, and none without a choice", async () => {
     for (const branch of [
       { mode: "new", from: "develop" },
       { mode: "existing", name: "feature/login" },
     ] as const) {
-      const off = gateway({});
-      expect(await runOrbitThreadStart(onBranch(branch), ports(off.client).ports)).toBe(true);
-      const offAgain = gateway({});
-      const gateOff = { ...ports(offAgain.client).ports, branchOnCreate: false };
-      expect(await runOrbitThreadStart(onBranch(branch), gateOff)).toBe(true);
-      expect([...off.branches, ...offAgain.branches]).toEqual([null, null]);
-
-      const on = gateway({});
-      const gateOn = { ...ports(on.client).ports, branchOnCreate: true };
-      expect(await runOrbitThreadStart(onBranch(branch), gateOn)).toBe(true);
-      expect(on.branches).toEqual([branch]);
+      const sent = gateway({});
+      expect(await runOrbitThreadStart(onBranch(branch), ports(sent.client).ports)).toBe(true);
+      expect(sent.branches).toEqual([branch]);
     }
-    // No choice ("From main") sends none, also with the gate on.
+    // No choice ("From main") sends none.
     const none = gateway({});
-    expect(
-      await runOrbitThreadStart(onBranch(null), {
-        ...ports(none.client).ports,
-        branchOnCreate: true,
-      }),
-    ).toBe(true);
+    expect(await runOrbitThreadStart(onBranch(null), ports(none.client).ports)).toBe(true);
     expect(none.branches).toEqual([null]);
   });
 
@@ -939,7 +926,7 @@ describe("runOrbitThreadStart with a branch", () => {
     "keeps an admission refusal %s with its details, made no Instance, and drops the key",
     async (code, status, details) => {
       const { client } = gateway({ createLost: [refusal(code, status, details)] });
-      const run = { ...ports(client), branchOnCreate: true };
+      const run = ports(client);
       expect(await runOrbitThreadStart(onBranch({ mode: "new", from: "develop" }), run.ports)).toBe(
         false,
       );
@@ -959,15 +946,11 @@ describe("runOrbitThreadStart with a branch", () => {
     const branch = { mode: "existing", name: "feature/login" } as const;
     const first = gateway({ createLost: [refusal("source.head_unavailable", 502)] });
     const run = ports(first.client);
-    expect(
-      await runOrbitThreadStart(onBranch(branch), { ...run.ports, branchOnCreate: true }),
-    ).toBe(false);
+    expect(await runOrbitThreadStart(onBranch(branch), run.ports)).toBe(false);
     const retried = retryOrbitThreadStartRecord(run.saves.at(-1)!);
     expect(retried).toMatchObject({ branch, errorCode: null, errorDetails: null });
     const second = gateway({});
-    expect(
-      await runOrbitThreadStart(retried, { ...ports(second.client).ports, branchOnCreate: true }),
-    ).toBe(true);
+    expect(await runOrbitThreadStart(retried, ports(second.client).ports)).toBe(true);
     expect([...first.branches, ...second.branches]).toEqual([branch, branch]);
   });
 

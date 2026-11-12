@@ -25,7 +25,6 @@ import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
-import { ORBIT_BRANCH_CONTROL_ENABLED } from "./orbitBranchControl";
 import type { OrbitDraftStartInput } from "./orbitDraft";
 import {
   readStored,
@@ -231,7 +230,6 @@ export async function runSavedOrbitThreadStart(
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
       stopped,
-      branchOnCreate: ORBIT_BRANCH_CONTROL_ENABLED,
       isSaved,
       connect,
       onCreateOperation: (operation) => recordCreateOperation(id, operation),

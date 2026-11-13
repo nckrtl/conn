@@ -68,6 +68,7 @@ function harness(outcome: () => Promise<OrbitInstanceWakeOutcome>) {
     },
     userActive: () => active,
     gatewayClient: () => client,
+    orbitMode: () => true,
     now: () => clock,
     later: (run) => run(),
   });
@@ -273,5 +274,58 @@ describe("createOrbitInstanceSleepController", () => {
     await list([server(41, "stopped")]);
 
     expect(log).toEqual(["wake 41", "release env-41"]);
+  });
+
+  it("reads the list on input when a shown Instance does not connect, and wakes it", async () => {
+    const { controller, list, setListing, log, logged, advance } = harness(awake);
+    await list([server(41, "running")]);
+    const release = controller.hold("env-41");
+    await controller.ensureAwake("env-41", "connecting");
+    // It fell asleep after the last read; the phase stays `connecting` against a frozen port.
+    setListing([server(41, "stopped")]);
+    advance(6_000);
+    controller.activity();
+    await logged("retry env-41");
+
+    expect(log).toEqual(["list", "wake 41", "retry env-41"]);
+    release();
+  });
+
+  it("sends no wake on input once an older Gateway is known", async () => {
+    const { controller, list, log } = harness(awake);
+    await list([server(41, "stopped")]);
+    const release = controller.hold("env-41");
+    useOrbitInstanceSleep.setState({ unsupportedAt: 1_000_000 });
+    log.length = 0;
+    controller.activity();
+    await controller.ensureAwake("env-41", "reconnecting");
+
+    expect(log).toEqual([]);
+    release();
+  });
+
+  it("shows today's failure, not a silent view, while a failed wake waits", async () => {
+    const { controller, list, log, setActive } = harness(async () => ({
+      kind: "failed",
+      code: "instance.t3_unready",
+      message: "T3 was slow.",
+    }));
+    await list([server(41, "stopped")]);
+    const release = controller.hold("env-41");
+    await controller.ensureAwake("env-41", "available");
+    // The window goes idle and a list read parks it again; then the user comes back.
+    setActive(false);
+    await list([server(41, "stopped")]);
+    setActive(true);
+    await controller.ensureAwake("env-41", "available");
+
+    expect(log).toEqual([
+      "park env-41",
+      "release env-41",
+      "wake 41",
+      "park env-41",
+      "release env-41",
+    ]);
+    release();
   });
 });

@@ -104,6 +104,8 @@ export interface OrbitInstanceSleepPorts {
    * its Instance only then, so a window left open on a thread does not keep the Instance awake.
    */
   readonly userActive: () => boolean;
+  /** True while Orbit provides the environments; outside Orbit mode Conn reads no list itself. */
+  readonly orbitMode: () => boolean;
   /** The Gateway client of this window, for a window whose list reads come from nowhere else. */
   readonly gatewayClient: () => OrbitGatewayClient | null;
   readonly now: () => number;
@@ -120,6 +122,10 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
   const wokenAt = new Map<string, number>();
   let freshReadAt: number | null = null;
   const waking = new Set<string>();
+  /** The last connection phase each shown environment reported. */
+  const phases = new Map<string, EnvironmentConnectionPhase | null>();
+  const supported = () =>
+    orbitWakeSupported(useOrbitInstanceSleep.getState().unsupportedAt, ports.now());
   const later = ports.later ?? ((run: () => void, ms: number) => void setTimeout(run, ms));
   const currentClient = () => client ?? ports.gatewayClient();
 
@@ -178,9 +184,13 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
   const wake = async (environmentId: string): Promise<void> => {
     const item = listed.get(environmentId);
     const reader = currentClient();
-    if (reader === null || item === undefined || waking.has(environmentId)) return;
+    if (reader === null || item === undefined || waking.has(environmentId) || !supported()) return;
     const failed = failedAt.get(environmentId);
-    if (failed !== undefined && ports.now() - failed < FAILED_WAKE_PAUSE_MS) return;
+    if (failed !== undefined && ports.now() - failed < FAILED_WAKE_PAUSE_MS) {
+      // No new wake yet, but the user sees today's failure, not a silent view.
+      await setParked(environmentId, false);
+      return;
+    }
     waking.add(environmentId);
     try {
       // Connecting starts now, so the view shows what a slow connect shows today.
@@ -265,7 +275,7 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
   /** Reads the Gateway list now, at most once per FRESH_READ_EVERY_MS for this window. */
   const readFresh = async (): Promise<void> => {
     const reader = currentClient();
-    if (reader === null) return;
+    if (reader === null || !ports.orbitMode()) return;
     if (freshReadAt !== null && ports.now() - freshReadAt < FRESH_READ_EVERY_MS) return;
     freshReadAt = ports.now();
     let orbit: readonly OrbitGatewayEnvironment[];
@@ -286,6 +296,7 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
     environmentId: string,
     phase: EnvironmentConnectionPhase | null,
   ): Promise<void> => {
+    phases.set(environmentId, phase);
     if (phase === "connected" || !ports.userActive()) return;
     if (!orbitWakeSupported(useOrbitInstanceSleep.getState().unsupportedAt, ports.now())) return;
     if (isStopped(environmentId)) {
@@ -301,9 +312,19 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
 
   /** The user acted in this window: wake the asleep Instances it shows. */
   const activity = (): void => {
+    if (!supported()) return;
+    let unknown = false;
     for (const environmentId of inUse.keys()) {
       if (isStopped(environmentId)) void wake(environmentId);
+      else if (phases.get(environmentId) !== "connected") unknown = true;
     }
+    // A shown environment that does not connect may sleep since the last list read: read again.
+    if (!unknown) return;
+    void readFresh().then(() => {
+      for (const environmentId of inUse.keys()) {
+        if (isStopped(environmentId)) void wake(environmentId);
+      }
+    });
   };
 
   /** A window no profile sync feeds (a second window) reads the list itself now and then. */
@@ -323,6 +344,7 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
       if (count > 0) inUse.set(environmentId, count);
       else {
         inUse.delete(environmentId);
+        phases.delete(environmentId);
         // A remount holds it again at once; only an environment nobody shows is parked.
         later(() => {
           if (!inUse.has(environmentId)) void settle(environmentId);
@@ -380,6 +402,7 @@ const controller = createOrbitInstanceSleepController({
   userActive: () =>
     document.visibilityState === "visible" && Date.now() - lastInputAt < USER_ACTIVE_MS,
   gatewayClient: () => desktopOrbitGatewayClientOrNull(),
+  orbitMode: () => isOrbitProvider(),
   now: Date.now,
 });
 
@@ -400,10 +423,12 @@ export function registerOrbitSleepClient(factory: () => OrbitGatewayClient | nul
 let windowWatched = false;
 /** Notes user input in this window, and lets a window no profile sync feeds read the list. */
 function watchWindow(): void {
-  if (windowWatched || typeof window === "undefined") return;
+  if (windowWatched || typeof window === "undefined" || typeof document === "undefined") return;
   windowWatched = true;
   let lastSignal = 0;
-  const onInput = () => {
+  const onInput = (event: Event) => {
+    // A cursor passing over an inactive window is no work in it.
+    if ((event.type === "pointermove" || event.type === "wheel") && !document.hasFocus()) return;
     lastInputAt = Date.now();
     // Input comes in bursts: tell the controller at most every 2 s.
     if (lastInputAt - lastSignal < 2_000) return;
@@ -417,6 +442,9 @@ function watchWindow(): void {
     if (isOrbitProvider()) void controller.pollIfUnfed();
   }, UNFED_POLL_MS);
 }
+
+// Input before the first thread view mounts counts too (a click that opens the first thread).
+watchWindow();
 
 function isOrbitProvider(): boolean {
   try {
@@ -438,7 +466,6 @@ export function useOrbitEnvironmentInUse(
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the shown environment as in use with the sleep controller while mounted
   useEffect(() => {
     if (environmentId === null) return;
-    watchWindow();
     return holdOrbitEnvironmentInUse(environmentId);
   }, [environmentId]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks Orbit to wake the shown environment's Instance when its connection is not up

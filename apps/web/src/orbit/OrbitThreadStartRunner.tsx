@@ -1,4 +1,5 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gateway";
 import { type AnyRouter, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
 
@@ -9,7 +10,6 @@ import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
 import { ORBIT_INSTANCE_STAYS_LINE } from "./orbitSetupView";
 import { openOrbitInstanceById } from "./openOrbitInstance";
 import { orbitStartDraftTarget } from "./OrbitPendingThreadView";
-import { readOrbitEnvironments } from "./orbitPaletteProjects";
 import {
   dismissOrbitThreadStart,
   orbitPendingThreadPath,
@@ -83,6 +83,28 @@ export function OrbitThreadStartRunner() {
   return null;
 }
 
+/** Reads of the Gateway's list at a hand-over, and the wait between two, while Orbit lists it late. */
+const LISTING_READS = 5;
+const LISTING_WAIT_MS = 1_000;
+
+/**
+ * The Gateway's environment list, read fresh: the palette's cached copy can be older than the
+ * create. While the new Instance is not listed yet, it reads again a few times within about 4 s.
+ */
+export async function readOrbitEnvironmentsListing(
+  read: () => Promise<readonly OrbitGatewayEnvironment[]>,
+  instanceId: number,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms)),
+): Promise<readonly OrbitGatewayEnvironment[]> {
+  let environments = await read();
+  for (let attempt = 1; attempt < LISTING_READS; attempt++) {
+    if (environments.some((environment) => environment.instanceId === instanceId)) break;
+    await sleep(LISTING_WAIT_MS);
+    environments = await read();
+  }
+  return environments;
+}
+
 /** Starts whose Instance is being opened, so a re-run of the runner opens it only once. */
 const finishing = new Set<string>();
 
@@ -95,6 +117,7 @@ export async function finishOrbitPlusStart(router: AnyRouter, startId: string): 
   // The saved start, not the runner's snapshot: only it knows the created Instance.
   const start = readStored().find((entry) => entry.id === startId);
   if (start === undefined || finishing.has(start.id) || start.instanceId === null) return;
+  const instanceId = start.instanceId;
   finishing.add(start.id);
   try {
     if (router.state.location.pathname === orbitPendingThreadPath(start.id)) {
@@ -108,8 +131,12 @@ export async function finishOrbitPlusStart(router: AnyRouter, startId: string): 
           nodeName: target.nodeName,
           domainSuffix: target.domainSuffix,
         },
-        instance: { id: start.instanceId, name: start.instanceName },
-        environments: readOrbitEnvironments,
+        instance: { id: instanceId, name: start.instanceName },
+        environments: () => {
+          const client = desktopOrbitGatewayClient();
+          if (client === null) throw new Error("The Orbit Gateway is not available here.");
+          return readOrbitEnvironmentsListing(() => client.environments(), instanceId);
+        },
       }).catch((error: unknown) => ({
         kind: "unavailable" as const,
         reason: error instanceof Error ? error.message : String(error),

@@ -1,8 +1,12 @@
 import type { AuthSessionState } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 
 import type { SupervisorConnectionState } from "../connection/model.ts";
-import type { OrbitGatewayEnvironment } from "./client.ts";
+
+import { OrbitGatewayError, type OrbitGatewayEnvironment } from "./client.ts";
+
+const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
 /**
  * Where a client's environments come from. `default` is T3's own list: environments the user adds by
@@ -35,6 +39,78 @@ export interface OrbitEnvironmentState {
    * them again.
    */
   readonly revokedAt?: Readonly<Record<string, number>>;
+  /**
+   * Conn: servers whose last renewal failed, with the time and the reason. The server's row shows
+   * it with a Retry until a pairing with that server succeeds.
+   */
+  readonly renewalFailed?: Readonly<Record<string, RenewalFailure>>;
+}
+
+/**
+ * Conn: why a renewal failed, in the words the user reads. `session_ended`: Orbit's own session on
+ * the server ended, so it cannot make a link. `unknown`: anything else; the row then says only
+ * "Could not renew." and never shows a code.
+ */
+export type RenewalFailureReason =
+  | "session_ended"
+  | "revoked"
+  | "orbit_unreachable"
+  | "server_unreachable"
+  | "link_refused"
+  | "unknown";
+
+export interface RenewalFailure {
+  readonly at: number;
+  readonly reason: RenewalFailureReason;
+}
+
+const RENEWAL_FAILURE_REASONS: readonly RenewalFailureReason[] = [
+  "session_ended",
+  "revoked",
+  "orbit_unreachable",
+  "server_unreachable",
+  "link_refused",
+  "unknown",
+];
+
+/** Conn: Gateway error codes of a pairing, by the reason the user reads. */
+const RENEWAL_FAILURE_CODES: Readonly<Record<string, RenewalFailureReason>> = {
+  "conn.session_expired": "session_ended",
+  "conn.session_rejected": "session_ended",
+  "conn.pairing_revoked": "revoked",
+  "gateway.unreachable": "orbit_unreachable",
+  "operation.timeout": "orbit_unreachable",
+  "conn.server_unreachable": "server_unreachable",
+  "conn.request_refused": "link_refused",
+  "conn.response_invalid": "link_refused",
+};
+
+/**
+ * Conn: the reason of a failed renewal. A Gateway error maps by its code. A failure to use the new
+ * link on this device: a transient connection error means the server did not answer, a blocked
+ * one that it refused the link.
+ */
+export function renewalFailureReason(error: unknown): RenewalFailureReason {
+  if (isOrbitGatewayError(error)) return RENEWAL_FAILURE_CODES[error.code] ?? "unknown";
+  const tag =
+    typeof error === "object" && error !== null ? (error as { _tag?: unknown })._tag : undefined;
+  if (tag === "ConnectionTransientError") return "server_unreachable";
+  if (tag === "ConnectionBlockedError") return "link_refused";
+  return "unknown";
+}
+
+const RENEWAL_FAILURE_TEXT: Readonly<Record<RenewalFailureReason, string>> = {
+  session_ended: "Could not renew: Orbit's session on this server ended.",
+  revoked: "Could not renew: revoked in Orbit.",
+  orbit_unreachable: "Could not renew: Orbit is not reachable.",
+  server_unreachable: "Could not renew: the server is not reachable.",
+  link_refused: "Could not renew: the server refused the link.",
+  unknown: "Could not renew.",
+};
+
+/** Conn: the sentence a server row shows for a failed renewal. */
+export function renewalFailureText(reason: RenewalFailureReason): string {
+  return RENEWAL_FAILURE_TEXT[reason];
 }
 
 export const EMPTY_ORBIT_ENVIRONMENT_STATE: OrbitEnvironmentState = {
@@ -102,6 +178,66 @@ export function connectionRefusedCredential(
     connection.lastFailure?._tag === "ConnectionBlockedError" &&
     connection.lastFailure.reason === "authentication"
   );
+}
+
+/**
+ * Conn: the saved servers whose session needs a renewal (see `sessionRenewalReason`). The desktop
+ * and the phone read the same two facts per server: its connection and its session.
+ */
+export function readSessionRenewals(input: {
+  readonly environmentIds: readonly string[];
+  readonly readConnection: (
+    environmentId: string,
+  ) => Pick<SupervisorConnectionState, "phase" | "lastFailure"> | null;
+  readonly readSession: (
+    environmentId: string,
+  ) => Pick<AuthSessionState, "authenticated" | "expiresAt"> | null;
+  readonly now: number;
+}): SessionRenewal[] {
+  return input.environmentIds.flatMap((environmentId) => {
+    const reason = sessionRenewalReason({
+      authenticationRefused: connectionRefusedCredential(input.readConnection(environmentId)),
+      session: input.readSession(environmentId),
+      now: input.now,
+    });
+    return reason === null ? [] : [{ environmentId, reason }];
+  });
+}
+
+/**
+ * Conn: watches the connection of each saved Orbit server and calls `onRefused` once each time a
+ * server starts refusing its credential. A refusal arrives seconds after the refresh that the
+ * app's return to the front started (the connection retries at the same moment), so that refresh
+ * cannot see it; the watch lets the app run one more at once.
+ */
+export function createCredentialRefusalWatch(input: {
+  readonly subscribe: (
+    environmentId: string,
+    listener: (connection: Pick<SupervisorConnectionState, "phase" | "lastFailure"> | null) => void,
+  ) => () => void;
+  readonly onRefused: (environmentId: string) => void;
+}): { readonly watch: (environmentIds: readonly string[]) => void } {
+  const watches = new Map<string, () => void>();
+  return {
+    watch(environmentIds) {
+      const wanted = new Set(environmentIds);
+      for (const [environmentId, unsubscribe] of watches) {
+        if (wanted.has(environmentId)) continue;
+        unsubscribe();
+        watches.delete(environmentId);
+      }
+      for (const environmentId of wanted) {
+        if (watches.has(environmentId)) continue;
+        let refused = false;
+        const unsubscribe = input.subscribe(environmentId, (connection) => {
+          const next = connectionRefusedCredential(connection);
+          if (next && !refused) input.onRefused(environmentId);
+          refused = next;
+        });
+        watches.set(environmentId, unsubscribe);
+      }
+    },
+  };
 }
 
 /** A saved environment the provider manages. The desktop's own local backend is never passed in. */
@@ -254,6 +390,25 @@ export function recordRenewal(
   return { ...state, renewedAt: { ...state.renewedAt, [environmentId]: now } };
 }
 
+/** Conn: records a failed renewal; the server's row shows it until a pairing succeeds. */
+export function recordRenewalFailed(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+  failure: RenewalFailure,
+): OrbitEnvironmentState {
+  return { ...state, renewalFailed: { ...state.renewalFailed, [environmentId]: failure } };
+}
+
+/** Conn: a pairing with the server succeeded, so no failed renewal describes it any more. */
+export function forgetRenewalFailure(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+): OrbitEnvironmentState {
+  if (state.renewalFailed?.[environmentId] === undefined) return state;
+  const { [environmentId]: _renewed, ...renewalFailed } = state.renewalFailed;
+  return { ...state, renewalFailed };
+}
+
 /** Conn: records that Orbit refused a renewal because this Node's pairing there is revoked. */
 export function recordPairingRevoked(
   state: OrbitEnvironmentState,
@@ -337,6 +492,7 @@ export function forgetOrbitEnvironment(
   const pairRefusedAt = without(state.pairRefusedAt);
   const renewedAt = without(state.renewedAt);
   const revokedAt = without(state.revokedAt);
+  const renewalFailed = without(state.renewalFailed);
   return {
     disabledByOrbit: state.disabledByOrbit.filter((id) => id !== environmentId),
     pairedByOrbit: state.pairedByOrbit.filter((id) => id !== environmentId),
@@ -345,6 +501,7 @@ export function forgetOrbitEnvironment(
     ...(pairRefusedAt === undefined ? {} : { pairRefusedAt }),
     ...(renewedAt === undefined ? {} : { renewedAt }),
     ...(revokedAt === undefined ? {} : { revokedAt }),
+    ...(renewalFailed === undefined ? {} : { renewalFailed }),
   };
 }
 
@@ -375,6 +532,23 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     }
     return result;
   };
+  const failures = (value: unknown) => {
+    const result: Record<string, RenewalFailure> = {};
+    if (typeof value === "object" && value !== null) {
+      for (const [id, entry] of Object.entries(value)) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const { at, reason } = entry as { at?: unknown; reason?: unknown };
+        if (typeof at !== "number") continue;
+        result[id] = {
+          at,
+          reason: RENEWAL_FAILURE_REASONS.includes(reason as RenewalFailureReason)
+            ? (reason as RenewalFailureReason)
+            : "unknown",
+        };
+      }
+    }
+    return result;
+  };
   return {
     disabledByOrbit: ids(record.disabledByOrbit),
     pairedByOrbit: ids(record.pairedByOrbit),
@@ -383,5 +557,6 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     pairRefusedAt: texts(record.pairRefusedAt),
     renewedAt: times(record.renewedAt),
     revokedAt: times(record.revokedAt),
+    renewalFailed: failures(record.renewalFailed),
   };
 }

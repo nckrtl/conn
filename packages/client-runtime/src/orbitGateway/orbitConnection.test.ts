@@ -192,6 +192,31 @@ const server = (
 });
 
 describe("orbitNodeServers", () => {
+  it("shows a failed renewal with its reason, below an expired registration and a revoke", () => {
+    const nodes = orbitNodeServers({
+      environments: [
+        server("beast", { url: "http://10.44.0.2:3773" }),
+        server("mini", { url: "http://10.44.0.3:3773", status: "session_expired" }),
+        server("shark", { url: "http://10.44.0.4:3773" }),
+        server("nick", { url: "http://10.44.0.5:3773" }),
+      ],
+      paired: new Set(["beast", "mini", "shark", "nick"]),
+      revoked: new Set(["shark"]),
+      renewalFailed: new Map([
+        ["beast", "orbit_unreachable"],
+        ["mini", "session_ended"],
+        ["shark", "unknown"],
+      ]),
+      device: null,
+    });
+    expect(nodes.map((node) => [node.name, node.state, node.renewalFailure])).toEqual([
+      ["beast", "renewal_failed", "orbit_unreachable"],
+      ["mini", "expired", null],
+      ["nick", "paired", null],
+      ["shark", "revoked", null],
+    ]);
+  });
+
   it("shows a server whose pairing Orbit revoked as revoked, even while it is saved", () => {
     const nodes = orbitNodeServers({
       environments: [server("beast", { url: "http://10.44.0.2:3773" })],
@@ -222,6 +247,7 @@ describe("orbitNodeServers", () => {
         name: "nick",
         address: "10.44.0.12",
         state: "paired",
+        renewalFailure: null,
         isThisDevice: true,
       },
       {
@@ -229,6 +255,7 @@ describe("orbitNodeServers", () => {
         name: "beast",
         address: "10.44.0.2",
         state: "expired",
+        renewalFailure: null,
         isThisDevice: false,
       },
       {
@@ -236,6 +263,7 @@ describe("orbitNodeServers", () => {
         name: "mini",
         address: "10.44.0.3",
         state: "paired",
+        renewalFailure: null,
         isThisDevice: false,
       },
     ]);

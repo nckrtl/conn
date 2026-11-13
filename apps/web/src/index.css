@@ -495,6 +495,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+/* The app modals cover the whole window, the browser page included: a bright page under the
+   lighter dialog-backdrop stays orange and its large text readable. */
+@utility app-modal-backdrop {
+  background: color-mix(in srgb, var(--background) 80%, transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+}
+
 @utility dropdown-glass {
   /* Floating surfaces share the shell's overlay: mostly fill, heavy blur. Rows
      inside highlight with the shell's highlight instead of the faint accent. */
@@ -2685,6 +2693,10 @@ html {
   --shell-blur: 40px;
   --shell-saturate: 1.6;
   --shell-fill: color-mix(in srgb, var(--sidebar) 88%, transparent);
+  /* The frame of the app modals (Settings, Usage, Orbit). They float over the app, not over
+     the desktop, so they keep this fill when html.electron-macos thins --shell-fill for the
+     native glass: a bright page behind them must not tint them. Same 94% as --shell-overlay. */
+  --shell-modal-fill: color-mix(in srgb, var(--sidebar) 94%, transparent);
   --shell-panel: color-mix(in oklab, var(--sidebar) 40%, var(--background));
   /* Chat and right-panel cards share the thread panel's opaque color, so they
      can re-root --background on it for everything inside. */
@@ -2748,6 +2760,11 @@ html {
   --shell-fill: color-mix(
     in srgb,
     color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 86%,
+    transparent
+  );
+  --shell-modal-fill: color-mix(
+    in srgb,
+    color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 94%,
     transparent
   );
   --shell-panel: var(--sidebar);

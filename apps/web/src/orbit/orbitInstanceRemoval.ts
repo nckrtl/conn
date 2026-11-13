@@ -116,15 +116,78 @@ export type OrbitInstanceRemoval =
   /** Orbit removed it; the row stays hidden even if a list read still carries it. */
   | { readonly status: "removed" };
 
-/** The row state of each Instance being removed, by Instance id, for the current Orbit profile. */
+/** The profile key of a click that still waits for the page's profile read. */
+const PENDING = "?";
+
+const entryKey = (profile: string, instanceId: number) => `${profile}:${instanceId}`;
+
+/** One removal: its row state, its one follow and the profile it runs (and is saved) under. */
+export interface OrbitInstanceRemovalEntry {
+  /** The Orbit profile key ("none" without one), or `?` while the click waits for the page read. */
+  readonly profile: string;
+  readonly instanceId: number;
+  /** Changes on every new attempt; a late event of a replaced attempt does not touch the entry. */
+  readonly token: symbol;
+  /** The page opening a click was made in; null for a removal restored from this device's records. */
+  readonly opening: symbol | null;
+  readonly removal: OrbitInstanceRemoval;
+  /** The running attempt or follow; null once it ended (a failure, or the removed tombstone). */
+  readonly follow: Promise<unknown> | null;
+}
+
+/** One opening of the Instances page and its one profile read. */
+export interface OrbitInstanceRemovalPage {
+  readonly opening: symbol;
+  /** Undefined while the read runs; null when it failed. */
+  readonly profile: string | null | undefined;
+  readonly read: Promise<string | null>;
+  /** Settles when the follows this opening restored have ended. */
+  readonly restored: Promise<void>;
+}
+
+/** Every removal of this window, keyed `profile:instanceId`, and the open Instances page. */
 export const useOrbitInstanceRemovals = create<{
-  readonly byInstance: Readonly<Record<number, OrbitInstanceRemoval>>;
-  /**
-   * The page opening whose profile check has run (`restoreOrbitInstanceRemovals`). Until then
-   * the page shows only removals this window runs itself, never older saved ones.
-   */
-  readonly restoredFor: symbol | null;
-}>(() => ({ byInstance: {}, restoredFor: null }));
+  readonly entries: Readonly<Record<string, OrbitInstanceRemovalEntry>>;
+  readonly page: OrbitInstanceRemovalPage | null;
+}>(() => ({ entries: {}, page: null }));
+
+type RemovalStoreState = ReturnType<typeof useOrbitInstanceRemovals.getState>;
+
+/**
+ * The rows the page shows: after a good profile read, that profile's removals; before it (or
+ * after a failed read) only this window's own running clicks. Always the clicks still waiting
+ * for a read, and the refusals of this opening. Other profiles never show.
+ */
+export function shownOrbitInstanceRemovals(
+  state: Pick<RemovalStoreState, "entries" | "page">,
+): Readonly<Record<number, OrbitInstanceRemoval>> {
+  const { page, entries } = state;
+  if (page === null) return {};
+  const shown: Record<number, OrbitInstanceRemoval> = {};
+  const all = Object.values(entries);
+  if (typeof page.profile === "string") {
+    for (const entry of all) {
+      if (entry.profile === page.profile) shown[entry.instanceId] = entry.removal;
+    }
+  }
+  if (typeof page.profile !== "string") {
+    // Before a good read: this window's own running clicks, whatever opening made them.
+    for (const entry of all) {
+      if (entry.opening !== null && entry.follow !== null && entry.profile !== PENDING) {
+        shown[entry.instanceId] = entry.removal;
+      }
+    }
+  }
+  for (const entry of all) {
+    if (
+      entry.profile === PENDING &&
+      (entry.removal.status === "removing" || entry.opening === page.opening)
+    ) {
+      shown[entry.instanceId] = entry.removal;
+    }
+  }
+  return shown;
+}
 
 /**
  * A removal saved on this device, so a restart or a reopened panel shows it again. Saved per Orbit
@@ -188,25 +251,6 @@ function profileKey(profileId: number | null): string {
   return profileId === null ? "none" : String(profileId);
 }
 
-/** The profile the store shows now; a follow of another profile's removal does not touch it. */
-let shownProfile: string | null = null;
-/**
- * Instances this window works on now (a click waiting for its answer, or a followed Operation),
- * with the profile they run under; null while a click still reads the profile.
- */
-const active = new Map<number, string | null>();
-/** When a click started each running removal of this window (restored follows have none). */
-const clickedAt = new Map<number, number>();
-
-/**
- * True while a click in this window, made at or after `since`, removes the Instance. Before its
- * profile check the page shows only these, never a follow restored for another profile.
- */
-export function isOrbitInstanceRemovalClickedSince(instanceId: number, since: number): boolean {
-  const at = clickedAt.get(instanceId);
-  return at !== undefined && at >= since;
-}
-
 function saveRemoval(
   storage: OrbitInstanceRemovalStorage,
   profile: string,
@@ -218,19 +262,6 @@ function saveRemoval(
   const next = saved === null ? rest : { ...rest, [String(instanceId)]: saved };
   const { [profile]: _old, ...others } = all;
   storage.write(Object.keys(next).length === 0 ? others : { ...others, [profile]: next });
-}
-
-function showRemoval(
-  profile: string,
-  instanceId: number,
-  removal: OrbitInstanceRemoval | null,
-): void {
-  // This window's own clicks always update their row; other follows only for the shown profile.
-  if (shownProfile !== profile && !clickedAt.has(instanceId)) return;
-  useOrbitInstanceRemovals.setState(({ byInstance }) => {
-    const { [instanceId]: _previous, ...rest } = byInstance;
-    return { byInstance: removal === null ? rest : { ...rest, [instanceId]: removal } };
-  });
 }
 
 function toRemovalRow(row: OrbitInstanceRemovalRow): OrbitInstanceRemovalRow {
@@ -248,18 +279,6 @@ function toRemovalRow(row: OrbitInstanceRemovalRow): OrbitInstanceRemovalRow {
     environmentId: row.environmentId,
     branch: row.branch,
   };
-}
-
-function savedToRemoval(saved: SavedOrbitInstanceRemoval): OrbitInstanceRemoval {
-  return saved.status === "failed"
-    ? {
-        status: "failed",
-        refused: false,
-        message: saved.message ?? ORBIT_REMOVAL_LOST_TEXT,
-        acknowledgeUnsaved: saved.acknowledgeUnsaved,
-        row: saved.row,
-      }
-    : { status: "removing", progress: null, row: saved.row };
 }
 
 export interface OrbitInstanceRemovalPorts {
@@ -298,61 +317,89 @@ export function webOrbitInstanceRemovalPorts(): OrbitInstanceRemovalPorts {
   };
 }
 
-/** Ends a removal: shows it, saves it for a restart, or drops it once the row is gone. */
+/** Applies `change` to the entry at `key` only while it is still the attempt `token`. */
+function updateEntry(
+  key: string,
+  token: symbol,
+  change: (entry: OrbitInstanceRemovalEntry) => OrbitInstanceRemovalEntry | null,
+): boolean {
+  let applied = false;
+  useOrbitInstanceRemovals.setState(({ entries }) => {
+    const entry = entries[key];
+    if (entry?.token !== token) return {};
+    applied = true;
+    const next = change(entry);
+    const { [key]: _previous, ...rest } = entries;
+    return { entries: next === null ? rest : { ...rest, [key]: next } };
+  });
+  return applied;
+}
+
+const REMOVING_ALREADY: OrbitInstanceRemoveOutcome = {
+  kind: "failed",
+  code: "conn.remove_running",
+  message: "Removing already.",
+};
+
+/** True when the entry blocks a new destroy: one runs, or Orbit removed the Instance. */
+function blocksNewRemoval(entry: OrbitInstanceRemovalEntry | undefined): boolean {
+  return entry !== undefined && entry.removal.status !== "failed";
+}
+
+interface Attempt {
+  readonly key: string;
+  readonly token: symbol;
+  readonly profile: string;
+  readonly instance: { readonly id: number; readonly environmentId: string | null };
+  readonly row: OrbitInstanceRemovalRow;
+  readonly acknowledgeUnsaved: boolean;
+  readonly ports: OrbitInstanceRemovalPorts;
+}
+
+/** Ends an attempt: shows it, saves it for a restart, or drops it once the row is gone. */
 async function settle(
-  instance: { readonly id: number; readonly environmentId: string | null },
-  row: OrbitInstanceRemovalRow,
-  profile: string,
-  acknowledgeUnsaved: boolean,
+  attempt: Attempt,
   outcome: OrbitInstanceRemoveOutcome,
-  ports: OrbitInstanceRemovalPorts,
   admitted = true,
 ): Promise<void> {
+  const { key, token, profile, instance, row, acknowledgeUnsaved, ports } = attempt;
   if (outcome.kind === "stopped") return;
   if (outcome.kind === "lost") {
     // Orbit no longer shows the Operation: a fresh list read tells whether the Instance went.
     await ports.reloadList();
-    if (ports.isListed(instance.id) === false) {
-      return settle(instance, row, profile, acknowledgeUnsaved, { kind: "removed" }, ports);
-    }
-  }
-  if (outcome.kind === "failed" && !admitted) {
-    // A refusal started nothing; it is shown here and not kept for a restart.
-    saveRemoval(ports.storage, profile, instance.id, null);
-    showRemoval(profile, instance.id, {
-      status: "failed",
-      refused: true,
-      message: outcome.message,
-      acknowledgeUnsaved,
-      row,
-    });
-    return;
+    if (ports.isListed(instance.id) === false) return settle(attempt, { kind: "removed" });
   }
   if (outcome.kind === "failed" || outcome.kind === "lost") {
+    // A refusal started nothing; it is shown here and not kept for a restart.
+    const refused = outcome.kind === "failed" && !admitted;
     const message = outcome.kind === "failed" ? outcome.message : ORBIT_REMOVAL_LOST_TEXT;
-    saveRemoval(ports.storage, profile, instance.id, {
-      operationId: null,
-      acknowledgeUnsaved,
-      status: "failed",
-      message,
-      row,
-    });
-    showRemoval(profile, instance.id, {
-      status: "failed",
-      refused: false,
-      message,
-      acknowledgeUnsaved,
-      row,
-    });
+    const current = updateEntry(key, token, (entry) => ({
+      ...entry,
+      follow: null,
+      removal: { status: "failed", refused, message, acknowledgeUnsaved, row },
+    }));
+    if (current) {
+      saveRemoval(
+        ports.storage,
+        profile,
+        instance.id,
+        refused ? null : { operationId: null, acknowledgeUnsaved, status: "failed", message, row },
+      );
+    }
     return;
   }
   if (outcome.kind === "unsaved_work") {
-    saveRemoval(ports.storage, profile, instance.id, null);
-    showRemoval(profile, instance.id, null);
+    if (updateEntry(key, token, () => null)) saveRemoval(ports.storage, profile, instance.id, null);
     return;
   }
+  // Removed: the tombstone keeps the row hidden even if a list read still carries it.
+  const current = updateEntry(key, token, (entry) => ({
+    ...entry,
+    follow: null,
+    removal: { status: "removed" },
+  }));
+  if (!current) return;
   saveRemoval(ports.storage, profile, instance.id, null);
-  showRemoval(profile, instance.id, { status: "removed" });
   // Orbit removed it; a cleanup failure must not show the row as "Could not remove".
   await cleanUpRemovedOrbitInstance(instance, ports.cleanup).catch(() => undefined);
   await ports.reloadList();
@@ -366,63 +413,222 @@ async function currentProfile(ports: OrbitInstanceRemovalPorts): Promise<string 
   }
 }
 
+/** Follows a removal saved under `profile` again (the entry at `key` is already in the store). */
+async function followSaved(
+  attempt: Attempt,
+  operationId: number | null,
+  gateway: OrbitInstanceRemovePorts,
+): Promise<void> {
+  // The app ended before Orbit answered the destroy: its fate is unknown.
+  if (operationId === null) return settle(attempt, { kind: "lost" });
+  const outcome = await followOrbitInstanceRemoval(gateway, {
+    operationId,
+    onProgress: (progress) => {
+      if (progress.kind === "admitted") return;
+      updateEntry(attempt.key, attempt.token, (entry) => ({
+        ...entry,
+        removal: { status: "removing", progress, row: attempt.row },
+      }));
+    },
+  });
+  await settle(attempt, outcome);
+}
+
+/**
+ * Puts the saved removals of `profile` into the store; a key the store already holds keeps its
+ * entry (its follow already runs, or it ended in this window). Returns the follows it started.
+ */
+function restoreSaved(profile: string, ports: OrbitInstanceRemovalPorts): Promise<void>[] {
+  const gateway = ports.gateway;
+  if (gateway === null) return [];
+  const follows: Promise<void>[] = [];
+  for (const [id, value] of Object.entries(ports.storage.read()[profile] ?? {})) {
+    const instanceId = Number(id);
+    if (!Number.isInteger(instanceId) || !isSavedRemoval(value)) {
+      saveRemoval(ports.storage, profile, instanceId, null);
+      continue;
+    }
+    const key = entryKey(profile, instanceId);
+    if (useOrbitInstanceRemovals.getState().entries[key] !== undefined) continue;
+    const token = Symbol(key);
+    const base = { profile, instanceId, token, opening: null };
+    if (value.status === "failed") {
+      useOrbitInstanceRemovals.setState(({ entries }) => ({
+        entries: {
+          ...entries,
+          [key]: {
+            ...base,
+            follow: null,
+            removal: {
+              status: "failed",
+              refused: false,
+              message: value.message ?? ORBIT_REMOVAL_LOST_TEXT,
+              acknowledgeUnsaved: value.acknowledgeUnsaved,
+              row: value.row,
+            },
+          },
+        },
+      }));
+      continue;
+    }
+    const attempt: Attempt = {
+      key,
+      token,
+      profile,
+      instance: { id: instanceId, environmentId: value.row.environmentId },
+      row: value.row,
+      acknowledgeUnsaved: value.acknowledgeUnsaved,
+      ports,
+    };
+    // The async follow starts after this synchronous block, so the entry exists before it acts.
+    const follow = Promise.resolve().then(() => followSaved(attempt, value.operationId, gateway));
+    useOrbitInstanceRemovals.setState(({ entries }) => ({
+      entries: {
+        ...entries,
+        [key]: { ...base, follow, removal: { status: "removing", progress: null, row: value.row } },
+      },
+    }));
+    follows.push(follow);
+  }
+  return follows;
+}
+
+/**
+ * Opens the Instances page: ONE profile read for this opening. A good read puts the profile's
+ * saved removals into the store and follows them again; clicks of the page wait for this read.
+ */
+export function openOrbitInstanceRemovalPage(
+  ports: OrbitInstanceRemovalPorts,
+  opening: symbol = Symbol("orbit-instances-page"),
+): OrbitInstanceRemovalPage {
+  let restoredFollows: Promise<void>[] = [];
+  let self: OrbitInstanceRemovalPage | null = null;
+  const read = currentProfile(ports).then((profile) => {
+    // A page opened since then owns the store's page; this read changes nothing for it.
+    if (self === null || useOrbitInstanceRemovals.getState().page !== self) return profile;
+    self = { ...self, profile };
+    useOrbitInstanceRemovals.setState({ page: self });
+    if (profile !== null) restoredFollows = restoreSaved(profile, ports);
+    return profile;
+  });
+  const page: OrbitInstanceRemovalPage = {
+    opening,
+    profile: undefined,
+    read,
+    restored: read.then(() => Promise.all(restoredFollows)).then(() => undefined),
+  };
+  self = page;
+  useOrbitInstanceRemovals.setState(({ entries }) => ({
+    page,
+    // Refusals belong to the opening that showed them.
+    entries: Object.fromEntries(
+      Object.entries(entries).filter(
+        ([, entry]) => entry.profile !== PENDING || entry.removal.status === "removing",
+      ),
+    ),
+  }));
+  return page;
+}
+
 /**
  * One remove attempt (the dialog's Remove Instance, or the row's Retry). The row reads
  * "Removing…" at once, before any Gateway call; then it goes, or shows the failure with Retry.
  * `unsaved_work` clears the row; the caller opens the dialog again with Orbit's Git state.
+ * Starts only when the store holds no running removal of this key; a failed one is replaced.
  */
-export async function runOrbitInstanceRemoval(
+export function runOrbitInstanceRemoval(
   instance: OrbitInstanceRemovalRow & { readonly git?: OrbitInstanceGitState },
   acknowledgeUnsaved: boolean,
   ports: OrbitInstanceRemovalPorts,
 ): Promise<OrbitInstanceRemoveOutcome> {
-  const current = useOrbitInstanceRemovals.getState().byInstance[instance.id]?.status;
-  if (current === "removing" || current === "removed") {
-    return { kind: "failed", code: "conn.remove_running", message: "Removing already." };
+  const page = useOrbitInstanceRemovals.getState().page ?? openOrbitInstanceRemovalPage(ports);
+  const profile = typeof page.profile === "string" ? page.profile : PENDING;
+  const key = entryKey(profile, instance.id);
+  const state = useOrbitInstanceRemovals.getState();
+  const shown = shownOrbitInstanceRemovals(state)[instance.id];
+  if (
+    blocksNewRemoval(state.entries[key]) ||
+    shown?.status === "removing" ||
+    shown?.status === "removed"
+  ) {
+    return Promise.resolve(REMOVING_ALREADY);
   }
+  const token = Symbol(key);
   const row = toRemovalRow(instance);
-  // Shown in this window first, so the click answers at once; the profile read comes after.
-  active.set(instance.id, null);
-  clickedAt.set(instance.id, Date.now());
-  useOrbitInstanceRemovals.setState(({ byInstance }) => ({
-    byInstance: { ...byInstance, [instance.id]: { status: "removing", progress: null, row } },
+  // The body pauses at its first await, after the entry below is in the store.
+  const follow = runAttempt(key, token, instance, row, acknowledgeUnsaved, ports);
+  useOrbitInstanceRemovals.setState(({ entries }) => ({
+    entries: {
+      ...entries,
+      [key]: {
+        profile,
+        instanceId: instance.id,
+        token,
+        opening: page.opening,
+        follow,
+        removal: { status: "removing", progress: null, row },
+      },
+    },
   }));
-  try {
-    return await runAdmittedRemoval(instance, row, acknowledgeUnsaved, ports);
-  } finally {
-    active.delete(instance.id);
-    clickedAt.delete(instance.id);
+  return follow;
+}
+
+/** The profile read of the page open now; a reopened page's read replaces an earlier one. */
+async function readOfCurrentPage(): Promise<string | null> {
+  for (;;) {
+    const page = useOrbitInstanceRemovals.getState().page;
+    if (page === null) return null;
+    const profile = await page.read;
+    if (useOrbitInstanceRemovals.getState().page?.read === page.read) return profile;
   }
 }
 
-async function runAdmittedRemoval(
+async function runAttempt(
+  startKey: string,
+  token: symbol,
   instance: OrbitInstanceRemovalRow & { readonly git?: OrbitInstanceGitState },
   row: OrbitInstanceRemovalRow,
   acknowledgeUnsaved: boolean,
   ports: OrbitInstanceRemovalPorts,
 ): Promise<OrbitInstanceRemoveOutcome> {
-  const profile = await currentProfile(ports);
+  await Promise.resolve();
+  const profile = await readOfCurrentPage();
   if (profile === null || ports.gateway === null) {
     const message =
       ports.gateway === null
         ? "The Orbit Gateway is not available here."
         : "The Orbit Gateway did not answer.";
-    useOrbitInstanceRemovals.setState(({ byInstance }) => ({
-      byInstance: {
-        ...byInstance,
-        [instance.id]: { status: "failed", refused: true, message, acknowledgeUnsaved, row },
-      },
+    updateEntry(startKey, token, (entry) => ({
+      ...entry,
+      follow: null,
+      removal: { status: "failed", refused: true, message, acknowledgeUnsaved, row },
     }));
     return { kind: "failed", code: "gateway.unavailable", message };
   }
-  if (shownProfile !== profile) {
-    // The device's profile changed since the page read its saved removals: show only this one.
-    shownProfile = profile;
-    useOrbitInstanceRemovals.setState({
-      byInstance: { [instance.id]: { status: "removing", progress: null, row } },
+  const key = entryKey(profile, instance.id);
+  if (key !== startKey) {
+    // The click waited for the read: it moves to its profile's key, or yields to the removal
+    // that key already runs (also one the same read restored), so no second destroy goes out.
+    let moved = false;
+    useOrbitInstanceRemovals.setState(({ entries }) => {
+      const mine = entries[startKey];
+      if (mine?.token !== token) return {};
+      const { [startKey]: _pending, ...rest } = entries;
+      if (blocksNewRemoval(rest[key])) return { entries: rest };
+      moved = true;
+      return { entries: { ...rest, [key]: { ...mine, profile } } };
     });
+    if (!moved) return REMOVING_ALREADY;
   }
-  active.set(instance.id, profile);
+  const attempt: Attempt = {
+    key,
+    token,
+    profile,
+    instance,
+    row,
+    acknowledgeUnsaved,
+    ports,
+  };
   saveRemoval(ports.storage, profile, instance.id, {
     operationId: null,
     acknowledgeUnsaved,
@@ -440,117 +646,64 @@ async function runAdmittedRemoval(
     onProgress: (progress) => {
       if (progress.kind === "admitted") {
         admitted = true;
-        saveRemoval(ports.storage, profile, instance.id, {
-          operationId: progress.operationId,
-          acknowledgeUnsaved,
-          status: "removing",
-          message: null,
-          row,
-        });
+        if (useOrbitInstanceRemovals.getState().entries[key]?.token === token) {
+          saveRemoval(ports.storage, profile, instance.id, {
+            operationId: progress.operationId,
+            acknowledgeUnsaved,
+            status: "removing",
+            message: null,
+            row,
+          });
+        }
         return;
       }
-      showRemoval(profile, instance.id, { status: "removing", progress, row });
+      updateEntry(key, token, (entry) => ({
+        ...entry,
+        removal: { status: "removing", progress, row },
+      }));
     },
   });
-  await settle(instance, row, profile, acknowledgeUnsaved, outcome, ports, admitted);
+  await settle(attempt, outcome, admitted);
   return outcome;
 }
 
 /**
- * Rebuilds the rows from this device's saved removals of the current Orbit profile and follows
- * each saved Operation again. Runs when the Instances page opens (also the first time after a
- * restart). `listedIds` are the Instances in the list just read, or null when it failed.
+ * After the page's list read: waits for this opening's profile read, then drops the failures
+ * (and the removed tombstones) of that profile whose Instance left the list, since Orbit removed
+ * it after all. `listedIds` are the Instances in the list just read, or null when it failed.
+ * Resolves once the follows this opening restored have ended. Without `opening`, opens the page.
  */
 export async function restoreOrbitInstanceRemovals(
   ports: OrbitInstanceRemovalPorts,
   listedIds: ReadonlySet<number> | null,
   opening: symbol | null = null,
 ): Promise<void> {
-  const profile = await currentProfile(ports);
-  const sameProfile = profile !== null && shownProfile === profile;
-  /**
-   * This window's own rows under `profile`: running ones, clicks still reading their profile,
-   * and a refusal it showed (refusals are not saved).
-   */
-  const ownRows = (byInstance: Readonly<Record<number, OrbitInstanceRemoval>>) =>
-    Object.fromEntries(
-      Object.entries(byInstance).filter(([id, removal]) => {
-        const runsUnder = active.get(Number(id));
-        // A click of this window stays, whatever profile it resolved to: it is the user's own act.
-        if (clickedAt.has(Number(id))) return true;
-        if (active.has(Number(id))) {
-          return runsUnder === null || (profile !== null && runsUnder === profile);
-        }
-        return sameProfile && removal.status === "failed" && removal.refused;
-      }),
+  const open = useOrbitInstanceRemovals.getState().page;
+  const page =
+    opening !== null && open?.opening === opening
+      ? open
+      : openOrbitInstanceRemovalPage(ports, opening ?? undefined);
+  const profile = await page.read;
+  if (profile !== null && listedIds !== null) {
+    const gone = Object.values(useOrbitInstanceRemovals.getState().entries).filter(
+      (entry) =>
+        entry.profile === profile && entry.follow === null && !listedIds.has(entry.instanceId),
     );
-  if (profile === null) {
-    // Profile unknown: show no saved removal, only clicks of this window that still read theirs.
-    // No profile is shown, so a follow of an earlier profile cannot put its row back.
-    shownProfile = null;
-    useOrbitInstanceRemovals.setState(({ byInstance }) => ({
-      byInstance: ownRows(byInstance),
-      restoredFor: opening,
-    }));
-    return;
-  }
-  const saved = ports.storage.read()[profile] ?? {};
-  const restored: Record<number, OrbitInstanceRemoval> = {};
-  const toFollow: Array<[number, SavedOrbitInstanceRemoval]> = [];
-  for (const [key, value] of Object.entries(saved)) {
-    const instanceId = Number(key);
-    if (!Number.isInteger(instanceId) || !isSavedRemoval(value)) {
-      saveRemoval(ports.storage, profile, instanceId, null);
-      continue;
-    }
-    // A failure whose Instance is no longer listed: Orbit removed it after all.
-    if (value.status === "failed" && listedIds !== null && !listedIds.has(instanceId)) {
-      saveRemoval(ports.storage, profile, instanceId, null);
-      continue;
-    }
-    restored[instanceId] = savedToRemoval(value);
-    if (value.status === "removing") toFollow.push([instanceId, value]);
-  }
-  shownProfile = profile;
-  // This window's live states win: their progress is fresher than the saved record.
-  useOrbitInstanceRemovals.setState(({ byInstance }) => ({
-    byInstance: { ...restored, ...ownRows(byInstance) },
-    restoredFor: opening,
-  }));
-  const gateway = ports.gateway;
-  if (gateway === null) return;
-  await Promise.all(
-    toFollow.map(async ([instanceId, value]) => {
-      if (active.has(instanceId)) return;
-      active.set(instanceId, profile);
-      try {
-        const instance = { id: instanceId, environmentId: value.row.environmentId };
-        if (value.operationId === null) {
-          // The app ended before Orbit answered the destroy: its fate is unknown.
-          await settle(
-            instance,
-            value.row,
-            profile,
-            value.acknowledgeUnsaved,
-            { kind: "lost" },
-            ports,
-          );
-          return;
-        }
-        const outcome = await followOrbitInstanceRemoval(gateway, {
-          operationId: value.operationId,
-          onProgress: (progress) => {
-            if (progress.kind === "admitted") return;
-            showRemoval(profile, instanceId, { status: "removing", progress, row: value.row });
-          },
-        });
-        await settle(instance, value.row, profile, value.acknowledgeUnsaved, outcome, ports);
-      } finally {
-        active.delete(instanceId);
+    for (const entry of gone) {
+      if (updateEntry(entryKey(profile, entry.instanceId), entry.token, () => null)) {
+        saveRemoval(ports.storage, profile, entry.instanceId, null);
       }
-    }),
-  );
+    }
+  }
+  await page.restored;
 }
+
+const EMPTY_PAGE: OrbitInstanceRemovalPage = {
+  opening: Symbol("no-page"),
+  profile: undefined,
+  read: Promise.resolve(null),
+  restored: Promise.resolve(),
+};
 
 /**
  * The Instances page's list: read each time the page opens, then the saved removals of the current
@@ -558,42 +711,36 @@ export async function restoreOrbitInstanceRemovals(
  */
 export function useOrbitInstanceListWithRemovals(): {
   readonly list: OrbitInstanceListState;
-  /** The removals the page may show: all once this opening's profile check ran, else own ones. */
+  /** The removals the page may show (`shownOrbitInstanceRemovals`). */
   readonly removals: Readonly<Record<number, OrbitInstanceRemoval>>;
 } {
   const [opening] = useState(() => Symbol("orbit-instances-page"));
-  const [openedAt] = useState(() => Date.now());
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway and the saved removals each time the Instances page opens
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the profile, the Gateway list and the saved removals each time the Instances page opens
   useEffect(() => {
+    const ports = webOrbitInstanceRemovalPorts();
+    openOrbitInstanceRemovalPage(ports, opening);
     void (async () => {
       await loadOrbitInstanceList();
       const { state } = useOrbitInstanceListStore.getState();
       await restoreOrbitInstanceRemovals(
-        webOrbitInstanceRemovalPorts(),
+        ports,
         state.status === "loaded" ? new Set(state.rows.map((row) => row.id)) : null,
         opening,
       );
     })();
   }, [opening]);
   const list = useOrbitInstanceListStore((store) => store.state);
-  const byInstance = useOrbitInstanceRemovals((store) => store.byInstance);
-  const checked = useOrbitInstanceRemovals((store) => store.restoredFor === opening);
-  return {
-    list,
-    removals: checked
-      ? byInstance
-      : Object.fromEntries(
-          Object.entries(byInstance).filter(([id]) =>
-            isOrbitInstanceRemovalClickedSince(Number(id), openedAt),
-          ),
-        ),
-  };
+  const entries = useOrbitInstanceRemovals((store) => store.entries);
+  const page = useOrbitInstanceRemovals((store) => store.page);
+  // Until this opening's page is in the store, an earlier opening's profile does not count.
+  const removals = shownOrbitInstanceRemovals({
+    entries,
+    page: page?.opening === opening ? page : { ...EMPTY_PAGE, opening },
+  });
+  return { list, removals };
 }
 
-/** Tests only: forget which profile is shown and which removals this window follows. */
+/** Tests only: forget every removal and the open page. */
 export function resetOrbitInstanceRemovalsForTest(): void {
-  shownProfile = null;
-  active.clear();
-  clickedAt.clear();
-  useOrbitInstanceRemovals.setState({ byInstance: {}, restoredFor: null });
+  useOrbitInstanceRemovals.setState({ entries: {}, page: null });
 }

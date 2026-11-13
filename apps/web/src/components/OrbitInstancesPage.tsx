@@ -26,11 +26,12 @@ import { useState } from "react";
 
 import { cn } from "../lib/utils";
 import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
-import { loadOrbitInstanceList, useOrbitInstanceList } from "../orbit/orbitInstanceList";
+import { loadOrbitInstanceList } from "../orbit/orbitInstanceList";
 import {
   runOrbitInstanceRemoval,
-  useOrbitInstanceRemovals,
+  useOrbitInstanceListWithRemovals,
   webOrbitInstanceRemovalPorts,
+  type OrbitInstanceRemoval,
 } from "../orbit/orbitInstanceRemoval";
 import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
 import { useVisibleThreadShells } from "../state/entities";
@@ -40,6 +41,7 @@ import {
   OrbitInstanceRemoveAction,
   OrbitInstanceRemoveDialog,
   OrbitInstanceRemoveFailure,
+  orbitInstanceRemovingText,
 } from "./OrbitInstanceRemove";
 import { ProjectMonogram } from "./ProjectMonogram";
 import { isSidebarHiddenThread } from "./Sidebar.logic";
@@ -216,7 +218,7 @@ async function removeInstance(
   askAgain: (request: RemoveRequest) => void,
 ) {
   const outcome = await runOrbitInstanceRemoval(
-    { id: row.id, environmentId: row.environmentId, ...(git ? { git } : {}) },
+    { ...row, ...(git ? { git } : {}) },
     acknowledgeUnsaved,
     webOrbitInstanceRemovalPorts(),
   );
@@ -225,15 +227,19 @@ async function removeInstance(
 
 function InstanceRow({
   row,
+  listed,
+  removal,
   onRemove,
   onRetry,
 }: {
   readonly row: OrbitInstanceWithThreads;
+  readonly removal: OrbitInstanceRemoval | undefined;
+  /** False for a row kept from a saved removal after the Instance left Orbit's list. */
+  readonly listed: boolean;
   readonly onRemove: () => void;
   readonly onRetry: (acknowledgeUnsaved: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const removal = useOrbitInstanceRemovals((store) => store.byInstance[row.id]);
   const { state } = orbitInstanceAvailability(row);
   const hasThreads = row.threads.length > 0;
   const unfolded = open && hasThreads;
@@ -254,10 +260,13 @@ function InstanceRow({
       ) : null}
     </span>
   );
+  const removing = removal?.status === "removing";
   const body = (
     <>
       {name}
-      <span className="block truncate text-muted-foreground text-xs">{instanceFacts(row)}</span>
+      <span className="block truncate text-muted-foreground text-xs">
+        {(removing ? orbitInstanceRemovingText(removal.progress) : null) ?? instanceFacts(row)}
+      </span>
     </>
   );
   return (
@@ -282,17 +291,15 @@ function InstanceRow({
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">{body}</div>
         )}
         <div className="flex shrink-0 items-center gap-1.5">
-          {removal?.status === "removing" ? null : <NewThreadButton row={row} />}
+          {removing || !listed ? null : <NewThreadButton row={row} />}
           {/* On every row: the list cannot tell a checkout from a container; Orbit's refusal says so. */}
-          <OrbitInstanceRemoveAction
-            removing={removal?.status === "removing"}
-            onRemove={onRemove}
-          />
+          <OrbitInstanceRemoveAction removing={removing} onRemove={onRemove} />
         </div>
       </div>
       {removal?.status === "failed" ? (
         <div className="mt-1.5 ms-5">
           <OrbitInstanceRemoveFailure
+            refused={removal.refused}
             message={removal.message}
             onRetry={() => onRetry(removal.acknowledgeUnsaved)}
           />
@@ -382,17 +389,23 @@ function ProjectFilter(props: {
  * reach, by Project, with its local threads.
  */
 export function OrbitInstancesPage() {
-  const list = useOrbitInstanceList();
+  const { list, removals } = useOrbitInstanceListWithRemovals();
   const threads = useVisibleThreadShells();
   const [query, setQuery] = useState("");
   const [projectId, setProjectId] = useState<number | null>(null);
   const [removeRequest, setRemoveRequest] = useState<RemoveRequest | null>(null);
-  const removals = useOrbitInstanceRemovals((store) => store.byInstance);
+  const listedIds = new Set(list.status === "loaded" ? list.rows.map((row) => row.id) : []);
 
   const rows =
     list.status === "loaded"
       ? joinOrbitInstanceThreads(
-          list.rows.filter((row) => removals[row.id]?.status !== "removed"),
+          [
+            ...list.rows.filter((row) => removals[row.id]?.status !== "removed"),
+            // A removal still running or failed stays visible after its Instance left the list.
+            ...Object.values(removals).flatMap((removal) =>
+              removal.status !== "removed" && !listedIds.has(removal.row.id) ? [removal.row] : [],
+            ),
+          ],
           threads
             .filter((thread) => !isSidebarHiddenThread(thread))
             .map((thread) => ({
@@ -471,6 +484,8 @@ export function OrbitInstancesPage() {
               <InstanceRow
                 key={row.id}
                 row={row}
+                listed={listedIds.has(row.id)}
+                removal={removals[row.id]}
                 onRemove={() => setRemoveRequest({ row, git: row.git })}
                 onRetry={(acknowledgeUnsaved) =>
                   void removeInstance(row, row.git, acknowledgeUnsaved, setRemoveRequest)

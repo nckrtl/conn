@@ -75,7 +75,7 @@ describe("OrbitInstanceRemoveDialog", () => {
         <OrbitInstanceGitLine git={parseOrbitInstanceGit({ state: "unknown" })} />
         <OrbitInstanceRemoveAction removing={failure === null} onRemove={onRemove} />
         {failure === null ? null : (
-          <OrbitInstanceRemoveFailure message={failure} onRetry={onRetry} />
+          <OrbitInstanceRemoveFailure refused message={failure} onRetry={onRetry} />
         )}
       </div>
     );

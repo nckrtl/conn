@@ -12,7 +12,7 @@ import "~/index.css";
 import { render, stubGlobal } from "../../test/render";
 import { setEnvironmentProvider } from "../orbit/environmentProvider";
 import { useOrbitInstanceListStore } from "../orbit/orbitInstanceList";
-import { useOrbitInstanceRemovals } from "../orbit/orbitInstanceRemoval";
+import { resetOrbitInstanceRemovalsForTest } from "../orbit/orbitInstanceRemoval";
 import { loadOrbitPaletteProjects } from "../orbit/orbitPaletteProjects";
 import { OrbitInstancesPage } from "./OrbitInstancesPage";
 import { OrbitPanelLayout } from "./OrbitPanel";
@@ -102,12 +102,14 @@ function setup(
 ) {
   const real = createOrbitGatewayClient(gateway);
   mocks.client = {
+    me: async () => ({ id: 11, name: "mini", wireguardIp: "10.44.0.9", profile: null }),
     environments,
     projects: async () => PROJECTS,
     destroyInstance: real.destroyInstance,
     operation: real.operation,
   } satisfies Partial<OrbitGatewayClient>;
-  useOrbitInstanceRemovals.setState({ byInstance: {} });
+  resetOrbitInstanceRemovalsForTest();
+  window.localStorage.removeItem("conn:orbit-instance-removals:v1");
   mocks.threads = threads;
   mocks.openInstance.mockReset();
   mocks.openInstance.mockResolvedValue({ kind: "opened", draftId: "draft-1" });
@@ -419,5 +421,59 @@ describe("Removing an Instance", () => {
     await expect
       .element(row("old-spike").getByRole("button", { name: "Remove Instance" }))
       .toBeVisible();
+  });
+
+  it("shows a failed removal with Orbit's reason and Retry, and shows it again after a restart", async () => {
+    let destroys = 0;
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async (request) => {
+        if (request.path === "/instances/11/destroy") {
+          destroys++;
+          return destroyOperation("queued");
+        }
+        return answer(200, {
+          data: {
+            id: 501,
+            kind: "instance.destroy",
+            status: "failed",
+            target_id: 11,
+            poll_after_seconds: null,
+            error: {
+              code: "swamp.start_unavailable",
+              detail: "The native workflow start could not connect.",
+            },
+          },
+        });
+      },
+    );
+    {
+      await using _screen = await renderPage();
+      await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+      await userEvent.click(
+        page.getByRole("alertdialog").getByRole("button", { name: "Remove Instance" }),
+      );
+      await expect
+        .element(
+          row("pricing-page").getByText(
+            "Removal failed: The native workflow start could not connect.",
+          ),
+        )
+        .toBeVisible();
+    }
+    // A restart: the window's memory is gone, the saved record is not.
+    resetOrbitInstanceRemovalsForTest();
+    useOrbitInstanceListStore.setState({ state: { status: "loading" }, generation: 0 });
+    await using _again = await renderPage();
+    await expect
+      .element(
+        row("pricing-page").getByText(
+          "Removal failed: The native workflow start could not connect.",
+        ),
+      )
+      .toBeVisible();
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Retry" }));
+    await vi.waitFor(() => expect(destroys).toBe(2));
   });
 });

@@ -561,4 +561,52 @@ describe("review fixes (conn#73)", () => {
     await afterProgress;
     expect(useOrbitInstanceRemovals.getState().byInstance).toEqual({});
   });
+
+  it("keeps this window's own running click when a reopened page cannot read the profile", async () => {
+    const state = device();
+    let finish: (next: OrbitGatewayOperation) => void = () => {};
+    let destroys = 0;
+    const ports = {
+      ...removalPorts(
+        gateway(async () => operation("succeeded")),
+        state,
+      ).ports,
+      gateway: {
+        now: () => 0,
+        sleep: async () => undefined,
+        client: {
+          destroyInstance: async () => {
+            destroys++;
+            return operation("running", { pollAfterSeconds: 2 });
+          },
+          operation: () =>
+            new Promise<OrbitGatewayOperation>((resolve) => {
+              finish = resolve;
+            }),
+        },
+      },
+    };
+    const click = runOrbitInstanceRemoval(ROW, true, ports);
+    await vi.waitFor(() => expect(destroys).toBe(1));
+    await restoreOrbitInstanceRemovals(
+      {
+        ...ports,
+        profileId: async () => {
+          throw new Error("Gateway down");
+        },
+      },
+      new Set([41]),
+      Symbol("reopen"),
+    );
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toMatchObject({
+      status: "removing",
+    });
+    expect(await runOrbitInstanceRemoval(ROW, true, ports)).toMatchObject({
+      code: "conn.remove_running",
+    });
+    finish(operation("succeeded"));
+    expect(await click).toEqual({ kind: "removed" });
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toEqual({ status: "removed" });
+    expect(destroys).toBe(1);
+  });
 });

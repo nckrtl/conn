@@ -225,7 +225,8 @@ function showRemoval(
   instanceId: number,
   removal: OrbitInstanceRemoval | null,
 ): void {
-  if (shownProfile !== profile) return;
+  // This window's own clicks always update their row; other follows only for the shown profile.
+  if (shownProfile !== profile && !clickedAt.has(instanceId)) return;
   useOrbitInstanceRemovals.setState(({ byInstance }) => {
     const { [instanceId]: _previous, ...rest } = byInstance;
     return { byInstance: removal === null ? rest : { ...rest, [instanceId]: removal } };
@@ -475,6 +476,8 @@ export async function restoreOrbitInstanceRemovals(
     Object.fromEntries(
       Object.entries(byInstance).filter(([id, removal]) => {
         const runsUnder = active.get(Number(id));
+        // A click of this window stays, whatever profile it resolved to: it is the user's own act.
+        if (clickedAt.has(Number(id))) return true;
         if (active.has(Number(id))) {
           return runsUnder === null || (profile !== null && runsUnder === profile);
         }

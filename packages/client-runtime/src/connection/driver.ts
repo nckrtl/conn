@@ -43,6 +43,11 @@ export interface EnvironmentConnectionLease {
 }
 
 export type RouteCheck = "answered" | "silent" | "unchecked";
+
+/** Conn: a route that answered refused the credential (an ended or revoked session). */
+function isAuthenticationRefusal(error: ConnectionAttemptError | undefined): boolean {
+  return error?._tag === "ConnectionBlockedError" && error.reason === "authentication";
+}
 /** "unprepared" means the route answered its check but could not be prepared. */
 export type RoutePreflight = "ready" | "unprepared" | "silent" | "unchecked";
 
@@ -122,10 +127,15 @@ export const connectOverRoutes = Effect.fn("ConnectionDriver.connectOverRoutes")
   const answeredLate = silent.filter((_, position) => late[position] !== "silent");
   const stillSilent = silent.filter((_, position) => late[position] === "silent");
   for (const { route } of [...answeredLate, ...stillSilent]) {
-    // A route still silent after its whole check can hold the attempt open far
-    // longer than the check did. Once another route failed in a way that
-    // retries, the retry reaches it sooner than waiting here would.
-    if (transient !== undefined && stillSilent.some((entry) => entry.route === route)) break;
+    // A still-silent route can hold the attempt open far longer than its check did. Skip it
+    // once another route failed in a way that retries, or (Conn) refused the credential: the
+    // wait would turn that refusal into a setup timeout and hide the ended session.
+    if (
+      (transient !== undefined || isAuthenticationRefusal(blocked)) &&
+      stillSilent.some((entry) => entry.route === route)
+    ) {
+      break;
+    }
     const result = yield* attempt(route);
     if (result._tag === "Success") return result.success;
     if (result.failure.reason === "unsupported") return yield* result.failure;

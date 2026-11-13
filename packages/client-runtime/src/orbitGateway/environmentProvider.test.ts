@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { OrbitGatewayEnvironment } from "./client.ts";
 import * as DateTime from "effect/DateTime";
 
+import { ConnectionBlockedError, ConnectionTransientError } from "../connection/model.ts";
 import {
   ACCESS_PAIRING_RETRY_MS,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
@@ -22,6 +23,7 @@ import {
   recordRenewal,
   SESSION_RENEW_BEFORE_MS,
   sessionRenewalReason,
+  connectionRefusedCredential,
   type ManagedEnvironment,
   type OrbitEnvironmentState,
 } from "./environmentProvider.ts";
@@ -436,5 +438,34 @@ describe("session renewal", () => {
       now,
     });
     expect(plan.pair).toEqual([]);
+  });
+
+  // Conn: on a return to the front the connection retries at once and reads `connecting` while it
+  // keeps the server's refusal; the phase alone missed it (seen in the iOS simulator, 2026-11-13).
+  describe("connectionRefusedCredential", () => {
+    const refused = new ConnectionBlockedError({
+      reason: "authentication",
+      detail: "The environment credential is invalid.",
+    });
+    it("reads a refusal while blocked and while the next attempt runs", () => {
+      expect(connectionRefusedCredential({ phase: "blocked", lastFailure: refused })).toBe(true);
+      expect(connectionRefusedCredential({ phase: "connecting", lastFailure: refused })).toBe(true);
+    });
+    it("ignores a connected server, other failures and a missing state", () => {
+      expect(connectionRefusedCredential({ phase: "connected", lastFailure: refused })).toBe(false);
+      expect(
+        connectionRefusedCredential({
+          phase: "connecting",
+          lastFailure: new ConnectionTransientError({ reason: "timeout", detail: "Slow." }),
+        }),
+      ).toBe(false);
+      expect(
+        connectionRefusedCredential({
+          phase: "blocked",
+          lastFailure: new ConnectionBlockedError({ reason: "permission", detail: "Scope." }),
+        }),
+      ).toBe(false);
+      expect(connectionRefusedCredential(null)).toBe(false);
+    });
   });
 });

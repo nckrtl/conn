@@ -93,6 +93,53 @@ else
     echo "skip registration flow (no jq)"
 fi
 
+# The loaded launchd job wins over the plist file: on 2026-11-06 the mini's server plist was rewritten
+# as a bare JSON array, PlistBuddy could not read it, and registration failed for a week.
+mkdir -p "$tmp/fakelaunchctl"
+cat > "$tmp/fakelaunchctl/launchctl" <<FAKE
+#!/bin/sh
+[ "\$1" = print ] && [ "\$2" = "gui/\$(id -u)/com.example.loaded" ] || exit 113
+printf 'gui/501/com.example.loaded = {\n\tpath = /x.plist\n\tprogram = %s\n\targuments = {\n\t\t%s\n\t\t__service-launcher\n\t}\n\n\tenvironment = {\n\t\tA => b\n\t}\n}\n' "$bin" "$bin"
+FAKE
+chmod +x "$tmp/fakelaunchctl/launchctl"
+printf '["%s","__service-launcher"]' "$bin" > "$tmp/Library/LaunchAgents/com.example.loaded.plist"
+out=$(HOME=$tmp PATH="$tmp/fakelaunchctl:$PATH" sh "$script" --service-label com.example.loaded --print-cli http://127.0.0.1:1 2>&1)
+[ "$out" = "$bin" ] && pass "label resolves the loaded job over a broken plist" || fail "label resolves the loaded job over a broken plist" "$out"
+rm "$tmp/Library/LaunchAgents/com.example.loaded.plist"
+out=$(HOME=$tmp PATH="$tmp/fakelaunchctl:$PATH" sh "$script" --service-label com.example.loaded --print-cli http://127.0.0.1:1 2>&1)
+[ "$out" = "$bin" ] && pass "label resolves the loaded job without a plist" || fail "label resolves the loaded job without a plist" "$out"
+
+if command -v plutil >/dev/null 2>&1; then
+    printf '{"Label":"x","ProgramArguments":["%s","serve"]}' "$bin" > "$tmp/json.plist"
+    out=$(sh "$script" --service-plist "$tmp/json.plist" --print-cli http://127.0.0.1:1 2>&1)
+    [ "$out" = "$bin" ] && pass "JSON plist resolves" || fail "JSON plist resolves" "$out"
+    printf '["%s","serve"]' "$bin" > "$tmp/array.plist"
+    out=$(sh "$script" --service-plist "$tmp/array.plist" --print-cli http://127.0.0.1:1 2>&1); rc=$?
+    [ "$rc" = 65 ] && pass "bare-array plist exits 65" || fail "bare-array plist exits 65" "rc=$rc $out"
+fi
+
+# t3-orbit-relink: the same lookup, and a failed list fails the run.
+relink="$here/t3-orbit-relink"
+if command -v jq >/dev/null 2>&1; then
+    cp "$script" "$tmp/t3-orbit-register"; cp "$relink" "$tmp/t3-orbit-relink"
+    printf '#!/bin/sh\necho "$*" >> "%s/relink-t3.log"\ncase "$*" in "environment list --json") echo "[]" ;; esac\n' "$tmp" > "$bin"
+    out=$(HOME=$tmp PATH="$tmp/fakelaunchctl:$PATH" sh "$tmp/t3-orbit-relink" --service-label com.example.loaded 2>&1); rc=$?
+    { [ "$rc" = 0 ] && grep -q 'environment list --json' "$tmp/relink-t3.log"; } \
+        && pass "relink uses the loaded job" || fail "relink uses the loaded job" "rc=$rc $out"
+    out=$(HOME=$tmp sh "$tmp/t3-orbit-relink" --service-label com.example.missing 2>&1); rc=$?
+    [ "$rc" = 66 ] && pass "relink with an unknown job exits 66" || fail "relink with an unknown job exits 66" "rc=$rc $out"
+    printf '#!/bin/sh\necho broken >&2\nexit 3\n' > "$tmp/fake-failing-t3"; chmod +x "$tmp/fake-failing-t3"
+    out=$(sh "$tmp/t3-orbit-relink" "$tmp/fake-failing-t3" 2>&1); rc=$?
+    [ "$rc" = 1 ] && pass "relink fails when the list fails" || fail "relink fails when the list fails" "rc=$rc $out"
+    printf '#!/bin/sh\necho fake-t3 "$@"\n' > "$bin"
+else
+    echo "skip relink (no jq)"
+fi
+if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$here/com.nckrtl.t3-orbit-relink.plist" >/dev/null && pass "relink plist lints" || fail "relink plist lints" "plutil -lint"
+fi
+grep -q 'PlistBuddy' "$here/com.nckrtl.t3-orbit-relink.plist" && fail "relink plist has no PlistBuddy" "found" || pass "relink plist has no PlistBuddy"
+
 sh "$script" >/dev/null 2>&1; rc=$?
 [ "$rc" = 64 ] && pass "no URL exits 64" || fail "no URL exits 64" "rc=$rc"
 

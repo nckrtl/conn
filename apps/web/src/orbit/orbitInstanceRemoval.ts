@@ -195,10 +195,16 @@ let shownProfile: string | null = null;
  * with the profile they run under; null while a click still reads the profile.
  */
 const active = new Map<number, string | null>();
+/** When a click started each running removal of this window (restored follows have none). */
+const clickedAt = new Map<number, number>();
 
-/** True while this window itself removes the Instance (the page shows it before any check). */
-export function isOrbitInstanceRemovalActive(instanceId: number): boolean {
-  return active.has(instanceId);
+/**
+ * True while a click in this window, made at or after `since`, removes the Instance. Before its
+ * profile check the page shows only these, never a follow restored for another profile.
+ */
+export function isOrbitInstanceRemovalClickedSince(instanceId: number, since: number): boolean {
+  const at = clickedAt.get(instanceId);
+  return at !== undefined && at >= since;
 }
 
 function saveRemoval(
@@ -376,6 +382,7 @@ export async function runOrbitInstanceRemoval(
   const row = toRemovalRow(instance);
   // Shown in this window first, so the click answers at once; the profile read comes after.
   active.set(instance.id, null);
+  clickedAt.set(instance.id, Date.now());
   useOrbitInstanceRemovals.setState(({ byInstance }) => ({
     byInstance: { ...byInstance, [instance.id]: { status: "removing", progress: null, row } },
   }));
@@ -383,6 +390,7 @@ export async function runOrbitInstanceRemoval(
     return await runAdmittedRemoval(instance, row, acknowledgeUnsaved, ports);
   } finally {
     active.delete(instance.id);
+    clickedAt.delete(instance.id);
   }
 }
 
@@ -458,16 +466,25 @@ export async function restoreOrbitInstanceRemovals(
   opening: symbol | null = null,
 ): Promise<void> {
   const profile = await currentProfile(ports);
-  /** This window's own removals under `profile` (or still reading theirs). */
+  const sameProfile = profile !== null && shownProfile === profile;
+  /**
+   * This window's own rows under `profile`: running ones, clicks still reading their profile,
+   * and a refusal it showed (refusals are not saved).
+   */
   const ownRows = (byInstance: Readonly<Record<number, OrbitInstanceRemoval>>) =>
     Object.fromEntries(
-      Object.entries(byInstance).filter(([id]) => {
+      Object.entries(byInstance).filter(([id, removal]) => {
         const runsUnder = active.get(Number(id));
-        return active.has(Number(id)) && (runsUnder === null || runsUnder === profile);
+        if (active.has(Number(id))) {
+          return runsUnder === null || (profile !== null && runsUnder === profile);
+        }
+        return sameProfile && removal.status === "failed" && removal.refused;
       }),
     );
   if (profile === null) {
-    // Profile unknown: show no saved removal, only what this window runs now.
+    // Profile unknown: show no saved removal, only clicks of this window that still read theirs.
+    // No profile is shown, so a follow of an earlier profile cannot put its row back.
+    shownProfile = null;
     useOrbitInstanceRemovals.setState(({ byInstance }) => ({
       byInstance: ownRows(byInstance),
       restoredFor: opening,
@@ -542,6 +559,7 @@ export function useOrbitInstanceListWithRemovals(): {
   readonly removals: Readonly<Record<number, OrbitInstanceRemoval>>;
 } {
   const [opening] = useState(() => Symbol("orbit-instances-page"));
+  const [openedAt] = useState(() => Date.now());
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway and the saved removals each time the Instances page opens
   useEffect(() => {
     void (async () => {
@@ -562,7 +580,9 @@ export function useOrbitInstanceListWithRemovals(): {
     removals: checked
       ? byInstance
       : Object.fromEntries(
-          Object.entries(byInstance).filter(([id]) => isOrbitInstanceRemovalActive(Number(id))),
+          Object.entries(byInstance).filter(([id]) =>
+            isOrbitInstanceRemovalClickedSince(Number(id), openedAt),
+          ),
         ),
   };
 }
@@ -571,5 +591,6 @@ export function useOrbitInstanceListWithRemovals(): {
 export function resetOrbitInstanceRemovalsForTest(): void {
   shownProfile = null;
   active.clear();
+  clickedAt.clear();
   useOrbitInstanceRemovals.setState({ byInstance: {}, restoredFor: null });
 }

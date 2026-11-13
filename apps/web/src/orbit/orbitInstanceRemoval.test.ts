@@ -500,4 +500,65 @@ describe("review fixes (conn#73)", () => {
     const { ports } = removalPorts(orbit, state);
     expect(await runOrbitInstanceRemoval(ROW, true, ports)).toEqual({ kind: "removed" });
   });
+
+  it("never brings back a follow of an earlier profile after a failed profile read", async () => {
+    const state = device();
+    let tick: (next: OrbitGatewayOperation) => void = () => {};
+    let slept: () => void = () => {};
+    const afterProgress = new Promise<void>((resolve) => {
+      slept = resolve;
+    });
+    let reads = 0;
+    const orbit = gateway(async () => operation("succeeded"));
+    // Profile 1 follows a saved removal whose Operation is still running.
+    const ports = {
+      ...removalPorts(orbit, state, memoryStorage(), 1).ports,
+      gateway: {
+        now: () => 0,
+        // The follow sleeps right after it reported progress.
+        sleep: async () => {
+          slept();
+          await new Promise<void>(() => {});
+        },
+        client: {
+          destroyInstance: async () => operation("succeeded"),
+          operation: () =>
+            new Promise<OrbitGatewayOperation>((resolve) => {
+              reads++;
+              tick = resolve;
+            }),
+        },
+      },
+    };
+    const storage = memoryStorage({
+      "1": {
+        "41": {
+          operationId: 77,
+          acknowledgeUnsaved: true,
+          status: "removing",
+          message: null,
+          row: ROW,
+        },
+      },
+    });
+    void restoreOrbitInstanceRemovals({ ...ports, storage: storage.storage }, new Set([41]));
+    await vi.waitFor(() => expect(reads).toBe(1));
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toMatchObject({
+      status: "removing",
+    });
+    // The page opens again; the profile read fails.
+    const opening = Symbol("reopen");
+    await restoreOrbitInstanceRemovals(
+      removalPorts(orbit, state, storage, async () => {
+        throw new Error("Gateway down");
+      }).ports,
+      new Set([41]),
+      opening,
+    );
+    expect(useOrbitInstanceRemovals.getState().byInstance).toEqual({});
+    // Profile 1's follow reports progress: the row must stay hidden.
+    tick(operation("running", { pollAfterSeconds: 2, currentStep: "Withdraw the Route" }));
+    await afterProgress;
+    expect(useOrbitInstanceRemovals.getState().byInstance).toEqual({});
+  });
 });

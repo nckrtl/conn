@@ -22,8 +22,10 @@ import { requestOrbitBranchMenu, takeOrbitBranchMenuRequest } from "./orbitBranc
 import { readOrbitEnvironments } from "./orbitPaletteProjects";
 import type { OrbitDraftTarget } from "./orbitDraft";
 import { openOrbitInstanceStep } from "./orbitInstanceStep";
-import { orbitSetupView } from "./orbitSetupView";
+import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
+import { ORBIT_INSTANCE_STAYS_LINE, orbitSetupView } from "./orbitSetupView";
 import {
+  cancelOrbitThreadStart,
   dismissOrbitThreadStart,
   orbitThreadStartBlockedReason,
   retryOrbitThreadStart,
@@ -169,6 +171,24 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
     });
   };
 
+  const cancel = async () => {
+    try {
+      const { instanceStays } = await cancelOrbitThreadStart(desktopOrbitGatewayClient(), start.id);
+      void navigate({ to: "/", replace: true });
+      toastManager.add({
+        type: "info",
+        title: "Instance setup cancelled",
+        ...(instanceStays ? { description: ORBIT_INSTANCE_STAYS_LINE } : {}),
+      });
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Could not cancel the Instance setup",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   return (
     <PendingThreadShell
       startId={start.id}
@@ -203,6 +223,7 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
               dismissOrbitThreadStart(start.id);
               void navigate({ to: "/", replace: true });
             }}
+            onCancel={() => void cancel()}
           />
         </div>
       </div>

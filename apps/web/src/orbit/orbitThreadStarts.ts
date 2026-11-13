@@ -1,5 +1,6 @@
 import {
   newOrbitThreadStart,
+  orbitThreadStartCreatedInstance,
   retryOrbitThreadStartRecord,
   runOrbitThreadStart,
   type OrbitModelFallback,
@@ -108,6 +109,25 @@ export function retryOrbitThreadStart(id: string): void {
 
 export function dismissOrbitThreadStart(id: string): void {
   updateStarts((starts) => starts.filter((start) => start.id !== id));
+}
+
+/**
+ * Cancel on a running start: asks Orbit to stop a create it admitted and still runs, then drops
+ * the saved start. Resolves whether the start made an Instance, which stays as on a failed create.
+ * A failed cancel keeps the start and throws.
+ */
+export async function cancelOrbitThreadStart(
+  client: OrbitGatewayClient | null,
+  id: string,
+): Promise<{ readonly instanceStays: boolean }> {
+  const start = readStored().find((entry) => entry.id === id);
+  if (start === undefined) return { instanceStays: false };
+  if (start.createOperationId !== null && start.environmentId === null) {
+    if (client === null) throw new Error("Conn cannot reach the Orbit Gateway from this window.");
+    await client.cancelOperation(start.createOperationId);
+  }
+  dismissOrbitThreadStart(id);
+  return { instanceStays: orbitThreadStartCreatedInstance(start) };
 }
 
 function isSaved(environmentId: string): boolean {

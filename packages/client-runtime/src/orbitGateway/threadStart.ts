@@ -25,6 +25,12 @@ import {
   type OrbitGatewayOperation,
   type OrbitGatewayProject,
 } from "./client.ts";
+import {
+  observeOrbitCreateRows,
+  readSavedOrbitCreateRows,
+  sameOrbitCreateRows,
+  type OrbitCreateRows,
+} from "./orbitCreateRows.ts";
 
 /**
  * Conn: a thread started in an Orbit Project (Orbit's docs/cli/instance/container/thread.mmd). The
@@ -115,6 +121,11 @@ export interface OrbitThreadStart {
    * Before the create the runner may shorten that name's slug, keeping the suffix.
    */
   readonly nameSuffix?: string | null;
+  /**
+   * The rows under "Create Instance", saved as the runner reads the create Operation, so the card
+   * shows them after a reload; null on older rows.
+   */
+  readonly createRows?: OrbitCreateRows | null;
 }
 
 /** A name whose address `<name>.<project domain>` Orbit refuses (check or create). */
@@ -201,6 +212,7 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
         resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
         nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
+        createRows: readSavedOrbitCreateRows(row.createRows),
       },
     ];
   });
@@ -250,7 +262,7 @@ export function retryOrbitThreadStartRecord(
   return {
     ...next,
     ...(createAgain && next.createOperationId === null
-      ? { createStartedAt: null, createFinishedAt: null }
+      ? { createStartedAt: null, createFinishedAt: null, createRows: null }
       : {}),
     ...(next.connected ? {} : { connectStartedAt: null, connectFinishedAt: null }),
     ...(next.sentAt == null ? { agentStartedAt: null } : {}),
@@ -417,6 +429,7 @@ export function newOrbitThreadStart(input: {
     resultBranch: null,
     resultBaseBranch: null,
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
+    createRows: null,
   };
 }
 
@@ -622,7 +635,12 @@ export async function runOrbitThreadStart(
         // counts from now. A repeat under the saved key keeps the first time.
         const begin = current.createKey
           ? stamp("createStartedAt")
-          : { createKey: newKey("create"), createStartedAt: ports.now(), createFinishedAt: null };
+          : {
+              createKey: newKey("create"),
+              createStartedAt: ports.now(),
+              createFinishedAt: null,
+              createRows: null,
+            };
         if (Object.keys(begin).length > 0) update(begin);
         let operation;
         try {
@@ -675,7 +693,11 @@ export async function runOrbitThreadStart(
             code,
             detail,
           ),
-        ports.onCreateOperation,
+        (operation) => {
+          const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
+          if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
+          ports.onCreateOperation?.(operation);
+        },
       );
       const server = (await ports.client.environments()).find(
         (environment) => environment.instanceId === current.instanceId,

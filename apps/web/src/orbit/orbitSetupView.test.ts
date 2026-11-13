@@ -64,10 +64,19 @@ const op = (progress: Partial<OrbitGatewayOperation>): OrbitGatewayOperation => 
   ...progress,
 });
 
-/** Each card row as `label:status`, plus the Node and the clone step where shown. */
+/** Each card row as `label:status`, plus the Node and the create rows that left pending. */
 function rows(start: OrbitThreadStart, create: OrbitGatewayOperation | null = null) {
   return orbitSetupView(start, create).stages.map((stage) =>
-    [`${stage.label}:${stage.status}`, stage.detail, stage.subDetail].filter(Boolean).join(" "),
+    [
+      `${stage.label}:${stage.status}`,
+      stage.detail,
+      stage.rows
+        ?.filter((row) => row.status !== "pending")
+        .map((row) => `${row.label}:${row.status}`)
+        .join(", "),
+    ]
+      .filter(Boolean)
+      .join(" "),
   );
 }
 
@@ -80,41 +89,20 @@ describe("orbitSetupView", () => {
       ["Create Instance:pending beast", "Connect:pending", "Start agent:pending"],
     ],
     [
-      "new, create running with empty steps[]",
-      creating,
-      op({ steps: [], currentStep: "clone-workspace" }),
+      "new, create running with saved rows",
+      {
+        ...creating,
+        createRows: {
+          container: { status: "done", startedAt: 1_000, finishedAt: 4_000 },
+          address: { status: "running", startedAt: 1_200, finishedAt: null },
+        },
+      },
+      null,
       [
-        "Create Instance:running beast Copying the workspace",
+        "Create Instance:running beast Copy the container:done, Publish the address:running",
         "Connect:pending",
         "Start agent:pending",
       ],
-    ],
-    [
-      "new, create running with filled steps[] and no current step",
-      creating,
-      op({
-        steps: [
-          {
-            name: "clone-container",
-            job: "clone",
-            status: "succeeded",
-            startedAt: null,
-            finishedAt: null,
-          },
-          { name: "clone-t3", job: "clone", status: "running", startedAt: null, finishedAt: null },
-        ],
-      }),
-      [
-        "Create Instance:running beast Starting the T3 server",
-        "Connect:pending",
-        "Start agent:pending",
-      ],
-    ],
-    [
-      "new, unknown step gives no sub-detail",
-      creating,
-      op({ currentStep: "clone-sessions" }),
-      ["Create Instance:running beast", "Connect:pending", "Start agent:pending"],
     ],
     [
       "new, connecting",
@@ -127,11 +115,7 @@ describe("orbitSetupView", () => {
       "new, create failed",
       { ...creating, error: "Orbit could not create the clone.", errorCode: "instance.t3_unready" },
       op({ status: "failed", failedStep: "clone-t3" }),
-      [
-        "Create Instance:failed beast Starting the T3 server",
-        "Connect:pending",
-        "Start agent:pending",
-      ],
+      ["Create Instance:failed beast", "Connect:pending", "Start agent:pending"],
     ],
     ["existing, saved", existing, null, ["Connect:pending", "Start agent:pending"]],
     [
@@ -142,6 +126,22 @@ describe("orbitSetupView", () => {
     ],
   ])("%s", (_name, start, create, expected) => {
     expect(rows(start, create)).toEqual(expected);
+  });
+
+  it("gives the running card its Details: what the start asked for", () => {
+    expect(
+      orbitSetupView({
+        ...creating,
+        branch: { mode: "new", from: "develop" },
+        instanceDomainSuffix: ".create-bench.test",
+      }).details,
+    ).toEqual({
+      instanceName: "pricing-page",
+      nodeName: "beast",
+      branch: "pricing-page",
+      baseBranch: "develop",
+      url: "https://pricing-page.create-bench.test",
+    });
   });
 
   it("offers Change name only for a taken name, and says the Instance stays only when one was made", () => {

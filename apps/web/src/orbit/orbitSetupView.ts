@@ -13,6 +13,8 @@ import {
   orbitSetupStages,
   orbitThreadStartCanRetry,
   orbitThreadStartCreatedInstance,
+  type OrbitCreateRowId,
+  type OrbitCreateRowStatus,
   type OrbitGatewayOperation,
   type OrbitSetupStageId,
   type OrbitSetupStageStatus,
@@ -30,10 +32,27 @@ export interface OrbitSetupViewStage {
   readonly status: OrbitSetupStageStatus;
   /** "Create Instance": the Node. */
   readonly detail: string | null;
-  /** "Create Instance": the clone step that runs or failed. */
-  readonly subDetail: string | null;
+  /** "Create Instance": Orbit's create steps in five rows, while it runs or where it failed. */
+  readonly rows: readonly OrbitSetupViewRow[] | null;
   readonly startedAt: string | null;
   readonly endedAt: string | null;
+}
+
+export interface OrbitSetupViewRow {
+  readonly id: OrbitCreateRowId;
+  readonly label: string;
+  readonly status: OrbitCreateRowStatus;
+  readonly startedAt: string | null;
+  readonly endedAt: string | null;
+}
+
+/** The running card's Details: what the start asked for, before Orbit answered. */
+export interface OrbitSetupDetails {
+  readonly instanceName: string;
+  readonly nodeName: string;
+  readonly branch: string;
+  readonly baseBranch: string | null;
+  readonly url: string | null;
 }
 
 export interface OrbitSetupView {
@@ -52,6 +71,7 @@ export interface OrbitSetupView {
   readonly openInstance: { readonly id: number; readonly name: string } | null;
   /** The start made an Instance: Dismiss leaves it, and the card says so unless the error does. */
   readonly instanceStays: boolean;
+  readonly details: OrbitSetupDetails;
 }
 
 export const ORBIT_SETUP_FAILED_TITLE = "Instance setup failed";
@@ -187,7 +207,14 @@ export function orbitSetupView(
     label: STAGE_LABELS[stage.id],
     status: stage.status,
     detail: stage.detail,
-    subDetail: stage.subDetail,
+    rows:
+      stage.rows?.map((row) => ({
+        id: row.id,
+        label: row.label,
+        status: row.status,
+        startedAt: iso(row.startedAt),
+        endedAt: iso(row.finishedAt),
+      })) ?? null,
     startedAt: iso(stage.startedAt),
     endedAt: iso(stage.finishedAt),
   }));
@@ -208,6 +235,21 @@ export function orbitSetupView(
       failed &&
       orbitThreadStartCreatedInstance(start) &&
       start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE,
+    details: orbitSetupDetails(start),
+  };
+}
+
+function orbitSetupDetails(start: OrbitThreadStart): OrbitSetupDetails {
+  const branch = start.branch ?? null;
+  const suffix = start.instanceDomainSuffix ?? null;
+  return {
+    instanceName: start.instanceName,
+    nodeName: start.nodeName,
+    branch: requestedBranch(start),
+    baseBranch: branch?.mode === "new" ? branch.from : null,
+    url: suffix
+      ? `https://${start.instanceName}${suffix.startsWith(".") ? "" : "."}${suffix}`
+      : null,
   };
 }
 

@@ -606,11 +606,18 @@ describe("createOrbitGatewayClient", () => {
             started_at: "2026-11-11T20:37:04.739Z",
             finished_at: "2026-11-11T20:37:11.045Z",
           },
-          { name: "clone-t3", job: "clone", status: "failed", started_at: null },
+          { name: "clone-t3", group: "t3", job: "clone", status: "failed", started_at: null },
           { name: "clone-next", status: "paused-by-orbit", job: 3 },
           { name: 7, status: "running" },
           "clone-odd",
         ],
+      },
+      "POST /operations/100/cancel": {
+        id: 100,
+        kind: "instance.create",
+        status: "running",
+        target_id: 41,
+        poll_after_seconds: 2,
       },
       // A Project process did not stay up: Orbit names its unit; other facts are optional.
       "GET /operations/101": {
@@ -759,6 +766,15 @@ describe("createOrbitGatewayClient", () => {
       timeoutMs: 60_000,
       idempotencyKey: "key-1",
     });
+    await expect(client.cancelOperation(100)).resolves.toMatchObject({
+      id: 100,
+      status: "running",
+    });
+    expect(requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/operations/100/cancel",
+      body: {},
+    });
     await expect(client.operation(101)).resolves.toMatchObject({
       errorCode: "instance.container_process_inactive",
       processFailureUnit: "conn-web.service",
@@ -794,7 +810,14 @@ describe("createOrbitGatewayClient", () => {
           startedAt: "2026-11-11T20:37:04.739Z",
           finishedAt: "2026-11-11T20:37:11.045Z",
         },
-        { name: "clone-t3", job: "clone", status: "failed", startedAt: null, finishedAt: null },
+        {
+          name: "clone-t3",
+          group: "t3",
+          job: "clone",
+          status: "failed",
+          startedAt: null,
+          finishedAt: null,
+        },
         {
           name: "clone-next",
           job: null,

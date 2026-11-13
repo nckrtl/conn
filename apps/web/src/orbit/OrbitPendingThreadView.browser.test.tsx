@@ -8,6 +8,11 @@ import { OrbitPendingThreadView } from "./OrbitPendingThreadView";
 import { readStored, updateStarts, useOrbitThreadStarts } from "./orbitThreadStartStore";
 
 vi.mock("../state/entities", { spy: true });
+const gateway = vi.hoisted(() => ({ cancelOperation: vi.fn() }));
+vi.mock("./OrbitProfileSync", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./OrbitProfileSync")>()),
+  desktopOrbitGatewayClient: () => ({ cancelOperation: gateway.cancelOperation }),
+}));
 
 const start = (patch: Partial<OrbitThreadStart> = {}): OrbitThreadStart => ({
   ...newOrbitThreadStart({
@@ -26,6 +31,7 @@ const start = (patch: Partial<OrbitThreadStart> = {}): OrbitThreadStart => ({
 });
 
 function setup(saved: OrbitThreadStart) {
+  gateway.cancelOperation.mockReset();
   window.localStorage.clear();
   updateStarts(() => [saved]);
   vi.mocked(useThreadShell).mockReturnValue(null);
@@ -108,5 +114,34 @@ describe("OrbitPendingThreadView", () => {
     await screen.getByRole("button", { name: "Change name" }).click();
     await expect.element(screen.getByText("Instance setup failed")).toBeVisible();
     expect(readStored()).toHaveLength(1);
+  });
+
+  it("Cancel stops Orbit's create, then drops the saved start", async () => {
+    setup(
+      start({
+        createStartedAt: 1,
+        createKey: "k",
+        createOperationId: 100,
+        instanceId: 41,
+        createRows: {
+          container: { status: "running", startedAt: 1, finishedAt: null },
+          address: { status: "done", startedAt: 1, finishedAt: 2 },
+        },
+      }),
+    );
+    gateway.cancelOperation.mockResolvedValue({ id: 100, status: "running" });
+    await using screen = await render(view(), { router: "/orbit/s1" });
+    await expect.element(screen.getByText("Copy the container")).toBeVisible();
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    await vi.waitFor(() => expect(readStored()).toEqual([]));
+    expect(gateway.cancelOperation).toHaveBeenCalledWith(100);
+  });
+
+  it("Cancel before Orbit admitted the create only drops the saved start", async () => {
+    setup(start({ createStartedAt: 1, createKey: "k" }));
+    await using screen = await render(view(), { router: "/orbit/s1" });
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    await vi.waitFor(() => expect(readStored()).toEqual([]));
+    expect(gateway.cancelOperation).not.toHaveBeenCalled();
   });
 });

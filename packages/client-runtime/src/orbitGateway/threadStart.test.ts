@@ -278,6 +278,7 @@ describe("readOrbitThreadStarts", () => {
       resultBranch: null,
       resultBaseBranch: null,
       nameSuffix: null,
+      createRows: null,
     });
 
     const { client, calls } = gateway({});
@@ -380,6 +381,8 @@ describe("runOrbitThreadStart", () => {
       agentStartedAt: expect.any(Number),
       sentAt: expect.any(Number),
     });
+    // The create's rows are saved as the runner reads the Operation.
+    expect(run.saves.at(-1)!.createRows?.register?.status).toBe("done");
   });
 
   it("starts in an existing Instance without a create, and pairs with it", async () => {
@@ -611,6 +614,12 @@ describe("runOrbitThreadStart", () => {
     const [reloaded] = readOrbitThreadStarts(JSON.parse(JSON.stringify([stopped])));
     expect(reloaded!.errorDetail).toBe("Argument list too long");
     expect(retryOrbitThreadStartRecord(stopped).errorDetail).toBeNull();
+    expect(
+      retryOrbitThreadStartRecord({
+        ...stopped,
+        createRows: { container: { status: "failed", startedAt: 1, finishedAt: 2 } },
+      }).createRows,
+    ).toBeNull();
 
     const retry = gateway({});
     const retryRun = ports(retry.client);

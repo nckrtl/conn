@@ -7,6 +7,7 @@ export * from "./profileSync.ts";
 export * from "./threadStart.ts";
 export * from "./threadTurn.ts";
 export * from "./orbitSetupStages.ts";
+export * from "./orbitCreateRows.ts";
 export * from "./orbitInstance.ts";
 export * from "./instanceList.ts";
 export * from "./orbitConnection.ts";

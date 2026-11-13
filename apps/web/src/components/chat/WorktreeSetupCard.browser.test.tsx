@@ -173,6 +173,7 @@ function orbitCard(
       baseBranch: null,
       url: "https://meetup.nckrtl.test",
     },
+    cancelling: false,
     ...view,
   };
   return {

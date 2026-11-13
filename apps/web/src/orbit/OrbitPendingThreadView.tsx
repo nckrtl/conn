@@ -173,8 +173,13 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
 
   const cancel = async () => {
     try {
-      const { instanceStays } = await cancelOrbitThreadStart(desktopOrbitGatewayClient(), start.id);
+      const { instanceStays, requested } = await cancelOrbitThreadStart(
+        desktopOrbitGatewayClient(),
+        start.id,
+      );
       void navigate({ to: "/", replace: true });
+      // A requested cancel ends once Orbit admitted the create; the runner reports it then.
+      if (requested) return;
       toastManager.add({
         type: "info",
         title: "Instance setup cancelled",

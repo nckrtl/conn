@@ -15,7 +15,11 @@ export function OrbitPendingThreadList() {
   const available = useOrbitThreadsAvailable();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const starts = useOrbitThreadStarts((state) => state.starts).filter(
-    (start) => start.pendingThread && start.sentAt == null,
+    // A start that waits for its Cancel to reach Orbit is hidden until it ends or fails.
+    (start) =>
+      start.pendingThread &&
+      start.sentAt == null &&
+      !(start.cancelRequested && start.error === null),
   );
   if (!available || starts.length === 0) return null;
   return (

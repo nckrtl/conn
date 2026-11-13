@@ -72,6 +72,8 @@ export interface OrbitSetupView {
   /** The start made an Instance: Dismiss leaves it, and the card says so unless the error does. */
   readonly instanceStays: boolean;
   readonly details: OrbitSetupDetails;
+  /** Cancel waits for Orbit to admit the create, so it can be cancelled. */
+  readonly cancelling: boolean;
 }
 
 export const ORBIT_SETUP_FAILED_TITLE = "Instance setup failed";
@@ -236,6 +238,7 @@ export function orbitSetupView(
       orbitThreadStartCreatedInstance(start) &&
       start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE,
     details: orbitSetupDetails(start),
+    cancelling: phase === "running" && start.cancelRequested === true,
   };
 }
 

@@ -291,7 +291,9 @@ the step name; an unknown step stays with the row that ran). Orbit fills step ti
 Operation ended, so each row is timed from when the runner first saw it change, saved in the
 start's `createRows`, and Orbit's times replace those at the end. The running card has Details and
 Cancel; Cancel asks Orbit to cancel an admitted create (`POST /operations/{id}/cancel`), then
-drops the start; an admitted Instance stays.
+drops the start; an admitted Instance stays. A Cancel while the runner admits the create marks the
+start (`cancelRequested`, hidden from the sidebar); the runner cancels the Operation Orbit admits
+and drops the start then, or keeps it as failed when the cancel fails.
 
 **Runner.** `OrbitThreadStartRunner`, mounted once in the main window's root route, runs every
 saved start (`orbitThreadStarts.ts` on the shared `runOrbitThreadStart`): Orbit creates a clone of

@@ -207,10 +207,16 @@ export function OrbitSetupCard({
         <>
           <div className="mt-0.5 ml-[calc(--spacing(6)+2px-(--spacing(2)-1px))] flex items-center gap-0.5">
             <DetailsToggle open={detailsOpen} onToggle={() => setDetailsOpen((open) => !open)} />
-            <Button type="button" size="xs" variant="ghost-muted" onClick={onCancel}>
-              <XIcon aria-hidden />
-              Cancel
-            </Button>
+            {view.cancelling ? (
+              <span className="px-2 text-xs text-muted-foreground" data-orbit-setup-cancelling>
+                Cancelling…
+              </span>
+            ) : (
+              <Button type="button" size="xs" variant="ghost-muted" onClick={onCancel}>
+                <XIcon aria-hidden />
+                Cancel
+              </Button>
+            )}
           </div>
           {detailsOpen ? (
             <OrbitDetailsGrid>

@@ -7,6 +7,7 @@ import type { Workspace } from "../workspaces.logic";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { buildOrbitDraftStart, type OrbitDraftTarget } from "./orbitDraft";
 import {
+  cancelOrbitThreadStart,
   dismissOrbitThreadStart,
   retryOrbitThreadStart,
   runSavedOrbitThreadStart,
@@ -14,23 +15,24 @@ import {
 } from "./orbitThreadStarts";
 import { readStored } from "./orbitThreadStartStore";
 
-vi.mock("@t3tools/client-runtime/orbit-gateway", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@t3tools/client-runtime/orbit-gateway")>()),
-  // The clone is created and paired; only the first message is left.
-  runOrbitThreadStart: async (
-    start: Parameters<
-      typeof import("@t3tools/client-runtime/orbit-gateway").runOrbitThreadStart
-    >[0],
-    ports: Parameters<
-      typeof import("@t3tools/client-runtime/orbit-gateway").runOrbitThreadStart
-    >[1],
-  ) => {
-    const sent = await ports.send({ ...start, environmentId: "clone" });
-    ports.save({ ...start, ...sent, environmentId: "clone", sentAt: 1 });
-    return true;
-  },
-  sendOrbitFirstMessage: async () => "ws",
-}));
+const runner = vi.hoisted(() => ({ real: false }));
+vi.mock("@t3tools/client-runtime/orbit-gateway", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@t3tools/client-runtime/orbit-gateway")>();
+  return {
+    ...original,
+    // Unless a test runs the real one: the clone is created and paired; only the first message is left.
+    runOrbitThreadStart: async (
+      start: Parameters<typeof original.runOrbitThreadStart>[0],
+      ports: Parameters<typeof original.runOrbitThreadStart>[1],
+    ) => {
+      if (runner.real) return original.runOrbitThreadStart(start, ports);
+      const sent = await ports.send({ ...start, environmentId: "clone" });
+      ports.save({ ...start, ...sent, environmentId: "clone", sentAt: 1 });
+      return true;
+    },
+    sendOrbitFirstMessage: async () => "ws",
+  };
+});
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({
   runAtomCommand: vi.fn(),
   squashAtomCommandFailure: vi.fn(),
@@ -170,6 +172,83 @@ describe("runSavedOrbitThreadStart", () => {
     });
 
     expect((await startAndSend("S"))[0]).toBe(byKey);
+  });
+});
+
+describe("cancelOrbitThreadStart", () => {
+  beforeEach(() => {
+    runner.real = true;
+    vi.stubGlobal("window", {
+      localStorage: createLocalStorageStub(),
+      desktopBridge: { orbitGatewaySend: vi.fn() },
+    });
+  });
+  afterEach(() => {
+    runner.real = false;
+    vi.unstubAllGlobals();
+  });
+
+  const saveDraftStart = () => {
+    sendOrbitDraft({
+      start: buildOrbitDraftStart({
+        target: { ...projectTarget, instanceName: "list-files" },
+        message: "List the files",
+        modelSelection: null,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }),
+      openPending: () => {},
+      clearDraft: () => {},
+    });
+    return readStored()[0]!.id;
+  };
+
+  it("cancels the create Orbit admits after a Cancel during admission, then drops the start", async () => {
+    const id = saveDraftStart();
+    const admission = deferred();
+    const admitting = deferred();
+    const cancelOperation = vi.fn(async () => ({}));
+    const gateway = {
+      createThreadInstance: async () => {
+        admitting.resolve();
+        await admission.promise;
+        return {
+          id: 100,
+          kind: "instance.create",
+          status: "queued",
+          targetId: 41,
+          errorCode: null,
+          pollAfterSeconds: 2,
+        };
+      },
+      cancelOperation,
+    } as unknown as OrbitGatewayClient;
+    const run = runSavedOrbitThreadStart(gateway, id);
+    await admitting.promise;
+
+    expect(await cancelOrbitThreadStart(gateway, id)).toEqual({
+      instanceStays: true,
+      requested: true,
+    });
+    expect(readStored()[0]).toMatchObject({ id, cancelRequested: true });
+    expect(cancelOperation).not.toHaveBeenCalled();
+
+    admission.resolve();
+    expect(await run).toBeNull();
+    expect(cancelOperation).toHaveBeenCalledWith(100);
+    expect(readStored()).toEqual([]);
+  });
+
+  it("drops a start no runner works on at once, without a Gateway call", async () => {
+    const id = saveDraftStart();
+    const cancelOperation = vi.fn();
+    const gateway = { cancelOperation } as unknown as OrbitGatewayClient;
+    expect(await cancelOrbitThreadStart(gateway, id)).toEqual({
+      instanceStays: false,
+      requested: false,
+    });
+    expect(readStored()).toEqual([]);
+    expect(cancelOperation).not.toHaveBeenCalled();
   });
 });
 

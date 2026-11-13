@@ -259,6 +259,22 @@ export function observeOrbitCreateRows(
   return next;
 }
 
+/** The rows after a create failed where Orbit named no step: the row that ran failed now. */
+export function stopRunningOrbitCreateRows(
+  rows: OrbitCreateRows | null,
+  now: number,
+): OrbitCreateRows | null {
+  const id = ORBIT_CREATE_ROW_IDS.findLast((row) => rows?.[row]?.status === "running");
+  if (
+    rows === null ||
+    id === undefined ||
+    ORBIT_CREATE_ROW_IDS.some((row) => rows[row]?.status === "failed")
+  ) {
+    return null;
+  }
+  return { ...rows, [id]: { ...rows[id]!, status: "failed", finishedAt: now } };
+}
+
 /** Saved rows from a stored start of any build; a broken row reads as missing. */
 export function readSavedOrbitCreateRows(value: unknown): OrbitCreateRows | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;

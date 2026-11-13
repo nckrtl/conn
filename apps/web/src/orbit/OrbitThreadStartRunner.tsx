@@ -6,6 +6,7 @@ import { toastManager } from "../components/ui/toast";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useOrbitThreadsAvailable } from "./environmentProvider";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
+import { ORBIT_INSTANCE_STAYS_LINE } from "./orbitSetupView";
 import { orbitPendingThreadPath, runSavedOrbitThreadStart } from "./orbitThreadStarts";
 import { useOrbitThreadStarts } from "./orbitThreadStartStore";
 
@@ -26,7 +27,14 @@ export function OrbitThreadStartRunner() {
     for (const start of starts) {
       // A sent start is kept only for its thread's ready row.
       if (start.error !== null || (start.sentAt != null && start.pendingThread)) continue;
-      void runSavedOrbitThreadStart(client, start.id).then((sent) => {
+      void runSavedOrbitThreadStart(client, start.id, {
+        onCancelled: () =>
+          toastManager.add({
+            type: "info",
+            title: "Instance setup cancelled",
+            description: ORBIT_INSTANCE_STAYS_LINE,
+          }),
+      }).then((sent) => {
         if (router.state.location.pathname === orbitPendingThreadPath(start.id)) return;
         if (sent !== null) {
           const id = toastManager.add({

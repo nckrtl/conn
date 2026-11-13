@@ -112,23 +112,34 @@ export function dismissOrbitThreadStart(id: string): void {
 }
 
 /**
- * Cancel on a running start: asks Orbit to stop a create it admitted and still runs, then drops
- * the saved start. Resolves whether the start made an Instance, which stays as on a failed create.
- * A failed cancel keeps the start and throws.
+ * Cancels Orbit's admitted create, then drops the start; a failed cancel keeps it and throws.
+ * During this window's admission it only marks the start (`requested`): the runner cancels the
+ * Operation Orbit admits, then drops it. An admitted Instance stays, as on a failed create.
  */
 export async function cancelOrbitThreadStart(
   client: OrbitGatewayClient | null,
   id: string,
-): Promise<{ readonly instanceStays: boolean }> {
+): Promise<{ readonly instanceStays: boolean; readonly requested: boolean }> {
   const start = readStored().find((entry) => entry.id === id);
-  if (start === undefined) return { instanceStays: false };
+  if (start === undefined) return { instanceStays: false, requested: false };
+  const admitting =
+    start.environmentId === null && start.createOperationId === null && start.createKey != null;
+  if (admitting && running.has(id)) {
+    updateStarts((starts) =>
+      starts.map((entry) => (entry.id === id ? { ...entry, cancelRequested: true } : entry)),
+    );
+    return { instanceStays: true, requested: true };
+  }
   if (start.createOperationId !== null && start.environmentId === null) {
     if (client === null) throw new Error("Conn cannot reach the Orbit Gateway from this window.");
     await client.cancelOperation(start.createOperationId);
   }
   dismissOrbitThreadStart(id);
-  return { instanceStays: orbitThreadStartCreatedInstance(start) };
+  return { instanceStays: orbitThreadStartCreatedInstance(start), requested: false };
 }
+
+const cancelRequested = (id: string) =>
+  readStored().find((entry) => entry.id === id)?.cancelRequested === true;
 
 function isSaved(environmentId: string): boolean {
   return appAtomRegistry
@@ -216,6 +227,8 @@ const running = new Set<string>();
 export async function runSavedOrbitThreadStart(
   client: OrbitGatewayClient,
   id: string,
+  /** `onCancelled`: the runner cancelled the create a Cancel during admission asked for. */
+  options: { readonly onCancelled?: () => void } = {},
 ): Promise<{ readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null> {
   const start = readStored().find((entry) => entry.id === id);
   if (start !== undefined && start.sentAt != null && !start.pendingThread) {
@@ -246,7 +259,13 @@ export async function runSavedOrbitThreadStart(
     let environmentId: string | null = null;
     const sent = await runOrbitThreadStart(start, {
       client,
-      save: saveStart,
+      // Only the UI sets a Cancel request, so a save of the runner's copy keeps it.
+      save: (next) => saveStart({ ...next, cancelRequested: cancelRequested(id) }),
+      cancelRequested: () => cancelRequested(id),
+      cancelled: () => {
+        dismissOrbitThreadStart(id);
+        options.onCancelled?.();
+      },
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
       stopped,

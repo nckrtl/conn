@@ -187,8 +187,9 @@ export interface OrbitDraftStartInput {
   readonly instanceName: string;
   readonly existing: OrbitExistingInstance | null;
   readonly modelSelection: ModelSelection | null;
-  readonly runtimeMode: RuntimeMode;
-  readonly interactionMode: ProviderInteractionMode;
+  /** Null for a start with no message (the palette's plus). */
+  readonly runtimeMode: RuntimeMode | null;
+  readonly interactionMode: ProviderInteractionMode | null;
   readonly projectName?: string;
   readonly instanceDomainSuffix?: string | null;
   readonly branch: OrbitGatewayBranchSelection | null;
@@ -203,8 +204,8 @@ export function buildOrbitDraftStart(input: {
   readonly target: OrbitDraftTarget;
   readonly message: string;
   readonly modelSelection: ModelSelection | null;
-  readonly runtimeMode: RuntimeMode;
-  readonly interactionMode: ProviderInteractionMode;
+  readonly runtimeMode: RuntimeMode | null;
+  readonly interactionMode: ProviderInteractionMode | null;
 }): OrbitDraftStartInput {
   const { target } = input;
   return {

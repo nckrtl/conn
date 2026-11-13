@@ -41,7 +41,10 @@ vi.mock("../orbit/orbitPaletteProjects", () => ({
   recheckOrbitPaletteProjects: () => orbit.recheck(),
   checkOrbitInstanceName: async () => ({ available: true }),
 }));
-vi.mock("../orbit/openOrbitDraft", () => ({ openOrbitDraft: async () => {} }));
+vi.mock("../orbit/openOrbitDraft", () => ({
+  openOrbitDraft: async () => {},
+  openOrbitPlusCreate: async () => {},
+}));
 
 function project(cloneable: boolean): OrbitGatewayProjectListing {
   const failing = !cloneable;

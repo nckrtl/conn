@@ -524,8 +524,17 @@ function isAdmissionRefusal(error: unknown): error is OrbitGatewayError {
 }
 
 /**
+ * A start made by the palette's plus: it creates and connects the Instance and sends no message.
+ * Done once `connected` is set.
+ */
+export function orbitThreadStartHasNoMessage(start: OrbitThreadStart): boolean {
+  return start.message.trim() === "";
+}
+
+/**
  * Runs a start from its last saved step to the sent message. Resolves `true` once the message is
- * sent; otherwise it saves the start with `error` set and resolves `false`.
+ * sent, or for a start with no message once the Instance is connected; otherwise it saves the
+ * start with `error` set and resolves `false`.
  */
 export async function runOrbitThreadStart(
   start: OrbitThreadStart,
@@ -805,6 +814,9 @@ export async function runOrbitThreadStart(
     }
 
     checkStopped();
+    // A start the palette's plus made has no first message: it ends once the Instance is
+    // connected, and Conn opens a normal new-thread draft there.
+    if (orbitThreadStartHasNoMessage(current)) return true;
     const begin = stamp("agentStartedAt");
     if (Object.keys(begin).length > 0) update(begin);
     const sent = await ports.send({ ...current, environmentId });

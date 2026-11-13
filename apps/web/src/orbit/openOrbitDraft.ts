@@ -13,7 +13,11 @@ import {
   orbitDraftProjectId,
   type OrbitDraftTarget,
 } from "./orbitDraft";
-import { orbitThreadStartBlockedReason } from "./orbitThreadStarts";
+import {
+  orbitPendingThreadPath,
+  orbitThreadStartBlockedReason,
+  startOrbitInstanceFromPlus,
+} from "./orbitThreadStarts";
 
 /**
  * Opens the draft for a thread in a new Instance or an unpaired one; a paired Instance uses a normal
@@ -61,4 +65,19 @@ export async function openOrbitDraft(
   );
   await router.navigate({ to: "/draft/$draftId", params: { draftId } });
   return draftId;
+}
+
+/**
+ * The palette's plus (or Enter on the name): starts the new Instance's create at once and opens
+ * its pending thread, as a first message does, without a prompt. Resolves the start's id, or null
+ * where `orbitThreadStartBlockedReason` names why.
+ */
+export async function openOrbitPlusCreate(
+  router: AnyRouter,
+  target: OrbitDraftTarget,
+): Promise<string | null> {
+  const start = startOrbitInstanceFromPlus(target);
+  if (start === null) return null;
+  await router.navigate({ to: orbitPendingThreadPath(start.id) });
+  return start.id;
 }

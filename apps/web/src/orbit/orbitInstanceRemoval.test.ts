@@ -141,7 +141,8 @@ function removalPorts(
   orbit: ReturnType<typeof gateway>,
   state: ReturnType<typeof device>,
   storage = memoryStorage(),
-  profileId: number | null = 1,
+  profileId: number | null | (() => Promise<number | null>) = 1,
+  listed: ReadonlySet<number> = new Set([41]),
 ) {
   const reloadList = vi.fn(async () => undefined);
   return {
@@ -150,7 +151,8 @@ function removalPorts(
       cleanup: state.ports,
       reloadList,
       storage: storage.storage,
-      profileId: async () => profileId,
+      profileId: typeof profileId === "function" ? profileId : async () => profileId,
+      isListed: (instanceId: number) => listed.has(instanceId),
     },
     reloadList,
     storage,
@@ -393,5 +395,109 @@ describe("restoreOrbitInstanceRemovals", () => {
     await restoreOrbitInstanceRemovals(removalPorts(orbit, state, storage, 1).ports, new Set([41]));
     expect(useOrbitInstanceRemovals.getState().byInstance).toEqual({});
     expect(storage.saved()["2"]?.["41"]).toBeDefined();
+  });
+});
+
+describe("review fixes (conn#73)", () => {
+  beforeEach(() => resetOrbitInstanceRemovalsForTest());
+
+  const saved = (extra: Record<string, unknown>) => ({
+    operationId: 77,
+    acknowledgeUnsaved: true,
+    status: "failed",
+    message: "Old failure.",
+    row: ROW,
+    ...extra,
+  });
+
+  it("shows no saved removal when the profile cannot be read, only this window's own", async () => {
+    const state = device();
+    const storage = memoryStorage({ none: { "41": saved({ operationId: null }) } });
+    const orbit = gateway(async () => operation("succeeded"));
+    useOrbitInstanceRemovals.setState({
+      byInstance: {
+        41: { status: "failed", refused: false, message: "x", acknowledgeUnsaved: true, row: ROW },
+      },
+      restoredFor: null,
+    });
+    const opening = Symbol("open");
+    await restoreOrbitInstanceRemovals(
+      removalPorts(orbit, state, storage, async () => {
+        throw new Error("Gateway down");
+      }).ports,
+      new Set([41]),
+      opening,
+    );
+    expect(useOrbitInstanceRemovals.getState()).toEqual({ byInstance: {}, restoredFor: opening });
+  });
+
+  it("drops another profile's rows from the store when the page opens under a new profile", async () => {
+    const state = device();
+    const storage = memoryStorage({ "1": { "41": saved({ operationId: null }) } });
+    const orbit = gateway(async () => operation("succeeded"));
+    await restoreOrbitInstanceRemovals(removalPorts(orbit, state, storage, 1).ports, new Set([41]));
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toBeDefined();
+    await restoreOrbitInstanceRemovals(removalPorts(orbit, state, storage, 2).ports, new Set([41]));
+    expect(useOrbitInstanceRemovals.getState().byInstance).toEqual({});
+  });
+
+  it("keeps a click's row when a restore runs while the click still reads the profile", async () => {
+    const state = device();
+    let release: () => void = () => {};
+    const profileRead = new Promise<number>((resolve) => {
+      release = () => resolve(1);
+    });
+    let destroys = 0;
+    const orbit = gateway(async () => {
+      destroys++;
+      return operation("running", { pollAfterSeconds: 2 });
+    }, [operation("succeeded")]);
+    const storage = memoryStorage();
+    const click = runOrbitInstanceRemoval(
+      ROW,
+      true,
+      removalPorts(orbit, state, storage, () => profileRead).ports,
+    );
+    await restoreOrbitInstanceRemovals(removalPorts(orbit, state, storage, 1).ports, new Set([41]));
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toMatchObject({
+      status: "removing",
+    });
+    // The bin stays replaced: a second click does not send a second destroy.
+    expect(
+      await runOrbitInstanceRemoval(ROW, true, removalPorts(orbit, state, storage).ports),
+    ).toMatchObject({
+      code: "conn.remove_running",
+    });
+    release();
+    expect(await click).toEqual({ kind: "removed" });
+    expect(destroys).toBe(1);
+  });
+
+  it("calls a live removal whose Operation Orbit no longer shows removed once the list lacks it", async () => {
+    const state = device();
+    const orbit = gateway(async () => operation("running", { pollAfterSeconds: 2 }), [notFound()]);
+    const { ports, storage } = removalPorts(orbit, state, memoryStorage(), 1, new Set());
+    await runOrbitInstanceRemoval(ROW, true, ports);
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toEqual({ status: "removed" });
+    expect(storage.saved()).toEqual({});
+  });
+
+  it("keeps following through an expired session or a server error", async () => {
+    const state = device();
+    const orbit = gateway(
+      async () => operation("running", { pollAfterSeconds: 2 }),
+      [
+        new OrbitGatewayError({
+          code: "auth.unauthenticated",
+          message: "Expired.",
+          status: 401,
+          details: {},
+        }),
+        new OrbitGatewayError({ code: "http.503", message: "Down.", status: 503, details: {} }),
+        operation("succeeded"),
+      ],
+    );
+    const { ports } = removalPorts(orbit, state);
+    expect(await runOrbitInstanceRemoval(ROW, true, ports)).toEqual({ kind: "removed" });
   });
 });

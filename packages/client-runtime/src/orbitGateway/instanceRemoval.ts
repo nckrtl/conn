@@ -138,6 +138,12 @@ export function orbitInstanceRemoveKey(instanceId: number, attemptAt: number): s
 const isGatewayError = Schema.is(OrbitGatewayError);
 const isLostAnswer = (error: unknown) =>
   isGatewayError(error) && error.code === "gateway.unreachable";
+/**
+ * After admission only these end a follow: a 404 (Orbit no longer shows the Operation) and an
+ * answer Conn cannot read. A 401 (expired session), a 429 or a 5xx passes; Orbit keeps removing.
+ */
+const endsFollow = (error: unknown) =>
+  !isGatewayError(error) || error.code === "gateway.response_invalid";
 
 function failed(error: unknown): OrbitInstanceRemoveOutcome {
   return isGatewayError(error)
@@ -227,7 +233,7 @@ export async function followOrbitInstanceRemoval(
       return await followDestroy(ports, operation, input);
     } catch (error) {
       if (isGatewayError(error) && error.status === 404) return { kind: "lost" };
-      if (!isLostAnswer(error)) return failed(error);
+      if (endsFollow(error)) return failed(error);
       await ports.sleep(operationPollDelayMs(SLOW_POLL_SECONDS));
     }
   }
@@ -253,9 +259,10 @@ async function followDestroy(
     try {
       operation = await ports.client.operation(operation.id);
     } catch (error) {
-      // A short Gateway outage does not end the destroy.
+      // A Gateway outage or an expired session does not end the destroy.
       if (isGatewayError(error) && error.status === 404) return { kind: "lost" };
-      if (!isLostAnswer(error)) return failed(error);
+      if (endsFollow(error)) return failed(error);
+      operation = { ...operation, pollAfterSeconds: SLOW_POLL_SECONDS };
     }
   }
 }

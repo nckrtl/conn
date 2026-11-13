@@ -30,8 +30,8 @@ import { loadOrbitInstanceList } from "../orbit/orbitInstanceList";
 import {
   runOrbitInstanceRemoval,
   useOrbitInstanceListWithRemovals,
-  useOrbitInstanceRemovals,
   webOrbitInstanceRemovalPorts,
+  type OrbitInstanceRemoval,
 } from "../orbit/orbitInstanceRemoval";
 import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
 import { useVisibleThreadShells } from "../state/entities";
@@ -228,17 +228,18 @@ async function removeInstance(
 function InstanceRow({
   row,
   listed,
+  removal,
   onRemove,
   onRetry,
 }: {
   readonly row: OrbitInstanceWithThreads;
+  readonly removal: OrbitInstanceRemoval | undefined;
   /** False for a row kept from a saved removal after the Instance left Orbit's list. */
   readonly listed: boolean;
   readonly onRemove: () => void;
   readonly onRetry: (acknowledgeUnsaved: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const removal = useOrbitInstanceRemovals((store) => store.byInstance[row.id]);
   const { state } = orbitInstanceAvailability(row);
   const hasThreads = row.threads.length > 0;
   const unfolded = open && hasThreads;
@@ -388,12 +389,11 @@ function ProjectFilter(props: {
  * reach, by Project, with its local threads.
  */
 export function OrbitInstancesPage() {
-  const list = useOrbitInstanceListWithRemovals();
+  const { list, removals } = useOrbitInstanceListWithRemovals();
   const threads = useVisibleThreadShells();
   const [query, setQuery] = useState("");
   const [projectId, setProjectId] = useState<number | null>(null);
   const [removeRequest, setRemoveRequest] = useState<RemoveRequest | null>(null);
-  const removals = useOrbitInstanceRemovals((store) => store.byInstance);
   const listedIds = new Set(list.status === "loaded" ? list.rows.map((row) => row.id) : []);
 
   const rows =
@@ -485,6 +485,7 @@ export function OrbitInstancesPage() {
                 key={row.id}
                 row={row}
                 listed={listedIds.has(row.id)}
+                removal={removals[row.id]}
                 onRemove={() => setRemoveRequest({ row, git: row.git })}
                 onRetry={(acknowledgeUnsaved) =>
                   void removeInstance(row, row.git, acknowledgeUnsaved, setRemoveRequest)

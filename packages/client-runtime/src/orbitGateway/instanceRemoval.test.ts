@@ -300,6 +300,17 @@ describe("removal states (conn remove UX, 2026-11-13)", () => {
     expect(await gone.follow()).toEqual({ kind: "lost" });
   });
 
+  it("keeps following a saved Operation through a 401 or a 5xx, and its id is never dropped", async () => {
+    const orbit = gateway([
+      error(401, "auth.unauthenticated"),
+      error(503, "http.503"),
+      ok(op("running")),
+      error(429, "http.429"),
+      ok(op("succeeded")),
+    ]);
+    expect(await orbit.follow()).toEqual({ kind: "removed" });
+  });
+
   it("names today's destroy steps in plain words, and no text for unknown steps", () => {
     expect(orbitInstanceRemoveStepText("Withdraw the Route")).toBe("Taking the address offline");
     expect(orbitInstanceRemoveStepText("withdraw_node-0-0")).toBe("Taking the address offline");

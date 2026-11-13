@@ -11,7 +11,7 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { create } from "zustand";
 
 import { environmentCatalog } from "../connection/catalog";
@@ -119,7 +119,12 @@ export type OrbitInstanceRemoval =
 /** The row state of each Instance being removed, by Instance id, for the current Orbit profile. */
 export const useOrbitInstanceRemovals = create<{
   readonly byInstance: Readonly<Record<number, OrbitInstanceRemoval>>;
-}>(() => ({ byInstance: {} }));
+  /**
+   * The page opening whose profile check has run (`restoreOrbitInstanceRemovals`). Until then
+   * the page shows only removals this window runs itself, never older saved ones.
+   */
+  readonly restoredFor: symbol | null;
+}>(() => ({ byInstance: {}, restoredFor: null }));
 
 /**
  * A removal saved on this device, so a restart or a reopened panel shows it again. Saved per Orbit
@@ -185,8 +190,16 @@ function profileKey(profileId: number | null): string {
 
 /** The profile the store shows now; a follow of another profile's removal does not touch it. */
 let shownProfile: string | null = null;
-/** Instances whose Operation this window follows now, by profile. */
-const following = new Set<string>();
+/**
+ * Instances this window works on now (a click waiting for its answer, or a followed Operation),
+ * with the profile they run under; null while a click still reads the profile.
+ */
+const active = new Map<number, string | null>();
+
+/** True while this window itself removes the Instance (the page shows it before any check). */
+export function isOrbitInstanceRemovalActive(instanceId: number): boolean {
+  return active.has(instanceId);
+}
 
 function saveRemoval(
   storage: OrbitInstanceRemovalStorage,
@@ -249,6 +262,8 @@ export interface OrbitInstanceRemovalPorts {
   readonly storage: OrbitInstanceRemovalStorage;
   /** The Orbit profile this device is linked to now, or null. */
   readonly profileId: () => Promise<number | null>;
+  /** Whether the list read last holds the Instance; null when the list could not be read. */
+  readonly isListed: (instanceId: number) => boolean | null;
 }
 
 export function webOrbitInstanceRemovalPorts(): OrbitInstanceRemovalPorts {
@@ -269,6 +284,10 @@ export function webOrbitInstanceRemovalPorts(): OrbitInstanceRemovalPorts {
       if (client === null) return null;
       return (await client.me()).profile?.id ?? null;
     },
+    isListed: (instanceId) => {
+      const { state } = useOrbitInstanceListStore.getState();
+      return state.status === "loaded" ? state.rows.some((row) => row.id === instanceId) : null;
+    },
   };
 }
 
@@ -283,6 +302,13 @@ async function settle(
   admitted = true,
 ): Promise<void> {
   if (outcome.kind === "stopped") return;
+  if (outcome.kind === "lost") {
+    // Orbit no longer shows the Operation: a fresh list read tells whether the Instance went.
+    await ports.reloadList();
+    if (ports.isListed(instance.id) === false) {
+      return settle(instance, row, profile, acknowledgeUnsaved, { kind: "removed" }, ports);
+    }
+  }
   if (outcome.kind === "failed" && !admitted) {
     // A refusal started nothing; it is shown here and not kept for a restart.
     saveRemoval(ports.storage, profile, instance.id, null);
@@ -349,9 +375,23 @@ export async function runOrbitInstanceRemoval(
   }
   const row = toRemovalRow(instance);
   // Shown in this window first, so the click answers at once; the profile read comes after.
+  active.set(instance.id, null);
   useOrbitInstanceRemovals.setState(({ byInstance }) => ({
     byInstance: { ...byInstance, [instance.id]: { status: "removing", progress: null, row } },
   }));
+  try {
+    return await runAdmittedRemoval(instance, row, acknowledgeUnsaved, ports);
+  } finally {
+    active.delete(instance.id);
+  }
+}
+
+async function runAdmittedRemoval(
+  instance: OrbitInstanceRemovalRow & { readonly git?: OrbitInstanceGitState },
+  row: OrbitInstanceRemovalRow,
+  acknowledgeUnsaved: boolean,
+  ports: OrbitInstanceRemovalPorts,
+): Promise<OrbitInstanceRemoveOutcome> {
   const profile = await currentProfile(ports);
   if (profile === null || ports.gateway === null) {
     const message =
@@ -373,8 +413,7 @@ export async function runOrbitInstanceRemoval(
       byInstance: { [instance.id]: { status: "removing", progress: null, row } },
     });
   }
-  const followKey = `${profile}:${instance.id}`;
-  following.add(followKey);
+  active.set(instance.id, profile);
   saveRemoval(ports.storage, profile, instance.id, {
     operationId: null,
     acknowledgeUnsaved,
@@ -403,7 +442,7 @@ export async function runOrbitInstanceRemoval(
       }
       showRemoval(profile, instance.id, { status: "removing", progress, row });
     },
-  }).finally(() => following.delete(followKey));
+  });
   await settle(instance, row, profile, acknowledgeUnsaved, outcome, ports, admitted);
   return outcome;
 }
@@ -416,9 +455,25 @@ export async function runOrbitInstanceRemoval(
 export async function restoreOrbitInstanceRemovals(
   ports: OrbitInstanceRemovalPorts,
   listedIds: ReadonlySet<number> | null,
+  opening: symbol | null = null,
 ): Promise<void> {
   const profile = await currentProfile(ports);
-  if (profile === null) return;
+  /** This window's own removals under `profile` (or still reading theirs). */
+  const ownRows = (byInstance: Readonly<Record<number, OrbitInstanceRemoval>>) =>
+    Object.fromEntries(
+      Object.entries(byInstance).filter(([id]) => {
+        const runsUnder = active.get(Number(id));
+        return active.has(Number(id)) && (runsUnder === null || runsUnder === profile);
+      }),
+    );
+  if (profile === null) {
+    // Profile unknown: show no saved removal, only what this window runs now.
+    useOrbitInstanceRemovals.setState(({ byInstance }) => ({
+      byInstance: ownRows(byInstance),
+      restoredFor: opening,
+    }));
+    return;
+  }
   const saved = ports.storage.read()[profile] ?? {};
   const restored: Record<number, OrbitInstanceRemoval> = {};
   const toFollow: Array<[number, SavedOrbitInstanceRemoval]> = [];
@@ -436,56 +491,43 @@ export async function restoreOrbitInstanceRemovals(
     restored[instanceId] = savedToRemoval(value);
     if (value.status === "removing") toFollow.push([instanceId, value]);
   }
-  const switched = shownProfile !== profile;
   shownProfile = profile;
-  useOrbitInstanceRemovals.setState(({ byInstance }) => {
-    // Keep this window's live states of this profile (a fresher progress than the saved one).
-    const live = switched
-      ? {}
-      : Object.fromEntries(
-          Object.entries(byInstance).filter(([id]) => following.has(`${profile}:${id}`)),
-        );
-    return { byInstance: { ...restored, ...live } };
-  });
+  // This window's live states win: their progress is fresher than the saved record.
+  useOrbitInstanceRemovals.setState(({ byInstance }) => ({
+    byInstance: { ...restored, ...ownRows(byInstance) },
+    restoredFor: opening,
+  }));
   const gateway = ports.gateway;
   if (gateway === null) return;
   await Promise.all(
     toFollow.map(async ([instanceId, value]) => {
-      const followKey = `${profile}:${instanceId}`;
-      if (following.has(followKey)) return;
-      if (value.operationId === null) {
-        // The app ended before Orbit answered the destroy: its fate is unknown.
-        const listed = listedIds === null || listedIds.has(instanceId);
-        await settle(
-          { id: instanceId, environmentId: value.row.environmentId },
-          value.row,
-          profile,
-          value.acknowledgeUnsaved,
-          listed ? { kind: "lost" } : { kind: "removed" },
-          ports,
-        );
-        return;
+      if (active.has(instanceId)) return;
+      active.set(instanceId, profile);
+      try {
+        const instance = { id: instanceId, environmentId: value.row.environmentId };
+        if (value.operationId === null) {
+          // The app ended before Orbit answered the destroy: its fate is unknown.
+          await settle(
+            instance,
+            value.row,
+            profile,
+            value.acknowledgeUnsaved,
+            { kind: "lost" },
+            ports,
+          );
+          return;
+        }
+        const outcome = await followOrbitInstanceRemoval(gateway, {
+          operationId: value.operationId,
+          onProgress: (progress) => {
+            if (progress.kind === "admitted") return;
+            showRemoval(profile, instanceId, { status: "removing", progress, row: value.row });
+          },
+        });
+        await settle(instance, value.row, profile, value.acknowledgeUnsaved, outcome, ports);
+      } finally {
+        active.delete(instanceId);
       }
-      following.add(followKey);
-      const outcome = await followOrbitInstanceRemoval(gateway, {
-        operationId: value.operationId,
-        onProgress: (progress) => {
-          if (progress.kind === "admitted") return;
-          showRemoval(profile, instanceId, { status: "removing", progress, row: value.row });
-        },
-      }).finally(() => following.delete(followKey));
-      const resolved =
-        outcome.kind === "lost" && listedIds !== null && !listedIds.has(instanceId)
-          ? ({ kind: "removed" } as const)
-          : outcome;
-      await settle(
-        { id: instanceId, environmentId: value.row.environmentId },
-        value.row,
-        profile,
-        value.acknowledgeUnsaved,
-        resolved,
-        ports,
-      );
     }),
   );
 }
@@ -494,7 +536,12 @@ export async function restoreOrbitInstanceRemovals(
  * The Instances page's list: read each time the page opens, then the saved removals of the current
  * Orbit profile on top of it, so a removal from before a restart shows again.
  */
-export function useOrbitInstanceListWithRemovals(): OrbitInstanceListState {
+export function useOrbitInstanceListWithRemovals(): {
+  readonly list: OrbitInstanceListState;
+  /** The removals the page may show: all once this opening's profile check ran, else own ones. */
+  readonly removals: Readonly<Record<number, OrbitInstanceRemoval>>;
+} {
+  const [opening] = useState(() => Symbol("orbit-instances-page"));
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway and the saved removals each time the Instances page opens
   useEffect(() => {
     void (async () => {
@@ -503,15 +550,26 @@ export function useOrbitInstanceListWithRemovals(): OrbitInstanceListState {
       await restoreOrbitInstanceRemovals(
         webOrbitInstanceRemovalPorts(),
         state.status === "loaded" ? new Set(state.rows.map((row) => row.id)) : null,
+        opening,
       );
     })();
-  }, []);
-  return useOrbitInstanceListStore((store) => store.state);
+  }, [opening]);
+  const list = useOrbitInstanceListStore((store) => store.state);
+  const byInstance = useOrbitInstanceRemovals((store) => store.byInstance);
+  const checked = useOrbitInstanceRemovals((store) => store.restoredFor === opening);
+  return {
+    list,
+    removals: checked
+      ? byInstance
+      : Object.fromEntries(
+          Object.entries(byInstance).filter(([id]) => isOrbitInstanceRemovalActive(Number(id))),
+        ),
+  };
 }
 
 /** Tests only: forget which profile is shown and which removals this window follows. */
 export function resetOrbitInstanceRemovalsForTest(): void {
   shownProfile = null;
-  following.clear();
-  useOrbitInstanceRemovals.setState({ byInstance: {} });
+  active.clear();
+  useOrbitInstanceRemovals.setState({ byInstance: {}, restoredFor: null });
 }

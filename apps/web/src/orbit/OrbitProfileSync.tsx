@@ -25,6 +25,7 @@ import {
   loadSectionState,
   saveSectionState,
 } from "./profileSyncStorage";
+import { registerOrbitSleepClient } from "./orbitInstanceSleep";
 import { createSerialRunner } from "./serialRunner";
 import { trackNonUserThemeChanges } from "./themeOrigin";
 import {
@@ -76,6 +77,9 @@ export function syncOrbitProfileNow(): Promise<void> {
   return requestSync?.() ?? Promise.resolve();
 }
 
+// Conn: every window's sleep controller reads the Gateway through this window's client.
+registerOrbitSleepClient(() => desktopOrbitGatewayClient());
+
 /** The Gateway client over the desktop main process, or null outside the desktop app. */
 export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
   const send = window.desktopBridge?.orbitGatewaySend;
@@ -88,6 +92,7 @@ export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
       ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
       ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
+      ...(request.root === true ? { root: true as const } : {}),
     });
     if (response.error !== null) throw new Error(response.error);
     return { status: response.status, body: response.body };

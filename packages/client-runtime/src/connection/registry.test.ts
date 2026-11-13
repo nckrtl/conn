@@ -1163,6 +1163,48 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
+  it.effect("a parked environment stays off without changing its saved flag, then connects", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.start;
+        yield* awaitConnectionState(
+          registry,
+          RELAY_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+
+        yield* registry.setParked(RELAY_TARGET.environmentId, true);
+        yield* awaitConnectionState(
+          registry,
+          RELAY_TARGET.environmentId,
+          (state) => state.phase === "available",
+        );
+        const entry = (yield* SubscriptionRef.get(registry.entries)).get(
+          RELAY_TARGET.environmentId,
+        );
+        expect(entry?.enabled).toBe(true);
+        expect((yield* Ref.get(harness.storedDisabled)).has(RELAY_TARGET.environmentId)).toBe(
+          false,
+        );
+
+        // A switch-on while parked keeps it off; only the release connects.
+        yield* registry.setEnabled(RELAY_TARGET.environmentId, false);
+        yield* registry.setEnabled(RELAY_TARGET.environmentId, true);
+        expect((yield* registry.state(RELAY_TARGET.environmentId)).phase).toBe("available");
+
+        yield* registry.setParked(RELAY_TARGET.environmentId, false);
+        yield* awaitConnectionState(
+          registry,
+          RELAY_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
   it.effect("re-registering a switched-off environment keeps it off", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([RELAY_TARGET], [], [], {

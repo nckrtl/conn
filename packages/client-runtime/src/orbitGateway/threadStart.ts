@@ -1,3 +1,4 @@
+import type { OrbitInstanceWakeOutcome } from "./instanceWake.ts";
 import {
   ModelSelection,
   ProviderInteractionMode,
@@ -316,6 +317,11 @@ export interface OrbitThreadStartPorts {
   readonly cancelled?: () => void;
   /** Each read of the create Operation, for the setup card's clone step. */
   readonly onCreateOperation?: (operation: OrbitGatewayOperation) => void;
+  /**
+   * Conn: wakes an asleep Instance before Conn pairs with or connects to it. Without it, an asleep
+   * Instance stops the start as before.
+   */
+  readonly wake?: (instanceId: number) => Promise<OrbitInstanceWakeOutcome>;
   /** Opens a one-time pairing link and saves the server. */
   readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
   /**
@@ -491,6 +497,24 @@ function isLostAdmission(error: unknown): boolean {
 function isTargetBusy(error: unknown): boolean {
   return (
     isOrbitGatewayError(error) && error.status === 409 && error.code === "operation.target_busy"
+  );
+}
+
+/** Conn: the start's text for an asleep Instance when Conn cannot wake it (no port, older Gateway). */
+const ORBIT_CLONE_ASLEEP_TEXT = "The clone is asleep. Conn cannot wake it yet.";
+
+/** Conn: wakes the Instance through the port, or fails the step as an asleep clone did before. */
+async function wakeClone(ports: OrbitThreadStartPorts, instanceId: number): Promise<void> {
+  const outcome = ports.wake === undefined ? null : await ports.wake(instanceId);
+  if (outcome?.kind === "awake") return;
+  if (outcome === null || outcome.kind === "unsupported") {
+    throw stepFailed(ORBIT_CLONE_ASLEEP_TEXT, {});
+  }
+  throw stepFailed(
+    `Orbit could not wake the clone (${outcome.code}).`,
+    {},
+    outcome.code,
+    outcome.message,
   );
 }
 
@@ -748,9 +772,7 @@ export async function runOrbitThreadStart(
       if (server.status !== "registered") {
         throw stepFailed("The clone's T3 server registration expired.", {});
       }
-      if (server.powerState === "stopped") {
-        throw stepFailed("The clone is asleep. Conn cannot wake it yet.", {});
-      }
+      if (server.powerState === "stopped") await wakeClone(ports, current.instanceId!);
       const result = created.result ?? null;
       update({
         environmentId: server.environmentId,
@@ -774,6 +796,18 @@ export async function runOrbitThreadStart(
           });
         }
         if (current.pairingOperationId === null) {
+          // Conn: an existing Instance may be asleep; its server cannot mint a link until it wakes.
+          if (
+            ports.wake !== undefined &&
+            current.orbitInstanceKind === "existing" &&
+            current.instanceId !== null
+          ) {
+            // A failed read changes nothing: the pairing then fails or succeeds as before.
+            const listed = (await ports.client.environments().catch(() => [])).find(
+              (environment) => environment.environmentId === environmentId,
+            );
+            if (listed?.powerState === "stopped") await wakeClone(ports, current.instanceId);
+          }
           if (!current.pairingKey) update({ pairingKey: newKey("pairing") });
           const operation = await admit(ports.now() + PAIRING_ADMISSION_MS, () =>
             ports.client.startPairing(environmentId, current.pairingKey!),

@@ -59,6 +59,8 @@ import { readEnvironmentScope } from "~/state/session";
 import { type EnvironmentPresentation, useRelayEnvironmentDiscovery } from "~/state/environments";
 import { APP_VERSION } from "~/branding";
 import { useManagedPolicy } from "~/state/managedPolicy";
+import { useOrbitEnvironmentParked } from "~/orbit/orbitInstanceSleep";
+import { ORBIT_INSTANCE_STOPPED_LABEL } from "~/orbit/orbitInstanceStepLogic";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "~/state/server";
 import {
@@ -79,12 +81,18 @@ type SavedBackendListRowProps = {
   onAddRoute: (environment: EnvironmentPresentation) => void;
 };
 
-function savedBackendStatus(environment: EnvironmentPresentation): {
+function savedBackendStatus(
+  environment: EnvironmentPresentation,
+  /** Conn: an asleep Orbit Instance Conn does not connect to until it is used. */
+  asleep = false,
+): {
   readonly text: string;
   readonly tone: "muted" | "error";
 } {
   if (!environment.entry.enabled && environment.connection.phase !== "unsupported")
     return { text: "Off", tone: "muted" };
+  if (asleep && environment.connection.phase === "available")
+    return { text: ORBIT_INSTANCE_STOPPED_LABEL, tone: "muted" };
   const { connection } = environment;
   switch (connection.phase) {
     case "connected":
@@ -174,7 +182,8 @@ export function SavedBackendListRow({
   const resumingServerUpdate =
     restartingServer ||
     (serverUpdateState.status === "running" && serverUpdateState.stage === "resuming");
-  const status = savedBackendStatus(environment);
+  const asleep = useOrbitEnvironmentParked(environmentId);
+  const status = savedBackendStatus(environment, asleep);
   const serverVersion = environment.serverConfig?.environment.serverVersion ?? null;
   // Discovery empties its map on every refresh, so hold the last descriptor
   // seen or the glyph would blink back to the generic one each time.
@@ -233,7 +242,9 @@ export function SavedBackendListRow({
     unsupported
       ? (environment.connection.error ?? connectionStatusText(environment.connection))
       : enabled
-        ? connectionStatusText(environment.connection)
+        ? asleep && environment.connection.phase === "available"
+          ? ORBIT_INSTANCE_STOPPED_LABEL
+          : connectionStatusText(environment.connection)
         : "Switched off"
   }${
     versionMismatch

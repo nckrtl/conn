@@ -27,6 +27,7 @@ import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
+import { wakeOrbitInstanceForStart } from "./orbitInstanceSleep";
 import {
   buildOrbitDraftStart,
   type OrbitDraftStartInput,
@@ -300,6 +301,7 @@ export async function runSavedOrbitThreadStart(
       stopped,
       isSaved,
       connect,
+      wake: (instanceId) => wakeOrbitInstanceForStart(client, instanceId),
       onCreateOperation: (operation) => recordCreateOperation(id, operation),
       send: async (ready) => {
         environmentId = ready.environmentId;

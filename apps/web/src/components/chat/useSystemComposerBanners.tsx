@@ -24,6 +24,7 @@ import { ENVIRONMENT_RECONNECT_WARNING_GRACE_MS } from "../ChatView.logic";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { ServerUpdateAction, serverUpdateStageLabel } from "../ServerUpdateAction";
+import { useOrbitEnvironmentParked } from "../../orbit/orbitInstanceSleep";
 import { useAutoBalanceUpdateBanner } from "./useAutoBalanceUpdateBanner";
 import { ComposerServerUpdateIcon } from "./ComposerServerUpdateStatus";
 import {
@@ -67,6 +68,10 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     autoUpdateEnvironments,
   } = input;
   const navigate = useNavigate();
+  // Conn: an asleep Orbit Instance Conn holds off is not offline; it wakes on the next input.
+  const unavailableAsleep = useOrbitEnvironmentParked(
+    activeEnvironmentUnavailableState?.environmentId ?? null,
+  );
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
@@ -182,7 +187,8 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     const showUnavailableBanner =
       activeEnvironmentUnavailableState !== null &&
       unavailableConnection !== null &&
-      !suppressUnavailableBanner;
+      !suppressUnavailableBanner &&
+      !unavailableAsleep;
     if (showUnavailableBanner) {
       items.push({
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,

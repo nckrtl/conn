@@ -1289,6 +1289,8 @@ export interface DesktopOrbitGatewayRequest {
   /** Overrides the default 15 s limit, up to 120 s. */
   readonly timeoutMs?: number;
   readonly idempotencyKey?: string;
+  /** Conn: `path` is below `/api/v1`; the main process allows only an Instance wake and an Operation read. */
+  readonly root?: true;
 }
 
 export interface DesktopOrbitGatewayResponse {

@@ -25,6 +25,11 @@ export interface OrbitGatewayRequest {
   readonly timeoutMs?: number;
   /** Sent as `Idempotency-Key`: the same key and input return the same Operation. */
   readonly idempotencyKey?: string;
+  /**
+   * Conn: `path` is below `/api/v1`, not `/api/v1/conn`. The desktop allows only an Instance wake
+   * and an Operation read this way.
+   */
+  readonly root?: true;
 }
 
 export interface OrbitGatewayResponse {
@@ -410,6 +415,24 @@ export interface OrbitGatewayClient {
    * Throws like every call; an older Gateway answers 404. Use `readOrbitInstanceGit`.
    */
   readonly instanceGit: (instanceId: number, timeoutMs: number) => Promise<unknown>;
+  /**
+   * Conn: asks Orbit to wake an asleep Instance (`POST /api/v1/instances/{id}/wake`, outside the
+   * Conn layer). The answer's Operation may already have ended. Use `createOrbitInstanceWaker`.
+   */
+  readonly wakeInstance: (
+    instanceId: number,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayWakeOperation>;
+  /** Conn: reads a wake's Operation (`GET /api/v1/operations/{id}`; the Conn read does not serve it). */
+  readonly wakeOperation: (operationId: number) => Promise<OrbitGatewayWakeOperation>;
+}
+
+/** Conn: an `instance.wake` Operation. Its statuses include `pending`, which the Conn layer never sends. */
+export interface OrbitGatewayWakeOperation {
+  readonly id: number;
+  readonly status: string;
+  readonly errorCode: string | null;
+  readonly pollAfterSeconds: number | null;
 }
 
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
@@ -672,6 +695,28 @@ export function createOrbitGatewayClient(
     },
     instanceGit: async (instanceId, timeoutMs) =>
       call({ method: "GET", path: `/instances/${instanceId}/work`, timeoutMs }),
+    wakeInstance: async (instanceId, idempotencyKey) => {
+      const path = `/instances/${instanceId}/wake`;
+      return wakeOperation(
+        await call({ method: "POST", path, body: {}, idempotencyKey, root: true }),
+        path,
+      );
+    },
+    wakeOperation: async (operationId) => {
+      const path = `/operations/${operationId}`;
+      return wakeOperation(await call({ method: "GET", path, root: true }), path);
+    },
+  };
+}
+
+function wakeOperation(value: unknown, path: string): OrbitGatewayWakeOperation {
+  const data = record(value);
+  if (typeof data?.id !== "number" || typeof data.status !== "string") throw invalid(path);
+  return {
+    id: data.id,
+    status: data.status,
+    errorCode: typeof data.error_code === "string" ? data.error_code : null,
+    pollAfterSeconds: typeof data.poll_after_seconds === "number" ? data.poll_after_seconds : null,
   };
 }
 

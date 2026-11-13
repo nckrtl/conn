@@ -396,6 +396,7 @@ const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import { ConnIconScope } from "../icons/connIcon";
 import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
+import { useOrbitEnvironmentInUse } from "../orbit/orbitInstanceSleep";
 import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
 import { useOrbitReady } from "../orbit/useOrbitReady";
 
@@ -487,6 +488,13 @@ export default function ChatView(props: ChatViewProps) {
   const primaryEnvironment = usePrimaryEnvironment();
   const environmentById = new Map(
     environments.map((environment) => [environment.environmentId, environment]),
+  );
+  // Conn: the shown thread's or draft's environment is in use; an asleep Instance wakes. A thread
+  // kept mounted behind another page (Settings, Usage) is not in use.
+  const shownInBackground = use(BackgroundThreadContext);
+  useOrbitEnvironmentInUse(
+    shownInBackground ? null : environmentId,
+    environmentById.get(environmentId)?.connection.phase ?? null,
   );
   const baseComposerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;

@@ -533,6 +533,37 @@ describe("runOrbitThreadStart", () => {
     expect(run.saves.at(-1)).toMatchObject({ createStartedAt: null, createKey: null });
   });
 
+  it("wakes an asleep existing Instance before it pairs, and leaves an awake one alone", async () => {
+    const existing = (id: string) =>
+      newOrbitThreadStart({
+        id,
+        project,
+        message: "Add a dark mode",
+        suffix: "unused",
+        threadId: `thread-${id}`,
+        messageId: `message-${id}`,
+        commandId: `command-${id}`,
+        now: 0,
+        existing: { instanceId: 41, environmentId: "env-41", name: "dark-mode", nodeName: "shark" },
+      });
+    const woken: number[] = [];
+    const wake = async (instanceId: number) => {
+      woken.push(instanceId);
+      return { kind: "awake" as const };
+    };
+
+    const asleep = gateway({ servers: [server(41, "stopped")] });
+    const asleepRun = ports(asleep.client);
+    expect(await runOrbitThreadStart(existing("s3"), { ...asleepRun.ports, wake })).toBe(true);
+    expect(woken).toEqual([41]);
+    expect(asleep.calls.slice(0, 2)).toEqual(["environments", "pair env-41"]);
+
+    const awake = gateway({});
+    const awakeRun = ports(awake.client);
+    expect(await runOrbitThreadStart(existing("s4"), { ...awakeRun.ports, wake })).toBe(true);
+    expect(woken).toEqual([41]);
+  });
+
   it("keeps a taken name's code and drops its key, so a new name is created anew", async () => {
     const taken = new OrbitGatewayError({
       code: "instance.name_taken",
@@ -1199,7 +1230,7 @@ describe("runOrbitThreadStart", () => {
     expect(again.sent).toHaveLength(1);
   });
 
-  it("stops on a clone whose container is asleep", async () => {
+  it("stops on a clone whose container is asleep when Conn cannot wake it", async () => {
     const { client } = gateway({ servers: [server(41, "stopped")] });
     const run = ports(client);
 
@@ -1207,7 +1238,46 @@ describe("runOrbitThreadStart", () => {
 
     expect(run.saves.at(-1)).toMatchObject({
       environmentId: null,
-      error: expect.stringContaining("asleep"),
+      error: "The clone is asleep. Conn cannot wake it yet.",
+    });
+  });
+
+  it("wakes an asleep clone once and goes on to pair with it", async () => {
+    const { client, calls } = gateway({ servers: [server(41, "stopped")] });
+    const run = ports(client);
+    const woken: number[] = [];
+    const wake = async (instanceId: number) => {
+      woken.push(instanceId);
+      return { kind: "awake" as const };
+    };
+
+    expect(await runOrbitThreadStart(fresh(), { ...run.ports, wake })).toBe(true);
+
+    expect(woken).toEqual([41]);
+    expect(calls).toContain("pair env-41");
+    expect(run.sent).toHaveLength(1);
+  });
+
+  it("shows a failed wake, and keeps today's text on a Gateway without the wake route", async () => {
+    const failed = gateway({ servers: [server(41, "stopped")] });
+    const failedRun = ports(failed.client);
+    const wakeFails = async () =>
+      ({ kind: "failed", code: "instance.t3_unready", message: "T3 was slow." }) as const;
+    expect(await runOrbitThreadStart(fresh(), { ...failedRun.ports, wake: wakeFails })).toBe(false);
+    expect(failedRun.saves.at(-1)).toMatchObject({
+      error: "Orbit could not wake the clone (instance.t3_unready).",
+      errorCode: "instance.t3_unready",
+    });
+    expect(failed.calls).not.toContain("pair env-41");
+
+    const older = gateway({ servers: [server(41, "stopped")] });
+    const olderRun = ports(older.client);
+    const unsupported = async () => ({ kind: "unsupported" }) as const;
+    expect(await runOrbitThreadStart(fresh(), { ...olderRun.ports, wake: unsupported })).toBe(
+      false,
+    );
+    expect(olderRun.saves.at(-1)).toMatchObject({
+      error: "The clone is asleep. Conn cannot wake it yet.",
     });
   });
 

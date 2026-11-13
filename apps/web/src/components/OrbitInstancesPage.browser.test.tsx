@@ -13,6 +13,7 @@ import { render, stubGlobal } from "../../test/render";
 import { setEnvironmentProvider } from "../orbit/environmentProvider";
 import { useOrbitInstanceListStore } from "../orbit/orbitInstanceList";
 import { resetOrbitInstanceRemovalsForTest } from "../orbit/orbitInstanceRemoval";
+import { useOrbitInstanceSleep } from "../orbit/orbitInstanceSleep";
 import { loadOrbitPaletteProjects } from "../orbit/orbitPaletteProjects";
 import { OrbitInstancesPage } from "./OrbitInstancesPage";
 import { OrbitPanelLayout } from "./OrbitPanel";
@@ -226,7 +227,7 @@ describe("Orbit Instances page", () => {
     );
   });
 
-  it("starts a thread in a running Instance and says why a stopped or lost one cannot", async () => {
+  it("starts a thread in a running or asleep Instance and says why a lost one cannot", async () => {
     using _env = setup(async () => ENVIRONMENTS);
     await using _screen = await renderPage();
     const newThread = (name: string) =>
@@ -253,6 +254,12 @@ describe("Orbit Instances page", () => {
       ENVIRONMENTS,
     );
 
+    // Conn wakes an asleep Instance when a thread starts in it.
+    await expect.element(newThread("old-spike")).not.toHaveAttribute("aria-disabled");
+    await vi.waitFor(() => expect(row("old-spike").element().textContent).toContain("· Stopped ·"));
+    // An older Gateway without the wake route: today's reason, and the button stays blocked.
+    // A fixed time far ahead, so the memory of an older Gateway cannot expire in the test.
+    useOrbitInstanceSleep.setState({ unsupportedAt: Number.MAX_SAFE_INTEGER });
     await expect.element(newThread("old-spike")).toHaveAttribute("aria-disabled", "true");
     await expect
       .element(newThread("old-spike"))
@@ -272,6 +279,7 @@ describe("Orbit Instances page", () => {
     await userEvent.keyboard("{Enter}");
     await userEvent.click(newThread("lost"), { force: true });
     expect(mocks.openInstance).toHaveBeenCalledTimes(1);
+    useOrbitInstanceSleep.setState({ unsupportedAt: null });
   });
 
   it("shows skeleton rows while loading, then the Gateway notice with a working Retry", async () => {

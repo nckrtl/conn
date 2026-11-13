@@ -112,5 +112,36 @@ export function orbitInstanceRemoveNeedsAck(input: {
 }): boolean {
   if (input.workingCount > 0) return true;
   if (input.git === undefined) return false;
-  return input.git.state !== "known" || input.git.uncommitted > 0 || input.git.unpushed > 0;
+  // Orbit counts a branch without an upstream as work that is not on the remote.
+  return (
+    input.git.state !== "known" ||
+    input.git.uncommitted > 0 ||
+    input.git.unpushed > 0 ||
+    !input.git.hasUpstream
+  );
+}
+
+/** How long a Git read before a remove may take at most; the sheet waits only `…_WAIT_MS`. */
+const ORBIT_INSTANCE_GIT_READ_TIMEOUT_MS = 10_000;
+/** The remove sheet keeps its button off this long while the Git read runs, then acts as before. */
+export const ORBIT_INSTANCE_GIT_READ_WAIT_MS = 1_000;
+
+/**
+ * Reads one Instance's Git state when the remove sheet opens. Undefined when Orbit cannot answer
+ * it (an older Gateway without the read answers 404, or any error): the sheet then works as
+ * before and Orbit's refusal at the click names the state. Accepts `data` or `data.git`.
+ */
+export async function readOrbitInstanceGit(
+  client: { readonly instanceGit: (instanceId: number, timeoutMs: number) => Promise<unknown> },
+  instanceId: number,
+): Promise<OrbitInstanceGitState | undefined> {
+  try {
+    const data = await client.instanceGit(instanceId, ORBIT_INSTANCE_GIT_READ_TIMEOUT_MS);
+    const record =
+      typeof data === "object" && data !== null ? (data as Record<string, unknown>) : null;
+    if (record === null) return undefined;
+    return parseOrbitInstanceGit("git" in record ? record.git : record);
+  } catch {
+    return undefined;
+  }
 }

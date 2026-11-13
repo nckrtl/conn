@@ -99,14 +99,22 @@ function setup(
   gateway: (request: OrbitGatewayRequest) => Promise<OrbitGatewayResponse> = async () => {
     throw new Error("no Gateway call expected");
   },
+  /** Orbit's answer to the Git read when the remove dialog opens; default: an older Gateway. */
+  gitRead: (request: OrbitGatewayRequest) => Promise<OrbitGatewayResponse> = async () =>
+    answer(404, { error: { code: "http.404", message: "Not Found.", details: {} } }),
 ) {
-  const real = createOrbitGatewayClient(gateway);
+  const real = createOrbitGatewayClient((request) =>
+    request.method === "GET" && /^\/instances\/\d+\/git$/.test(request.path)
+      ? gitRead(request)
+      : gateway(request),
+  );
   mocks.client = {
     me: async () => ({ id: 11, name: "mini", wireguardIp: "10.44.0.9", profile: null }),
     environments,
     projects: async () => PROJECTS,
     destroyInstance: real.destroyInstance,
     operation: real.operation,
+    instanceGit: real.instanceGit,
   } satisfies Partial<OrbitGatewayClient>;
   resetOrbitInstanceRemovalsForTest();
   window.localStorage.removeItem("conn:orbit-instance-removals:v1");
@@ -329,7 +337,7 @@ const refusal = (code: string, message: string, details: unknown = {}) =>
   answer(409, { error: { code, message, details } });
 
 describe("Removing an Instance", () => {
-  it("asks once, takes Orbit's unknown-state refusal as the tick, shows Removing…, then drops the row", async () => {
+  it("against an older Gateway (no Git read): asks once, takes Orbit's unknown-state refusal as the tick, shows Removing…, then drops the row", async () => {
     const requests: OrbitGatewayRequest[] = [];
     let finish: () => void = () => {};
     const finished = new Promise<void>((resolve) => {
@@ -475,5 +483,177 @@ describe("Removing an Instance", () => {
       .toBeVisible();
     await userEvent.click(row("pricing-page").getByRole("button", { name: "Retry" }));
     await vi.waitFor(() => expect(destroys).toBe(2));
+  });
+});
+
+const gitState = (data: unknown) => async () => answer(200, { data });
+const destroys = (requests: readonly OrbitGatewayRequest[]) =>
+  requests.filter((request) => request.method === "POST").map((request) => request.body);
+
+describe("Removing an Instance, Git state read when the dialog opens", () => {
+  it("clean: no warning, and one click removes", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async (request) => {
+        requests.push(request);
+        return destroyOperation("queued");
+      },
+      gitState({
+        state: "known",
+        branch: "main",
+        uncommitted: 0,
+        unpushed: 0,
+        has_upstream: true,
+        read_at: "2026-11-13T19:00:00Z",
+      }),
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+    const dialog = page.getByRole("alertdialog");
+    const confirm = dialog.getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm).toBeEnabled();
+    await expect.element(dialog.getByRole("checkbox")).not.toBeInTheDocument();
+    await userEvent.click(confirm);
+    await expect.element(row("pricing-page").getByText("Removing…")).toBeVisible();
+    expect(destroys(requests)).toEqual([{ acknowledge_unsaved: false }]);
+  });
+
+  it("work: the warning with the counts from the start; the ticked click removes at once", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async (request) => {
+        requests.push(request);
+        return destroyOperation("queued");
+      },
+      gitState({
+        state: "known",
+        branch: "feature-x",
+        uncommitted: 3,
+        unpushed: 2,
+        has_upstream: true,
+        read_at: "2026-11-13T19:00:00Z",
+      }),
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+    const dialog = page.getByRole("alertdialog");
+    await expect
+      .element(dialog.getByText("This Instance holds work that is not on the remote:"))
+      .toBeVisible();
+    await expect.element(dialog.getByText("3 uncommitted changes")).toBeVisible();
+    await expect
+      .element(dialog.getByText("2 commits not pushed on branch feature-x"))
+      .toBeVisible();
+    const confirm = dialog.getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm).toBeDisabled();
+    await userEvent.click(dialog.getByText("Remove it anyway. This work is lost."));
+    await expect.element(confirm).toBeEnabled();
+    await userEvent.click(confirm);
+    await expect.element(row("pricing-page").getByText("Removing…")).toBeVisible();
+    expect(destroys(requests)).toEqual([{ acknowledge_unsaved: true }]);
+  });
+
+  it("unknown: Orbit's sentence and the tick from the start; the ticked click removes at once", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async (request) => {
+        requests.push(request);
+        return destroyOperation("queued");
+      },
+      gitState({ state: "unknown", reason: "stopped" }),
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("old-spike").getByRole("button", { name: "Remove Instance" }));
+    const dialog = page.getByRole("alertdialog");
+    await expect
+      .element(
+        dialog.getByText(
+          "Orbit cannot tell whether this Instance holds work that is not on the remote.",
+        ),
+      )
+      .toBeVisible();
+    const confirm = dialog.getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm).toBeDisabled();
+    await userEvent.click(dialog.getByText("Remove it anyway. Any unsaved work is lost."));
+    await userEvent.click(confirm);
+    await vi.waitFor(() => expect(destroys(requests)).toEqual([{ acknowledge_unsaved: true }]));
+  });
+
+  it("a state that changed before the click: Orbit's refusal opens the dialog again with it", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async (request) => {
+        requests.push(request);
+        const body = request.body as { acknowledge_unsaved: boolean };
+        return body.acknowledge_unsaved
+          ? destroyOperation("queued")
+          : refusal("instance.unsaved_work", "The Instance holds unsaved work.", {
+              uncommitted: 2,
+              unpushed: 0,
+              state: "dirty",
+            });
+      },
+      gitState({
+        state: "known",
+        branch: "main",
+        uncommitted: 0,
+        unpushed: 0,
+        has_upstream: true,
+        read_at: null,
+      }),
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+    const confirm = page.getByRole("alertdialog").getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm).toBeEnabled();
+    await userEvent.click(confirm);
+    await expect
+      .element(page.getByRole("alertdialog").getByText("2 uncommitted changes"))
+      .toBeVisible();
+    await userEvent.click(page.getByText("Remove it anyway. This work is lost."));
+    await userEvent.click(
+      page.getByRole("alertdialog").getByRole("button", { name: "Remove Instance" }),
+    );
+    await vi.waitFor(() =>
+      expect(destroys(requests)).toEqual([
+        { acknowledge_unsaved: false },
+        { acknowledge_unsaved: true },
+      ]),
+    );
+  });
+
+  it("a slow read: Remove Instance waits only a moment, then works as before", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async (request) => {
+        requests.push(request);
+        return destroyOperation("queued");
+      },
+      () => new Promise<OrbitGatewayResponse>(() => {}),
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+    const dialog = page.getByRole("alertdialog");
+    const confirm = dialog.getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm).toBeDisabled();
+    await expect.element(confirm, { timeout: 3_000 }).toBeEnabled();
+    await expect.element(dialog.getByRole("checkbox")).not.toBeInTheDocument();
+    await userEvent.click(confirm);
+    await vi.waitFor(() => expect(destroys(requests)).toEqual([{ acknowledge_unsaved: false }]));
   });
 });

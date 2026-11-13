@@ -21,7 +21,11 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { deriveProjectIdentity } from "@t3tools/shared/projectIdentity";
-import type { OrbitInstanceGitState } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  ORBIT_INSTANCE_GIT_READ_WAIT_MS,
+  readOrbitInstanceGit,
+  type OrbitInstanceGitState,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { useState } from "react";
 
 import { cn } from "../lib/utils";
@@ -205,10 +209,42 @@ function InstanceThreads({ row }: { readonly row: OrbitInstanceWithThreads }) {
   );
 }
 
-/** The row the remove dialog asks about, with the Git state Orbit's refusal named, if any. */
+/**
+ * The row the remove dialog asks about, with the Git state Orbit named (the read when the dialog
+ * opened, or its refusal at the click). `checking`: the read runs and Remove Instance waits.
+ */
 interface RemoveRequest {
   readonly row: OrbitInstanceWithThreads;
   readonly git: OrbitInstanceGitState | undefined;
+  readonly checking?: boolean;
+  readonly opened?: symbol;
+}
+
+/**
+ * The remove dialog's request. Opening it asks Orbit for the Instance's Git state at once, so the
+ * dialog shows the truth before the click. Remove Instance waits for the answer at most
+ * `ORBIT_INSTANCE_GIT_READ_WAIT_MS`; after that, or without an answer (an older Gateway), the
+ * dialog works as before. A later answer still updates the dialog until the click.
+ */
+function useRemoveRequest() {
+  const [request, setRequest] = useState<RemoveRequest | null>(null);
+  const open = (row: OrbitInstanceWithThreads) => {
+    const opened = Symbol(String(row.id));
+    const update = (change: (current: RemoveRequest) => RemoveRequest) =>
+      setRequest((current) => (current?.opened === opened ? change(current) : current));
+    const client = desktopOrbitGatewayClient();
+    setRequest({ row, git: row.git, checking: client !== null, opened });
+    if (client === null) return;
+    const wait = setTimeout(
+      () => update((current) => ({ ...current, checking: false })),
+      ORBIT_INSTANCE_GIT_READ_WAIT_MS,
+    );
+    void readOrbitInstanceGit(client, row.id).then((git) => {
+      clearTimeout(wait);
+      update((current) => ({ ...current, checking: false, git: git ?? current.git }));
+    });
+  };
+  return [request, setRequest, open] as const;
 }
 
 async function removeInstance(
@@ -393,7 +429,7 @@ export function OrbitInstancesPage() {
   const threads = useVisibleThreadShells();
   const [query, setQuery] = useState("");
   const [projectId, setProjectId] = useState<number | null>(null);
-  const [removeRequest, setRemoveRequest] = useState<RemoveRequest | null>(null);
+  const [removeRequest, setRemoveRequest, openRemoveRequest] = useRemoveRequest();
   const listedIds = new Set(list.status === "loaded" ? list.rows.map((row) => row.id) : []);
 
   const rows =
@@ -486,7 +522,7 @@ export function OrbitInstancesPage() {
                 row={row}
                 listed={listedIds.has(row.id)}
                 removal={removals[row.id]}
-                onRemove={() => setRemoveRequest({ row, git: row.git })}
+                onRemove={() => openRemoveRequest(row)}
                 onRetry={(acknowledgeUnsaved) =>
                   void removeInstance(row, row.git, acknowledgeUnsaved, setRemoveRequest)
                 }
@@ -508,6 +544,7 @@ export function OrbitInstancesPage() {
                 git: removeRequest.git,
               }
         }
+        checking={removeRequest?.checking === true}
         onCancel={() => setRemoveRequest(null)}
         onConfirm={(acknowledgeUnsaved) => {
           if (removeRequest === null) return;

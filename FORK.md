@@ -80,7 +80,12 @@ behavior and draws the shell inside it: `AppRouteModal` is the frosted frame,
 `AppRouteModalHeader` the transparent 44px header, `AppRouteModalCard` the inset
 card, and `APP_ROUTE_MODAL_NAV_CLASS` the inset Settings nav beside the card.
 On a conflict there, take upstream's routing and dismissal logic and keep these
-four pieces.
+four pieces. The modal floats over the app, not over the desktop: its frame uses
+`--shell-modal-fill` (94%, which `html.electron-macos` does not thin like
+`--shell-fill`), and its backdrop is `DialogBackdrop variant="app"`
+(`app-modal-backdrop`: 80% `--background` and the glass blur), so a bright
+browser page behind it neither tints the frame nor stays readable. Small dialogs
+and the palette keep the lighter `dialog-backdrop`.
 
 The terminal's actions float in a `ToolbarGroup` over its top right corner, and
 the dark chat composer is a step lighter than the chat card (`--shell-composer`).

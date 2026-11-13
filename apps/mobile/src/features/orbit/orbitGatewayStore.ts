@@ -1,4 +1,5 @@
 import {
+  connectionRefusedCredential,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
   forgetPairingRevoked,
   isFinalPairingError,
@@ -219,15 +220,45 @@ function readSessionRenewals(environmentIds: readonly string[], now: number): Se
     const connection = Option.getOrNull(
       AsyncResult.value(appAtomRegistry.get(environmentCatalog.stateAtom(id))),
     );
-    const authenticationRefused =
-      connection?.phase === "blocked" &&
-      connection.lastFailure?._tag === "ConnectionBlockedError" &&
-      connection.lastFailure.reason === "authentication";
+    const authenticationRefused = connectionRefusedCredential(connection);
     const result = appAtomRegistry.get(environmentSession.sessionStateAtom(id));
     const session = result._tag === "Failure" ? null : Option.getOrNull(AsyncResult.value(result));
     const reason = sessionRenewalReason({ authenticationRefused, session, now });
     return reason === null ? [] : [{ environmentId, reason }];
   });
+}
+
+/**
+ * Conn: unsubscribe functions of the saved Orbit servers whose connection this store watches. A
+ * refused credential arrives seconds after the refresh that the app's return to the front started
+ * (the connection retries at the same moment), so that refresh cannot see it; the watch runs one
+ * more refresh as soon as the server refuses. The planner's backoff keeps it to one renewal.
+ */
+const refusalWatches = new Map<string, () => void>();
+
+function watchCredentialRefusals(environmentIds: readonly string[]): void {
+  const wanted = new Set(environmentIds);
+  for (const [environmentId, unsubscribe] of refusalWatches) {
+    if (wanted.has(environmentId)) continue;
+    unsubscribe();
+    refusalWatches.delete(environmentId);
+  }
+  for (const environmentId of wanted) {
+    if (refusalWatches.has(environmentId)) continue;
+    let refused = false;
+    const unsubscribe = appAtomRegistry.subscribe(
+      environmentCatalog.stateAtom(environmentId as EnvironmentId),
+      (result) => {
+        const next = connectionRefusedCredential(Option.getOrNull(AsyncResult.value(result)));
+        if (next && !refused && state.provider === "orbit") {
+          // A running refresh may have read the state before the refusal: run one after it.
+          void (refreshing ?? Promise.resolve()).then(() => refreshOrbitGateway());
+        }
+        refused = next;
+      },
+    );
+    refusalWatches.set(environmentId, unsubscribe);
+  }
 }
 
 /** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
@@ -266,6 +297,13 @@ async function reconcileEnvironments(
     )
     .map((entry) => entry.environmentId);
   const now = Date.now();
+  // Conn: only bearer sessions, the kind a pairing gives; a new pairing cannot fix a relay or SSH
+  // connection's sign-in.
+  const bearerIds = [...catalog.entries.entries()]
+    .filter(([, entry]) => entry.target._tag === "BearerConnectionTarget")
+    .map(([environmentId]) => String(environmentId));
+  const orbitIds = new Set((orbit ?? []).map((entry) => entry.environmentId));
+  watchCredentialRefusals(bearerIds.filter((environmentId) => orbitIds.has(environmentId)));
   const plan = planEnvironmentProvider({
     provider: state.provider,
     saved,
@@ -275,14 +313,7 @@ async function reconcileEnvironments(
     // Conn: a thread start pairs its own clone; the sync must not pair it a second time.
     heldInstanceIds: heldOrbitInstanceIds(),
     requestedEnvironmentIds: [...requestedEnvironmentIds],
-    // Conn: only bearer sessions, the kind a pairing gives; a new pairing cannot fix a relay
-    // or SSH connection's sign-in.
-    renew: readSessionRenewals(
-      [...catalog.entries.entries()]
-        .filter(([, entry]) => entry.target._tag === "BearerConnectionTarget")
-        .map(([environmentId]) => String(environmentId)),
-      now,
-    ),
+    renew: readSessionRenewals(bearerIds, now),
     now,
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));

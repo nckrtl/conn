@@ -1,6 +1,7 @@
 import type { AuthSessionState } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
+import type { SupervisorConnectionState } from "../connection/model.ts";
 import type { OrbitGatewayEnvironment } from "./client.ts";
 
 /**
@@ -85,6 +86,22 @@ export function sessionRenewalReason(input: {
   const endsAt = DateTime.toEpochMillis(session.expiresAt);
   if (endsAt <= input.now) return "expired";
   return endsAt - input.now < SESSION_RENEW_BEFORE_MS ? "expiring" : null;
+}
+
+/**
+ * Conn: whether the server refused this connection's credential and no attempt has connected
+ * since. Bringing the app to the front moves a blocked connection back to `connecting` while it
+ * keeps that failure, so the phase alone misses a refusal exactly when the app refreshes.
+ */
+export function connectionRefusedCredential(
+  connection: Pick<SupervisorConnectionState, "phase" | "lastFailure"> | null,
+): boolean {
+  return (
+    connection !== null &&
+    connection.phase !== "connected" &&
+    connection.lastFailure?._tag === "ConnectionBlockedError" &&
+    connection.lastFailure.reason === "authentication"
+  );
 }
 
 /** A saved environment the provider manages. The desktop's own local backend is never passed in. */

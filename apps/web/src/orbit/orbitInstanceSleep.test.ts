@@ -47,6 +47,7 @@ function harness(outcome: () => Promise<OrbitInstanceWakeOutcome>) {
       ? Promise.resolve()
       : new Promise<void>((resolve) => waiters.push({ entry, times, resolve }));
   let listing: OrbitGatewayEnvironment[] = [];
+  let active = true;
   const client = {
     environments: async () => {
       record("list");
@@ -65,6 +66,8 @@ function harness(outcome: () => Promise<OrbitInstanceWakeOutcome>) {
       record(`wake ${instanceId}`);
       return outcome();
     },
+    userActive: () => active,
+    gatewayClient: () => client,
     now: () => clock,
     later: (run) => run(),
   });
@@ -82,6 +85,9 @@ function harness(outcome: () => Promise<OrbitInstanceWakeOutcome>) {
     },
     advance: (ms: number) => {
       clock += ms;
+    },
+    setActive: (next: boolean) => {
+      active = next;
     },
   };
 }
@@ -216,5 +222,56 @@ describe("createOrbitInstanceSleepController", () => {
     await logged("park env-41", 2);
 
     expect(log).toEqual(["park env-41", "release env-41", "wake 41", "park env-41"]);
+  });
+
+  it("parks a shown Instance while nobody works in the window, and wakes it on the next input", async () => {
+    const { controller, list, log, logged, setActive } = harness(awake);
+    setActive(false);
+    await list([server(41, "running")]);
+    const release = controller.hold("env-41");
+    // Frozen overnight with the window idle: the list read parks it and wakes nothing.
+    await list([server(41, "stopped")]);
+    await controller.ensureAwake("env-41", "reconnecting");
+    expect(log).toEqual(["park env-41"]);
+
+    setActive(true);
+    controller.activity();
+    await logged("retry env-41");
+    expect(log).toEqual(["park env-41", "release env-41", "wake 41", "retry env-41"]);
+    release();
+  });
+
+  it("treats a 404 for an Instance Orbit no longer lists as a failed wake, not an older Gateway", async () => {
+    const { controller, list, setListing, log } = harness(async () => ({ kind: "unsupported" }));
+    await list([server(41, "stopped")]);
+    const release = controller.hold("env-41");
+    setListing([]);
+    await controller.ensureAwake("env-41", "available");
+
+    expect(log).toEqual(["park env-41", "release env-41", "wake 41", "list"]);
+    expect(useOrbitInstanceSleep.getState().unsupportedAt).toBeNull();
+    release();
+  });
+
+  it("reads the list itself in a window no profile sync feeds, and wakes once", async () => {
+    const { controller, setListing, log, logged } = harness(awake);
+    setListing([server(41, "stopped")]);
+    const release = controller.hold("env-41");
+    await controller.ensureAwake("env-41", "connecting");
+    await logged("retry env-41");
+
+    expect(log.filter((entry) => entry === "wake 41")).toHaveLength(1);
+    expect(log[0]).toBe("list");
+    release();
+  });
+
+  it("keeps an Instance the start runner woke from being parked by an older list read", async () => {
+    const { controller, client, list, log } = harness(awake);
+    await list([server(41, "stopped")]);
+    log.length = 0;
+    await expect(controller.wakeForStart(client, 41)).resolves.toEqual({ kind: "awake" });
+    await list([server(41, "stopped")]);
+
+    expect(log).toEqual(["wake 41", "release env-41"]);
   });
 });

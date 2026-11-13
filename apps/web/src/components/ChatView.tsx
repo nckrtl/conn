@@ -489,9 +489,11 @@ export default function ChatView(props: ChatViewProps) {
   const environmentById = new Map(
     environments.map((environment) => [environment.environmentId, environment]),
   );
-  // Conn: the shown thread's or draft's environment is in use; an asleep Instance wakes.
+  // Conn: the shown thread's or draft's environment is in use; an asleep Instance wakes. A thread
+  // kept mounted behind another page (Settings, Usage) is not in use.
+  const shownInBackground = use(BackgroundThreadContext);
   useOrbitEnvironmentInUse(
-    environmentId,
+    shownInBackground ? null : environmentId,
     environmentById.get(environmentId)?.connection.phase ?? null,
   );
   const baseComposerDraftTarget: ScopedThreadRef | DraftId =

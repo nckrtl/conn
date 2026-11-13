@@ -25,6 +25,7 @@ import {
   loadSectionState,
   saveSectionState,
 } from "./profileSyncStorage";
+import { registerOrbitSleepClient } from "./orbitInstanceSleep";
 import { createSerialRunner } from "./serialRunner";
 import { trackNonUserThemeChanges } from "./themeOrigin";
 import {
@@ -75,6 +76,9 @@ let requestSync: (() => Promise<void>) | null = null;
 export function syncOrbitProfileNow(): Promise<void> {
   return requestSync?.() ?? Promise.resolve();
 }
+
+// Conn: every window's sleep controller reads the Gateway through this window's client.
+registerOrbitSleepClient(() => desktopOrbitGatewayClient());
 
 /** The Gateway client over the desktop main process, or null outside the desktop app. */
 export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {

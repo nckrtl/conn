@@ -15,7 +15,10 @@ import {
  */
 export type OrbitInstanceWakeOutcome =
   | { readonly kind: "awake" }
-  /** The Gateway has no wake route (404 or 405): Conn behaves as before the wake existed. */
+  /**
+   * The wake call answered 404 or 405: an older Gateway without the route, or an Instance Orbit no
+   * longer knows. The caller tells them apart by the Gateway's list.
+   */
   | { readonly kind: "unsupported" }
   | { readonly kind: "failed"; readonly code: string; readonly message: string };
 
@@ -70,6 +73,11 @@ export function createOrbitInstanceWaker(
             await sleep(BUSY_RETRY_MS);
             continue;
           }
+          // Only the wake route itself can be missing; Orbit answers an unknown Instance the
+          // same way, so the caller checks that the Instance is still listed.
+          if (isOrbitGatewayError(error) && (error.status === 404 || error.status === 405)) {
+            return { kind: "unsupported" };
+          }
           throw error;
         }
       }
@@ -92,7 +100,6 @@ export function createOrbitInstanceWaker(
       };
     } catch (error) {
       if (isOrbitGatewayError(error)) {
-        if (error.status === 404 || error.status === 405) return { kind: "unsupported" };
         return { kind: "failed", code: error.code, message: error.message };
       }
       return {

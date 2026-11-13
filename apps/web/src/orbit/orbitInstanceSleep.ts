@@ -27,7 +27,15 @@ const FAILED_WAKE_PAUSE_MS = 30_000;
 /** A fresh list read for an environment in use that is not connected, at most this often. */
 const FRESH_READ_EVERY_MS = 5_000;
 /** A listing read while a wake ran may still say `stopped`: trust the wake this long. */
-const WOKEN_GRACE_MS = 30_000;
+const WOKEN_GRACE_MS = 10_000;
+/** A Gateway list older than this is read again before a shown environment is judged. */
+const LISTING_STALE_MS = 45_000;
+/** A window counts as worked in this long after its last input. */
+const USER_ACTIVE_MS = 5 * 60_000;
+/** How often a window checks whether a profile sync fed it a list lately. */
+const UNFED_POLL_MS = 30_000;
+/** The environment provider's storage key (environmentProvider.ts), read here without a cycle. */
+const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 /** A view that remounts (a route swap) holds the environment again within this. */
 const RELEASE_SETTLE_MS = 1_000;
 const UNSUPPORTED_STORAGE_KEY = "t3code:orbit-wake-unsupported-at:v1";
@@ -91,6 +99,13 @@ export interface OrbitInstanceSleepPorts {
     client: OrbitGatewayClient,
     instanceId: number,
   ) => Promise<OrbitInstanceWakeOutcome>;
+  /**
+   * True while the user works in this window (recent input, window visible). A shown thread wakes
+   * its Instance only then, so a window left open on a thread does not keep the Instance awake.
+   */
+  readonly userActive: () => boolean;
+  /** The Gateway client of this window, for a window whose list reads come from nowhere else. */
+  readonly gatewayClient: () => OrbitGatewayClient | null;
   readonly now: () => number;
   /** Runs `run` after `ms`; tests run it at once. */
   readonly later?: (run: () => void, ms: number) => void;
@@ -99,12 +114,14 @@ export interface OrbitInstanceSleepPorts {
 export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPorts) {
   let client: OrbitGatewayClient | null = null;
   let listed = new Map<string, ListedInstance>();
+  let observedAt: number | null = null;
   const inUse = new Map<string, number>();
   const failedAt = new Map<string, number>();
   const wokenAt = new Map<string, number>();
-  const freshReadAt = new Map<string, number>();
+  let freshReadAt: number | null = null;
   const waking = new Set<string>();
   const later = ports.later ?? ((run: () => void, ms: number) => void setTimeout(run, ms));
+  const currentClient = () => client ?? ports.gatewayClient();
 
   const parked = () => useOrbitInstanceSleep.getState().parked;
   const setParked = (environmentId: string, hold: boolean): Promise<void> => {
@@ -125,29 +142,58 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
     const woken = wokenAt.get(environmentId);
     return woken === undefined || ports.now() - woken >= WOKEN_GRACE_MS;
   };
+  /** Records a wake that succeeded; returns the Instance's environments. */
+  const markAwake = (instanceId: number): string[] => {
+    const environmentIds: string[] = [];
+    for (const [environmentId, item] of listed) {
+      if (item.instanceId !== instanceId) continue;
+      failedAt.delete(environmentId);
+      wokenAt.set(environmentId, ports.now());
+      listed.set(environmentId, { ...item, stopped: false });
+      environmentIds.push(environmentId);
+    }
+    return environmentIds;
+  };
+  /**
+   * A 404 on the wake means an older Gateway only while Orbit still lists the Instance: the same
+   * answer comes for an Instance that is gone. Anything else is a failed wake.
+   */
+  const confirmUnsupported = async (
+    reader: OrbitGatewayClient,
+    instanceId: number,
+  ): Promise<OrbitInstanceWakeOutcome> => {
+    try {
+      const orbit = await reader.environments();
+      if (orbit.some((environment) => environment.instanceId === instanceId)) {
+        rememberUnsupported(ports.now());
+        await releaseAll();
+        return { kind: "unsupported" };
+      }
+    } catch {
+      // Unknown: not a reason to stop waking every Instance for an hour.
+    }
+    return { kind: "failed", code: "instance.not_found", message: "Orbit no longer lists it." };
+  };
 
   const wake = async (environmentId: string): Promise<void> => {
     const item = listed.get(environmentId);
-    if (client === null || item === undefined || waking.has(environmentId)) return;
+    const reader = currentClient();
+    if (reader === null || item === undefined || waking.has(environmentId)) return;
     const failed = failedAt.get(environmentId);
     if (failed !== undefined && ports.now() - failed < FAILED_WAKE_PAUSE_MS) return;
     waking.add(environmentId);
     try {
       // Connecting starts now, so the view shows what a slow connect shows today.
       await setParked(environmentId, false);
-      const outcome = await ports.wake(client, item.instanceId);
+      let outcome = await ports.wake(reader, item.instanceId);
+      if (outcome.kind === "unsupported")
+        outcome = await confirmUnsupported(reader, item.instanceId);
       if (outcome.kind === "awake") {
-        failedAt.delete(environmentId);
-        wokenAt.set(environmentId, ports.now());
-        const current = listed.get(environmentId);
-        if (current) listed.set(environmentId, { ...current, stopped: false });
+        markAwake(item.instanceId);
         // Nothing may have held it off meanwhile; release it again before the connect.
         await setParked(environmentId, false);
         await ports.retryNow(environmentId);
-      } else if (outcome.kind === "unsupported") {
-        rememberUnsupported(ports.now());
-        await releaseAll();
-      } else {
+      } else if (outcome.kind === "failed") {
         // The connection keeps trying as it does today, and shows today's failure.
         failedAt.set(environmentId, ports.now());
         console.warn(`Conn could not wake ${environmentId}: ${outcome.code}: ${outcome.message}`);
@@ -157,7 +203,10 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
     }
   };
 
-  /** Parks an asleep Instance nobody uses, wakes one in use, and lets an awake one connect. */
+  /**
+   * Parks an asleep Instance unless the user works in it now (then it wakes), and lets an awake one
+   * connect. A thread left open in an idle window is parked too, so it can stay asleep.
+   */
   const settle = async (environmentId: string): Promise<void> => {
     if (!orbitWakeSupported(useOrbitInstanceSleep.getState().unsupportedAt, ports.now())) {
       await setParked(environmentId, false);
@@ -168,12 +217,13 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
       return;
     }
     if (waking.has(environmentId)) return;
-    if ((inUse.get(environmentId) ?? 0) > 0) {
+    if ((inUse.get(environmentId) ?? 0) > 0 && ports.userActive()) {
       // A list read must not wait for the wake.
       void wake(environmentId);
       return;
     }
-    if (ports.isSaved(environmentId)) await setParked(environmentId, true);
+    // Also before the catalog has loaded: the registry keeps the hold for a later registration.
+    await setParked(environmentId, true);
   };
 
   /** Each Gateway list read: power states of the Instances' servers. Null outside Orbit mode. */
@@ -182,6 +232,7 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
     orbit: readonly OrbitGatewayEnvironment[] | null,
   ): Promise<void> => {
     client = nextClient;
+    observedAt = ports.now();
     if (orbit === null) {
       listed = new Map();
       await releaseAll();
@@ -211,26 +262,12 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
     }
   };
 
-  /**
-   * A window shows a thread or draft of the environment. When it is not connected and Orbit lists
-   * its Instance asleep, it wakes; an Instance listed awake whose connection fails is read again.
-   */
-  const ensureAwake = async (
-    environmentId: string,
-    phase: EnvironmentConnectionPhase | null,
-  ): Promise<void> => {
-    if (phase === "connected" || !listed.has(environmentId)) return;
-    if (!orbitWakeSupported(useOrbitInstanceSleep.getState().unsupportedAt, ports.now())) return;
-    if (isStopped(environmentId)) {
-      await wake(environmentId);
-      return;
-    }
-    if (phase !== "reconnecting" && phase !== "error") return;
-    const lastRead = freshReadAt.get(environmentId);
-    if (client === null || (lastRead !== undefined && ports.now() - lastRead < FRESH_READ_EVERY_MS))
-      return;
-    freshReadAt.set(environmentId, ports.now());
-    const reader = client;
+  /** Reads the Gateway list now, at most once per FRESH_READ_EVERY_MS for this window. */
+  const readFresh = async (): Promise<void> => {
+    const reader = currentClient();
+    if (reader === null) return;
+    if (freshReadAt !== null && ports.now() - freshReadAt < FRESH_READ_EVERY_MS) return;
+    freshReadAt = ports.now();
     let orbit: readonly OrbitGatewayEnvironment[];
     try {
       orbit = await reader.environments();
@@ -238,6 +275,41 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
       return;
     }
     await observe(reader, orbit);
+  };
+
+  /**
+   * A window shows a thread or draft of the environment. While the user works in the window and it
+   * is not connected: an Instance listed asleep wakes; otherwise the list is read again, since it
+   * may be stale or (in a second window) missing.
+   */
+  const ensureAwake = async (
+    environmentId: string,
+    phase: EnvironmentConnectionPhase | null,
+  ): Promise<void> => {
+    if (phase === "connected" || !ports.userActive()) return;
+    if (!orbitWakeSupported(useOrbitInstanceSleep.getState().unsupportedAt, ports.now())) return;
+    if (isStopped(environmentId)) {
+      await wake(environmentId);
+      return;
+    }
+    const stale = observedAt === null || ports.now() - observedAt >= LISTING_STALE_MS;
+    if (!stale && !listed.has(environmentId)) return;
+    if (!stale && phase !== "reconnecting" && phase !== "error" && phase !== "available") return;
+    await readFresh();
+    if (isStopped(environmentId) && (inUse.get(environmentId) ?? 0) > 0) await wake(environmentId);
+  };
+
+  /** The user acted in this window: wake the asleep Instances it shows. */
+  const activity = (): void => {
+    for (const environmentId of inUse.keys()) {
+      if (isStopped(environmentId)) void wake(environmentId);
+    }
+  };
+
+  /** A window no profile sync feeds (a second window) reads the list itself now and then. */
+  const pollIfUnfed = async (): Promise<void> => {
+    if (observedAt !== null && ports.now() - observedAt < LISTING_STALE_MS) return;
+    await readFresh();
   };
 
   /** Marks the environment in use until the returned release runs. */
@@ -267,18 +339,21 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
     if (!orbitWakeSupported(useOrbitInstanceSleep.getState().unsupportedAt, ports.now())) {
       return { kind: "unsupported" };
     }
-    const outcome = await ports.wake(startClient, instanceId);
-    if (outcome.kind === "unsupported") {
-      rememberUnsupported(ports.now());
-      await releaseAll();
+    let outcome = await ports.wake(startClient, instanceId);
+    if (outcome.kind === "unsupported") outcome = await confirmUnsupported(startClient, instanceId);
+    if (outcome.kind === "awake") {
+      for (const environmentId of markAwake(instanceId)) await setParked(environmentId, false);
     }
     return outcome;
   };
 
-  return { observe, ensureAwake, hold, wakeForStart };
+  return { observe, ensureAwake, hold, wakeForStart, activity, pollIfUnfed };
 }
 
 const waker = createOrbitInstanceWaker();
+
+/** The last input in this window (focus, pointer, keys). */
+let lastInputAt = typeof document !== "undefined" && document.hasFocus() ? Date.now() : 0;
 
 const controller = createOrbitInstanceSleepController({
   isSaved: (environmentId) =>
@@ -302,6 +377,9 @@ const controller = createOrbitInstanceSleepController({
     );
   },
   wake: (client, instanceId) => waker.wake(client, instanceId),
+  userActive: () =>
+    document.visibilityState === "visible" && Date.now() - lastInputAt < USER_ACTIVE_MS,
+  gatewayClient: () => desktopOrbitGatewayClientOrNull(),
   now: Date.now,
 });
 
@@ -310,10 +388,48 @@ export const ensureOrbitEnvironmentAwake = controller.ensureAwake;
 export const holdOrbitEnvironmentInUse = controller.hold;
 export const wakeOrbitInstanceForStart = controller.wakeForStart;
 
+/** Conn: the renderer's own Gateway client; set by the profile sync module, null outside Orbit. */
+let desktopClientFactory: (() => OrbitGatewayClient | null) | null = null;
+function desktopOrbitGatewayClientOrNull(): OrbitGatewayClient | null {
+  return desktopClientFactory?.() ?? null;
+}
+export function registerOrbitSleepClient(factory: () => OrbitGatewayClient | null): void {
+  desktopClientFactory = factory;
+}
+
+let windowWatched = false;
+/** Notes user input in this window, and lets a window no profile sync feeds read the list. */
+function watchWindow(): void {
+  if (windowWatched || typeof window === "undefined") return;
+  windowWatched = true;
+  let lastSignal = 0;
+  const onInput = () => {
+    lastInputAt = Date.now();
+    // Input comes in bursts: tell the controller at most every 2 s.
+    if (lastInputAt - lastSignal < 2_000) return;
+    lastSignal = lastInputAt;
+    controller.activity();
+  };
+  for (const name of ["focus", "pointerdown", "pointermove", "keydown", "wheel"] as const) {
+    window.addEventListener(name, onInput, { capture: true, passive: true });
+  }
+  setInterval(() => {
+    if (isOrbitProvider()) void controller.pollIfUnfed();
+  }, UNFED_POLL_MS);
+}
+
+function isOrbitProvider(): boolean {
+  try {
+    return window.localStorage.getItem(PROVIDER_STORAGE_KEY) === JSON.stringify("orbit");
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Conn: the window shows a thread or draft of this environment, so it is in use: an asleep Orbit
- * Instance is woken and then connected. Mount it only where the user works in the environment;
- * a list or badge that mounts it would keep Instances awake.
+ * Conn: the window shows a thread or draft of this environment, so it is in use. While the user
+ * works in the window, an asleep Orbit Instance is woken and then connected. Mount it only where the
+ * user works in the environment, never in a background view, list or badge.
  */
 export function useOrbitEnvironmentInUse(
   environmentId: string | null,
@@ -322,6 +438,7 @@ export function useOrbitEnvironmentInUse(
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers the shown environment as in use with the sleep controller while mounted
   useEffect(() => {
     if (environmentId === null) return;
+    watchWindow();
     return holdOrbitEnvironmentInUse(environmentId);
   }, [environmentId]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks Orbit to wake the shown environment's Instance when its connection is not up

@@ -109,9 +109,15 @@ describe("createOrbitInstanceWaker", () => {
     });
   });
 
-  it("calls an older Gateway without the wake route unsupported", async () => {
-    const { client, waker } = gateway([error(404, "http.404")]);
-    await expect(waker.wake(client, 41)).resolves.toEqual({ kind: "unsupported" });
+  it("calls a 404 on the wake call unsupported, and a 404 on the Operation read a failure", async () => {
+    const older = gateway([error(404, "http.404")]);
+    await expect(older.waker.wake(older.client, 41)).resolves.toEqual({ kind: "unsupported" });
+
+    const gone = gateway([ok(op("running"), 202), error(404, "http.404")]);
+    await expect(gone.waker.wake(gone.client, 41)).resolves.toMatchObject({
+      kind: "failed",
+      code: "http.404",
+    });
   });
 
   it("gives up on a wake that does not end", async () => {

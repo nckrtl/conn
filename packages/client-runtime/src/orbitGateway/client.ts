@@ -287,6 +287,8 @@ export interface OrbitGatewayOperation {
   readonly processFailureUnit?: string | null;
   /** `result.recovery.requires`: what must change before a Retry of a retained create works. */
   readonly recoveryRequires?: string | null;
+  /** True while Orbit names a place in its task queue (`capacity_wait`); absent when not sent. */
+  readonly capacityWait?: boolean;
 }
 
 export interface OrbitGatewayOperationError {
@@ -718,6 +720,7 @@ function operation(value: unknown, path: string): OrbitGatewayOperation {
     ...("result" in data ? { result: record(data.result) } : {}),
     ...processFailure(data.result),
     ...recovery(data.result),
+    ...("capacity_wait" in data ? { capacityWait: record(data.capacity_wait) !== null } : {}),
   };
 }
 

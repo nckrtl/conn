@@ -22,12 +22,18 @@ import {
 
 const ORBIT_INSTANCE_UNSAVED_WORK = "instance.unsaved_work";
 const DESTROY_OPERATION_KIND = "instance.destroy";
-/** How long Conn follows a destroy before it shows the row as failed. */
+/**
+ * After this long Conn reads the Operation at the slowest rate. It never calls a running destroy
+ * failed: a batch on one Node queues for minutes, and only Orbit knows when it ends.
+ */
 export const DESTROY_TIMEOUT_MS = 10 * 60_000;
+const SLOW_POLL_SECONDS = 15;
 /** A lost answer to the destroy request repeats under the same key for this long. */
 const ADMISSION_RETRY_MS = 60_000;
 
 const DESTROY_FAILED_TEXT = "Orbit did not finish removing the Instance.";
+/** A saved removal whose Operation Orbit no longer shows, while the Instance is still listed. */
+export const ORBIT_REMOVAL_LOST_TEXT = "Conn lost track of this removal.";
 
 export type OrbitInstanceRemoveOutcome =
   /** Removed, or already gone (any 404; Orbit answers `http.404` for a missing Instance). */
@@ -37,7 +43,92 @@ export type OrbitInstanceRemoveOutcome =
    * first release: `state: "unknown"`, null counts). Nothing changed.
    */
   | { readonly kind: "unsaved_work"; readonly git: OrbitInstanceGitState }
-  | { readonly kind: "failed"; readonly code: string; readonly message: string };
+  | { readonly kind: "failed"; readonly code: string; readonly message: string }
+  /** Following a saved Operation: Orbit answers 404 for it, so its end is unknown. */
+  | { readonly kind: "lost" }
+  /** The caller stopped following (`stopped()`); the Operation may still run. */
+  | { readonly kind: "stopped" };
+
+/** What the row shows while Orbit works on an admitted destroy. */
+export type OrbitInstanceRemoveProgress =
+  /** Admitted; `operationId` is saved so a restart can follow it again. */
+  | { readonly kind: "admitted"; readonly operationId: number }
+  /** Queued behind other work on the Node (another removal, mostly). */
+  | { readonly kind: "waiting" }
+  /** Running; `step` is a plain text of Orbit's step, or null when it has none. */
+  | { readonly kind: "running"; readonly step: string | null };
+
+/**
+ * Plain words for the steps of today's `instance.destroy` (Orbit 2026-11-13). Step names may carry
+ * a `-<n>-<n>` suffix per Process; unknown steps show no step text.
+ */
+const DESTROY_STEP_TEXT: ReadonlyArray<readonly [readonly string[], string]> = [
+  [["Prepare container removal"], "Preparing"],
+  [
+    ["Write the git credential", "Check work is pushed", "Remove the git credential"],
+    "Checking for unpushed work",
+  ],
+  [["Withdraw the Route"], "Taking the address offline"],
+  [
+    [
+      "Stop, remove Processes",
+      "Disable and stop the unit",
+      "Stop the unit",
+      "Remove the unit",
+      "Reload systemd",
+    ],
+    "Stopping its processes",
+  ],
+  [
+    [
+      "Remove the container",
+      "Delete the container",
+      "Check container removal",
+      "Read container removal",
+      "Clean container files",
+    ],
+    "Removing the container",
+  ],
+  [
+    ["Remove hibernation files", "Remove the source", "Remove the dev environment"],
+    "Removing its files",
+  ],
+  [["Verify it is gone", "Check it is gone"], "Checking it is gone"],
+];
+
+export function orbitInstanceRemoveStepText(step: string | null | undefined): string | null {
+  if (step === null || step === undefined) return null;
+  const name = step.replace(/(-\d+)+$/, "").trim();
+  if (name.startsWith("withdraw_")) return "Taking the address offline";
+  return DESTROY_STEP_TEXT.find(([names]) => names.includes(name))?.[1] ?? null;
+}
+
+/** A destroy Operation still at work, as the row shows it. */
+export function orbitInstanceRemoveProgress(
+  operation: OrbitGatewayOperation,
+): Exclude<OrbitInstanceRemoveProgress, { kind: "admitted" }> {
+  if (operation.status === "queued" || operation.status === "waiting" || operation.capacityWait) {
+    return { kind: "waiting" };
+  }
+  return { kind: "running", step: orbitInstanceRemoveStepText(operation.currentStep) };
+}
+
+/** The outcome of an ended destroy Operation, or null while it still runs. */
+export function orbitInstanceRemoveOutcomeOf(
+  operation: OrbitGatewayOperation,
+): Extract<OrbitInstanceRemoveOutcome, { kind: "removed" | "failed" }> | null {
+  if (operation.status === "succeeded") return { kind: "removed" };
+  // `interrupted` ends it too; `error.detail` may be null. A failed start (Nick's case on
+  // 2026-11-13, `swamp.start_unavailable`) has a detail and no message.
+  if (OPERATION_TERMINAL_STATUSES.has(operation.status)) {
+    return {
+      kind: "failed",
+      code: operation.error?.code ?? operation.errorCode ?? `operation.${operation.status}`,
+      message: operation.error?.message ?? operation.error?.detail ?? DESTROY_FAILED_TEXT,
+    };
+  }
+  return null;
+}
 
 /** One key per remove attempt: Retry and a ticked second try are new attempts. */
 export function orbitInstanceRemoveKey(instanceId: number, attemptAt: number): string {
@@ -64,6 +155,12 @@ export interface OrbitInstanceRemovePorts {
   readonly now: () => number;
 }
 
+export interface OrbitInstanceRemoveFollow {
+  readonly onProgress?: (progress: OrbitInstanceRemoveProgress) => void;
+  /** Checked before each read; true ends the follow with `stopped`. */
+  readonly stopped?: () => boolean;
+}
+
 /**
  * Asks Orbit to destroy the Instance and follows the Operation to its end. Never throws: every
  * result is an outcome the row or the dialog shows.
@@ -76,7 +173,7 @@ export async function removeOrbitInstance(
     readonly idempotencyKey: string;
     /** The list's Git state, kept where Orbit's refusal leaves a count out. */
     readonly git?: OrbitInstanceGitState;
-  },
+  } & OrbitInstanceRemoveFollow,
 ): Promise<OrbitInstanceRemoveOutcome> {
   const start = ports.now();
   let operation: OrbitGatewayOperation;
@@ -110,31 +207,54 @@ export async function removeOrbitInstance(
       message: `The Orbit Gateway answered with a ${operation.kind} Operation.`,
     };
   }
+  input.onProgress?.({ kind: "admitted", operationId: operation.id });
+  return followDestroy(ports, operation, input);
+}
 
-  const deadline = ports.now() + DESTROY_TIMEOUT_MS;
+/**
+ * Follows a destroy Operation that this device saved (after a restart, or when the panel opens).
+ * A 404 on the Operation is `lost`: the caller decides from the list whether the Instance went.
+ */
+export async function followOrbitInstanceRemoval(
+  ports: OrbitInstanceRemovePorts,
+  input: { readonly operationId: number } & OrbitInstanceRemoveFollow,
+): Promise<OrbitInstanceRemoveOutcome> {
   for (;;) {
-    if (operation.status === "succeeded") return { kind: "removed" };
-    // `interrupted` ends it too; `error.detail` may be null, so only the message is read.
-    if (OPERATION_TERMINAL_STATUSES.has(operation.status)) {
-      return {
-        kind: "failed",
-        code: operation.error?.code ?? operation.errorCode ?? `operation.${operation.status}`,
-        message: operation.error?.message ?? DESTROY_FAILED_TEXT,
-      };
+    if (input.stopped?.()) return { kind: "stopped" };
+    try {
+      const operation = await ports.client.operation(input.operationId);
+      if (operation.kind !== DESTROY_OPERATION_KIND) return { kind: "lost" };
+      return await followDestroy(ports, operation, input);
+    } catch (error) {
+      if (isGatewayError(error) && error.status === 404) return { kind: "lost" };
+      if (!isLostAnswer(error)) return failed(error);
+      await ports.sleep(operationPollDelayMs(SLOW_POLL_SECONDS));
     }
-    if (ports.now() >= deadline) {
-      return { kind: "failed", code: "operation.timeout", message: DESTROY_FAILED_TEXT };
-    }
+  }
+}
+
+async function followDestroy(
+  ports: OrbitInstanceRemovePorts,
+  first: OrbitGatewayOperation,
+  follow: OrbitInstanceRemoveFollow,
+): Promise<OrbitInstanceRemoveOutcome> {
+  const slowAfter = ports.now() + DESTROY_TIMEOUT_MS;
+  let operation = first;
+  for (;;) {
+    const outcome = orbitInstanceRemoveOutcomeOf(operation);
+    if (outcome !== null) return outcome;
+    follow.onProgress?.(orbitInstanceRemoveProgress(operation));
     await ports.sleep(
-      Math.max(
-        Math.min(operationPollDelayMs(operation.pollAfterSeconds), deadline - ports.now()),
-        0,
+      operationPollDelayMs(
+        ports.now() >= slowAfter ? SLOW_POLL_SECONDS : operation.pollAfterSeconds,
       ),
     );
+    if (follow.stopped?.()) return { kind: "stopped" };
     try {
       operation = await ports.client.operation(operation.id);
     } catch (error) {
-      // A short Gateway outage does not end the destroy; the deadline does.
+      // A short Gateway outage does not end the destroy.
+      if (isGatewayError(error) && error.status === 404) return { kind: "lost" };
       if (!isLostAnswer(error)) return failed(error);
     }
   }

@@ -2,6 +2,7 @@ import {
   orbitInstanceGitLine,
   orbitInstanceRemoveText,
   type OrbitInstanceGitState,
+  type OrbitInstanceRemoveProgress,
   type OrbitInstanceRemoveTarget,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { CheckIcon, Trash2Icon, CircleAlertIcon } from "lucide-react";
@@ -44,6 +45,18 @@ export function OrbitInstanceGitLine({ git }: { readonly git: OrbitInstanceGitSt
   );
 }
 
+/**
+ * The row's second line while Orbit removes the Instance: its queue place or a plain step; null
+ * keeps the row's facts (no step yet, or a step without plain words).
+ */
+export function orbitInstanceRemovingText(
+  progress: OrbitInstanceRemoveProgress | null,
+): string | null {
+  if (progress?.kind === "waiting") return "Waiting for another removal to finish";
+  if (progress?.kind === "running") return progress.step;
+  return null;
+}
+
 /** The row's bin button, or "Removing…" while Orbit removes the Instance. */
 export function OrbitInstanceRemoveAction(props: {
   readonly removing: boolean;
@@ -77,15 +90,21 @@ export function OrbitInstanceRemoveAction(props: {
   );
 }
 
-/** A failed remove stays on the row with Retry. */
+/**
+ * A failed remove stays on the row with Retry, which sends the destroy again with the same tick.
+ * "Could not remove" when Orbit refused before it started; "Removal failed" when it started.
+ */
 export function OrbitInstanceRemoveFailure(props: {
+  readonly refused: boolean;
   readonly message: string;
   readonly onRetry: () => void;
 }) {
   return (
     <span className="flex items-center gap-1.5 text-destructive-foreground text-xs" role="alert">
       <CircleAlertIcon aria-hidden className="size-3 shrink-0" />
-      <span className="min-w-0">Could not remove: {props.message}</span>
+      <span className="min-w-0">
+        {props.refused ? "Could not remove" : "Removal failed"}: {props.message}
+      </span>
       <button
         type="button"
         className="shrink-0 text-foreground underline underline-offset-2 hover:no-underline"

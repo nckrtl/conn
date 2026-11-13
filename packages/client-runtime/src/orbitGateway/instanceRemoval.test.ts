@@ -8,8 +8,13 @@ import {
 import { parseOrbitInstanceGit } from "./instanceGit.ts";
 import {
   DESTROY_TIMEOUT_MS,
+  followOrbitInstanceRemoval,
+  orbitInstanceRemoveOutcomeOf,
+  orbitInstanceRemoveProgress,
+  orbitInstanceRemoveStepText,
   orbitInstanceRemoveText,
   removeOrbitInstance,
+  type OrbitInstanceRemoveProgress,
   type OrbitInstanceRemoveTarget,
 } from "./instanceRemoval.ts";
 
@@ -50,14 +55,26 @@ function gateway(answers: Array<OrbitGatewayResponse | Error>) {
       clock += ms;
     },
   };
-  const remove = (acknowledgeUnsaved = false, git = parseOrbitInstanceGit(undefined)) =>
+  const progress: OrbitInstanceRemoveProgress[] = [];
+  const remove = (
+    acknowledgeUnsaved = false,
+    git = parseOrbitInstanceGit(undefined),
+    stopped?: () => boolean,
+  ) =>
     removeOrbitInstance(ports, {
       instanceId: 41,
       acknowledgeUnsaved,
       idempotencyKey: "key-1",
       ...(git ? { git } : {}),
+      onProgress: (next) => progress.push(next),
+      ...(stopped ? { stopped } : {}),
     });
-  return { requests, remove, elapsed: () => clock };
+  const follow = (operationId = 77) =>
+    followOrbitInstanceRemoval(ports, {
+      operationId,
+      onProgress: (next) => progress.push(next),
+    });
+  return { requests, remove, follow, progress, elapsed: () => clock };
 }
 
 describe("removeOrbitInstance", () => {
@@ -147,7 +164,7 @@ describe("removeOrbitInstance", () => {
     ]);
   });
 
-  it("shows a failed or never-ending destroy as failed, with the Operation's code", async () => {
+  it("shows a failed or cancelled destroy as failed, with the Operation's code", async () => {
     const failing = gateway([
       ok(op("running"), 202),
       ok(
@@ -168,13 +185,6 @@ describe("removeOrbitInstance", () => {
       code: "operation.cancelled",
       message: "Orbit did not finish removing the Instance.",
     });
-
-    const stuck = gateway([
-      ok(op("running"), 202),
-      ...Array.from({ length: 400 }, () => ok(op("running"))),
-    ]);
-    expect(await stuck.remove(true)).toMatchObject({ kind: "failed", code: "operation.timeout" });
-    expect(stuck.elapsed()).toBe(DESTROY_TIMEOUT_MS);
   });
 
   it("stops polling on an interrupted Operation", async () => {
@@ -196,6 +206,107 @@ describe("removeOrbitInstance", () => {
       kind: "failed",
       code: "gateway.response_invalid",
     });
+  });
+});
+
+describe("removal states (conn remove UX, 2026-11-13)", () => {
+  it("reports admission, a queue place and plain steps while Orbit works", async () => {
+    const orbit = gateway([
+      ok(op("queued"), 202),
+      ok(op("running", { capacity_wait: { position: 2 } })),
+      ok(op("running", { current_step: "Stop, remove Processes-1-1" })),
+      ok(op("running", { current_step: "input" })),
+      ok(op("succeeded")),
+    ]);
+    expect(await orbit.remove(true)).toEqual({ kind: "removed" });
+    expect(orbit.progress).toEqual([
+      { kind: "admitted", operationId: 77 },
+      { kind: "waiting" },
+      { kind: "waiting" },
+      { kind: "running", step: "Stopping its processes" },
+      { kind: "running", step: null },
+    ]);
+  });
+
+  it("uses Orbit's detail when a failed start has no message (Nick's four removals)", async () => {
+    const orbit = gateway([
+      ok(op("queued"), 202),
+      ok(
+        op("failed", {
+          error_code: "swamp.start_unavailable",
+          error: {
+            code: "swamp.start_unavailable",
+            detail: "The native workflow start could not connect.",
+          },
+        }),
+      ),
+    ]);
+    expect(await orbit.remove(true)).toEqual({
+      kind: "failed",
+      code: "swamp.start_unavailable",
+      message: "The native workflow start could not connect.",
+    });
+  });
+
+  it.each(["failed", "cancelled", "interrupted"])(
+    "maps a %s Operation to a failure, and succeeded to removed",
+    (status) => {
+      const parse = (value: unknown) =>
+        createOrbitGatewayClient(async () => ok(value)).operation(77);
+      return Promise.all([parse(op(status)), parse(op("succeeded")), parse(op("running"))]).then(
+        ([ended, succeeded, running]) => {
+          expect(orbitInstanceRemoveOutcomeOf(ended)).toEqual({
+            kind: "failed",
+            code: `operation.${status}`,
+            message: "Orbit did not finish removing the Instance.",
+          });
+          expect(orbitInstanceRemoveOutcomeOf(succeeded)).toEqual({ kind: "removed" });
+          expect(orbitInstanceRemoveOutcomeOf(running)).toBeNull();
+          expect(orbitInstanceRemoveProgress(running)).toEqual({ kind: "running", step: null });
+        },
+      );
+    },
+  );
+
+  it("never calls a long destroy failed: it keeps reading, slower, until Orbit ends it", async () => {
+    const orbit = gateway([
+      ok(op("running"), 202),
+      ...Array.from({ length: 400 }, () => ok(op("running"))),
+      ok(op("succeeded")),
+    ]);
+    expect(await orbit.remove(true)).toEqual({ kind: "removed" });
+    expect(orbit.elapsed()).toBeGreaterThan(DESTROY_TIMEOUT_MS);
+  });
+
+  it("stops following when asked, without a verdict", async () => {
+    let reads = 0;
+    const orbit = gateway([ok(op("running"), 202), ok(op("running")), ok(op("running"))]);
+    expect(await orbit.remove(true, undefined, () => ++reads > 1)).toEqual({ kind: "stopped" });
+  });
+
+  it("follows a saved Operation again, and calls a 404 on it lost", async () => {
+    const saved = gateway([
+      ok(op("running", { current_step: "Verify it is gone" })),
+      ok(op("failed")),
+    ]);
+    expect(await saved.follow()).toMatchObject({ kind: "failed", code: "operation.failed" });
+    expect(saved.progress).toEqual([{ kind: "running", step: "Checking it is gone" }]);
+    expect(saved.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      "GET /operations/77",
+      "GET /operations/77",
+    ]);
+
+    const gone = gateway([error(404, "http.404")]);
+    expect(await gone.follow()).toEqual({ kind: "lost" });
+  });
+
+  it("names today's destroy steps in plain words, and no text for unknown steps", () => {
+    expect(orbitInstanceRemoveStepText("Withdraw the Route")).toBe("Taking the address offline");
+    expect(orbitInstanceRemoveStepText("withdraw_node-0-0")).toBe("Taking the address offline");
+    expect(orbitInstanceRemoveStepText("Remove hibernation files-2-2")).toBe("Removing its files");
+    expect(orbitInstanceRemoveStepText("Check work is pushed")).toBe("Checking for unpushed work");
+    expect(orbitInstanceRemoveStepText("compose")).toBeNull();
+    expect(orbitInstanceRemoveStepText(null)).toBeNull();
   });
 });
 

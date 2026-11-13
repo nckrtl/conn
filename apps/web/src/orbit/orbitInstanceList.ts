@@ -2,7 +2,6 @@ import {
   listOrbitInstances,
   type OrbitInstanceListRow,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { useEffect } from "react";
 import { create } from "zustand";
 
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
@@ -39,13 +38,4 @@ export async function loadOrbitInstanceList(): Promise<void> {
   if (useOrbitInstanceListStore.getState().generation === current) {
     useOrbitInstanceListStore.setState({ state: next });
   }
-}
-
-/** Reads the list each time the page opens. */
-export function useOrbitInstanceList(): OrbitInstanceListState {
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway each time the Instances page opens
-  useEffect(() => {
-    void loadOrbitInstanceList();
-  }, []);
-  return useOrbitInstanceListStore((store) => store.state);
 }

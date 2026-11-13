@@ -79,6 +79,38 @@ const DESKTOP_LAUNCH = [
   /^scripts\/(smoke-desktop-app\.ts|fixtures\/desktop-launch\/)/,
 ];
 
+// Fork: GitHub's free plan runs 20 jobs at a time, so Rust and Release Smoke run only
+// for the files they read, not for every unknown path. Main pushes (--full) still run both.
+const FORK = process.env.GITHUB_REPOSITORY !== "pingdotgg/t3code";
+// scripts/release-smoke.ts reads every manifest, the lockfile and these scripts.
+const RELEASE_SMOKE_FILES =
+  /(^|\/)package\.json$|^pnpm-(lock|workspace)\.yaml$|^\.github\/workflows\/release\.yml$|^\.github\/scripts\/relay-state-output/;
+
+function forkReleaseSmoke(files, packages) {
+  if (files.some((file) => RELEASE_SMOKE_FILES.test(file))) return true;
+  const affected = new Set(
+    files.flatMap((file) => {
+      const owners = ownersOf(file, packages);
+      if (owners) return owners;
+      const owner = packages
+        .filter((pkg) => file.startsWith(`${pkg.dir}/`))
+        .sort((a, b) => b.dir.length - a.dir.length)[0];
+      return owner ? [owner.name] : [];
+    }),
+  );
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const pkg of packages) {
+      if (!affected.has(pkg.name) && pkg.deps.some((dep) => affected.has(dep))) {
+        affected.add(pkg.name);
+        grew = true;
+      }
+    }
+  }
+  return affected.has("@t3tools/scripts");
+}
+
 const OWN_TEST_JOB = new Set(["t3", "@t3tools/web", "@t3tools/monorepo"]);
 
 function readWorkspace() {
@@ -197,8 +229,9 @@ function decide(files, packages, full) {
       test_packages: everything ? "" : tested.map((pkg) => pkg.name).join(" "),
       test_web: has("@t3tools/web"),
       test_server: has("t3"),
-      rust: everything || rust,
-      release_smoke: scriptsChanged,
+      rust: FORK && files !== null && !full ? rust : everything || rust,
+      release_smoke:
+        FORK && files !== null && !full ? forkReleaseSmoke(files, packages) : scriptsChanged,
       mobile_native: files === null || files.some((file) => MOBILE_NATIVE.test(file)),
     },
   };

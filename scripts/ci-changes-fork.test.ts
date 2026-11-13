@@ -29,10 +29,32 @@ function resolveRuntimeImport(from: string, specifier: string): string | null {
   }
   if (!specifier.startsWith(".")) return null;
   const base = NodePath.resolve(NodePath.dirname(from), specifier);
-  const file = [base, `${base}.ts`, `${base}.tsx`, NodePath.join(base, "index.ts")].find(
-    (candidate) => NodeFS.existsSync(candidate) && NodeFS.statSync(candidate).isFile(),
+  // TypeScript resolves "./x.js" to x.ts.
+  const sourceBase = base.replace(/\.(m?)js(x?)$/, ".$1ts$2");
+  const file = [
+    base,
+    sourceBase,
+    `${base}.ts`,
+    `${base}.tsx`,
+    NodePath.join(base, "index.ts"),
+  ].find((candidate) => NodeFS.existsSync(candidate) && NodeFS.statSync(candidate).isFile());
+  const inRuntime = (path: string) => path.startsWith(`${runtimeDir}${NodePath.sep}`);
+  if (!file && (inRuntime(base) || inRuntime(from))) {
+    throw new Error(`${from} imports ${specifier}, which this test cannot resolve`);
+  }
+  return file && inRuntime(file) ? file : null;
+}
+
+function workspaceDeps(dir: string): Array<string> {
+  const manifest = JSON.parse(
+    NodeFS.readFileSync(NodePath.join(root, dir, "package.json"), "utf8"),
   );
-  return file?.startsWith(`${runtimeDir}${NodePath.sep}`) ? file : null;
+  const deps = {
+    ...manifest.dependencies,
+    ...manifest.devDependencies,
+    ...manifest.peerDependencies,
+  };
+  return Object.keys(deps).filter((name) => String(deps[name]).startsWith("workspace:"));
 }
 
 it("lists every client-runtime file the server can import", () => {
@@ -63,4 +85,11 @@ it("runs the server shards only for the client-runtime files the server imports"
   expect(runsServer("packages/client-runtime/src/orbitGateway/threadStart.ts")).toBe(false);
   expect(runsServer("packages/client-runtime/src/orbitGateway/client.ts")).toBe(true);
   expect(runsServer("packages/client-runtime/package.json")).toBe(true);
+});
+
+it("keeps client-runtime's workspace dependencies within the server's", () => {
+  // The server-to-client-runtime edge is file-level, so a package only client-runtime
+  // used could change the four files without reaching the server.
+  const server = new Set(workspaceDeps("apps/server"));
+  expect(workspaceDeps("packages/client-runtime").filter((name) => !server.has(name))).toEqual([]);
 });

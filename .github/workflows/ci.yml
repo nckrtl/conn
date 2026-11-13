@@ -499,7 +499,7 @@ jobs:
 
       # Fork: a dropped Chromium connection with no failed test passes with a warning.
       - name: Test
-        run: node .github/scripts/web-test.cjs vp run --filter @t3tools/web test --shard=${{ matrix.shard.index }}/${{ matrix.shard.total }}
+        run: node .github/scripts/web-test.cjs ${{ matrix.shard.index }}/${{ matrix.shard.total }}
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
   # one at a time. Sharding spreads them over separate runners instead of

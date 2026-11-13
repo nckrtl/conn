@@ -299,6 +299,8 @@ export interface OrbitGatewayOperationError {
 /** One step of an Operation. `status` is the Gateway's own word; unknown values pass through. */
 export interface OrbitGatewayOperationStep {
   readonly name: string;
+  /** Orbit's stable group of a create step, such as `container`; absent on older Gateways. */
+  readonly group?: string | null;
   readonly job: string | null;
   readonly status: string;
   readonly startedAt: string | null;
@@ -375,6 +377,8 @@ export interface OrbitGatewayClient {
   readonly branches: (projectId: number, query: string) => Promise<OrbitGatewayBranches>;
   /** Reads an Operation this device started through the Conn layer. */
   readonly operation: (operationId: number) => Promise<OrbitGatewayOperation>;
+  /** Asks Orbit to stop an Operation this device started; the stop may still be pending. */
+  readonly cancelOperation: (operationId: number) => Promise<OrbitGatewayOperation>;
   /**
    * Admits a pairing with the server; the Operation's `targetId` is the pairing. Admission copies
    * a secret to Swamp, so it has the create's limit; the same key returns the same Operation.
@@ -608,6 +612,10 @@ export function createOrbitGatewayClient(
       const path = `/operations/${operationId}`;
       return operation(await call({ method: "GET", path }), path);
     },
+    cancelOperation: async (operationId) => {
+      const path = `/operations/${operationId}/cancel`;
+      return operation(await call({ method: "POST", path, body: {} }), path);
+    },
     startPairing: async (environmentId, idempotencyKey) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
       return operation(
@@ -708,6 +716,7 @@ function operationStep(value: unknown): OrbitGatewayOperationStep[] {
   return [
     {
       name,
+      ...(data !== null && "group" in data ? { group: optionalText(data.group) } : {}),
       job: optionalText(data?.job),
       status,
       startedAt: optionalText(data?.started_at),

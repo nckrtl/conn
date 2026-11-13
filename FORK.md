@@ -285,7 +285,16 @@ and says dependencies come from the default branch when the code is not that bra
 (`OrbitPendingThreadView.tsx`) shows the message and a setup card built on the client from the
 saved start and the runner's reads of the create Operation (`orbitSetupView.ts`), since the clone's
 server does not exist yet. The worktree setup contract is untouched. A pending start also shows as
-a sidebar row (`OrbitPendingThreadList.tsx`) and survives a reload.
+a sidebar row (`OrbitPendingThreadList.tsx`) and survives a reload. While "Create Instance" runs it
+shows five rows of Orbit's create steps (`orbitCreateRows.ts`: Orbit's step `group` when sent, else
+the step name; an unknown step stays with the row that ran). Orbit fills step times only once the
+Operation ended, so each row is timed from when the runner first saw it change, saved in the
+start's `createRows`, and Orbit's times replace those at the end. The running card has Details and
+Cancel; Cancel asks Orbit to cancel an admitted create (`POST /operations/{id}/cancel`), then
+drops the start; an admitted Instance stays. A Cancel after the create was sent but before Orbit
+answered, in any window, marks the start (`cancelRequested`, hidden from the sidebar); the main
+window's runner repeats the admission under the same key, cancels the Operation and drops the
+start, or keeps it as failed when the cancel fails. A start with no create sent is dropped at once.
 
 **Runner.** `OrbitThreadStartRunner`, mounted once in the main window's root route, runs every
 saved start (`orbitThreadStarts.ts` on the shared `runOrbitThreadStart`): Orbit creates a clone of

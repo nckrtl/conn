@@ -25,6 +25,13 @@ import {
   type OrbitGatewayOperation,
   type OrbitGatewayProject,
 } from "./client.ts";
+import {
+  observeOrbitCreateRows,
+  readSavedOrbitCreateRows,
+  stopRunningOrbitCreateRows,
+  sameOrbitCreateRows,
+  type OrbitCreateRows,
+} from "./orbitCreateRows.ts";
 
 /**
  * Conn: a thread started in an Orbit Project (Orbit's docs/cli/instance/container/thread.mmd). The
@@ -115,6 +122,16 @@ export interface OrbitThreadStart {
    * Before the create the runner may shorten that name's slug, keeping the suffix.
    */
   readonly nameSuffix?: string | null;
+  /**
+   * The rows under "Create Instance", saved as the runner reads the create Operation, so the card
+   * shows them after a reload; null on older rows.
+   */
+  readonly createRows?: OrbitCreateRows | null;
+  /**
+   * Cancel came while the create was being admitted: the runner cancels the Operation Orbit
+   * admits, then drops the start. Only the UI sets it; Retry clears it.
+   */
+  readonly cancelRequested?: boolean;
 }
 
 /** A name whose address `<name>.<project domain>` Orbit refuses (check or create). */
@@ -201,6 +218,8 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
         resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
         nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
+        createRows: readSavedOrbitCreateRows(row.createRows),
+        cancelRequested: row.cancelRequested === true,
       },
     ];
   });
@@ -245,12 +264,13 @@ export function retryOrbitThreadStartRecord(
     errorDetail: null,
     errorProcessUnit: null,
     errorRecoveryRequires: null,
+    cancelRequested: false,
   };
   const createAgain = next.environmentId === null;
   return {
     ...next,
     ...(createAgain && next.createOperationId === null
-      ? { createStartedAt: null, createFinishedAt: null }
+      ? { createStartedAt: null, createFinishedAt: null, createRows: null }
       : {}),
     ...(next.connected ? {} : { connectStartedAt: null, connectFinishedAt: null }),
     ...(next.sentAt == null ? { agentStartedAt: null } : {}),
@@ -290,6 +310,10 @@ export interface OrbitThreadStartPorts {
   readonly stopped: () => boolean;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
+  /** Whether the user pressed Cancel while the create was being admitted. */
+  readonly cancelRequested?: () => boolean;
+  /** The runner cancelled the create Orbit admitted for a Cancel; the start is to be dropped. */
+  readonly cancelled?: () => void;
   /** Each read of the create Operation, for the setup card's clone step. */
   readonly onCreateOperation?: (operation: OrbitGatewayOperation) => void;
   /** Opens a one-time pairing link and saves the server. */
@@ -417,6 +441,7 @@ export function newOrbitThreadStart(input: {
     resultBranch: null,
     resultBaseBranch: null,
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
+    createRows: null,
   };
 }
 
@@ -535,11 +560,13 @@ export async function runOrbitThreadStart(
       operation: OrbitGatewayOperation | null,
     ) => StepFailed,
     observe?: (operation: OrbitGatewayOperation) => void,
+    beforeRead?: () => Promise<void>,
   ): Promise<OrbitGatewayOperation> => {
     const deadline = ports.now() + timeoutMs;
     let outageSince: number | null = null;
     for (;;) {
       checkStopped();
+      await beforeRead?.();
       let operation;
       try {
         operation = await ports.client.operation(operationId);
@@ -585,6 +612,21 @@ export async function runOrbitThreadStart(
       await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
     }
   };
+  /** A Cancel that came during admission cancels the admitted create, then ends the start. */
+  const cancelIfRequested = async (operationId: number) => {
+    if (!ports.cancelRequested?.()) return;
+    try {
+      await ports.client.cancelOperation(operationId);
+    } catch (error) {
+      throw stepFailed(
+        `Orbit could not cancel the create: ${error instanceof Error ? error.message : String(error)}`,
+        {},
+        isOrbitGatewayError(error) ? error.code : null,
+      );
+    }
+    ports.cancelled?.();
+    throw new Stopped();
+  };
   const newKey = (step: string) => `conn-thread-start:${current.id}:${step}:${ports.now()}`;
 
   /**
@@ -622,7 +664,12 @@ export async function runOrbitThreadStart(
         // counts from now. A repeat under the saved key keeps the first time.
         const begin = current.createKey
           ? stamp("createStartedAt")
-          : { createKey: newKey("create"), createStartedAt: ports.now(), createFinishedAt: null };
+          : {
+              createKey: newKey("create"),
+              createStartedAt: ports.now(),
+              createFinishedAt: null,
+              createRows: null,
+            };
         if (Object.keys(begin).length > 0) update(begin);
         let operation;
         try {
@@ -658,6 +705,7 @@ export async function runOrbitThreadStart(
           );
         }
         update({ createOperationId: operation.id, instanceId: operation.targetId });
+        await cancelIfRequested(operation.id);
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
@@ -675,7 +723,12 @@ export async function runOrbitThreadStart(
             code,
             detail,
           ),
-        ports.onCreateOperation,
+        (operation) => {
+          const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
+          if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
+          ports.onCreateOperation?.(operation);
+        },
+        () => cancelIfRequested(current.createOperationId!),
       );
       const server = (await ports.client.environments()).find(
         (environment) => environment.instanceId === current.instanceId,
@@ -760,7 +813,13 @@ export async function runOrbitThreadStart(
   } catch (error) {
     // A start stopped mid-step ends without an error, so it resumes if it comes back.
     if (isStopped(error) || ports.stopped()) return false;
+    // A create that timed out, or lost the Gateway, stops the row that ran at this time.
+    const stoppedRows =
+      current.environmentId === null && (!isStepFailed(error) || error.code === "operation.timeout")
+        ? stopRunningOrbitCreateRows(current.createRows ?? null, ports.now())
+        : null;
     update({
+      ...(stoppedRows ? { createRows: stoppedRows } : {}),
       ...(isStepFailed(error) ? (error.reset as Partial<OrbitThreadStart>) : {}),
       error: error instanceof Error ? error.message : String(error),
       errorCode: isStepFailed(error) ? error.code : isOrbitGatewayError(error) ? error.code : null,

@@ -71,6 +71,8 @@ function gateway(script: {
   readonly failedRequires?: string;
   /** Answers each name check with a reason (null: available), or throws for a failed check. */
   readonly nameCheck?: (name: string) => string | null;
+  /** The cancel of an Operation fails with this error. */
+  readonly cancelFails?: OrbitGatewayError;
 }) {
   const calls: string[] = [];
   const keys: string[] = [];
@@ -143,6 +145,11 @@ function gateway(script: {
       return id === 100 && status === "succeeded" && script.createResult
         ? { ...read, result: script.createResult }
         : read;
+    },
+    cancelOperation: async (id: number) => {
+      calls.push(`cancel ${id}`);
+      if (script.cancelFails) throw script.cancelFails;
+      return op(id, 41, "running");
     },
     environments: async () => {
       calls.push("environments");
@@ -278,6 +285,8 @@ describe("readOrbitThreadStarts", () => {
       resultBranch: null,
       resultBaseBranch: null,
       nameSuffix: null,
+      createRows: null,
+      cancelRequested: false,
     });
 
     const { client, calls } = gateway({});
@@ -379,6 +388,61 @@ describe("runOrbitThreadStart", () => {
       connectFinishedAt: expect.any(Number),
       agentStartedAt: expect.any(Number),
       sentAt: expect.any(Number),
+    });
+    // The create's rows are saved as the runner reads the Operation.
+    expect(run.saves.at(-1)!.createRows?.register?.status).toBe("done");
+  });
+
+  describe("Cancel while the create is admitted", () => {
+    const cancelPorts = (client: OrbitGatewayClient, requested: () => boolean) => {
+      const run = ports(client);
+      const cancelled: string[] = [];
+      return {
+        run,
+        cancelled,
+        ports: { ...run.ports, cancelRequested: requested, cancelled: () => cancelled.push("x") },
+      };
+    };
+
+    it("cancels the Operation Orbit admitted, then ends the start", async () => {
+      const { client, calls } = gateway({});
+      const cancel = cancelPorts(client, () => true);
+      expect(await runOrbitThreadStart(fresh(), cancel.ports)).toBe(false);
+      expect(calls).toEqual(["create 3 fix-the-login-bug-on-ios-k3j9", "cancel 100"]);
+      expect(cancel.cancelled).toHaveLength(1);
+      expect(cancel.run.saves.at(-1)!.error).toBeNull();
+    });
+
+    it("cancels a create it already follows once the request arrives", async () => {
+      const { client, calls } = gateway({ create: ["running", "running", "succeeded"] });
+      const cancel = cancelPorts(client, () => calls.includes("operation 100"));
+      expect(await runOrbitThreadStart(fresh(), cancel.ports)).toBe(false);
+      expect(calls).toEqual([
+        "create 3 fix-the-login-bug-on-ios-k3j9",
+        "operation 100",
+        "cancel 100",
+      ]);
+      expect(cancel.cancelled).toHaveLength(1);
+    });
+
+    it("keeps the start with the kept Instance when the cancel fails", async () => {
+      const { client } = gateway({
+        cancelFails: new OrbitGatewayError({
+          code: "operation.not_cancellable",
+          message: "Too late to cancel.",
+          status: 409,
+          details: {},
+        }),
+      });
+      const cancel = cancelPorts(client, () => true);
+      expect(await runOrbitThreadStart(fresh(), cancel.ports)).toBe(false);
+      expect(cancel.cancelled).toEqual([]);
+      expect(cancel.run.saves.at(-1)).toMatchObject({
+        instanceId: 41,
+        createOperationId: 100,
+        errorCode: "operation.not_cancellable",
+        error: expect.stringContaining("could not cancel"),
+      });
     });
   });
 
@@ -611,6 +675,12 @@ describe("runOrbitThreadStart", () => {
     const [reloaded] = readOrbitThreadStarts(JSON.parse(JSON.stringify([stopped])));
     expect(reloaded!.errorDetail).toBe("Argument list too long");
     expect(retryOrbitThreadStartRecord(stopped).errorDetail).toBeNull();
+    expect(
+      retryOrbitThreadStartRecord({
+        ...stopped,
+        createRows: { container: { status: "failed", startedAt: 1, finishedAt: 2 } },
+      }).createRows,
+    ).toBeNull();
 
     const retry = gateway({});
     const retryRun = ports(retry.client);
@@ -928,9 +998,19 @@ describe("runOrbitThreadStart", () => {
     expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(62_000);
 
     const create = gateway({ create: ["running"] });
-    const slow = ports(create.client);
+    const read = create.client.operation;
+    const slow = ports({
+      ...create.client,
+      operation: async (id: number) => ({ ...(await read(id)), currentStep: "clone-workspace" }),
+    } as OrbitGatewayClient);
     expect(await runOrbitThreadStart(fresh(), slow.ports)).toBe(false);
-    expect(slow.saves.at(-1)).toMatchObject({ createOperationId: 100, environmentId: null });
+    const stopped = slow.saves.at(-1)!;
+    expect(stopped).toMatchObject({ createOperationId: 100, environmentId: null });
+    // The row that ran turns red with the time the create stopped.
+    expect(stopped.createRows?.workspace).toMatchObject({
+      status: "failed",
+      finishedAt: slow.ports.now(),
+    });
   });
 
   it("never polls faster than every 0.5 s", async () => {

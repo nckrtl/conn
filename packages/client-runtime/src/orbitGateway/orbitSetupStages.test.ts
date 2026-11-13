@@ -36,10 +36,10 @@ function createOp(
   };
 }
 
-/** Each stage as `id:status`, with the create stage's sub-detail and a failed stage's code. */
+/** Each stage as `id:status`, with a failed stage's code. */
 function summary(start: OrbitThreadStart, create: OrbitGatewayOperation | null = null): string[] {
   return orbitSetupStages({ start, create }).map((stage) =>
-    [`${stage.id}:${stage.status}`, stage.subDetail, stage.errorCode].filter(Boolean).join(" "),
+    [`${stage.id}:${stage.status}`, stage.errorCode].filter(Boolean).join(" "),
   );
 }
 
@@ -53,92 +53,16 @@ describe("orbitSetupStages", () => {
       ["create:running", "connect:pending", "agent:pending"],
     ],
     [
-      "clone-container",
-      creating,
-      createOp("running", { currentStep: "clone-container" }),
-      ["create:running Copying the container", "connect:pending", "agent:pending"],
-    ],
-    [
-      "clone-workspace",
-      creating,
-      createOp("running", { currentStep: "clone-workspace" }),
-      ["create:running Copying the workspace", "connect:pending", "agent:pending"],
-    ],
-    [
-      "clone-t3, from the running step when current_step is absent",
-      creating,
-      createOp("running", {
-        steps: [
-          {
-            name: "clone-workspace",
-            job: "clone",
-            status: "succeeded",
-            startedAt: null,
-            finishedAt: null,
-          },
-          { name: "clone-t3", job: "clone", status: "running", startedAt: null, finishedAt: null },
-        ],
-      }),
-      ["create:running Starting the T3 server", "connect:pending", "agent:pending"],
-    ],
-    [
-      "clone-register",
-      creating,
-      createOp("running", { currentStep: "clone-register" }),
-      ["create:running Registering with Orbit", "connect:pending", "agent:pending"],
-    ],
-    // Conn's Operation show today: current_step and failed_step, but an empty steps[].
-    [
-      "Conn's empty steps[] with current_step",
-      creating,
-      createOp("running", { steps: [], currentStep: "clone-workspace" }),
-      ["create:running Copying the workspace", "connect:pending", "agent:pending"],
-    ],
-    [
       "Conn's empty steps[] with failed_step",
       { ...creating, error: "Orbit could not create the clone.", errorCode: "instance.t3_unready" },
       createOp("failed", { steps: [], currentStep: null, failedStep: "clone-register" }),
-      [
-        "create:failed Registering with Orbit instance.t3_unready",
-        "connect:pending",
-        "agent:pending",
-      ],
+      ["create:failed instance.t3_unready", "connect:pending", "agent:pending"],
     ],
     [
       "Conn's empty steps[] on a succeeded create, before the clone's server is found",
       creating,
       createOp("succeeded", { steps: [], currentStep: null }),
       ["create:done", "connect:pending", "agent:pending"],
-    ],
-    [
-      "a filled steps[] next to current_step",
-      creating,
-      createOp("running", {
-        currentStep: "clone-t3",
-        steps: [
-          {
-            name: "clone-container",
-            job: "clone",
-            status: "succeeded",
-            startedAt: null,
-            finishedAt: null,
-          },
-          { name: "clone-t3", job: "clone", status: "running", startedAt: null, finishedAt: null },
-        ],
-      }),
-      ["create:running Starting the T3 server", "connect:pending", "agent:pending"],
-    ],
-    [
-      "an unknown step",
-      creating,
-      createOp("running", { currentStep: "clone-sessions" }),
-      ["create:running", "connect:pending", "agent:pending"],
-    ],
-    [
-      "a prototype key as step name",
-      creating,
-      createOp("running", { currentStep: "constructor" }),
-      ["create:running", "connect:pending", "agent:pending"],
     ],
     [
       "failed step",
@@ -149,11 +73,7 @@ describe("orbitSetupStages", () => {
         errorCode: "instance.t3_unready",
       },
       createOp("failed", { failedStep: "clone-t3", errorCode: "instance.t3_unready" }),
-      [
-        "create:failed Starting the T3 server instance.t3_unready",
-        "connect:pending",
-        "agent:pending",
-      ],
+      ["create:failed instance.t3_unready", "connect:pending", "agent:pending"],
     ],
     [
       "name taken",
@@ -210,7 +130,7 @@ describe("orbitSetupStages", () => {
         startedAt: 10,
         finishedAt: 40,
         detail: "beast",
-        subDetail: null,
+        rows: null,
         error: null,
         errorCode: null,
       },
@@ -220,7 +140,7 @@ describe("orbitSetupStages", () => {
         startedAt: 41,
         finishedAt: 50,
         detail: null,
-        subDetail: null,
+        rows: null,
         error: null,
         errorCode: null,
       },
@@ -230,11 +150,52 @@ describe("orbitSetupStages", () => {
         startedAt: 51,
         finishedAt: 60,
         detail: null,
-        subDetail: null,
+        rows: null,
         error: null,
         errorCode: null,
       },
     ]);
+  });
+
+  it("shows the five create rows while the create runs or failed, and folds them once done", () => {
+    const rows = (start: OrbitThreadStart) =>
+      orbitSetupStages({ start })[0]!.rows?.map((row) => `${row.label}:${row.status}`) ?? null;
+    const saved = {
+      ...creating,
+      createRows: {
+        container: { status: "done", startedAt: 11, finishedAt: 20 },
+        address: { status: "running", startedAt: 12, finishedAt: null },
+      },
+    } satisfies OrbitThreadStart;
+    expect(rows(creating)).toEqual([
+      "Copy the container:pending",
+      "Publish the address:pending",
+      "Copy the workspace:pending",
+      "Start the T3 server:pending",
+      "Register with Orbit:pending",
+    ]);
+    expect(rows(saved)).toEqual([
+      "Copy the container:done",
+      "Publish the address:running",
+      "Copy the workspace:pending",
+      "Start the T3 server:pending",
+      "Register with Orbit:pending",
+    ]);
+    // A failure the Operation never placed, such as a timeout, stops the row that ran.
+    expect(
+      rows({ ...saved, error: "Orbit did not finish.", errorCode: "operation.timeout" }),
+    ).toEqual([
+      "Copy the container:done",
+      "Publish the address:failed",
+      "Copy the workspace:pending",
+      "Start the T3 server:pending",
+      "Register with Orbit:pending",
+    ]);
+    // A create refused before admission has no rows.
+    expect(rows({ ...base, error: "The name is taken.", errorCode: "instance.name_taken" })).toBe(
+      null,
+    );
+    expect(rows({ ...saved, environmentId: "env-41", createFinishedAt: 40 })).toBe(null);
   });
 
   it("shows only Connect and Start agent for an existing Instance", () => {

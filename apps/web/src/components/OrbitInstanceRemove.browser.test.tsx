@@ -9,7 +9,6 @@ import {
   OrbitInstanceRemoveAction,
   OrbitInstanceRemoveDialog,
   OrbitInstanceRemoveFailure,
-  type OrbitInstanceRowRemoval,
 } from "./OrbitInstanceRemove";
 
 const target = (git: unknown, workingCount = 0) => ({
@@ -71,23 +70,23 @@ describe("OrbitInstanceRemoveDialog", () => {
   it("replaces the bin button while removing, so a remove cannot start twice", async () => {
     const onRemove = vi.fn();
     const onRetry = vi.fn();
-    const row = (removal: OrbitInstanceRowRemoval) => (
+    const row = (failure: string | null) => (
       <div>
         <OrbitInstanceGitLine git={parseOrbitInstanceGit({ state: "unknown" })} />
-        <OrbitInstanceRemoveAction removal={removal} onRemove={onRemove} />
-        {removal.status === "failed" ? (
-          <OrbitInstanceRemoveFailure message={removal.message} onRetry={onRetry} />
-        ) : null}
+        <OrbitInstanceRemoveAction removing={failure === null} onRemove={onRemove} />
+        {failure === null ? null : (
+          <OrbitInstanceRemoveFailure message={failure} onRetry={onRetry} />
+        )}
       </div>
     );
-    await using screen = await render(row({ status: "removing" }));
+    await using screen = await render(row(null));
     await expect.element(page.getByText("Git state unknown")).toBeVisible();
     await expect.element(page.getByText("Removing…")).toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "Remove Instance" }))
       .not.toBeInTheDocument();
 
-    await screen.rerender(row({ status: "failed", message: "Orbit says no." }));
+    await screen.rerender(row("Orbit says no."));
     await expect.element(page.getByText("Could not remove: Orbit says no.")).toBeVisible();
     await userEvent.click(page.getByRole("button", { name: "Retry" }));
     expect(onRetry).toHaveBeenCalledOnce();

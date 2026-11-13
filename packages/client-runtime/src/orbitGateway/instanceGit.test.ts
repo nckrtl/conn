@@ -71,7 +71,7 @@ describe("orbitInstanceGitLine", () => {
 });
 
 describe("orbitInstanceRemoveNeedsAck", () => {
-  it("asks for the tick unless Orbit says clean and no thread works", () => {
+  it("asks for the tick for unsaved work, a working thread or an unknown state Orbit sent", () => {
     expect(orbitInstanceRemoveNeedsAck({ git: known(0, 0), workingCount: 0 })).toBe(false);
     expect(orbitInstanceRemoveNeedsAck({ git: known(0, 0), workingCount: 1 })).toBe(true);
     expect(orbitInstanceRemoveNeedsAck({ git: known(1, 0), workingCount: 0 })).toBe(true);
@@ -79,7 +79,9 @@ describe("orbitInstanceRemoveNeedsAck", () => {
     expect(
       orbitInstanceRemoveNeedsAck({ git: { state: "unknown", reason: null }, workingCount: 0 }),
     ).toBe(true);
-    expect(orbitInstanceRemoveNeedsAck({ git: undefined, workingCount: 0 })).toBe(true);
+    // Without the list's Git state, Orbit's `instance.unsaved_work` asks for the tick.
+    expect(orbitInstanceRemoveNeedsAck({ git: undefined, workingCount: 0 })).toBe(false);
+    expect(orbitInstanceRemoveNeedsAck({ git: undefined, workingCount: 1 })).toBe(true);
   });
 });
 

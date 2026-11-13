@@ -16,10 +16,7 @@ import { loadOrbitInstanceList } from "./orbitInstanceList";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
 import { dropOrbitInstanceStarts } from "./orbitThreadStartStore";
 
-/**
- * Conn: removing an Instance from the Orbit panel (DESIGN.md, "Orbit panel and Manage Instances").
- * Not rendered yet: it waits for Orbit's remove handle (A) and the list's Git state.
- */
+/** Conn: removing an Instance from the Orbit panel (DESIGN.md, "Orbit panel and Manage Instances"). */
 
 export interface OrbitInstanceCleanupPorts {
   /** The Instance's saved servers the last Gateway sync knew. */
@@ -77,7 +74,9 @@ export const webOrbitInstanceCleanupPorts: OrbitInstanceCleanupPorts = {
 
 export type OrbitInstanceRemoval =
   | { readonly status: "removing" }
-  | { readonly status: "failed"; readonly message: string };
+  | { readonly status: "failed"; readonly message: string; readonly acknowledgeUnsaved: boolean }
+  /** Orbit removed it; the row stays hidden even if a list read still carries it. */
+  | { readonly status: "removed" };
 
 /** The row state of each Instance being removed, by Instance id; this window only. */
 export const useOrbitInstanceRemovals = create<{
@@ -115,7 +114,7 @@ export function webOrbitInstanceRemovalPorts(): OrbitInstanceRemovalPorts {
 
 /**
  * One remove attempt (the dialog's Remove Instance, or the row's Retry): the row reads
- * "Removing…", then goes with the list's next read, or shows the failure with Retry.
+ * "Removing…", then goes, or shows the failure with Retry.
  * `unsaved_work` clears the row; the caller opens the dialog again with Orbit's Git state.
  */
 export async function runOrbitInstanceRemoval(
@@ -127,7 +126,8 @@ export async function runOrbitInstanceRemoval(
   acknowledgeUnsaved: boolean,
   ports: OrbitInstanceRemovalPorts,
 ): Promise<OrbitInstanceRemoveOutcome> {
-  if (useOrbitInstanceRemovals.getState().byInstance[instance.id]?.status === "removing") {
+  const current = useOrbitInstanceRemovals.getState().byInstance[instance.id]?.status;
+  if (current === "removing" || current === "removed") {
     return { kind: "failed", code: "conn.remove_running", message: "Removing already." };
   }
   setRemoval(instance.id, { status: "removing" });
@@ -145,14 +145,16 @@ export async function runOrbitInstanceRemoval(
           ...(instance.git ? { git: instance.git } : {}),
         });
   if (outcome.kind === "failed") {
-    setRemoval(instance.id, { status: "failed", message: outcome.message });
+    setRemoval(instance.id, { status: "failed", message: outcome.message, acknowledgeUnsaved });
     return outcome;
   }
-  if (outcome.kind === "removed") {
-    // Orbit removed it; a cleanup failure must not show the row as "Could not remove".
-    await cleanUpRemovedOrbitInstance(instance, ports.cleanup).catch(() => undefined);
-    await ports.reloadList();
+  if (outcome.kind === "unsaved_work") {
+    setRemoval(instance.id, null);
+    return outcome;
   }
-  setRemoval(instance.id, null);
+  setRemoval(instance.id, { status: "removed" });
+  // Orbit removed it; a cleanup failure must not show the row as "Could not remove".
+  await cleanUpRemovedOrbitInstance(instance, ports.cleanup).catch(() => undefined);
+  await ports.reloadList();
   return outcome;
 }

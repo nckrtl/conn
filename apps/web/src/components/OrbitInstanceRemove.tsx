@@ -24,8 +24,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 /**
  * Conn: the Instances row's Git line, remove button and remove states, and the remove dialog
- * (DESIGN.md, "Orbit panel and Manage Instances"). Not rendered yet: they wait for Orbit's remove
- * handle and the list's Git state.
+ * (DESIGN.md, "Orbit panel and Manage Instances"). The Git line waits for the list's Git state.
  */
 
 /** "Clean", the unsaved work in the warning colour, or "Git state unknown". */
@@ -45,17 +44,12 @@ export function OrbitInstanceGitLine({ git }: { readonly git: OrbitInstanceGitSt
   );
 }
 
-export type OrbitInstanceRowRemoval =
-  | { readonly status: "idle" }
-  | { readonly status: "removing" }
-  | { readonly status: "failed"; readonly message: string };
-
 /** The row's bin button, or "Removing…" while Orbit removes the Instance. */
 export function OrbitInstanceRemoveAction(props: {
-  readonly removal: OrbitInstanceRowRemoval;
+  readonly removing: boolean;
   readonly onRemove: () => void;
 }) {
-  if (props.removal.status === "removing") {
+  if (props.removing) {
     return (
       <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
         <Spinner className="size-3" />
@@ -154,7 +148,11 @@ function RemoveDialogBody(props: {
         <Button
           variant="destructive"
           disabled={blocked}
-          onClick={() => props.onConfirm(text.acknowledge !== null)}
+          // Without the list's Git state the tick covers only the working threads; Orbit's
+          // `instance.unsaved_work` then asks about the Git state itself.
+          onClick={() =>
+            props.onConfirm(text.acknowledge !== null && props.target.git !== undefined)
+          }
         >
           Remove Instance
         </Button>

@@ -15,7 +15,7 @@ import {
 } from "./instanceGit.ts";
 
 /**
- * Conn: removing an Orbit Instance (handle A, `POST /conn/instances/{id}/destroy`, not live yet).
+ * Conn: removing an Orbit Instance (handle A, `POST /conn/instances/{id}/destroy`).
  * Orbit checks every refusal before any effect. Conn reads only `instance.unsaved_work`; every
  * other code is a failure shown with Orbit's own message.
  */
@@ -184,7 +184,7 @@ export function orbitInstanceRemoveText(
   if (!orbitInstanceRemoveNeedsAck({ git, workingCount })) {
     return { ...base, warning: null, acknowledge: null };
   }
-  if (git?.state !== "known") {
+  if (git !== undefined && git.state !== "known") {
     return {
       ...base,
       warning: {
@@ -196,7 +196,9 @@ export function orbitInstanceRemoveText(
   }
   const parts = orbitInstanceGitParts(git);
   const items = parts.map((part) =>
-    part.endsWith("not pushed") && git.branch !== null ? `${part} on branch ${git.branch}` : part,
+    part.endsWith("not pushed") && git?.state === "known" && git.branch !== null
+      ? `${part} on branch ${git.branch}`
+      : part,
   );
   if (workingCount === 1) items.push("1 thread is working now. It stops.");
   else if (workingCount > 1) items.push(`${workingCount} threads are working now. They stop.`);

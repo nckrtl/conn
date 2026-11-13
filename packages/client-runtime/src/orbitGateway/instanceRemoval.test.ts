@@ -114,6 +114,7 @@ describe("removeOrbitInstance", () => {
 
   it.each([
     [403, "node_access.required"],
+    [422, "validation.failed"],
     [409, "instance.default_protected"],
     [409, "instance.not_container"],
     [409, "instance.lifecycle_busy"],
@@ -246,14 +247,24 @@ describe("orbitInstanceRemoveText", () => {
       },
       acknowledge: "Remove it anyway. The thread stops.",
     });
-    for (const git of [{ state: "unknown", reason: "stopped" } as const, undefined]) {
-      expect(orbitInstanceRemoveText(target({ git }))).toMatchObject({
-        warning: {
-          kind: "unknown",
-          text: "Orbit cannot tell whether this Instance holds work that is not on the remote.",
-        },
-        acknowledge: "Remove it anyway. Any unsaved work is lost.",
-      });
-    }
+    expect(
+      orbitInstanceRemoveText(target({ git: { state: "unknown", reason: "stopped" } })),
+    ).toMatchObject({
+      warning: {
+        kind: "unknown",
+        text: "Orbit cannot tell whether this Instance holds work that is not on the remote.",
+      },
+      acknowledge: "Remove it anyway. Any unsaved work is lost.",
+    });
+    // No Git state from the list: one confirmation, or the working thread alone; Orbit's refusal
+    // brings the unknown state.
+    expect(orbitInstanceRemoveText(target({ git: undefined }))).toMatchObject({
+      warning: null,
+      acknowledge: null,
+    });
+    expect(orbitInstanceRemoveText(target({ git: undefined, workingCount: 1 }))).toMatchObject({
+      warning: { kind: "lost", heading: "This Instance is in use:" },
+      acknowledge: "Remove it anyway. The thread stops.",
+    });
   });
 });

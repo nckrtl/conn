@@ -103,17 +103,14 @@ export function orbitInstanceGitLine(git: OrbitInstanceGitState | undefined): {
 }
 
 /**
- * Whether removing needs the extra tick: unsaved work, a working thread, or a Git state Conn does
- * not know (unknown, or not sent at all).
+ * Whether removing needs the extra tick: unsaved work, a working thread, or a Git state Orbit
+ * reports as unknown. Without any Git state (no handle B yet) only Orbit's refusal asks for it.
  */
 export function orbitInstanceRemoveNeedsAck(input: {
   readonly git: OrbitInstanceGitState | undefined;
   readonly workingCount: number;
 }): boolean {
-  return (
-    input.git?.state !== "known" ||
-    input.git.uncommitted > 0 ||
-    input.git.unpushed > 0 ||
-    input.workingCount > 0
-  );
+  if (input.workingCount > 0) return true;
+  if (input.git === undefined) return false;
+  return input.git.state !== "known" || input.git.uncommitted > 0 || input.git.unpushed > 0;
 }

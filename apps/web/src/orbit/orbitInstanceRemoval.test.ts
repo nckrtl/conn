@@ -25,6 +25,7 @@ vi.mock("./orbitThreadStartStore", () => ({ dropOrbitInstanceStarts: vi.fn() }))
 
 /** A device's saved servers: env-a and env-b of Instance 41, env-c of Instance 7. */
 function device(options: { failRemoving?: string } = {}) {
+  useOrbitInstanceRemovals.setState({ byInstance: {} });
   const saved = new Set(["env-a", "env-b", "env-c"]);
   const paired = new Set(["env-a", "env-b", "env-c"]);
   const log: string[] = [];
@@ -108,7 +109,7 @@ describe("runOrbitInstanceRemoval", () => {
     });
     expect(outcome).toEqual({ kind: "removed" });
     expect(during).toEqual({ status: "removing" });
-    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toBeUndefined();
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toEqual({ status: "removed" });
     expect([...state.saved]).toEqual(["env-c"]);
     expect(reloadList).toHaveBeenCalledOnce();
   });
@@ -124,13 +125,14 @@ describe("runOrbitInstanceRemoval", () => {
     expect(useOrbitInstanceRemovals.getState().byInstance[41]).toEqual({
       status: "failed",
       message: "Orbit did not finish removing the Instance.",
+      acknowledgeUnsaved: true,
     });
     expect([...state.saved]).toEqual(["env-a", "env-b", "env-c"]);
     expect(reloadList).not.toHaveBeenCalled();
 
     answer = operation("succeeded");
     await runOrbitInstanceRemoval({ id: 41, environmentId: "env-a" }, true, ports);
-    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toBeUndefined();
+    expect(useOrbitInstanceRemovals.getState().byInstance[41]).toEqual({ status: "removed" });
     expect(new Set(orbit.keys).size).toBe(2);
   });
 

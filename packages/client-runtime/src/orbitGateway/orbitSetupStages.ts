@@ -140,7 +140,12 @@ export function orbitSetupStages(input: {
     ),
     stage(
       "agent",
-      start.sentAt != null ? "done" : start.connected ? "running" : "pending",
+      // A start the plus made waits here for its first message: nothing runs yet.
+      start.sentAt != null
+        ? "done"
+        : start.connected && start.message.trim() !== ""
+          ? "running"
+          : "pending",
       start.agentStartedAt,
       start.sentAt,
     ),

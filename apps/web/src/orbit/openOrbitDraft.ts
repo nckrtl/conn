@@ -14,6 +14,7 @@ import {
   type OrbitDraftTarget,
 } from "./orbitDraft";
 import { orbitThreadStartBlockedReason, startOrbitInstanceFromPlus } from "./orbitThreadStarts";
+import { updateStarts } from "./orbitThreadStartStore";
 
 /**
  * Opens the draft for a thread in a new Instance or an unpaired one; a paired Instance uses a normal
@@ -47,6 +48,24 @@ export async function openOrbitPlusCreate(
     return null;
   }
   await router.navigate({ to: "/draft/$draftId", params: { draftId } });
+  return draftId;
+}
+
+/**
+ * Gives a start the plus made a new draft of its own when its draft is gone (discarded, or
+ * another device's), so its first message can still be written there.
+ */
+export async function reopenOrbitPlusDraft(
+  router: AnyRouter,
+  startId: string,
+  target: OrbitDraftTarget,
+): Promise<DraftId | null> {
+  const draftId = prepareOrbitDraft(target, true);
+  if (draftId === null) return null;
+  updateStarts((starts) =>
+    starts.map((start) => (start.id === startId ? { ...start, draftId } : start)),
+  );
+  await router.navigate({ to: "/draft/$draftId", params: { draftId }, replace: true });
   return draftId;
 }
 

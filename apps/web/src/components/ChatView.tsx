@@ -1626,7 +1626,8 @@ export default function ChatView(props: ChatViewProps) {
     isWorking,
     draftHeroDockRequested,
     backgroundSubmissionPending,
-    hasWorktreeSetupCard: worktreeSetup !== null,
+    // Conn: the setup card of the plus's create takes the timeline, as a worktree setup does.
+    hasWorktreeSetupCard: worktreeSetup !== null || orbitDraftStart !== null,
   });
   const {
     transitionGroupRef: draftHeroTransitionGroupRef,

@@ -9,6 +9,7 @@ import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useEnvironmentProvider } from "./environmentProvider";
 import { OrbitDraftSetup } from "./OrbitDraftSetup";
 import { OrbitPendingThreadList } from "./OrbitPendingThreadList";
+import { OrbitPendingThreadView } from "./OrbitPendingThreadView";
 import { orbitReadyView } from "./orbitSetupView";
 import { linkedOrbitStart, sendIntoOrbitStart, withUiFields } from "./orbitThreadStarts";
 import { readStored, updateStarts } from "./orbitThreadStartStore";
@@ -118,6 +119,38 @@ describe("OrbitDraftSetup", () => {
     await screen.getByRole("button", { name: "Cancel" }).click();
     await vi.waitFor(() => expect(readStored()).toEqual([]));
     expect(gateway.cancelOperation).toHaveBeenCalledWith(100);
+  });
+});
+
+describe("a waiting start whose draft is gone", () => {
+  it("opens a new draft of its own from the pending thread, so its first message can be written", async () => {
+    setup(plusStart({ createStartedAt: 1, environmentId: "env-41", connected: true }));
+    const bridgeWindow = window as { desktopBridge?: unknown };
+    const previousBridge = bridgeWindow.desktopBridge;
+    const previousProvider = useEnvironmentProvider.getState();
+    bridgeWindow.desktopBridge = { orbitGatewaySend: vi.fn() };
+    useEnvironmentProvider.setState({ provider: "orbit", orbitInstances: {} });
+    try {
+      await using screen = await render(
+        <SidebarProvider>
+          <OrbitPendingThreadView startId="p1" />
+        </SidebarProvider>,
+        { router: "/orbit/p1" },
+      );
+      await vi.waitFor(() =>
+        expect(screen.router?.state.location.pathname).toMatch(/^\/draft\/.+/),
+      );
+      const draftId = screen.router!.state.location.pathname.slice("/draft/".length);
+      expect(draftId).not.toBe(DRAFT);
+      expect(readStored()[0]).toMatchObject({ id: "p1", draftId, message: "" });
+      expect(
+        useComposerDraftStore.getState().getDraftSession(draftId as DraftId)?.orbitTarget,
+      ).toMatchObject({ projectId: 66, instanceName: "abc", branch: null });
+      useComposerDraftStore.getState().clearDraftThread(draftId as DraftId);
+    } finally {
+      bridgeWindow.desktopBridge = previousBridge;
+      useEnvironmentProvider.setState(previousProvider, true);
+    }
   });
 });
 

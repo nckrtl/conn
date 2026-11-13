@@ -2,7 +2,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { OrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { type AnyRouter, useNavigate, useRouter } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 import { OrbitSetupCard } from "../components/chat/OrbitSetupCard";
 import { Button } from "../components/ui/button";
@@ -16,7 +16,7 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "../workspaceTitlebar";
 import { useThreadShell } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import type { DraftId } from "../composerDraftStore";
-import { openOrbitDraft } from "./openOrbitDraft";
+import { openOrbitDraft, reopenOrbitPlusDraft } from "./openOrbitDraft";
 import { openOrbitInstanceById } from "./openOrbitInstance";
 import { requestOrbitBranchMenu, takeOrbitBranchMenuRequest } from "./orbitBranchControl";
 import { readOrbitEnvironments } from "./orbitPaletteProjects";
@@ -91,6 +91,27 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
     const timer = setTimeout(open, HANDOVER_WAIT_MS);
     return () => clearTimeout(timer);
   }, [navigate, handoverEnvironmentId, handoverThreadId, threadShown]);
+
+  // A start the plus made takes its first message in a draft: open it, or a new one when it is gone.
+  const awaitsPrompt =
+    start !== null && start.message === "" && start.error === null && start.sentAt == null;
+  const plusDraftId = awaitsPrompt ? (start?.draftId ?? null) : null;
+  const plusDraftLive = useComposerDraftStore(
+    (state) => plusDraftId !== null && state.getDraftSession(plusDraftId as DraftId) !== null,
+  );
+  // One new draft per start: the store write that links it re-runs this effect.
+  const reopenedRef = useRef<string | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves a start that waits for its first message to the draft that takes it
+  useEffect(() => {
+    if (!awaitsPrompt || start === null) return;
+    if (plusDraftId !== null && plusDraftLive) {
+      void navigate({ to: "/draft/$draftId", params: { draftId: plusDraftId }, replace: true });
+      return;
+    }
+    if (reopenedRef.current === start.id) return;
+    reopenedRef.current = start.id;
+    void reopenOrbitPlusDraft(router, start.id, { ...orbitStartDraftTarget(start), branch: null });
+  }, [awaitsPrompt, navigate, plusDraftId, plusDraftLive, router, start]);
 
   if (start === null) {
     return (

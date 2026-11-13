@@ -221,6 +221,16 @@ describe("orbitSetupStages", () => {
     ).toEqual(["connect:failed operation.timeout", "agent:pending"]);
   });
 
+  it("keeps Start agent pending for a start the plus made while it waits for its first message", () => {
+    const waiting = { ...connected, message: "", agentStartedAt: null, readyWithoutPrompt: true };
+    expect(summary(waiting)).toEqual(["create:done", "connect:done", "agent:pending"]);
+    expect(summary({ ...waiting, message: "Fix it" })).toEqual([
+      "create:done",
+      "connect:done",
+      "agent:running",
+    ]);
+  });
+
   it("keeps Connect pending after the create until the runner stamps it", () => {
     expect(summary(created)).toEqual(["create:done", "connect:pending", "agent:pending"]);
     expect(summary({ ...created, connectStartedAt: 41 })).toEqual([

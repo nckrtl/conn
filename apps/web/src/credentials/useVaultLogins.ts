@@ -11,7 +11,7 @@ export function useVaultLogins(url: string | null) {
     busy: boolean;
     result: VaultLoginsResponse | null;
   } | null>(null);
-  // The mount effect calls this; a stable identity keeps rerenders from re-listing.
+  // The per-URL effect calls this; a stable identity keeps rerenders from re-listing.
   const load = useStableCallback(async (allowUnlock: boolean = false) => {
     if (!lookup || !url) return;
     const current = ++generation.current;
@@ -44,7 +44,8 @@ export function useVaultLogins(url: string | null) {
     return () => {
       generation.current++;
     };
-  }, [load]);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- load is stable; each page URL is a new lookup.
+  }, [load, url]);
   const current = state?.url === url ? state : null;
   return {
     supported: !!lookup,

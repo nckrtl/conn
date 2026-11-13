@@ -168,6 +168,12 @@ vi.mock(import("~/browser/previewRuntime"), async (original) => ({
 }));
 
 vi.mock(import("~/browser/browserViewportActions"), { spy: true });
+// The real key button queries saved logins; only its mount in the address bar matters here.
+vi.mock(import("~/credentials/CredentialKeyButton"), () => ({
+  CredentialKeyButton: ((props: { pageUrl: string | null }) => (
+    <button type="button" aria-label="Saved logins" data-page-url={props.pageUrl ?? ""} />
+  )) as never,
+}));
 // The real surface opens a preview stream to the server; only its box matters here.
 vi.mock(import("~/browser/ServerBrowserSurface"), async (original) => ({
   ...(await original()),
@@ -399,6 +405,13 @@ describe("PreviewView", () => {
     const rect = card.element().getBoundingClientRect();
     const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
     expect(card.element().contains(hit)).toBe(true);
+  });
+
+  it("mounts the saved-logins key in the address bar of a desktop tab", async () => {
+    setup();
+    await using _screen = await render(view());
+    const key = page.getByRole("button", { name: "Saved logins" });
+    await expect.element(key).toHaveAttribute("data-page-url", "http://example.com/");
   });
 
   it("sizes the first device viewport of a streamed tab to its panel", async () => {

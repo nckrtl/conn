@@ -1,4 +1,5 @@
 import { BrowserAnnotationControl } from "~/annotations/BrowserAnnotationControl";
+import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
@@ -1009,6 +1010,18 @@ export function PreviewView({
               </TooltipTrigger>
               <TooltipPopup side="top">{activeProfileName}</TooltipPopup>
             </Tooltip>
+          ) : null
+        }
+        credentialAction={
+          previewBridge && tabId && runtimeTabId ? (
+            <CredentialKeyButton
+              threadRef={threadRef}
+              tabId={tabId}
+              runtimeTabId={runtimeTabId}
+              pageUrl={url || null}
+              loading={loading || navStatus._tag !== "Success"}
+              visible={visible && !isUnreachable}
+            />
           ) : null
         }
         annotationAction={

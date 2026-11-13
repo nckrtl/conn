@@ -7,7 +7,9 @@ import {
   projectWorkspaceStack,
   isPresentedRoute,
 } from "../../native/workspace-stack-projection";
+import { registerPresentedRoutes } from "../layout/workspace-overlay-routes";
 import { workspaceTabNavigationState } from "../layout/workspace/workspace-tab-navigation";
+import { settingsOpenOverWorkspace, settingsSheetNavigationState } from "./settings-navigation";
 import {
   SETTINGS_LIST_PRESENTATION,
   SETTINGS_OPENS_AS_SHEET,
@@ -93,5 +95,50 @@ describe("iPhone Settings sheet", () => {
       { key: "v", name: "SettingsVoice" },
     ]);
     expect(settingsSheetClosedState(state)).toMatchObject({ index: 1, routes: [home, thread] });
+  });
+
+  describe("with the Settings route registered as presented, as the root stack does on iPhone", () => {
+    registerPresentedRoutes(isPresentedRoute(SETTINGS_LIST_PRESENTATION) ? ["Settings"] : []);
+    const list: Route = { key: "settings", name: "Settings" };
+
+    it("counts Settings as open while its sheet or a page in it is on top", () => {
+      expect(settingsOpenOverWorkspace([home, thread, list])).toBe(true);
+      expect(
+        settingsOpenOverWorkspace([home, thread, list, { key: "v", name: "SettingsVoice" }]),
+      ).toBe(true);
+      expect(settingsOpenOverWorkspace([home, thread])).toBe(false);
+    });
+
+    it("opens a Settings page in the sheet over the workspace, from outside or inside it", () => {
+      const fromThread = settingsSheetNavigationState(
+        { index: 1, routes: [home, thread] },
+        "SettingsEnvironments",
+      );
+      expect(names(fromThread.routes)).toEqual([
+        "Home",
+        "Thread",
+        "Settings",
+        "SettingsEnvironments",
+      ]);
+      expect(fromThread.routes.slice(0, 2)).toEqual([home, thread]);
+      const voice = { key: "v", name: "SettingsVoice" };
+      const fromSheet = settingsSheetNavigationState(
+        { index: 3, routes: [home, thread, list, voice] },
+        "SettingsEnvironments",
+      );
+      expect(names(fromSheet.routes)).toEqual([
+        "Home",
+        "Thread",
+        "Settings",
+        "SettingsEnvironments",
+      ]);
+      expect(fromSheet.routes[2]).toBe(list);
+      const again = settingsSheetNavigationState(
+        { index: 3, routes: [home, thread, list, voice] },
+        "SettingsVoice",
+      );
+      expect(again.routes.slice(2)).toEqual([list, voice]);
+      expect(shown(again.routes as Route[]).sheets).toHaveLength(1);
+    });
   });
 });

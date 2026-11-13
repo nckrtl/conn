@@ -9,6 +9,7 @@ import {
   cleanUpRemovedOrbitInstance,
   openOrbitInstanceRemovalPage,
   resetOrbitInstanceRemovalsForTest,
+  restoreOpenOrbitInstancesPage,
   restoreOrbitInstanceRemovals,
   runOrbitInstanceRemoval,
   shownOrbitInstanceRemovals,
@@ -772,6 +773,26 @@ describe("E. page open and restore", () => {
     expect(shown()).toEqual({});
     await restoreOrbitInstanceRemovals(removalPorts(orbit, device(), storage).ports, new Set([41]));
     expect(shown()[41]).toMatchObject({ status: "failed", refused: false });
+  });
+
+  it("E12 a late list load of a closed opening leaves the newer page and its rows alone", async () => {
+    const held = heldGateway();
+    const storage = memoryStorage({ "1": { "41": savedRemoving() } });
+    const { ports } = heldPorts(held, storage);
+    const first = Symbol("opening 1");
+    openOrbitInstanceRemovalPage(ports, first);
+    const second = Symbol("opening 2");
+    openOrbitInstanceRemovalPage(ports, second);
+    void restoreOpenOrbitInstancesPage(ports, new Set([41]), second);
+    await vi.waitFor(() => expect(held.counts.reads).toBe(1));
+    const page = useOrbitInstanceRemovals.getState().page;
+    // Opening 1's list load lands late (the page's own step after its list read).
+    await restoreOpenOrbitInstancesPage(ports, new Set([41]), first);
+    expect(useOrbitInstanceRemovals.getState().page).toBe(page);
+    expect(page?.opening).toBe(second);
+    expect(shown()[41]).toMatchObject({ status: "removing" });
+    held.answer(operation("succeeded"));
+    await vi.waitFor(() => expect(shown()[41]).toEqual({ status: "removed" }));
   });
 
   it("E11 a refusal is shown only in the opening that made it", async () => {

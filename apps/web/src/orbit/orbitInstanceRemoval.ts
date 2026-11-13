@@ -668,10 +668,9 @@ async function runAttempt(
 }
 
 /**
- * After the page's list read: waits for this opening's profile read, then drops the failures
- * (and the removed tombstones) of that profile whose Instance left the list, since Orbit removed
- * it after all. `listedIds` are the Instances in the list just read, or null when it failed.
- * Resolves once the follows this opening restored have ended. Without `opening`, opens the page.
+ * After the list read (`listedIds`, null when it failed): drops the ended removals of the page's
+ * profile whose Instance left the list. Opens a page when `opening` is not the open one.
+ * Resolves once the follows this opening restored have ended.
  */
 export async function restoreOrbitInstanceRemovals(
   ports: OrbitInstanceRemovalPorts,
@@ -706,6 +705,19 @@ const EMPTY_PAGE: OrbitInstanceRemovalPage = {
 };
 
 /**
+ * The Instances page's step after its list read: restores for `opening` only while it is still the
+ * open page. A late list load of a closed opening changes nothing; the newer page owns the store.
+ */
+export async function restoreOpenOrbitInstancesPage(
+  ports: OrbitInstanceRemovalPorts,
+  listedIds: ReadonlySet<number> | null,
+  opening: symbol,
+): Promise<void> {
+  if (useOrbitInstanceRemovals.getState().page?.opening !== opening) return;
+  await restoreOrbitInstanceRemovals(ports, listedIds, opening);
+}
+
+/**
  * The Instances page's list: read each time the page opens, then the saved removals of the current
  * Orbit profile on top of it, so a removal from before a restart shows again.
  */
@@ -722,7 +734,7 @@ export function useOrbitInstanceListWithRemovals(): {
     void (async () => {
       await loadOrbitInstanceList();
       const { state } = useOrbitInstanceListStore.getState();
-      await restoreOrbitInstanceRemovals(
+      await restoreOpenOrbitInstancesPage(
         ports,
         state.status === "loaded" ? new Set(state.rows.map((row) => row.id)) : null,
         opening,

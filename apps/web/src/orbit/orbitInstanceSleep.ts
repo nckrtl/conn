@@ -28,6 +28,8 @@ const FAILED_WAKE_PAUSE_MS = 30_000;
 const FRESH_READ_EVERY_MS = 5_000;
 /** A listing read while a wake ran may still say `stopped`: trust the wake this long. */
 const WOKEN_GRACE_MS = 30_000;
+/** A view that remounts (a route swap) holds the environment again within this. */
+const RELEASE_SETTLE_MS = 1_000;
 const UNSUPPORTED_STORAGE_KEY = "t3code:orbit-wake-unsupported-at:v1";
 
 interface OrbitInstanceSleepStore {
@@ -90,6 +92,8 @@ export interface OrbitInstanceSleepPorts {
     instanceId: number,
   ) => Promise<OrbitInstanceWakeOutcome>;
   readonly now: () => number;
+  /** Runs `run` after `ms`; tests run it at once. */
+  readonly later?: (run: () => void, ms: number) => void;
 }
 
 export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPorts) {
@@ -100,6 +104,7 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
   const wokenAt = new Map<string, number>();
   const freshReadAt = new Map<string, number>();
   const waking = new Set<string>();
+  const later = ports.later ?? ((run: () => void, ms: number) => void setTimeout(run, ms));
 
   const parked = () => useOrbitInstanceSleep.getState().parked;
   const setParked = (environmentId: string, hold: boolean): Promise<void> => {
@@ -134,6 +139,10 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
       if (outcome.kind === "awake") {
         failedAt.delete(environmentId);
         wokenAt.set(environmentId, ports.now());
+        const current = listed.get(environmentId);
+        if (current) listed.set(environmentId, { ...current, stopped: false });
+        // Nothing may have held it off meanwhile; release it again before the connect.
+        await setParked(environmentId, false);
         await ports.retryNow(environmentId);
       } else if (outcome.kind === "unsupported") {
         rememberUnsupported(ports.now());
@@ -158,6 +167,7 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
       await setParked(environmentId, false);
       return;
     }
+    if (waking.has(environmentId)) return;
     if ((inUse.get(environmentId) ?? 0) > 0) {
       // A list read must not wait for the wake.
       void wake(environmentId);
@@ -241,7 +251,10 @@ export function createOrbitInstanceSleepController(ports: OrbitInstanceSleepPort
       if (count > 0) inUse.set(environmentId, count);
       else {
         inUse.delete(environmentId);
-        void settle(environmentId);
+        // A remount holds it again at once; only an environment nobody shows is parked.
+        later(() => {
+          if (!inUse.has(environmentId)) void settle(environmentId);
+        }, RELEASE_SETTLE_MS);
       }
     };
   };

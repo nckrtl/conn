@@ -66,6 +66,7 @@ function harness(outcome: () => Promise<OrbitInstanceWakeOutcome>) {
       return outcome();
     },
     now: () => clock,
+    later: (run) => run(),
   });
   return {
     controller,
@@ -113,6 +114,26 @@ describe("createOrbitInstanceSleepController", () => {
 
     expect(log).toEqual(["park env-41", "release env-41", "wake 41", "retry env-41"]);
     release();
+    second();
+  });
+
+  it("does not park an Instance whose view remounts while it wakes", async () => {
+    let finish: (outcome: OrbitInstanceWakeOutcome) => void = () => {};
+    const { controller, list, log, logged } = harness(
+      () => new Promise((resolve) => (finish = resolve)),
+    );
+    await list([server(41, "stopped")]);
+    const first = controller.hold("env-41");
+    void controller.ensureAwake("env-41", "available");
+    await logged("wake 41");
+    // A route swap: the old view lets go and the new one holds it.
+    first();
+    const second = controller.hold("env-41");
+    finish({ kind: "awake" });
+    await logged("retry env-41");
+
+    expect(log).toEqual(["park env-41", "release env-41", "wake 41", "retry env-41"]);
+    expect(useOrbitInstanceSleep.getState().parked).toEqual(new Set());
     second();
   });
 

@@ -25,9 +25,12 @@ function alphaOf(color: string): number {
 
 /** The root classes of the macOS desktop app, removed again when the test ends. */
 function macDesktopRoot(dark: boolean): Disposable {
-  const classes = dark ? ["electron-macos", "dark"] : ["electron-macos"];
-  document.documentElement.classList.add(...classes);
-  return { [Symbol.dispose]: () => document.documentElement.classList.remove(...classes) };
+  const root = document.documentElement.classList;
+  const classes = (dark ? ["electron-macos", "dark"] : ["electron-macos"]).filter(
+    (name) => !root.contains(name),
+  );
+  root.add(...classes);
+  return { [Symbol.dispose]: () => root.remove(...classes) };
 }
 
 describe("AppRouteModal", () => {

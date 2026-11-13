@@ -2963,6 +2963,7 @@ html.electron-macos.dark {
   html.electron-macos,
   html.electron-macos.dark {
     --shell-fill: var(--sidebar);
+    --shell-modal-fill: var(--sidebar);
     --shell-inner-fill: var(--shell-card);
   }
 }

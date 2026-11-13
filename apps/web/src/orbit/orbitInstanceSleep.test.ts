@@ -5,7 +5,11 @@ import type {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { createOrbitInstanceSleepController, useOrbitInstanceSleep } from "./orbitInstanceSleep";
+import {
+  countsAsWork,
+  createOrbitInstanceSleepController,
+  useOrbitInstanceSleep,
+} from "./orbitInstanceSleep";
 
 function server(
   instanceId: number,
@@ -327,5 +331,14 @@ describe("createOrbitInstanceSleepController", () => {
       "release env-41",
     ]);
     release();
+  });
+
+  it("counts a cursor over an inactive window as no work, but a click, key or focus always", () => {
+    expect(countsAsWork("pointermove", false)).toBe(false);
+    expect(countsAsWork("wheel", false)).toBe(false);
+    expect(countsAsWork("pointermove", true)).toBe(true);
+    for (const type of ["pointerdown", "keydown", "focus"]) {
+      expect(countsAsWork(type, false)).toBe(true);
+    }
   });
 });

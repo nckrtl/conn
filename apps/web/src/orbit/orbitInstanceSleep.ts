@@ -420,6 +420,11 @@ export function registerOrbitSleepClient(factory: () => OrbitGatewayClient | nul
   desktopClientFactory = factory;
 }
 
+/** Whether a window event is work in the window; a cursor passing over an inactive one is not. */
+export function countsAsWork(type: string, focused: boolean): boolean {
+  return focused || (type !== "pointermove" && type !== "wheel");
+}
+
 let windowWatched = false;
 /** Notes user input in this window, and lets a window no profile sync feeds read the list. */
 function watchWindow(): void {
@@ -427,8 +432,7 @@ function watchWindow(): void {
   windowWatched = true;
   let lastSignal = 0;
   const onInput = (event: Event) => {
-    // A cursor passing over an inactive window is no work in it.
-    if ((event.type === "pointermove" || event.type === "wheel") && !document.hasFocus()) return;
+    if (!countsAsWork(event.type, document.hasFocus())) return;
     lastInputAt = Date.now();
     // Input comes in bursts: tell the controller at most every 2 s.
     if (lastInputAt - lastSignal < 2_000) return;

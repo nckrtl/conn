@@ -47,8 +47,8 @@ jobs:
           sparse-checkout: |
             /pnpm-workspace.yaml
             /.github/scripts/ci-changes.cjs
-            /.github/scripts/web-test-retry.cjs
-            /.github/scripts/web-test-retry.test.cjs
+            /.github/scripts/web-test.cjs
+            /.github/scripts/web-test.test.cjs
             /.github/actions/ci-changes/
             /*/package.json
             /*/*/package.json
@@ -60,8 +60,8 @@ jobs:
         uses: ./.github/actions/ci-changes
 
       # Cheap and always runs, so a change to the wrapper is tested even when no web test runs.
-      - name: Test the web test retry wrapper
-        run: node --test .github/scripts/web-test-retry.test.cjs
+      - name: Test the web test wrapper
+        run: node --test .github/scripts/web-test.test.cjs
 
   # Lint and the desktop build each get a runner so they run side by side.
   # Typecheck shares the build's install. Lint always runs: it formats every
@@ -294,8 +294,9 @@ jobs:
       id-token: write
     # The fork's 4 vCPU runners need 9-10 minutes to test every package, against a
     # 10 minute limit. Mobile and the lint plugin run longest and hold two of
-    # the four slots for minutes, so the fork gives each its own runner. `only`
-    # runs just those packages; `skip` runs the rest.
+    # the four slots for minutes, so the fork gives each its own runner, and
+    # desktop, shared and client-runtime share a fourth. `only` runs just those
+    # packages; `skip` runs the rest.
     name: Test${{ matrix.shard.total > 1 && format(' {0}', matrix.shard.index) || '' }}
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test != 'false' }}
@@ -304,7 +305,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1,"only":"","skip":""}]' || '[{"index":1,"total":3,"only":"","skip":"@t3tools/mobile @t3tools/oxlint-plugin-t3code"},{"index":2,"total":3,"only":"@t3tools/mobile","skip":""},{"index":3,"total":3,"only":"@t3tools/oxlint-plugin-t3code","skip":""}]') }}
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1,"only":"","skip":""}]' || '[{"index":1,"total":4,"only":"","skip":"@t3tools/mobile @t3tools/oxlint-plugin-t3code @t3tools/desktop @t3tools/shared @t3tools/client-runtime"},{"index":2,"total":4,"only":"@t3tools/mobile","skip":""},{"index":3,"total":4,"only":"@t3tools/oxlint-plugin-t3code","skip":""},{"index":4,"total":4,"only":"@t3tools/desktop @t3tools/shared @t3tools/client-runtime","skip":""}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -446,17 +447,16 @@ jobs:
       contents: read
       id-token: write
     # The fork's 4 vCPU runners take about 9 minutes for the whole web suite,
-    # against a 10 minute limit, so the fork splits it over two runners.
+    # so the fork splits it over four runners to keep each job under 5 minutes.
     name: Test Web${{ matrix.shard.total > 1 && format(' {0}', matrix.shard.index) || '' }}
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test_web != 'false' }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
-    # The fork's shards take ~6 minutes, so a retry needs room.
-    timeout-minutes: ${{ github.repository == 'pingdotgg/t3code' && 10 || 20 }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1}]' || '[{"index":1,"total":2},{"index":2,"total":2}]') }}
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[{"index":1,"total":1}]' || '[{"index":1,"total":4},{"index":2,"total":4},{"index":3,"total":4},{"index":4,"total":4}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -497,9 +497,9 @@ jobs:
             node apps/web/node_modules/playwright/cli.js install-deps chromium
           fi
 
-      # Retries once when Chromium drops its vitest connection with no failed test.
+      # Fork: a dropped Chromium connection with no failed test passes with a warning.
       - name: Test
-        run: node .github/scripts/web-test-retry.cjs vp run --filter @t3tools/web test --shard=${{ matrix.shard.index }}/${{ matrix.shard.total }}
+        run: node .github/scripts/web-test.cjs ${{ matrix.shard.index }}/${{ matrix.shard.total }}
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
   # one at a time. Sharding spreads them over separate runners instead of
@@ -520,9 +520,9 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        # Fork: ten shards keep each GitHub-hosted runner under 5 minutes.
+        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[1,2,3,4,5,6,7,8]' || '[1,2,3,4,5,6,7,8,9,10]') }}
     steps:
       # Depth 2 brings the base commit the change is diffed against.
       - name: Checkout

@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { classify, runWithRetry, INFRA_MESSAGE } = require("./web-test-retry.cjs");
+const { classify, decide, INFRA_MESSAGE, CLOSED_AGAIN } = require("./web-test.cjs");
 
 const esc = "\u001b";
 const rule = "⎯⎯⎯⎯⎯⎯";
@@ -99,58 +99,95 @@ test("a plain failure without the signature is a real failure", () => {
   assert.equal(classify("", 1), "fail");
 });
 
-function attempts(...results) {
-  const calls = [];
-  return {
-    calls,
-    attempt: async (n) => {
-      calls.push(n);
-      return results[n - 1];
+const spec = (file, project = "browser") => ({ file, project });
+const planned = Array.from({ length: 81 }, (_, i) => spec(`src/f${i}.browser.test.tsx`));
+const finishedFirst = (n) => planned.slice(0, n).map((f) => ({ ...f, state: "passed" }));
+const closedWith = (summaryLine) => `${closedMidRun}\n${summaryLine}\n     Errors  1 error\n`;
+
+async function decideWith(first, record, ...reruns) {
+  const lines = [];
+  const rerunCalls = [];
+  const code = await decide(
+    first,
+    record,
+    async (files) => {
+      rerunCalls.push(files);
+      return reruns[rerunCalls.length - 1];
     },
-  };
+    (line) => lines.push(line),
+  );
+  return { code, lines, rerunCalls };
 }
 
-const quiet = () => {};
-
-test("a pass or a real failure runs once", async () => {
-  const pass = attempts({ code: 0, output: "" });
-  assert.equal(await runWithRetry(pass.attempt, quiet), 0);
-  assert.deepEqual(pass.calls, [1]);
-
-  const fail = attempts({ code: 1, output: closedAfterRun + failedAssertion });
-  assert.equal(await runWithRetry(fail.attempt, quiet), 1);
-  assert.deepEqual(fail.calls, [1]);
+test("a pass or a real failure keeps its exit code and does not rerun", async () => {
+  const record = { planned, finished: finishedFirst(81) };
+  for (const [result, expected] of [
+    [{ code: 0, output: "" }, 0],
+    [{ code: 1, output: closedAfterRun + failedAssertion }, 1],
+    [{ code: 1, output: plainFailure }, 1],
+  ]) {
+    const run = await decideWith(result, record);
+    assert.equal(run.code, expected);
+    assert.equal(run.rerunCalls.length, 0);
+  }
 });
 
-test("browser closed once, then a pass, passes", async () => {
-  const run = attempts({ code: 1, output: closedMidRun }, { code: 0, output: "" });
-  assert.equal(await runWithRetry(run.attempt, quiet), 0);
-  assert.deepEqual(run.calls, [1, 2]);
-});
-
-test("browser closed, then a real failure, fails without the infra label", async () => {
-  const lines = [];
-  const run = attempts({ code: 1, output: closedMidRun }, { code: 1, output: plainFailure });
-  assert.equal(await runWithRetry(run.attempt, (line) => lines.push(line)), 1);
-  assert.deepEqual(run.calls, [1, 2]);
-  assert.ok(!lines.some((line) => line.includes(INFRA_MESSAGE)));
-});
-
-test("browser closed twice fails as an infrastructure failure", async () => {
-  const lines = [];
-  const run = attempts({ code: 1, output: closedAfterRun }, { code: 1, output: closedMidRun });
-  assert.equal(await runWithRetry(run.attempt, (line) => lines.push(line)), 1);
-  assert.deepEqual(run.calls, [1, 2]);
-  assert.ok(lines.includes(`::error::${INFRA_MESSAGE}`));
-  const named = attempts({ code: 1, output: closedMidRun }, { code: 1, output: closedAfterRun });
-  const namedLines = [];
-  await runWithRetry(named.attempt, (line) => namedLines.push(line));
-  assert.ok(
-    namedLines.some((line) =>
-      line.endsWith(
-        "check /home/runner/work/conn/conn/apps/web/src/components/files/FileExplorerPane.browser.test.tsx.",
-      ),
-    ),
+test("a closed browser reruns only the unfinished files and passes when they pass", async () => {
+  const run = await decideWith(
+    { code: 1, output: closedWith(" Test Files  75 passed (81)") },
+    { planned, finished: finishedFirst(75) },
+    { code: 0, output: " Test Files  6 passed (6)" },
   );
-  assert.match(INFRA_MESSAGE, /browser connection closed twice; not a test failure/);
+  assert.equal(run.code, 0);
+  assert.deepEqual(run.rerunCalls, [planned.slice(75).map((f) => f.file)]);
+  assert.ok(run.lines[0].startsWith(`::warning title=Web tests::${INFRA_MESSAGE}`));
+});
+
+test("a closed browser fails when the rerun closes again or fails", async () => {
+  const record = { planned, finished: finishedFirst(1) };
+  const closedAgain = await decideWith(
+    { code: 1, output: closedWith(" Test Files  1 passed (81)") },
+    record,
+    { code: 1, output: closedWith(" Test Files  3 passed (80)") },
+  );
+  assert.equal(closedAgain.code, 1);
+  assert.equal(closedAgain.rerunCalls[0].length, 80);
+  assert.ok(closedAgain.lines.includes(`::error title=Web tests::${CLOSED_AGAIN}`));
+
+  const realFailure = await decideWith(
+    { code: 1, output: closedWith(" Test Files  1 passed (81)") },
+    record,
+    { code: 1, output: plainFailure },
+  );
+  assert.equal(realFailure.code, 1);
+});
+
+test("a closed browser fails without a rerun when no summary or no passed file", async () => {
+  for (const [output, finished] of [
+    [closedMidRun, finishedFirst(40)],
+    [closedWith(" Test Files  (81)"), finishedFirst(0)],
+    [closedWith(" Test Files  1 passed (81)"), finishedFirst(0)],
+    [closedWith(" Test Files  1 passed (81)"), []],
+  ]) {
+    const run = await decideWith({ code: 1, output }, { planned, finished });
+    assert.equal(run.code, 1);
+    assert.equal(run.rerunCalls.length, 0);
+    assert.ok(run.lines[0].startsWith("::error title=Web tests::"));
+  }
+  const noRecord = await decideWith(
+    { code: 1, output: closedWith(" Test Files  5 passed (81)") },
+    { planned: [], finished: [] },
+  );
+  assert.equal(noRecord.code, 1);
+  assert.equal(noRecord.rerunCalls.length, 0);
+});
+
+test("a closed browser after every file finished passes with a warning", async () => {
+  const run = await decideWith(
+    { code: 1, output: closedWith(" Test Files  81 passed (81)") },
+    { planned, finished: finishedFirst(81) },
+  );
+  assert.equal(run.code, 0);
+  assert.equal(run.rerunCalls.length, 0);
+  assert.match(run.lines[0], /^::warning title=Web tests::/);
 });

@@ -264,8 +264,8 @@ export interface OrbitReadyView {
   readonly nodeName: string;
   readonly url: string | null;
   /**
-   * The one assistant-style line Conn renders; never sent to the agent. Null for an Instance the
-   * plus created: the line speaks of a request, and there was none when it became ready.
+   * The one assistant-style line Conn renders; never sent to the agent. Null for an Instance that
+   * was ready before any prompt came: the line speaks of a request, and there was none then.
    */
   readonly readyLine: string | null;
   /** The model the agent uses instead of the composer's, or null. */
@@ -298,7 +298,7 @@ export function orbitReadyView(start: OrbitThreadStart, url: string | null): Orb
     instanceName: start.instanceName,
     nodeName: start.nodeName,
     url,
-    readyLine: start.draftId == null ? orbitReadyLine(url) : null,
+    readyLine: start.readyWithoutPrompt ? null : orbitReadyLine(url),
     modelFallbackLine: fallback
       ? `This Instance does not offer ${fallback.requestedModel}, so the agent uses ${fallback.usedModel}.`
       : null,

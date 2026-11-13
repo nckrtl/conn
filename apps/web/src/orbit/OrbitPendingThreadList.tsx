@@ -2,6 +2,7 @@ import { CircleAlertIcon } from "lucide-react";
 import { Link, useRouterState } from "@tanstack/react-router";
 
 import { Spinner } from "../components/ui/spinner";
+import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { cn } from "../lib/utils";
 import { useOrbitThreadsAvailable } from "./environmentProvider";
 import { useOrbitThreadStarts } from "./orbitThreadStartStore";
@@ -21,12 +22,27 @@ export function OrbitPendingThreadList() {
       start.sentAt == null &&
       !(start.cancelRequested && start.error === null),
   );
+  // The plus's drafts that still exist; a discarded one leaves its start to the pending thread.
+  const liveDrafts = useComposerDraftStore((state) =>
+    starts
+      .flatMap((start) =>
+        start.draftId && state.getDraftSession(start.draftId as DraftId) !== null
+          ? [start.draftId]
+          : [],
+      )
+      .join(" "),
+  ).split(" ");
   if (!available || starts.length === 0) return null;
   return (
     <ul className="mt-1 grid grid-cols-1 gap-0.5" aria-label="Threads being set up">
       {starts.map((start) => {
         // A start the plus made opens its draft until it has a message; the row then names the Instance.
-        const draftId = start.message === "" ? (start.draftId ?? null) : null;
+        const draftId =
+          start.message === "" && start.draftId && liveDrafts.includes(start.draftId)
+            ? start.draftId
+            : null;
+        // Ready and waiting for its first message: nothing runs, so no spinner.
+        const waiting = start.message === "" && start.connected && start.error === null;
         const active = pathname === (draftId === null ? `/orbit/${start.id}` : `/draft/${draftId}`);
         const linkProps =
           draftId === null
@@ -45,6 +61,8 @@ export function OrbitPendingThreadList() {
             >
               {start.error ? (
                 <CircleAlertIcon className="size-3.5 shrink-0 text-destructive-foreground" />
+              ) : waiting ? (
+                <span className="size-3.5 shrink-0" aria-hidden />
               ) : (
                 <Spinner size="sm" className="shrink-0" />
               )}

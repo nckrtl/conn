@@ -35,7 +35,10 @@ export function OrbitThreadStartRunner() {
             description: ORBIT_INSTANCE_STAYS_LINE,
           }),
       }).then((sent) => {
-        if (router.state.location.pathname === orbitPendingThreadPath(start.id)) return;
+        // The pending thread, or the plus's draft, shows the start's end itself.
+        const shown = router.state.location.pathname;
+        if (shown === orbitPendingThreadPath(start.id)) return;
+        if (start.draftId && shown === `/draft/${start.draftId}`) return;
         if (sent !== null) {
           const id = toastManager.add({
             type: "success",

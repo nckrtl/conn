@@ -138,6 +138,11 @@ export interface OrbitThreadStart {
    * message made.
    */
   readonly draftId?: string | null;
+  /**
+   * The Instance was ready before any prompt came: Conn's "while I work on your request" line
+   * does not fit it, also after a later prompt. A prompt sent during the create leaves it unset.
+   */
+  readonly readyWithoutPrompt?: boolean;
 }
 
 /**
@@ -241,6 +246,7 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         createRows: readSavedOrbitCreateRows(row.createRows),
         cancelRequested: row.cancelRequested === true,
         draftId: typeof row.draftId === "string" ? row.draftId : null,
+        readyWithoutPrompt: row.readyWithoutPrompt === true,
       },
     ];
   });
@@ -838,7 +844,10 @@ export async function runOrbitThreadStart(
     const prompt = ports.prompt?.() ?? null;
     if (prompt !== null && prompt.message.trim() !== "") current = { ...current, ...prompt };
     // A start made by the plus is ready here and waits for its first message.
-    if (current.message.trim() === "") throw new Stopped();
+    if (current.message.trim() === "") {
+      if (!current.readyWithoutPrompt) update({ readyWithoutPrompt: true });
+      throw new Stopped();
+    }
     const begin = stamp("agentStartedAt");
     if (Object.keys(begin).length > 0) update(begin);
     const sent = await ports.send({ ...current, environmentId });

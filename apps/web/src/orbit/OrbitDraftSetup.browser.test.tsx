@@ -3,10 +3,13 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { render } from "../../test/render";
 import { SidebarProvider } from "../components/ui/sidebar";
-import type { DraftId } from "../composerDraftStore";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useEnvironmentProvider } from "./environmentProvider";
 import { OrbitDraftSetup } from "./OrbitDraftSetup";
 import { OrbitPendingThreadList } from "./OrbitPendingThreadList";
+import { orbitReadyView } from "./orbitSetupView";
 import { linkedOrbitStart, sendIntoOrbitStart, withUiFields } from "./orbitThreadStarts";
 import { readStored, updateStarts } from "./orbitThreadStartStore";
 
@@ -118,6 +121,16 @@ describe("OrbitDraftSetup", () => {
   });
 });
 
+describe("the ready line of a plus start", () => {
+  it("is left out when the Instance was ready before any prompt, and kept when a prompt came during the create", () => {
+    const url = "https://abc.create-bench.test";
+    expect(orbitReadyView(plusStart({ readyWithoutPrompt: true }), url).readyLine).toBeNull();
+    expect(orbitReadyView(plusStart({ message: "Fix it" }), url).readyLine).toContain(
+      "while I work on your request",
+    );
+  });
+});
+
 describe("the plus's start and its first message", () => {
   it("writes a prompt sent during the create into the start once, and the runner's saves keep it", async () => {
     setup(
@@ -152,14 +165,39 @@ describe("the plus's start and its first message", () => {
     expect(saved).toMatchObject({ message: "Add a pricing page", environmentId: "env-41" });
   });
 
-  it("names a start without a message after its Instance in the sidebar and opens its draft", async () => {
-    setup(plusStart({ createStartedAt: 1 }));
+  it("names a waiting start after its Instance in the sidebar, without a spinner, and opens its draft", async () => {
+    setup(plusStart({ createStartedAt: 1, environmentId: "env-41", connected: true }));
     const bridgeWindow = window as { desktopBridge?: unknown };
     const previousBridge = bridgeWindow.desktopBridge;
     const previousProvider = useEnvironmentProvider.getState();
     bridgeWindow.desktopBridge = { orbitGatewaySend: vi.fn() };
     useEnvironmentProvider.setState({ provider: "orbit" });
+    const store = useComposerDraftStore.getState();
     try {
+      // Its draft is gone (discarded): the row opens the pending thread, which can dismiss it.
+      {
+        await using screen = await render(
+          <SidebarProvider>
+            <OrbitPendingThreadList />
+          </SidebarProvider>,
+          { router: "/" },
+        );
+        const row = screen.getByRole("link", { name: /abc/ });
+        await expect.element(row).toBeVisible();
+        expect(row.element().getAttribute("href")).toBe("/orbit/p1");
+        expect(row.element().querySelector('[role="status"], .animate-spin')).toBeNull();
+      }
+      store.setLogicalProjectDraftThreadId(
+        "orbit-project:66:plus:check",
+        scopeProjectRef(EnvironmentId.make("env-anchor"), ProjectId.make("orbit-project:66")),
+        DRAFT,
+        {
+          threadId: ThreadId.make("thread-draft"),
+          envMode: "local",
+          branch: null,
+          worktreePath: null,
+        },
+      );
       await using screen = await render(
         <SidebarProvider>
           <OrbitPendingThreadList />
@@ -167,9 +205,9 @@ describe("the plus's start and its first message", () => {
         { router: "/" },
       );
       const row = screen.getByRole("link", { name: /abc/ });
-      await expect.element(row).toBeVisible();
-      expect(row.element().getAttribute("href")).toBe(`/draft/${DRAFT}`);
+      await vi.waitFor(() => expect(row.element().getAttribute("href")).toBe(`/draft/${DRAFT}`));
     } finally {
+      store.clearDraftThread(DRAFT);
       bridgeWindow.desktopBridge = previousBridge;
       useEnvironmentProvider.setState(previousProvider, true);
     }

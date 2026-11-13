@@ -192,6 +192,8 @@ export function orbitStartCardActions(input: {
   readonly router: AnyRouter;
   readonly navigate: (to: "/") => void;
   readonly onLeave?: () => void;
+  /** The plus's draft: what its composer holds goes with Change name. */
+  readonly draftPrompt?: () => string;
 }) {
   const { start, router } = input;
   const navigate = ({ to }: { to: "/"; replace?: boolean }) => {
@@ -203,7 +205,8 @@ export function orbitStartCardActions(input: {
   const moveToDraft = (draftId: DraftId) => {
     const store = useComposerDraftStore.getState();
     // A start the plus made has no message yet; the reopened draft keeps what it holds.
-    if (start.message !== "") store.setPrompt(draftId, start.message);
+    const prompt = start.message !== "" ? start.message : (input.draftPrompt?.() ?? "");
+    if (prompt !== "") store.setPrompt(draftId, prompt);
     if (start.modelSelection) store.setModelSelection(draftId, start.modelSelection);
     if (start.runtimeMode) store.setRuntimeMode(draftId, start.runtimeMode);
     if (start.interactionMode) store.setInteractionMode(draftId, start.interactionMode);

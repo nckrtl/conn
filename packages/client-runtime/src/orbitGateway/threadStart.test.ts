@@ -289,6 +289,7 @@ describe("readOrbitThreadStarts", () => {
       createRows: null,
       cancelRequested: false,
       draftId: null,
+      readyWithoutPrompt: false,
     });
 
     const { client, calls } = gateway({});
@@ -429,6 +430,7 @@ describe("runOrbitThreadStart", () => {
         agentStartedAt: null,
         sentAt: null,
         draftId: "draft-p",
+        readyWithoutPrompt: true,
       });
       // No timer runs while it waits: nothing slept after the pairing.
       expect(orbitThreadStartAwaitsPrompt(paused)).toBe(true);
@@ -485,6 +487,8 @@ describe("runOrbitThreadStart", () => {
       expect(await runOrbitThreadStart(plusStart(), { ...run.ports, prompt })).toBe(true);
       expect(calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
       expect(run.sent).toEqual(["env-41 thread-p Fix the header"]);
+      // It had a prompt before it was ready: the ready line still fits.
+      expect(run.saves.at(-1)!.readyWithoutPrompt).toBeFalsy();
     });
   });
 

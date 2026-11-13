@@ -384,7 +384,7 @@ export async function runSavedOrbitThreadStart(
         !stopped()
       ) {
         running.delete(id);
-        return runSavedOrbitThreadStart(client, id, options);
+        return await runSavedOrbitThreadStart(client, id, options);
       }
       return null;
     }

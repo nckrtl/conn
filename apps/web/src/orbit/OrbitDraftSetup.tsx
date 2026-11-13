@@ -37,7 +37,8 @@ export function OrbitDraftSetup({ draftId }: { draftId: DraftId }) {
     return (
       <div className="chat-content-lane" data-orbit-draft-setup="ready">
         <OrbitReadyRow
-          view={orbitReadyView(start, url)}
+          // No prompt yet, so never the line about working on a request.
+          view={{ ...orbitReadyView(start, url), readyLine: null }}
           threadRef={scopeThreadRef(
             EnvironmentId.make(readyEnvironmentId),
             ThreadId.make(start.threadId),
@@ -51,6 +52,7 @@ export function OrbitDraftSetup({ draftId }: { draftId: DraftId }) {
     router,
     navigate: (to) => void navigate({ to, replace: true }),
     onLeave: () => useComposerDraftStore.getState().clearDraftThread(draftId),
+    draftPrompt: () => useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt ?? "",
   });
   return (
     <div className="chat-content-lane" data-orbit-draft-setup="running">

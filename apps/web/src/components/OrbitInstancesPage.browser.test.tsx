@@ -1,6 +1,9 @@
-import type {
-  OrbitGatewayClient,
-  OrbitGatewayEnvironment,
+import {
+  createOrbitGatewayClient,
+  type OrbitGatewayClient,
+  type OrbitGatewayEnvironment,
+  type OrbitGatewayRequest,
+  type OrbitGatewayResponse,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent, type Locator } from "vite-plus/test/browser";
@@ -9,6 +12,7 @@ import "~/index.css";
 import { render, stubGlobal } from "../../test/render";
 import { setEnvironmentProvider } from "../orbit/environmentProvider";
 import { useOrbitInstanceListStore } from "../orbit/orbitInstanceList";
+import { useOrbitInstanceRemovals } from "../orbit/orbitInstanceRemoval";
 import { loadOrbitPaletteProjects } from "../orbit/orbitPaletteProjects";
 import { OrbitInstancesPage } from "./OrbitInstancesPage";
 import { OrbitPanelLayout } from "./OrbitPanel";
@@ -92,11 +96,18 @@ function shell(id: string, environmentId: string, minutesAgo: number, running = 
 function setup(
   environments: () => Promise<readonly OrbitGatewayEnvironment[]>,
   threads = [] as unknown[],
+  gateway: (request: OrbitGatewayRequest) => Promise<OrbitGatewayResponse> = async () => {
+    throw new Error("no Gateway call expected");
+  },
 ) {
+  const real = createOrbitGatewayClient(gateway);
   mocks.client = {
     environments,
     projects: async () => PROJECTS,
+    destroyInstance: real.destroyInstance,
+    operation: real.operation,
   } satisfies Partial<OrbitGatewayClient>;
+  useOrbitInstanceRemovals.setState({ byInstance: {} });
   mocks.threads = threads;
   mocks.openInstance.mockReset();
   mocks.openInstance.mockResolvedValue({ kind: "opened", draftId: "draft-1" });
@@ -294,5 +305,119 @@ describe("Orbit Instances page", () => {
     // The filter wraps under the field instead of squeezing it.
     expect(field.width).toBeGreaterThanOrEqual(192);
     expect(filter.getBoundingClientRect().top).toBeGreaterThanOrEqual(field.bottom);
+  });
+});
+
+/** Orbit's answers to handle A, as its proof recorded them. */
+const answer = (status: number, body: unknown): OrbitGatewayResponse => ({
+  status,
+  body: JSON.stringify(body),
+});
+const destroyOperation = (status: string) =>
+  answer(status === "queued" ? 202 : 200, {
+    data: {
+      id: 77,
+      kind: "instance.destroy",
+      status,
+      target_id: 11,
+      poll_after_seconds: status === "succeeded" ? null : 1,
+    },
+  });
+const refusal = (code: string, message: string, details: unknown = {}) =>
+  answer(409, { error: { code, message, details } });
+
+describe("Removing an Instance", () => {
+  it("asks once, takes Orbit's unknown-state refusal as the tick, shows Removing…, then drops the row", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    let finish: () => void = () => {};
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let removed = false;
+    using _env = setup(
+      async () =>
+        removed
+          ? ENVIRONMENTS.filter((environment) => environment.instanceId !== 11)
+          : ENVIRONMENTS,
+      [],
+      async (request) => {
+        requests.push(request);
+        if (request.path === "/instances/11/destroy") {
+          const body = request.body as { acknowledge_unsaved: boolean };
+          return body.acknowledge_unsaved
+            ? destroyOperation("queued")
+            : refusal(
+                "instance.unsaved_work",
+                "The Instance may hold unsaved work. Acknowledge its removal to continue.",
+                { uncommitted: null, unpushed: null, state: "unknown" },
+              );
+        }
+        await finished;
+        removed = true;
+        return destroyOperation("succeeded");
+      },
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+    const dialog = page.getByRole("alertdialog");
+    await expectText(dialog, "Orbit removes the Instance pricing-page.p5.test on beast");
+    await expect.element(dialog.getByRole("checkbox")).not.toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("button", { name: "Remove Instance" }));
+
+    // Orbit cannot read the Git state yet: it refuses once, and the dialog asks for the tick.
+    await expect
+      .element(page.getByText(/Orbit cannot tell whether this Instance holds work/))
+      .toBeVisible();
+    const confirm = page.getByRole("alertdialog").getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm).toBeDisabled();
+    await userEvent.click(page.getByText("Remove it anyway. Any unsaved work is lost."));
+    await userEvent.click(confirm);
+
+    await expect.element(row("pricing-page").getByText("Removing…")).toBeVisible();
+    finish();
+    await expect.element(row("pricing-page")).not.toBeInTheDocument();
+    await expect.element(row("old-spike")).toBeVisible();
+
+    const destroys = requests.filter((request) => request.method === "POST");
+    expect(destroys.map((request) => request.body)).toEqual([
+      { acknowledge_unsaved: false },
+      { acknowledge_unsaved: true },
+    ]);
+    expect(destroys[0]!.idempotencyKey).toMatch(/^conn-instance-destroy:11:/);
+    expect(destroys[1]!.idempotencyKey).not.toBe(destroys[0]!.idempotencyKey);
+  });
+
+  it("keeps Orbit's refusal on the row, with Retry", async () => {
+    let calls = 0;
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async () => {
+        calls++;
+        return refusal(
+          "instance.default_protected",
+          "The default Instance cannot be removed from Conn.",
+        );
+      },
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("old-spike").getByRole("button", { name: "Remove Instance" }));
+    await userEvent.click(
+      page.getByRole("alertdialog").getByRole("button", { name: "Remove Instance" }),
+    );
+    await expect
+      .element(
+        row("old-spike").getByText(
+          "Could not remove: The default Instance cannot be removed from Conn.",
+        ),
+      )
+      .toBeVisible();
+    await userEvent.click(row("old-spike").getByRole("button", { name: "Retry" }));
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await expect
+      .element(row("old-spike").getByRole("button", { name: "Remove Instance" }))
+      .toBeVisible();
   });
 });

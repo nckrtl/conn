@@ -21,15 +21,26 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { deriveProjectIdentity } from "@t3tools/shared/projectIdentity";
+import type { OrbitInstanceGitState } from "@t3tools/client-runtime/orbit-gateway";
 import { useState } from "react";
 
 import { cn } from "../lib/utils";
 import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
 import { loadOrbitInstanceList, useOrbitInstanceList } from "../orbit/orbitInstanceList";
+import {
+  runOrbitInstanceRemoval,
+  useOrbitInstanceRemovals,
+  webOrbitInstanceRemovalPorts,
+} from "../orbit/orbitInstanceRemoval";
 import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
 import { useVisibleThreadShells } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { formatRelativeTimeLabel } from "../timestampFormat";
+import {
+  OrbitInstanceRemoveAction,
+  OrbitInstanceRemoveDialog,
+  OrbitInstanceRemoveFailure,
+} from "./OrbitInstanceRemove";
 import { ProjectMonogram } from "./ProjectMonogram";
 import { isSidebarHiddenThread } from "./Sidebar.logic";
 import { SettingsPageContainer, SettingsSection } from "./settings/settingsLayout";
@@ -192,8 +203,37 @@ function InstanceThreads({ row }: { readonly row: OrbitInstanceWithThreads }) {
   );
 }
 
-function InstanceRow({ row }: { readonly row: OrbitInstanceWithThreads }) {
+/** The row the remove dialog asks about, with the Git state Orbit's refusal named, if any. */
+interface RemoveRequest {
+  readonly row: OrbitInstanceWithThreads;
+  readonly git: OrbitInstanceGitState | undefined;
+}
+
+async function removeInstance(
+  row: OrbitInstanceWithThreads,
+  git: OrbitInstanceGitState | undefined,
+  acknowledgeUnsaved: boolean,
+  askAgain: (request: RemoveRequest) => void,
+) {
+  const outcome = await runOrbitInstanceRemoval(
+    { id: row.id, environmentId: row.environmentId, ...(git ? { git } : {}) },
+    acknowledgeUnsaved,
+    webOrbitInstanceRemovalPorts(),
+  );
+  if (outcome.kind === "unsaved_work") askAgain({ row, git: outcome.git });
+}
+
+function InstanceRow({
+  row,
+  onRemove,
+  onRetry,
+}: {
+  readonly row: OrbitInstanceWithThreads;
+  readonly onRemove: () => void;
+  readonly onRetry: (acknowledgeUnsaved: boolean) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const removal = useOrbitInstanceRemovals((store) => store.byInstance[row.id]);
   const { state } = orbitInstanceAvailability(row);
   const hasThreads = row.threads.length > 0;
   const unfolded = open && hasThreads;
@@ -241,11 +281,23 @@ function InstanceRow({ row }: { readonly row: OrbitInstanceWithThreads }) {
         ) : (
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">{body}</div>
         )}
-        {/* Room for the Git state and the remove button Orbit makes possible later. */}
         <div className="flex shrink-0 items-center gap-1.5">
-          <NewThreadButton row={row} />
+          {removal?.status === "removing" ? null : <NewThreadButton row={row} />}
+          {/* On every row: the list cannot tell a checkout from a container; Orbit's refusal says so. */}
+          <OrbitInstanceRemoveAction
+            removing={removal?.status === "removing"}
+            onRemove={onRemove}
+          />
         </div>
       </div>
+      {removal?.status === "failed" ? (
+        <div className="mt-1.5 ms-5">
+          <OrbitInstanceRemoveFailure
+            message={removal.message}
+            onRetry={() => onRetry(removal.acknowledgeUnsaved)}
+          />
+        </div>
+      ) : null}
       {unfolded ? <InstanceThreads row={row} /> : null}
     </div>
   );
@@ -334,11 +386,13 @@ export function OrbitInstancesPage() {
   const threads = useVisibleThreadShells();
   const [query, setQuery] = useState("");
   const [projectId, setProjectId] = useState<number | null>(null);
+  const [removeRequest, setRemoveRequest] = useState<RemoveRequest | null>(null);
+  const removals = useOrbitInstanceRemovals((store) => store.byInstance);
 
   const rows =
     list.status === "loaded"
       ? joinOrbitInstanceThreads(
-          list.rows,
+          list.rows.filter((row) => removals[row.id]?.status !== "removed"),
           threads
             .filter((thread) => !isSidebarHiddenThread(thread))
             .map((thread) => ({
@@ -414,11 +468,43 @@ export function OrbitInstancesPage() {
             }
           >
             {group.rows.map((row) => (
-              <InstanceRow key={row.id} row={row} />
+              <InstanceRow
+                key={row.id}
+                row={row}
+                onRemove={() => setRemoveRequest({ row, git: row.git })}
+                onRetry={(acknowledgeUnsaved) =>
+                  void removeInstance(row, row.git, acknowledgeUnsaved, setRemoveRequest)
+                }
+              />
             ))}
           </SettingsSection>
         ))
       )}
+      <OrbitInstanceRemoveDialog
+        target={
+          removeRequest === null
+            ? null
+            : {
+                name: removeRequest.row.name,
+                domain: removeRequest.row.domain,
+                nodeName: removeRequest.row.nodeName,
+                threadCount: removeRequest.row.threads.length,
+                workingCount: removeRequest.row.workingCount,
+                git: removeRequest.git,
+              }
+        }
+        onCancel={() => setRemoveRequest(null)}
+        onConfirm={(acknowledgeUnsaved) => {
+          if (removeRequest === null) return;
+          setRemoveRequest(null);
+          void removeInstance(
+            removeRequest.row,
+            removeRequest.git,
+            acknowledgeUnsaved,
+            setRemoveRequest,
+          );
+        }}
+      />
     </SettingsPageContainer>
   );
 }

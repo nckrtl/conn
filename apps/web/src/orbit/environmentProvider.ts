@@ -1,5 +1,6 @@
 import {
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  forgetOrbitEnvironment,
   isFinalPairingError,
   orbitInstanceFromEnvironment,
   orbitInstancesByEnvironment,
@@ -137,6 +138,21 @@ export function setEnvironmentProvider(provider: EnvironmentProvider): void {
 /** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
 export function recordOrbitPaired(environmentId: string): void {
   useEnvironmentProvider.setState(({ state }) => ({ state: recordPaired(state, environmentId) }));
+}
+
+/** Conn: the saved servers of an Instance, as the last sync saw them. */
+export function orbitInstanceEnvironmentIds(instanceId: number): string[] {
+  return Object.entries(useEnvironmentProvider.getState().orbitInstances)
+    .filter(([, descriptor]) => descriptor.instanceId === instanceId)
+    .map(([environmentId]) => environmentId);
+}
+
+/** Conn: forgets a server Orbit removed: its pairing records and its Orbit facts. */
+export function forgetOrbitInstanceEnvironment(environmentId: string): void {
+  useEnvironmentProvider.setState(({ state, orbitInstances }) => {
+    const { [environmentId]: _gone, ...rest } = orbitInstances;
+    return { state: forgetOrbitEnvironment(state, environmentId), orbitInstances: rest };
+  });
 }
 
 /**

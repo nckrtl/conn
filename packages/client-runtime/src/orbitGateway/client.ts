@@ -385,6 +385,16 @@ export interface OrbitGatewayClient {
   ) => Promise<OrbitGatewayOperation>;
   /** Reads the link of a pairing whose Operation succeeded. The Gateway hands it out once. */
   readonly readPairing: (environmentId: string, pairingId: number) => Promise<OrbitGatewayPairing>;
+  /**
+   * Conn: asks Orbit to destroy an Instance (handle A, not live yet); the Operation's kind is
+   * `instance.destroy`. Without `acknowledgeUnsaved`, Orbit refuses an Instance with unsaved work
+   * or an unreadable Git state (409 `instance.unsaved_work`). Use `removeOrbitInstance`.
+   */
+  readonly destroyInstance: (
+    instanceId: number,
+    acknowledgeUnsaved: boolean,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayOperation>;
 }
 
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
@@ -608,6 +618,19 @@ export function createOrbitGatewayClient(
     readPairing: async (environmentId, pairingId) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings/${pairingId}`;
       return issuedPairing(await call({ method: "GET", path }), path);
+    },
+    destroyInstance: async (instanceId, acknowledgeUnsaved, idempotencyKey) => {
+      const path = `/instances/${instanceId}/destroy`;
+      return operation(
+        await call({
+          method: "POST",
+          path,
+          body: { acknowledge_unsaved: acknowledgeUnsaved },
+          timeoutMs: ADMISSION_TIMEOUT_MS,
+          idempotencyKey,
+        }),
+        path,
+      );
     },
   };
 }

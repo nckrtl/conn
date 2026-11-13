@@ -5,6 +5,9 @@ import { isAllowedConnQuery, resolveConnUrl } from "./orbitGateway.ts";
 describe("resolveConnUrl", () => {
   it("keeps ordinary Conn paths below the prefix", () => {
     expect(resolveConnUrl("/me")?.pathname).toBe("/api/v1/conn/me");
+    expect(resolveConnUrl("/instances/41/destroy")?.pathname).toBe(
+      "/api/v1/conn/instances/41/destroy",
+    );
     expect(resolveConnUrl("/profiles/1/settings")?.pathname).toBe(
       "/api/v1/conn/profiles/1/settings",
     );

@@ -3,6 +3,7 @@ import type {
   OrbitGatewayEnvironment,
   OrbitGatewayProjectListing,
 } from "./client.ts";
+import type { OrbitInstanceGitState } from "./instanceGit.ts";
 
 /**
  * Conn: the Orbit panel's Instances list, shared by desktop and mobile. Pages read only
@@ -10,15 +11,6 @@ import type {
  * Projects; Orbit's coming `GET /api/v1/conn/instances` sends the same fields flat, so only
  * `listOrbitInstances` changes when it lands.
  */
-
-/** Orbit's Git state of an Instance. Orbit does not send it yet, so `git` is always absent. */
-export type OrbitInstanceGitState =
-  | {
-      readonly known: true;
-      readonly uncommittedCount: number;
-      readonly notPushedCount: number;
-    }
-  | { readonly known: false };
 
 export interface OrbitInstanceListRow {
   readonly id: number;
@@ -35,6 +27,7 @@ export interface OrbitInstanceListRow {
   /** The Instance's T3 server; null when it has none yet. */
   readonly environmentId: string | null;
   readonly branch: string | null;
+  /** Absent until the list reads Orbit's `?include=git` (`parseOrbitInstanceGit`). */
   readonly git?: OrbitInstanceGitState;
 }
 

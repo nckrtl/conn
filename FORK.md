@@ -321,8 +321,8 @@ first turn uses the clone's default and the ready area says so.
 
 **Failures.** A failed start offers Retry (from the last saved step), Change name (for refusals
 that made no Instance, such as `instance.name_taken` and `route.domain_invalid`; reopens the draft with the message and model, then the Instance step) and
-Dismiss, which drops only the saved start on this device. Conn removes no Instance; Instances are
-removed in Orbit. A create that failed with `instance.container_process_inactive` (a Project process
+Dismiss, which drops only the saved start on this device; it removes no Instance (the Orbit
+panel's Instances page does). A create that failed with `instance.container_process_inactive` (a Project process
 did not stay up, named by `result.process_failure.unit`) offers Retry on the desktop and the phone
 only when the Operation's `result.recovery.requires` is `project_process_definition`: Orbit then
 retries with the Project's current process definitions, and the card says to change or remove the
@@ -373,8 +373,14 @@ never a default: today from the Gateway's environments named from its Projects, 
 flat `GET /conn/instances`. Only `listOrbitInstances` in `client-runtime/src/orbitGateway/instanceList.ts`
 reads the source; grouping, search, the Project filter and the join with local threads beside it
 are pure, so mobile reuses them. "New thread in this Instance" does what the palette's Instance
-step does (`openOrbitInstanceById`). Removing an Instance and its Git state wait for Orbit (a
-destroy handle for Conn and Git state per Instance). Conn picks up the Orbit connection from the
+step does (`openOrbitInstanceById`). The bin button removes an Instance through
+`POST /conn/instances/{id}/destroy` (`removeOrbitInstance`, one `Idempotency-Key` per attempt) and
+follows its `instance.destroy` Operation; any 404 counts as already removed. The list carries no
+Git state yet, so the first request goes without `acknowledge_unsaved`, and Orbit's 409
+`instance.unsaved_work` (always `state: "unknown"` for now) makes the dialog ask for the tick. Every
+other refusal (a default or checkout Instance, a busy one, …) stays on the row with Orbit's message
+and Retry. After a remove, `cleanUpRemovedOrbitInstance` drops the saved starts, pairings, servers
+and their threads. The phone has no remove yet. Conn picks up the Orbit connection from the
 machine (tunnel, root CA and Node are set up outside Conn), so Connection has no Gateway address
 field and no set-up flow. It shows this device's Node name and WireGuard address with Reload,
 three checks read from one `me` call (Gateway reachable, certificate trusted, device known), the

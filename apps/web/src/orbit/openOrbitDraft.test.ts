@@ -7,6 +7,7 @@ import type { DraftId } from "../composerDraftStore";
 import { openOrbitDraft } from "./openOrbitDraft";
 import { openOrbitInstanceById } from "./openOrbitInstance";
 import type { OrbitDraftTarget } from "./orbitDraft";
+import { useOrbitInstanceSleep } from "./orbitInstanceSleep";
 
 const mocks = vi.hoisted(() => ({
   enabled: true,
@@ -250,10 +251,22 @@ describe("openOrbitInstanceById", () => {
       kind: "unavailable",
       reason: "Instance login has no T3 server this device can reach.",
     });
-    expect(await open([environment("env-42", { powerState: "stopped" })])).toMatchObject({
+    expect(await open([environment("env-42", { status: "session_expired" })])).toMatchObject({
       kind: "unavailable",
     });
     expect(mocks.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
     expect(mocks.newThread).not.toHaveBeenCalled();
+  });
+
+  it("opens an asleep Instance (Conn wakes it when the draft shows), but not on an older Gateway", async () => {
+    expect(await open([environment("env-42", { powerState: "stopped" })])).toEqual({
+      kind: "opened",
+      draftId: "draft-new",
+    });
+    useOrbitInstanceSleep.setState({ unsupportedAt: Number.MAX_SAFE_INTEGER });
+    expect(await open([environment("env-42", { powerState: "stopped" })])).toMatchObject({
+      kind: "unavailable",
+    });
+    useOrbitInstanceSleep.setState({ unsupportedAt: null });
   });
 });

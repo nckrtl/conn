@@ -1,5 +1,7 @@
 # Wake an asleep Instance from Conn (conn#80): real-app check on the mini
 
+Re-run after the review fixes, 23:16–23:52 UTC on head 6be8cc7094 plus the round-2 fixes (head 7696671d2a). Clicks are real CDP mouse events, because a wake needs user input in the window. The shots 10, 20, 21, 31, 32, 70 and 71 are from that re-run.
+
 Taken on 13 Nov 2026, 22:46–23:05 UTC, from the real Conn dev app on the mini (own clone `/Volumes/Data/nckrtl/.cache/conn-slice-wake/repo`, CDP port 9481, own home). Default dark theme, Orbit mode, no profile linked. Screenshots only through CDP `Page.captureScreenshot` (1280×820, scale 2).
 
 Set-up (nothing on Orbit, no live call):
@@ -18,6 +20,9 @@ Set-up (nothing on Orbit, no live call):
 - `40-wake-failed-4s.png`, `41-wake-failed-24s.png`: a failed wake. Today's display: "mini is reconnecting", with today's retries and backoff. Conn asks for a wake again at most every 30 s while the view shows the Instance.
 - `50-old-gateway-instances.png`: an older Gateway (the wake answers 404). The connection keeps today's behaviour. The row's New thread button is blocked again with today's reason, "Orbit cannot start a stopped Instance yet" (`aria-disabled=true`; the tooltip shows on hover).
 - `before-fix/`: the first run, at head e02d141965. A route swap parked the Instance again during its wake, so it showed "mini is offline" until the next list read (about 21 s). Fixed in 34e94b0c7e; every run above is at that head.
+
+- `70-idle-window-parked.png`: a thread of the Instance open, then no input for 5.5 min, then a freeze. Within 11 s Conn holds it off with no wake call and no banner.
+- `71-idle-window-after-input.png`: one click into the window woke it; connected 0.5 s later.
 
 ## Measured
 - Not in use: parked within one list read (8.8–22 s after the freeze). The connection reads `available`, not a failure, and no connect hangs.

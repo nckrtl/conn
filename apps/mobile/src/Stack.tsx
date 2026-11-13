@@ -132,6 +132,7 @@ import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsLabsRouteScreen } from "./features/settings/ThreadSettingsSections";
 import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
 import { openSettings, settingsOpenIn } from "./features/settings/settings-navigation";
+import { SETTINGS_LIST_PRESENTATION } from "./features/settings/settings-sheet";
 import { DEFAULT_SETTINGS_PAGE } from "./features/layout/workspace/workspace-tab-navigation";
 import {
   isWorkspaceOverlayRoute,
@@ -166,6 +167,7 @@ const SETTINGS_SCREENS = {
     options: {
       ...pageRoute({ title: "Settings", itemStyle: "standard", root: true }),
       ...(Platform.OS === "android" ? { animation: "none" as const } : {}),
+      ...SETTINGS_LIST_PRESENTATION,
     },
   }),
   SettingsEnvironments: createNativeStackScreen({

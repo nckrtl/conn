@@ -11,6 +11,7 @@ import { cn } from "../../../lib/cn";
 import type { SettingsLegalDocumentTarget, SettingsPageTarget } from "./settings-page-targets";
 import { SettingsSidebarContext } from "./SettingsSection";
 import { openSettings } from "../settings-navigation";
+import { SETTINGS_OPENS_AS_SHEET } from "../settings-sheet";
 
 export function SettingsRow(props: {
   readonly disabled?: boolean;
@@ -27,7 +28,9 @@ export function SettingsRow(props: {
   const navigation = useNavigation();
   const sidebar = use(SettingsSidebarContext);
   // The Settings list opens pages in place of the detail column; a page's own rows push below.
-  const inList = ["Home", "Settings"].includes(useRoute().name);
+  // In the iPhone sheet the list's rows push too, so the workspace under the sheet stays put.
+  const routeName = useRoute().name;
+  const inList = routeName === "Home" || (routeName === "Settings" && !SETTINGS_OPENS_AS_SHEET);
   const valueBelow =
     props.valuePosition === "below" ||
     (props.valuePosition === undefined && Platform.OS === "android");

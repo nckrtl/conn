@@ -12,7 +12,11 @@ import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { setEnvironmentProvider, useEnvironmentProvider } from "~/orbit/environmentProvider";
+import {
+  connectOrbitEnvironment,
+  setEnvironmentProvider,
+  useEnvironmentProvider,
+} from "~/orbit/environmentProvider";
 import { desktopOrbitGatewayClient } from "~/orbit/OrbitProfileSync";
 import { useEnvironments } from "~/state/environments";
 
@@ -104,6 +108,7 @@ const NODE_STATES: Record<OrbitNodeState, { readonly label: string; readonly dot
   paired: { label: "Paired", dot: "bg-success" },
   pairing: { label: "Pairing…", dot: "bg-muted-foreground/40" },
   expired: { label: "Registration expired", dot: "bg-warning" },
+  revoked: { label: "Revoked in Orbit", dot: "bg-destructive" },
 };
 
 /**
@@ -143,6 +148,36 @@ function useOrbitConnection() {
 }
 
 /**
+ * Conn: Connect for a server whose pairing Orbit revoked; the one way to pair it again. A failed
+ * Connect leaves the revoked state when Orbit refuses the pairing again.
+ */
+function RevokedConnectButton(props: {
+  readonly environmentId: string;
+  readonly environments: readonly OrbitGatewayEnvironment[] | null;
+}) {
+  const [connecting, setConnecting] = useState(false);
+  const environment = props.environments?.find(
+    (entry) => entry.environmentId === props.environmentId,
+  );
+  if (!environment) return null;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      disabled={connecting}
+      onClick={() => {
+        const client = desktopOrbitGatewayClient();
+        if (!client) return;
+        setConnecting(true);
+        void connectOrbitEnvironment(client, environment).finally(() => setConnecting(false));
+      }}
+    >
+      {connecting ? "Connecting…" : "Connect"}
+    </Button>
+  );
+}
+
+/**
  * The Orbit panel's Connection page: this device's Node, the three checks of its connection to
  * the Gateway, and the Nodes that run a T3 server. Conn picks up the connection from the machine,
  * so a failed check says what to fix outside Conn. Instances are on the Instances page.
@@ -150,6 +185,7 @@ function useOrbitConnection() {
 export function OrbitConnectionPage() {
   const { probe, environments, load } = useOrbitConnection();
   const { environments: savedEnvironments } = useEnvironments();
+  const revokedAt = useEnvironmentProvider((store) => store.state.revokedAt);
   const navigate = useNavigate();
   const m = useMessages();
   const connectionsLabel = m(SETTINGS_SECTION_LABELS["/settings/connections"]);
@@ -164,6 +200,7 @@ export function OrbitConnectionPage() {
           paired: new Set(
             savedEnvironments.map((environment) => String(environment.environmentId)),
           ),
+          revoked: new Set(Object.keys(revokedAt ?? {})),
           device: node,
         });
 
@@ -247,8 +284,16 @@ export function OrbitConnectionPage() {
                 }
                 description={entry.isThisDevice ? `This device · ${entry.address}` : entry.address}
                 control={
-                  <span className="text-ui text-muted-foreground">
-                    {NODE_STATES[entry.state].label}
+                  <span className="flex items-center gap-3">
+                    <span className="text-ui text-muted-foreground">
+                      {NODE_STATES[entry.state].label}
+                    </span>
+                    {entry.state === "revoked" ? (
+                      <RevokedConnectButton
+                        environmentId={entry.environmentId}
+                        environments={environments}
+                      />
+                    ) : null}
                   </span>
                 }
               />

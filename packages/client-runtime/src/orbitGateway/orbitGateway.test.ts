@@ -3,6 +3,7 @@ import {
   createOrbitGatewayClient,
   orbitGatewayPathWithQuery,
   isFinalPairingError,
+  isPairingRevokedError,
   OrbitGatewayError,
   startableOrbitProject,
   type OrbitGatewayRequest,
@@ -429,6 +430,29 @@ describe("createOrbitGatewayClient", () => {
       expect(requests[0]?.timeoutMs).toBe(60_000);
     });
 
+    it("sends renew only for a renewal, and reports a revoked pairing as final", async () => {
+      const { requests, transport } = scripted([
+        [201, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
+        [201, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
+      ]);
+      const client = createOrbitGatewayClient(transport);
+      await client.pair("env-spike");
+      await client.pair("env-spike", { renew: true });
+      expect(requests[0]?.body).toBeUndefined();
+      expect(requests[1]?.body).toEqual({ renew: true });
+
+      const revoked = createOrbitGatewayClient(async () => ({
+        status: 409,
+        body: JSON.stringify({
+          status: 409,
+          error: { code: "conn.pairing_revoked", message: "Revoked.", details: {} },
+        }),
+      }));
+      const failure = await revoked.pair("env-spike", { renew: true }).catch((error) => error);
+      expect(isPairingRevokedError(failure)).toBe(true);
+      expect(isFinalPairingError(failure)).toBe(true);
+    });
+
     it("still accepts a Gateway that answers with the link at once", async () => {
       const { requests, transport } = scripted([
         [201, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
@@ -474,6 +498,9 @@ describe("createOrbitGatewayClient", () => {
       expect(isFinalPairingError(error("conn.session_rejected"))).toBe(true);
       expect(isFinalPairingError(error("conn.request_refused"))).toBe(true);
       expect(isFinalPairingError(error("conn.response_invalid"))).toBe(true);
+      expect(isFinalPairingError(error("conn.pairing_revoked"))).toBe(true);
+      expect(isPairingRevokedError(error("conn.pairing_revoked"))).toBe(true);
+      expect(isPairingRevokedError(error("conn.session_rejected"))).toBe(false);
       expect(isFinalPairingError(error("conn.pairing_outcome_unknown"))).toBe(false);
       expect(isFinalPairingError(error("gateway.unreachable"))).toBe(false);
       expect(isFinalPairingError(new Error("conn.session_rejected"))).toBe(false);

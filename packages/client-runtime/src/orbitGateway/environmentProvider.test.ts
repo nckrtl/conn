@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { OrbitGatewayEnvironment } from "./client.ts";
+import * as DateTime from "effect/DateTime";
+
 import {
   ACCESS_PAIRING_RETRY_MS,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  EXPIRED_RENEWAL_RETRY_MS,
+  EXPIRING_RENEWAL_RETRY_MS,
   forgetOrbitEnvironment,
+  forgetPairingRevoked,
+  isPairingRevoked,
   PAIRING_RETRY_MS,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
@@ -12,6 +18,10 @@ import {
   recordPaired,
   recordPairingAttempt,
   recordPairingRefused,
+  recordPairingRevoked,
+  recordRenewal,
+  SESSION_RENEW_BEFORE_MS,
+  sessionRenewalReason,
   type ManagedEnvironment,
   type OrbitEnvironmentState,
 } from "./environmentProvider.ts";
@@ -121,7 +131,7 @@ describe("planEnvironmentProvider", () => {
         orbit: null,
         state,
       }),
-    ).toEqual({ enable: [], disable: [], pair: [], state });
+    ).toEqual({ enable: [], disable: [], pair: [], renew: [], state });
   });
 
   it("restores exactly the earlier list on each switch, back and forth", () => {
@@ -275,5 +285,156 @@ describe("planEnvironmentProvider", () => {
       pairAttemptedAt: { kept: 2 },
       pairRefusedAt: { kept: "2026-11-12T08:00:00+00:00" },
     });
+  });
+
+  it("forgets a destroyed Instance's renewal and revoke records too", () => {
+    const state = recordPairingRevoked(
+      recordRenewal(recordPaired(EMPTY_ORBIT_ENVIRONMENT_STATE, "gone"), "gone", 1),
+      "gone",
+      2,
+    );
+    expect(JSON.stringify(forgetOrbitEnvironment(state, "gone"))).not.toContain("gone");
+  });
+});
+
+describe("session renewal", () => {
+  const now = 1_800_000_000_000;
+  const day = 24 * 60 * 60 * 1000;
+  const at = (ms: number) => DateTime.makeUnsafe(ms);
+
+  describe("sessionRenewalReason", () => {
+    it("renews a session that ends within seven days, or has ended", () => {
+      const reason = (session: Parameters<typeof sessionRenewalReason>[0]["session"]) =>
+        sessionRenewalReason({ authenticationRefused: false, session, now });
+      expect(reason({ authenticated: true, expiresAt: at(now + 30 * day) })).toBeNull();
+      expect(reason({ authenticated: true, expiresAt: at(now + SESSION_RENEW_BEFORE_MS) })).toBe(
+        null,
+      );
+      expect(reason({ authenticated: true, expiresAt: at(now + 6 * day) })).toBe("expiring");
+      expect(reason({ authenticated: true, expiresAt: at(now - 1) })).toBe("expired");
+      expect(reason({ authenticated: false })).toBe("expired");
+      // A session without an end (a cookie session) or not read yet needs nothing.
+      expect(reason({ authenticated: true })).toBeNull();
+      expect(reason(null)).toBeNull();
+    });
+
+    it("counts a connection blocked on its credential as an ended session", () => {
+      expect(sessionRenewalReason({ authenticationRefused: true, session: null, now })).toBe(
+        "expired",
+      );
+    });
+  });
+
+  const input = (state: OrbitEnvironmentState, extra: Record<string, unknown> = {}) => ({
+    provider: "orbit" as const,
+    saved: [saved("beast"), saved("mini"), saved("shark"), saved("nick")],
+    orbit: [orbit("beast"), orbit("mini"), orbit("shark"), orbit("nick")],
+    state,
+    renew: [
+      { environmentId: "beast", reason: "expired" as const },
+      { environmentId: "mini", reason: "expired" as const },
+      { environmentId: "shark", reason: "expiring" as const },
+    ],
+    now,
+    ...extra,
+  });
+
+  it("renews every saved server whose session ends soon or has ended, in one plan", () => {
+    const plan = planEnvironmentProvider(input(EMPTY_ORBIT_ENVIRONMENT_STATE));
+    expect(plan.pair).toEqual(["beast", "mini", "shark"]);
+    expect(plan.renew).toEqual(["beast", "mini", "shark"]);
+  });
+
+  it("backs off 5 minutes after renewing an ended session, 6 hours for one that ends soon", () => {
+    let state = EMPTY_ORBIT_ENVIRONMENT_STATE;
+    for (const id of ["beast", "mini", "shark"]) state = recordRenewal(state, id, now);
+    expect(planEnvironmentProvider(input(state, { now: now + 60_000 })).pair).toEqual([]);
+    expect(
+      planEnvironmentProvider(input(state, { now: now + EXPIRED_RENEWAL_RETRY_MS })).renew,
+    ).toEqual(["beast", "mini"]);
+    expect(
+      planEnvironmentProvider(input(state, { now: now + EXPIRING_RENEWAL_RETRY_MS })).renew,
+    ).toEqual(["beast", "mini", "shark"]);
+  });
+
+  it("never renews a server whose pairing Orbit revoked, until an explicit Connect", () => {
+    const revoked = recordPairingRevoked(EMPTY_ORBIT_ENVIRONMENT_STATE, "beast", now);
+    expect(isPairingRevoked(revoked, "beast")).toBe(true);
+    const later = input(revoked, { now: now + 365 * day });
+    expect(planEnvironmentProvider(later).renew).toEqual(["mini", "shark"]);
+    // Nor does the access re-pair bring it back.
+    expect(planEnvironmentProvider({ ...later, renew: [], lacksAccess: ["beast"] }).pair).toEqual(
+      [],
+    );
+    const connected = forgetPairingRevoked(revoked, "beast");
+    expect(isPairingRevoked(connected, "beast")).toBe(false);
+    expect(planEnvironmentProvider(input(connected)).renew).toEqual(["beast", "mini", "shark"]);
+  });
+
+  it("keeps the revoked state across a reload and a switch to Default", () => {
+    const revoked = recordRenewal(
+      recordPairingRevoked(EMPTY_ORBIT_ENVIRONMENT_STATE, "beast", 7),
+      "mini",
+      9,
+    );
+    const reloaded = parseOrbitEnvironmentState(JSON.parse(JSON.stringify(revoked)));
+    expect(reloaded.revokedAt).toEqual({ beast: 7 });
+    expect(reloaded.renewedAt).toEqual({ mini: 9 });
+    const toDefault = planEnvironmentProvider({
+      provider: "default",
+      saved: [],
+      orbit: null,
+      state: reloaded,
+    });
+    expect(isPairingRevoked(toDefault.state, "beast")).toBe(true);
+  });
+
+  it("never renews a removed Instance's server, and waits for a stopped one", () => {
+    const plan = planEnvironmentProvider({
+      provider: "orbit",
+      saved: [saved("removed-clone"), saved("asleep-clone"), saved("expired-admin")],
+      // A removed Instance's server has left the Gateway's list.
+      orbit: [
+        { ...orbit("asleep-clone", "registered", 43), powerState: "stopped" },
+        orbit("expired-admin", "session_expired", 44),
+      ],
+      state: EMPTY_ORBIT_ENVIRONMENT_STATE,
+      renew: ["removed-clone", "asleep-clone", "expired-admin"].map((environmentId) => ({
+        environmentId,
+        reason: "expired" as const,
+      })),
+      now,
+    });
+    expect(plan.pair).toEqual([]);
+    expect(plan.disable).toEqual(["removed-clone"]);
+  });
+
+  it("renews a server T3 refused for good only after it registers again", () => {
+    const refused = recordPairingRefused(
+      recordRenewal(EMPTY_ORBIT_ENVIRONMENT_STATE, "beast", now),
+      orbit("beast"),
+    );
+    const later = input(refused, { now: now + day });
+    expect(planEnvironmentProvider(later).renew).toEqual(["mini", "shark"]);
+    const registeredAgain = { ...orbit("beast"), registeredAt: "2026-11-13T08:00:00+00:00" };
+    expect(
+      planEnvironmentProvider({
+        ...later,
+        orbit: [registeredAgain, orbit("mini"), orbit("shark")],
+      }).renew,
+    ).toEqual(["beast", "mini", "shark"]);
+  });
+
+  it("leaves the clone a thread start pairs itself", () => {
+    const plan = planEnvironmentProvider({
+      provider: "orbit",
+      saved: [saved("clone")],
+      orbit: [orbit("clone", "registered", 41)],
+      state: EMPTY_ORBIT_ENVIRONMENT_STATE,
+      renew: [{ environmentId: "clone", reason: "expired" }],
+      heldInstanceIds: [41],
+      now,
+    });
+    expect(plan.pair).toEqual([]);
   });
 });

@@ -342,10 +342,14 @@ export interface OrbitGatewayClient {
   ) => Promise<OrbitGatewaySettings>;
   readonly environments: () => Promise<readonly OrbitGatewayEnvironment[]>;
   /**
-   * Mints a one-time pairing link to the server for this device. The Gateway mints it in an
-   * Operation; this follows the Operation and reads the link, which the Gateway hands out once.
+   * Mints a one-time pairing link to the server for this device, following the Gateway's
+   * Operation. `renew`: an automatic pairing of a saved server, which Orbit refuses with 409
+   * `conn.pairing_revoked` once this Node's pairing there is revoked (older Gateways ignore it).
    */
-  readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
+  readonly pair: (
+    environmentId: string,
+    options?: OrbitGatewayPairOptions,
+  ) => Promise<OrbitGatewayPairing>;
   /** The Projects this device sees; `startableOrbitProject` keeps those a thread can start in. */
   readonly projects: (
     options?: OrbitGatewayProjectsOptions,
@@ -403,6 +407,17 @@ export interface OrbitGatewayClient {
 
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
 
+export interface OrbitGatewayPairOptions {
+  /** Sends `{"renew": true}`: a background renewal, which a revoked pairing stops. */
+  readonly renew?: boolean;
+}
+
+/**
+ * Orbit's answer to a renewal when this Node's newest pairing with the server is revoked. Final:
+ * only an explicit Connect pairs that server again.
+ */
+const PAIRING_REVOKED = "conn.pairing_revoked";
+
 /** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
 export const OPERATION_TIMEOUT_MS = 60_000;
 /** The Gateway copies secrets to Swamp before it admits a create or a pairing: 19-27 s today. */
@@ -429,6 +444,7 @@ const FINAL_PAIRING_ERROR_CODES: ReadonlySet<string> = new Set([
   "conn.session_rejected",
   "conn.request_refused",
   "conn.response_invalid",
+  PAIRING_REVOKED,
 ]);
 
 export interface OrbitGatewayClientOptions {
@@ -551,9 +567,16 @@ export function createOrbitGatewayClient(
       ),
     environments: async () =>
       list(await call({ method: "GET", path: "/environments" }), "/environments", environment),
-    pair: async (environmentId) => {
+    pair: async (environmentId, pairOptions) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
-      let data = record(await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS }));
+      let data = record(
+        await call({
+          method: "POST",
+          path,
+          timeoutMs: ADMISSION_TIMEOUT_MS,
+          ...(pairOptions?.renew ? { body: { renew: true } } : {}),
+        }),
+      );
       // The Gateway mints the link in an Operation (202). Follow it, then read the link once.
       if (typeof data?.pairing_url !== "string") {
         const result = record((await settle(data, path)).result);
@@ -842,6 +865,11 @@ function projectCheck(value: unknown): OrbitGatewayProjectCheck[] {
 /** Whether a `pair` failure is one the Gateway calls final, so the caller must not retry it. */
 export function isFinalPairingError(error: unknown): boolean {
   return isOrbitGatewayError(error) && FINAL_PAIRING_ERROR_CODES.has(error.code);
+}
+
+/** Whether Orbit refused a renewal because this Node's pairing with the server is revoked. */
+export function isPairingRevokedError(error: unknown): boolean {
+  return isOrbitGatewayError(error) && error.code === PAIRING_REVOKED;
 }
 
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);

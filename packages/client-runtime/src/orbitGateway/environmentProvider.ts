@@ -1,3 +1,6 @@
+import type { AuthSessionState } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+
 import type { OrbitGatewayEnvironment } from "./client.ts";
 
 /**
@@ -23,6 +26,14 @@ export interface OrbitEnvironmentState {
    * had then. Orbit pairs such a server again only after it registers again.
    */
   readonly pairRefusedAt?: Readonly<Record<string, string>>;
+  /** Conn: when Orbit last renewed a saved server's session that ends soon or has ended. */
+  readonly renewedAt?: Readonly<Record<string, number>>;
+  /**
+   * Conn: servers whose renewal Orbit refused with `conn.pairing_revoked`, with the time of that
+   * answer. They are never renewed again; only an explicit Connect (`forgetPairingRevoked`) pairs
+   * them again.
+   */
+  readonly revokedAt?: Readonly<Record<string, number>>;
 }
 
 export const EMPTY_ORBIT_ENVIRONMENT_STATE: OrbitEnvironmentState = {
@@ -38,6 +49,43 @@ export const ACCESS_PAIRING_RETRY_MS = 6 * 60 * 60 * 1000;
  * Each attempt mints a link on the server, so a failure must not repeat on every sync.
  */
 export const PAIRING_RETRY_MS = 5 * 60 * 1000;
+
+/** Conn: a saved server's session is renewed once it ends within this time. */
+export const SESSION_RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Conn: the wait between renewals of a session that has ended (each one mints a link). */
+export const EXPIRED_RENEWAL_RETRY_MS = 5 * 60 * 1000;
+/** Conn: the wait between renewals of a session that still works but ends soon. */
+export const EXPIRING_RENEWAL_RETRY_MS = 6 * 60 * 60 * 1000;
+
+/** Conn: why a saved server's session needs a renewal. */
+export type SessionRenewalReason = "expired" | "expiring";
+
+/** Conn: a saved Orbit server whose session ends soon or has ended. */
+export interface SessionRenewal {
+  readonly environmentId: string;
+  readonly reason: SessionRenewalReason;
+}
+
+/**
+ * Conn: whether a saved server's session needs a renewal. `expired` when the server refused the
+ * credential (its session reads `authenticated: false`, or the connection is blocked on
+ * authentication); `expiring` when the session ends within `SESSION_RENEW_BEFORE_MS`. A session
+ * the client has not read yet, or one without an end, needs nothing.
+ */
+export function sessionRenewalReason(input: {
+  readonly authenticationRefused: boolean;
+  readonly session: Pick<AuthSessionState, "authenticated" | "expiresAt"> | null;
+  readonly now: number;
+}): SessionRenewalReason | null {
+  if (input.authenticationRefused) return "expired";
+  const session = input.session;
+  if (session === null) return null;
+  if (!session.authenticated) return "expired";
+  if (session.expiresAt === undefined) return null;
+  const endsAt = DateTime.toEpochMillis(session.expiresAt);
+  if (endsAt <= input.now) return "expired";
+  return endsAt - input.now < SESSION_RENEW_BEFORE_MS ? "expiring" : null;
+}
 
 /** A saved environment the provider manages. The desktop's own local backend is never passed in. */
 export interface ManagedEnvironment {
@@ -55,6 +103,11 @@ export interface EnvironmentProviderPlan {
    * `recordAccessPairing`.
    */
   readonly pair: readonly string[];
+  /**
+   * Conn: the part of `pair` that renews a saved server's session. Pair these one after another
+   * with `renew: true`, and record each attempt with `recordRenewal`.
+   */
+  readonly renew: readonly string[];
   readonly state: OrbitEnvironmentState;
 }
 
@@ -80,6 +133,8 @@ export function planEnvironmentProvider(input: {
    * is listed but left unpaired, so a new clone does not get a pairing from every device.
    */
   readonly requestedEnvironmentIds?: readonly string[];
+  /** Conn: saved Orbit servers whose session ends soon or has ended (`sessionRenewalReason`). */
+  readonly renew?: readonly SessionRenewal[];
   readonly now?: number;
 }): EnvironmentProviderPlan {
   const { saved, state } = input;
@@ -100,11 +155,12 @@ export function planEnvironmentProvider(input: {
       enable,
       disable,
       pair: [],
+      renew: [],
       state: { ...state, disabledByOrbit: [], pairedByOrbit: [...pairedByOrbit] },
     };
   }
 
-  if (input.orbit === null) return { enable, disable, pair: [], state };
+  if (input.orbit === null) return { enable, disable, pair: [], renew: [], state };
 
   const orbitIds = new Set(input.orbit.map((environment) => environment.environmentId));
   const savedIds = new Set(saved.map((environment) => environment.environmentId));
@@ -122,6 +178,10 @@ export function planEnvironmentProvider(input: {
   const lacksAccess = new Set(input.lacksAccess ?? []);
   const held = new Set(input.heldInstanceIds ?? []);
   const requested = new Set(input.requestedEnvironmentIds ?? []);
+  const renewals = new Map(
+    (input.renew ?? []).map((renewal) => [renewal.environmentId, renewal.reason]),
+  );
+  const renew: string[] = [];
   const now = input.now ?? 0;
   const pair = input.orbit
     .filter((environment) => {
@@ -137,6 +197,20 @@ export function planEnvironmentProvider(input: {
         const lastAttempt = state.pairAttemptedAt?.[id];
         return lastAttempt === undefined || now - lastAttempt >= PAIRING_RETRY_MS;
       }
+      // Conn: a revoked pairing is never renewed; only an explicit Connect pairs it again.
+      if (state.revokedAt?.[id] !== undefined) return false;
+      // Conn: a session that ends soon or has ended is renewed, unless T3 refused this
+      // registration's pairing for good (it is tried again once the server registers again).
+      const reason = renewals.get(id);
+      if (reason !== undefined) {
+        const refusedAt = state.pairRefusedAt?.[id];
+        if (refusedAt !== undefined && refusedAt === environment.registeredAt) return false;
+        const lastRenewal = state.renewedAt?.[id];
+        const wait = reason === "expired" ? EXPIRED_RENEWAL_RETRY_MS : EXPIRING_RENEWAL_RETRY_MS;
+        if (lastRenewal !== undefined && now - lastRenewal < wait) return false;
+        renew.push(id);
+        return true;
+      }
       // Conn: pair again so the session can manage linked environments (see FORK.md, "Orbit").
       const lastTry = state.accessPairedAt?.[id];
       return (
@@ -149,8 +223,42 @@ export function planEnvironmentProvider(input: {
     enable,
     disable,
     pair,
+    renew,
     state: { ...state, disabledByOrbit: [...disabledByOrbit], pairedByOrbit: [...pairedByOrbit] },
   };
+}
+
+/** Conn: records an attempt to renew a saved server's session, successful or not. */
+export function recordRenewal(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+  now: number,
+): OrbitEnvironmentState {
+  return { ...state, renewedAt: { ...state.renewedAt, [environmentId]: now } };
+}
+
+/** Conn: records that Orbit refused a renewal because this Node's pairing there is revoked. */
+export function recordPairingRevoked(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+  now: number,
+): OrbitEnvironmentState {
+  return { ...state, revokedAt: { ...state.revokedAt, [environmentId]: now } };
+}
+
+/** Conn: an explicit Connect lifts the revoked state, so the server pairs (and renews) again. */
+export function forgetPairingRevoked(
+  state: OrbitEnvironmentState,
+  environmentId: string,
+): OrbitEnvironmentState {
+  if (state.revokedAt?.[environmentId] === undefined) return state;
+  const { [environmentId]: _lifted, ...revokedAt } = state.revokedAt;
+  return { ...state, revokedAt };
+}
+
+/** Conn: whether Orbit revoked this device's pairing with the server (see `recordPairingRevoked`). */
+export function isPairingRevoked(state: OrbitEnvironmentState, environmentId: string): boolean {
+  return state.revokedAt?.[environmentId] !== undefined;
 }
 
 /** Conn: records an attempt to pair a saved server again for access, successful or not. */
@@ -210,12 +318,16 @@ export function forgetOrbitEnvironment(
   const accessPairedAt = without(state.accessPairedAt);
   const pairAttemptedAt = without(state.pairAttemptedAt);
   const pairRefusedAt = without(state.pairRefusedAt);
+  const renewedAt = without(state.renewedAt);
+  const revokedAt = without(state.revokedAt);
   return {
     disabledByOrbit: state.disabledByOrbit.filter((id) => id !== environmentId),
     pairedByOrbit: state.pairedByOrbit.filter((id) => id !== environmentId),
     ...(accessPairedAt === undefined ? {} : { accessPairedAt }),
     ...(pairAttemptedAt === undefined ? {} : { pairAttemptedAt }),
     ...(pairRefusedAt === undefined ? {} : { pairRefusedAt }),
+    ...(renewedAt === undefined ? {} : { renewedAt }),
+    ...(revokedAt === undefined ? {} : { revokedAt }),
   };
 }
 
@@ -252,5 +364,7 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     accessPairedAt: times(record.accessPairedAt),
     pairAttemptedAt: times(record.pairAttemptedAt),
     pairRefusedAt: texts(record.pairRefusedAt),
+    renewedAt: times(record.renewedAt),
+    revokedAt: times(record.revokedAt),
   };
 }

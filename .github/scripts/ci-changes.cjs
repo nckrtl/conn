@@ -32,6 +32,10 @@ const FORK_FILE_DEPS = {
 const EXTRA_OWNERS = [
   // Vite configs and tsconfigs of these apps import scripts/lib directly.
   [/^scripts\/lib\//, ["@t3tools/desktop", "@t3tools/mobile", "@t3tools/web", "t3"]],
+  [/^fork-sync\.json$/, ["@t3tools/scripts"]],
+  [/^settings-carryover\.json$/, ["@t3tools/scripts"]],
+  [/^knip\.jsonc$/, ["@t3tools/scripts"]],
+  [/^\.github\/scripts\/ci-changes\.cjs$/, ["@t3tools/scripts"]],
   // scripts/build-desktop-artifact.ts reads the GNOME extension manifest.
   [/^apps\/desktop\/gnome-extension\//, ["@t3tools/scripts"]],
   [/^native\/browser-secret\//, ["@t3tools/desktop"]],

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "keys": {
+    "ServerSettings.fastWorktreeCheckout": {
+      "keepUpstreamDefault": true,
+      "note": "Upstream default-off Labs beta. Standing policy keeps the upstream default."
+    },
+    "ServerSettings.promptSuggestionsEnabled": {
+      "keepUpstreamDefault": true,
+      "note": "Upstream default-off beta. Standing policy keeps the upstream default."
+    },
+    "ServerSettings.ghqCloneLayout": {
+      "keepUpstreamDefault": true,
+      "note": "Upstream default-off clone layout. Standing policy keeps the upstream default."
+    },
+    "ClientSettingsSchema.speechTranslateToEnglish": {
+      "keepUpstreamDefault": true,
+      "note": "Upstream default-off speech option. Standing policy keeps the upstream default."
+    },
+    "ClientSettingsSchema.historySwipeNavigation": {
+      "keepUpstreamDefault": false,
+      "note": "Fork setting. Default on. Gate around HistorySwipeNavigation."
+    }
+  }
+}

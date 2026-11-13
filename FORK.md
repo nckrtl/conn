@@ -1000,7 +1000,9 @@ because the Gateway's admin session expires.
 
 The script needs the T3 CLI of the server that is running now. On macOS, give
 it the server's launchd job with `--service-label LABEL`. At every run it reads
-`ProgramArguments:0` of `~/Library/LaunchAgents/LABEL.plist`, skipping an
+the first argument of the loaded job (`launchctl print gui/<uid>/LABEL`). Only
+when launchd does not know the job does it read `ProgramArguments` of
+`~/Library/LaunchAgents/LABEL.plist` with `plutil`. It skips an
 `env VAR=value` wrapper. The label differs per host:
 
 - mini: `com.t3tools.t3code.service`.
@@ -1026,6 +1028,12 @@ unit runs the `~/.local/bin/t3` launcher symlink, which updates repoint.
 > without contacting anything. `sh scripts/orbit/t3-orbit-register.test.sh`
 > checks the lookup offline.
 
+> [!WARNING]
+> On 2026-11-06 a hand-run `plutil -extract ProgramArguments json FILE`
+> (without `-o -`) rewrote the server plists on mini and nick-vm as bare JSON
+> arrays. PlistBuddy could not read them, so registration failed until
+> 2026-11-13. The lookup now asks launchd first.
+
 Sources:
 
 - `scripts/orbit/t3-orbit-register`,
@@ -1044,7 +1052,10 @@ then links again with the same addresses and access.
 Install the script in `~/.local/bin`, next to `t3-orbit-register` (see Orbit
 registration), and its
 `scripts/orbit/com.nckrtl.t3-orbit-relink.plist` in `~/Library/LaunchAgents`. It
-runs daily and logs to `~/Library/Logs/t3-orbit-relink.log`. The recorded mini
+runs daily and logs to `~/Library/Logs/t3-orbit-relink.log`. Its
+`--service-label LABEL` finds the T3 CLI with the same lookup as
+`t3-orbit-register` (set the label of the host's server job). A failed
+`environment list` fails the run. The recorded mini
 setup links nick, beast and shark with full access.
 
 It also renews links whose status is already `expired`. On Linux hosts install

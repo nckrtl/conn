@@ -23,6 +23,7 @@ import {
 import { deriveProjectIdentity } from "@t3tools/shared/projectIdentity";
 import {
   ORBIT_INSTANCE_GIT_READ_WAIT_MS,
+  orbitInstanceRemoveAcknowledgesGit,
   readOrbitInstanceGit,
   type OrbitInstanceGitState,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -253,12 +254,20 @@ function useRemoveRequest() {
     });
   };
   /**
-   * The request a click on Remove Instance may act on: only when the dialog showed the newest
-   * Git state. A late answer that changed the dialog in the same moment drops the click.
+   * What a click on Remove Instance may do. The dialog showed the newest Git state: as clicked.
+   * A late answer changed it in the same moment: a state that needs the tick drops the click; one
+   * that does not removes without the override, so Orbit still reads the Instance itself.
    */
-  const confirmable = (shownGit: OrbitInstanceGitState | undefined) => {
+  const confirmable = (
+    shownGit: OrbitInstanceGitState | undefined,
+    acknowledgeUnsaved: boolean,
+  ): { readonly request: RemoveRequest; readonly acknowledgeUnsaved: boolean } | null => {
     const current = latest.current;
-    return current !== null && !current.checking && current.git === shownGit ? current : null;
+    if (current === null || current.checking) return null;
+    if (current.git === shownGit) return { request: current, acknowledgeUnsaved };
+    return orbitInstanceRemoveAcknowledgesGit(current.git)
+      ? null
+      : { request: current, acknowledgeUnsaved: false };
   };
   return [request, setRequest, open, confirmable] as const;
 }
@@ -564,10 +573,15 @@ export function OrbitInstancesPage() {
         checking={removeRequest?.checking === true}
         onCancel={() => setRemoveRequest(null)}
         onConfirm={(acknowledgeUnsaved, shownGit) => {
-          const request = confirmableRemoveRequest(shownGit);
-          if (request === null) return;
+          const click = confirmableRemoveRequest(shownGit, acknowledgeUnsaved);
+          if (click === null) return;
           setRemoveRequest(null);
-          void removeInstance(request.row, request.git, acknowledgeUnsaved, setRemoveRequest);
+          void removeInstance(
+            click.request.row,
+            click.request.git,
+            click.acknowledgeUnsaved,
+            setRemoveRequest,
+          );
         }}
       />
     </SettingsPageContainer>

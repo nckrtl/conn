@@ -769,4 +769,55 @@ describe("Removing an Instance, work state read when the dialog opens", () => {
     await userEvent.click(confirm);
     await vi.waitFor(() => expect(destroys(requests)).toEqual([{ acknowledge_unsaved: true }]));
   });
+
+  it("clean with a working thread: the tick only stops the thread, so Orbit still reads at the destroy", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [shell("t1", "env-pricing-page", 1, true)],
+      async (request) => {
+        requests.push(request);
+        return destroyOperation("queued");
+      },
+      gitState(work({})),
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+    const dialog = page.getByRole("alertdialog");
+    await expect.element(dialog.getByText("Remove it anyway. The thread stops.")).toBeVisible();
+    const confirm = dialog.getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm).toBeDisabled();
+    await vi.waitFor(() => expect(requests).toEqual([]));
+    await userEvent.click(dialog.getByText("Remove it anyway. The thread stops."));
+    await expect.element(confirm).toBeEnabled();
+    await userEvent.click(confirm);
+    await vi.waitFor(() => expect(destroys(requests)).toEqual([{ acknowledge_unsaved: false }]));
+  });
+
+  it("a late clean answer in the same moment as a click: the click removes, without the override", async () => {
+    const requests: OrbitGatewayRequest[] = [];
+    let answerLate: (response: OrbitGatewayResponse) => void = () => {};
+    using _env = setup(
+      async () => ENVIRONMENTS,
+      [],
+      async (request) => {
+        requests.push(request);
+        return destroyOperation("queued");
+      },
+      () =>
+        new Promise<OrbitGatewayResponse>((resolve) => {
+          answerLate = resolve;
+        }),
+    );
+    await using _screen = await renderPage();
+
+    await userEvent.click(row("pricing-page").getByRole("button", { name: "Remove Instance" }));
+    const confirm = page.getByRole("alertdialog").getByRole("button", { name: "Remove Instance" });
+    await expect.element(confirm, { timeout: 3_000 }).toBeEnabled();
+    answerLate(answer(200, { data: work({}) }));
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    (confirm.element() as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(destroys(requests)).toEqual([{ acknowledge_unsaved: false }]));
+  });
 });

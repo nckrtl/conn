@@ -6,6 +6,7 @@ import {
   orbitInstanceRemoveNeedsAck,
   parseOrbitInstanceGit,
   orbitInstanceGitParts,
+  orbitInstanceRemoveAcknowledgesGit,
   parseOrbitInstanceWork,
   readOrbitInstanceGit,
 } from "./instanceGit.ts";
@@ -175,6 +176,26 @@ describe("parseOrbitInstanceWork (contract v2)", () => {
       unpushed: { count: 1, branch_count: 1, branches: [{ name: "x", count: 1 }] },
     });
     expect(orbitInstanceGitParts(v1)).toEqual(["1 commit not pushed on branch x"]);
+  });
+
+  it("commits without a readable branch list name no branch", () => {
+    const git = parseOrbitInstanceWork(
+      v2({ commits: { count: 2, branch_count: 1, branches: [] } }),
+    );
+    expect(orbitInstanceGitParts(git)).toEqual(["2 commits not pushed"]);
+  });
+
+  it("only Git facts or 'cannot tell' let the tick skip Orbit's read", () => {
+    expect(orbitInstanceRemoveAcknowledgesGit(parseOrbitInstanceWork(v2({ state: "clean" })))).toBe(
+      false,
+    );
+    expect(orbitInstanceRemoveAcknowledgesGit(undefined)).toBe(false);
+    expect(orbitInstanceRemoveAcknowledgesGit({ state: "unknown", reason: null })).toBe(true);
+    expect(
+      orbitInstanceRemoveAcknowledgesGit(
+        parseOrbitInstanceWork(v2({ stashes: { count: 1, names: [] } })),
+      ),
+    ).toBe(true);
   });
 
   it("never reads a broken or empty answer as clean", () => {

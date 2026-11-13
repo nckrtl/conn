@@ -1,5 +1,6 @@
 import {
   orbitInstanceGitLine,
+  orbitInstanceRemoveAcknowledgesGit,
   orbitInstanceRemoveText,
   type OrbitInstanceGitState,
   type OrbitInstanceRemoveProgress,
@@ -171,11 +172,11 @@ function RemoveDialogBody(props: {
         <Button
           variant="destructive"
           disabled={blocked}
-          // Without Orbit's Git state the tick covers only the working threads; Orbit's
-          // `instance.unsaved_work` then asks about the Git state itself.
+          // A tick that only stops working threads (no Git facts, clean, or no Git state) keeps
+          // Orbit's own read at the destroy: `instance.unsaved_work` then asks again.
           onClick={() =>
             props.onConfirm(
-              text.acknowledge !== null && props.target.git !== undefined,
+              text.acknowledge !== null && orbitInstanceRemoveAcknowledgesGit(props.target.git),
               props.target.git,
             )
           }

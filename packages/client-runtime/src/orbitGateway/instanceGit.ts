@@ -186,7 +186,9 @@ export function orbitInstanceGitParts(
     if (more > 0) parts.push(`and ${more} more ${more === 1 ? "branch" : "branches"}`);
   } else if (git.unpushed > 0) {
     parts.push(
-      `${plural(git.unpushed, "commit")} not pushed${perBranch && git.branch !== null ? ` on branch ${git.branch}` : ""}`,
+      // The old list shape names the checked-out branch; v2 sends `branches`, so an empty list
+      // leaves the commits' branch unknown.
+      `${plural(git.unpushed, "commit")} not pushed${perBranch && git.branches === undefined && git.branch !== null ? ` on branch ${git.branch}` : ""}`,
     );
   }
   const stashes = git.stashes ?? 0;
@@ -217,6 +219,17 @@ export function orbitInstanceRemoveNeedsAck(input: {
   if (input.workingCount > 0) return true;
   if (input.git === undefined) return false;
   return input.git.state !== "known" || orbitInstanceGitParts(input.git).length > 0;
+}
+
+/**
+ * Whether the tick covers Git work: the dialog named Orbit's facts or said Orbit cannot tell. Only
+ * then may the destroy skip Orbit's own read (`acknowledge_unsaved: true`); a tick that only stops
+ * working threads never does.
+ */
+export function orbitInstanceRemoveAcknowledgesGit(
+  git: OrbitInstanceGitState | undefined,
+): boolean {
+  return git !== undefined && (git.state !== "known" || orbitInstanceGitParts(git).length > 0);
 }
 
 /** How long a Git read before a remove may take at most; the sheet waits only `…_WAIT_MS`. */

@@ -115,6 +115,7 @@ import {
 import { workspaceTabOf, type WorkspaceTab } from "./workspace/workspace-tabs-state";
 import { workspaceRoutesOf } from "./workspace-overlay-routes";
 import { SettingsWorkspaceLayout } from "../settings/SettingsWorkspaceLayout";
+import { SETTINGS_OPENS_AS_SHEET } from "../settings/settings-sheet";
 import { WorkspaceThreadSidebar } from "./workspace/WorkspaceThreadSidebar";
 
 export { useAdaptiveWorkspaceLayout, useWorkspacePaneState };
@@ -552,6 +553,7 @@ function AdaptiveWorkspaceLayoutContent(
         columns: workspaceTabColumns(Platform.OS, tab, options?.columns ?? layout.usesSplitView),
         check: workspaceSelectionCheck,
         overlays,
+        settingsSheet: SETTINGS_OPENS_AS_SHEET,
         seedPullRequest: withKnownPullRequestSummary,
       },
     );

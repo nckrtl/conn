@@ -210,10 +210,21 @@ export function workspaceTabNavigationState<
     readonly columns: boolean;
     readonly check: WorkspaceSelectionCheck;
     readonly overlays?: readonly RouteLike[];
+    /** iPhone: Settings is a sheet over the workspace, which stays as it is under it. */
+    readonly settingsSheet?: boolean;
     readonly seedPullRequest?: (identity: Omit<PullRequestSelection, "key">) => object;
   },
 ) {
   const overlays = options.overlays ?? [];
+  if (tab === "settings" && options.settingsSheet) {
+    const open = overlays.some((route) => route.name === "Settings");
+    const routes = [
+      ...state.routes.map(keyed),
+      ...overlays,
+      ...(open ? [] : [keyed({ name: "Settings" })]),
+    ];
+    return { ...state, index: routes.length - 1, routes };
+  }
   if (tab === "settings") {
     const page = options.columns ? rememberedSettingsPage(selections) : undefined;
     const settings = settingsNavigationState(

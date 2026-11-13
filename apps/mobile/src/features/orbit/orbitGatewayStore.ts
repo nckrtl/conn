@@ -275,8 +275,12 @@ async function reconcileEnvironments(
     // Conn: a thread start pairs its own clone; the sync must not pair it a second time.
     heldInstanceIds: heldOrbitInstanceIds(),
     requestedEnvironmentIds: [...requestedEnvironmentIds],
+    // Conn: only bearer sessions, the kind a pairing gives; a new pairing cannot fix a relay
+    // or SSH connection's sign-in.
     renew: readSessionRenewals(
-      saved.map((entry) => entry.environmentId),
+      [...catalog.entries.entries()]
+        .filter(([, entry]) => entry.target._tag === "BearerConnectionTarget")
+        .map(([environmentId]) => String(environmentId)),
       now,
     ),
     now,

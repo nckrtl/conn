@@ -148,8 +148,8 @@ function useOrbitConnection() {
 }
 
 /**
- * Conn: Connect for a server whose pairing Orbit revoked; the one way to pair it again. A failed
- * Connect leaves the revoked state when Orbit refuses the pairing again.
+ * Conn: Connect for a server whose pairing Orbit revoked; the one way to pair it again. It lifts
+ * the revoked state first, so renewals resume even when this pairing fails.
  */
 function RevokedConnectButton(props: {
   readonly environmentId: string;

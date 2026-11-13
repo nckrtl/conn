@@ -342,8 +342,12 @@ export async function reconcileEnvironmentProvider(
     state,
     lacksAccess,
     heldInstanceIds: heldOrbitInstanceIds(),
+    // Conn: only bearer sessions, the kind a pairing gives; a new pairing cannot fix a relay
+    // or SSH connection's sign-in.
     renew: readSessionRenewals(
-      saved.map((entry) => entry.environmentId),
+      [...catalog.entries.entries()]
+        .filter(([, entry]) => entry.target._tag === "BearerConnectionTarget")
+        .map(([environmentId]) => String(environmentId)),
       now,
     ),
     now,

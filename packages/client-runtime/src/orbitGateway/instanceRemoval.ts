@@ -311,6 +311,7 @@ export function orbitInstanceRemoveText(
   if (!orbitInstanceRemoveNeedsAck({ git, workingCount })) {
     return { ...base, warning: null, acknowledge: null };
   }
+  const parts = orbitInstanceGitParts(git);
   if (git !== undefined && git.state !== "known") {
     return {
       ...base,
@@ -321,12 +322,7 @@ export function orbitInstanceRemoveText(
       acknowledge: "Remove it anyway. Any unsaved work is lost.",
     };
   }
-  const parts = orbitInstanceGitParts(git);
-  const items = parts.map((part) =>
-    part.endsWith("not pushed") && git?.state === "known" && git.branch !== null
-      ? `${part} on branch ${git.branch}`
-      : part,
-  );
+  const items = [...parts];
   if (workingCount === 1) items.push("1 thread is working now. It stops.");
   else if (workingCount > 1) items.push(`${workingCount} threads are working now. They stop.`);
   return {

@@ -192,6 +192,16 @@ const server = (
 });
 
 describe("orbitNodeServers", () => {
+  it("shows a server whose pairing Orbit revoked as revoked, even while it is saved", () => {
+    const nodes = orbitNodeServers({
+      environments: [server("beast", { url: "http://10.44.0.2:3773" })],
+      paired: new Set(["beast"]),
+      revoked: new Set(["beast"]),
+      device: null,
+    });
+    expect(nodes.map((node) => node.state)).toEqual(["revoked"]);
+  });
+
   it("lists host servers only, this device first, with their state", () => {
     const nodes = orbitNodeServers({
       environments: [

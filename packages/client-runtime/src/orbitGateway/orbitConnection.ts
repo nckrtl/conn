@@ -165,7 +165,8 @@ export function orbitConnectionChecks(probe: OrbitConnectionProbe): OrbitConnect
   });
 }
 
-export type OrbitNodeState = "paired" | "pairing" | "expired";
+/** `revoked`: Orbit refused this device's renewal there; only an explicit Connect pairs it again. */
+export type OrbitNodeState = "paired" | "pairing" | "expired" | "revoked";
 
 export interface OrbitNodeServer {
   readonly environmentId: string;
@@ -192,6 +193,8 @@ export function orbitNodeServers(input: {
   readonly environments: readonly OrbitGatewayEnvironment[];
   /** Environment ids this device has paired. */
   readonly paired: ReadonlySet<string>;
+  /** Environment ids whose pairing Orbit revoked for this device. */
+  readonly revoked?: ReadonlySet<string>;
   readonly device: Pick<OrbitGatewayNode, "name" | "wireguardIp"> | null;
 }): OrbitNodeServer[] {
   const seen = new Set<string>();
@@ -217,9 +220,11 @@ export function orbitNodeServers(input: {
       state:
         environment.status === "session_expired"
           ? "expired"
-          : input.paired.has(environment.environmentId)
-            ? "paired"
-            : "pairing",
+          : input.revoked?.has(environment.environmentId)
+            ? "revoked"
+            : input.paired.has(environment.environmentId)
+              ? "paired"
+              : "pairing",
       isThisDevice:
         input.device !== null &&
         ((deviceAddress !== null && address === deviceAddress) ||

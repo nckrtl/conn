@@ -1,8 +1,11 @@
-import { ServerIcon } from "lucide-react";
+import { GitBranchIcon, ServerIcon } from "lucide-react";
 
 import type { DraftId } from "../composerDraftStore";
 import { orbitDraftContextRow, type OrbitDraftTarget } from "../orbit/orbitDraft";
 import { BranchToolbarOrbitBranch } from "./BranchToolbarOrbitBranch";
+import { useOrbitDraftStart } from "../orbit/OrbitDraftSetup";
+import { orbitBranchControlLabel, orbitDefaultBranches } from "../orbit/orbitBranchControl";
+import { MiddleTruncate } from "./ui/middle-truncate";
 import { openOrbitInstanceStep } from "../orbit/orbitInstanceStep";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { OrbitLogoIcon } from "./OrbitLogoIcon";
@@ -25,6 +28,17 @@ export function BranchToolbarOrbitInstance({
   onTargetChange?: ((patch: Partial<OrbitDraftTarget>) => void) | undefined;
 }) {
   const row = orbitDraftContextRow(target);
+  // The plus started this Instance's create: its branch is fixed, so the row only names it.
+  const started = useOrbitDraftStart(draftId ?? null);
+  const startedBranch =
+    started === null
+      ? null
+      : (started.resultBranch ??
+        orbitBranchControlLabel({
+          branch: null,
+          defaultBranch:
+            orbitDefaultBranches.known(target.projectId) ?? target.defaultBranch ?? null,
+        }));
   return (
     <div
       className="flex min-h-7 min-w-10 flex-1 items-center gap-1 sm:min-h-6"
@@ -54,7 +68,25 @@ export function BranchToolbarOrbitInstance({
         </TooltipTrigger>
         <TooltipPopup>{row.instanceTitle}</TooltipPopup>
       </Tooltip>
-      {onTargetChange && target.instanceKind === "new" ? (
+      {startedBranch !== null ? (
+        <>
+          <Separator
+            orientation="vertical"
+            className="mx-0.5 h-3.5!"
+            data-composer-context-control
+          />
+          <span
+            className="inline-flex h-7 min-w-0 items-center gap-1.5 px-1.75 sm:h-6"
+            data-composer-context-control
+            data-orbit-branch-fixed
+          >
+            <ComposerControlIcon icon={GitBranchIcon} size="xs" />
+            <ComposerContextLabel>
+              <MiddleTruncate value={startedBranch} variant="cap-aligned" className="w-full" />
+            </ComposerContextLabel>
+          </span>
+        </>
+      ) : onTargetChange && target.instanceKind === "new" ? (
         <>
           <Separator
             orientation="vertical"

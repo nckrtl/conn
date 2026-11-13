@@ -398,6 +398,7 @@ import { ConnIconScope } from "../icons/connIcon";
 import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
 import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
 import { useOrbitReady } from "../orbit/useOrbitReady";
+import { OrbitDraftSetup, useOrbitDraftStart } from "../orbit/OrbitDraftSetup";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1592,6 +1593,8 @@ export default function ChatView(props: ChatViewProps) {
     isServerThread ? (displayedThreadRef?.environmentId ?? null) : null,
     isServerThread ? (displayedThreadRef?.threadId ?? null) : null,
   );
+  // Conn: the create the palette's plus started for this draft, shown until its first message.
+  const orbitDraftStart = useOrbitDraftStart(isServerThread ? null : draftId);
   const {
     worktreeSetup,
     isPreparingWorktree,
@@ -3182,12 +3185,16 @@ export default function ChatView(props: ChatViewProps) {
   // The end of the timeline holds the thread's present and next turns: what it is doing now,
   // its lifecycle status, guest messages awaiting you, then your queued messages.
   const timelineFooter =
+    orbitDraftStart === null &&
     pendingHandoff === null &&
     !hasThreadNow &&
     threadStatusLine === null &&
     pendingGuestMessageCount === 0 &&
     !hasQueuedTurns ? null : (
       <>
+        {orbitDraftStart === null || draftId === null ? null : (
+          <OrbitDraftSetup draftId={draftId} />
+        )}
         {pendingHandoff === null ? null : (
           <div className="chat-content-lane">
             <HandoffRow

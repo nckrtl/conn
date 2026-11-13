@@ -1,0 +1,177 @@
+import { newOrbitThreadStart, type OrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import { render } from "../../test/render";
+import { SidebarProvider } from "../components/ui/sidebar";
+import type { DraftId } from "../composerDraftStore";
+import { useEnvironmentProvider } from "./environmentProvider";
+import { OrbitDraftSetup } from "./OrbitDraftSetup";
+import { OrbitPendingThreadList } from "./OrbitPendingThreadList";
+import { linkedOrbitStart, sendIntoOrbitStart, withUiFields } from "./orbitThreadStarts";
+import { readStored, updateStarts } from "./orbitThreadStartStore";
+
+const gateway = vi.hoisted(() => ({ cancelOperation: vi.fn() }));
+vi.mock("./OrbitProfileSync", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./OrbitProfileSync")>()),
+  desktopOrbitGatewayClient: () => ({ cancelOperation: gateway.cancelOperation }),
+}));
+
+const DRAFT = "draft-plus" as DraftId;
+
+/** A start the palette's plus made: no message, owned by the draft. */
+const plusStart = (patch: Partial<OrbitThreadStart> = {}): OrbitThreadStart => ({
+  ...newOrbitThreadStart({
+    id: "p1",
+    project: { id: 66, slug: "create-bench", nodeName: "beast" },
+    message: "",
+    suffix: "x",
+    threadId: "thread-p",
+    messageId: "message-p",
+    commandId: "command-p",
+    now: 0,
+    instanceName: "abc",
+    pendingThread: true,
+    instanceDomainSuffix: ".create-bench.test",
+    draftId: DRAFT,
+  }),
+  ...patch,
+});
+
+function setup(saved: OrbitThreadStart) {
+  gateway.cancelOperation.mockReset();
+  window.localStorage.clear();
+  updateStarts(() => [saved]);
+}
+
+const draftView = () => (
+  <SidebarProvider>
+    <OrbitDraftSetup draftId={DRAFT} />
+  </SidebarProvider>
+);
+
+describe("OrbitDraftSetup", () => {
+  it("shows the create's steps in the draft before any message", async () => {
+    setup(
+      plusStart({
+        createStartedAt: 1,
+        createKey: "k",
+        createOperationId: 100,
+        instanceId: 41,
+        createRows: {
+          container: { status: "running", startedAt: 1, finishedAt: null },
+          address: { status: "done", startedAt: 1, finishedAt: 2 },
+        },
+      }),
+    );
+    await using screen = await render(draftView(), { router: `/draft/${DRAFT}` });
+    await expect.element(screen.getByText("Create Instance")).toBeVisible();
+    await expect.element(screen.getByText("Copy the container")).toBeVisible();
+    expect(screen.container.querySelector('[data-orbit-draft-setup="running"]')).not.toBeNull();
+    expect(screen.container.querySelector("[data-orbit-pending-message]")).toBeNull();
+  });
+
+  it("shows the folded ready row without Conn's line once the Instance waits for its first message", async () => {
+    setup(
+      plusStart({
+        createStartedAt: 1,
+        createFinishedAt: 3_000,
+        connectStartedAt: 3_000,
+        connectFinishedAt: 4_000,
+        createOperationId: 100,
+        instanceId: 41,
+        environmentId: "env-41",
+        connected: true,
+        resultBranch: "abc",
+      }),
+    );
+    await using screen = await render(draftView(), { router: `/draft/${DRAFT}` });
+    await expect.element(screen.getByText("Instance ready")).toBeVisible();
+    expect(screen.container.querySelector('[data-orbit-draft-setup="ready"]')).not.toBeNull();
+    expect(screen.container.querySelector("[data-orbit-ready-line]")).toBeNull();
+    expect(screen.container.querySelector("[data-orbit-setup-phase]")).toBeNull();
+  });
+
+  it("shows a failed create as the pending thread does, and Dismiss drops the start", async () => {
+    setup(
+      plusStart({
+        createStartedAt: 1,
+        error: "The name abc is taken.",
+        errorCode: "instance.name_taken",
+      }),
+    );
+    await using screen = await render(draftView(), { router: `/draft/${DRAFT}` });
+    await expect.element(screen.getByText("Instance setup failed")).toBeVisible();
+    await expect.element(screen.getByRole("button", { name: "Change name" })).toBeVisible();
+    await screen.getByRole("button", { name: "Dismiss" }).click();
+    await vi.waitFor(() => expect(readStored()).toEqual([]));
+  });
+
+  it("Cancel during the create cancels Orbit's Operation and drops the start, as today", async () => {
+    setup(
+      plusStart({ createStartedAt: 1, createKey: "k", createOperationId: 100, instanceId: 41 }),
+    );
+    gateway.cancelOperation.mockResolvedValue({ id: 100, status: "running" });
+    await using screen = await render(draftView(), { router: `/draft/${DRAFT}` });
+    await screen.getByRole("button", { name: "Cancel" }).click();
+    await vi.waitFor(() => expect(readStored()).toEqual([]));
+    expect(gateway.cancelOperation).toHaveBeenCalledWith(100);
+  });
+});
+
+describe("the plus's start and its first message", () => {
+  it("writes a prompt sent during the create into the start once, and the runner's saves keep it", async () => {
+    setup(
+      plusStart({ createStartedAt: 1, createKey: "k", createOperationId: 100, instanceId: 41 }),
+    );
+    const runnerCopy = readStored()[0]!;
+    const opened: string[] = [];
+    const prompt = {
+      message: "Add a pricing page",
+      modelSelection: null,
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+    };
+    const send = () =>
+      sendIntoOrbitStart({
+        startId: "p1",
+        prompt,
+        openPending: (path) => {
+          opened.push(path);
+        },
+        clearDraft: () => {},
+      });
+    expect(send()).toBe(true);
+    // A second send finds the message there and changes nothing.
+    expect(send()).toBe(false);
+    expect(opened).toEqual(["/orbit/p1"]);
+    expect(readStored()[0]).toMatchObject({ message: "Add a pricing page" });
+    expect(linkedOrbitStart(readStored(), DRAFT)?.id).toBe("p1");
+
+    // The runner saves its older copy while it follows the create: the message stays.
+    const saved = withUiFields({ ...runnerCopy, environmentId: "env-41" });
+    expect(saved).toMatchObject({ message: "Add a pricing page", environmentId: "env-41" });
+  });
+
+  it("names a start without a message after its Instance in the sidebar and opens its draft", async () => {
+    setup(plusStart({ createStartedAt: 1 }));
+    const bridgeWindow = window as { desktopBridge?: unknown };
+    const previousBridge = bridgeWindow.desktopBridge;
+    const previousProvider = useEnvironmentProvider.getState();
+    bridgeWindow.desktopBridge = { orbitGatewaySend: vi.fn() };
+    useEnvironmentProvider.setState({ provider: "orbit" });
+    try {
+      await using screen = await render(
+        <SidebarProvider>
+          <OrbitPendingThreadList />
+        </SidebarProvider>,
+        { router: "/" },
+      );
+      const row = screen.getByRole("link", { name: /abc/ });
+      await expect.element(row).toBeVisible();
+      expect(row.element().getAttribute("href")).toBe(`/draft/${DRAFT}`);
+    } finally {
+      bridgeWindow.desktopBridge = previousBridge;
+      useEnvironmentProvider.setState(previousProvider, true);
+    }
+  });
+});

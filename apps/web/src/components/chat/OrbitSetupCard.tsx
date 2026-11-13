@@ -330,31 +330,35 @@ export function OrbitReadyRow({
           {view.modelFallbackLine}
         </p>
       ) : null}
-      <p
-        className="mt-3 text-sm leading-relaxed text-foreground"
-        data-orbit-ready-line
-        data-message-role="conn"
-      >
-        {view.url ? (
-          <>
-            Your Instance is ready. You can preview it at{" "}
-            <a
-              href={view.url}
-              className="underline underline-offset-2"
-              onClick={(event) => {
-                event.preventDefault();
-                void openLink(view.url!, { event }).catch((error: unknown) => console.error(error));
-              }}
-              onContextMenu={(event) => showLinkMenu(event, view.url!)}
-            >
-              {view.url}
-            </a>{" "}
-            while I work on your request.
-          </>
-        ) : (
-          view.readyLine
-        )}
-      </p>
+      {view.readyLine === null ? null : (
+        <p
+          className="mt-3 text-sm leading-relaxed text-foreground"
+          data-orbit-ready-line
+          data-message-role="conn"
+        >
+          {view.url ? (
+            <>
+              Your Instance is ready. You can preview it at{" "}
+              <a
+                href={view.url}
+                className="underline underline-offset-2"
+                onClick={(event) => {
+                  event.preventDefault();
+                  void openLink(view.url!, { event }).catch((error: unknown) =>
+                    console.error(error),
+                  );
+                }}
+                onContextMenu={(event) => showLinkMenu(event, view.url!)}
+              >
+                {view.url}
+              </a>{" "}
+              while I work on your request.
+            </>
+          ) : (
+            view.readyLine
+          )}
+        </p>
+      )}
     </section>
   );
 }

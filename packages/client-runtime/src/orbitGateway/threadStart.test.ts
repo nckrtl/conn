@@ -11,6 +11,7 @@ import {
 } from "./client.ts";
 import {
   newOrbitThreadStart,
+  orbitThreadStartAwaitsPrompt,
   orbitThreadInstanceName,
   orbitThreadStartCanRetry,
   orbitThreadStartCreatedInstance,
@@ -287,6 +288,7 @@ describe("readOrbitThreadStarts", () => {
       nameSuffix: null,
       createRows: null,
       cancelRequested: false,
+      draftId: null,
     });
 
     const { client, calls } = gateway({});
@@ -391,6 +393,99 @@ describe("runOrbitThreadStart", () => {
     });
     // The create's rows are saved as the runner reads the Operation.
     expect(run.saves.at(-1)!.createRows?.register?.status).toBe("done");
+  });
+
+  describe("a start made by the plus, before any prompt", () => {
+    const plusStart = () =>
+      newOrbitThreadStart({
+        id: "p1",
+        project,
+        message: "",
+        suffix: "k3j9",
+        threadId: "thread-p",
+        messageId: "message-p",
+        commandId: "command-p",
+        now: 0,
+        instanceName: "abc",
+        draftId: "draft-p",
+      });
+
+    it("sends the same create as a first message, pairs, then pauses before the agent without an error", async () => {
+      const { client, calls, branches } = gateway({});
+      const run = ports(client);
+
+      expect(orbitThreadStartAwaitsPrompt(plusStart())).toBe(true);
+      expect(await runOrbitThreadStart(plusStart(), run.ports)).toBe(false);
+
+      expect(calls.filter((call) => call.startsWith("create"))).toEqual(["create 3 abc"]);
+      expect(branches).toEqual([null]);
+      expect(run.connected).toHaveLength(1);
+      expect(run.sent).toEqual([]);
+      const paused = run.saves.at(-1)!;
+      expect(paused).toMatchObject({
+        environmentId: "env-41",
+        connected: true,
+        error: null,
+        agentStartedAt: null,
+        sentAt: null,
+        draftId: "draft-p",
+      });
+      // No timer runs while it waits: nothing slept after the pairing.
+      expect(orbitThreadStartAwaitsPrompt(paused)).toBe(true);
+    });
+
+    it("stays paused across a relaunch, and sends a later prompt once without a second create or pairing", async () => {
+      const { client, calls } = gateway({});
+      const first = ports(client);
+      await runOrbitThreadStart(plusStart(), first.ports);
+      // A relaunch reads the saved row back, still without a prompt.
+      const saved = readOrbitThreadStarts(JSON.parse(JSON.stringify([first.saves.at(-1)])))[0]!;
+      const idle = ports(client, { saved: true });
+      expect(await runOrbitThreadStart(saved, idle.ports)).toBe(false);
+      expect(idle.sent).toEqual([]);
+      expect(idle.saves.every((entry) => entry.error === null)).toBe(true);
+
+      const calledBefore = calls.length;
+      const later = ports(client, { saved: true });
+      const prompt = {
+        message: "Add a pricing page",
+        modelSelection: null,
+        runtimeMode: "approval-required" as const,
+        interactionMode: "plan" as const,
+      };
+      expect(
+        await runOrbitThreadStart(idle.saves.at(-1) ?? saved, {
+          ...later.ports,
+          prompt: () => prompt,
+        }),
+      ).toBe(true);
+      expect(calls.slice(calledBefore)).toEqual([]);
+      expect(later.sent).toEqual(["env-41 thread-p Add a pricing page"]);
+      expect(later.saves.at(-1)).toMatchObject({
+        message: "Add a pricing page",
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+        sentAt: expect.any(Number),
+      });
+    });
+
+    it("sends a prompt that came while the create ran, once, when the Instance is ready", async () => {
+      const { client, calls } = gateway({ create: ["running", "running", "succeeded"] });
+      const run = ports(client);
+      // The prompt arrives after the first read of the create.
+      const prompt = () =>
+        calls.filter((call) => call === "operation 100").length >= 2
+          ? {
+              message: "Fix the header",
+              modelSelection: null,
+              runtimeMode: null,
+              interactionMode: null,
+            }
+          : null;
+      expect(await runOrbitThreadStart(plusStart(), { ...run.ports, prompt })).toBe(true);
+      expect(calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
+      expect(run.sent).toEqual(["env-41 thread-p Fix the header"]);
+    });
   });
 
   describe("Cancel while the create is admitted", () => {

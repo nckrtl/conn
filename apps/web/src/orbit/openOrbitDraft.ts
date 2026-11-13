@@ -13,7 +13,7 @@ import {
   orbitDraftProjectId,
   type OrbitDraftTarget,
 } from "./orbitDraft";
-import { orbitThreadStartBlockedReason } from "./orbitThreadStarts";
+import { orbitThreadStartBlockedReason, startOrbitInstanceFromPlus } from "./orbitThreadStarts";
 
 /**
  * Opens the draft for a thread in a new Instance or an unpaired one; a paired Instance uses a normal
@@ -24,6 +24,34 @@ export async function openOrbitDraft(
   router: AnyRouter,
   target: OrbitDraftTarget,
 ): Promise<DraftId | null> {
+  const draftId = prepareOrbitDraft(target, false);
+  if (draftId === null) return null;
+  await router.navigate({ to: "/draft/$draftId", params: { draftId } });
+  return draftId;
+}
+
+/**
+ * The palette's plus (or Enter on the name): starts the new Instance's create at once, in a draft
+ * of its own, and opens that draft. Its composer then gives the start its first message. The
+ * Project's usual draft stays as it is, so the next plus starts another Instance.
+ */
+export async function openOrbitPlusCreate(
+  router: AnyRouter,
+  target: OrbitDraftTarget,
+): Promise<DraftId | null> {
+  if (target.instanceKind !== "new") return null;
+  const draftId = prepareOrbitDraft(target, true);
+  if (draftId === null) return null;
+  if (startOrbitInstanceFromPlus({ target, draftId }) === null) {
+    useComposerDraftStore.getState().clearDraftThread(draftId);
+    return null;
+  }
+  await router.navigate({ to: "/draft/$draftId", params: { draftId } });
+  return draftId;
+}
+
+/** Saves the draft and its target; `own` gives it a key of its own, with no kept branch. */
+function prepareOrbitDraft(target: OrbitDraftTarget, own: boolean): DraftId | null {
   if (orbitThreadStartBlockedReason() !== null) return null;
   const anchor = chooseOrbitDraftAnchor({
     orbitProjectId: target.projectId,
@@ -32,13 +60,19 @@ export async function openOrbitDraft(
     primaryEnvironmentId: appAtomRegistry.get(primaryEnvironmentIdAtom),
     hostEnvironmentId: appAtomRegistry.get(hostEnvironmentIdAtom),
   });
-  const logicalProjectKey = orbitDraftLogicalProjectKey(target.projectId);
+  const ownDraftId = own ? newDraftId() : null;
+  const logicalProjectKey =
+    ownDraftId === null
+      ? orbitDraftLogicalProjectKey(target.projectId)
+      : `${orbitDraftLogicalProjectKey(target.projectId)}:plus:${ownDraftId}`;
   const store = useComposerDraftStore.getState();
-  const existing = store.getDraftSessionByLogicalProjectKey(logicalProjectKey);
-  const draftId = existing?.draftId ?? newDraftId();
+  const existing = own ? null : store.getDraftSessionByLogicalProjectKey(logicalProjectKey);
+  const draftId = ownDraftId ?? existing?.draftId ?? newDraftId();
   // A new Instance keeps the branch chosen for the Project's draft unless the target sets one.
+  // The plus always creates from the default branch: no branch control is reachable before it.
   const previous = existing?.orbitTarget;
   const keptBranch =
+    !own &&
     target.instanceKind === "new" &&
     target.branch === undefined &&
     previous?.projectId === target.projectId
@@ -56,9 +90,8 @@ export async function openOrbitDraft(
       envMode: "local",
       branch: null,
       worktreePath: null,
-      orbitTarget: { ...target, ...keptBranch },
+      orbitTarget: own ? { ...target, branch: null } : { ...target, ...keptBranch },
     },
   );
-  await router.navigate({ to: "/draft/$draftId", params: { draftId } });
   return draftId;
 }

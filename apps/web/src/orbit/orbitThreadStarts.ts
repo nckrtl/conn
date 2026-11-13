@@ -1,5 +1,6 @@
 import {
   newOrbitThreadStart,
+  orbitThreadStartAwaitsPrompt,
   orbitThreadStartCreatedInstance,
   retryOrbitThreadStartRecord,
   runOrbitThreadStart,
@@ -8,6 +9,7 @@ import {
   type OrbitFirstMessagePorts,
   type OrbitGatewayClient,
   type OrbitThreadStart,
+  type OrbitThreadStartPrompt,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
@@ -26,7 +28,11 @@ import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
-import type { OrbitDraftStartInput } from "./orbitDraft";
+import {
+  buildOrbitDraftStart,
+  type OrbitDraftStartInput,
+  type OrbitDraftTarget,
+} from "./orbitDraft";
 import {
   readStored,
   recordCreateOperation,
@@ -41,7 +47,10 @@ const ORBIT_CLONE_WORKSPACE = "/srv/workspace";
 const CLONE_READY_TIMEOUT_MS = 60_000;
 
 /** Saves the start an Orbit draft sends: the typed Instance name, kind, model and modes. */
-function saveOrbitDraftStart(input: OrbitDraftStartInput): OrbitThreadStart {
+function saveOrbitDraftStart(
+  input: OrbitDraftStartInput,
+  draftId: string | null = null,
+): OrbitThreadStart {
   const fresh = newOrbitThreadStart({
     id: randomUUID(),
     project: input.project,
@@ -61,6 +70,7 @@ function saveOrbitDraftStart(input: OrbitDraftStartInput): OrbitThreadStart {
     instanceDomainSuffix: input.instanceDomainSuffix ?? null,
     branch: input.branch,
     defaultBranch: input.defaultBranch,
+    draftId,
   });
   const start = { ...fresh, workspaceId: useWorkspaceStore.getState().activeWorkspaceId };
   updateStarts((starts) => [...starts, start]);
@@ -99,6 +109,80 @@ export function sendOrbitDraft(input: {
     .finally(input.clearDraft)
     .catch(() => {});
   return start;
+}
+
+/**
+ * The palette's plus: starts the create of a new Instance at once, before any prompt, as the
+ * first message would. The start belongs to `draftId`; the draft's composer gives it its first
+ * message later. Always from the Project's default branch: no branch control is reachable first.
+ */
+export function startOrbitInstanceFromPlus(input: {
+  readonly target: OrbitDraftTarget;
+  readonly draftId: string;
+}): OrbitThreadStart | null {
+  if (orbitThreadStartBlockedReason() !== null || input.target.instanceKind !== "new") return null;
+  // The composer's model and modes come with the first message.
+  const start = buildOrbitDraftStart({
+    target: { ...input.target, branch: null },
+    message: "",
+    modelSelection: null,
+    runtimeMode: null,
+    interactionMode: null,
+  });
+  return saveOrbitDraftStart(start, input.draftId);
+}
+
+/** The unsent start a draft's plus made, or null. */
+export function linkedOrbitStart(
+  starts: readonly OrbitThreadStart[],
+  draftId: string | null,
+): OrbitThreadStart | null {
+  if (draftId === null) return null;
+  return starts.find((start) => start.draftId === draftId && start.sentAt == null) ?? null;
+}
+
+/**
+ * Sends the first message of a draft whose plus started the create: the message, model and
+ * modes go into that start, and its pending thread opens, as a first message's does. The runner
+ * sends it once the Instance is ready, or at once when it is.
+ */
+export function sendIntoOrbitStart(input: {
+  readonly startId: string;
+  readonly prompt: OrbitThreadStartPrompt;
+  readonly openPending: (path: string) => Promise<void> | void;
+  readonly clearDraft: () => void;
+}): boolean {
+  const start = readStored().find((entry) => entry.id === input.startId);
+  if (start === undefined || !orbitThreadStartAwaitsPrompt(start)) return false;
+  saveStart({ ...start, ...input.prompt });
+  void Promise.resolve(input.openPending(orbitPendingThreadPath(start.id)))
+    .finally(input.clearDraft)
+    .catch(() => {});
+  return true;
+}
+
+/**
+ * The runner's copy of a start with what only the UI writes kept from the stored one: a Cancel
+ * request, and the first message the plus's draft sent while the runner ran.
+ */
+export function withUiFields(next: OrbitThreadStart): OrbitThreadStart {
+  return {
+    ...next,
+    ...(next.message.trim() === "" ? (storedPrompt(next.id) ?? {}) : {}),
+    cancelRequested: cancelRequested(next.id),
+  };
+}
+
+/** The first message the UI wrote into a stored start, or null while it has none. */
+function storedPrompt(id: string): OrbitThreadStartPrompt | null {
+  const stored = readStored().find((entry) => entry.id === id);
+  if (stored === undefined || stored.message.trim() === "") return null;
+  return {
+    message: stored.message,
+    modelSelection: stored.modelSelection ?? null,
+    runtimeMode: stored.runtimeMode ?? null,
+    interactionMode: stored.interactionMode ?? null,
+  };
 }
 
 export function retryOrbitThreadStart(id: string): void {
@@ -260,8 +344,10 @@ export async function runSavedOrbitThreadStart(
     let environmentId: string | null = null;
     const sent = await runOrbitThreadStart(start, {
       client,
-      // Only the UI sets a Cancel request, so a save of the runner's copy keeps it.
-      save: (next) => saveStart({ ...next, cancelRequested: cancelRequested(id) }),
+      // Only the UI sets a Cancel request and a plus start's first message, so a save of the
+      // runner's copy keeps them.
+      save: (next) => saveStart(withUiFields(next)),
+      prompt: () => storedPrompt(id),
       cancelRequested: () => cancelRequested(id),
       cancelled: () => {
         dismissOrbitThreadStart(id);
@@ -288,7 +374,20 @@ export async function runSavedOrbitThreadStart(
         return { modelFallback };
       },
     });
-    if (!sent || environmentId === null) return null;
+    if (!sent || environmentId === null) {
+      // A plus start paused for its first message; one that came just before the pause runs now.
+      const paused = readStored().find((entry) => entry.id === id);
+      if (
+        paused !== undefined &&
+        paused.error === null &&
+        storedPrompt(id) !== null &&
+        !stopped()
+      ) {
+        running.delete(id);
+        return runSavedOrbitThreadStart(client, id, options);
+      }
+      return null;
+    }
     // The start stays for the real thread's "Instance ready" row.
     return {
       environmentId: environmentId as EnvironmentId,

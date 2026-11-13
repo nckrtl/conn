@@ -263,8 +263,11 @@ export interface OrbitReadyView {
   readonly instanceName: string;
   readonly nodeName: string;
   readonly url: string | null;
-  /** The one assistant-style line Conn renders; never sent to the agent. */
-  readonly readyLine: string;
+  /**
+   * The one assistant-style line Conn renders; never sent to the agent. Null for an Instance the
+   * plus created: the line speaks of a request, and there was none when it became ready.
+   */
+  readonly readyLine: string | null;
   /** The model the agent uses instead of the composer's, or null. */
   readonly modelFallbackLine: string | null;
   /** From the create's result: the branch checked out, and the base (null in mode existing). */
@@ -295,7 +298,7 @@ export function orbitReadyView(start: OrbitThreadStart, url: string | null): Orb
     instanceName: start.instanceName,
     nodeName: start.nodeName,
     url,
-    readyLine: orbitReadyLine(url),
+    readyLine: start.draftId == null ? orbitReadyLine(url) : null,
     modelFallbackLine: fallback
       ? `This Instance does not offer ${fallback.requestedModel}, so the agent uses ${fallback.usedModel}.`
       : null,

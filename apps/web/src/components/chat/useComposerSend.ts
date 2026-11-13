@@ -156,7 +156,13 @@ import {
   orbitDraftAttachmentsBlockedReason,
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
-import { orbitThreadStartBlockedReason, sendOrbitDraft } from "../../orbit/orbitThreadStarts";
+import {
+  linkedOrbitStart,
+  orbitThreadStartBlockedReason,
+  sendIntoOrbitStart,
+  sendOrbitDraft,
+} from "../../orbit/orbitThreadStarts";
+import { useOrbitThreadStarts } from "../../orbit/orbitThreadStartStore";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -813,18 +819,31 @@ export function useComposerSend(input: ComposerSendInput) {
         return;
       }
       const composerDraft = useComposerDraftStore.getState().getComposerDraft(draftId);
+      const interactionMode =
+        composerDraft?.interactionMode ?? draftThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
+      const modelSelection = isOrbitDraftWithoutEnvironment(environmentId)
+        ? null
+        : ctxSelectedModelSelection;
+      // The plus started this draft's create already: the message joins that start.
+      const linked = linkedOrbitStart(useOrbitThreadStarts.getState().starts, draftId);
+      if (linked !== null) {
+        sendIntoOrbitStart({
+          startId: linked.id,
+          prompt: { message: trimmed, modelSelection, runtimeMode, interactionMode },
+          openPending: (to) => navigate({ to }),
+          clearDraft: () => useComposerDraftStore.getState().clearDraftThread(draftId),
+        });
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+        return;
+      }
       sendOrbitDraft({
         start: buildOrbitDraftStart({
           target: orbitDraftTarget,
           message: trimmed,
-          modelSelection: isOrbitDraftWithoutEnvironment(environmentId)
-            ? null
-            : ctxSelectedModelSelection,
+          modelSelection,
           runtimeMode,
-          interactionMode:
-            composerDraft?.interactionMode ??
-            draftThread?.interactionMode ??
-            DEFAULT_INTERACTION_MODE,
+          interactionMode,
         }),
         openPending: (to) => navigate({ to }),
         clearDraft: () => useComposerDraftStore.getState().clearDraftThread(draftId),

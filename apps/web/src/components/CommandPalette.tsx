@@ -284,7 +284,7 @@ import {
   useOrbitPairedEnvironmentIds,
   useOrbitPaletteProjects,
 } from "../orbit/orbitPaletteProjects";
-import { openOrbitDraft } from "../orbit/openOrbitDraft";
+import { openOrbitDraft, openOrbitPlusCreate } from "../orbit/openOrbitDraft";
 import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
 import { registerOrbitInstanceStepOpener } from "../orbit/orbitInstanceStep";
 import {
@@ -485,6 +485,7 @@ function OpenCommandPaletteDialog(props: {
   const isActionsOnly = deferredQuery.startsWith(">");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const resultListRef = useRef<LegendListRef | null>(null);
+  const orbitCreateStartedRef = useRef(false);
   // A pushed view drops the typed highlight until the user moves it again.
   const highlightClearedRef = useRef(viewStack.length > 0);
   // Entering or leaving browse mode remounts the input; carry the caret across it.
@@ -1936,14 +1937,16 @@ function OpenCommandPaletteDialog(props: {
             : (orbitThreadStartBlockedReason() ?? "Open New thread and pick the Project again."),
       }),
     );
+  // The plus and Enter start the create; the palette closes, and a second press starts no other.
   const createOrbitInstance = () => {
-    if (orbitStepProject === null) return;
+    if (orbitStepProject === null || orbitCreateStartedRef.current) return;
     if (!orbitStep.hint.canCreate) {
       if (orbitStep.hint.plusEnabled) orbitStep.markSubmitted();
       return;
     }
+    orbitCreateStartedRef.current = true;
     setOpen(false);
-    void openOrbitDraft(router, {
+    void openOrbitPlusCreate(router, {
       projectId: orbitStepProject.id,
       projectSlug: orbitStepProject.slug,
       projectName: orbitStepProject.name,

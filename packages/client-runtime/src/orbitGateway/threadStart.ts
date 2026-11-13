@@ -132,6 +132,26 @@ export interface OrbitThreadStart {
    * admits, then drops the start. Only the UI sets it; Retry clears it.
    */
   readonly cancelRequested?: boolean;
+  /**
+   * The draft a start made by the palette's plus belongs to: the create runs before any prompt,
+   * and the draft's composer sends the first message into this start. Null for a start the first
+   * message made.
+   */
+  readonly draftId?: string | null;
+}
+
+/**
+ * The fields the user's first message sets. A start made by the plus has none yet: it creates and
+ * pairs, then waits for them.
+ */
+export type OrbitThreadStartPrompt = Pick<
+  OrbitThreadStart,
+  "message" | "modelSelection" | "runtimeMode" | "interactionMode"
+>;
+
+/** The start waits for its first message: created by the plus and not given a prompt yet. */
+export function orbitThreadStartAwaitsPrompt(start: OrbitThreadStart): boolean {
+  return start.sentAt == null && start.message.trim() === "";
 }
 
 /** A name whose address `<name>.<project domain>` Orbit refuses (check or create). */
@@ -220,6 +240,7 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
         createRows: readSavedOrbitCreateRows(row.createRows),
         cancelRequested: row.cancelRequested === true,
+        draftId: typeof row.draftId === "string" ? row.draftId : null,
       },
     ];
   });
@@ -316,6 +337,12 @@ export interface OrbitThreadStartPorts {
   readonly cancelled?: () => void;
   /** Each read of the create Operation, for the setup card's clone step. */
   readonly onCreateOperation?: (operation: OrbitGatewayOperation) => void;
+  /**
+   * The first message the user gave since the run began (a start made by the plus gets it while
+   * it runs), or null for none. Without a message the start stops before "Start agent", with no
+   * error and no time limit, and resumes from there once one comes.
+   */
+  readonly prompt?: () => OrbitThreadStartPrompt | null;
   /** Opens a one-time pairing link and saves the server. */
   readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
   /**
@@ -393,6 +420,8 @@ export function newOrbitThreadStart(input: {
   /** A new Instance only; ignored for an existing one. */
   readonly branch?: OrbitGatewayBranchSelection | null;
   readonly defaultBranch?: string | null;
+  /** The plus's draft; the start then waits for that draft's first message. */
+  readonly draftId?: string | null;
 }): OrbitThreadStart {
   const existing = input.existing;
   return {
@@ -442,6 +471,7 @@ export function newOrbitThreadStart(input: {
     resultBaseBranch: null,
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
     createRows: null,
+    draftId: input.draftId ?? null,
   };
 }
 
@@ -805,6 +835,10 @@ export async function runOrbitThreadStart(
     }
 
     checkStopped();
+    const prompt = ports.prompt?.() ?? null;
+    if (prompt !== null && prompt.message.trim() !== "") current = { ...current, ...prompt };
+    // A start made by the plus is ready here and waits for its first message.
+    if (current.message.trim() === "") throw new Stopped();
     const begin = stamp("agentStartedAt");
     if (Object.keys(begin).length > 0) update(begin);
     const sent = await ports.send({ ...current, environmentId });

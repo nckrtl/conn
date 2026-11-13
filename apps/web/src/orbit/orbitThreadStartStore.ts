@@ -78,10 +78,13 @@ export function dropOrbitInstanceStarts(
   );
 }
 
-/** Instances whose server a start pairs with itself; the environment sync leaves them alone. */
+/**
+ * Instances whose server a start pairs with itself; the environment sync leaves them alone. Once
+ * the start paired, it holds nothing: a plus start may then wait for its first message for days.
+ */
 export function heldOrbitInstanceIds(): number[] {
   return readStored().flatMap((start) =>
-    start.instanceId === null || start.sentAt != null ? [] : [start.instanceId],
+    start.instanceId === null || start.sentAt != null || start.connected ? [] : [start.instanceId],
   );
 }
 

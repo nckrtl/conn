@@ -1,7 +1,7 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { OrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { useNavigate, useRouter } from "@tanstack/react-router";
+import { type AnyRouter, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
 
 import { OrbitSetupCard } from "../components/chat/OrbitSetupCard";
@@ -108,19 +108,112 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
     );
   }
 
+  const actions = orbitStartCardActions({
+    start,
+    router,
+    navigate: (to) => void navigate({ to, replace: true }),
+  });
+
+  return (
+    <PendingThreadShell
+      startId={start.id}
+      header={
+        <>
+          <span className="min-w-0 truncate text-sm font-medium text-foreground">
+            {start.message.split("\n")[0] || start.instanceName}
+          </span>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {start.instanceName} · {start.projectSlug}
+          </span>
+        </>
+      }
+    >
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
+        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
+          {start.message === "" ? null : (
+            <div className="flex justify-end pb-4">
+              <div
+                data-orbit-pending-message
+                className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"
+              >
+                {start.message}
+              </div>
+            </div>
+          )}
+          <OrbitSetupCard view={orbitSetupView(start, create)} {...actions} />
+        </div>
+      </div>
+    </PendingThreadShell>
+  );
+}
+
+/** ChatView's frame: the shell fill, its header height and its card, so the handover keeps them. */
+function PendingThreadShell({
+  startId,
+  header,
+  children,
+}: {
+  startId?: string;
+  header: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <SidebarInset className="h-dvh" data-orbit-pending-thread={startId}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate)">
+        <header
+          className={cn(
+            "flex h-(--shell-header-height) min-h-(--shell-header-height) shrink-0 items-center gap-3",
+            isElectron
+              ? "drag-region px-3 sm:px-5"
+              : "pl-(--workspace-gutter-start) pr-(--workspace-gutter-end)",
+            COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+          )}
+        >
+          {header}
+        </header>
+        <div
+          data-shell-sidebar-edge=""
+          className="relative z-0 mr-(--shell-inset) mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tr-(--shell-corner) rounded-br-(--shell-corner) shell-inner-panel [--background:var(--shell-card)]"
+        >
+          {children}
+        </div>
+      </div>
+    </SidebarInset>
+  );
+}
+
+/**
+ * What the setup card's buttons do, for the pending thread and for the draft whose plus started
+ * the create. `onLeave` runs once the start is gone from where it was shown (the plus's draft
+ * drops itself there).
+ */
+export function orbitStartCardActions(input: {
+  readonly start: OrbitThreadStart;
+  readonly router: AnyRouter;
+  readonly navigate: (to: "/") => void;
+  readonly onLeave?: () => void;
+}) {
+  const { start, router } = input;
+  const navigate = ({ to }: { to: "/"; replace?: boolean }) => {
+    input.navigate(to);
+    input.onLeave?.();
+    return Promise.resolve();
+  };
   /** Carries the message, model and modes into the reopened draft, then drops the saved start. */
   const moveToDraft = (draftId: DraftId) => {
     const store = useComposerDraftStore.getState();
-    store.setPrompt(draftId, start.message);
+    // A start the plus made has no message yet; the reopened draft keeps what it holds.
+    if (start.message !== "") store.setPrompt(draftId, start.message);
     if (start.modelSelection) store.setModelSelection(draftId, start.modelSelection);
     if (start.runtimeMode) store.setRuntimeMode(draftId, start.runtimeMode);
     if (start.interactionMode) store.setInteractionMode(draftId, start.interactionMode);
     // Offered only when the create made no Instance, so only the saved start goes.
     dismissOrbitThreadStart(start.id);
+    input.onLeave?.();
   };
   const reopenDraft = async (): Promise<OrbitDraftTarget | null> => {
     const target = orbitStartDraftTarget(start);
-    const draftId = await openOrbitDraft(router, target);
+    const draftId = await openOrbitDraft(input.router, target);
     if (draftId === null) {
       toastManager.add({
         type: "error",
@@ -194,79 +287,16 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
     }
   };
 
-  return (
-    <PendingThreadShell
-      startId={start.id}
-      header={
-        <>
-          <span className="min-w-0 truncate text-sm font-medium text-foreground">
-            {start.message.split("\n")[0]}
-          </span>
-          <span className="shrink-0 text-xs text-muted-foreground">
-            {start.instanceName} · {start.projectSlug}
-          </span>
-        </>
-      }
-    >
-      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
-        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
-          <div className="flex justify-end pb-4">
-            <div
-              data-orbit-pending-message
-              className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"
-            >
-              {start.message}
-            </div>
-          </div>
-          <OrbitSetupCard
-            view={orbitSetupView(start, create)}
-            onRetry={() => retryOrbitThreadStart(start.id)}
-            onChangeName={() => void changeName()}
-            onChangeBranch={() => void changeBranch()}
-            onOpenInstance={(instance) => void openHolder(instance)}
-            onDismiss={() => {
-              dismissOrbitThreadStart(start.id);
-              void navigate({ to: "/", replace: true });
-            }}
-            onCancel={() => void cancel()}
-          />
-        </div>
-      </div>
-    </PendingThreadShell>
-  );
-}
-
-/** ChatView's frame: the shell fill, its header height and its card, so the handover keeps them. */
-function PendingThreadShell({
-  startId,
-  header,
-  children,
-}: {
-  startId?: string;
-  header: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <SidebarInset className="h-dvh" data-orbit-pending-thread={startId}>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate)">
-        <header
-          className={cn(
-            "flex h-(--shell-header-height) min-h-(--shell-header-height) shrink-0 items-center gap-3",
-            isElectron
-              ? "drag-region px-3 sm:px-5"
-              : "pl-(--workspace-gutter-start) pr-(--workspace-gutter-end)",
-            COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
-          )}
-        >
-          {header}
-        </header>
-        <div
-          data-shell-sidebar-edge=""
-          className="relative z-0 mr-(--shell-inset) mb-(--shell-inset) flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-tr-(--shell-corner) rounded-br-(--shell-corner) shell-inner-panel [--background:var(--shell-card)]"
-        >
-          {children}
-        </div>
-      </div>
-    </SidebarInset>
-  );
+  return {
+    onRetry: () => retryOrbitThreadStart(start.id),
+    onChangeName: () => void changeName(),
+    onChangeBranch: () => void changeBranch(),
+    onOpenInstance: (instance: { readonly id: number; readonly name: string }) =>
+      void openHolder(instance),
+    onDismiss: () => {
+      dismissOrbitThreadStart(start.id);
+      void navigate({ to: "/", replace: true });
+    },
+    onCancel: () => void cancel(),
+  };
 }

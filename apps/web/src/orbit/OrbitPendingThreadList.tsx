@@ -25,12 +25,17 @@ export function OrbitPendingThreadList() {
   return (
     <ul className="mt-1 grid grid-cols-1 gap-0.5" aria-label="Threads being set up">
       {starts.map((start) => {
-        const active = pathname === `/orbit/${start.id}`;
+        // A start the plus made opens its draft until it has a message; the row then names the Instance.
+        const draftId = start.message === "" ? (start.draftId ?? null) : null;
+        const active = pathname === (draftId === null ? `/orbit/${start.id}` : `/draft/${draftId}`);
+        const linkProps =
+          draftId === null
+            ? ({ to: "/orbit/$startId", params: { startId: start.id } } as const)
+            : ({ to: "/draft/$draftId", params: { draftId } } as const);
         return (
           <li key={start.id}>
             <Link
-              to="/orbit/$startId"
-              params={{ startId: start.id }}
+              {...linkProps}
               aria-current={active ? "page" : undefined}
               data-orbit-pending-row={start.error ? "failed" : "running"}
               className={cn(
@@ -44,7 +49,7 @@ export function OrbitPendingThreadList() {
                 <Spinner size="sm" className="shrink-0" />
               )}
               <span className="min-w-0 flex-1 truncate text-sidebar-foreground">
-                {start.message.split("\n")[0]}
+                {start.message.split("\n")[0] || start.instanceName}
               </span>
               <span className="shrink-0 text-xs">
                 {start.error ? "Setup failed" : start.projectSlug}

@@ -21,6 +21,7 @@ import {
   ProviderInteractionMode,
   type RunId,
   RuntimeMode,
+  OrchestrationV2LinkedSender,
   ThreadId,
 } from "@t3tools/contracts";
 
@@ -33,6 +34,7 @@ import * as DeviceService from "../device/DeviceService.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as PullRequestWatchService from "../pullRequest/PullRequestWatchService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
 import {
@@ -207,6 +209,34 @@ const withModeLimit = (
     : { ...invocation, client: { ...invocation.client, narrowedTo: limit.value } };
 };
 
+const decodeSenderThread = Schema.decodeUnknownOption(OrchestrationV2LinkedSender);
+
+/** Records the thread a linked environment calls for; a malformed header only loses the name. */
+const withSenderThread = (
+  invocation: McpInvocationContext.McpInvocationScope,
+  request: HttpServerRequest.HttpServerRequest,
+): McpInvocationContext.McpInvocationScope => {
+  const header = request.headers[McpInvocationContext.SENDER_THREAD_HEADER];
+  if (header === undefined || invocation.client?.linked !== true) return invocation;
+  const [environmentId, threadId, title, ...rest] = header.trim().split("/");
+  if (environmentId === undefined || threadId === undefined || title === undefined)
+    return invocation;
+  if (rest.length > 0) return invocation;
+  let decoded: Option.Option<OrchestrationV2LinkedSender>;
+  try {
+    decoded = decodeSenderThread({
+      environmentId: decodeURIComponent(environmentId),
+      threadId: decodeURIComponent(threadId),
+      title: decodeURIComponent(title),
+    });
+  } catch {
+    return invocation;
+  }
+  return Option.isNone(decoded)
+    ? invocation
+    : { ...invocation, client: { ...invocation.client, senderThread: decoded.value } };
+};
+
 // The Linked environments beta is off here: links wait until it is on again.
 const linkedEnvironmentsOff = HttpServerResponse.jsonUnsafe(
   {
@@ -255,7 +285,7 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
     }
-    const asked = withModeLimit(invocation, request);
+    const asked = withModeLimit(withSenderThread(invocation, request), request);
     if (asked === undefined) return invalidModeLimit;
     const limited = McpInvocationContext.withRuntimeModeCeiling(asked, runtimeModeCeiling);
     const linkedEnvironments = yield* linksEnabled;
@@ -557,6 +587,7 @@ const parameterValidationMessage = (error: unknown) =>
     : undefined;
 
 const isPreviewAutomationError = Schema.is(PreviewAutomationError);
+const isPreviewScreenshotSaveError = Schema.is(PreviewScreenshotSaveError);
 
 const previewSnapshotFailure = Effect.fn("previewSnapshotFailure")(function <E>(
   cause: Cause.Cause<E>,
@@ -574,9 +605,10 @@ const previewSnapshotFailure = Effect.fn("previewSnapshotFailure")(function <E>(
       ? firstFailure._tag
       : "PreviewSnapshotError";
   // Preview errors contain server-authored recovery guidance, never page output.
-  const message = isPreviewAutomationError(firstFailure)
-    ? firstFailure.message
-    : parameterValidationMessage(firstFailure);
+  const message =
+    isPreviewAutomationError(firstFailure) || isPreviewScreenshotSaveError(firstFailure)
+      ? firstFailure.message
+      : parameterValidationMessage(firstFailure);
   const result = new McpSchema.CallToolResult({
     isError: true,
     structuredContent: {
@@ -808,7 +840,7 @@ const registerImageTool = Effect.fn("McpHttpServer.registerImageTool")(function*
   R,
 >(
   tool: T,
-  handle: (payload: Tool.Parameters<T>) => Effect.Effect<{ readonly encodedResult: unknown }, E, R>,
+  handle: (payload: Schema.Json) => Effect.Effect<{ readonly encodedResult: unknown }, E, R>,
   provide: (
     effect: Effect.Effect<{ readonly encodedResult: unknown }, E, R>,
   ) => Effect.Effect<
@@ -843,7 +875,7 @@ const registerImageTool = Effect.fn("McpHttpServer.registerImageTool")(function*
           fiber.context,
           McpInvocationContext.McpInvocationContext,
         );
-        return provide(handle(payload as Tool.Parameters<T>)).pipe(
+        return provide(handle(payload)).pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.matchCauseEffect({
             onFailure: imageToolFailure(tool.name, operation, failureText),
@@ -1309,7 +1341,7 @@ export const layerAttachmentToolkit = toolkitRegistration(
 export const layerPullRequestsToolkit = toolkitRegistration(
   PullRequestsToolkit,
   PullRequestsHandlers.layer,
-);
+).pipe(Layer.provide(PullRequestWatchService.layer));
 
 const layerDeviceStandardToolkitRegistration = toolkitRegistration(
   DeviceStandardToolkit,
@@ -1350,7 +1382,8 @@ export const layerMcpTransport = <RA, RE, RR>(registrations: Layer.Layer<RA, RE,
     name: "T3 Code",
     version: packageJson.version,
     path: "/mcp",
-    protocols: [McpProtocol.v2025_06_18],
+    // The first protocol is the fallback for clients that offer an unknown version.
+    protocols: [McpProtocol.v2025_06_18, McpProtocol.v2026_07_28],
     allowSessionTermination: true,
     registrations,
   }).pipe(Layer.provide(layerMcpAuthMiddleware));

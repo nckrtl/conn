@@ -113,8 +113,9 @@ export function dismissOrbitThreadStart(id: string): void {
 
 /**
  * Cancels Orbit's admitted create, then drops the start; a failed cancel keeps it and throws.
- * During this window's admission it only marks the start (`requested`): the runner cancels the
- * Operation Orbit admits, then drops it. An admitted Instance stays, as on a failed create.
+ * Once a create was sent but not answered, in any window, it only marks the start (`requested`):
+ * the main window's runner repeats the admission under the same key, cancels the Operation and
+ * drops the start. An admitted Instance stays, as on a failed create.
  */
 export async function cancelOrbitThreadStart(
   client: OrbitGatewayClient | null,
@@ -124,7 +125,7 @@ export async function cancelOrbitThreadStart(
   if (start === undefined) return { instanceStays: false, requested: false };
   const admitting =
     start.environmentId === null && start.createOperationId === null && start.createKey != null;
-  if (admitting && running.has(id)) {
+  if (admitting) {
     updateStarts((starts) =>
       starts.map((entry) => (entry.id === id ? { ...entry, cancelRequested: true } : entry)),
     );

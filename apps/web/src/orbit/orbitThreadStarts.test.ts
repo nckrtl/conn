@@ -13,7 +13,7 @@ import {
   runSavedOrbitThreadStart,
   sendOrbitDraft,
 } from "./orbitThreadStarts";
-import { readStored } from "./orbitThreadStartStore";
+import { readStored, updateStarts } from "./orbitThreadStartStore";
 
 const runner = vi.hoisted(() => ({ real: false }));
 vi.mock("@t3tools/client-runtime/orbit-gateway", async (importOriginal) => {
@@ -239,8 +239,37 @@ describe("cancelOrbitThreadStart", () => {
     expect(readStored()).toEqual([]);
   });
 
-  it("drops a start no runner works on at once, without a Gateway call", async () => {
+  it("cancels the create a runner repeats after a Cancel from a window that runs no start", async () => {
     const id = saveDraftStart();
+    // The main window sent the create, then the answer was lost (or the app reloaded).
+    updateStarts((starts) => starts.map((entry) => ({ ...entry, createKey: "key-1" })));
+    const createThreadInstance = vi.fn(async () => ({
+      id: 100,
+      kind: "instance.create",
+      status: "queued",
+      targetId: 41,
+      errorCode: null,
+      pollAfterSeconds: 2,
+    }));
+    const cancelOperation = vi.fn(async () => ({}));
+    const gateway = { createThreadInstance, cancelOperation } as unknown as OrbitGatewayClient;
+
+    expect(await cancelOrbitThreadStart(gateway, id)).toEqual({
+      instanceStays: true,
+      requested: true,
+    });
+    expect(readStored()[0]).toMatchObject({ id, cancelRequested: true });
+    expect(cancelOperation).not.toHaveBeenCalled();
+
+    expect(await runSavedOrbitThreadStart(gateway, id)).toBeNull();
+    expect(createThreadInstance).toHaveBeenCalledWith(3, "list-files", "key-1", null);
+    expect(cancelOperation).toHaveBeenCalledWith(100);
+    expect(readStored()).toEqual([]);
+  });
+
+  it("drops a start whose create was never sent at once, without a Gateway call", async () => {
+    const id = saveDraftStart();
+    expect(readStored()[0]!.createKey).toBeNull();
     const cancelOperation = vi.fn();
     const gateway = { cancelOperation } as unknown as OrbitGatewayClient;
     expect(await cancelOrbitThreadStart(gateway, id)).toEqual({

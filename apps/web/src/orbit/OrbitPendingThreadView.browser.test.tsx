@@ -137,8 +137,8 @@ describe("OrbitPendingThreadView", () => {
     expect(gateway.cancelOperation).toHaveBeenCalledWith(100);
   });
 
-  it("Cancel before Orbit admitted the create only drops the saved start", async () => {
-    setup(start({ createStartedAt: 1, createKey: "k" }));
+  it("Cancel before the create was sent only drops the saved start", async () => {
+    setup(start({ createStartedAt: 1 }));
     await using screen = await render(view(), { router: "/orbit/s1" });
     await screen.getByRole("button", { name: "Cancel" }).click();
     await vi.waitFor(() => expect(readStored()).toEqual([]));

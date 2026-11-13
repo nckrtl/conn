@@ -5,9 +5,10 @@ import {
   orbitInstanceGitLine,
   orbitInstanceRemoveNeedsAck,
   parseOrbitInstanceGit,
+  orbitInstanceGitParts,
+  parseOrbitInstanceWork,
   readOrbitInstanceGit,
 } from "./instanceGit.ts";
-import { orbitInstanceRemoveText } from "./instanceRemoval.ts";
 import { OrbitGatewayError } from "./client.ts";
 
 const known = (uncommitted: number, unpushed: number) =>
@@ -117,43 +118,113 @@ describe("orbitInstanceGitFromUnsavedWork", () => {
   });
 });
 
+const v2 = (fields: Record<string, unknown>) => ({
+  state: "dirty",
+  reason: null,
+  read_at: "2026-11-13T20:31:02Z",
+  head: "main",
+  modified: { count: 0, names: [] },
+  untracked: { count: 0, names: [] },
+  commits: { count: 0, branch_count: 0, branches: [] },
+  stashes: { count: 0, names: [] },
+  ...fields,
+});
+
+describe("parseOrbitInstanceWork (contract v2)", () => {
+  it("reads the four classes into one fact per line", () => {
+    const git = parseOrbitInstanceWork(
+      v2({
+        modified: { count: 1, names: ["a"] },
+        untracked: { count: 1, names: ["b"] },
+        commits: {
+          count: 3,
+          branch_count: 2,
+          branches: [
+            { name: "x", count: 2 },
+            { name: "y", count: 1 },
+          ],
+        },
+        stashes: { count: 2, names: [] },
+      }),
+    );
+    expect(orbitInstanceGitParts(git)).toEqual([
+      "1 uncommitted change",
+      "1 new file",
+      "2 commits not pushed on branch x",
+      "1 commit not pushed on branch y",
+      "2 stashes",
+    ]);
+    expect(orbitInstanceRemoveNeedsAck({ git, workingCount: 0 })).toBe(true);
+  });
+
+  it("names at most three branches, then how many more", () => {
+    const branches = ["a", "b", "c", "d", "e"].map((name) => ({ name, count: 1 }));
+    const git = parseOrbitInstanceWork(v2({ commits: { count: 9, branch_count: 9, branches } }));
+    expect(orbitInstanceGitParts(git).slice(3)).toEqual(["and 6 more branches"]);
+  });
+
+  it("a stash alone is work; clean is clean; v1's `work` and `unpushed` still read", () => {
+    const stash = parseOrbitInstanceWork(v2({ stashes: { count: 1, names: [] } }));
+    expect(orbitInstanceGitParts(stash)).toEqual(["1 stash"]);
+    expect(orbitInstanceRemoveNeedsAck({ git: stash, workingCount: 0 })).toBe(true);
+    const clean = parseOrbitInstanceWork(v2({ state: "clean" }));
+    expect(orbitInstanceRemoveNeedsAck({ git: clean, workingCount: 0 })).toBe(false);
+    const v1 = parseOrbitInstanceWork({
+      ...v2({ state: "work" }),
+      commits: undefined,
+      unpushed: { count: 1, branch_count: 1, branches: [{ name: "x", count: 1 }] },
+    });
+    expect(orbitInstanceGitParts(v1)).toEqual(["1 commit not pushed on branch x"]);
+  });
+
+  it("never reads a broken or empty answer as clean", () => {
+    expect(parseOrbitInstanceWork({ state: "unknown", reason: "asleep" })).toEqual({
+      state: "unknown",
+      reason: "asleep",
+    });
+    expect(parseOrbitInstanceWork(v2({ modified: null })).state).toBe("unknown");
+    expect(parseOrbitInstanceWork(v2({})).state).toBe("unknown");
+    expect(parseOrbitInstanceWork({ state: "fine" }).state).toBe("unknown");
+    expect(parseOrbitInstanceWork(null).state).toBe("unknown");
+  });
+
+  it("reads the destroy refusal's full details, and today's integer-only details", () => {
+    expect(
+      orbitInstanceGitFromUnsavedWork(v2({ untracked: { count: 2, names: [] } }), undefined),
+    ).toMatchObject({ state: "known", untracked: 2 });
+    expect(
+      orbitInstanceGitFromUnsavedWork({ state: "unknown", reason: "stopped" }, undefined),
+    ).toEqual({ state: "unknown", reason: "stopped" });
+  });
+});
+
 describe("readOrbitInstanceGit (the remove dialog's read on open)", () => {
   const client = (answer: () => Promise<unknown>) => ({ instanceGit: answer });
 
-  it("reads Orbit's state from `data` or `data.git`", async () => {
-    const data = { state: "known", branch: "x", uncommitted: 1, unpushed: 0, has_upstream: true };
+  it("reads Orbit's work state", async () => {
     expect(
       await readOrbitInstanceGit(
-        client(async () => data),
+        client(async () => v2({ modified: { count: 1, names: [] } })),
         11,
       ),
-    ).toMatchObject({
-      state: "known",
-      uncommitted: 1,
-    });
-    expect(
-      await readOrbitInstanceGit(
-        client(async () => ({ git: { state: "unknown" } })),
-        11,
-      ),
-    ).toEqual({ state: "unknown", reason: null });
+    ).toMatchObject({ state: "known", uncommitted: 1 });
   });
 
-  it("gives undefined (the old flow) for an older Gateway or any failure", async () => {
-    const notFound = new OrbitGatewayError({
-      code: "http.404",
-      message: "Not Found.",
-      status: 404,
-      details: {},
-    });
-    expect(
-      await readOrbitInstanceGit(
-        client(async () => {
-          throw notFound;
-        }),
-        11,
-      ),
-    ).toBeUndefined();
+  it("gives undefined (the old flow) for an older Gateway, a host Instance or any failure", async () => {
+    for (const [status, code] of [
+      [404, "http.404"],
+      [409, "instance.not_container"],
+    ] as const) {
+      const error = new OrbitGatewayError({ code, message: "x", status, details: {} });
+      expect(
+        await readOrbitInstanceGit(
+          client(async () => {
+            throw error;
+          }),
+          11,
+        ),
+      ).toBeUndefined();
+    }
     expect(
       await readOrbitInstanceGit(
         client(async () => null),
@@ -166,29 +237,5 @@ describe("readOrbitInstanceGit (the remove dialog's read on open)", () => {
         11,
       ),
     ).toBeUndefined();
-  });
-
-  it("a branch without an upstream needs the tick and reads as 'cannot tell'", () => {
-    const git = parseOrbitInstanceGit({
-      state: "known",
-      branch: "spike",
-      uncommitted: 0,
-      unpushed: 0,
-      has_upstream: false,
-    });
-    expect(orbitInstanceRemoveNeedsAck({ git, workingCount: 0 })).toBe(true);
-    const text = orbitInstanceRemoveText({
-      name: "spike",
-      domain: null,
-      nodeName: "beast",
-      threadCount: 0,
-      workingCount: 0,
-      git,
-    });
-    expect(text.warning).toEqual({
-      kind: "unknown",
-      text: "Orbit cannot tell whether this Instance holds work that is not on the remote.",
-    });
-    expect(text.acknowledge).toBe("Remove it anyway. Any unsaved work is lost.");
   });
 });

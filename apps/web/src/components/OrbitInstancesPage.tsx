@@ -26,7 +26,7 @@ import {
   readOrbitInstanceGit,
   type OrbitInstanceGitState,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { cn } from "../lib/utils";
 import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
@@ -227,11 +227,19 @@ interface RemoveRequest {
  * dialog works as before. A later answer still updates the dialog until the click.
  */
 function useRemoveRequest() {
-  const [request, setRequest] = useState<RemoveRequest | null>(null);
+  const [request, setRequestState] = useState<RemoveRequest | null>(null);
+  // The newest request, also before React renders it: a click checks it (`confirmable`).
+  const latest = useRef<RemoveRequest | null>(null);
+  const setRequest = (next: RemoveRequest | null) => {
+    latest.current = next;
+    setRequestState(next);
+  };
   const open = (row: OrbitInstanceWithThreads) => {
     const opened = Symbol(String(row.id));
-    const update = (change: (current: RemoveRequest) => RemoveRequest) =>
-      setRequest((current) => (current?.opened === opened ? change(current) : current));
+    const update = (change: (current: RemoveRequest) => RemoveRequest) => {
+      const current = latest.current;
+      if (current?.opened === opened) setRequest(change(current));
+    };
     const client = desktopOrbitGatewayClient();
     setRequest({ row, git: row.git, checking: client !== null, opened });
     if (client === null) return;
@@ -244,7 +252,15 @@ function useRemoveRequest() {
       update((current) => ({ ...current, checking: false, git: git ?? current.git }));
     });
   };
-  return [request, setRequest, open] as const;
+  /**
+   * The request a click on Remove Instance may act on: only when the dialog showed the newest
+   * Git state. A late answer that changed the dialog in the same moment drops the click.
+   */
+  const confirmable = (shownGit: OrbitInstanceGitState | undefined) => {
+    const current = latest.current;
+    return current !== null && !current.checking && current.git === shownGit ? current : null;
+  };
+  return [request, setRequest, open, confirmable] as const;
 }
 
 async function removeInstance(
@@ -429,7 +445,8 @@ export function OrbitInstancesPage() {
   const threads = useVisibleThreadShells();
   const [query, setQuery] = useState("");
   const [projectId, setProjectId] = useState<number | null>(null);
-  const [removeRequest, setRemoveRequest, openRemoveRequest] = useRemoveRequest();
+  const [removeRequest, setRemoveRequest, openRemoveRequest, confirmableRemoveRequest] =
+    useRemoveRequest();
   const listedIds = new Set(list.status === "loaded" ? list.rows.map((row) => row.id) : []);
 
   const rows =
@@ -546,15 +563,11 @@ export function OrbitInstancesPage() {
         }
         checking={removeRequest?.checking === true}
         onCancel={() => setRemoveRequest(null)}
-        onConfirm={(acknowledgeUnsaved) => {
-          if (removeRequest === null) return;
+        onConfirm={(acknowledgeUnsaved, shownGit) => {
+          const request = confirmableRemoveRequest(shownGit);
+          if (request === null) return;
           setRemoveRequest(null);
-          void removeInstance(
-            removeRequest.row,
-            removeRequest.git,
-            acknowledgeUnsaved,
-            setRemoveRequest,
-          );
+          void removeInstance(request.row, request.git, acknowledgeUnsaved, setRemoveRequest);
         }}
       />
     </SettingsPageContainer>

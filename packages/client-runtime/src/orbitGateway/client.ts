@@ -406,8 +406,8 @@ export interface OrbitGatewayClient {
     idempotencyKey: string,
   ) => Promise<OrbitGatewayOperation>;
   /**
-   * Conn: reads one Instance's Git state before a remove (`GET /conn/instances/{id}/git`). Throws
-   * like every call; an older Gateway answers 404. Use `readOrbitInstanceGit`.
+   * Conn: reads one Instance's work state before a remove (`GET /conn/instances/{id}/work`).
+   * Throws like every call; an older Gateway answers 404. Use `readOrbitInstanceGit`.
    */
   readonly instanceGit: (instanceId: number, timeoutMs: number) => Promise<unknown>;
 }
@@ -671,7 +671,7 @@ export function createOrbitGatewayClient(
       );
     },
     instanceGit: async (instanceId, timeoutMs) =>
-      call({ method: "GET", path: `/instances/${instanceId}/git`, timeoutMs }),
+      call({ method: "GET", path: `/instances/${instanceId}/work`, timeoutMs }),
   };
 }
 

@@ -312,10 +312,7 @@ export function orbitInstanceRemoveText(
     return { ...base, warning: null, acknowledge: null };
   }
   const parts = orbitInstanceGitParts(git);
-  // A branch without an upstream has no count to name: the sheet says Orbit cannot tell.
-  const noUpstreamOnly =
-    git?.state === "known" && !git.hasUpstream && parts.length === 0 && workingCount === 0;
-  if ((git !== undefined && git.state !== "known") || noUpstreamOnly) {
+  if (git !== undefined && git.state !== "known") {
     return {
       ...base,
       warning: {
@@ -325,11 +322,7 @@ export function orbitInstanceRemoveText(
       acknowledge: "Remove it anyway. Any unsaved work is lost.",
     };
   }
-  const items = parts.map((part) =>
-    part.endsWith("not pushed") && git?.state === "known" && git.branch !== null
-      ? `${part} on branch ${git.branch}`
-      : part,
-  );
+  const items = [...parts];
   if (workingCount === 1) items.push("1 thread is working now. It stops.");
   else if (workingCount > 1) items.push(`${workingCount} threads are working now. They stop.`);
   return {

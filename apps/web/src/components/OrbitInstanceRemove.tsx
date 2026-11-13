@@ -119,7 +119,10 @@ export function OrbitInstanceRemoveFailure(props: {
 function RemoveDialogBody(props: {
   readonly target: OrbitInstanceRemoveTarget;
   readonly checking: boolean;
-  readonly onConfirm: (acknowledgeUnsaved: boolean) => void;
+  readonly onConfirm: (
+    acknowledgeUnsaved: boolean,
+    shownGit: OrbitInstanceGitState | undefined,
+  ) => void;
 }) {
   const text = orbitInstanceRemoveText(props.target);
   const [acknowledged, setAcknowledged] = useState(false);
@@ -171,7 +174,10 @@ function RemoveDialogBody(props: {
           // Without Orbit's Git state the tick covers only the working threads; Orbit's
           // `instance.unsaved_work` then asks about the Git state itself.
           onClick={() =>
-            props.onConfirm(text.acknowledge !== null && props.target.git !== undefined)
+            props.onConfirm(
+              text.acknowledge !== null && props.target.git !== undefined,
+              props.target.git,
+            )
           }
         >
           Remove Instance
@@ -190,7 +196,11 @@ export function OrbitInstanceRemoveDialog(props: {
   readonly target: OrbitInstanceRemoveTarget | null;
   readonly checking?: boolean;
   readonly onCancel: () => void;
-  readonly onConfirm: (acknowledgeUnsaved: boolean) => void;
+  /** `shownGit`: the Git state the dialog showed at the click. */
+  readonly onConfirm: (
+    acknowledgeUnsaved: boolean,
+    shownGit: OrbitInstanceGitState | undefined,
+  ) => void;
 }) {
   const { target } = props;
   return (

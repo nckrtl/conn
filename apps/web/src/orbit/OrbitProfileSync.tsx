@@ -12,7 +12,11 @@ import { create } from "zustand";
 
 import { useWorkspaceStore } from "../workspaceStore";
 import { WORKSPACE_COLORS, type Workspace, type WorkspaceColor } from "../workspaces.logic";
-import { reconcileEnvironmentProvider, useEnvironmentProvider } from "./environmentProvider";
+import {
+  onOrbitCredentialRefused,
+  reconcileEnvironmentProvider,
+  useEnvironmentProvider,
+} from "./environmentProvider";
 import { pruneWorkspaceCloneRefs } from "./cloneWorkspaceRefs";
 import { OrbitAppearanceSync } from "./OrbitAppearanceSync";
 import { getProfileSyncChannels, onLocalProfileChange } from "./profileSyncRegistry";
@@ -251,6 +255,9 @@ export function OrbitProfileSync() {
       if (state.workspaces !== previous.workspaces) scheduleEditSync();
     });
     const unsubscribeLocalChange = onLocalProfileChange(scheduleEditSync);
+    // Conn: a server that starts refusing this device's credential is renewed now, not at the
+    // next poll.
+    const unsubscribeRefused = onOrbitCredentialRefused(run);
     // A theme the environment pushed is not the user's pick: it stays on this device.
     const unsubscribeDefaultTheme = trackNonUserThemeChanges(() =>
       sync.beginNonUserChange(APPEARANCE_SECTION),
@@ -269,6 +276,7 @@ export function OrbitProfileSync() {
       unsubscribeProvider();
       unsubscribe();
       unsubscribeLocalChange();
+      unsubscribeRefused();
       unsubscribeDefaultTheme();
       clearInterval(interval);
       if (editTimer) clearTimeout(editTimer);

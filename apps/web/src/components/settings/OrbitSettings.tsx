@@ -2,6 +2,7 @@ import {
   orbitConnectionChecks,
   orbitNodeServers,
   orbitSignedInText,
+  renewalFailureText,
   type EnvironmentProvider,
   type OrbitConnectionCheckState,
   type OrbitConnectionProbe,
@@ -14,6 +15,7 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   connectOrbitEnvironment,
+  retryOrbitRenewal,
   setEnvironmentProvider,
   useEnvironmentProvider,
 } from "~/orbit/environmentProvider";
@@ -109,6 +111,8 @@ const NODE_STATES: Record<OrbitNodeState, { readonly label: string; readonly dot
   pairing: { label: "Pairing…", dot: "bg-muted-foreground/40" },
   expired: { label: "Registration expired", dot: "bg-warning" },
   revoked: { label: "Revoked in Orbit", dot: "bg-destructive" },
+  // The row shows the reason's sentence (renewalFailureText) in place of this label.
+  renewal_failed: { label: "Could not renew.", dot: "bg-warning" },
 };
 
 /**
@@ -145,6 +149,33 @@ function useOrbitConnection() {
   }, [load]);
 
   return { probe, environments, load };
+}
+
+/** Conn: Retry for a server whose last renewal failed: renews it now, without the planner's wait. */
+function RenewalRetryButton(props: {
+  readonly environmentId: string;
+  readonly environments: readonly OrbitGatewayEnvironment[] | null;
+}) {
+  const [renewing, setRenewing] = useState(false);
+  const environment = props.environments?.find(
+    (entry) => entry.environmentId === props.environmentId,
+  );
+  if (!environment) return null;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      disabled={renewing}
+      onClick={() => {
+        const client = desktopOrbitGatewayClient();
+        if (!client) return;
+        setRenewing(true);
+        void retryOrbitRenewal(client, environment).finally(() => setRenewing(false));
+      }}
+    >
+      {renewing ? "Renewing…" : "Retry"}
+    </Button>
+  );
 }
 
 /**
@@ -186,6 +217,7 @@ export function OrbitConnectionPage() {
   const { probe, environments, load } = useOrbitConnection();
   const { environments: savedEnvironments } = useEnvironments();
   const revokedAt = useEnvironmentProvider((store) => store.state.revokedAt);
+  const renewalFailed = useEnvironmentProvider((store) => store.state.renewalFailed);
   const navigate = useNavigate();
   const m = useMessages();
   const connectionsLabel = m(SETTINGS_SECTION_LABELS["/settings/connections"]);
@@ -201,6 +233,9 @@ export function OrbitConnectionPage() {
             savedEnvironments.map((environment) => String(environment.environmentId)),
           ),
           revoked: new Set(Object.keys(revokedAt ?? {})),
+          renewalFailed: new Map(
+            Object.entries(renewalFailed ?? {}).map(([id, failure]) => [id, failure.reason]),
+          ),
           device: node,
         });
 
@@ -286,10 +321,17 @@ export function OrbitConnectionPage() {
                 control={
                   <span className="flex items-center gap-3">
                     <span className="text-ui text-muted-foreground">
-                      {NODE_STATES[entry.state].label}
+                      {entry.renewalFailure !== null
+                        ? renewalFailureText(entry.renewalFailure)
+                        : NODE_STATES[entry.state].label}
                     </span>
                     {entry.state === "revoked" ? (
                       <RevokedConnectButton
+                        environmentId={entry.environmentId}
+                        environments={environments}
+                      />
+                    ) : entry.state === "renewal_failed" ? (
+                      <RenewalRetryButton
                         environmentId={entry.environmentId}
                         environments={environments}
                       />

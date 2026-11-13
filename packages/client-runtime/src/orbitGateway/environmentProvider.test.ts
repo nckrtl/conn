@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { OrbitGatewayEnvironment } from "./client.ts";
+import { OrbitGatewayError, type OrbitGatewayEnvironment } from "./client.ts";
 import * as DateTime from "effect/DateTime";
 
 import { ConnectionBlockedError, ConnectionTransientError } from "../connection/model.ts";
@@ -24,6 +24,12 @@ import {
   SESSION_RENEW_BEFORE_MS,
   sessionRenewalReason,
   connectionRefusedCredential,
+  createCredentialRefusalWatch,
+  forgetRenewalFailure,
+  readSessionRenewals,
+  recordRenewalFailed,
+  renewalFailureReason,
+  renewalFailureText,
   type ManagedEnvironment,
   type OrbitEnvironmentState,
 } from "./environmentProvider.ts";
@@ -467,5 +473,132 @@ describe("session renewal", () => {
       ).toBe(false);
       expect(connectionRefusedCredential(null)).toBe(false);
     });
+  });
+});
+
+describe("session renewal, shared by desktop and phone", () => {
+  const refused = new ConnectionBlockedError({
+    reason: "authentication",
+    detail: "The environment credential is invalid.",
+  });
+  const now = Date.parse("2026-12-13T10:00:00Z");
+  const session = (endsAt: string) => ({
+    authenticated: true,
+    expiresAt: DateTime.makeUnsafe(Date.parse(endsAt)),
+  });
+
+  it("reads every server that needs a renewal, including a refusal while the next attempt runs", () => {
+    // 12 Nov 2026: four servers ended at once. The desktop read a refusal only while "blocked",
+    // so a window brought to the front (which moves it to "connecting") hid it.
+    const connections: Record<
+      string,
+      { phase: "blocked" | "connecting" | "connected"; lastFailure: ConnectionBlockedError | null }
+    > = {
+      mini: { phase: "connecting", lastFailure: refused },
+      beast: { phase: "blocked", lastFailure: refused },
+      shark: { phase: "connected", lastFailure: null },
+      nick: { phase: "connected", lastFailure: null },
+    };
+    const sessions: Record<string, ReturnType<typeof session> | null> = {
+      mini: null,
+      beast: null,
+      shark: session("2026-12-15T10:00:00Z"),
+      nick: session("2027-01-30T10:00:00Z"),
+    };
+    expect(
+      readSessionRenewals({
+        environmentIds: ["mini", "beast", "shark", "nick"],
+        readConnection: (id) => connections[id] ?? null,
+        readSession: (id) => sessions[id] ?? null,
+        now,
+      }),
+    ).toEqual([
+      { environmentId: "mini", reason: "expired" },
+      { environmentId: "beast", reason: "expired" },
+      { environmentId: "shark", reason: "expiring" },
+    ]);
+  });
+
+  it("calls onRefused once per refusal, again after the server connected, and stops watching removed servers", () => {
+    const listeners = new Map<
+      string,
+      (
+        connection: {
+          phase: "blocked" | "connecting" | "connected";
+          lastFailure: ConnectionBlockedError | null;
+        } | null,
+      ) => void
+    >();
+    const refusals: string[] = [];
+    const watch = createCredentialRefusalWatch({
+      subscribe: (id, listener) => {
+        listeners.set(id, listener);
+        return () => listeners.delete(id);
+      },
+      onRefused: (id) => refusals.push(id),
+    });
+    watch.watch(["mini", "beast"]);
+    listeners.get("mini")?.({ phase: "blocked", lastFailure: refused });
+    listeners.get("mini")?.({ phase: "connecting", lastFailure: refused });
+    listeners.get("beast")?.({ phase: "blocked", lastFailure: refused });
+    listeners.get("mini")?.({ phase: "connected", lastFailure: null });
+    listeners.get("mini")?.({ phase: "blocked", lastFailure: refused });
+    expect(refusals).toEqual(["mini", "beast", "mini"]);
+    watch.watch(["mini"]);
+    expect([...listeners.keys()]).toEqual(["mini"]);
+  });
+
+  it("names each failure in plain words and never shows a code", () => {
+    const gateway = (code: string) =>
+      new OrbitGatewayError({ code, message: code, status: 409, details: {} });
+    const reasons = [
+      gateway("conn.session_expired"),
+      gateway("conn.pairing_revoked"),
+      gateway("gateway.unreachable"),
+      gateway("conn.server_unreachable"),
+      gateway("conn.request_refused"),
+      new ConnectionTransientError({ reason: "network", detail: "no answer" }),
+      refused,
+      gateway("conn.something_new"),
+      new Error("boom"),
+    ].map(renewalFailureReason);
+    expect(reasons).toEqual([
+      "session_ended",
+      "revoked",
+      "orbit_unreachable",
+      "server_unreachable",
+      "link_refused",
+      "server_unreachable",
+      "link_refused",
+      "unknown",
+      "unknown",
+    ]);
+    expect(reasons.map(renewalFailureText)).toEqual([
+      "Could not renew: Orbit's session on this server ended.",
+      "Could not renew: revoked in Orbit.",
+      "Could not renew: Orbit is not reachable.",
+      "Could not renew: the server is not reachable.",
+      "Could not renew: the server refused the link.",
+      "Could not renew: the server is not reachable.",
+      "Could not renew: the server refused the link.",
+      "Could not renew.",
+      "Could not renew.",
+    ]);
+  });
+
+  it("keeps a failed renewal across a restart until a pairing succeeds or Orbit removes the server", () => {
+    const failed = recordRenewalFailed(EMPTY_ORBIT_ENVIRONMENT_STATE, "mini", {
+      at: now,
+      reason: "orbit_unreachable",
+    });
+    const reloaded = parseOrbitEnvironmentState(JSON.parse(JSON.stringify(failed)));
+    expect(reloaded.renewalFailed).toEqual({ mini: { at: now, reason: "orbit_unreachable" } });
+    expect(
+      parseOrbitEnvironmentState({
+        renewalFailed: { a: { at: 1, reason: "new" }, b: { reason: "x" } },
+      }).renewalFailed,
+    ).toEqual({ a: { at: 1, reason: "unknown" } });
+    expect(forgetRenewalFailure(reloaded, "mini").renewalFailed).toEqual({});
+    expect(forgetOrbitEnvironment(reloaded, "mini").renewalFailed).toEqual({});
   });
 });

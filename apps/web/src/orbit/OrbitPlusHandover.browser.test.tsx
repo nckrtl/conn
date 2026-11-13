@@ -118,3 +118,36 @@ describe("finishOrbitPlusStart with a stale palette list", () => {
     }
   });
 });
+
+describe("finishOrbitPlusStart when the user leaves during the read", () => {
+  it("opens nothing and shows no toast for a user who left the pending view; the start is done", async () => {
+    window.localStorage.clear();
+    updateStarts(() => [connectedPlusStart()]);
+    const bridgeWindow = window as { desktopBridge?: unknown };
+    const previousBridge = bridgeWindow.desktopBridge;
+    const previousProvider = useEnvironmentProvider.getState();
+    bridgeWindow.desktopBridge = { orbitGatewaySend: vi.fn() };
+    useEnvironmentProvider.setState({ provider: "orbit", orbitInstances: {} });
+    try {
+      await using screen = await render(<div />, { router: "/orbit/p1" });
+      const router = screen.router!;
+      // Orbit lists the Instance one read late; the user moves on before that read.
+      gateway.environments
+        .mockReset()
+        .mockImplementationOnce(async () => {
+          await router.navigate({ to: "/" });
+          return [];
+        })
+        .mockResolvedValue([listed]);
+      await finishOrbitPlusStart(router, "p1");
+      expect(router.state.location.pathname).toBe("/");
+      expect(readStored()).toEqual([]);
+      expect(screen.container.ownerDocument.body.textContent).not.toContain(
+        "Could not open Instance",
+      );
+    } finally {
+      bridgeWindow.desktopBridge = previousBridge;
+      useEnvironmentProvider.setState(previousProvider, true);
+    }
+  });
+});

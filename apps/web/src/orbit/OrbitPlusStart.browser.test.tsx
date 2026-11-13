@@ -20,7 +20,11 @@ vi.mock("./openOrbitInstance", () => ({
 }));
 vi.mock("./OrbitProfileSync", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./OrbitProfileSync")>()),
-  desktopOrbitGatewayClient: () => ({ cancelOperation: orbit.cancelOperation }),
+  desktopOrbitGatewayClient: () => ({
+    cancelOperation: orbit.cancelOperation,
+    // The Gateway lists the new Instance at the hand-over's fresh read.
+    environments: async () => [{ instanceId: 41, environmentId: "env-41" }],
+  }),
 }));
 
 /** A start the palette's plus made: no message. */

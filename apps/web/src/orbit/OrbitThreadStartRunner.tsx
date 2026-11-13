@@ -119,35 +119,48 @@ export async function finishOrbitPlusStart(router: AnyRouter, startId: string): 
   if (start === undefined || finishing.has(start.id) || start.instanceId === null) return;
   const instanceId = start.instanceId;
   finishing.add(start.id);
+  const onPendingView = () =>
+    router.state.location.pathname === orbitPendingThreadPath(start.id) &&
+    readStored().some((entry) => entry.id === start.id);
   try {
-    if (router.state.location.pathname === orbitPendingThreadPath(start.id)) {
-      const target = orbitStartDraftTarget(start);
-      const result = await openOrbitInstanceById({
-        router,
-        project: {
-          id: target.projectId,
-          slug: target.projectSlug,
-          name: target.projectName,
-          nodeName: target.nodeName,
-          domainSuffix: target.domainSuffix,
-        },
-        instance: { id: instanceId, name: start.instanceName },
-        environments: () => {
-          const client = desktopOrbitGatewayClient();
-          if (client === null) throw new Error("The Orbit Gateway is not available here.");
-          return readOrbitEnvironmentsListing(() => client.environments(), instanceId);
-        },
-      }).catch((error: unknown) => ({
-        kind: "unavailable" as const,
-        reason: error instanceof Error ? error.message : String(error),
-      }));
-      if (result.kind === "unavailable") {
-        toastManager.add({
-          type: "error",
-          title: `Could not open Instance ${start.instanceName}`,
-          description: result.reason,
-        });
-        void router.navigate({ to: "/", replace: true });
+    if (onPendingView()) {
+      let listing: readonly OrbitGatewayEnvironment[] | { readonly failed: string };
+      try {
+        const client = desktopOrbitGatewayClient();
+        if (client === null) throw new Error("The Orbit Gateway is not available here.");
+        listing = await readOrbitEnvironmentsListing(() => client.environments(), instanceId);
+      } catch (error) {
+        listing = { failed: error instanceof Error ? error.message : String(error) };
+      }
+      // The read may wait a few seconds: a user who left the view, or cancelled, stays put.
+      if (onPendingView()) {
+        const target = orbitStartDraftTarget(start);
+        const result =
+          "failed" in listing
+            ? { kind: "unavailable" as const, reason: listing.failed }
+            : await openOrbitInstanceById({
+                router,
+                project: {
+                  id: target.projectId,
+                  slug: target.projectSlug,
+                  name: target.projectName,
+                  nodeName: target.nodeName,
+                  domainSuffix: target.domainSuffix,
+                },
+                instance: { id: instanceId, name: start.instanceName },
+                environments: async () => listing,
+              }).catch((error: unknown) => ({
+                kind: "unavailable" as const,
+                reason: error instanceof Error ? error.message : String(error),
+              }));
+        if (result.kind === "unavailable") {
+          toastManager.add({
+            type: "error",
+            title: `Could not open Instance ${start.instanceName}`,
+            description: result.reason,
+          });
+          void router.navigate({ to: "/", replace: true });
+        }
       }
     }
     dismissOrbitThreadStart(start.id);

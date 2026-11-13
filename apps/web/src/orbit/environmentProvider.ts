@@ -42,6 +42,7 @@ import { connectPairing } from "../connection/onboarding";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useServerConfigs } from "../state/entities";
 import { environmentSession, readEnvironmentLacksScope } from "../state/session";
+import { observeOrbitInstancePower } from "./orbitInstanceSleep";
 import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
@@ -368,6 +369,8 @@ export async function reconcileEnvironmentProvider(
   const { provider, state } = useEnvironmentProvider.getState();
   const orbit = provider === "orbit" ? await client.environments() : null;
   saveOrbitInstances(orbit === null ? {} : orbitInstancesByEnvironment(orbit));
+  // Conn: asleep Instances nobody uses stay unconnected; one in use is woken.
+  await observeOrbitInstancePower(client, orbit);
   const catalog = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
   if (!catalog.isReady) return orbit;
 

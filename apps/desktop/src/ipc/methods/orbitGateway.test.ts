@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { isAllowedConnQuery, resolveConnUrl } from "./orbitGateway.ts";
+import { isAllowedConnQuery, resolveConnUrl, resolveRootUrl } from "./orbitGateway.ts";
 
 describe("resolveConnUrl", () => {
   it("keeps ordinary Conn paths below the prefix", () => {
@@ -86,5 +86,35 @@ describe("isAllowedConnQuery", () => {
     ["a POST", { method: "POST" as const, path: "/projects", query: { include_unavailable: "1" } }],
   ])("refuses %s", (_label, request) => {
     expect(isAllowedConnQuery(request)).toBe(false);
+  });
+});
+
+describe("resolveRootUrl", () => {
+  it("allows only an Instance wake and an Operation read below /api/v1", () => {
+    expect(resolveRootUrl({ method: "POST", path: "/instances/41/wake" })?.toString()).toBe(
+      "https://gateway.orbit/api/v1/instances/41/wake",
+    );
+    expect(resolveRootUrl({ method: "GET", path: "/operations/501" })?.toString()).toBe(
+      "https://gateway.orbit/api/v1/operations/501",
+    );
+  });
+
+  it.each([
+    { method: "GET", path: "/instances/41/wake" },
+    { method: "POST", path: "/instances/41/sleep" },
+    { method: "POST", path: "/instances/41/destroy" },
+    { method: "POST", path: "/operations/501" },
+    { method: "POST", path: "/operations/501/cancel" },
+    { method: "GET", path: "/instances/0/wake" },
+    { method: "POST", path: "/instances/41/wake/../../nodes" },
+    { method: "POST", path: "/conn/instances/41/destroy" },
+  ] as const)("refuses $method $path", (request) => {
+    expect(resolveRootUrl(request)).toBeNull();
+  });
+
+  it("refuses a query on an allowed call", () => {
+    expect(
+      resolveRootUrl({ method: "GET", path: "/operations/501", query: { include: "steps" } }),
+    ).toBeNull();
   });
 });

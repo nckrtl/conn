@@ -285,6 +285,7 @@ import {
   useOrbitPaletteProjects,
 } from "../orbit/orbitPaletteProjects";
 import { openOrbitDraft, openOrbitPlusCreate } from "../orbit/openOrbitDraft";
+import { orbitWakeSupported, useOrbitInstanceSleep } from "../orbit/orbitInstanceSleep";
 import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
 import { registerOrbitInstanceStepOpener } from "../orbit/orbitInstanceStep";
 import {
@@ -603,6 +604,7 @@ function OpenCommandPaletteDialog(props: {
           ? orbitStepSnapshot
           : null;
   const pairedEnvironmentIds = useOrbitPairedEnvironmentIds();
+  const orbitCanWake = useOrbitInstanceSleep((state) => orbitWakeSupported(state.unsupportedAt));
   const orbitInstanceListState = orbitInstanceListStatus(orbitProjectsState);
   const orbitInstanceRows =
     orbitStepProject !== null && orbitProjectsState.status === "loaded"
@@ -611,6 +613,7 @@ function OpenCommandPaletteDialog(props: {
           environments: orbitProjectsState.environments,
           threads,
           pairedEnvironmentIds,
+          canWake: orbitCanWake,
         })
       : [];
   const orbitInstanceMatchCount =

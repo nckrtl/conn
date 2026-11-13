@@ -32,6 +32,7 @@ import { useRef, useState } from "react";
 import { cn } from "../lib/utils";
 import { openOrbitInstanceById } from "../orbit/openOrbitInstance";
 import { loadOrbitInstanceList } from "../orbit/orbitInstanceList";
+import { orbitWakeSupported, useOrbitInstanceSleep } from "../orbit/orbitInstanceSleep";
 import {
   runOrbitInstanceRemoval,
   useOrbitInstanceListWithRemovals,
@@ -104,7 +105,8 @@ function domainSuffix(row: OrbitInstanceWithThreads): string | null {
 
 function NewThreadButton({ row }: { readonly row: OrbitInstanceWithThreads }) {
   const router = useRouter();
-  const { blockedReason } = orbitInstanceAvailability(row);
+  const canWake = useOrbitInstanceSleep((state) => orbitWakeSupported(state.unsupportedAt));
+  const { blockedReason } = orbitInstanceAvailability(row, canWake);
   const [opening, setOpening] = useState(false);
   const open = async () => {
     setOpening(true);

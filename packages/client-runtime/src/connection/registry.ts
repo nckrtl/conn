@@ -158,6 +158,11 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * Conn: holds an enabled environment off without changing the user's saved on/off choice,
+     * for an Orbit Instance that is asleep and not in use. Not persisted; a release connects it.
+     */
+    readonly setParked: (environmentId: EnvironmentId, parked: boolean) => Effect.Effect<void>;
     readonly setEnabled: (
       environmentId: EnvironmentId,
       enabled: boolean,
@@ -284,6 +289,7 @@ export const make = Effect.gen(function* () {
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
+  const parked = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
 
   const withLeaseLock = <A, E, R>(
     environmentId: EnvironmentId,
@@ -366,7 +372,10 @@ export const make = Effect.gen(function* () {
           const supervisor = yield* EnvironmentSupervisor.make(entry, {
             // Seed the intent to avoid publishing a false switched-off state
             // before an enabled, compatible environment starts connecting.
-            initiallyDesired: entry.enabled && entry.unsupportedReason === undefined,
+            initiallyDesired:
+              entry.enabled &&
+              entry.unsupportedReason === undefined &&
+              !(yield* Ref.get(parked)).has(environmentId),
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
@@ -1053,6 +1062,25 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
       Effect.withSpan("EnvironmentRegistry.retryNow"),
     );
+  const setParked = (environmentId: EnvironmentId, hold: boolean) =>
+    withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const current = yield* Ref.get(parked);
+        if (current.has(environmentId) === hold) return;
+        const next = new Set(current);
+        if (hold) next.add(environmentId);
+        else next.delete(environmentId);
+        yield* Ref.set(parked, next);
+        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+        if (lease === undefined) return;
+        if (hold) {
+          yield* lease.supervisor.disconnect;
+        } else if (lease.entry.enabled && lease.entry.unsupportedReason === undefined) {
+          yield* lease.supervisor.connect;
+        }
+      }),
+    ).pipe(Effect.withSpan("EnvironmentRegistry.setParked"));
   const setEnabled = Effect.fn("EnvironmentRegistry.setEnabled")(function* (
     environmentId: EnvironmentId,
     enabled: boolean,
@@ -1092,8 +1120,9 @@ export const make = Effect.gen(function* () {
           nextEntries.set(environmentId, next);
           return nextEntries;
         });
+        const held = (yield* Ref.get(parked)).has(environmentId);
         if (lease !== undefined) {
-          yield* enabled ? lease.supervisor.connect : lease.supervisor.disconnect;
+          yield* enabled && !held ? lease.supervisor.connect : lease.supervisor.disconnect;
         } else if (enabled) {
           yield* createServiceScope(next);
         }
@@ -1174,7 +1203,8 @@ export const make = Effect.gen(function* () {
             new Map(current).set(environmentId, { ...lease, entry: next }),
           );
           if (error !== null) yield* lease.supervisor.disconnect;
-          else if (next.enabled) yield* lease.supervisor.connect;
+          else if (next.enabled && !(yield* Ref.get(parked)).has(environmentId))
+            yield* lease.supervisor.connect;
         }
         yield* SubscriptionRef.update(entries, (current) =>
           new Map(current).set(environmentId, next),
@@ -1195,6 +1225,7 @@ export const make = Effect.gen(function* () {
     reorderRoutes,
     removeRelayEnvironments,
     retryNow,
+    setParked,
     setEnabled,
     setCompatibility,
     state,

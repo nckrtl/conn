@@ -102,7 +102,11 @@ const ORBIT_INSTANCE_EXPIRED_TEXT = "Must register with Orbit again";
 const ORBIT_INSTANCE_NO_SERVER_TEXT = "No agent server";
 
 /** The row's state dot and, when a thread cannot start in it, why. */
-export function orbitInstanceAvailability(row: OrbitInstanceListRow): {
+export function orbitInstanceAvailability(
+  row: OrbitInstanceListRow,
+  /** Conn: false on an older Gateway without the wake route; an asleep row then blocks a start. */
+  canWake = true,
+): {
   readonly state: OrbitInstanceState;
   readonly label: string | null;
   readonly blockedReason: string | null;
@@ -122,7 +126,11 @@ export function orbitInstanceAvailability(row: OrbitInstanceListRow): {
     };
   }
   if (row.powerState === "stopped") {
-    return { state: "stopped", label: "Stopped", blockedReason: ORBIT_INSTANCE_STOPPED_TEXT };
+    return {
+      state: "stopped",
+      label: "Stopped",
+      blockedReason: canWake ? null : ORBIT_INSTANCE_STOPPED_TEXT,
+    };
   }
   return { state: "running", label: null, blockedReason: null };
 }

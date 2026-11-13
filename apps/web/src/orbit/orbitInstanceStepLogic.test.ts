@@ -253,20 +253,30 @@ describe("Existing Orbit instances", () => {
     );
   });
 
-  it("disables stopped and expired Instances with their reason", () => {
+  it("keeps an asleep Instance pickable with its state word, and disables an expired one", () => {
     const sleepy = rows.find((row) => row.name === "sleepy")!;
     const expired = rows.find((row) => row.name === "expired")!;
-    expect([sleepy.state, sleepy.disabledReason]).toEqual([
-      "stopped",
-      ORBIT_INSTANCE_STOPPED_REASON,
-    ]);
+    expect([sleepy.state, sleepy.disabledReason]).toEqual(["stopped", null]);
+    expect(orbitInstanceRowSubline(sleepy)).toBe("beast · Stopped · i3.nckrtl.test · no threads");
+    expect(orbitInstancePick(sleepy)).toMatchObject({ kind: "unpaired", instanceId: 3 });
     expect([expired.state, expired.disabledReason]).toEqual([
       "expired",
       ORBIT_INSTANCE_EXPIRED_REASON,
     ]);
     expect(orbitInstanceRowSubline(expired)).toBe(`beast · ${ORBIT_INSTANCE_EXPIRED_REASON}`);
-    expect(orbitInstancePick(sleepy)).toEqual({ kind: "disabled" });
     expect(orbitInstancePick(expired)).toEqual({ kind: "disabled" });
+  });
+
+  it("disables an asleep Instance on an older Gateway without the wake route", () => {
+    const [sleepy] = buildOrbitInstanceRows({
+      projectId: 3,
+      environments: [environment({ instanceId: 3, instanceName: "sleepy", powerState: "stopped" })],
+      threads: [],
+      pairedEnvironmentIds: new Set(),
+      canWake: false,
+    });
+    expect(sleepy!.disabledReason).toBe(ORBIT_INSTANCE_STOPPED_REASON);
+    expect(orbitInstancePick(sleepy!)).toEqual({ kind: "disabled" });
   });
 
   it("opens a paired Instance in its clone project and an unpaired one as an Orbit draft", () => {

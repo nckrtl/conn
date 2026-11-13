@@ -192,6 +192,17 @@ export function createEnvironmentCatalogAtoms<R, E>(
       ),
   });
 
+  /** Conn: holds an asleep Orbit Instance's connection off, or lets it connect again. */
+  const setParked = createRuntimeCommand(runtime, {
+    label: "environment-catalog:set-parked",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (input: { readonly environmentId: EnvironmentIdType; readonly parked: boolean }) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.setParked(input.environmentId, input.parked)),
+      ),
+  });
+
   return {
     catalogAtom,
     catalogValueAtom,
@@ -208,5 +219,6 @@ export function createEnvironmentCatalogAtoms<R, E>(
     removeRelayEnvironments,
     retryNow,
     setEnabled,
+    setParked,
   };
 }

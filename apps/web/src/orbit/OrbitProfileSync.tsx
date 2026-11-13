@@ -88,6 +88,7 @@ export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
       ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
       ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
+      ...(request.root === true ? { root: true as const } : {}),
     });
     if (response.error !== null) throw new Error(response.error);
     return { status: response.status, body: response.body };

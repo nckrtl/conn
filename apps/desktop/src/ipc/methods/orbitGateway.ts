@@ -26,6 +26,8 @@ const OrbitGatewayRequest = Schema.Struct({
   idempotencyKey: Schema.optional(
     Schema.String.check(Schema.isPattern(/^[A-Za-z0-9:._-]{1,128}$/)),
   ),
+  /** Conn: a path below `/api/v1`; only the calls in `ROOT_CALLS` go out this way. */
+  root: Schema.optional(Schema.Literal(true)),
 });
 
 const OrbitGatewayResponse = Schema.Struct({
@@ -65,6 +67,26 @@ export function resolveConnUrl(path: string): URL | null {
   }
   const inside = url.pathname === CONN_PREFIX || url.pathname.startsWith(`${CONN_PREFIX}/`);
   return inside && url.origin === new URL(DEFAULT_ORBIT_GATEWAY_URL).origin ? url : null;
+}
+
+/**
+ * Conn: the only calls outside `/api/v1/conn`, each exact: an Instance wake and the read of an
+ * Operation (Orbit's Conn Operation read does not serve `instance.wake`). Neither takes a query.
+ */
+const ROOT_CALLS: ReadonlyArray<{ readonly method: "GET" | "POST"; readonly pattern: RegExp }> = [
+  { method: "POST", pattern: /^\/instances\/[1-9][0-9]{0,15}\/wake$/ },
+  { method: "GET", pattern: /^\/operations\/[1-9][0-9]{0,15}$/ },
+];
+
+/** The Gateway URL of an allowed call below `/api/v1`, or null for anything else. */
+export function resolveRootUrl(
+  request: Pick<typeof OrbitGatewayRequest.Type, "method" | "path" | "query">,
+): URL | null {
+  if (Object.keys(request.query ?? {}).length > 0) return null;
+  const allowed = ROOT_CALLS.some(
+    (call) => call.method === request.method && call.pattern.test(request.path),
+  );
+  return allowed ? new URL(`${DEFAULT_ORBIT_GATEWAY_URL}/api/v1${request.path}`) : null;
 }
 
 /** Orbit's Instance name rule allows at most 63 characters; anything longer is no name to check. */
@@ -120,11 +142,11 @@ export function isAllowedConnQuery(
 async function send(
   request: typeof OrbitGatewayRequest.Type,
 ): Promise<typeof OrbitGatewayResponse.Type> {
-  const url = resolveConnUrl(request.path);
+  const url = request.root === true ? resolveRootUrl(request) : resolveConnUrl(request.path);
   if (url === null) {
     return { error: "That Gateway path is not allowed.", status: 0, body: "" };
   }
-  if (!isAllowedConnQuery(request)) {
+  if (request.root !== true && !isAllowedConnQuery(request)) {
     return { error: "That Gateway query is not allowed.", status: 0, body: "" };
   }
   for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value);

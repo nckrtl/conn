@@ -138,17 +138,21 @@ function readOrbitCreateRows(
 ): Partial<Record<OrbitCreateRowId, RowRead>> {
   const steps: readonly OrbitGatewayOperationStep[] = operation.steps ?? [];
   const running = runningRow(previous);
+  // Where an unknown step belongs: the row that runs, else the one a Retry runs again (it
+  // failed), else the copy when nothing ran yet. After a done row, nowhere: no done row reopens.
+  const resumed = SEQUENTIAL_ROWS.findLast((id) => previous?.[id]?.status === "failed");
+  const seen = SEQUENTIAL_ROWS.some((id) => previous?.[id] !== undefined);
+  const unknownRow: SequentialRowId | null = running ?? resumed ?? (seen ? null : "container");
   const reads: Partial<Record<OrbitCreateRowId, RowRead>> = {};
   if (steps.length > 0) {
     const counted: Partial<Record<OrbitCreateRowId, OrbitGatewayOperationStep[]>> = {};
     const statuses = new Map<OrbitGatewayOperationStep, OrbitCreateRowStatus>();
-    let last: OrbitCreateRowId | null = running;
+    let last: OrbitCreateRowId | null = unknownRow;
     for (const step of steps) {
       const status = stepStatus(step.status);
       if (status === null) continue;
       const known = orbitCreateRowOf(step);
-      const row: OrbitCreateRowId | null =
-        known ?? (status === "pending" ? null : (last ?? "container"));
+      const row: OrbitCreateRowId | null = known ?? (status === "pending" ? null : last);
       if (row === null) continue;
       if (status !== "pending" && isSequential(row)) last = row;
       // An unknown step that finished says nothing new; one that runs or failed holds its row.
@@ -182,18 +186,15 @@ function readOrbitCreateRows(
     }
   } else if (operation.currentStep) {
     // Orbit's Conn show may send only the current step: earlier phases have ended.
-    // An unknown step stays with the row that ran last, so no done row runs again.
-    const lastSeen = SEQUENTIAL_ROWS.findLast((id) => previous?.[id] !== undefined);
-    const row =
-      orbitCreateRowOf({ name: operation.currentStep }) ?? running ?? lastSeen ?? "container";
-    if (isSequential(row)) {
+    const row = orbitCreateRowOf({ name: operation.currentStep }) ?? unknownRow;
+    if (row !== null && isSequential(row)) {
       for (const id of SEQUENTIAL_ROWS) {
         if (ROW_PHASE[id] < ROW_PHASE[row]) {
           reads[id] = { status: "done", startedAt: null, finishedAt: null };
         }
       }
     }
-    reads[row] = { status: "running", startedAt: null, finishedAt: null };
+    if (row !== null) reads[row] = { status: "running", startedAt: null, finishedAt: null };
   }
   // The address starts with the copy and runs while the create runs, whatever its own steps say:
   // its row ends only with the completion (or with a create that has none).

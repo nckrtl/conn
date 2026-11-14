@@ -245,6 +245,32 @@ describe("observeOrbitCreateRows while the create runs", () => {
     expect(rows.t3?.status).toBe("running");
   });
 
+  it("an unknown step after a done row, with nothing running, reopens no row", () => {
+    const before: OrbitCreateRows = {
+      container: { status: "done", startedAt: 1, finishedAt: 2 },
+      address: { status: "running", startedAt: 1, finishedAt: null },
+      t3: { status: "done", startedAt: 2, finishedAt: 3 },
+    };
+    const byCurrent = observeOrbitCreateRows(
+      before,
+      op("running", [], { currentStep: "x-new" }),
+      4,
+    );
+    expect(statuses(byCurrent)).toEqual(["container:done", "address:running", "t3:done"]);
+    const bySteps = observeOrbitCreateRows(before, op("running", [step("x-new", "running")]), 4);
+    expect(statuses(bySteps)).toEqual(["container:done", "address:running", "t3:done"]);
+  });
+
+  it("a resumed create's unknown first step goes to the row that failed, not the copy", () => {
+    const before: OrbitCreateRows = {
+      container: { status: "done", startedAt: 1, finishedAt: 2 },
+      address: { status: "pending", startedAt: 1, finishedAt: null },
+      t3: { status: "failed", startedAt: 2, finishedAt: 3 },
+    };
+    const rows = observeOrbitCreateRows(before, op("running", [step("x-new", "running")]), 4);
+    expect(statuses(rows)).toEqual(["container:done", "address:running", "t3:running"]);
+  });
+
   it("never moves a row back to pending while the create runs", () => {
     const before = observeOrbitCreateRows(null, op("running", [step("clone-t3", "running")]), 1);
     expect(observeOrbitCreateRows(before, op("running", []), 2)).toEqual(before);

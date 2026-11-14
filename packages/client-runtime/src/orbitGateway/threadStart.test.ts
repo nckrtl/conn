@@ -564,22 +564,13 @@ describe("runOrbitThreadStart", () => {
       expect(calls).toEqual(["cancel 100", "cancel 101"]);
     });
 
-    it("cancels the saved completion when the create's answer does not name one", async () => {
-      const { client, calls } = fake({
-        "cancel 100": op(100, 41, "succeeded"),
-        "cancel 101": op(101, 41, "running"),
-      });
-      await cancelOrbitCreate(client, 100, 101);
-      expect(calls).toEqual(["cancel 100", "cancel 101"]);
-    });
-
     it("stops after a running or cancelled create: nothing else is cancelled", async () => {
       const running = fake({ "cancel 100": { ...op(100, 41, "running"), cancelRequested: true } });
-      await cancelOrbitCreate(running.client, 100, 101);
+      await cancelOrbitCreate(running.client, 100);
       expect(running.calls).toEqual(["cancel 100"]);
       // A second click: Orbit answers the create cancelled again.
       const again = fake({ "cancel 100": op(100, 41, "cancelled") });
-      await cancelOrbitCreate(again.client, 100, 101);
+      await cancelOrbitCreate(again.client, 100);
       expect(again.calls).toEqual(["cancel 100"]);
     });
 
@@ -598,7 +589,7 @@ describe("runOrbitThreadStart", () => {
         "cancel 100": notFound,
         "operation 100": op(100, 41, "running"),
       });
-      await expect(cancelOrbitCreate(client, 100, 101)).rejects.toBe(notFound);
+      await expect(cancelOrbitCreate(client, 100)).rejects.toBe(notFound);
       expect(calls).toEqual(["cancel 100", "operation 100"]);
       // Another Node's Operation: the read is refused too, and the cancel's refusal stands.
       const foreign = fake({ "cancel 100": notFound, "operation 100": notFound });

@@ -163,7 +163,7 @@ export async function cancelOrbitThreadStart(
   }
   if (start.createOperationId !== null && start.environmentId === null) {
     if (client === null) throw new Error(NO_GATEWAY_TEXT);
-    await cancelOrbitCreate(client, start.createOperationId, start.completionOperationId ?? null);
+    await cancelOrbitCreate(client, start.createOperationId);
   } else if (completionStillRuns(start)) {
     // The create succeeded but the thread has not opened: its completion is what still runs.
     if (client === null) throw new Error(NO_GATEWAY_TEXT);
@@ -175,7 +175,10 @@ export async function cancelOrbitThreadStart(
 
 const NO_GATEWAY_TEXT = "Conn cannot reach the Orbit Gateway from this window.";
 
-/** A Cancel before the thread opened, after the create succeeded, while its completion runs. */
+/**
+ * A Cancel before the thread opened, after the create succeeded. The saved status stays "queued"
+ * until the thread opens; a completion that ended meanwhile is read back by the cancel.
+ */
 function completionStillRuns(start: OrbitThreadStart): boolean {
   return (
     start.environmentId !== null &&

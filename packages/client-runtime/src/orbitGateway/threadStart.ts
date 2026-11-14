@@ -570,19 +570,18 @@ export async function cancelOrbitCompletion(
 
 /**
  * Cancels a start's create (Orbit release 2063). A create that already succeeded has admitted its
- * completion: that one is cancelled too, named by the create's `result.completion_operation_id`
- * or else `knownCompletionId`. A create that ended otherwise needs nothing more; a refusal of a
- * create that still runs (such as an older Gateway's 404) throws.
+ * completion (`result.completion_operation_id`): that one is cancelled too. A create that ended
+ * otherwise needs nothing more; a refusal of a create that still runs (such as an older
+ * Gateway's 404) throws.
  */
 export async function cancelOrbitCreate(
   client: OrbitCancelClient,
   createOperationId: number,
-  knownCompletionId: number | null = null,
 ): Promise<void> {
   const create = await cancelOrRead(client, createOperationId);
-  if (create.status !== "succeeded") return;
-  const completionId = create.completionOperationId ?? knownCompletionId;
-  if (typeof completionId === "number") await cancelOrbitCompletion(client, completionId);
+  if (create.status === "succeeded" && typeof create.completionOperationId === "number") {
+    await cancelOrbitCompletion(client, create.completionOperationId);
+  }
 }
 
 /** Conn: the start's text for an asleep Instance when Conn cannot wake it (no port, older Gateway). */
@@ -734,7 +733,7 @@ export async function runOrbitThreadStart(
   const cancelIfRequested = async (operationId: number) => {
     if (!ports.cancelRequested?.()) return;
     try {
-      await cancelOrbitCreate(ports.client, operationId, current.completionOperationId ?? null);
+      await cancelOrbitCreate(ports.client, operationId);
     } catch (error) {
       throw stepFailed(
         `Orbit could not cancel the create: ${error instanceof Error ? error.message : String(error)}`,

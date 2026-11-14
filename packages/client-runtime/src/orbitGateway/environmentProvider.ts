@@ -45,16 +45,32 @@ export interface OrbitEnvironmentState {
    */
   readonly renewalFailed?: Readonly<Record<string, RenewalFailure>>;
   /**
-   * Conn: servers a Gateway list showed with an Orbit Instance (newest last, at most
+   * Conn: servers a Gateway list showed with an Orbit Instance, with its id (newest last, at most
    * `MAX_REMEMBERED_INSTANCE_SERVERS`). A gone server's record no longer says it was an Instance's.
    */
-  readonly instanceServers?: readonly string[];
-  /** Conn: saved Instance servers the last successful, non-empty Gateway list left out. */
-  readonly missingFromGateway?: readonly string[];
+  readonly instanceServers?: Readonly<Record<string, number>>;
+  /**
+   * Conn: saved Instance servers a successful, non-empty Gateway list left out, with when a list
+   * first did.
+   */
+  readonly missingFromGateway?: Readonly<Record<string, number>>;
 }
 
 /** Conn: how many Instance servers a device remembers (see `instanceServers`). */
 const MAX_REMEMBERED_INSTANCE_SERVERS = 500;
+
+/**
+ * Conn: how long an Instance's server must stay out of the Gateway's lists before this device
+ * removes it. A profile edit runs a second sync within seconds, so two lists alone are no proof.
+ */
+export const GONE_CONFIRM_MS = 2 * 60 * 1000;
+
+/** Conn: a saved server whose Orbit Instance is gone, to remove from this device. */
+export interface GoneInstanceServer {
+  readonly environmentId: string;
+  /** Null for a server known only from older records. */
+  readonly instanceId: number | null;
+}
 
 /**
  * Conn: why a renewal failed, in the words the user reads. `session_ended`: Orbit's own session on
@@ -272,11 +288,11 @@ export interface EnvironmentProviderPlan {
    */
   readonly renew: readonly string[];
   /**
-   * Conn: saved servers of Orbit Instances that two successful, non-empty Gateway lists in a row
-   * left out: the Instance is gone. Remove each from this device as the Orbit panel does when the
+   * Conn: saved servers of Orbit Instances that successful, non-empty Gateway lists left out for
+   * `GONE_CONFIRM_MS`, two lists at least: the Instance is gone. Remove each from this device as the Orbit panel does when the
    * user removes an Instance, and forget it with `forgetOrbitEnvironment`.
    */
-  readonly remove: readonly string[];
+  readonly remove: readonly GoneInstanceServer[];
   readonly state: OrbitEnvironmentState;
 }
 
@@ -328,7 +344,13 @@ export function planEnvironmentProvider(input: {
       pair: [],
       renew: [],
       remove: [],
-      state: { ...state, disabledByOrbit: [], pairedByOrbit: [...pairedByOrbit] },
+      // Conn: a server Orbit mode saw missing is counted again from the next switch back.
+      state: {
+        ...state,
+        disabledByOrbit: [],
+        pairedByOrbit: [...pairedByOrbit],
+        missingFromGateway: {},
+      },
     };
   }
 
@@ -337,18 +359,20 @@ export function planEnvironmentProvider(input: {
   const orbitIds = new Set(input.orbit.map((environment) => environment.environmentId));
   const savedIds = new Set(saved.map((environment) => environment.environmentId));
   // Conn: a server is an Instance's when a list showed it with one. An empty list is never taken
-  // as the truth (a Gateway can briefly list nothing), so it removes nothing and changes no count.
+  // as the truth (a Gateway can briefly list nothing), so it removes nothing and changes no mark.
   const listed = input.orbit.length > 0;
   const instanceServers = rememberInstanceServers(
-    state.instanceServers ?? [],
+    state.instanceServers ?? {},
     input.orbit.flatMap((environment) =>
-      environment.instanceId === null ? [] : [environment.environmentId],
+      environment.instanceId === null ? [] : [[environment.environmentId, environment.instanceId]],
     ),
   );
-  const isInstanceServer = new Set([...instanceServers, ...(input.knownInstanceServers ?? [])]);
-  const wasMissing = new Set(state.missingFromGateway ?? []);
-  const missingFromGateway: string[] = [];
-  const remove: string[] = [];
+  const known = new Set(input.knownInstanceServers ?? []);
+  const wasMissing = state.missingFromGateway ?? {};
+  const missingFromGateway: Record<string, number> = {};
+  const remove: GoneInstanceServer[] = [];
+  const now = input.now ?? 0;
+  const held = new Set(input.heldInstanceIds ?? []);
   for (const environment of saved) {
     const id = environment.environmentId;
     if (orbitIds.has(id)) {
@@ -356,17 +380,21 @@ export function planEnvironmentProvider(input: {
       if (!environment.enabled && pairedByOrbit.has(id)) enable.push(id);
       continue;
     }
-    // Conn: an Instance's server two lists in a row left out is gone: its Instance was destroyed,
-    // and Orbit may give its address to a new Instance. One list is not enough, because removal
-    // costs a pairing that only an explicit Connect makes again.
-    if (isInstanceServer.has(id)) {
+    // Conn: an Instance's server that lists leave out for `GONE_CONFIRM_MS` is gone: its Instance
+    // was destroyed, and Orbit may give its address to a new Instance. Removal costs a pairing
+    // that only an explicit Connect makes again, so one list, or two within seconds, is not enough.
+    const instanceId = instanceServers[id] ?? null;
+    const isInstanceServer = instanceId !== null || known.has(id);
+    // A clone a thread start is pairing with belongs to that start.
+    if (isInstanceServer && !(instanceId !== null && held.has(instanceId))) {
+      const since = wasMissing[id];
       if (!listed) {
-        if (wasMissing.has(id)) missingFromGateway.push(id);
-      } else if (wasMissing.has(id)) {
-        remove.push(id);
+        if (since !== undefined) missingFromGateway[id] = since;
+      } else if (since !== undefined && now - since >= GONE_CONFIRM_MS) {
+        remove.push({ environmentId: id, instanceId });
         continue;
       } else {
-        missingFromGateway.push(id);
+        missingFromGateway[id] = since ?? now;
       }
     }
     if (environment.enabled) {
@@ -375,15 +403,13 @@ export function planEnvironmentProvider(input: {
       if (!pairedByOrbit.has(id)) disabledByOrbit.add(id);
     }
   }
-  const removed = new Set(remove);
+  const removed = new Set(remove.map((server) => server.environmentId));
   const lacksAccess = new Set(input.lacksAccess ?? []);
-  const held = new Set(input.heldInstanceIds ?? []);
   const requested = new Set(input.requestedEnvironmentIds ?? []);
   const renewals = new Map(
     (input.renew ?? []).map((renewal) => [renewal.environmentId, renewal.reason]),
   );
   const renew: string[] = [];
-  const now = input.now ?? 0;
   const pair = input.orbit
     .filter((environment) => {
       if (environment.status !== "registered") return false;
@@ -436,11 +462,16 @@ export function planEnvironmentProvider(input: {
   };
 }
 
-/** Conn: adds ids at the end (newest last) and keeps the newest `MAX_REMEMBERED_INSTANCE_SERVERS`. */
-function rememberInstanceServers(current: readonly string[], seen: readonly string[]): string[] {
-  const added = new Set(seen);
-  const ids = [...new Set([...current.filter((id) => !added.has(id)), ...seen])];
-  return ids.slice(Math.max(0, ids.length - MAX_REMEMBERED_INSTANCE_SERVERS));
+/** Conn: adds servers at the end (newest last) and keeps the newest `MAX_REMEMBERED_INSTANCE_SERVERS`. */
+function rememberInstanceServers(
+  current: Readonly<Record<string, number>>,
+  seen: ReadonlyArray<readonly [string, number]>,
+): Record<string, number> {
+  const added = new Set(seen.map(([id]) => id));
+  const entries = [...Object.entries(current).filter(([id]) => !added.has(id)), ...seen];
+  return Object.fromEntries(
+    entries.slice(Math.max(0, entries.length - MAX_REMEMBERED_INSTANCE_SERVERS)),
+  );
 }
 
 /** Conn: records an attempt to renew a saved server's session, successful or not. */
@@ -562,7 +593,7 @@ export function forgetOrbitEnvironment(
     ...(state.instanceServers === undefined ? {} : { instanceServers: state.instanceServers }),
     ...(state.missingFromGateway === undefined
       ? {}
-      : { missingFromGateway: state.missingFromGateway.filter((id) => id !== environmentId) }),
+      : { missingFromGateway: without(state.missingFromGateway) ?? {} }),
     ...(accessPairedAt === undefined ? {} : { accessPairedAt }),
     ...(pairAttemptedAt === undefined ? {} : { pairAttemptedAt }),
     ...(pairRefusedAt === undefined ? {} : { pairRefusedAt }),
@@ -625,7 +656,7 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     renewedAt: times(record.renewedAt),
     revokedAt: times(record.revokedAt),
     renewalFailed: failures(record.renewalFailed),
-    instanceServers: ids(record.instanceServers),
-    missingFromGateway: ids(record.missingFromGateway),
+    instanceServers: times(record.instanceServers),
+    missingFromGateway: times(record.missingFromGateway),
   };
 }

@@ -316,13 +316,13 @@ async function reconcileEnvironments(
     plan.state.pairedByOrbit.reduce(recordPaired, {
       ...current,
       disabledByOrbit: plan.state.disabledByOrbit,
-      instanceServers: plan.state.instanceServers ?? [],
-      missingFromGateway: plan.state.missingFromGateway ?? [],
+      instanceServers: plan.state.instanceServers ?? {},
+      missingFromGateway: plan.state.missingFromGateway ?? {},
     }),
   );
-  // Conn: the server of an Instance two Gateway lists in a row left out is gone; Orbit may give
+  // Conn: the server of an Instance the Gateway's lists left out long enough is gone; Orbit may give
   // its address to a new Instance. Removed from this device as the desktop's Orbit panel does.
-  for (const environmentId of plan.remove) {
+  for (const { environmentId } of plan.remove) {
     await runAtomCommand(
       appAtomRegistry,
       environmentCatalog.remove,

@@ -177,8 +177,8 @@ function saveReconciledState(next: OrbitEnvironmentState): void {
     state: next.pairedByOrbit.reduce(recordPaired, {
       ...current,
       disabledByOrbit: next.disabledByOrbit,
-      instanceServers: next.instanceServers ?? [],
-      missingFromGateway: next.missingFromGateway ?? [],
+      instanceServers: next.instanceServers ?? {},
+      missingFromGateway: next.missingFromGateway ?? {},
     }),
   }));
 }
@@ -194,7 +194,7 @@ async function removeGoneInstanceServer(environmentId: string, instanceId: numbe
     reportFailure: false,
   });
   // Forgotten even when the removal failed: a later sync, which still knows it as an Instance's
-  // server, removes it again after two more lists without it.
+  // server, removes it again once lists leave it out long enough.
   forgetOrbitInstanceEnvironment(environmentId);
 }
 
@@ -386,8 +386,6 @@ export async function reconcileEnvironmentProvider(
 ): Promise<readonly OrbitGatewayEnvironment[] | null> {
   const { provider, state } = useEnvironmentProvider.getState();
   const orbit = provider === "orbit" ? await client.environments() : null;
-  // Conn: the Instance facts of the last list, before this one replaces them.
-  const previousInstances = useEnvironmentProvider.getState().orbitInstances;
   saveOrbitInstances(orbit === null ? {} : orbitInstancesByEnvironment(orbit));
   // Conn: asleep Instances nobody uses stay unconnected; one in use is woken.
   await observeOrbitInstancePower(client, orbit);
@@ -422,7 +420,7 @@ export async function reconcileEnvironmentProvider(
     lacksAccess,
     heldInstanceIds: heldOrbitInstanceIds(),
     renew: readSessionRenewals({ environmentIds: bearerIds, readConnection, readSession, now }),
-    knownInstanceServers: [...Object.keys(previousInstances), ...rememberedCloneEnvironmentIds()],
+    knownInstanceServers: rememberedCloneEnvironmentIds(),
     now,
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
@@ -438,11 +436,8 @@ export async function reconcileEnvironmentProvider(
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
 
   saveReconciledState(plan.state);
-  for (const environmentId of plan.remove) {
-    await removeGoneInstanceServer(
-      environmentId,
-      previousInstances[environmentId]?.instanceId ?? null,
-    );
+  for (const gone of plan.remove) {
+    await removeGoneInstanceServer(gone.environmentId, gone.instanceId);
   }
   // Conn: every renewal of this sync, one after another, without holding up the profile sync.
   const renew = new Set(plan.renew);

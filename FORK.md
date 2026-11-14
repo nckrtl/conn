@@ -226,13 +226,15 @@ the sync, with the usual back-off, until the app restarts. Pairings made before 
 nothing revokes them. `planEnvironmentProvider` takes the phone's requested ids; web and mobile
 share one pairing step (`pairOne`), and a second call for a server joins the one in flight.
 
-A saved Instance server that two successful, non-empty Gateway lists in a row leave out is
-removed from the device (`plan.remove`): its Instance is gone, and Orbit may give its address to a
+A saved Instance server that two successful, non-empty Gateway lists in a row leave out, at
+least `GONE_CONFIRM_MS` (2 min) apart, is removed from the device (`plan.remove`): its Instance is gone, and Orbit may give its address to a
 new Instance. Web removes it as the Orbit panel removes an Instance (catalog, pairing records,
 Orbit facts, thread starts); mobile removes the catalog entry and the pairing records. A server
 counts as an Instance's when a list showed it with an `instance_id` (`instanceServers`, also the
-web's remembered clone ids). Two lists, not one, because only an explicit Connect pairs a removed
-clone again. A failed read or an empty list removes nothing; host servers only switch off.
+web's remembered clone ids). Two lists and a minimum time, because only an explicit Connect pairs a
+removed clone again, and a profile edit runs a second sync within seconds. A failed read or an
+empty list removes nothing; host servers only switch off; a clone a thread start holds stays.
+Losing access to a Node, or another Gateway, removes its clones the same way.
 
 An old worktree-based Instance's checkout sits beside the Project's `default` checkout
 (`<apps>/<project>/t3code-<8 hex>`, older ones `t3-<8 hex>`). `isOrbitCheckout`
@@ -994,11 +996,11 @@ an agent's transcript. The server asks the Gateway for a pairing as its own Node
 Operation (one pairing per call), takes the code from the link and calls `PeerLinks.link` with
 the Gateway's URL for that server. It prints only the outcome, or `<code>: <message>`.
 
-Stale records never take a link (`packages/client-runtime/src/linkRequest.ts`): a switched-off
-saved server offers no addresses, and a saved server whose address now answers as another
-environment (the card's live `environmentId`) is not the target; the card links that address as
-the environment answering there. `PeerLinks.answeringAs` names both: `<url> now answers as
-<label> (<id>), not <expected>.` There is
+Stale records never take a link: a switched-off saved server offers no addresses
+(`linkableMachines` in `packages/client-runtime/src/linkRequest.ts`), so a card for an address
+that Orbit gave to a new Instance links whatever answers there now. When a saved server still
+claims the address, `PeerLinks.answeringAs` names both: `<url> now answers as <label> (<id>),
+not <expected>.` There is
 no MCP tool for it: agents that orchestrate Orbit clones run `t3` in a shell, and a tool would
 add to every agent's tool list. A peer with Linked environments off refuses with
 `peer_disabled` (`PEER_LINKS_OFF_DESCRIPTION`), shown as `target_links_off`. The server reuses

@@ -490,40 +490,6 @@ describe("linkRequestTarget", () => {
     });
   });
 
-  it("never links a saved machine whose address now answers as another environment", () => {
-    // Conn: the stale record of a destroyed Orbit Instance whose port went to a new one.
-    const stale = {
-      ...box,
-      environmentId: EnvironmentId.make("environment-instance-1846"),
-      label: "instance-1846",
-      urls: ["http://10.253.0.14:3773", "http://10.44.0.7:3810"],
-    };
-    const card = {
-      url: "http://10.44.0.7:3810",
-      environmentId: EnvironmentId.make("environment-instance-2764"),
-      label: "instance-2764",
-    };
-    expect(linkRequestTarget(card, [stale], null)).toEqual({
-      kind: "machine",
-      environmentId: card.environmentId,
-      label: "http://10.44.0.7:3810",
-      urls: ["http://10.44.0.7:3810"],
-      linked: false,
-    });
-    // The live environment saved too: that one, at its own addresses.
-    const live = {
-      ...box,
-      environmentId: card.environmentId,
-      label: "instance-2764",
-      urls: ["http://10.44.0.7:3810"],
-    };
-    expect(linkRequestTarget(card, [stale, live], null)).toMatchObject({
-      kind: "machine",
-      environmentId: card.environmentId,
-      label: "instance-2764",
-    });
-  });
-
   it("links the machine the agent named or the user picked, at the addresses this app has", () => {
     expect(linkRequestTarget({ environmentId: box.environmentId }, [box], null)).toMatchObject({
       kind: "machine",

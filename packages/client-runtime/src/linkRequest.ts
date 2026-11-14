@@ -250,31 +250,11 @@ export function linkRequestTarget(
   choice: string | null,
 ): LinkRequestTarget {
   const asked = item.url === undefined ? undefined : originOf(item.url);
-  const atAddress =
+  // Two machines on separate networks can share a private address.
+  const [reached, ...others] =
     asked === undefined
       ? []
       : machines.filter((machine) => machine.urls.some((url) => originOf(url) === asked));
-  // Conn: beside a `url`, `environmentId` is what the address answers as now. A saved machine
-  // that answers as another is a stale record (its address went to a new server), never the target.
-  const [reached, ...others] =
-    item.environmentId === undefined
-      ? atAddress
-      : atAddress.filter((machine) => machine.environmentId === item.environmentId);
-  if (
-    item.url !== undefined &&
-    item.environmentId !== undefined &&
-    reached === undefined &&
-    atAddress.length > 0
-  ) {
-    // Linked at the asked address only, as the environment that answers there now.
-    return {
-      kind: "machine",
-      environmentId: item.environmentId,
-      label: linkRequestTargetName(item),
-      urls: [item.url],
-      linked: false,
-    };
-  }
   const chosen =
     item.url === undefined
       ? (item.environmentId ?? choice)

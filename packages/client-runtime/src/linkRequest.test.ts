@@ -225,6 +225,33 @@ describe("linkableMachines", () => {
     ]);
   });
 
+  it("offers no address of a switched-off server, which another server may answer at now", () => {
+    const here = presentation("environment-here", "Here", { saved: ["http://localhost:3773"] });
+    const stale = presentation("environment-instance-1846", "instance-1846", {
+      saved: ["http://10.44.0.7:3810"],
+      reported: ["http://10.253.0.14:3773"],
+      connected: false,
+    });
+    const switchedOff = { ...stale, entry: { ...stale.entry, enabled: false } };
+    const [machine] = linkableMachines({
+      environments: [here, switchedOff],
+      threadEnvironmentId: here.environmentId,
+      links: [],
+      connect: new Map(),
+    });
+    expect(machine).toMatchObject({ environmentId: stale.environmentId, urls: [] });
+    expect(
+      linkRequestTarget(
+        {
+          url: "http://10.44.0.7:3810",
+          environmentId: EnvironmentId.make("environment-instance-2764"),
+        },
+        machine === undefined ? [] : [machine],
+        null,
+      ),
+    ).toEqual({ kind: "address" });
+  });
+
   it("reaches a machine saved only over T3 Connect at its Connect address", () => {
     const here = presentation("environment-here", "Here", { saved: ["http://localhost:3773"] });
     const box = presentation("environment-box", "Box");

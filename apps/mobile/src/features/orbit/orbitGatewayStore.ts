@@ -1,6 +1,7 @@
 import {
   createCredentialRefusalWatch,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  forgetOrbitEnvironment,
   forgetPairingRevoked,
   isFinalPairingError,
   isPairingRevokedError,
@@ -315,22 +316,66 @@ async function reconcileEnvironments(
     plan.state.pairedByOrbit.reduce(recordPaired, {
       ...current,
       disabledByOrbit: plan.state.disabledByOrbit,
+      instanceServers: plan.state.instanceServers ?? {},
+      missingFromGateway: plan.state.missingFromGateway ?? {},
     }),
   );
+  // Conn: the server of an Instance the Gateway's lists left out long enough is gone; Orbit may give
+  // its address to a new Instance. Removed from this device as the desktop's Orbit panel does.
+  for (const { environmentId } of plan.remove) {
+    await runAtomCommand(
+      appAtomRegistry,
+      environmentCatalog.remove,
+      environmentId as EnvironmentId,
+      { reportFailure: false },
+    );
+    await updateEnvironmentState((current) => forgetOrbitEnvironment(current, environmentId));
+  }
   // Conn: until the saved thread starts load, the sync cannot tell which clones they hold.
   if (!orbitThreadStartStore.loaded()) return;
-  // Conn: every renewal in this refresh, one after another, so all servers work again after one
-  // app open.
-  const renew = new Set(plan.renew);
-  for (const entry of orbit ?? []) {
+  // Conn: a pairing follows a Gateway Operation for up to a minute. It runs after the refresh, so
+  // the lists and a later refresh never wait for it; a refresh during a run starts no second run.
+  // A refresh during a run plans again once the run ends, so a refusal seen meanwhile still renews.
+  if (pairingRun) {
+    pairingAgain = true;
+    return;
+  }
+  const provider = state.provider;
+  pairingRun = runPairings(orbit ?? [], plan.renew, plan.pair, savedIds).finally(() => {
+    pairingRun = null;
+    // A switch of provider during the run re-applies the new one; a refresh during it plans again.
+    if (state.provider !== provider || (pairingAgain && state.provider === "orbit")) {
+      pairingAgain = false;
+      void refreshOrbitGateway();
+    }
+    pairingAgain = false;
+  });
+}
+
+let pairingRun: Promise<void> | null = null;
+let pairingAgain = false;
+
+/** Conn: the pairings one refresh planned, run after it. */
+async function runPairings(
+  orbit: readonly OrbitGatewayEnvironment[],
+  renewIds: readonly string[],
+  pairIds: readonly string[],
+  savedIds: ReadonlySet<string>,
+): Promise<void> {
+  // Every renewal of this refresh, one after another, so all servers work again after one app
+  // open without a burst of Gateway Operations.
+  const renew = new Set(renewIds);
+  for (const entry of orbit) {
+    // A switch to Default mode during the run stops it before the next pairing.
+    if (state.provider !== "orbit") return;
     if (renew.has(entry.environmentId) && !pairings.has(entry.environmentId)) {
       await pairOne(entry, "renew");
     }
   }
-  // One other server per refresh: pairing waits for a Gateway Operation, and the refresh waits too.
-  const environmentId = plan.pair.find((id) => !renew.has(id) && !pairings.has(id));
-  const environment = orbit?.find((entry) => entry.environmentId === environmentId);
-  if (environment) {
+  // One other server per refresh.
+  const environmentId = pairIds.find((id) => !renew.has(id) && !pairings.has(id));
+  const environment = orbit.find((entry) => entry.environmentId === environmentId);
+  if (environment && state.provider === "orbit") {
     await pairOne(environment, savedIds.has(environment.environmentId) ? "access" : "new");
   }
 }
@@ -373,6 +418,8 @@ export function refreshOrbitGateway(): Promise<void> {
 /** Chooses where this device's environments come from and applies it at once. */
 export async function setEnvironmentProvider(provider: EnvironmentProvider): Promise<void> {
   if (refreshing) await refreshing;
+  // Conn: a pairing in flight saves its server; let it end before the switch reconciles.
+  if (pairingRun) await pairingRun;
   set({ provider });
   await saveProvider();
   await refreshOrbitGateway();

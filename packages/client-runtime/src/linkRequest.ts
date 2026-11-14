@@ -132,13 +132,17 @@ export function linkableMachines(input: {
         connected: environment.connection.phase === "connected",
         connectOnly: false,
         linked: linkedIds.has(environment.environmentId),
-        urls: [
-          ...new Set([
-            ...reported,
-            ...routes,
-            ...(connect === undefined ? [] : [connect.httpBaseUrl]),
-          ]),
-        ].filter((url) => !isLoopbackUrl(url)),
+        // Conn: a switched-off server (Orbit switches off one that left the Gateway's list)
+        // offers no addresses: another server may answer at them now.
+        urls: !environment.entry.enabled
+          ? []
+          : [
+              ...new Set([
+                ...reported,
+                ...routes,
+                ...(connect === undefined ? [] : [connect.httpBaseUrl]),
+              ]),
+            ].filter((url) => !isLoopbackUrl(url)),
       };
     });
   const savedIds = new Set<string>(saved.map((machine) => machine.environmentId));

@@ -462,7 +462,7 @@ const make = Effect.gen(function* () {
           if (descriptor.environmentId !== environmentId) {
             return yield* new PeerLinkError({
               reason: "unreachable",
-              message: `${origin} answered as another environment, ${descriptor.label}.`,
+              message: `${origin} now answers as ${descriptor.label} (${descriptor.environmentId}), not ${name}.`,
             });
           }
           return { origin, descriptor };

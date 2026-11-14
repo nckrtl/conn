@@ -108,6 +108,9 @@ overrides:
   micromark: 4.0.2
   mdast-util-to-hast: 13.2.1
   alchemy: "catalog:"
+  # @cloudflare/unenv-preset 2.16.2 (through alchemy) wants this exact peer; lockfile-free
+  # installs would otherwise take a newer unenv prerelease and fail strictPeerDependencies.
+  unenv: 2.0.0-rc.24
   expo-audio: 58.0.11
   expo-network: 58.0.4
   "@clerk/expo-native-components": 0.4.4

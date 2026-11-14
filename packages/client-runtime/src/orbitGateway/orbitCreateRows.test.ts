@@ -234,6 +234,17 @@ describe("observeOrbitCreateRows while the create runs", () => {
     expect(statuses(unknown)).toEqual(["container:done", "address:running", "t3:running"]);
   });
 
+  it("an unknown current_step after a stopped row never runs a done row again", () => {
+    // A Retry after an unnamed failure: the copy is done, the T3 row failed and runs again.
+    const before: OrbitCreateRows = {
+      container: { status: "done", startedAt: 1, finishedAt: 2 },
+      t3: { status: "failed", startedAt: 2, finishedAt: 3 },
+    };
+    const rows = observeOrbitCreateRows(before, op("running", [], { currentStep: "brand-new" }), 4);
+    expect(rows.container?.status).toBe("done");
+    expect(rows.t3?.status).toBe("running");
+  });
+
   it("never moves a row back to pending while the create runs", () => {
     const before = observeOrbitCreateRows(null, op("running", [step("clone-t3", "running")]), 1);
     expect(observeOrbitCreateRows(before, op("running", []), 2)).toEqual(before);
@@ -438,19 +449,22 @@ describe("observeOrbitCompletionRows: all of instance.complete is the address ro
     ]);
   });
 
-  it.each(COMPLETION_STEPS)("a failed %s (job %s) fails the address row at once", (name, job) => {
-    const rows = observeOrbitCompletionRows(
-      atCreate(),
-      completion("running", [step(name, "failed", { job })]),
-      ms(50),
-    );
-    expect(statuses(rows)).toEqual([
-      "container:done",
-      "address:failed",
-      "t3:done",
-      "register:done",
-    ]);
-  });
+  it.each(COMPLETION_STEPS)(
+    "a failed %s (job %s) keeps the address running while it runs",
+    (name, job) => {
+      const rows = observeOrbitCompletionRows(
+        atCreate(),
+        completion("running", [step(name, "failed", { job })]),
+        ms(50),
+      );
+      expect(statuses(rows)).toEqual([
+        "container:done",
+        "address:running",
+        "t3:done",
+        "register:done",
+      ]);
+    },
+  );
 
   it("stays running while a route step is done but database, Processes or checks still run (storyboard 6)", () => {
     const rows = observeOrbitCompletionRows(

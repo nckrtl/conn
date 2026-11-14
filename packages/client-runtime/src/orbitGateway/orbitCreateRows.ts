@@ -182,7 +182,10 @@ function readOrbitCreateRows(
     }
   } else if (operation.currentStep) {
     // Orbit's Conn show may send only the current step: earlier phases have ended.
-    const row = orbitCreateRowOf({ name: operation.currentStep }) ?? running ?? "container";
+    // An unknown step stays with the row that ran last, so no done row runs again.
+    const lastSeen = SEQUENTIAL_ROWS.findLast((id) => previous?.[id] !== undefined);
+    const row =
+      orbitCreateRowOf({ name: operation.currentStep }) ?? running ?? lastSeen ?? "container";
     if (isSequential(row)) {
       for (const id of SEQUENTIAL_ROWS) {
         if (ROW_PHASE[id] < ROW_PHASE[row]) {
@@ -336,6 +339,7 @@ export function stopRunningOrbitCreateRows(
       ? {
           address: {
             ...address,
+            // No terminal read on this path, so no route_publication either.
             status: orbitFailedCreateAddressStatus({
               createStatus: "failed",
               routePublication: null,
@@ -384,8 +388,8 @@ export function sameOrbitCreateRows(
 
 /**
  * The address row after a read of `instance.complete`, whose every step (known or not) is this
- * row. It runs until the completion ends: done when it succeeded, failed otherwise or once a step
- * failed. The other rows ended with the create and never reopen.
+ * row. It runs until the completion ends: done when it succeeded, failed otherwise. The other
+ * rows ended with the create and never reopen.
  */
 export function observeOrbitCompletionRows(
   previous: OrbitCreateRows | null,
@@ -397,11 +401,11 @@ export function observeOrbitCompletionRows(
   const starts = steps.map((step) => time(step.startedAt)).filter((t) => t !== null);
   const ends = steps.map((step) => time(step.finishedAt)).filter((t) => t !== null);
   const lastEnd = ends.length > 0 ? Math.max(...ends) : null;
+  // A failed step while the Operation runs fails nothing yet: Orbit may carry on.
   const status: OrbitCreateRowStatus =
     operation.status === "succeeded"
       ? "done"
-      : OPERATION_TERMINAL_STATUSES.has(operation.status) ||
-          steps.some((step) => stepStatus(step.status) === "failed")
+      : OPERATION_TERMINAL_STATUSES.has(operation.status)
         ? "failed"
         : "running";
   return {

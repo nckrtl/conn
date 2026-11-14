@@ -45,6 +45,10 @@ export interface OrbitSetupCreateRow {
  */
 function createRows(start: OrbitThreadStart): OrbitSetupCreateRow[] {
   const saved = start.createRows ?? null;
+  // With a completion the address row is its phase, whatever an older build saved.
+  const completion = orbitCompletionPhase(start);
+  const addressOfCompletion: OrbitCreateRowStatus | null =
+    completion === "running" ? "running" : completion === "failed" ? "failed" : null;
   const createFailed = start.error !== null && start.environmentId === null;
   const failedHere =
     createFailed && !ORBIT_CREATE_ROW_IDS.some((id) => saved?.[id]?.status === "failed");
@@ -57,14 +61,17 @@ function createRows(start: OrbitThreadStart): OrbitSetupCreateRow[] {
     const status: OrbitCreateRowStatus =
       id === stopped
         ? "failed"
-        : // A saved row that still runs after the create failed (a failure Orbit never named).
-          id === "address" && createFailed && row?.status === "running"
-          ? orbitFailedCreateAddressStatus({
-              createStatus: "failed",
-              routePublication: null,
-              completionStatus: start.completionStatus ?? null,
-            })
-          : (row?.status ?? "pending");
+        : id === "address" && addressOfCompletion !== null
+          ? addressOfCompletion
+          : // A saved row that still runs after the create failed: a failure with no terminal
+            // read, so no route_publication.
+            id === "address" && createFailed && row?.status === "running"
+            ? orbitFailedCreateAddressStatus({
+                createStatus: "failed",
+                routePublication: null,
+                completionStatus: start.completionStatus ?? null,
+              })
+            : (row?.status ?? "pending");
     return {
       id,
       label: ORBIT_CREATE_ROW_LABELS[id],
@@ -118,12 +125,15 @@ export function orbitSetupStages(input: {
   const stages: OrbitSetupStage[] = [];
   if (start.orbitInstanceKind !== "existing") {
     const completion = orbitCompletionPhase(start);
+    // A succeeded create read whose completion the runner has not saved yet.
+    const completionAhead =
+      completion === "none" && typeof create?.completionOperationId === "number";
     // The header spins until the address is live, and shows the card's failure wherever it is.
     const status: OrbitSetupStageStatus =
       start.error !== null || completion === "failed"
         ? "failed"
         : start.environmentId !== null || create?.status === "succeeded"
-          ? completion === "running"
+          ? completion === "running" || completionAhead
             ? "running"
             : "done"
           : start.createStartedAt != null || start.createOperationId !== null || create !== null

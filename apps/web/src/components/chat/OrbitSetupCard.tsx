@@ -123,7 +123,7 @@ function OrbitCreateRow({ row }: { row: OrbitSetupViewRow }) {
 function OrbitDetailsGrid({ children }: { children: ReactNode }) {
   return (
     <dl
-      className="mt-1 mb-1.5 ml-3.5 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground"
+      className="mt-1 mb-1.5 ml-0.5 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground"
       data-orbit-setup-details
     >
       {children}

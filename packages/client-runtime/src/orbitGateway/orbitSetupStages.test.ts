@@ -269,6 +269,51 @@ describe("orbitSetupStages", () => {
     ]);
   });
 
+  it("an older build's saved rows: the address row follows the completion's phase", () => {
+    // Builds before this change saved a failed completion on the workspace row.
+    const older = {
+      ...creating,
+      ...atCreateSuccess,
+      connected: true,
+      sentAt: 60,
+      completionStatus: "failed",
+      createRows: {
+        ...atCreateSuccess.createRows,
+        address: { status: "done", startedAt: 12, finishedAt: 30 },
+      },
+    } satisfies OrbitThreadStart;
+    expect(rows(older)?.[1]).toBe("Publish the address:failed");
+    expect(rows({ ...older, completionStatus: "running" })?.[1]).toBe(
+      "Publish the address:running",
+    );
+    // A Retry Orbit has not answered yet.
+    const retry: OrbitThreadStart = {
+      ...older,
+      completionStatus: "queued",
+      completionOperationId: null,
+      completionKey: "k",
+    };
+    expect(rows(retry)?.[1]).toBe("Publish the address:running");
+  });
+
+  it("keeps the header spinning between the create's success and the saved completion", () => {
+    const succeeded = createOp("succeeded", { completionOperationId: 106 });
+    const start = {
+      ...creating,
+      createRows: {
+        container: { status: "done", startedAt: 11, finishedAt: 20 },
+        address: { status: "running", startedAt: 12, finishedAt: null },
+        t3: { status: "done", startedAt: 20, finishedAt: 30 },
+        register: { status: "done", startedAt: 30, finishedAt: 40 },
+      },
+    } satisfies OrbitThreadStart;
+    const [stage] = orbitSetupStages({ start, create: succeeded });
+    expect(stage!.status).toBe("running");
+    expect(stage!.rows?.map((row) => row.status)).toEqual(["done", "running", "done", "done"]);
+    // An older Gateway (no completion): done and folded.
+    expect(orbitSetupStages({ start, create: createOp("succeeded") })[0]!.rows).toBe(null);
+  });
+
   it("folds the rows once the address is live, or when there is no completion (storyboard 7)", () => {
     const live: OrbitThreadStart = {
       ...creating,

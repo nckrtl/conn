@@ -41,7 +41,8 @@ function moments(operation: LiveOperation): number[] {
 function readAt(operation: LiveOperation, at: number, last: boolean): OrbitGatewayOperation {
   const steps = operation.steps.map((step) => {
     const start = ms(step.started_at);
-    const end = ms(step.finished_at);
+    // Orbit sends no end time for some child steps: they end when they start.
+    const end = ms(step.finished_at) ?? start;
     const status =
       step.status === "skipped" || last
         ? step.status
@@ -55,7 +56,7 @@ function readAt(operation: LiveOperation, at: number, last: boolean): OrbitGatew
       job: step.job,
       status,
       startedAt: start !== null && at >= start ? step.started_at : null,
-      finishedAt: end !== null && at >= end ? step.finished_at : null,
+      finishedAt: end !== null && at >= end ? (step.finished_at ?? step.started_at) : null,
     };
   });
   return {
@@ -275,6 +276,8 @@ function failedAfterPublished(routePublication: string | null): LiveOperation {
   const create = live.published.create;
   const t3End = create.steps.find((step) => step.name === "clone-t3")!.finished_at;
   const later = new Set(["clone-sessions", "clone-session-copy", "clone-register"]);
+  // After the failure Orbit runs its closing steps.
+  const closing = new Set(["finish", "clone-private-cleanup", "cleanup", "stop-container"]);
   return {
     ...create,
     status: "failed",
@@ -288,7 +291,9 @@ function failedAfterPublished(routePublication: string | null): LiveOperation {
           ? { ...step, status: "skipped", started_at: null, finished_at: null }
           : step.name === "accepted"
             ? { ...step, status: "failed", started_at: t3End, finished_at: t3End }
-            : step,
+            : closing.has(step.name)
+              ? { ...step, status: "succeeded", started_at: t3End, finished_at: t3End }
+              : step,
     ),
   };
 }

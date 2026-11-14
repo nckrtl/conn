@@ -212,6 +212,75 @@ describe("observeOrbitCreateRows while the create runs", () => {
     expect(statuses(ended)).toEqual(["address:pending", "t3:failed"]);
   });
 
+  it("an older Gateway that names an address step keeps the address X, also with a failed accepted", () => {
+    const rows = observeOrbitCreateRows(
+      null,
+      op(
+        "failed",
+        [
+          step("clone-container", "succeeded"),
+          step("clone-route", "failed"),
+          step("clone-t3", "succeeded"),
+          step("finish", "succeeded"),
+          step("accepted", "failed"),
+        ],
+        { failedStep: "clone-route" },
+      ),
+      2,
+    );
+    expect(statuses(rows)).toEqual(["container:done", "address:failed", "t3:done"]);
+  });
+
+  it("an unnamed failure goes to the row that ran, not to a failed publication step", () => {
+    const before = observeOrbitCreateRows(
+      null,
+      op("running", [
+        step("clone-container", "succeeded"),
+        step("clone-route", "failed"),
+        step("clone-t3", "running"),
+      ]),
+      1,
+    );
+    expect(statuses(before)).toEqual(["container:done", "address:running", "t3:running"]);
+    for (const [routePublication, address] of [
+      ["deferred", "pending"],
+      ["published", "done"],
+    ] as const) {
+      const rows = observeOrbitCreateRows(
+        before,
+        op(
+          "interrupted",
+          [
+            step("clone-container", "succeeded"),
+            step("clone-route", "failed"),
+            step("clone-t3", "running"),
+          ],
+          {
+            result: { route_publication: routePublication },
+          },
+        ),
+        2,
+      );
+      expect(statuses(rows)).toEqual(["container:done", `address:${address}`, "t3:failed"]);
+    }
+  });
+
+  it("a named step Conn does not know keeps the closing steps off the register row", () => {
+    const before = observeOrbitCreateRows(null, op("running", [step("clone-t3", "running")]), 1);
+    const rows = observeOrbitCreateRows(
+      before,
+      op(
+        "failed",
+        [step("clone-t3", "running"), step("finish", "succeeded"), step("accepted", "failed")],
+        {
+          failedStep: "clone-foo",
+        },
+      ),
+      2,
+    );
+    expect(statuses(rows)).toEqual(["address:pending", "t3:failed"]);
+  });
+
   it("a failed closing step alone fails the register row", () => {
     const rows = observeOrbitCreateRows(
       null,

@@ -73,6 +73,8 @@ const CLOSING_STEPS: ReadonlySet<string> = new Set([
   "clone-private-cleanup",
   "cleanup",
   "accepted",
+  "stop-container",
+  "withdraw-route",
 ]);
 
 /** Step name prefixes of the address row: numbered steps and Orbit's step descriptions. */
@@ -157,15 +159,14 @@ function readOrbitCreateRows(
   const unknownRow: SequentialRowId | null = running ?? resumed ?? (seen ? null : "container");
   const reads: Partial<Record<OrbitCreateRowId, RowRead>> = {};
   const terminal = OPERATION_TERMINAL_STATUSES.has(operation.status);
-  /** A failed step of the copy, T3 or register phases, not a closing step. */
-  const failedEarlier = (step: { readonly name: string }) => {
-    const row = orbitCreateRowOf(step);
-    return row !== null && isSequential(row) && !CLOSING_STEPS.has(step.name);
-  };
+  /** A failed step that is neither a closing step nor a publication step (known or not). */
+  const failedEarlier = (step: { readonly name: string }) =>
+    !CLOSING_STEPS.has(step.name) && orbitCreateRowOf(step) !== "address";
   const failedSteps = steps.filter((step) => step.status === "failed");
-  const broken =
-    failedSteps.some(failedEarlier) ||
-    (operation.failedStep != null && failedEarlier({ name: operation.failedStep }));
+  const named = operation.failedStep ?? null;
+  // An address step Orbit names as the failure (Gateways before release 2061).
+  const namedAddress = named !== null && orbitCreateRowOf({ name: named }) === "address";
+  const broken = failedSteps.some(failedEarlier) || (named !== null && !CLOSING_STEPS.has(named));
   if (steps.length > 0) {
     const counted: Partial<Record<OrbitCreateRowId, OrbitGatewayOperationStep[]>> = {};
     const statuses = new Map<OrbitGatewayOperationStep, OrbitCreateRowStatus>();
@@ -231,16 +232,15 @@ function readOrbitCreateRows(
     }
   }
   // Orbit names the create step that failed it. Without that name: a failed step of the copy,
-  // T3 or register phases, then a closing step; a failed publication step only once the create
-  // ended (it never fails a create that runs).
+  // T3 or register phases, then a closing step. A failed publication step never names the
+  // failure: the row that ran takes it, and the address only when no row ran.
   const failedName =
-    operation.failedStep ??
-    (
-      failedSteps.find(failedEarlier) ??
-      failedSteps.find((step) => CLOSING_STEPS.has(step.name)) ??
-      (terminal ? failedSteps[0] : undefined)
-    )?.name ??
+    named ??
+    (failedSteps.find(failedEarlier) ?? failedSteps.find((step) => CLOSING_STEPS.has(step.name)))
+      ?.name ??
     null;
+  const addressFailedAtEnd =
+    terminal && failedSteps.some((step) => orbitCreateRowOf(step) === "address");
   let failedRow: OrbitCreateRowId | null = null;
   if (operation.status === "succeeded") {
     const completes = typeof operation.completionOperationId === "number";
@@ -259,13 +259,15 @@ function readOrbitCreateRows(
       (failedName === null ? null : orbitCreateRowOf(failedStep ?? { name: failedName })) ??
       SEQUENTIAL_ROWS.findLast((id) => reads[id]?.status === "running") ??
       running ??
-      (failedName === null ? null : "container");
+      (failedName !== null ? "container" : addressFailedAtEnd ? "address" : null);
     if (row) reads[row] = { startedAt: null, finishedAt: null, ...reads[row], status: "failed" };
     failedRow = row;
   }
   // A create that ended without success: the address row follows Orbit's route_publication,
-  // unless the step Orbit named as the failure is an address step (Gateways before 5063).
-  if (terminal && operation.status !== "succeeded" && failedRow !== "address") {
+  // unless the failure is an address step (Gateways before release 2061).
+  if (terminal && operation.status !== "succeeded" && (failedRow === "address" || namedAddress)) {
+    reads.address = { startedAt: null, finishedAt: null, ...reads.address, status: "failed" };
+  } else if (terminal && operation.status !== "succeeded") {
     reads.address = {
       startedAt: null,
       finishedAt: null,

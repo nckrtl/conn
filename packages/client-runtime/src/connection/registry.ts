@@ -400,6 +400,9 @@ export const make = Effect.gen(function* () {
               !(yield* isParked(environmentId)),
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
             learnLabel: (descriptor) => learnLabel({ environmentId, descriptor }),
+            latestEntry: SubscriptionRef.get(entries).pipe(
+              Effect.map((current) => Option.fromUndefinedOr(current.get(environmentId))),
+            ),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
             Effect.provideService(ConnectionDriver.ConnectionDriver, driver),

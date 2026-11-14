@@ -12,6 +12,7 @@ import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Tracer from "effect/Tracer";
@@ -159,6 +160,11 @@ export interface EnvironmentSupervisorOptions {
   readonly learnLabel?: (
     descriptor: ExecutionEnvironmentDescriptor,
   ) => Effect.Effect<Option.Option<ConnectionCatalogEntry>>;
+  /**
+   * Conn: the registry's entry now. After a learned change the supervisor takes this instead of the
+   * value that change returned, so two changes that finish out of order cannot restore an older one.
+   */
+  readonly latestEntry?: Effect.Effect<Option.Option<ConnectionCatalogEntry>>;
 }
 
 function retryDelayMs(failureCount: number, random: number): number {
@@ -335,12 +341,19 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   // Learned routes arrive while a session is live, so the route list is read
   // fresh by each attempt and check instead of being fixed at creation.
   const currentEntry = yield* Ref.make(entry);
-  const adoptEntry = (next: ConnectionCatalogEntry) =>
-    Effect.sync(() => {
-      if (next.target.label !== labelledTarget.label) {
-        labelledTarget = withTargetLabel(target, next.target.label);
-      }
-    }).pipe(Effect.andThen(Ref.set(currentEntry, next)));
+  const adoptLock = yield* Semaphore.make(1);
+  const adoptEntry = (updated: ConnectionCatalogEntry) =>
+    adoptLock.withPermits(1)(
+      Effect.gen(function* () {
+        const latest =
+          options?.latestEntry === undefined ? Option.none() : yield* options.latestEntry;
+        const next = Option.getOrElse(latest, () => updated);
+        if (next.target.label !== labelledTarget.label) {
+          labelledTarget = withTargetLabel(target, next.target.label);
+        }
+        yield* Ref.set(currentEntry, next);
+      }),
+    );
   const currentRoutes = Ref.get(currentEntry).pipe(Effect.map(connectionRoutes));
   const preferredRouteId = yield* Ref.make(Option.none<string>());
   const routeCooldowns = yield* Ref.make<ReadonlyMap<string, bigint>>(new Map());
@@ -466,13 +479,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     yield* Queue.offer(signals, next);
   });
 
-  const logManagedRelayAccountChange = Effect.logInfo(
-    "Managed relay account changed; restarting the environment connection.",
-  ).pipe(
-    Effect.annotateLogs({
-      "environment.id": target.environmentId,
-      "environment.label": labelledTarget.label,
-    }),
+  const logManagedRelayAccountChange = Effect.suspend(() =>
+    Effect.logInfo("Managed relay account changed; restarting the environment connection.").pipe(
+      Effect.annotateLogs({
+        "environment.id": target.environmentId,
+        "environment.label": labelledTarget.label,
+      }),
+    ),
   );
 
   const reportProgress = Effect.fn("EnvironmentSupervisor.reportProgress")(function* (

@@ -658,6 +658,55 @@ describe("connection onboarding", () => {
       }),
   );
 
+  it.effect("Conn: a form opened before the server renamed itself keeps the newer name", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("environment-paired");
+      const entry = Option.some({
+        target: new BearerConnectionTarget({
+          environmentId,
+          label: "task-5003.dlf-leden",
+          connectionId: "bearer:environment-paired",
+        }),
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId: "bearer:environment-paired",
+            environmentId,
+            label: "instance-1846",
+            httpBaseUrl: "http://old.example.test/",
+            wsBaseUrl: "ws://old.example.test/",
+          }),
+        ),
+        enabled: true,
+      });
+      const credential = Option.some(new BearerConnectionCredential({ token: "bearer-token" }));
+      const untouched = yield* prepareBearerConnectionUpdate({
+        input: {
+          environmentId,
+          label: "instance-1846",
+          openedLabel: "instance-1846",
+          httpBaseUrl: "http://new.example.test/",
+        },
+        entry,
+        credential,
+      });
+      expect(untouched.target.label).toBe("task-5003.dlf-leden");
+      expect(untouched.target.labelSetByUser).toBeUndefined();
+      expect(untouched.profile.label).toBe("task-5003.dlf-leden");
+
+      const typed = yield* prepareBearerConnectionUpdate({
+        input: {
+          environmentId,
+          label: "My box",
+          openedLabel: "instance-1846",
+          httpBaseUrl: "http://new.example.test/",
+        },
+        entry,
+        credential,
+      });
+      expect(typed.target).toMatchObject({ label: "My box", labelSetByUser: true });
+    }),
+  );
+
   it.effect("prepares an SSH registration from the provisioned platform environment", () =>
     Effect.gen(function* () {
       const target = {

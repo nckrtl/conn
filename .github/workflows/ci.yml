@@ -72,6 +72,8 @@ jobs:
       contents: read
       id-token: write
     name: Lint
+    # Fork: Build and Typecheck runs these checks, so a full run stays within GitHub's 20 parallel jobs.
+    if: ${{ github.repository == 'pingdotgg/t3code' }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
@@ -127,7 +129,7 @@ jobs:
       id-token: write
     name: Build and Typecheck
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.build != 'false' || needs.changes.outputs.typecheck != 'false') }}
+    if: ${{ !cancelled() && (github.repository != 'pingdotgg/t3code' || needs.changes.outputs.build != 'false' || needs.changes.outputs.typecheck != 'false') }}
     runs-on: ${{ github.repository == 'pingdotgg/t3code' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 10
     steps:
@@ -281,6 +283,32 @@ jobs:
           until test -s "$RUNNER_TEMP/typecheck-status"; do sleep 1; done
           cat "$RUNNER_TEMP/typecheck.log"
           exit "$(cat "$RUNNER_TEMP/typecheck-status")"
+
+      # Fork: the Lint job's checks, after the build so they do not slow it.
+      - name: Reject repository-owned PR assets
+        if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' }}
+        run: |
+          files="$(git ls-files .github/pr-assets)"
+          if test -n "$files"; then
+            printf 'PR evidence must be uploaded to GitHub, not committed:\n%s\n' "$files" >&2
+            exit 1
+          fi
+
+      - name: Check unused code
+        if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' && steps.electron.outcome == 'success' }}
+        run: vp run knip:check
+
+      - name: Check generated GitHub GraphQL operations
+        if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' && steps.electron.outcome == 'success' }}
+        run: vp run --filter @t3tools/source-control-github generate --check
+
+      - name: Check generated Expo GraphQL operations
+        if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' && steps.electron.outcome == 'success' }}
+        run: vp run --filter t3 generate --check
+
+      - name: Check
+        if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' && steps.electron.outcome == 'success' }}
+        run: vp check
 
   # Everything except `t3` (apps/server) and the web app, which has its own job
   # below. `--parallel` drops the package dependency ordering that `vp run`
@@ -521,8 +549,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Fork: ten shards keep each GitHub-hosted runner under 5 minutes.
-        shard: ${{ fromJSON(github.repository == 'pingdotgg/t3code' && '[1,2,3,4,5,6,7,8]' || '[1,2,3,4,5,6,7,8,9,10]') }}
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       # Depth 2 brings the base commit the change is diffed against.
       - name: Checkout
@@ -758,6 +785,8 @@ jobs:
       - name: Require every job to pass
         env:
           RESULTS: ${{ toJSON(needs) }}
+          # Fork: Build and Typecheck runs Lint's checks, so Lint skips.
+          LINT_IN_BUILD: ${{ github.repository != 'pingdotgg/t3code' }}
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           # A job may skip only when `changes` said every gate it represents was
@@ -767,6 +796,7 @@ jobs:
             | {build: ["build", "typecheck", "desktop_launch"], mobile_native_static_analysis: ["mobile_native"]} as $renamed
             | all(to_entries[];
                 .value.result == "success"
+                or (.key == "lint" and .value.result == "skipped" and env.LINT_IN_BUILD == "true")
                 or (.value.result == "skipped"
                   and (($renamed[.key] // [.key]) | all(.[]; $gates[.] == "false"))))' > /dev/null
 

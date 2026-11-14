@@ -109,6 +109,8 @@ async function decide(first, record, rerun, log = console.log) {
     record.finished.filter((f) => f.state === "passed" || f.state === "skipped").map(key),
   );
   const passed = record.finished.filter((f) => f.state === "passed").length;
+  const failed = record.finished.find((f) => f.state === "failed");
+  if (failed) return fail(`${failed.file} failed before the browser connection closed.`);
   if (summaryPassed === 0 || passed === 0 || record.planned.length === 0) {
     return fail(`The browser connection closed before any test file passed.${where}`);
   }
@@ -125,6 +127,14 @@ async function decide(first, record, rerun, log = console.log) {
   );
   const second = await rerun(files);
   const verdict = classify(second.output, second.code);
+  const rerunCounts = stripAnsi(second.output).match(SUMMARY)?.[1] ?? "";
+  const rerunDone = [...rerunCounts.matchAll(/(\d+) (?:passed|skipped)/g)].reduce(
+    (sum, [, n]) => sum + Number(n),
+    0,
+  );
+  if (verdict === "pass" && rerunDone < files.length) {
+    return fail(`The rerun finished ${rerunDone} of the ${files.length} unfinished test files.`);
+  }
   if (verdict === "pass") {
     summary(
       `⚠️ ${INFRA_MESSAGE}${where} The ${files.length} unfinished test files passed on a rerun.`,
@@ -161,11 +171,9 @@ async function main() {
   );
   const code = await decide(first, readRecord(recordFile), (files) => {
     console.log(`\n=== Rerun of ${files.length} unfinished test files ===\n`);
-    return runOnce(
-      "vp",
-      ["test", "run", "--passWithNoTests", "--project", "unit", "--project", "browser", ...files],
-      { cwd: path.join(__dirname, "../../apps/web") },
-    );
+    return runOnce("vp", ["test", "run", "--project", "unit", "--project", "browser", ...files], {
+      cwd: path.join(__dirname, "../../apps/web"),
+    });
   });
   process.exit(code);
 }

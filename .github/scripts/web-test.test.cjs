@@ -191,3 +191,20 @@ test("a closed browser after every file finished passes with a warning", async (
   assert.equal(run.rerunCalls.length, 0);
   assert.match(run.lines[0], /^::warning title=Web tests::/);
 });
+
+test("a closed browser fails when a recorded file failed or the rerun ran too few files", async () => {
+  const failedFile = await decideWith(
+    { code: 1, output: closedWith(" Test Files  75 passed (81)") },
+    { planned, finished: [...finishedFirst(74), { ...planned[74], state: "failed" }] },
+  );
+  assert.equal(failedFile.code, 1);
+  assert.equal(failedFile.rerunCalls.length, 0);
+
+  const tooFew = await decideWith(
+    { code: 1, output: closedWith(" Test Files  75 passed (81)") },
+    { planned, finished: finishedFirst(75) },
+    { code: 0, output: " Test Files  2 passed (2)" },
+  );
+  assert.equal(tooFew.code, 1);
+  assert.ok(tooFew.lines.some((line) => line.includes("finished 2 of the 6")));
+});

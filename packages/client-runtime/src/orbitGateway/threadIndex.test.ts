@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { threadRuntimeIsActive } from "../state/models.ts";
-import { createOrbitGatewayClient } from "./client.ts";
+import {
+  createOrbitGatewayClient,
+  parseOrbitThreadIndex,
+  type OrbitThreadIndex,
+  type OrbitThreadIndexRow,
+} from "./client.ts";
 import { joinOrbitInstanceThreads, type OrbitInstanceThreadInput } from "./instanceList.ts";
 import {
   EMPTY_ORBIT_THREAD_INDEX_STATE,
@@ -9,10 +14,7 @@ import {
   nextOrbitThreadIndexState,
   orbitIndexThreadInput,
   orbitThreadInputsWithIndex,
-  parseOrbitThreadIndex,
   readOrbitThreadIndex,
-  type OrbitThreadIndex,
-  type OrbitThreadIndexRow,
 } from "./threadIndex.ts";
 
 function wireRow(overrides: Record<string, unknown> = {}) {

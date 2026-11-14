@@ -1,8 +1,6 @@
 // @effect-diagnostics globalTimers:off - The Gateway client runs in the app, outside an Effect runtime.
 import * as Schema from "effect/Schema";
 
-import { parseOrbitThreadIndex, type OrbitThreadIndex } from "./threadIndex.ts";
-
 /**
  * The Conn layer of the Orbit Gateway (`/api/v1/conn`, see Orbit's docs/reference/conn.md).
  *
@@ -1209,4 +1207,89 @@ function environment(value: unknown, path: string): OrbitGatewayEnvironment {
 /** A trimmed string, or null for anything else (absent, empty or another type). */
 function optionalText(value: unknown): string | null {
   return typeof value === "string" ? gatewayText(value) : null;
+}
+
+// Conn (thread-index plan, C3): the answer of `GET /conn/threads`.
+/** One thread of the index, as the Gateway lists it. */
+export interface OrbitThreadIndexRow {
+  readonly environmentId: string;
+  readonly instanceId: number;
+  readonly projectId: number;
+  readonly threadId: string;
+  readonly title: string;
+  /** T3's thread status (`idle`, `running`, `completed`, …); null until the Gateway read the server. */
+  readonly state: string | null;
+  readonly needsInput: boolean;
+  readonly lastUserMessageAt: string | null;
+  readonly lastRunCompletedAt: string | null;
+  readonly seenAt: string;
+}
+
+/** One covered server of the index (`meta.environments`). */
+export interface OrbitThreadIndexEnvironment {
+  readonly environmentId: string;
+  readonly instanceId: number;
+  readonly powerState: string;
+  /** When the Gateway last read this server; null when it never did. */
+  readonly readAt: string | null;
+  readonly readError: string | null;
+}
+
+export interface OrbitThreadIndex {
+  readonly rows: readonly OrbitThreadIndexRow[];
+  readonly environments: readonly OrbitThreadIndexEnvironment[];
+}
+
+const indexNullableString = (value: unknown): string | null =>
+  typeof value === "string" ? value : null;
+
+function indexRow(value: unknown): OrbitThreadIndexRow | null {
+  const data = record(value);
+  if (
+    typeof data?.environment_id !== "string" ||
+    typeof data.instance_id !== "number" ||
+    typeof data.project_id !== "number" ||
+    typeof data.thread_id !== "string" ||
+    typeof data.title !== "string" ||
+    typeof data.seen_at !== "string"
+  ) {
+    return null;
+  }
+  return {
+    environmentId: data.environment_id,
+    instanceId: data.instance_id,
+    projectId: data.project_id,
+    threadId: data.thread_id,
+    title: data.title,
+    state: indexNullableString(data.state),
+    needsInput: data.needs_input === true,
+    lastUserMessageAt: indexNullableString(data.last_user_message_at),
+    lastRunCompletedAt: indexNullableString(data.last_run_completed_at),
+    seenAt: data.seen_at,
+  };
+}
+
+function indexEnvironment(value: unknown): OrbitThreadIndexEnvironment | null {
+  const data = record(value);
+  if (typeof data?.environment_id !== "string" || typeof data.instance_id !== "number") return null;
+  return {
+    environmentId: data.environment_id,
+    instanceId: data.instance_id,
+    powerState: typeof data.power_state === "string" ? data.power_state : "running",
+    readAt: indexNullableString(data.read_at),
+    readError: indexNullableString(data.read_error),
+  };
+}
+
+/**
+ * Reads the envelope's `data` and `meta.environments`; null when either is not a list. A row or
+ * server entry that is not one is left out, so one odd row does not hide the rest.
+ */
+export function parseOrbitThreadIndex(data: unknown, meta: unknown): OrbitThreadIndex | null {
+  const environments = record(meta)?.environments;
+  if (!Array.isArray(data) || !Array.isArray(environments)) return null;
+  return {
+    rows: data.flatMap((entry) => indexRow(entry) ?? []),
+    environments: environments.flatMap((entry) => indexEnvironment(entry) ?? []),
+  };
 }

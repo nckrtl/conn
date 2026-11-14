@@ -105,6 +105,7 @@ describe("desktop tab runner", () => {
             }
             return cdp.send(method as Parameters<typeof cdp.send>[0], params as never);
           },
+          receivesScreencast: () => true,
           targetId: async () => (await cdp.send("Target.getTargetInfo")).targetInfo.targetId,
           url: () => page.url(),
           title: () => "Fixture",

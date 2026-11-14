@@ -42,7 +42,9 @@ export function AppRouteModal({ label, children }: { label: string; children: Re
       <DialogPrimitive.Portal>
         <DialogBackdrop variant="app" />
         <DialogPrimitive.Viewport
-          className="fixed inset-0 z-50 flex items-center justify-center sm:p-6 lg:p-10"
+          // Electron hit-tests drag regions under the backdrop regardless of z-index; without
+          // this, presses above the modal move the window instead of dismissing it.
+          className="fixed inset-0 z-50 flex items-center justify-center [-webkit-app-region:no-drag] sm:p-6 lg:p-10"
           onPointerDown={(event) => {
             backdropPressRef.current = event.target === event.currentTarget;
           }}

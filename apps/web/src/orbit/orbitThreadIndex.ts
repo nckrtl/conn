@@ -1,7 +1,10 @@
 import {
   EMPTY_ORBIT_THREAD_INDEX_STATE,
+  nextOrbitThreadIndexState,
+  orbitThreadInputsWithIndex,
   readOrbitThreadIndex,
   type OrbitGatewayClient,
+  type OrbitInstanceThreadInput,
   type OrbitThreadIndexState,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
@@ -56,15 +59,15 @@ export function createOrbitThreadIndex(ports: OrbitThreadIndexPorts) {
     }
     const held = await refreshHeld();
     if (client === null) return;
-    const index = await readOrbitThreadIndex({
+    const answer = await readOrbitThreadIndex({
       enabled: true,
       held,
-      previous: useOrbitThreadIndexStore.getState().index,
       threads: () => client.threads(),
     });
-    if (index !== useOrbitThreadIndexStore.getState().index) {
-      useOrbitThreadIndexStore.setState({ index });
-    }
+    // Merged into the state as it is NOW: a read that answers after a newer one cannot undo it.
+    const current = useOrbitThreadIndexStore.getState().index;
+    const index = nextOrbitThreadIndexState(current, answer);
+    if (index !== current) useOrbitThreadIndexStore.setState({ index });
   };
 
   return { load, refreshHeld };
@@ -103,4 +106,16 @@ export async function loadOrbitThreadIndex(
 /** After a park reason changed in this window: which servers the list shows from the index. */
 export async function refreshOrbitThreadIndexHeld(): Promise<void> {
   await appOrbitThreadIndex().refreshHeld();
+}
+
+/**
+ * The Orbit list's threads: `live` itself with the flag off; with it on, held-off servers from the
+ * index (`orbitThreadInputsWithIndex`).
+ */
+export function orbitListThreadInputs(
+  live: readonly OrbitInstanceThreadInput[],
+  store: OrbitThreadIndexStore,
+  enabled: boolean,
+): readonly OrbitInstanceThreadInput[] {
+  return orbitThreadInputsWithIndex({ enabled, live, index: store.index, held: store.held });
 }

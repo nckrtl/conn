@@ -6,7 +6,6 @@ import {
   orbitCompletionPhase,
   orbitInstanceAvailability,
   orbitInstanceProjectOptions,
-  orbitThreadInputsWithIndex,
   type OrbitInstanceState,
   type OrbitInstanceWithThreads,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -44,7 +43,7 @@ import {
 import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
 import { readStored as readStoredOrbitStarts } from "../orbit/orbitThreadStartStore";
 import { readAttachedServersFlag } from "../orbit/attachedServersSeed";
-import { useOrbitThreadIndexStore } from "../orbit/orbitThreadIndex";
+import { orbitListThreadInputs, useOrbitThreadIndexStore } from "../orbit/orbitThreadIndex";
 import { useVisibleThreadShells } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { formatRelativeTimeLabel } from "../timestampFormat";
@@ -487,11 +486,8 @@ export function OrbitInstancesPage() {
             ),
           ],
           // Conn (C3, flag `connAttachedServers`): a held-off server's threads from the index.
-          orbitThreadInputsWithIndex({
-            enabled: readAttachedServersFlag(),
-            index: threadIndex,
-            held: heldEnvironments,
-            live: threads
+          orbitListThreadInputs(
+            threads
               .filter((thread) => !isSidebarHiddenThread(thread))
               .map((thread) => ({
                 environmentId: thread.environmentId,
@@ -501,7 +497,9 @@ export function OrbitInstancesPage() {
                 archivedAt: thread.archivedAt,
                 working: threadRuntimeIsActive(thread.runtime),
               })),
-          }),
+            { index: threadIndex, held: heldEnvironments },
+            readAttachedServersFlag(),
+          ),
         )
       : [];
   const options = orbitInstanceProjectOptions(rows);

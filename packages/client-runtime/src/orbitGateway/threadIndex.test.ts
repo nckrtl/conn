@@ -153,6 +153,27 @@ describe("orbitIndexThreadInput (the existing row model)", () => {
     expect(
       orbitIndexThreadInput(row({ lastUserMessageAt: null, lastRunCompletedAt: null })).updatedAt,
     ).toBe("");
+    // Such a row is no last use of its Instance (no stray "used" fact).
+    const [joined] = joinOrbitInstanceThreads(
+      [
+        {
+          id: 41,
+          name: "feature-a",
+          projectId: 3,
+          projectSlug: "p",
+          projectName: "P",
+          nodeName: "beast",
+          domain: null,
+          instanceUrl: null,
+          powerState: "running",
+          status: "registered",
+          environmentId: "inner-a",
+          branch: null,
+        },
+      ],
+      [orbitIndexThreadInput(row({ lastUserMessageAt: null, lastRunCompletedAt: null }))],
+    );
+    expect(joined?.lastUsedAt).toBeNull();
   });
 
   it("is working for exactly the statuses a live row shows as working", () => {
@@ -174,9 +195,10 @@ describe("orbitIndexThreadInput (the existing row model)", () => {
     expect(orbitIndexThreadInput(row({ state: null })).working).toBe(false);
   });
 
-  it("a thread that needs input shows as a live one does: working", () => {
+  it("a thread that needs input shows as a live one does: by its status only", () => {
     expect(orbitIndexThreadInput(row({ state: "waiting", needsInput: true })).working).toBe(true);
-    expect(orbitIndexThreadInput(row({ state: "idle", needsInput: true })).working).toBe(true);
+    // Live, an idle thread shows its time; the index row does too.
+    expect(orbitIndexThreadInput(row({ state: "idle", needsInput: true })).working).toBe(false);
   });
 
   it("knows subagent threads by their T3 ids", () => {
@@ -333,19 +355,18 @@ describe("readOrbitThreadIndex", () => {
     throw new Error("the flag-off path must not read the index");
   };
 
-  it("flag off: no call, the kept state stays", async () => {
+  it("flag off: no call", async () => {
     let calls = 0;
     const result = await readOrbitThreadIndex({
       enabled: false,
       held: new Set(["inner-a"]),
-      previous: EMPTY_ORBIT_THREAD_INDEX_STATE,
       threads: async () => {
         calls += 1;
         return dies();
       },
     });
     expect(calls).toBe(0);
-    expect(result).toBe(EMPTY_ORBIT_THREAD_INDEX_STATE);
+    expect(result).toBeNull();
   });
 
   it("nothing held: no call", async () => {
@@ -353,7 +374,6 @@ describe("readOrbitThreadIndex", () => {
     await readOrbitThreadIndex({
       enabled: true,
       held: new Set(),
-      previous: EMPTY_ORBIT_THREAD_INDEX_STATE,
       threads: async () => {
         calls += 1;
         return index([], []);
@@ -362,18 +382,16 @@ describe("readOrbitThreadIndex", () => {
     expect(calls).toBe(0);
   });
 
-  it("a failed call keeps the last rows", async () => {
+  it("a failed call answers null, which keeps the last rows", async () => {
     const kept = nextOrbitThreadIndexState(
       EMPTY_ORBIT_THREAD_INDEX_STATE,
       index([row()], [["inner-a", T1]]),
     );
-    expect(
-      await readOrbitThreadIndex({
-        enabled: true,
-        held: new Set(["inner-a"]),
-        previous: kept,
-        threads: dies,
-      }),
-    ).toBe(kept);
+    const answer = await readOrbitThreadIndex({
+      enabled: true,
+      held: new Set(["inner-a"]),
+      threads: dies,
+    });
+    expect(nextOrbitThreadIndexState(kept, answer)).toBe(kept);
   });
 });

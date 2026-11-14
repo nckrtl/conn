@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { loadOrbitInstanceList, useOrbitInstanceListStore } from "./orbitInstanceList";
+import { loadOrbitThreadIndex } from "./orbitThreadIndex";
 
 const mocks = vi.hoisted(() => ({ client: null as unknown }));
 vi.mock("./OrbitProfileSync", () => ({ desktopOrbitGatewayClient: () => mocks.client }));
@@ -8,6 +9,14 @@ vi.mock("./OrbitProfileSync", () => ({ desktopOrbitGatewayClient: () => mocks.cl
 vi.mock(import("./attachedServersSeed"), async (importOriginal) => ({
   ...(await importOriginal()),
   readAttachedServersFlag: () => false,
+}));
+// The registry holds a server off, so only the flag keeps the index from being read.
+vi.mock(import("@t3tools/client-runtime/state/runtime"), async (importOriginal) => ({
+  ...(await importOriginal()),
+  runAtomCommand: (async () => ({
+    _tag: "Success",
+    value: new Map([["env-one", new Set(["not-attached"])]]),
+  })) as never,
 }));
 
 const record = (instanceId: number, instanceName: string) => ({
@@ -41,6 +50,8 @@ describe("loadOrbitInstanceList", () => {
       },
     };
     await loadOrbitInstanceList();
+    // The list starts the index read without waiting; run the same read to its end.
+    await loadOrbitThreadIndex(mocks.client as never);
     expect(threads).toBe(0);
     expect(useOrbitInstanceListStore.getState().state.status).toBe("loaded");
   });

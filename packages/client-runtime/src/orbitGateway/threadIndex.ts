@@ -177,9 +177,9 @@ function later(left: string | null, right: string | null): string | null {
 }
 
 /**
- * An index row in the list's row model. Last activity: the later of the last user message and
- * the last finished run (empty when the server named neither, so the row shows no time). Working:
- * an active run status or a request that waits for the user, as a live row shows both.
+ * An index row in the list's row model. Last activity: the later of the last user message and the
+ * last finished run ("" when neither). Working: only the statuses a live row shows as working, so
+ * a thread that waits for the user (`waiting`) shows as it does live; `needs_input` is not used.
  */
 export function orbitIndexThreadInput(row: OrbitThreadIndexRow): OrbitInstanceThreadInput {
   return {
@@ -188,7 +188,7 @@ export function orbitIndexThreadInput(row: OrbitThreadIndexRow): OrbitInstanceTh
     title: row.title,
     updatedAt: later(row.lastUserMessageAt, row.lastRunCompletedAt) ?? "",
     archivedAt: null,
-    working: row.needsInput || (row.state !== null && ACTIVE_STATES.has(row.state)),
+    working: row.state !== null && ACTIVE_STATES.has(row.state),
   };
 }
 
@@ -220,18 +220,19 @@ export function orbitThreadInputsWithIndex(input: {
 
 /**
  * One index read for the Orbit list. Called where the list itself is read, never on a timer of its
- * own. Flag off, or no server held off: no call, the kept state stays. A failed call keeps it too.
+ * own. Flag off, or no server held off: no call. Null when there was no call or it failed; the
+ * caller merges an answer into its CURRENT kept state (`nextOrbitThreadIndexState`), so a read
+ * that answers after a newer one cannot undo it (the `read_at` check decides).
  */
 export async function readOrbitThreadIndex(input: {
   readonly enabled: boolean;
   readonly held: ReadonlySet<string>;
-  readonly previous: OrbitThreadIndexState;
   readonly threads: () => Promise<OrbitThreadIndex>;
-}): Promise<OrbitThreadIndexState> {
-  if (!input.enabled || input.held.size === 0) return input.previous;
+}): Promise<OrbitThreadIndex | null> {
+  if (!input.enabled || input.held.size === 0) return null;
   try {
-    return nextOrbitThreadIndexState(input.previous, await input.threads());
+    return await input.threads();
   } catch {
-    return input.previous;
+    return null;
   }
 }

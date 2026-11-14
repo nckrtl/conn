@@ -6,6 +6,7 @@ import {
   orbitCompletionPhase,
   orbitInstanceAvailability,
   orbitInstanceProjectOptions,
+  orbitThreadInputsWithIndex,
   type OrbitInstanceState,
   type OrbitInstanceWithThreads,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -42,6 +43,8 @@ import {
 } from "../orbit/orbitInstanceRemoval";
 import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
 import { readStored as readStoredOrbitStarts } from "../orbit/orbitThreadStartStore";
+import { readAttachedServersFlag } from "../orbit/attachedServersSeed";
+import { useOrbitThreadIndexStore } from "../orbit/orbitThreadIndex";
 import { useVisibleThreadShells } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { formatRelativeTimeLabel } from "../timestampFormat";
@@ -465,6 +468,8 @@ function ProjectFilter(props: {
 export function OrbitInstancesPage() {
   const { list, removals } = useOrbitInstanceListWithRemovals();
   const threads = useVisibleThreadShells();
+  const threadIndex = useOrbitThreadIndexStore((store) => store.index);
+  const heldEnvironments = useOrbitThreadIndexStore((store) => store.held);
   const [query, setQuery] = useState("");
   const [projectId, setProjectId] = useState<number | null>(null);
   const [removeRequest, setRemoveRequest, openRemoveRequest, confirmableRemoveRequest] =
@@ -481,16 +486,22 @@ export function OrbitInstancesPage() {
               removal.status !== "removed" && !listedIds.has(removal.row.id) ? [removal.row] : [],
             ),
           ],
-          threads
-            .filter((thread) => !isSidebarHiddenThread(thread))
-            .map((thread) => ({
-              environmentId: thread.environmentId,
-              id: thread.id,
-              title: thread.title,
-              updatedAt: thread.updatedAt,
-              archivedAt: thread.archivedAt,
-              working: threadRuntimeIsActive(thread.runtime),
-            })),
+          // Conn (C3, flag `connAttachedServers`): a held-off server's threads from the index.
+          orbitThreadInputsWithIndex({
+            enabled: readAttachedServersFlag(),
+            index: threadIndex,
+            held: heldEnvironments,
+            live: threads
+              .filter((thread) => !isSidebarHiddenThread(thread))
+              .map((thread) => ({
+                environmentId: thread.environmentId,
+                id: thread.id,
+                title: thread.title,
+                updatedAt: thread.updatedAt,
+                archivedAt: thread.archivedAt,
+                working: threadRuntimeIsActive(thread.runtime),
+              })),
+          }),
         )
       : [];
   const options = orbitInstanceProjectOptions(rows);

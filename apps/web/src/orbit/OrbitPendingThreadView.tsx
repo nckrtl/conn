@@ -214,8 +214,9 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
       }
     >
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
-        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
-          <div className="flex justify-end pb-4">
+        {/* Laid out as the real thread's timeline, so the hand-over does not move the card. */}
+        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-3 pt-6">
+          <div className="flex justify-end pb-12">
             <div
               data-orbit-pending-message
               className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"

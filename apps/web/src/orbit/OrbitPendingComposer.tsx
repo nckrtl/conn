@@ -14,16 +14,16 @@ export function OrbitPendingComposer() {
       data-orbit-pending-composer
       data-orbit-composer-locked="true"
       inert
-      className="chat-composer-lane w-full shrink-0 pt-2 pb-5 opacity-50"
+      className="chat-composer-lane w-full shrink-0 bg-background pt-2 pb-5"
     >
-      <ComposerSurface.Shell>
+      <ComposerSurface.Shell className="opacity-50">
         <ComposerSurface.Host>
           <ComposerSurface.Main>
             <div className="rounded-2xl">
-              <div className="min-h-14 px-3 pt-3 pb-1 text-sm text-placeholder">
+              <div className="h-17 px-3 pt-3 text-sm text-placeholder">
                 {DEFAULT_COMPOSER_PLACEHOLDER}
               </div>
-              <div className="flex min-w-0 items-center px-2 pb-2">
+              <div className="flex h-10 min-w-0 items-center px-2 pb-2">
                 <span className="me-2 flex size-7 items-center justify-center text-muted-foreground">
                   <PaperclipIcon aria-hidden className="size-4 translate-y-px" />
                 </span>

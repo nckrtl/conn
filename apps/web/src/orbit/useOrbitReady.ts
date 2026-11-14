@@ -4,7 +4,6 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import type { OrbitReadyTimelineInput } from "../components/chat/MessagesTimeline.logic";
 import { useOrbitInstance } from "./environmentProvider";
-import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
 import { orbitReadyView, orbitSetupView } from "./orbitSetupView";
 import { dismissOrbitThreadStart, retrySavedOrbitCompletion } from "./orbitThreadStarts";
 import { useSentOrbitThreadStart } from "./orbitThreadStartStore";
@@ -27,10 +26,7 @@ export function useOrbitReady(
   return {
     view: orbitReadyView(start, url),
     setup: completion === "none" || completion === "succeeded" ? null : orbitSetupView(start),
-    onRetry: () =>
-      void retrySavedOrbitCompletion(desktopOrbitGatewayClient(), id).catch((error: unknown) =>
-        console.error(error),
-      ),
+    onRetry: () => retrySavedOrbitCompletion(id),
     onDismiss: () => dismissOrbitThreadStart(id),
     messageId: start.messageId,
     threadRef: scopeThreadRef(

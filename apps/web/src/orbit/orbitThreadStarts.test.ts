@@ -608,17 +608,20 @@ describe("followSavedOrbitCompletion", () => {
     expect(after.error).toBeNull();
   });
 
-  it("Retry from any window saves the new Operation for the main window's runner", async () => {
+  it("Retry from any window only saves it; the main window's runner sends it once", async () => {
     updateStarts(() => [{ ...saved, completionStatus: "failed", completionRetryable: true }]);
+    retrySavedOrbitCompletion(saved.id);
+    const marked = readStored()[0]!;
+    expect(marked.completionOperationId).toBeNull();
+    expect(marked.completionKey).toMatch(/^conn-thread-start:s-restart:complete:/);
+    expect(orbitCompletionPhase(marked)).toBe("running");
+    expect(orbitCompletionNeedsFollow(marked)).toBe(false);
     const completeInstance = vi.fn(async () => read("queued", { id: 107, pollAfterSeconds: 2 }));
-    await retrySavedOrbitCompletion(
+    await resumeSavedOrbitCompletionRetry(
       { completeInstance } as unknown as OrbitGatewayClient,
       saved.id,
     );
-    expect(completeInstance).toHaveBeenCalledWith(
-      41,
-      expect.stringMatching(/^conn-thread-start:s-restart:complete:/),
-    );
+    expect(completeInstance).toHaveBeenCalledWith(41, marked.completionKey);
     const after = readStored()[0]!;
     expect(after.completionOperationId).toBe(107);
     expect(orbitCompletionNeedsFollow(after)).toBe(true);

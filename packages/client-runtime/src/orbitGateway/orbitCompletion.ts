@@ -166,20 +166,21 @@ export async function followOrbitCompletion(
 }
 
 /**
- * Retry of a failed completion: a new `instance.complete` under a new key, saved before the call
- * with no Operation id, so no follower reads the old one meanwhile. Once Orbit admitted it, the
- * runner follows the new Operation. Conn never retries by itself.
+ * Retry of a failed completion, from any window: saves a new key with no Operation id, so no
+ * follower reads the old one. Only the main window's runner sends it (`admitOrbitCompletion`),
+ * so two windows never send one Retry twice. Conn never retries by itself.
  */
-export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise<void> {
+export function markOrbitCompletionRetry(
+  ports: Pick<OrbitCompletionPorts, "read" | "save" | "now">,
+): boolean {
   const start = ports.read();
   if (start === null || start.instanceId === null || orbitCompletionPhase(start) !== "failed") {
-    return;
+    return false;
   }
-  const key = `conn-thread-start:${start.id}:complete:${ports.now()}`;
   ports.save({
     ...start,
     completionOperationId: null,
-    completionKey: key,
+    completionKey: `conn-thread-start:${start.id}:complete:${ports.now()}`,
     completionStatus: "queued",
     completionErrorCode: null,
     completionErrorDetail: null,
@@ -188,7 +189,12 @@ export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise
     completionRetryable: false,
     createRows: reopenOrbitCompletionRows(start.createRows ?? null),
   });
-  await admitOrbitCompletion(ports);
+  return true;
+}
+
+/** Marks the Retry and sends it here: for a caller that is the only sender. */
+export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise<void> {
+  if (markOrbitCompletionRetry(ports)) await admitOrbitCompletion(ports);
 }
 
 /**

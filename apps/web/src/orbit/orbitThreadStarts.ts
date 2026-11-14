@@ -1,8 +1,8 @@
 import {
   admitOrbitCompletion,
   followOrbitCompletion,
+  markOrbitCompletionRetry,
   newOrbitThreadStart,
-  retryOrbitCompletion,
   type OrbitCompletionPorts,
   orbitThreadStartHasNoMessage,
   orbitThreadStartCreatedInstance,
@@ -393,13 +393,17 @@ async function onceAdmitting(id: string, run: () => Promise<void>): Promise<void
   }
 }
 
-/** Retry of a failed completion, from any window: the main window's runner then follows it. */
-export async function retrySavedOrbitCompletion(
-  client: OrbitGatewayClient | null,
-  id: string,
-): Promise<void> {
-  if (client === null) return;
-  await onceAdmitting(id, () => retryOrbitCompletion(completionPorts(client, id)));
+/**
+ * Retry of a failed completion, from any window: it only saves the Retry. The main window's
+ * runner sends it and then follows the new Operation, so two windows never send it twice.
+ */
+export function retrySavedOrbitCompletion(id: string): void {
+  markOrbitCompletionRetry({
+    read: () => readStored().find((entry) => entry.id === id) ?? null,
+    save: (next) =>
+      updateStarts((starts) => starts.map((entry) => (entry.id === id ? next : entry))),
+    now: Date.now,
+  });
 }
 
 /**

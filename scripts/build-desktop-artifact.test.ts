@@ -693,7 +693,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
         undefined,
       );
-      assert.isNull(withoutFeed.publish ?? null);
+      assert.strictEqual(withoutFeed.publish, null);
       assert.isUndefined(withoutFeed.appImage);
     }).pipe(
       Effect.provide(

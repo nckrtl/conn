@@ -88,6 +88,8 @@ import { NewTaskFlowProvider } from "./features/threads/new-task-flow-provider";
 import { newTaskFlowKey } from "./features/threads/new-task-flow-state";
 import { NewTaskRouteScreen } from "./features/threads/NewTaskRouteScreen";
 import { OrbitThreadStartScreen } from "./features/orbit/OrbitThreadStartScreen";
+import { SettingsOrbitConnectionRouteScreen } from "./features/orbit/SettingsOrbitConnectionRouteScreen";
+import { SettingsOrbitRouteScreen } from "./features/orbit/SettingsOrbitRouteScreen";
 import { SettingsNavigationRouteScreen } from "./features/settings/SettingsNavigationRouteScreen";
 import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppearanceRouteScreen";
 import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
@@ -169,6 +171,16 @@ const SETTINGS_SCREENS = {
       ...(Platform.OS === "android" ? { animation: "none" as const } : {}),
       ...SETTINGS_LIST_PRESENTATION,
     },
+  }),
+  SettingsOrbit: createNativeStackScreen({
+    screen: SettingsOrbitRouteScreen,
+    linking: "settings/orbit",
+    options: settingsPage("Orbit"),
+  }),
+  SettingsOrbitConnection: createNativeStackScreen({
+    screen: SettingsOrbitConnectionRouteScreen,
+    linking: "settings/orbit/connection",
+    options: settingsPage("Connection"),
   }),
   SettingsEnvironments: createNativeStackScreen({
     screen: SettingsEnvironmentsRouteScreen,

@@ -25,6 +25,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { useAdaptiveWorkspaceLayout } from "../layout/adaptive-workspace-context";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
+import { OrbitLogo } from "../orbit/OrbitLogo";
+import { useOrbitGateway } from "../orbit/orbitGatewayStore";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection, SettingsSidebarContext } from "./components/SettingsSection";
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -193,8 +195,26 @@ function SettingsList(props: { readonly connections: readonly SettingsListRow[] 
   const query = workspace?.state.tabs.settings.query ?? "";
   const overflowRows = useOverflowRows();
   const indexSections = useSettingsIndexSections();
+  // Conn: the Orbit page shows only while this phone takes its environments from Orbit.
+  const orbitMode = useOrbitGateway().provider === "orbit";
+  const orbitSections: SettingsListSection[] = orbitMode
+    ? [
+        {
+          rows: [
+            {
+              id: "SettingsOrbit",
+              icon: undefined,
+              leading: <OrbitLogo size={24} />,
+              label: "Orbit",
+              target: "SettingsOrbit" as const,
+            },
+          ],
+        },
+      ]
+    : [];
   const sections = filterSettingsSections(
     [
+      ...orbitSections,
       { rows: overflowRows },
       { title: gt("Connections"), rows: props.connections },
       ...indexSections,

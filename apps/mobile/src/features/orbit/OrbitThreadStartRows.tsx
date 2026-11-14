@@ -90,7 +90,7 @@ export function OrbitThreadStartRows() {
                 <SymbolView name="xmark" size={15} tintColorClassName="accent-icon-muted" />
               </Pressable>
             </View>
-            {row.rows ? <OrbitCreateRows rows={row.rows} /> : null}
+            {row.rows ? <OrbitCreateRows rows={row.rows} host={orbitStartHost(start)} /> : null}
           </View>
         );
       })}
@@ -98,8 +98,24 @@ export function OrbitThreadStartRows() {
   );
 }
 
-/** The desktop card's rows under "Create Instance": done, running, failed or not started yet. */
-function OrbitCreateRows({ rows }: { rows: readonly OrbitSetupCreateRow[] }) {
+/** The address without its scheme, shown dimmed beside "Publish the address" as on the desktop. */
+function orbitStartHost(start: {
+  readonly instanceName: string;
+  readonly instanceDomainSuffix?: string | null;
+}): string | null {
+  const suffix = start.instanceDomainSuffix ?? null;
+  if (!suffix) return null;
+  return `${start.instanceName}${suffix.startsWith(".") ? "" : "."}${suffix}`;
+}
+
+/** The desktop card's rows under "Create Instance": label at the left, status at the right. */
+function OrbitCreateRows({
+  rows,
+  host,
+}: {
+  rows: readonly OrbitSetupCreateRow[];
+  host: string | null;
+}) {
   return (
     <View className="ml-9 gap-1.5">
       {rows.map((row) => (
@@ -109,6 +125,18 @@ function OrbitCreateRows({ rows }: { rows: readonly OrbitSetupCreateRow[] }) {
           className="flex-row items-center gap-2"
           testID={`orbit-create-row-${row.id}-${row.status}`}
         >
+          <Text
+            className={
+              row.status === "pending"
+                ? "shrink-0 text-sm text-foreground-muted"
+                : "shrink-0 text-sm text-foreground"
+            }
+          >
+            {row.label}
+          </Text>
+          <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
+            {row.id === "address" && host ? host : ""}
+          </Text>
           <View className="size-4 items-center justify-center">
             {row.status === "running" ? (
               <AppActivityIndicator size="small" colorClassName="accent-icon-muted" />
@@ -120,13 +148,6 @@ function OrbitCreateRows({ rows }: { rows: readonly OrbitSetupCreateRow[] }) {
               <SymbolView name="circle" size={10} tintColorClassName="accent-icon-muted" />
             )}
           </View>
-          <Text
-            className={
-              row.status === "pending" ? "text-sm text-foreground-muted" : "text-sm text-foreground"
-            }
-          >
-            {row.label}
-          </Text>
         </View>
       ))}
     </View>

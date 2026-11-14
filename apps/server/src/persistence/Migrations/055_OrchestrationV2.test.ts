@@ -3,8 +3,14 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { migrationEntries, runMigrations } from "../Migrations.ts";
+import { migrationEntries, migrationManifest, runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+
+/** The released migrations after `id`, as `runMigrations` reports them; later upstream syncs add to it. */
+const releasedAfter = (id: number) =>
+  migrationManifest
+    .filter(([entryId]) => entryId > id)
+    .map(([entryId, name]): [number, string] => [entryId, name]);
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
@@ -13,7 +19,8 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 87 }, (_, index) => index + 1),
+        // Contiguous from 1, whatever the latest released id is.
+        Array.from({ length: migrationEntries.length }, (_, index) => index + 1),
       );
     }),
   );
@@ -42,23 +49,7 @@ layer("055_OrchestrationV2", (it) => {
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
         [70, "PeerLinks"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -95,23 +86,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 68, name: "ShellStopRequestIndex" },
         { migration_id: 69, name: "ThreadMessageSearch" },
         { migration_id: 70, name: "PeerLinks" },
-        { migration_id: 71, name: "PeerLinkFence" },
-        { migration_id: 72, name: "WaitingLinkRequestIndex" },
-        { migration_id: 73, name: "ActiveTurnItemIndexes" },
-        { migration_id: 74, name: "ExcludeAttachmentPlaceholdersFromSearch" },
-        { migration_id: 75, name: "SubagentDeliveryState" },
-        { migration_id: 76, name: "ProjectionProjectsPinArchive" },
-        { migration_id: 77, name: "RepairBooleanSettledOverride" },
-        { migration_id: 78, name: "DropOrchestrationEventCorrelationIndex" },
-        { migration_id: 79, name: "DelegatedRecoveryIndexes" },
-        { migration_id: 80, name: "ScheduledTaskThreadMode" },
-        { migration_id: 81, name: "ProjectionMessageSearchText" },
-        { migration_id: 82, name: "TurnItemConversationIndex" },
-        { migration_id: 83, name: "CommandReadIndexes" },
-        { migration_id: 84, name: "LastExecutedRunIndex" },
-        { migration_id: 85, name: "TurnItemCounts" },
-        { migration_id: 86, name: "QueuedTurnInputIndex" },
-        { migration_id: 87, name: "ProjectionProjectsCustomTitle" },
+        ...releasedAfter(70).map(([migration_id, name]) => ({ migration_id, name })),
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`

@@ -771,7 +771,7 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
         .pipe(Effect.flip);
       expect(failed.reason).toBe("unreachable");
       expect(failed.message).toBe(
-        `This environment could not reach Box: ${new URL(impostor.url).origin} answered as another environment, Impostor. http://192.168.1.20:3773 is plain http, which would send the link's credentials unencrypted. Use its https address, its Tailscale address, or its Orbit WireGuard address.`,
+        `This environment could not reach Box: ${new URL(impostor.url).origin} now answers as Impostor (environment-impostor), not Box. http://192.168.1.20:3773 is plain http, which would send the link's credentials unencrypted. Use its https address, its Tailscale address, or its Orbit WireGuard address.`,
       );
       expect(yield* a.links.list).toEqual([]);
       expect(yield* linkedSessions(impostor)).toEqual([]);

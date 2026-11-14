@@ -43,7 +43,8 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useServerConfigs } from "../state/entities";
 import { environmentSession, readEnvironmentLacksScope } from "../state/session";
 import { observeOrbitInstancePower } from "./orbitInstanceSleep";
-import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
+import { rememberedCloneEnvironmentIds } from "./cloneWorkspaceRefs";
+import { dropOrbitInstanceStarts, heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
@@ -176,8 +177,25 @@ function saveReconciledState(next: OrbitEnvironmentState): void {
     state: next.pairedByOrbit.reduce(recordPaired, {
       ...current,
       disabledByOrbit: next.disabledByOrbit,
+      instanceServers: next.instanceServers ?? {},
+      missingFromGateway: next.missingFromGateway ?? {},
     }),
   }));
+}
+
+/**
+ * Conn: removes the server of an Instance that left the Gateway's list from this device, as the
+ * Orbit panel does when the user removes the Instance: the saved server, its pairing records and
+ * Orbit facts, and the thread starts that wait for it.
+ */
+async function removeGoneInstanceServer(environmentId: string, instanceId: number | null) {
+  dropOrbitInstanceStarts(instanceId, [environmentId]);
+  await runAtomCommand(appAtomRegistry, environmentCatalog.remove, environmentId as EnvironmentId, {
+    reportFailure: false,
+  });
+  // Forgotten even when the removal failed: a later sync, which still knows it as an Instance's
+  // server, removes it again once lists leave it out long enough.
+  forgetOrbitInstanceEnvironment(environmentId);
 }
 
 function updateState(change: (state: OrbitEnvironmentState) => OrbitEnvironmentState): void {
@@ -402,6 +420,7 @@ export async function reconcileEnvironmentProvider(
     lacksAccess,
     heldInstanceIds: heldOrbitInstanceIds(),
     renew: readSessionRenewals({ environmentIds: bearerIds, readConnection, readSession, now }),
+    knownInstanceServers: rememberedCloneEnvironmentIds(),
     now,
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
@@ -417,6 +436,9 @@ export async function reconcileEnvironmentProvider(
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
 
   saveReconciledState(plan.state);
+  for (const gone of plan.remove) {
+    await removeGoneInstanceServer(gone.environmentId, gone.instanceId);
+  }
   // Conn: every renewal of this sync, one after another, without holding up the profile sync.
   const renew = new Set(plan.renew);
   renewInOrder(

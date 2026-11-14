@@ -1,6 +1,7 @@
 import {
   createCredentialRefusalWatch,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  forgetOrbitEnvironment,
   forgetPairingRevoked,
   isFinalPairingError,
   isPairingRevokedError,
@@ -315,8 +316,21 @@ async function reconcileEnvironments(
     plan.state.pairedByOrbit.reduce(recordPaired, {
       ...current,
       disabledByOrbit: plan.state.disabledByOrbit,
+      instanceServers: plan.state.instanceServers ?? {},
+      missingFromGateway: plan.state.missingFromGateway ?? {},
     }),
   );
+  // Conn: the server of an Instance the Gateway's lists left out long enough is gone; Orbit may give
+  // its address to a new Instance. Removed from this device as the desktop's Orbit panel does.
+  for (const { environmentId } of plan.remove) {
+    await runAtomCommand(
+      appAtomRegistry,
+      environmentCatalog.remove,
+      environmentId as EnvironmentId,
+      { reportFailure: false },
+    );
+    await updateEnvironmentState((current) => forgetOrbitEnvironment(current, environmentId));
+  }
   // Conn: until the saved thread starts load, the sync cannot tell which clones they hold.
   if (!orbitThreadStartStore.loaded()) return;
   // Conn: a pairing follows a Gateway Operation for up to a minute. It runs after the refresh, so

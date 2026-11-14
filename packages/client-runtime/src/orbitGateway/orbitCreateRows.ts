@@ -63,6 +63,18 @@ const STEP_ROWS: Readonly<Record<string, OrbitCreateRowId>> = {
   accepted: "register",
 };
 
+/**
+ * The create's closing steps, which run after a failed step too (release 2061: finish, cleanup and
+ * a failed `accepted` follow a failed clone-t3). They count for the register row only while no
+ * other step failed, so a failure never also checks or fails "Register with Orbit".
+ */
+const CLOSING_STEPS: ReadonlySet<string> = new Set([
+  "finish",
+  "clone-private-cleanup",
+  "cleanup",
+  "accepted",
+]);
+
 /** Step name prefixes of the address row: numbered steps and Orbit's step descriptions. */
 const ADDRESS_PREFIXES = [
   "clone-route-",
@@ -144,6 +156,16 @@ function readOrbitCreateRows(
   const seen = SEQUENTIAL_ROWS.some((id) => previous?.[id] !== undefined);
   const unknownRow: SequentialRowId | null = running ?? resumed ?? (seen ? null : "container");
   const reads: Partial<Record<OrbitCreateRowId, RowRead>> = {};
+  const terminal = OPERATION_TERMINAL_STATUSES.has(operation.status);
+  /** A failed step of the copy, T3 or register phases, not a closing step. */
+  const failedEarlier = (step: { readonly name: string }) => {
+    const row = orbitCreateRowOf(step);
+    return row !== null && isSequential(row) && !CLOSING_STEPS.has(step.name);
+  };
+  const failedSteps = steps.filter((step) => step.status === "failed");
+  const broken =
+    failedSteps.some(failedEarlier) ||
+    (operation.failedStep != null && failedEarlier({ name: operation.failedStep }));
   if (steps.length > 0) {
     const counted: Partial<Record<OrbitCreateRowId, OrbitGatewayOperationStep[]>> = {};
     const statuses = new Map<OrbitGatewayOperationStep, OrbitCreateRowStatus>();
@@ -151,6 +173,7 @@ function readOrbitCreateRows(
     for (const step of steps) {
       const status = stepStatus(step.status);
       if (status === null) continue;
+      if (broken && CLOSING_STEPS.has(step.name)) continue;
       const known = orbitCreateRowOf(step);
       const row: OrbitCreateRowId | null = known ?? (status === "pending" ? null : last);
       if (row === null) continue;
@@ -197,17 +220,28 @@ function readOrbitCreateRows(
     if (row !== null) reads[row] = { status: "running", startedAt: null, finishedAt: null };
   }
   // The address starts with the copy and runs while the create runs, whatever its own steps say:
-  // its row ends only with the completion (or with a create that has none).
+  // its row ends only with the completion (or with a create that has none). A failed publication
+  // step fails nothing: it never fails the create, and the completion publishes again.
   const begun = ORBIT_CREATE_ROW_IDS.some(
     (id) => reads[id] !== undefined && reads[id]!.status !== "pending",
   );
-  if (!OPERATION_TERMINAL_STATUSES.has(operation.status) && reads.address?.status !== "failed") {
+  if (!terminal) {
     if (begun || previous?.address?.status === "running") {
       reads.address = { startedAt: null, finishedAt: null, ...reads.address, status: "running" };
     }
   }
+  // Orbit names the create step that failed it. Without that name: a failed step of the copy,
+  // T3 or register phases, then a closing step; a failed publication step only once the create
+  // ended (it never fails a create that runs).
   const failedName =
-    operation.failedStep ?? steps.find((step) => step.status === "failed")?.name ?? null;
+    operation.failedStep ??
+    (
+      failedSteps.find(failedEarlier) ??
+      failedSteps.find((step) => CLOSING_STEPS.has(step.name)) ??
+      (terminal ? failedSteps[0] : undefined)
+    )?.name ??
+    null;
+  let failedRow: OrbitCreateRowId | null = null;
   if (operation.status === "succeeded") {
     const completes = typeof operation.completionOperationId === "number";
     for (const id of ORBIT_CREATE_ROW_IDS) {
@@ -217,8 +251,8 @@ function readOrbitCreateRows(
           : { startedAt: null, finishedAt: null, ...reads[id], status: "done" };
     }
   } else if (
-    (failedName !== null || OPERATION_TERMINAL_STATUSES.has(operation.status)) &&
-    !ORBIT_CREATE_ROW_IDS.some((id) => reads[id]?.status === "failed")
+    (failedName !== null || terminal) &&
+    !SEQUENTIAL_ROWS.some((id) => reads[id]?.status === "failed")
   ) {
     const failedStep = failedName === null ? null : steps.find((step) => step.name === failedName);
     const row =
@@ -227,12 +261,11 @@ function readOrbitCreateRows(
       running ??
       (failedName === null ? null : "container");
     if (row) reads[row] = { startedAt: null, finishedAt: null, ...reads[row], status: "failed" };
+    failedRow = row;
   }
-  if (
-    OPERATION_TERMINAL_STATUSES.has(operation.status) &&
-    operation.status !== "succeeded" &&
-    reads.address?.status !== "failed"
-  ) {
+  // A create that ended without success: the address row follows Orbit's route_publication,
+  // unless the step Orbit named as the failure is an address step (Gateways before 5063).
+  if (terminal && operation.status !== "succeeded" && failedRow !== "address") {
     reads.address = {
       startedAt: null,
       finishedAt: null,
@@ -246,17 +279,28 @@ function readOrbitCreateRows(
   return reads;
 }
 
+/** The one switch for Nick's answer on a failed create whose address Orbit published. */
+const PUBLISHED_AFTER_FAILED_CREATE: OrbitCreateRowStatus = "done";
+
 /**
- * The address row of a failed create, from the create's status, its 5063 `route_publication` and
- * the completion's status. Today it did not start: only a completion publishes the Route, and
- * Orbit admits one only after a create succeeded. 5063's values are mapped here only.
+ * The address row of a create that failed or was cancelled, from its `route_publication`:
+ * "published" stays live (502) until a Retry or a removal; "failed" is the X; absent or
+ * "deferred" did not start.
  */
-export function orbitFailedCreateAddressStatus(_input: {
+export function orbitFailedCreateAddressStatus(input: {
   readonly createStatus: string;
   readonly routePublication: string | null;
   readonly completionStatus: string | null;
 }): OrbitCreateRowStatus {
-  return "pending";
+  switch (input.routePublication) {
+    case "published":
+      // Waits on Nick (proposal 2026-11-14): "done" shows the check; "pending" shows the ring.
+      return PUBLISHED_AFTER_FAILED_CREATE;
+    case "failed":
+      return "failed";
+    default:
+      return "pending";
+  }
 }
 
 /** `result.route_publication` of a create (Orbit task group 5063), or null. */
@@ -328,7 +372,7 @@ export function stopRunningOrbitCreateRows(
   if (
     rows === null ||
     id === undefined ||
-    ORBIT_CREATE_ROW_IDS.some((row) => rows[row]?.status === "failed")
+    SEQUENTIAL_ROWS.some((row) => rows[row]?.status === "failed")
   ) {
     return null;
   }

@@ -176,14 +176,59 @@ describe("observeOrbitCreateRows while the create runs", () => {
     expect(statuses(rows)).toEqual(["container:done", "address:running", "t3:running"]);
   });
 
-  it("fails the address row when a 5063 address step fails", () => {
+  it("keeps the address running when a publication step fails while the create runs", () => {
+    // Release 2061: a failed publication never fails the create; the completion publishes again.
     const rows = observeOrbitCreateRows(
       null,
       op("running", [step("clone-container", "running"), step("clone-route", "failed")]),
       1,
     );
-    expect(rows.address?.status).toBe("failed");
+    expect(rows.address?.status).toBe("running");
     expect(rows.container?.status).toBe("running");
+  });
+
+  it("the closing steps after a failed step never check or fail the register row", () => {
+    const before = observeOrbitCreateRows(null, op("running", [step("clone-t3", "running")]), 1);
+    const closing = [
+      step("clone-t3", "failed"),
+      step("clone-register", "skipped"),
+      step("finish", "succeeded"),
+      step("clone-private-cleanup", "succeeded"),
+      step("cleanup", "running"),
+    ];
+    const running = observeOrbitCreateRows(before, op("running", closing), 2);
+    expect(statuses(running)).toEqual(["address:running", "t3:failed"]);
+    const ended = observeOrbitCreateRows(
+      running,
+      op(
+        "failed",
+        [...closing.slice(0, 4), step("cleanup", "succeeded"), step("accepted", "failed")],
+        {
+          failedStep: "clone-t3",
+        },
+      ),
+      3,
+    );
+    expect(statuses(ended)).toEqual(["address:pending", "t3:failed"]);
+  });
+
+  it("a failed closing step alone fails the register row", () => {
+    const rows = observeOrbitCreateRows(
+      null,
+      op("failed", [
+        step("clone-container", "succeeded"),
+        step("clone-t3", "succeeded"),
+        step("clone-register", "succeeded"),
+        step("accepted", "failed"),
+      ]),
+      2,
+    );
+    expect(statuses(rows)).toEqual([
+      "container:done",
+      "address:pending",
+      "t3:done",
+      "register:failed",
+    ]);
   });
 
   it("counts skipped steps as nothing", () => {
@@ -388,16 +433,43 @@ describe("create failure", () => {
     expect(stopped.t3?.finishedAt).toBe(9);
   });
 
-  it("orbitFailedCreateAddressStatus: today every failed create leaves the address unstarted", () => {
-    for (const routePublication of [null, "published", "deferred", "failed"]) {
-      expect(
-        orbitFailedCreateAddressStatus({
-          createStatus: "failed",
-          routePublication,
-          completionStatus: null,
-        }),
-      ).toBe("pending");
-    }
+  it.each([
+    [null, "pending"],
+    ["deferred", "pending"],
+    ["unknown-word", "pending"],
+    ["failed", "failed"],
+    // Nick's pick pending (proposal 2026-11-14): the check; the switch is PUBLISHED_AFTER_FAILED_CREATE.
+    ["published", "done"],
+  ])(
+    "orbitFailedCreateAddressStatus: route_publication %s reads %s",
+    (routePublication, expected) => {
+      for (const createStatus of ["failed", "cancelled", "interrupted"]) {
+        expect(
+          orbitFailedCreateAddressStatus({
+            createStatus,
+            routePublication,
+            completionStatus: null,
+          }),
+        ).toBe(expected);
+      }
+    },
+  );
+
+  it("a failed create whose clone-route succeeded keeps the address published", () => {
+    const rows = observeOrbitCreateRows(
+      null,
+      op(
+        "failed",
+        [
+          step("clone-container", "succeeded"),
+          step("clone-route", "succeeded"),
+          step("clone-t3", "failed"),
+        ],
+        { failedStep: "clone-t3", result: { route_publication: "published" } },
+      ),
+      2,
+    );
+    expect(statuses(rows)).toEqual(["container:done", "address:done", "t3:failed"]);
   });
 });
 

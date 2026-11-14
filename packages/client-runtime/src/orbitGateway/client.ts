@@ -1,6 +1,8 @@
 // @effect-diagnostics globalTimers:off - The Gateway client runs in the app, outside an Effect runtime.
 import * as Schema from "effect/Schema";
 
+import { parseOrbitThreadIndex, type OrbitThreadIndex } from "./threadIndex.ts";
+
 /**
  * The Conn layer of the Orbit Gateway (`/api/v1/conn`, see Orbit's docs/reference/conn.md).
  *
@@ -362,6 +364,12 @@ export interface OrbitGatewayClient {
   ) => Promise<OrbitGatewaySettings>;
   readonly environments: () => Promise<readonly OrbitGatewayEnvironment[]>;
   /**
+   * Conn: the Gateway's thread index of every container server this Node may see
+   * (`GET /conn/threads`, unfiltered, so it never reads a server through). Use
+   * `readOrbitThreadIndex`.
+   */
+  readonly threads: () => Promise<OrbitThreadIndex>;
+  /**
    * Mints a one-time pairing link to the server for this device, following the Gateway's
    * Operation. `renew`: an automatic pairing of a saved server, which Orbit refuses with 409
    * `conn.pairing_revoked` once this Node's pairing there is revoked (older Gateways ignore it).
@@ -619,6 +627,12 @@ export function createOrbitGatewayClient(
       ),
     environments: async () =>
       list(await call({ method: "GET", path: "/environments" }), "/environments", environment),
+    threads: async () => {
+      const envelope = await callEnvelope({ method: "GET", path: "/threads" });
+      const index = parseOrbitThreadIndex(envelope.data, envelope.meta);
+      if (index === null) throw invalid("/threads");
+      return index;
+    },
     pair: async (environmentId, pairOptions) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
       let data = record(

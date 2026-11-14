@@ -239,7 +239,7 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
         </div>
       </div>
       {/* The prompt box from the moment of send, disabled until the Instance is ready. */}
-      <OrbitPendingComposer />
+      <OrbitPendingComposer startId={start.id} />
     </PendingThreadShell>
   );
 }

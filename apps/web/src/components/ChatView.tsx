@@ -2200,6 +2200,17 @@ export default function ChatView(props: ChatViewProps) {
     isCoarsePointer ? ignoreComposerFocus : focusComposerStable,
   );
 
+  // Conn: the Orbit lock ends when the Instance is ready; the box takes the focus it could not take on open.
+  const orbitComposerLocked = orbitReady?.locksComposer === true;
+  const orbitLockWasOn = useRef(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the composer once when the Orbit lock ends, on a fine pointer
+  useEffect(() => {
+    const wasOn = orbitLockWasOn.current;
+    orbitLockWasOn.current = orbitComposerLocked;
+    if (!wasOn || orbitComposerLocked || embedded || isCoarsePointer) return;
+    focusComposerStable();
+  }, [orbitComposerLocked, embedded, isCoarsePointer, focusComposerStable]);
+
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window focus listener that refocuses the composer after the window regains focus on a fine pointer
   useEffect(() => {
     if (
@@ -3655,13 +3666,7 @@ export default function ChatView(props: ChatViewProps) {
               <div ref={draftHeroTransitionGroupRef} className="chat-composer-lane w-full">
                 <div
                   data-chat-composer-stack="true"
-                  // Conn: disabled (dimmed, not typeable, send off) until the Orbit Instance is ready.
-                  data-orbit-composer-locked={orbitReady?.locksComposer ? "true" : undefined}
-                  inert={orbitReady?.locksComposer === true}
-                  className={cn(
-                    "group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width) transition-opacity duration-100",
-                    orbitReady?.locksComposer && "opacity-50",
-                  )}
+                  className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full">
@@ -3789,6 +3794,7 @@ export default function ChatView(props: ChatViewProps) {
                                               : projectCloneSendBlockReason)
                                 }
                                 isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
+                                inputLocked={orbitReady?.locksComposer === true}
                                 bannerItems={
                                   isDraftHeroState || composerBannerItems.length === 0
                                     ? EMPTY_COMPOSER_BANNER_ITEMS

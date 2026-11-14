@@ -46,15 +46,16 @@ export function useOrbitReady(
 
 /**
  * The timeline with the Orbit start's first message in front while the thread's own messages have
- * not loaded yet, so the hand-over from the pending thread keeps the message and the card in place.
- * Once any message of the thread is loaded, the entries are used as they are.
+ * not loaded yet and the Instance is still being made, so the hand-over from the pending thread
+ * keeps the message and the card in place. Once any message is loaded, the entries stay as they are.
  */
 export function withOrbitFirstMessage(
   entries: ReadonlyArray<TimelineEntry>,
   orbitReady: OrbitReadyTimelineInput | null,
 ): ReadonlyArray<TimelineEntry> {
   const first = orbitReady?.firstMessage;
-  if (!orbitReady || !first) return entries;
+  // Only while the Instance is still being made: a later empty timeline (a rewind) stays empty.
+  if (!orbitReady || !first || orbitReady.locksComposer !== true) return entries;
   if (entries.some((entry) => entry.kind === "message")) return entries;
   const message: ChatMessage = {
     id: MessageId.make(orbitReady.messageId),

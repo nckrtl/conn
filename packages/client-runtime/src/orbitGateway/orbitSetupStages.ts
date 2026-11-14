@@ -63,13 +63,12 @@ function createRows(start: OrbitThreadStart): OrbitSetupCreateRow[] {
         ? "failed"
         : id === "address" && addressOfCompletion !== null
           ? addressOfCompletion
-          : // A saved row that still runs after the create failed: a failure with no terminal
-            // read, so no route_publication.
-            id === "address" && createFailed && row?.status === "running"
+          : // The unnamed failure that stopped a row: no terminal read, so no route_publication.
+            id === "address" && stopped !== undefined && row?.status === "running"
             ? orbitFailedCreateAddressStatus({
                 createStatus: "failed",
                 routePublication: null,
-                completionStatus: start.completionStatus ?? null,
+                completionStatus: null,
               })
             : (row?.status ?? "pending");
     return {

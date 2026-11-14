@@ -314,6 +314,22 @@ describe("orbitSetupStages", () => {
     expect(orbitSetupStages({ start, create: createOp("succeeded") })[0]!.rows).toBe(null);
   });
 
+  it("a create Orbit finished but Conn failed after it: the completion runs, the address spins", () => {
+    // Orbit lists no T3 server for the clone: Conn fails the start, Orbit's completion runs on.
+    const failed = {
+      ...creating,
+      error: "Orbit created the clone but lists no T3 server for it.",
+      createRows: atCreateSuccess.createRows,
+    } satisfies OrbitThreadStart;
+    expect(header(failed)).toBe("failed");
+    expect(rows(failed)).toEqual([
+      "Copy the container:done",
+      "Publish the address:running",
+      "Start the T3 server:done",
+      "Register with Orbit:done",
+    ]);
+  });
+
   it("folds the rows once the address is live, or when there is no completion (storyboard 7)", () => {
     const live: OrbitThreadStart = {
       ...creating,

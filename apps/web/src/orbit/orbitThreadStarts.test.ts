@@ -17,6 +17,7 @@ import {
   cancelOrbitThreadStart,
   dismissOrbitThreadStart,
   followSavedOrbitCompletion,
+  resumeSavedOrbitCompletionRetry,
   retrySavedOrbitCompletion,
   retryOrbitThreadStart,
   runSavedOrbitThreadStart,
@@ -621,6 +622,26 @@ describe("followSavedOrbitCompletion", () => {
     const after = readStored()[0]!;
     expect(after.completionOperationId).toBe(107);
     expect(orbitCompletionNeedsFollow(after)).toBe(true);
+  });
+
+  it("a Retry cut off by a restart is sent again once, under its saved key", async () => {
+    updateStarts(() => [
+      {
+        ...saved,
+        completionOperationId: null,
+        completionKey: "conn-thread-start:s-restart:complete:5",
+        completionStatus: "queued",
+      },
+    ]);
+    const completeInstance = vi.fn(async () => read("running", { id: 107, pollAfterSeconds: 2 }));
+    const gatewayClient = { completeInstance } as unknown as OrbitGatewayClient;
+    await Promise.all([
+      resumeSavedOrbitCompletionRetry(gatewayClient, saved.id),
+      resumeSavedOrbitCompletionRetry(gatewayClient, saved.id),
+    ]);
+    expect(completeInstance).toHaveBeenCalledTimes(1);
+    expect(completeInstance).toHaveBeenCalledWith(41, "conn-thread-start:s-restart:complete:5");
+    expect(readStored()[0]!.completionOperationId).toBe(107);
   });
 
   it("Dismiss drops the start; the follow stops without saving it back", async () => {

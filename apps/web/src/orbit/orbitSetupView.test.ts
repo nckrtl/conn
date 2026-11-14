@@ -571,10 +571,19 @@ describe("orbitSetupView with the create's completion (release 2030)", () => {
     expect(view.canRetry).toBe(true);
   });
 
-  it("state 6: Retry running shows the running card again", () => {
+  it("state 6: Retry running shows the running card again, also before Orbit answered", () => {
     const view = orbitSetupView({ ...following, completionStatus: "queued" });
     expect(view.phase).toBe("running");
     expect(view.canCancel).toBe(false);
+    const admitting = orbitSetupView({
+      ...following,
+      completionOperationId: null,
+      completionKey: "k",
+      completionStatus: "queued",
+    });
+    expect(admitting.phase).toBe("running");
+    expect(admitting.canCancel).toBe(false);
+    expect(admitting.stages[0]!.rows).not.toBeNull();
   });
 
   it("state 8: a removal's cancel shows nothing new", () => {

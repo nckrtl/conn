@@ -1,5 +1,6 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
+  orbitCompletionNeedsAdmission,
   orbitCompletionNeedsFollow,
   type OrbitGatewayEnvironment,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -17,6 +18,7 @@ import {
   dismissOrbitThreadStart,
   followSavedOrbitCompletion,
   orbitPendingThreadPath,
+  resumeSavedOrbitCompletionRetry,
   runSavedOrbitThreadStart,
 } from "./orbitThreadStarts";
 import { readStored, useOrbitThreadStarts } from "./orbitThreadStartStore";
@@ -38,6 +40,9 @@ export function OrbitThreadStartRunner() {
     for (const start of starts) {
       // The create's completion runs on after the send; the thread's card follows it.
       if (orbitCompletionNeedsFollow(start)) void followSavedOrbitCompletion(client, start.id);
+      if (orbitCompletionNeedsAdmission(start)) {
+        void resumeSavedOrbitCompletionRetry(client, start.id);
+      }
       // A sent start is kept only for its thread's ready row.
       if (start.error !== null || (start.sentAt != null && start.pendingThread)) continue;
       void runSavedOrbitThreadStart(client, start.id, {

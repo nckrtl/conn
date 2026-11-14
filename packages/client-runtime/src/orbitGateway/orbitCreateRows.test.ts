@@ -432,7 +432,7 @@ describe("observeOrbitCompletionRows", () => {
     expect(rows.address).toEqual({ status: "failed", startedAt: ms(43), finishedAt: ms(56) });
   });
 
-  it("puts a row that never ran back to pending when the completion failed elsewhere", () => {
+  it("puts a row whose steps never ended back to pending when the completion failed elsewhere", () => {
     const rows = observeOrbitCompletionRows(
       atCreate(),
       completion(
@@ -443,6 +443,7 @@ describe("observeOrbitCompletionRows", () => {
             startedAt: T(49),
             finishedAt: T(50),
           }),
+          step("route-csr-0", "running", { job: "publication", startedAt: T(48) }),
         ],
         { resultFailedStep: "workspace", pollAfterSeconds: null },
       ),

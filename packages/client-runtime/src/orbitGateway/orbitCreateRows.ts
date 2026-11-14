@@ -363,7 +363,7 @@ export function orbitCompletionFailedRow(operation: OrbitGatewayOperation): Orbi
 /**
  * The workspace and address rows after a read of the create's `instance.complete`; no order is
  * inferred. A row runs until the completion ends, is done when it succeeded or all its steps did,
- * fails per `orbitCompletionFailedRow`, and reads pending if it never ran. It keeps its start.
+ * fails per `orbitCompletionFailedRow`, and reads pending if its steps never ended. It keeps its start.
  */
 export function observeOrbitCompletionRows(
   previous: OrbitCreateRows | null,
@@ -389,8 +389,9 @@ export function observeOrbitCompletionRows(
     else if (terminal) {
       if (id === failedRow) status = "failed";
       else if (states.length > 0 && states.every((state) => state === "done")) status = "done";
-      else if (before !== null && before.status !== "running") continue;
-      // The completion ended before this row's work did: it did not run.
+      // A row with no step in this read keeps its state (a refused admission: spec state 12).
+      else if (before !== null && (states.length === 0 || before.status !== "running")) continue;
+      // The completion ended while this row's steps were unfinished: they did not run.
       else status = "pending";
     } else if (states.includes("failed")) status = "failed";
     // A Retry re-runs the completion: a row that was done stays done until a step of it fails.

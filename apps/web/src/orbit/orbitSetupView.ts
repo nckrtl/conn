@@ -259,7 +259,7 @@ export function orbitSetupView(
       start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE,
     details,
     cancelling: phase === "running" && start.cancelRequested === true,
-    canCancel: phase === "running" && start.completionOperationId == null,
+    canCancel: phase === "running" && completion === "none",
   };
 }
 

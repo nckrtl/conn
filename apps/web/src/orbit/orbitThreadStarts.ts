@@ -1,4 +1,5 @@
 import {
+  admitOrbitCompletion,
   followOrbitCompletion,
   newOrbitThreadStart,
   retryOrbitCompletion,
@@ -379,11 +380,35 @@ export async function followSavedOrbitCompletion(
   }
 }
 
+/** Retries whose admission this window sends, by start, so a re-run of the runner sends it once. */
+const admitting = new Set<string>();
+
+async function onceAdmitting(id: string, run: () => Promise<void>): Promise<void> {
+  if (admitting.has(id)) return;
+  admitting.add(id);
+  try {
+    await run();
+  } finally {
+    admitting.delete(id);
+  }
+}
+
 /** Retry of a failed completion, from any window: the main window's runner then follows it. */
 export async function retrySavedOrbitCompletion(
   client: OrbitGatewayClient | null,
   id: string,
 ): Promise<void> {
   if (client === null) return;
-  await retryOrbitCompletion(completionPorts(client, id));
+  await onceAdmitting(id, () => retryOrbitCompletion(completionPorts(client, id)));
+}
+
+/**
+ * A Retry whose answer a reload or quit cut off: the main window's runner sends it again under
+ * the saved key, so Orbit returns the Operation it may have admitted.
+ */
+export async function resumeSavedOrbitCompletionRetry(
+  client: OrbitGatewayClient,
+  id: string,
+): Promise<void> {
+  await onceAdmitting(id, () => admitOrbitCompletion(completionPorts(client, id)));
 }

@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { OrbitGatewayError, type OrbitGatewayOperation } from "./client.ts";
 import {
+  admitOrbitCompletion,
   applyOrbitCompletionRead,
+  orbitCompletionNeedsAdmission,
   followOrbitCompletion,
   orbitCompletionNeedsFollow,
   orbitCompletionPhase,
@@ -193,6 +195,8 @@ describe("followOrbitCompletion", () => {
     expect(await followOrbitCompletion(h.ports)).toBe("ended");
     expect(h.calls).toEqual(["operation 106"]);
     expect(h.saved()!.createRows?.workspace?.status).toBe("failed");
+    // The address keeps running: the refused completion never reached it.
+    expect(h.saved()!.createRows?.address?.status).toBe("running");
     expect(h.saved()!.completionErrorCode).toBe("instance.complete_unavailable");
   });
 
@@ -252,7 +256,19 @@ describe("retryOrbitCompletion", () => {
   const failedStart = () =>
     applyOrbitCompletionRead(
       sentStart(),
-      { ...failedWorkspace(), resultFailedStep: "route" },
+      {
+        ...failedWorkspace(),
+        resultFailedStep: "route",
+        steps: [
+          {
+            name: "clone-check",
+            job: "complete",
+            status: "succeeded",
+            startedAt: null,
+            finishedAt: null,
+          },
+        ],
+      },
       2_000,
     );
 
@@ -262,7 +278,12 @@ describe("retryOrbitCompletion", () => {
     const first = h.saves[0]!;
     expect(first.completionKey).toBe("conn-thread-start:s1:complete:1000");
     expect(first.completionStatus).toBe("queued");
+    expect(first.completionOperationId).toBeNull();
     expect(first.createRows?.address?.status).toBe("running");
+    // While Orbit has not answered, the card runs and no follower reads the old Operation.
+    expect(orbitCompletionPhase(first)).toBe("running");
+    expect(orbitCompletionNeedsFollow(first)).toBe(false);
+    expect(orbitCompletionNeedsAdmission(first)).toBe(true);
     expect(h.calls).toEqual(["complete 41 conn-thread-start:s1:complete:1000"]);
     expect(h.saved()).toMatchObject({
       completionOperationId: 107,
@@ -314,9 +335,27 @@ describe("retryOrbitCompletion", () => {
       completionStatus: "failed",
       completionErrorCode: "operation.target_busy",
       completionRetryable: true,
-      completionOperationId: 106,
+      completionOperationId: null,
     });
-    expect(h.saved()!.createRows).toEqual(before.createRows);
+    expect(orbitCompletionPhase(h.saved()!)).toBe("failed");
+    const statuses = (start: OrbitThreadStart) =>
+      Object.entries(start.createRows ?? {}).map(([id, row]) => `${id}:${row!.status}`);
+    expect(statuses(h.saved()!)).toEqual(statuses(before));
+    expect(statuses(before)).toContain("address:failed");
+  });
+
+  it("after a restart, sends an unanswered Retry again under its saved key", async () => {
+    const cutOff = {
+      ...failedStart(),
+      completionOperationId: null,
+      completionKey: "conn-thread-start:s1:complete:500",
+      completionStatus: "queued" as const,
+    };
+    const h = harness(cutOff, {}, [completion(107, "running")]);
+    await admitOrbitCompletion(h.ports);
+    expect(h.calls).toEqual(["complete 41 conn-thread-start:s1:complete:500"]);
+    expect(h.saved()!.completionOperationId).toBe(107);
+    expect(orbitCompletionNeedsFollow(h.saved()!)).toBe(true);
   });
 
   it("does nothing for a completion that did not fail", async () => {

@@ -7,7 +7,11 @@ import {
   type OrbitGatewayClient,
   type OrbitGatewayOperation,
 } from "./client.ts";
-import { observeOrbitCompletionRows, reopenOrbitCompletionRows } from "./orbitCreateRows.ts";
+import {
+  observeOrbitCompletionRows,
+  reopenOrbitCompletionRows,
+  type OrbitCreateRows,
+} from "./orbitCreateRows.ts";
 import {
   orbitCancelledCompletionShowsFailure,
   orbitPlusStartFollowsCompletion,
@@ -32,7 +36,8 @@ export type OrbitCompletionPhase =
   | "removed";
 
 export function orbitCompletionPhase(start: OrbitThreadStart): OrbitCompletionPhase {
-  if (start.completionOperationId == null) return "none";
+  // A Retry Orbit has not answered yet has a key and no Operation id: it runs.
+  if (start.completionOperationId == null && start.completionKey == null) return "none";
   switch (start.completionStatus ?? "queued") {
     case "succeeded":
       return "succeeded";
@@ -56,6 +61,20 @@ export function orbitCompletionNeedsFollow(start: OrbitThreadStart): boolean {
     start.completionOperationId != null &&
     !OPERATION_TERMINAL_STATUSES.has(start.completionStatus ?? "queued") &&
     (!orbitThreadStartHasNoMessage(start) || orbitPlusStartFollowsCompletion())
+  );
+}
+
+/**
+ * A Retry sent but not answered (a reload or quit came first): the runner sends it again under
+ * the saved key, and Orbit returns the Operation it may have admitted.
+ */
+export function orbitCompletionNeedsAdmission(start: OrbitThreadStart): boolean {
+  return (
+    start.sentAt != null &&
+    start.pendingThread === true &&
+    start.completionOperationId == null &&
+    start.completionKey != null &&
+    !OPERATION_TERMINAL_STATUSES.has(start.completionStatus ?? "queued")
   );
 }
 
@@ -147,20 +166,19 @@ export async function followOrbitCompletion(
 }
 
 /**
- * Retry of a failed completion: a new `instance.complete` under a new key, saved before the call.
- * A lost answer repeats under the same key. A refusal shows the failed card with its code. Once
- * Orbit admitted it, the runner follows the new Operation. Conn never retries by itself.
+ * Retry of a failed completion: a new `instance.complete` under a new key, saved before the call
+ * with no Operation id, so no follower reads the old one meanwhile. Once Orbit admitted it, the
+ * runner follows the new Operation. Conn never retries by itself.
  */
 export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise<void> {
   const start = ports.read();
   if (start === null || start.instanceId === null || orbitCompletionPhase(start) !== "failed") {
     return;
   }
-  const instanceId = start.instanceId;
   const key = `conn-thread-start:${start.id}:complete:${ports.now()}`;
-  const failedRows = start.createRows ?? null;
   ports.save({
     ...start,
+    completionOperationId: null,
     completionKey: key,
     completionStatus: "queued",
     completionErrorCode: null,
@@ -168,8 +186,20 @@ export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise
     completionProcessUnit: null,
     completionRequires: null,
     completionRetryable: false,
-    createRows: reopenOrbitCompletionRows(failedRows),
+    createRows: reopenOrbitCompletionRows(start.createRows ?? null),
   });
+  await admitOrbitCompletion(ports);
+}
+
+/**
+ * Sends the saved Retry under its saved key until Orbit answers: a lost answer repeats it. A
+ * refusal shows the failed card with its code; the rows that ran again fail again.
+ */
+export async function admitOrbitCompletion(ports: OrbitCompletionPorts): Promise<void> {
+  const start = ports.read();
+  if (start === null || start.instanceId === null || !start.completionKey) return;
+  if (start.completionOperationId != null) return;
+  const { instanceId, completionKey: key } = start;
   const begin = ports.now();
   let operation: OrbitGatewayOperation;
   for (let attempt = 0; ; attempt++) {
@@ -179,14 +209,14 @@ export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise
     } catch (error) {
       if (!isLostAdmission(error) || ports.now() - begin >= ADMISSION_MS) {
         const fresh = ports.read();
-        if (fresh?.completionKey !== key) return;
+        if (fresh?.completionKey !== key || fresh.completionOperationId != null) return;
         ports.save({
           ...fresh,
           completionStatus: "failed",
           completionErrorCode: isOrbitGatewayError(error) ? error.code : null,
           completionErrorDetail: error instanceof Error ? error.message : String(error),
           completionRetryable: true,
-          createRows: failedRows,
+          createRows: failRunningCompletionRows(fresh.createRows ?? null, ports.now()),
         });
         return;
       }
@@ -194,7 +224,7 @@ export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise
     await ports.sleep(operationPollDelayMs(2 ** attempt));
   }
   const fresh = ports.read();
-  if (fresh?.completionKey !== key) return;
+  if (fresh?.completionKey !== key || fresh.completionOperationId != null) return;
   ports.save(
     applyOrbitCompletionRead(
       { ...fresh, completionOperationId: operation.id },
@@ -202,4 +232,25 @@ export async function retryOrbitCompletion(ports: OrbitCompletionPorts): Promise
       ports.now(),
     ),
   );
+}
+
+/**
+ * A refused Retry fails one row again, as a refused admission does: the workspace when it runs,
+ * else the address. The other row stays as it is.
+ */
+function failRunningCompletionRows(
+  rows: OrbitCreateRows | null,
+  now: number,
+): OrbitCreateRows | null {
+  if (rows == null) return null;
+  const id =
+    rows.workspace?.status === "running"
+      ? "workspace"
+      : rows.address?.status === "running"
+        ? "address"
+        : null;
+  const row = id === null ? undefined : rows[id];
+  return id === null || row === undefined
+    ? rows
+    : { ...rows, [id]: { ...row, status: "failed", finishedAt: now } };
 }

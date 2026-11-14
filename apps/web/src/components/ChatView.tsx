@@ -406,7 +406,7 @@ import { ConnIconScope } from "../icons/connIcon";
 import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
 import { useOrbitEnvironmentInUse } from "../orbit/orbitInstanceSleep";
 import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
-import { useOrbitReady } from "../orbit/useOrbitReady";
+import { useOrbitReady, withOrbitFirstMessage } from "../orbit/useOrbitReady";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1608,17 +1608,20 @@ export default function ChatView(props: ChatViewProps) {
         message,
       }) as const,
   );
-  const timelineEntries = isServerThread ? serverTimelineEntries : draftTimelineEntries;
-  const timelineMessages = timelineEntries.flatMap((entry) =>
-    entry.kind === "message" ? [entry.message] : [],
-  );
-  const timelineEmpty = timelineEntries.length === 0 && !hasStreamedTimelineRows;
   const displayedTimelineKey = activeThreadKey ?? routeThreadKey;
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   const orbitReady = useOrbitReady(
     isServerThread ? (displayedThreadRef?.environmentId ?? null) : null,
     isServerThread ? (displayedThreadRef?.threadId ?? null) : null,
   );
+  // Conn: a thread handed over from a pending Orbit start shows its first message before it loads.
+  const timelineEntries = isServerThread
+    ? withOrbitFirstMessage(serverTimelineEntries, orbitReady)
+    : draftTimelineEntries;
+  const timelineMessages = timelineEntries.flatMap((entry) =>
+    entry.kind === "message" ? [entry.message] : [],
+  );
+  const timelineEmpty = timelineEntries.length === 0 && !hasStreamedTimelineRows;
   const {
     worktreeSetup,
     isPreparingWorktree,
@@ -3652,7 +3655,13 @@ export default function ChatView(props: ChatViewProps) {
               <div ref={draftHeroTransitionGroupRef} className="chat-composer-lane w-full">
                 <div
                   data-chat-composer-stack="true"
-                  className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
+                  // Conn: disabled (dimmed, not typeable, send off) until the Orbit Instance is ready.
+                  data-orbit-composer-locked={orbitReady?.locksComposer ? "true" : undefined}
+                  inert={orbitReady?.locksComposer === true}
+                  className={cn(
+                    "group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width) transition-opacity duration-100",
+                    orbitReady?.locksComposer && "opacity-50",
+                  )}
                 >
                   {isDraftHeroState ? (
                     <div className="absolute inset-x-0 bottom-full">

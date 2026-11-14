@@ -18,6 +18,7 @@ import { buildThreadRouteParams } from "../threadRoutes";
 import type { DraftId } from "../composerDraftStore";
 import { openOrbitDraft } from "./openOrbitDraft";
 import { openOrbitInstanceById } from "./openOrbitInstance";
+import { OrbitPendingComposer } from "./OrbitPendingComposer";
 import { requestOrbitBranchMenu, takeOrbitBranchMenuRequest } from "./orbitBranchControl";
 import { readOrbitEnvironments } from "./orbitPaletteProjects";
 import type { OrbitDraftTarget } from "./orbitDraft";
@@ -236,6 +237,8 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
           />
         </div>
       </div>
+      {/* The prompt box from the moment of send, disabled until the Instance is ready. */}
+      <OrbitPendingComposer />
     </PendingThreadShell>
   );
 }

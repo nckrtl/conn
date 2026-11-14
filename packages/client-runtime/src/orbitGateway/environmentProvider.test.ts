@@ -139,7 +139,101 @@ describe("planEnvironmentProvider", () => {
         orbit: null,
         state,
       }),
-    ).toEqual({ enable: [], disable: [], pair: [], renew: [], state });
+    ).toEqual({ enable: [], disable: [], pair: [], renew: [], remove: [], state });
+  });
+
+  it("removes a saved Instance server once two successful lists in a row leave it out", () => {
+    const state: OrbitEnvironmentState = {
+      disabledByOrbit: [],
+      pairedByOrbit: ["host", "clone"],
+    };
+    const list = [saved("host"), saved("clone")];
+    // Listed: remembered as an Instance's server.
+    const seen = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: [orbit("host"), orbit("clone", "registered", 1846), orbit("other", "registered", 9)],
+      state,
+    });
+    expect(seen.remove).toEqual([]);
+    // The Instance was destroyed outside Conn: the first list without it switches it off.
+    const first = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: [orbit("host"), orbit("other", "registered", 9)],
+      state: seen.state,
+    });
+    expect(first.remove).toEqual([]);
+    expect(first.disable).toEqual(["clone"]);
+    // The next successful list without it removes it from this device.
+    const second = planEnvironmentProvider({
+      provider: "orbit",
+      saved: [saved("host"), saved("clone", false)],
+      orbit: [orbit("host"), orbit("other", "registered", 9)],
+      state: first.state,
+    });
+    expect(second.remove).toEqual(["clone"]);
+    expect(second.disable).toEqual([]);
+    expect(second.state.pairedByOrbit).toEqual(["host"]);
+    expect(second.state.missingFromGateway).toEqual([]);
+  });
+
+  it("removes nothing while the Gateway is out, or lists nothing", () => {
+    const state: OrbitEnvironmentState = {
+      disabledByOrbit: [],
+      pairedByOrbit: ["clone"],
+      instanceServers: ["clone"],
+      missingFromGateway: ["clone"],
+    };
+    const list = [saved("clone", false)];
+    const failed = planEnvironmentProvider({ provider: "orbit", saved: list, orbit: null, state });
+    expect(failed.remove).toEqual([]);
+    expect(failed.state).toBe(state);
+    // An empty list (a Gateway that briefly lists nothing) is no proof either; the count holds.
+    const empty = planEnvironmentProvider({ provider: "orbit", saved: list, orbit: [], state });
+    expect(empty.remove).toEqual([]);
+    expect(empty.state.missingFromGateway).toEqual(["clone"]);
+    // Back in the list: the count starts again.
+    const back = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: [orbit("clone", "registered", 1846)],
+      state,
+    });
+    expect(back.remove).toEqual([]);
+    expect(back.state.missingFromGateway).toEqual([]);
+  });
+
+  it("never removes a host server, which only switches off", () => {
+    let state: OrbitEnvironmentState = { disabledByOrbit: [], pairedByOrbit: ["host"] };
+    let list = [saved("host")];
+    for (let run = 0; run < 3; run++) {
+      const plan = planEnvironmentProvider({
+        provider: "orbit",
+        saved: list,
+        orbit: [orbit("other-host"), orbit("clone", "registered", 7)],
+        state,
+      });
+      expect(plan.remove).toEqual([]);
+      state = plan.state;
+      list = [saved("host", false)];
+    }
+    expect(state.missingFromGateway).toEqual([]);
+  });
+
+  it("removes a switched-off clone this device knew before it remembered Instance servers", () => {
+    const state: OrbitEnvironmentState = { disabledByOrbit: [], pairedByOrbit: ["instance-1846"] };
+    const input = {
+      provider: "orbit" as const,
+      saved: [saved("instance-1846", false)],
+      orbit: [orbit("instance-2764", "registered", 2764)],
+      knownInstanceServers: ["instance-1846"],
+    };
+    const first = planEnvironmentProvider({ ...input, state });
+    expect(first.remove).toEqual([]);
+    expect(planEnvironmentProvider({ ...input, state: first.state }).remove).toEqual([
+      "instance-1846",
+    ]);
   });
 
   it("restores exactly the earlier list on each switch, back and forth", () => {

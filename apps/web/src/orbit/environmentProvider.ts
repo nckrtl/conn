@@ -43,7 +43,8 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useServerConfigs } from "../state/entities";
 import { environmentSession, readEnvironmentLacksScope } from "../state/session";
 import { observeOrbitInstancePower } from "./orbitInstanceSleep";
-import { heldOrbitInstanceIds } from "./orbitThreadStartStore";
+import { rememberedCloneEnvironmentIds } from "./cloneWorkspaceRefs";
+import { dropOrbitInstanceStarts, heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
@@ -176,8 +177,25 @@ function saveReconciledState(next: OrbitEnvironmentState): void {
     state: next.pairedByOrbit.reduce(recordPaired, {
       ...current,
       disabledByOrbit: next.disabledByOrbit,
+      instanceServers: next.instanceServers ?? [],
+      missingFromGateway: next.missingFromGateway ?? [],
     }),
   }));
+}
+
+/**
+ * Conn: removes the server of an Instance that left the Gateway's list from this device, as the
+ * Orbit panel does when the user removes the Instance: the saved server, its pairing records and
+ * Orbit facts, and the thread starts that wait for it.
+ */
+async function removeGoneInstanceServer(environmentId: string, instanceId: number | null) {
+  dropOrbitInstanceStarts(instanceId, [environmentId]);
+  await runAtomCommand(appAtomRegistry, environmentCatalog.remove, environmentId as EnvironmentId, {
+    reportFailure: false,
+  });
+  // Forgotten even when the removal failed: a later sync, which still knows it as an Instance's
+  // server, removes it again after two more lists without it.
+  forgetOrbitInstanceEnvironment(environmentId);
 }
 
 function updateState(change: (state: OrbitEnvironmentState) => OrbitEnvironmentState): void {
@@ -368,6 +386,8 @@ export async function reconcileEnvironmentProvider(
 ): Promise<readonly OrbitGatewayEnvironment[] | null> {
   const { provider, state } = useEnvironmentProvider.getState();
   const orbit = provider === "orbit" ? await client.environments() : null;
+  // Conn: the Instance facts of the last list, before this one replaces them.
+  const previousInstances = useEnvironmentProvider.getState().orbitInstances;
   saveOrbitInstances(orbit === null ? {} : orbitInstancesByEnvironment(orbit));
   // Conn: asleep Instances nobody uses stay unconnected; one in use is woken.
   await observeOrbitInstancePower(client, orbit);
@@ -402,6 +422,7 @@ export async function reconcileEnvironmentProvider(
     lacksAccess,
     heldInstanceIds: heldOrbitInstanceIds(),
     renew: readSessionRenewals({ environmentIds: bearerIds, readConnection, readSession, now }),
+    knownInstanceServers: [...Object.keys(previousInstances), ...rememberedCloneEnvironmentIds()],
     now,
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
@@ -417,6 +438,12 @@ export async function reconcileEnvironmentProvider(
   for (const environmentId of plan.enable) await setEnabled(environmentId, true);
 
   saveReconciledState(plan.state);
+  for (const environmentId of plan.remove) {
+    await removeGoneInstanceServer(
+      environmentId,
+      previousInstances[environmentId]?.instanceId ?? null,
+    );
+  }
   // Conn: every renewal of this sync, one after another, without holding up the profile sync.
   const renew = new Set(plan.renew);
   renewInOrder(

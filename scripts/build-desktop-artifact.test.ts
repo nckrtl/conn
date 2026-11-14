@@ -670,8 +670,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it.effect("names updatable AppImages without a version and apart per channel", () =>
     Effect.gen(function* () {
+      // Conn: the fork ships no update feed (`publish = null`), so only a build with the mock
+      // update feed gets the updatable AppImage name; without it there is none to check.
       const appImageName = (version: string) =>
-        createBuildConfig("linux", "AppImage", version, false, false, undefined, undefined).pipe(
+        createBuildConfig("linux", "AppImage", version, false, true, undefined, undefined).pipe(
           Effect.map((config) => (config.appImage as { artifactName: string }).artifactName),
         );
 
@@ -681,6 +683,18 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.notInclude(stable, "${version}");
       assert.notInclude(nightly, "${version}");
       assert.notEqual(stable, nightly);
+
+      const withoutFeed = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "0.0.37",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.isNull(withoutFeed.publish ?? null);
+      assert.isUndefined(withoutFeed.appImage);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(

@@ -13,10 +13,11 @@ export function readAttachedThreadsSection(settings: OrbitGatewaySettings): {
   readonly version: number;
   readonly environmentIds: readonly string[];
 } {
-  const version = settings.sections?.[ATTACHED_THREADS_SECTION]?.version ?? 0;
   const raw = settings.document[ATTACHED_THREADS_SECTION];
-  const threads =
-    typeof raw === "object" && raw !== null ? (raw as { threads?: unknown }).threads : undefined;
+  // A cleared section (null) keeps a version above 0 but reads as never written.
+  if (typeof raw !== "object" || raw === null) return { version: 0, environmentIds: [] };
+  const version = settings.sections?.[ATTACHED_THREADS_SECTION]?.version ?? 0;
+  const threads = (raw as { threads?: unknown }).threads;
   const environmentIds = new Set<string>();
   if (Array.isArray(threads)) {
     for (const thread of threads) {

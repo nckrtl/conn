@@ -50,6 +50,13 @@ describe("readAttachedThreadsSection", () => {
     ).toEqual({ version: 4, environmentIds: ["inner-a"] });
   });
 
+  it("reads a cleared section (null value, version above 0) as never written", () => {
+    expect(readAttachedThreadsSection(settings(null, 5))).toEqual({
+      version: 0,
+      environmentIds: [],
+    });
+  });
+
   it("reads a missing or null section as an empty set at version 0", () => {
     expect(readAttachedThreadsSection(settings(undefined, null))).toEqual({
       version: 0,

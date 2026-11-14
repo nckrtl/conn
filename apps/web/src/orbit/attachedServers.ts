@@ -38,18 +38,27 @@ export interface AttachedServersPorts {
 }
 
 export function createAttachedServers(ports: AttachedServersPorts) {
-  /** Brings the registry's `not-attached` reasons to the stored record. */
-  const apply = async (): Promise<void> => {
-    if (!ports.enabled()) return;
-    const plan = planAttachedServers({
-      enabled: true,
-      stored: ports.load(),
-      current: await ports.heldNow(),
-    });
-    // Release first, so a server that became attached connects before the others drop.
-    for (const environmentId of plan.release) await ports.setHeld(environmentId, false);
-    for (const environmentId of plan.hold) await ports.setHeld(environmentId, true);
+  let heldAny = false;
+  // One registry change at a time, so two storage events cannot apply stale plans.
+  let queue: Promise<void> = Promise.resolve();
+  const serial = (run: () => Promise<void>): Promise<void> => {
+    const next = queue.then(run, run);
+    queue = next.catch(() => {});
+    return next;
   };
+
+  /** Brings the registry's `not-attached` reasons to the stored record. */
+  const apply = (): Promise<void> =>
+    serial(async () => {
+      if (!ports.enabled()) return;
+      const current = await ports.heldNow();
+      const plan = planAttachedServers({ enabled: true, stored: ports.load(), current });
+      // Release first, so a server that became attached connects before the others drop.
+      for (const environmentId of plan.release) await ports.setHeld(environmentId, false);
+      for (const environmentId of plan.hold) await ports.setHeld(environmentId, true);
+      // Seeded holds count too: they are in `current`.
+      heldAny = current.size - plan.release.length + plan.hold.length > 0;
+    });
 
   /**
    * After a Gateway list read in Orbit mode: keeps the profile's attached set and the container
@@ -98,10 +107,16 @@ export function createAttachedServers(ports: AttachedServersPorts) {
       await apply();
       return;
     }
-    for (const environmentId of await ports.heldNow()) await ports.setHeld(environmentId, false);
+    await serial(async () => {
+      for (const environmentId of await ports.heldNow()) await ports.setHeld(environmentId, false);
+      heldAny = false;
+    });
   };
 
-  return { apply, record, clear, releaseIfOff };
+  /** Whether this window held a server off since its last release. */
+  const heldAnything = (): boolean => heldAny;
+
+  return { apply, record, clear, releaseIfOff, heldAnything };
 }
 
 let attachedServers: ReturnType<typeof createAttachedServers> | null = null;
@@ -144,13 +159,18 @@ export async function recordAttachedServers(
   me: OrbitGatewayNode,
   environments: readonly OrbitGatewayEnvironment[],
 ): Promise<void> {
-  if (!readAttachedServersFlag()) return;
+  if (!readAttachedServersFlag()) return releaseAfterFlagOff();
   await appAttachedServers().record(client, me, environments);
 }
 
 export async function clearAttachedServers(): Promise<void> {
-  if (!readAttachedServersFlag()) return;
+  if (!readAttachedServersFlag()) return releaseAfterFlagOff();
   await appAttachedServers().clear();
+}
+
+/** The flag went off in this window after it held servers: let them connect again. */
+async function releaseAfterFlagOff(): Promise<void> {
+  if (attachedServers?.heldAnything() === true) await attachedServers.releaseIfOff();
 }
 
 let storageWatched = false;

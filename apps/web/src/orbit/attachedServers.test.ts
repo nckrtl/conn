@@ -148,6 +148,59 @@ describe("attached servers (flag connAttachedServers)", () => {
     expect(test.held.size).toBe(0);
   });
 
+  it("two applies at once end on the newest record", async () => {
+    const base = { schema: 1, profileId: 2, profileVersion: 5, containers: ["inner-x"] } as const;
+    let stored: StoredAttachedServers = { ...base, version: 1, attached: [] };
+    const held = new Set<string>();
+    const servers = createAttachedServers({
+      enabled: () => true,
+      load: () => stored,
+      save: () => {},
+      // Slow read: without serialization the second run would plan from the same empty state.
+      heldNow: async () => {
+        for (let tick = 0; tick < 5; tick += 1) await Promise.resolve();
+        return new Set(held);
+      },
+      setHeld: async (environmentId, hold) => {
+        if (hold) held.add(environmentId);
+        else held.delete(environmentId);
+      },
+    });
+    const first = servers.apply();
+    stored = { ...base, version: 2, attached: ["inner-x"] };
+    const second = servers.apply();
+    await Promise.all([first, second]);
+    expect(held.size).toBe(0);
+  });
+
+  it("turning the flag off releases what this window held", async () => {
+    let enabled = true;
+    const held = new Set<string>(["inner-b"]);
+    const servers = createAttachedServers({
+      enabled: () => enabled,
+      load: () => ({
+        schema: 1,
+        profileId: 2,
+        profileVersion: 5,
+        version: 1,
+        attached: ["inner-a"],
+        containers: ["inner-a", "inner-b"],
+      }),
+      save: () => {},
+      heldNow: async () => new Set(held),
+      setHeld: async (environmentId, hold) => {
+        if (hold) held.add(environmentId);
+        else held.delete(environmentId);
+      },
+    });
+    await servers.apply();
+    expect(servers.heldAnything()).toBe(true);
+    enabled = false;
+    await servers.releaseIfOff();
+    expect(held.size).toBe(0);
+    expect(servers.heldAnything()).toBe(false);
+  });
+
   it("a profile that never wrote the section holds nothing off", async () => {
     const test = harness(true);
     const client = {

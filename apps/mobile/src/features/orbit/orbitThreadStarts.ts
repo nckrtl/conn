@@ -79,6 +79,7 @@ export function beginOrbitThreadStart(
       messageId: input.uuid(),
       commandId: input.uuid(),
       now: input.now,
+      instanceDomainSuffix: input.project.instanceDomainSuffix ?? null,
     }),
     workspaceId: input.workspaceId,
   };

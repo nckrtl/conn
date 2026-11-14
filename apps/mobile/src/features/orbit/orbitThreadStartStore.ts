@@ -144,7 +144,12 @@ export function dismissOrbitThreadStart(id: string, store = orbitThreadStartStor
 
 /** Instances whose server a start pairs with itself; the environment sync leaves them alone. */
 export function heldOrbitInstanceIds(store = orbitThreadStartStore): number[] {
-  return store.starts().flatMap((start) => (start.instanceId === null ? [] : [start.instanceId]));
+  // A sent start no longer pairs; its Instance follows the sync, as on the desktop.
+  return store
+    .starts()
+    .flatMap((start) =>
+      start.instanceId === null || start.sentAt != null ? [] : [start.instanceId],
+    );
 }
 
 export type OrbitThreadStartStage =

@@ -35,6 +35,7 @@ const project = {
   name: "Create bench",
   nodeId: 7,
   nodeName: "beast",
+  instanceDomainSuffix: ".create-bench.test",
 };
 
 /** A file that keeps what was last written, as the app's documents folder does across restarts. */
@@ -183,6 +184,8 @@ describe("Orbit thread starts on the phone", () => {
     const after = createOrbitThreadStartStore(storage);
     await after.load();
     expect(heldOrbitInstanceIds(after)).toEqual([41]);
+    // The row's "Publish the address" shows the address with the listed domain.
+    expect(after.starts()[0]!.instanceDomainSuffix).toBe(".create-bench.test");
     expect(orbitThreadStartRow(after.starts()[0]!)).toMatchObject({ stage: "pairing" });
     const run = ports(after);
     expect(await runSavedOrbitThreadStart(start.id, run.ports)).not.toBeNull();
@@ -440,6 +443,8 @@ describe("the create's completion on the phone (same answers as the desktop)", (
     ]);
     const kept = store.starts()[0]!;
     expect(kept).toMatchObject({ completionOperationId: 106, pendingThread: true });
+    // A sent start leaves its Instance to the sync, so a removed one is cleaned up.
+    expect(heldOrbitInstanceIds(store)).toEqual([]);
     const row = orbitThreadStartRow(kept);
     expect(row.stage).toBe("setup");
     expect(row.rows?.map((entry) => `${entry.label}:${entry.status}`)).toContain(

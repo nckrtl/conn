@@ -14,6 +14,7 @@ import { isGuestPage } from "../guestPage";
 import * as Runtime from "../lib/runtime";
 import * as BackgroundActivityReporter from "../lib/backgroundActivityReporter";
 import * as ConnectionPlatform from "./platform";
+import { attachedServersSeedLayer } from "../orbit/attachedServersSeed";
 
 const layerProvidedConnectionPlatform = ConnectionPlatform.layer.pipe(Layer.provide(Runtime.layer));
 
@@ -30,7 +31,8 @@ type ConnectionLayerSource =
   | typeof Runtime.layer
   | typeof ConnectionPlatform.layer
   | typeof BackgroundActivityReporter.layerObserver
-  | typeof BackgroundActivityReporter.layer;
+  | typeof BackgroundActivityReporter.layer
+  | typeof attachedServersSeedLayer;
 
 const layerProvidedClientConnection = layerSnapshotLoader.pipe(
   Layer.provideMerge(
@@ -45,6 +47,8 @@ const layerProvidedClientConnection = layerSnapshotLoader.pipe(
       Runtime.layer,
       layerProvidedConnectionPlatform,
       BackgroundActivityReporter.layerObserver,
+      // Conn: the stored attached set holds servers off before the registry starts.
+      attachedServersSeedLayer,
     ),
   ),
 );

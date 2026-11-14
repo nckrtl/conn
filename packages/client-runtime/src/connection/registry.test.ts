@@ -57,6 +57,7 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as EnvironmentRegistry from "./registry.ts";
+import { ConnectionParkSeed } from "./parking.ts";
 import {
   PullRequestRoutingPermissions,
   type StoredPullRequestRoutingPermission,
@@ -1200,6 +1201,125 @@ describe("EnvironmentRegistry", () => {
           registry,
           RELAY_TARGET.environmentId,
           (state) => state.phase === "connected",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("park reasons are added and removed independently; any one holds the server off", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const id = RELAY_TARGET.environmentId;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, id, (state) => state.phase === "connected");
+
+        yield* registry.setParkReason(id, "asleep", true);
+        yield* registry.setParkReason(id, "not-attached", true);
+        yield* awaitConnectionState(registry, id, (state) => state.phase === "available");
+        expect((yield* registry.parkReasons).get(id)).toEqual(new Set(["asleep", "not-attached"]));
+
+        // Dropping one reason keeps the other: still off, no new connect.
+        const connectsBefore = (yield* Ref.get(harness.connectedRoutes)).length;
+        yield* registry.setParkReason(id, "asleep", false);
+        expect((yield* registry.parkReasons).get(id)).toEqual(new Set(["not-attached"]));
+        expect((yield* registry.state(id)).phase).toBe("available");
+        expect((yield* registry.connectedEnvironmentIds).has(id)).toBe(false);
+
+        // Adding the same reason twice and removing a reason it does not have change nothing.
+        yield* registry.setParkReason(id, "not-attached", true);
+        yield* registry.setParkReason(id, "asleep", false);
+        expect((yield* registry.state(id)).phase).toBe("available");
+        expect((yield* Ref.get(harness.connectedRoutes)).length).toBe(connectsBefore);
+
+        // The last reason gone: it connects.
+        yield* registry.setParkReason(id, "not-attached", false);
+        yield* awaitConnectionState(registry, id, (state) => state.phase === "connected");
+        expect((yield* registry.parkReasons).has(id)).toBe(false);
+        expect((yield* registry.connectedEnvironmentIds).has(id)).toBe(true);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("the sleep controller's release does not clear a not-attached reason", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const id = RELAY_TARGET.environmentId;
+        yield* registry.start;
+        yield* awaitConnectionState(registry, id, (state) => state.phase === "connected");
+        yield* registry.setParkReason(id, "not-attached", true);
+        yield* awaitConnectionState(registry, id, (state) => state.phase === "available");
+
+        // What the desktop sleep controller calls on every list read for an awake Instance, and
+        // what a wake calls: `setParked(id, false)` releases only `asleep`.
+        yield* registry.setParked(id, true);
+        yield* registry.setParked(id, false);
+        yield* registry.setParked(id, false);
+        yield* registry.retryNow(id);
+        expect((yield* registry.parkReasons).get(id)).toEqual(new Set(["not-attached"]));
+        expect((yield* registry.state(id)).phase).toBe("available");
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("a seeded reason holds a server off from the start: it never connects", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET, SECOND_RELAY_TARGET]);
+      const held = SECOND_RELAY_TARGET.environmentId;
+      const seeded = harness.layer.pipe(
+        Layer.provide(
+          Layer.succeed(ConnectionParkSeed, {
+            load: Effect.succeed(new Map([[held, new Set(["not-attached"] as const)]])),
+          }),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        expect((yield* registry.parkReasons).get(held)).toEqual(new Set(["not-attached"]));
+        yield* registry.start;
+        yield* awaitConnectionState(
+          registry,
+          RELAY_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        expect((yield* registry.state(held)).phase).toBe("available");
+        expect((yield* registry.state(held)).desired).toBe(false);
+        const connects = yield* Ref.get(harness.connectedRoutes);
+        expect(connects).toEqual([connectionRouteId(RELAY_TARGET)]);
+        expect(yield* registry.connectedEnvironmentIds).toEqual(
+          new Set([RELAY_TARGET.environmentId]),
+        );
+
+        // Releasing the seeded reason connects it.
+        yield* registry.setParkReason(held, "not-attached", false);
+        yield* awaitConnectionState(registry, held, (state) => state.phase === "connected");
+      }).pipe(Effect.provide(seeded));
+    }),
+  );
+
+  it.effect("without a seed (flag off) every saved server connects at start, as before", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([RELAY_TARGET, SECOND_RELAY_TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        expect((yield* registry.parkReasons).size).toBe(0);
+        yield* registry.start;
+        for (const target of [RELAY_TARGET, SECOND_RELAY_TARGET]) {
+          yield* awaitConnectionState(
+            registry,
+            target.environmentId,
+            (state) => state.phase === "connected",
+          );
+        }
+        expect(new Set(yield* Ref.get(harness.connectedRoutes))).toEqual(
+          new Set([connectionRouteId(RELAY_TARGET), connectionRouteId(SECOND_RELAY_TARGET)]),
         );
       }).pipe(Effect.provide(harness.layer));
     }),

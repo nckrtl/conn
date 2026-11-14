@@ -326,9 +326,11 @@ async function reconcileEnvironments(
     pairingAgain = true;
     return;
   }
+  const provider = state.provider;
   pairingRun = runPairings(orbit ?? [], plan.renew, plan.pair, savedIds).finally(() => {
     pairingRun = null;
-    if (pairingAgain && state.provider === "orbit") {
+    // A switch of provider during the run re-applies the new one; a refresh during it plans again.
+    if (state.provider !== provider || (pairingAgain && state.provider === "orbit")) {
       pairingAgain = false;
       void refreshOrbitGateway();
     }
@@ -350,6 +352,8 @@ async function runPairings(
   // open without a burst of Gateway Operations.
   const renew = new Set(renewIds);
   for (const entry of orbit) {
+    // A switch to Default mode during the run stops it before the next pairing.
+    if (state.provider !== "orbit") return;
     if (renew.has(entry.environmentId) && !pairings.has(entry.environmentId)) {
       await pairOne(entry, "renew");
     }
@@ -357,7 +361,7 @@ async function runPairings(
   // One other server per refresh.
   const environmentId = pairIds.find((id) => !renew.has(id) && !pairings.has(id));
   const environment = orbit.find((entry) => entry.environmentId === environmentId);
-  if (environment) {
+  if (environment && state.provider === "orbit") {
     await pairOne(environment, savedIds.has(environment.environmentId) ? "access" : "new");
   }
 }
@@ -400,6 +404,8 @@ export function refreshOrbitGateway(): Promise<void> {
 /** Chooses where this device's environments come from and applies it at once. */
 export async function setEnvironmentProvider(provider: EnvironmentProvider): Promise<void> {
   if (refreshing) await refreshing;
+  // Conn: a pairing in flight saves its server; let it end before the switch reconciles.
+  if (pairingRun) await pairingRun;
   set({ provider });
   await saveProvider();
   await refreshOrbitGateway();

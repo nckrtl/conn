@@ -43,7 +43,8 @@ export function ThreadTimeline({
   });
   // Conn: a thread handed over from a pending Orbit start shows its first message before it loads.
   const entries =
-    draftEntries ?? withOrbitFirstMessage(serverEntries, timelineProps.orbitReady ?? null);
+    draftEntries ??
+    withOrbitFirstMessage(serverEntries, timelineProps.orbitReady ?? null, detailLoading);
   const displayedEntries = resolveThreadSwitchTimeline({
     loading: entries.length === 0 && syncing,
     activeThreadKey,

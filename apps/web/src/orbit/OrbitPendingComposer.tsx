@@ -41,7 +41,7 @@ export function OrbitPendingComposer({ startId }: { startId: string }) {
                   <span className="flex size-7 items-center justify-center text-muted-foreground">
                     <MicIcon aria-hidden className="size-4" />
                   </span>
-                  <span className="flex size-8 items-center justify-center rounded-full bg-foreground/12 text-muted-foreground">
+                  <span className="flex size-8 items-center justify-center rounded-full bg-message-action text-message-action-foreground">
                     <ArrowUpIcon aria-hidden className="size-3.5" />
                   </span>
                 </span>

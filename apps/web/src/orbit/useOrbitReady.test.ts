@@ -44,6 +44,11 @@ describe("withOrbitFirstMessage", () => {
     expect(withOrbitFirstMessage(loaded, ready())).toBe(loaded);
   });
 
+  it("keeps the first message while the thread's messages first load, also after ready", () => {
+    const entries = withOrbitFirstMessage([], ready({ locksComposer: false }), true);
+    expect(entries).toHaveLength(1);
+  });
+
   it("adds nothing once the Instance is ready (a later empty timeline stays empty)", () => {
     const empty: TimelineEntry[] = [];
     expect(withOrbitFirstMessage(empty, ready({ locksComposer: false }))).toBe(empty);

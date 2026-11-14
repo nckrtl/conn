@@ -52,10 +52,14 @@ export function useOrbitReady(
 export function withOrbitFirstMessage(
   entries: ReadonlyArray<TimelineEntry>,
   orbitReady: OrbitReadyTimelineInput | null,
+  detailLoading = false,
 ): ReadonlyArray<TimelineEntry> {
   const first = orbitReady?.firstMessage;
-  // Only while the Instance is still being made: a later empty timeline (a rewind) stays empty.
-  if (!orbitReady || !first || orbitReady.locksComposer !== true) return entries;
+  // Only while the Instance is being made or the thread's messages first load: a later empty
+  // timeline (a rewind) stays empty.
+  if (!orbitReady || !first || (orbitReady.locksComposer !== true && !detailLoading)) {
+    return entries;
+  }
   if (entries.some((entry) => entry.kind === "message")) return entries;
   const message: ChatMessage = {
     id: MessageId.make(orbitReady.messageId),

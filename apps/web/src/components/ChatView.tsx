@@ -1616,7 +1616,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   // Conn: a thread handed over from a pending Orbit start shows its first message before it loads.
   const timelineEntries = isServerThread
-    ? withOrbitFirstMessage(serverTimelineEntries, orbitReady)
+    ? withOrbitFirstMessage(serverTimelineEntries, orbitReady, threadDetailLoading)
     : draftTimelineEntries;
   const timelineMessages = timelineEntries.flatMap((entry) =>
     entry.kind === "message" ? [entry.message] : [],
@@ -2208,6 +2208,9 @@ export default function ChatView(props: ChatViewProps) {
     const wasOn = orbitLockWasOn.current;
     orbitLockWasOn.current = orbitComposerLocked;
     if (!wasOn || orbitComposerLocked || embedded || isCoarsePointer) return;
+    // Never take the focus from a field the user is typing in (terminal, browser bar, side chat).
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
     focusComposerStable();
   }, [orbitComposerLocked, embedded, isCoarsePointer, focusComposerStable]);
 

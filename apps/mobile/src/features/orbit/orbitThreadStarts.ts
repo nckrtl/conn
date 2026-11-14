@@ -1,5 +1,6 @@
 import {
   newOrbitThreadStart,
+  orbitPhoneFollowsCompletion,
   runOrbitThreadStart,
   sendOrbitFirstMessage,
   type OrbitFirstMessagePorts,
@@ -150,7 +151,10 @@ export async function runSavedOrbitThreadStart(
       },
     });
     if (!sent || environmentId === null) return null;
-    store.update((starts) => starts.filter((entry) => entry.id !== id));
+    // The phone does not follow the create's completion: the start goes after the send.
+    if (!orbitPhoneFollowsCompletion()) {
+      store.update((starts) => starts.filter((entry) => entry.id !== id));
+    }
     return { environmentId, threadId: start.threadId };
   } finally {
     running.delete(id);

@@ -9,6 +9,8 @@ import {
   ORBIT_PLACEMENT_CONFLICT,
   ORBIT_ROUTE_DOMAIN_INVALID,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
+  orbitCompletionPhase,
+  orbitCompletionProcessFailureCanRetry,
   orbitSetupReadyMs,
   orbitSetupStages,
   orbitThreadStartCanRetry,
@@ -74,6 +76,11 @@ export interface OrbitSetupView {
   readonly details: OrbitSetupDetails;
   /** Cancel waits for Orbit to admit the create, so it can be cancelled. */
   readonly cancelling: boolean;
+  /**
+   * Cancel is offered while the start runs, but not once the create ended with a completion:
+   * the way to stop a completion is to remove the Instance.
+   */
+  readonly canCancel: boolean;
 }
 
 export const ORBIT_SETUP_FAILED_TITLE = "Instance setup failed";
@@ -114,7 +121,10 @@ interface OrbitStartFailure {
  * where Orbit made nothing; the two create step codes come from a failed Operation whose Instance
  * stays, so they offer no Change name or Change branch.
  */
-export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
+export function orbitStartFailure(
+  start: OrbitThreadStart,
+  canRetry: boolean = orbitThreadStartCanRetry(start),
+): OrbitStartFailure {
   const none = { changeName: false, changeBranch: false, openInstance: null };
   const madeNothing = !orbitThreadStartCreatedInstance(start);
   const details = record(start.errorDetails);
@@ -171,7 +181,7 @@ export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
       return { ...none, message: "Orbit could not set up the workspace." };
     case ORBIT_CONTAINER_PROCESS_INACTIVE: {
       const unit = start.errorProcessUnit?.trim();
-      const next = orbitThreadStartCanRetry(start)
+      const next = canRetry
         ? "Change or remove this process in the Project's Orbit settings, then retry."
         : "Fix the Project, remove this Instance in Orbit, then create it again.";
       return {
@@ -220,7 +230,17 @@ export function orbitSetupView(
     startedAt: iso(stage.startedAt),
     endedAt: iso(stage.finishedAt),
   }));
-  const phase = start.error !== null ? "failed" : start.sentAt != null ? "done" : "running";
+  const completion = orbitCompletionPhase(start);
+  const details = orbitSetupDetails(start);
+  if (start.error === null && completion === "failed") {
+    return { ...orbitCompletionFailedView(start), stages, details };
+  }
+  const phase =
+    start.error !== null
+      ? "failed"
+      : start.sentAt != null && (completion === "none" || completion === "succeeded")
+        ? "done"
+        : "running";
   const failed = phase === "failed";
   const newInstance = start.orbitInstanceKind !== "existing";
   const failure = failed ? orbitStartFailure(start) : null;
@@ -237,8 +257,52 @@ export function orbitSetupView(
       failed &&
       orbitThreadStartCreatedInstance(start) &&
       start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE,
-    details: orbitSetupDetails(start),
+    details,
     cancelling: phase === "running" && start.cancelRequested === true,
+    canCancel: phase === "running" && start.completionOperationId == null,
+  };
+}
+
+/** Completion codes with a Conn message; any other code shows only its detail line (spec Q2). */
+const COMPLETION_MESSAGE_CODES: ReadonlySet<string> = new Set([
+  ORBIT_CREATE_WORKSPACE_FAILED,
+  ORBIT_CONTAINER_PROCESS_INACTIVE,
+]);
+
+/**
+ * The card of a start whose completion failed: the create, Connect and Start agent stay done, the
+ * thread stays usable, and Retry asks Orbit for a new completion. No Change name, Change branch or
+ * Open: the Instance exists and works.
+ */
+function orbitCompletionFailedView(
+  start: OrbitThreadStart,
+): Omit<OrbitSetupView, "stages" | "details"> {
+  const code = start.completionErrorCode ?? null;
+  // The completion's fields in the shape the create's failure texts read.
+  const asStart: OrbitThreadStart = {
+    ...start,
+    errorCode: code,
+    errorDetail: start.completionErrorDetail ?? null,
+    errorDetails: null,
+    errorProcessUnit: start.completionProcessUnit ?? null,
+    errorRecoveryRequires: start.completionRequires ?? null,
+  };
+  const message =
+    code !== null && COMPLETION_MESSAGE_CODES.has(code)
+      ? orbitStartFailure(asStart, orbitCompletionProcessFailureCanRetry(start)).message
+      : null;
+  return {
+    phase: "failed",
+    error: message,
+    // Without Orbit's detail, the code alone, so the card names what failed.
+    errorDetailLine: orbitErrorDetailLine(asStart) ?? (message === null ? code : null),
+    canRetry: start.completionRetryable === true,
+    canChangeName: false,
+    canChangeBranch: false,
+    openInstance: null,
+    instanceStays: code !== ORBIT_CONTAINER_PROCESS_INACTIVE,
+    cancelling: false,
+    canCancel: false,
   };
 }
 

@@ -2,8 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { OrbitGatewayOperation, OrbitGatewayOperationStep } from "./client.ts";
 import {
+  observeOrbitCompletionRows,
   observeOrbitCreateRows,
+  orbitCompletionFailedRow,
+  orbitCompletionRowOf,
   orbitCreateRowOf,
+  reopenOrbitCompletionRows,
   readSavedOrbitCreateRows,
   type OrbitCreateRows,
 } from "./orbitCreateRows.ts";
@@ -205,5 +209,267 @@ describe("readSavedOrbitCreateRows", () => {
       t3: { status: "running", startedAt: null, finishedAt: null },
     });
     expect(readSavedOrbitCreateRows(undefined)).toBe(null);
+  });
+});
+
+const T = (seconds: number) => `2026-11-14T01:11:${String(seconds).padStart(2, "0")}.000Z`;
+const ms = (seconds: number) => Date.parse(T(seconds));
+
+/** Create 20511 (release 2030) as Conn reads it at its success, trimmed to the row steps. */
+function createAtSuccess(extra: Partial<OrbitGatewayOperation> = {}): OrbitGatewayOperation {
+  return op(
+    "succeeded",
+    [
+      step("input", "succeeded", { job: "input", startedAt: T(21), finishedAt: T(22) }),
+      step("clone-input", "succeeded", { job: "clone", startedAt: T(22), finishedAt: T(24) }),
+      step("clone-container", "succeeded", { job: "clone", startedAt: T(24), finishedAt: T(31) }),
+      step("clone-t3", "succeeded", { job: "clone", startedAt: T(31), finishedAt: T(36) }),
+      step("clone-workspace", "succeeded", { job: "clone", startedAt: T(31), finishedAt: T(32) }),
+      step("clone-register", "succeeded", { job: "clone", startedAt: T(40), finishedAt: T(41) }),
+      step("finish", "succeeded", { job: "create", startedAt: T(41), finishedAt: T(42) }),
+    ],
+    { completionOperationId: 20512, routeId: 77, ...extra },
+  );
+}
+
+function completion(
+  status: OrbitGatewayOperation["status"],
+  steps: readonly OrbitGatewayOperationStep[],
+  extra: Partial<OrbitGatewayOperation> = {},
+): OrbitGatewayOperation {
+  return op(status, steps, { id: 20512, kind: "instance.complete", ...extra });
+}
+
+describe("create success with a completion (release 2030)", () => {
+  it("leaves the workspace and the address running, the other three done", () => {
+    const rows = observeOrbitCreateRows(null, createAtSuccess(), ms(43));
+    expect(statuses(rows)).toEqual([
+      "container:done",
+      "address:running",
+      "workspace:running",
+      "t3:done",
+      "register:done",
+    ]);
+    // The workspace keeps the start of the create's checkout and has no end yet.
+    expect(rows.workspace).toEqual({ status: "running", startedAt: ms(31), finishedAt: null });
+    expect(rows.address?.finishedAt).toBeNull();
+  });
+
+  it("marks the address done when the Project has no Route", () => {
+    const rows = observeOrbitCreateRows(null, createAtSuccess({ routeId: null }), ms(43));
+    expect(rows.address?.status).toBe("done");
+    expect(rows.workspace?.status).toBe("running");
+  });
+
+  it("marks all five done on an older Gateway that names no completion", () => {
+    const { completionOperationId: _id, routeId: _route, ...older } = createAtSuccess();
+    const rows = observeOrbitCreateRows(null, older, ms(43));
+    expect(statuses(rows)).toEqual([
+      "container:done",
+      "address:done",
+      "workspace:done",
+      "t3:done",
+      "register:done",
+    ]);
+  });
+
+  it("maps clone-club-key to the container row", () => {
+    expect(orbitCreateRowOf({ name: "clone-club-key" })).toBe("container");
+  });
+});
+
+describe("orbitCompletionRowOf", () => {
+  it.each([
+    ["input", "input", null],
+    ["clone-input", "complete", "workspace"],
+    ["database-snapshot", "complete", "workspace"],
+    ["server-database", "complete", "workspace"],
+    ["server-valkey", "complete", "workspace"],
+    ["database-install", "complete", "workspace"],
+    ["server-database-check", "complete", "workspace"],
+    ["server-valkey-check", "complete", "workspace"],
+    ["clone-fleet", "complete", "workspace"],
+    ["database-cleanup", "complete", "workspace"],
+    ["server-database-fill", "complete", "workspace"],
+    ["clone-services", "complete", "workspace"],
+    ["clone-check", "complete", "workspace"],
+    ["route-csr-0", "publication", "address"],
+    ["route-csr-0-0", "publication", "address"],
+    ["route", "publication", "address"],
+    // Child workflow steps reuse names that the create maps; under a child job they show nothing.
+    ["input", "create", null],
+    ["cleanup", "create", null],
+    ["site", "create", null],
+    ["csr", "create", null],
+    ["sign", "create", null],
+    ["Make a CSR on the Node-0", "create", null],
+    ["Install cert, publish site-9-0", "create", null],
+    ["Probe the site over TLS-0-0", "create", null],
+    ["Publish private DNS-0-0", "create", null],
+    ["records-0-0", "create", null],
+    ["withdraw_route-0", "withdraw", null],
+    ["finish", "result", null],
+    ["clone-private-cleanup", "result", null],
+    ["withdraw-route", "result", null],
+    ["cleanup", "result", null],
+    ["accepted", "result", null],
+    ["something-new", "other", null],
+  ] as const)("%s in job %s → %s", (name, job, row) => {
+    expect(orbitCompletionRowOf({ name, job })).toBe(row);
+  });
+});
+
+describe("observeOrbitCompletionRows", () => {
+  const atCreate = () => observeOrbitCreateRows(null, createAtSuccess(), ms(43));
+
+  it("keeps the other rows and infers no order while the workspace runs", () => {
+    const rows = observeOrbitCompletionRows(
+      atCreate(),
+      completion("running", [
+        step("input", "succeeded", { job: "input", startedAt: T(47), finishedAt: T(48) }),
+        step("clone-input", "succeeded", { job: "complete", startedAt: T(48), finishedAt: T(49) }),
+        step("clone-services", "running", { job: "complete", startedAt: T(49) }),
+        step("csr", "running", { job: "create", startedAt: T(48) }),
+        step("brand-new-step", "failed", { job: "mystery" }),
+      ]),
+      ms(50),
+    );
+    expect(statuses(rows)).toEqual([
+      "container:done",
+      "address:running",
+      "workspace:running",
+      "t3:done",
+      "register:done",
+    ]);
+    expect(rows.workspace).toEqual({ status: "running", startedAt: ms(31), finishedAt: null });
+  });
+
+  it("marks both rows done with the last step's end when the completion succeeded (20512)", () => {
+    const rows = observeOrbitCompletionRows(
+      atCreate(),
+      completion(
+        "succeeded",
+        [
+          step("clone-input", "succeeded", {
+            job: "complete",
+            startedAt: T(48),
+            finishedAt: T(49),
+          }),
+          step("route-csr-0-0", "succeeded", {
+            job: "publication",
+            startedAt: T(48),
+            finishedAt: T(51),
+          }),
+          step("clone-services", "succeeded", {
+            job: "complete",
+            startedAt: T(49),
+            finishedAt: T(53),
+          }),
+          step("route", "succeeded", { job: "publication", startedAt: T(51), finishedAt: T(57) }),
+          step("clone-check", "succeeded", {
+            job: "complete",
+            startedAt: T(53),
+            finishedAt: T(54),
+          }),
+          step("finish", "succeeded", { job: "result", startedAt: T(57), finishedAt: T(58) }),
+        ],
+        { pollAfterSeconds: null },
+      ),
+      ms(59),
+    );
+    expect(rows.workspace).toEqual({ status: "done", startedAt: ms(31), finishedAt: ms(54) });
+    expect(rows.address?.status).toBe("done");
+    expect(rows.address?.finishedAt).toBe(ms(57));
+  });
+
+  it.each([
+    ["database", "workspace"],
+    ["fleet", "workspace"],
+    ["workspace", "workspace"],
+    ["check", "workspace"],
+    ["complete", "workspace"],
+    ["route", "address"],
+  ] as const)("fails the row of phase %s → %s", (phase, row) => {
+    const failed = completion("failed", [], { resultFailedStep: phase, pollAfterSeconds: null });
+    expect(orbitCompletionFailedRow(failed)).toBe(row);
+    const rows = observeOrbitCompletionRows(atCreate(), failed, ms(60));
+    expect(rows[row]?.status).toBe("failed");
+    expect(rows.t3?.status).toBe("done");
+  });
+
+  it("without a phase, fails the row of a failed step, else the workspace", () => {
+    expect(
+      orbitCompletionFailedRow(
+        completion("failed", [step("route-csr-1", "failed", { job: "publication" })]),
+      ),
+    ).toBe("address");
+    expect(orbitCompletionFailedRow(completion("cancelled", []))).toBe("workspace");
+  });
+
+  it("marks the workspace done and the address failed when publication failed", () => {
+    const rows = observeOrbitCompletionRows(
+      atCreate(),
+      completion(
+        "failed",
+        [
+          step("clone-input", "succeeded", {
+            job: "complete",
+            startedAt: T(48),
+            finishedAt: T(49),
+          }),
+          step("clone-check", "succeeded", {
+            job: "complete",
+            startedAt: T(53),
+            finishedAt: T(54),
+          }),
+          step("route", "failed", { job: "publication", startedAt: T(51), finishedAt: T(56) }),
+        ],
+        { resultFailedStep: "route", pollAfterSeconds: null },
+      ),
+      ms(57),
+    );
+    expect(rows.workspace?.status).toBe("done");
+    expect(rows.address).toEqual({ status: "failed", startedAt: ms(43), finishedAt: ms(56) });
+  });
+
+  it("puts a row that never ran back to pending when the completion failed elsewhere", () => {
+    const rows = observeOrbitCompletionRows(
+      atCreate(),
+      completion(
+        "failed",
+        [
+          step("clone-services", "failed", {
+            job: "complete",
+            startedAt: T(49),
+            finishedAt: T(50),
+          }),
+        ],
+        { resultFailedStep: "workspace", pollAfterSeconds: null },
+      ),
+      ms(51),
+    );
+    expect(rows.workspace?.status).toBe("failed");
+    expect(rows.address).toEqual({ status: "pending", startedAt: ms(43), finishedAt: null });
+  });
+
+  it("a Retry runs only the failed row again, and a done row stays done", () => {
+    const failed = observeOrbitCompletionRows(
+      atCreate(),
+      completion(
+        "failed",
+        [
+          step("clone-check", "succeeded", { job: "complete", finishedAt: T(54) }),
+          step("route", "failed", { job: "publication", finishedAt: T(56) }),
+        ],
+        { resultFailedStep: "route" },
+      ),
+      ms(57),
+    );
+    const reopened = reopenOrbitCompletionRows(failed)!;
+    expect(reopened.address).toEqual({ status: "running", startedAt: ms(43), finishedAt: null });
+    expect(reopened.workspace?.status).toBe("done");
+    const running = observeOrbitCompletionRows(reopened, completion("queued", []), ms(60));
+    expect(running.workspace?.status).toBe("done");
+    expect(running.address?.status).toBe("running");
   });
 });

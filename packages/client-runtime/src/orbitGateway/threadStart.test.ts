@@ -63,6 +63,8 @@ function gateway(script: {
   readonly pairingLost?: ReadonlyArray<number>;
   /** The succeeded create Operation's result. */
   readonly createResult?: Record<string, unknown>;
+  /** Parsed fields of the succeeded create, such as its completion (release 2030). */
+  readonly createExtra?: Partial<OrbitGatewayOperation>;
   /** Orbit's `error.detail` on a failed Operation. */
   readonly failedDetail?: string;
   /** The failed create's error code and its `result.process_failure.unit`. */
@@ -143,8 +145,12 @@ function gateway(script: {
           error: { code: read.errorCode, message: null, detail: script.failedDetail },
         };
       }
-      return id === 100 && status === "succeeded" && script.createResult
-        ? { ...read, result: script.createResult }
+      return id === 100 && status === "succeeded" && (script.createResult || script.createExtra)
+        ? {
+            ...read,
+            ...(script.createResult ? { result: script.createResult } : {}),
+            ...script.createExtra,
+          }
         : read;
     },
     cancelOperation: async (id: number) => {
@@ -288,6 +294,14 @@ describe("readOrbitThreadStarts", () => {
       nameSuffix: null,
       createRows: null,
       cancelRequested: false,
+      completionOperationId: null,
+      completionKey: null,
+      completionStatus: null,
+      completionErrorCode: null,
+      completionErrorDetail: null,
+      completionProcessUnit: null,
+      completionRequires: null,
+      completionRetryable: false,
     });
 
     const { client, calls } = gateway({});
@@ -1480,5 +1494,34 @@ describe("orbitThreadStartCreatedInstance", () => {
         environmentId: "env-41",
       }),
     ).toBe(false);
+  });
+});
+
+describe("runOrbitThreadStart with a completion (release 2030)", () => {
+  it("opens the thread at create success and saves the completion, not an error", async () => {
+    const { client } = gateway({ createExtra: { completionOperationId: 106, routeId: 77 } });
+    const run = ports(client);
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+    const last = run.saves.at(-1)!;
+    expect(run.sent).toHaveLength(1);
+    expect(last).toMatchObject({
+      connected: true,
+      error: null,
+      completionOperationId: 106,
+      completionStatus: "queued",
+    });
+    expect(last.sentAt).not.toBeNull();
+    expect(last.createRows?.workspace?.status).toBe("running");
+    expect(last.createRows?.address?.status).toBe("running");
+    expect(last.createRows?.t3?.status).toBe("done");
+  });
+
+  it("an older Gateway's create names no completion: all rows done, nothing to follow", async () => {
+    const { client } = gateway({});
+    const run = ports(client);
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+    const last = run.saves.at(-1)!;
+    expect(last.completionOperationId).toBeNull();
+    expect(last.completionStatus).toBeUndefined();
   });
 });

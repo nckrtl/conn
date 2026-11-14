@@ -1,5 +1,8 @@
 import {
+  followOrbitCompletion,
   newOrbitThreadStart,
+  retryOrbitCompletion,
+  type OrbitCompletionPorts,
   orbitThreadStartHasNoMessage,
   orbitThreadStartCreatedInstance,
   retryOrbitThreadStartRecord,
@@ -337,4 +340,50 @@ export async function runSavedOrbitThreadStart(
   } finally {
     running.delete(id);
   }
+}
+
+/** Completions this window follows, by start and Operation, so a re-run of the runner follows each once. */
+const following = new Set<string>();
+
+function completionPorts(client: OrbitGatewayClient, id: string): OrbitCompletionPorts {
+  return {
+    client,
+    read: () => readStored().find((entry) => entry.id === id) ?? null,
+    // Saves only a start that is still there: a Dismiss in another window wins.
+    save: (next) =>
+      updateStarts((starts) => starts.map((entry) => (entry.id === id ? next : entry))),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: Date.now,
+  };
+}
+
+/**
+ * Follows a sent start's completion (main window's runner only). Other windows render the saved
+ * rows and status; a restart resumes from the saved Operation id.
+ */
+export async function followSavedOrbitCompletion(
+  client: OrbitGatewayClient,
+  id: string,
+): Promise<void> {
+  const operationId = readStored().find((entry) => entry.id === id)?.completionOperationId;
+  if (operationId == null) return;
+  const key = `${id}:${operationId}`;
+  if (following.has(key)) return;
+  following.add(key);
+  try {
+    // Only Orbit-mode windows follow; a switch to Default pauses it until Orbit mode is back.
+    if (useEnvironmentProvider.getState().provider !== "orbit") return;
+    await followOrbitCompletion(completionPorts(client, id));
+  } finally {
+    following.delete(key);
+  }
+}
+
+/** Retry of a failed completion, from any window: the main window's runner then follows it. */
+export async function retrySavedOrbitCompletion(
+  client: OrbitGatewayClient | null,
+  id: string,
+): Promise<void> {
+  if (client === null) return;
+  await retryOrbitCompletion(completionPorts(client, id));
 }

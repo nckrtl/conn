@@ -674,8 +674,59 @@ describe("createOrbitGatewayClient", () => {
         error_code: "instance.container_process_inactive",
         result: {
           process_failure: { unit: "conn-web.service" },
+          // The Gateway's shape (InstanceCompleteProjection): `requires` is under `retry`.
+          recovery: {
+            state: "retained_for_retry",
+            retry: {
+              command: "instance:complete",
+              instance_id: 41,
+              new_idempotency_key: true,
+              requires: "project_process_definition",
+            },
+          },
+        },
+      },
+      // The shape Conn used to read: `requires` beside `retry` is not Orbit's.
+      "GET /operations/104": {
+        id: 104,
+        kind: "instance.create",
+        status: "failed",
+        target_id: 41,
+        result: {
           recovery: { state: "retained_for_retry", requires: "project_process_definition" },
         },
+      },
+      // Release 2030: a create that ends at a usable thread names its completion.
+      "GET /operations/105": {
+        id: 105,
+        kind: "instance.create",
+        status: "succeeded",
+        target_id: 41,
+        input: { route_id: 77 },
+        result: { instance_id: 41, completion_operation_id: 106 },
+      },
+      "GET /operations/106": {
+        id: 106,
+        kind: "instance.complete",
+        status: "failed",
+        target_id: 41,
+        failed_step: "clone-services",
+        error_code: "instance.create_workspace_failed",
+        cancel_requested: false,
+        result: {
+          failed_step: "workspace",
+          recovery: {
+            state: "retained_for_retry",
+            retry: { command: "instance:complete", instance_id: 41, new_idempotency_key: true },
+          },
+        },
+      },
+      "POST /instances/41/complete": {
+        id: 107,
+        kind: "instance.complete",
+        status: "queued",
+        target_id: 41,
+        poll_after_seconds: 2,
       },
     };
     const client = createOrbitGatewayClient(async (request) => {
@@ -811,6 +862,36 @@ describe("createOrbitGatewayClient", () => {
     await expect(client.operation(102)).resolves.not.toHaveProperty("recoveryRequires");
     await expect(client.operation(103)).resolves.toMatchObject({
       recoveryRequires: "project_process_definition",
+      recoveryRetryable: true,
+    });
+    await expect(client.operation(104)).resolves.toMatchObject({
+      recoveryRequires: null,
+      recoveryRetryable: false,
+    });
+    await expect(client.operation(105)).resolves.toMatchObject({
+      completionOperationId: 106,
+      routeId: 77,
+    });
+    // An older Gateway's create names no completion.
+    await expect(client.operation(103)).resolves.not.toHaveProperty("completionOperationId");
+    await expect(client.operation(106)).resolves.toMatchObject({
+      kind: "instance.complete",
+      failedStep: "clone-services",
+      resultFailedStep: "workspace",
+      cancelRequested: false,
+      recoveryRequires: null,
+      recoveryRetryable: true,
+    });
+    await expect(client.completeInstance(41, "key-c")).resolves.toMatchObject({
+      id: 107,
+      kind: "instance.complete",
+      status: "queued",
+    });
+    expect(requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/instances/41/complete",
+      timeoutMs: 60_000,
+      idempotencyKey: "key-c",
     });
     // An unknown step status passes through; a step without a name or status is dropped.
     await expect(client.operation(100)).resolves.toEqual({

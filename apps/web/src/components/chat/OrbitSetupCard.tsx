@@ -26,6 +26,7 @@ import {
 } from "~/orbit/orbitSetupView";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { OrbitInstanceUrlChip } from "../BranchToolbarEnvModeSelector";
+import type { OrbitReadyTimelineInput } from "./MessagesTimeline.logic";
 import { WorkLogRow } from "./WorkLog";
 import { Elapsed, ShimmerOverlay, StageIcon, stageRowClassName } from "./WorktreeSetupCard";
 
@@ -211,12 +212,12 @@ export function OrbitSetupCard({
               <span className="px-2 text-xs text-muted-foreground" data-orbit-setup-cancelling>
                 Cancelling…
               </span>
-            ) : (
+            ) : view.canCancel ? (
               <Button type="button" size="xs" variant="ghost-muted" onClick={onCancel}>
                 <XIcon aria-hidden />
                 Cancel
               </Button>
-            )}
+            ) : null}
           </div>
           {detailsOpen ? (
             <OrbitDetailsGrid>
@@ -267,6 +268,27 @@ export function OrbitSetupCard({
         </div>
       ) : null}
     </section>
+  );
+}
+
+const noop = () => {};
+
+/**
+ * The real thread's Orbit row: the setup card while the create's completion runs or failed (no
+ * Cancel; Retry and Dismiss when it failed), else the "Instance ready" row.
+ */
+export function OrbitThreadSetupRow({ ready }: { ready: OrbitReadyTimelineInput }) {
+  if (!ready.setup) return <OrbitReadyRow view={ready.view} threadRef={ready.threadRef} />;
+  return (
+    <OrbitSetupCard
+      view={ready.setup}
+      onRetry={ready.onRetry ?? noop}
+      onChangeName={noop}
+      onChangeBranch={noop}
+      onOpenInstance={noop}
+      onDismiss={ready.onDismiss ?? noop}
+      onCancel={noop}
+    />
   );
 }
 

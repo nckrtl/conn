@@ -4527,6 +4527,16 @@ it("keeps the working header in place across worktree setup handoff", () => {
     orbitReady: { ...orbitReady, messageId: "user-0" },
   });
   expect(laterHistoryOnly.map((row) => row.kind)).toEqual(["message", "message"]);
+  // While the create's completion runs or failed, the same slot carries the setup card.
+  const withSetup = deriveMessagesTimelineRows({
+    timelineEntries: [userEntry, assistantEntry],
+    isWorking: false,
+    turnDiffSummaries: [],
+    supportsConversationRollback: false,
+    orbitReady: { ...orbitReady, setup: { phase: "failed" } as never },
+  });
+  expect(withSetup.map((row) => row.kind)).toEqual(["message", "orbit-ready", "message"]);
+  expect(withSetup[1]).toMatchObject({ ready: { setup: { phase: "failed" } } });
   expect(
     withOrbitReady.flatMap((row) =>
       row.kind === "message" && row.message.role === "assistant" ? [row.message.text] : [],

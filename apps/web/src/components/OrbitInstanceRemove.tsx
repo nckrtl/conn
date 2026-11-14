@@ -47,12 +47,25 @@ export function OrbitInstanceGitLine({ git }: { readonly git: OrbitInstanceGitSt
 }
 
 /**
+ * Spec Q3, not decided yet: the row's line while a removal waits for the Instance's setup to stop.
+ * Proposal kept: today's text. Returning null shows the row's facts instead.
+ */
+export function orbitRemoveWaitTextBehindCompletion(): string | null {
+  return "Waiting for another removal to finish";
+}
+
+/**
  * The row's second line while Orbit removes the Instance: its queue place or a plain step; null
  * keeps the row's facts (no step yet, or a step without plain words).
  */
 export function orbitInstanceRemovingText(
   progress: OrbitInstanceRemoveProgress | null,
+  /** The Instance's setup (its `instance.complete`) still runs: Orbit stops it before removing. */
+  completionRunning = false,
 ): string | null {
+  if (progress?.kind === "waiting" && completionRunning) {
+    return orbitRemoveWaitTextBehindCompletion();
+  }
   if (progress?.kind === "waiting") return "Waiting for another removal to finish";
   if (progress?.kind === "running") return progress.step;
   return null;

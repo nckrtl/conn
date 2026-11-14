@@ -1,7 +1,7 @@
 import * as DateTime from "effect/DateTime";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import type { OrbitReadyView } from "../../orbit/orbitSetupView";
+import type { OrbitReadyView, OrbitSetupView } from "../../orbit/orbitSetupView";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
 import * as Equal from "effect/Equal";
@@ -492,6 +492,13 @@ const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 
 export interface OrbitReadyTimelineInput {
   readonly view: OrbitReadyView;
+  /**
+   * The setup card while the create's completion runs or failed; null shows the "Instance ready"
+   * row (also on Gateways without a completion).
+   */
+  readonly setup?: OrbitSetupView | null;
+  readonly onRetry?: () => void;
+  readonly onDismiss?: () => void;
   readonly threadRef: ScopedThreadRef;
   /** The start's first message; the row follows it and is left out while it is not loaded. */
   readonly messageId: string;

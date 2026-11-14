@@ -3,6 +3,7 @@ import {
   filterOrbitInstances,
   groupOrbitInstances,
   joinOrbitInstanceThreads,
+  orbitCompletionPhase,
   orbitInstanceAvailability,
   orbitInstanceProjectOptions,
   type OrbitInstanceState,
@@ -40,6 +41,7 @@ import {
   type OrbitInstanceRemoval,
 } from "../orbit/orbitInstanceRemoval";
 import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
+import { readStored as readStoredOrbitStarts } from "../orbit/orbitThreadStartStore";
 import { useVisibleThreadShells } from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { formatRelativeTimeLabel } from "../timestampFormat";
@@ -50,6 +52,13 @@ import {
   orbitInstanceRemovingText,
 } from "./OrbitInstanceRemove";
 import { ProjectMonogram } from "./ProjectMonogram";
+
+/** Whether this device follows a setup (`instance.complete`) of the Instance that still runs. */
+function completionRunning(instanceId: number): boolean {
+  return readStoredOrbitStarts().some(
+    (start) => start.instanceId === instanceId && orbitCompletionPhase(start) === "running",
+  );
+}
 import { isSidebarHiddenThread } from "./Sidebar.logic";
 import { SettingsPageContainer, SettingsSection } from "./settings/settingsLayout";
 import { Button } from "./ui/button";
@@ -328,7 +337,9 @@ function InstanceRow({
     <>
       {name}
       <span className="block truncate text-muted-foreground text-xs">
-        {(removing ? orbitInstanceRemovingText(removal.progress) : null) ?? instanceFacts(row)}
+        {(removing
+          ? orbitInstanceRemovingText(removal.progress, completionRunning(row.id))
+          : null) ?? instanceFacts(row)}
       </span>
     </>
   );

@@ -5,6 +5,7 @@ import {
   type OrbitCreateRowId,
   type OrbitCreateRowStatus,
 } from "./orbitCreateRows.ts";
+import { orbitCompletionPhase } from "./orbitCompletion.ts";
 import type { OrbitThreadStart } from "./threadStart.ts";
 
 /**
@@ -37,8 +38,9 @@ export interface OrbitSetupCreateRow {
 }
 
 /**
- * The rows under "Create Instance" while it runs, or where it failed. They fold away once the
- * stage is done; a create refused before Orbit admitted it has none.
+ * The rows under "Create Instance" while it runs, or where it failed, and after it while its
+ * completion runs or failed. They fold away once the stage is done and nothing follows it; a
+ * create refused before Orbit admitted it has none.
  */
 function createRows(
   start: OrbitThreadStart,
@@ -46,7 +48,10 @@ function createRows(
 ): OrbitSetupCreateRow[] | null {
   const saved = start.createRows ?? null;
   const any = saved !== null && ORBIT_CREATE_ROW_IDS.some((id) => saved[id] !== undefined);
-  if (status !== "running" && !(status === "failed" && any)) return null;
+  const completion = orbitCompletionPhase(start);
+  const completionShows =
+    status === "done" && any && completion !== "none" && completion !== "succeeded";
+  if (status !== "running" && !(status === "failed" && any) && !completionShows) return null;
   const failedHere =
     status === "failed" && !ORBIT_CREATE_ROW_IDS.some((id) => saved?.[id]?.status === "failed");
   // A failure the Operation never named (a timeout, a lost Gateway) stops the row that ran.

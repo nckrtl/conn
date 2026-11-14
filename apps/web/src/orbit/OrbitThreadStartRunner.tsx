@@ -1,5 +1,9 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  orbitCompletionNeedsAdmission,
+  orbitCompletionNeedsFollow,
+  type OrbitGatewayEnvironment,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { type AnyRouter, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
 
@@ -12,7 +16,9 @@ import { openOrbitInstanceById } from "./openOrbitInstance";
 import { orbitStartDraftTarget } from "./OrbitPendingThreadView";
 import {
   dismissOrbitThreadStart,
+  followSavedOrbitCompletion,
   orbitPendingThreadPath,
+  resumeSavedOrbitCompletionRetry,
   runSavedOrbitThreadStart,
 } from "./orbitThreadStarts";
 import { readStored, useOrbitThreadStarts } from "./orbitThreadStartStore";
@@ -32,6 +38,11 @@ export function OrbitThreadStartRunner() {
     const client = desktopOrbitGatewayClient();
     if (!available || client === null) return;
     for (const start of starts) {
+      // The create's completion runs on after the send; the thread's card follows it.
+      if (orbitCompletionNeedsFollow(start)) void followSavedOrbitCompletion(client, start.id);
+      if (orbitCompletionNeedsAdmission(start)) {
+        void resumeSavedOrbitCompletionRetry(client, start.id);
+      }
       // A sent start is kept only for its thread's ready row.
       if (start.error !== null || (start.sentAt != null && start.pendingThread)) continue;
       void runSavedOrbitThreadStart(client, start.id, {

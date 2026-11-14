@@ -228,6 +228,22 @@ describe("removal states (conn remove UX, 2026-11-13)", () => {
     ]);
   });
 
+  it("accepts a destroy that waits behind a running completion's cancel (release 2030)", async () => {
+    const orbit = gateway([
+      ok(op("waiting"), 202),
+      ok(op("waiting")),
+      ok(op("running", { current_step: "Stop, remove Processes-1-1" })),
+      ok(op("succeeded")),
+    ]);
+    expect(await orbit.remove(true)).toEqual({ kind: "removed" });
+    expect(orbit.progress).toEqual([
+      { kind: "admitted", operationId: 77 },
+      { kind: "waiting" },
+      { kind: "waiting" },
+      { kind: "running", step: "Stopping its processes" },
+    ]);
+  });
+
   it("uses Orbit's detail when a failed start has no message (Nick's four removals)", async () => {
     const orbit = gateway([
       ok(op("queued"), 202),

@@ -28,7 +28,7 @@ function rightClick(element: Element): boolean {
 }
 import type { OrbitCreateRowId } from "@t3tools/client-runtime/orbit-gateway";
 import type { OrbitSetupView, OrbitSetupViewStage } from "~/orbit/orbitSetupView";
-import { OrbitReadyRow, OrbitSetupCard } from "./OrbitSetupCard";
+import { OrbitReadyRow, OrbitSetupCard, OrbitThreadSetupRow } from "./OrbitSetupCard";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
 
 const NOW = new Date("2026-10-26T12:00:10.000Z");
@@ -174,6 +174,7 @@ function orbitCard(
       url: "https://meetup.nckrtl.test",
     },
     cancelling: false,
+    canCancel: true,
     ...view,
   };
   return {
@@ -218,6 +219,92 @@ it("shows a running Orbit setup with the create rows, Details closed and Cancel"
 
   await screen.getByRole("button", { name: "Cancel" }).click();
   expect(card.actions.cancel).toHaveBeenCalledOnce();
+});
+
+it("in the thread, follows the completion: no Cancel while it runs, Retry and Dismiss when it failed", async () => {
+  const threadRef = {
+    environmentId: EnvironmentId.make("env-41"),
+    threadId: ThreadId.make("thread-1"),
+  };
+  const readyView = {
+    readyMs: 30_000,
+    instanceName: "meetup",
+    nodeName: "beast",
+    url: null,
+    readyLine: "Your Instance is ready.",
+    modelFallbackLine: null,
+    branch: null,
+    baseBranch: null,
+    dependenciesLine: null,
+  };
+  const completionRows = (address: "running" | "failed") => [
+    orbitRow("container", "Copy the container", "done"),
+    orbitRow("address", "Publish the address", address),
+    orbitRow("workspace", "Copy the workspace", address === "failed" ? "done" : "running"),
+    orbitRow("t3", "Start the T3 server", "done"),
+    orbitRow("register", "Register with Orbit", "done"),
+  ];
+  const doneStages = (address: "running" | "failed") => [
+    orbitStage("create", "Create Instance", "done", {
+      detail: "beast",
+      rows: completionRows(address),
+    }),
+    orbitStage("connect", "Connect", "done"),
+    orbitStage("agent", "Start agent", "done"),
+  ];
+  const running = orbitCard({ stages: doneStages("running"), canCancel: false });
+  const retry = vi.fn();
+  const dismiss = vi.fn();
+  await using screen = await render(
+    <OrbitThreadSetupRow
+      ready={{
+        view: readyView,
+        threadRef,
+        messageId: "m1",
+        setup: (running.element.props as { view: OrbitSetupView }).view,
+      }}
+    />,
+  );
+  await expect.element(screen.getByText("Copy the workspace")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Cancel" }).query()).toBeNull();
+  expect(screen.getByText("Instance ready").query()).toBeNull();
+
+  const failed = orbitCard({
+    phase: "failed",
+    stages: doneStages("failed"),
+    canCancel: false,
+    canRetry: true,
+    instanceStays: true,
+    errorDetailLine: "instance.create_route_failed · dns",
+  });
+  await screen.rerender(
+    <OrbitThreadSetupRow
+      ready={{
+        view: readyView,
+        threadRef,
+        messageId: "m1",
+        setup: (failed.element.props as { view: OrbitSetupView }).view,
+        onRetry: retry,
+        onDismiss: dismiss,
+      }}
+    />,
+  );
+  await expect.element(screen.getByText("Instance setup failed")).toBeVisible();
+  const statuses = [...screen.container.querySelectorAll("[data-orbit-create-row]")].map(
+    (row) =>
+      `${row.getAttribute("data-orbit-create-row")}:${row.getAttribute("data-orbit-create-status")}`,
+  );
+  expect(statuses).toContain("address:failed");
+  expect(screen.getByRole("button", { name: "Change name" }).query()).toBeNull();
+  await screen.getByRole("button", { name: "Retry" }).click();
+  await screen.getByRole("button", { name: "Dismiss" }).click();
+  expect(retry).toHaveBeenCalledOnce();
+  expect(dismiss).toHaveBeenCalledOnce();
+
+  await screen.rerender(
+    <OrbitThreadSetupRow ready={{ view: readyView, threadRef, messageId: "m1", setup: null }} />,
+  );
+  await expect.element(screen.getByText("Instance ready")).toBeVisible();
 });
 
 it("folds the create rows once the stage is done", async () => {

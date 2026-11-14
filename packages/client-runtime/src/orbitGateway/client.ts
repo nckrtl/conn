@@ -290,8 +290,21 @@ export interface OrbitGatewayOperation {
   readonly result?: Readonly<Record<string, unknown>> | null;
   /** `result.process_failure.unit`: the Project process that did not stay up, when Orbit names it. */
   readonly processFailureUnit?: string | null;
-  /** `result.recovery.requires`: what must change before a Retry of a retained create works. */
+  /** `result.recovery.retry.requires`: what must change before a Retry of a retained create works. */
   readonly recoveryRequires?: string | null;
+  /** `result.recovery.retry` is present: Orbit takes a Retry of this Operation's target. */
+  readonly recoveryRetryable?: boolean;
+  /**
+   * `result.completion_operation_id` of a create: the `instance.complete` Operation that sets up
+   * the rest after the thread is usable. Absent on older Gateways.
+   */
+  readonly completionOperationId?: number | null;
+  /** `input.route_id` of a create: null when the Project has no Route; absent when not sent. */
+  readonly routeId?: number | null;
+  /** `result.failed_step`: the phase of a failed completion, such as `workspace` or `route`. */
+  readonly resultFailedStep?: string | null;
+  /** A cancel was asked, for example by a removal. */
+  readonly cancelRequested?: boolean;
   /** True while Orbit names a place in its task queue (`capacity_wait`); absent when not sent. */
   readonly capacityWait?: boolean;
 }
@@ -386,6 +399,15 @@ export interface OrbitGatewayClient {
    * name, fails with 502 `source.head_unavailable`.
    */
   readonly branches: (projectId: number, query: string) => Promise<OrbitGatewayBranches>;
+  /**
+   * Admits a new `instance.complete` for a clone whose completion failed or was cancelled
+   * (`POST /conn/instances/{id}/complete`). The same key returns the same Operation; refusals are
+   * 409 `instance.complete_unavailable` and `operation.target_busy`.
+   */
+  readonly completeInstance: (
+    instanceId: number,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayOperation>;
   /** Reads an Operation this device started through the Conn layer. */
   readonly operation: (operationId: number) => Promise<OrbitGatewayOperation>;
   /** Asks Orbit to stop an Operation this device started; the stop may still be pending. */
@@ -680,6 +702,13 @@ export function createOrbitGatewayClient(
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings/${pairingId}`;
       return issuedPairing(await call({ method: "GET", path }), path);
     },
+    completeInstance: async (instanceId, idempotencyKey) => {
+      const path = `/instances/${instanceId}/complete`;
+      return operation(
+        await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS, idempotencyKey }),
+        path,
+      );
+    },
     destroyInstance: async (instanceId, acknowledgeUnsaved, idempotencyKey) => {
       const path = `/instances/${instanceId}/destroy`;
       return operation(
@@ -772,6 +801,7 @@ function operation(value: unknown, path: string): OrbitGatewayOperation {
     ...("result" in data ? { result: record(data.result) } : {}),
     ...processFailure(data.result),
     ...recovery(data.result),
+    ...completionFields(data),
     ...("capacity_wait" in data ? { capacityWait: record(data.capacity_wait) !== null } : {}),
   };
 }
@@ -781,9 +811,37 @@ function processFailure(result: unknown): { processFailureUnit?: string | null }
   return failure === null ? {} : { processFailureUnit: optionalText(failure.unit) };
 }
 
-function recovery(result: unknown): { recoveryRequires?: string | null } {
+/** The Gateway writes `requires` under `recovery.retry` (Orbit's InstanceCompleteProjection). */
+function recovery(result: unknown): {
+  recoveryRequires?: string | null;
+  recoveryRetryable?: boolean;
+} {
   const value = record(record(result)?.recovery);
-  return value === null ? {} : { recoveryRequires: optionalText(value.requires) };
+  if (value === null) return {};
+  const retry = record(value.retry);
+  return { recoveryRequires: optionalText(retry?.requires), recoveryRetryable: retry !== null };
+}
+
+function completionFields(data: Record<string, unknown>): Partial<OrbitGatewayOperation> {
+  const result = record(data.result);
+  const input = record(data.input);
+  return {
+    ...(result !== null && "completion_operation_id" in result
+      ? {
+          completionOperationId:
+            typeof result.completion_operation_id === "number"
+              ? result.completion_operation_id
+              : null,
+        }
+      : {}),
+    ...(input !== null && "route_id" in input
+      ? { routeId: typeof input.route_id === "number" ? input.route_id : null }
+      : {}),
+    ...(result !== null && "failed_step" in result
+      ? { resultFailedStep: optionalText(result.failed_step) }
+      : {}),
+    ...("cancel_requested" in data ? { cancelRequested: data.cancel_requested === true } : {}),
+  };
 }
 
 function operationStep(value: unknown): OrbitGatewayOperationStep[] {

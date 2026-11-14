@@ -133,6 +133,22 @@ export interface OrbitThreadStart {
    * admits, then drops the start. Only the UI sets it; Retry clears it.
    */
   readonly cancelRequested?: boolean;
+  /**
+   * The create's `instance.complete` (Orbit release 2030): it sets up the workspace and the address
+   * after the thread is usable. Null or missing on older Gateways: then nothing follows the create.
+   * Its outcome is saved here, never in `error`, so `connected` and the composer stay as they are.
+   */
+  readonly completionOperationId?: number | null;
+  /** The key of the last Retry of the completion, saved before the call. */
+  readonly completionKey?: string | null;
+  readonly completionStatus?: OrbitGatewayOperation["status"] | null;
+  readonly completionErrorCode?: string | null;
+  readonly completionErrorDetail?: string | null;
+  readonly completionProcessUnit?: string | null;
+  /** `result.recovery.retry.requires` of the failed completion. */
+  readonly completionRequires?: string | null;
+  /** `result.recovery.retry` was present: Orbit takes a Retry. */
+  readonly completionRetryable?: boolean;
 }
 
 /** A name whose address `<name>.<project domain>` Orbit refuses (check or create). */
@@ -221,10 +237,31 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
         createRows: readSavedOrbitCreateRows(row.createRows),
         cancelRequested: row.cancelRequested === true,
+        completionOperationId:
+          typeof row.completionOperationId === "number" ? row.completionOperationId : null,
+        completionKey: typeof row.completionKey === "string" ? row.completionKey : null,
+        completionStatus: OPERATION_STATUS_WORDS.has(row.completionStatus as string)
+          ? (row.completionStatus as OrbitGatewayOperation["status"])
+          : null,
+        completionErrorCode: optionalString(row.completionErrorCode),
+        completionErrorDetail: optionalString(row.completionErrorDetail),
+        completionProcessUnit: optionalString(row.completionProcessUnit),
+        completionRequires: optionalString(row.completionRequires),
+        completionRetryable: row.completionRetryable === true,
       },
     ];
   });
 }
+
+const OPERATION_STATUS_WORDS: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "waiting",
+  ...OPERATION_TERMINAL_STATUSES,
+]);
+
+const optionalString = (value: unknown): string | null =>
+  typeof value === "string" ? value : null;
 
 /** A saved branch choice, or null for none or a broken one. */
 function readBranchSelection(value: unknown): OrbitGatewayBranchSelection | null {
@@ -448,6 +485,7 @@ export function newOrbitThreadStart(input: {
     resultBaseBranch: null,
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
     createRows: null,
+    completionOperationId: null,
   };
 }
 
@@ -778,6 +816,10 @@ export async function runOrbitThreadStart(
         environmentId: server.environmentId,
         resultBranch: typeof result?.branch === "string" ? result.branch : null,
         resultBaseBranch: typeof result?.base_branch === "string" ? result.base_branch : null,
+        // The completion runs on; the thread opens without waiting for it.
+        ...(typeof created.completionOperationId === "number"
+          ? { completionOperationId: created.completionOperationId, completionStatus: "queued" }
+          : {}),
         ...stamp("createFinishedAt"),
       });
     }

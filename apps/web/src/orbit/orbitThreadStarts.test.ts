@@ -1,5 +1,12 @@
 import { ProviderInstanceId } from "@t3tools/contracts";
-import type { OrbitGatewayClient } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  newOrbitThreadStart,
+  orbitCompletionNeedsFollow,
+  orbitCompletionPhase,
+  type OrbitGatewayClient,
+  type OrbitGatewayOperation,
+  type OrbitThreadStart,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useWorkspaceStore } from "../workspaceStore";
@@ -9,6 +16,9 @@ import { buildOrbitDraftStart, type OrbitDraftTarget } from "./orbitDraft";
 import {
   cancelOrbitThreadStart,
   dismissOrbitThreadStart,
+  followSavedOrbitCompletion,
+  resumeSavedOrbitCompletionRetry,
+  retrySavedOrbitCompletion,
   retryOrbitThreadStart,
   runSavedOrbitThreadStart,
   sendOrbitDraft,
@@ -512,6 +522,140 @@ describe("sendOrbitDraft", () => {
       JSON.stringify([{ ...dialogRow, environmentId: "clone", connected: true, sentAt: 4 }]),
     );
     expect(await runSavedOrbitThreadStart(client, start.id)).toBeNull();
+    expect(readStored()).toEqual([]);
+  });
+});
+
+describe("followSavedOrbitCompletion", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", {
+      localStorage: createLocalStorageStub(),
+      desktopBridge: { orbitGatewaySend: vi.fn() },
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** A start saved by an earlier run of the app: sent, its completion 106 still running. */
+  const saved: OrbitThreadStart = {
+    ...newOrbitThreadStart({
+      id: "s-restart",
+      project: { id: 3, slug: "bench", nodeName: "beast" },
+      message: "List the files",
+      suffix: "x",
+      threadId: "thread-r",
+      messageId: "message-r",
+      commandId: "command-r",
+      now: 0,
+      pendingThread: true,
+    }),
+    createOperationId: 100,
+    instanceId: 41,
+    environmentId: "clone",
+    connected: true,
+    sentAt: 10,
+    completionOperationId: 106,
+    completionStatus: "running",
+    createRows: {
+      container: { status: "done", startedAt: 1, finishedAt: 2 },
+      address: { status: "running", startedAt: 3, finishedAt: null },
+      workspace: { status: "running", startedAt: 2, finishedAt: null },
+      t3: { status: "done", startedAt: 2, finishedAt: 3 },
+      register: { status: "done", startedAt: 3, finishedAt: 4 },
+    },
+  };
+  const read = (
+    status: OrbitGatewayOperation["status"],
+    extra: Partial<OrbitGatewayOperation> = {},
+  ) =>
+    ({
+      id: 106,
+      kind: "instance.complete",
+      status,
+      targetId: 41,
+      errorCode: null,
+      pollAfterSeconds: null,
+      steps: [],
+      ...extra,
+    }) satisfies OrbitGatewayOperation;
+
+  it("resumes after a restart from the saved Operation id and follows it once", async () => {
+    updateStarts(() => [saved]);
+    const operation = vi.fn(async (id: number) => {
+      expect(id).toBe(106);
+      return read("succeeded");
+    });
+    const gatewayClient = { operation } as unknown as OrbitGatewayClient;
+    await Promise.all([
+      followSavedOrbitCompletion(gatewayClient, saved.id),
+      followSavedOrbitCompletion(gatewayClient, saved.id),
+    ]);
+    expect(operation).toHaveBeenCalledTimes(1);
+    const after = readStored()[0]!;
+    expect(orbitCompletionPhase(after)).toBe("succeeded");
+    expect(after.createRows?.workspace?.status).toBe("done");
+    expect(orbitCompletionNeedsFollow(after)).toBe(false);
+  });
+
+  it("a removal's cancel changes no row; the removal then drops the start", async () => {
+    updateStarts(() => [saved]);
+    const gatewayClient = {
+      operation: async () => read("cancelled", { cancelRequested: true }),
+    } as unknown as OrbitGatewayClient;
+    await followSavedOrbitCompletion(gatewayClient, saved.id);
+    const after = readStored()[0]!;
+    expect(after.createRows).toEqual(saved.createRows);
+    expect(orbitCompletionPhase(after)).toBe("removed");
+    expect(after.error).toBeNull();
+  });
+
+  it("Retry from any window only saves it; the main window's runner sends it once", async () => {
+    updateStarts(() => [{ ...saved, completionStatus: "failed", completionRetryable: true }]);
+    retrySavedOrbitCompletion(saved.id);
+    const marked = readStored()[0]!;
+    expect(marked.completionOperationId).toBeNull();
+    expect(marked.completionKey).toMatch(/^conn-thread-start:s-restart:complete:/);
+    expect(orbitCompletionPhase(marked)).toBe("running");
+    expect(orbitCompletionNeedsFollow(marked)).toBe(false);
+    const completeInstance = vi.fn(async () => read("queued", { id: 107, pollAfterSeconds: 2 }));
+    await resumeSavedOrbitCompletionRetry(
+      { completeInstance } as unknown as OrbitGatewayClient,
+      saved.id,
+    );
+    expect(completeInstance).toHaveBeenCalledWith(41, marked.completionKey);
+    const after = readStored()[0]!;
+    expect(after.completionOperationId).toBe(107);
+    expect(orbitCompletionNeedsFollow(after)).toBe(true);
+  });
+
+  it("a Retry cut off by a restart is sent again once, under its saved key", async () => {
+    updateStarts(() => [
+      {
+        ...saved,
+        completionOperationId: null,
+        completionKey: "conn-thread-start:s-restart:complete:5",
+        completionStatus: "queued",
+      },
+    ]);
+    const completeInstance = vi.fn(async () => read("running", { id: 107, pollAfterSeconds: 2 }));
+    const gatewayClient = { completeInstance } as unknown as OrbitGatewayClient;
+    await Promise.all([
+      resumeSavedOrbitCompletionRetry(gatewayClient, saved.id),
+      resumeSavedOrbitCompletionRetry(gatewayClient, saved.id),
+    ]);
+    expect(completeInstance).toHaveBeenCalledTimes(1);
+    expect(completeInstance).toHaveBeenCalledWith(41, "conn-thread-start:s-restart:complete:5");
+    expect(readStored()[0]!.completionOperationId).toBe(107);
+  });
+
+  it("Dismiss drops the start; the follow stops without saving it back", async () => {
+    updateStarts(() => [saved]);
+    const gatewayClient = {
+      operation: async () => {
+        dismissOrbitThreadStart(saved.id);
+        return read("succeeded");
+      },
+    } as unknown as OrbitGatewayClient;
+    await followSavedOrbitCompletion(gatewayClient, saved.id);
     expect(readStored()).toEqual([]);
   });
 });

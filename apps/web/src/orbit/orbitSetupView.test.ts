@@ -457,3 +457,144 @@ describe("orbitReadyView", () => {
     );
   });
 });
+
+describe("orbitSetupView with the create's completion (release 2030)", () => {
+  const rows = {
+    container: { status: "done" as const, startedAt: 1_000, finishedAt: 4_000 },
+    address: { status: "running" as const, startedAt: 9_000, finishedAt: null },
+    workspace: { status: "running" as const, startedAt: 3_000, finishedAt: null },
+    t3: { status: "done" as const, startedAt: 3_000, finishedAt: 6_000 },
+    register: { status: "done" as const, startedAt: 6_000, finishedAt: 9_000 },
+  };
+  const following: OrbitThreadStart = {
+    ...sent,
+    completionOperationId: 106,
+    completionStatus: "running",
+    createRows: rows,
+  };
+  const rowStatuses = (start: OrbitThreadStart) =>
+    orbitSetupView(start).stages[0]!.rows?.map((row) => `${row.id}:${row.status}`) ?? null;
+  const failed = (extra: Partial<OrbitThreadStart>): OrbitThreadStart => ({
+    ...following,
+    completionStatus: "failed",
+    completionRetryable: true,
+    createRows: { ...rows, workspace: { ...rows.workspace, status: "failed", finishedAt: 14_000 } },
+    ...extra,
+  });
+
+  it("state 3: the three stages done, the rows under Create Instance, no Cancel", () => {
+    const view = orbitSetupView(following);
+    expect(view.phase).toBe("running");
+    expect(view.stages.map((stage) => `${stage.id}:${stage.status}`)).toEqual([
+      "create:done",
+      "connect:done",
+      "agent:done",
+    ]);
+    expect(rowStatuses(following)).toEqual([
+      "container:done",
+      "address:running",
+      "workspace:running",
+      "t3:done",
+      "register:done",
+    ]);
+    expect(view.canCancel).toBe(false);
+    expect(view.canRetry).toBe(false);
+  });
+
+  it("before the send, the pending card hides Cancel once the create ended with a completion", () => {
+    const connecting = {
+      ...pairing,
+      completionOperationId: 106,
+      completionStatus: "queued" as const,
+    };
+    expect(orbitSetupView(connecting).canCancel).toBe(false);
+    expect(orbitSetupView(pairing).canCancel).toBe(true);
+    expect(orbitSetupView(creating).canCancel).toBe(true);
+  });
+
+  it("state 4: a succeeded completion is today's done card (the ready row)", () => {
+    const view = orbitSetupView({ ...following, completionStatus: "succeeded" });
+    expect(view.phase).toBe("done");
+    expect(view.stages[0]!.rows).toBeNull();
+  });
+
+  it("state 5: the failed row, Conn's workspace message, the detail line, Retry and Dismiss", () => {
+    const start = failed({
+      completionErrorCode: "instance.create_workspace_failed",
+      completionErrorDetail: "composer exit 1",
+    });
+    const view = orbitSetupView(start);
+    expect(view).toMatchObject({
+      phase: "failed",
+      error: "Orbit could not set up the workspace.",
+      errorDetailLine: "instance.create_workspace_failed · composer exit 1",
+      canRetry: true,
+      canChangeName: false,
+      canChangeBranch: false,
+      openInstance: null,
+      instanceStays: true,
+      canCancel: false,
+    });
+    expect(rowStatuses(start)).toContain("workspace:failed");
+    expect(view.stages.map((stage) => stage.status)).toEqual(["done", "done", "done"]);
+  });
+
+  it("Q2: a code without a Conn message shows only the detail line, or the code alone", () => {
+    const route = orbitSetupView(
+      failed({ completionErrorCode: "instance.create_route_failed", completionErrorDetail: "dns" }),
+    );
+    expect(route.error).toBeNull();
+    expect(route.errorDetailLine).toBe("instance.create_route_failed · dns");
+    const bare = orbitSetupView(failed({ completionErrorCode: "operation.admission_failed" }));
+    expect(bare.error).toBeNull();
+    expect(bare.errorDetailLine).toBe("operation.admission_failed");
+  });
+
+  it("Q7: a process that did not start says \u2026then retry while Orbit offers a Retry", () => {
+    const view = orbitSetupView(
+      failed({
+        completionErrorCode: "instance.container_process_inactive",
+        completionProcessUnit: "conn-web.service",
+      }),
+    );
+    expect(view.error).toBe(
+      "A process of this Project did not start: conn-web.service. Change or remove this process in the Project's Orbit settings, then retry.",
+    );
+    expect(view.canRetry).toBe(true);
+  });
+
+  it("state 12: a completion refused at admission fails the card at once", () => {
+    const view = orbitSetupView(
+      failed({ completionErrorCode: "instance.complete_unavailable", completionErrorDetail: null }),
+    );
+    expect(view.phase).toBe("failed");
+    expect(view.canRetry).toBe(true);
+  });
+
+  it("state 6: Retry running shows the running card again, also before Orbit answered", () => {
+    const view = orbitSetupView({ ...following, completionStatus: "queued" });
+    expect(view.phase).toBe("running");
+    expect(view.canCancel).toBe(false);
+    const admitting = orbitSetupView({
+      ...following,
+      completionOperationId: null,
+      completionKey: "k",
+      completionStatus: "queued",
+    });
+    expect(admitting.phase).toBe("running");
+    expect(admitting.canCancel).toBe(false);
+    expect(admitting.stages[0]!.rows).not.toBeNull();
+  });
+
+  it("state 8: a removal's cancel shows nothing new", () => {
+    const view = orbitSetupView({ ...following, completionStatus: "cancelled" });
+    expect(view.phase).toBe("running");
+    expect(view.error).toBeNull();
+  });
+
+  it("state 11: an older Gateway without a completion keeps today's done card", () => {
+    const view = orbitSetupView(sent);
+    expect(view.phase).toBe("done");
+    expect(view.canCancel).toBe(false);
+  });
+});

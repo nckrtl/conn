@@ -1,5 +1,9 @@
 import {
+  admitOrbitCompletion,
+  followOrbitCompletion,
+  markOrbitCompletionRetry,
   newOrbitThreadStart,
+  type OrbitCompletionPorts,
   orbitThreadStartHasNoMessage,
   orbitThreadStartCreatedInstance,
   retryOrbitThreadStartRecord,
@@ -337,4 +341,78 @@ export async function runSavedOrbitThreadStart(
   } finally {
     running.delete(id);
   }
+}
+
+/** Completions this window follows, by start and Operation, so a re-run of the runner follows each once. */
+const following = new Set<string>();
+
+function completionPorts(client: OrbitGatewayClient, id: string): OrbitCompletionPorts {
+  return {
+    client,
+    read: () => readStored().find((entry) => entry.id === id) ?? null,
+    // Saves only a start that is still there: a Dismiss in another window wins.
+    save: (next) =>
+      updateStarts((starts) => starts.map((entry) => (entry.id === id ? next : entry))),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: Date.now,
+  };
+}
+
+/**
+ * Follows a sent start's completion (main window's runner only). Other windows render the saved
+ * rows and status; a restart resumes from the saved Operation id.
+ */
+export async function followSavedOrbitCompletion(
+  client: OrbitGatewayClient,
+  id: string,
+): Promise<void> {
+  const operationId = readStored().find((entry) => entry.id === id)?.completionOperationId;
+  if (operationId == null) return;
+  const key = `${id}:${operationId}`;
+  if (following.has(key)) return;
+  following.add(key);
+  try {
+    // Only Orbit-mode windows follow; a switch to Default pauses it until Orbit mode is back.
+    if (useEnvironmentProvider.getState().provider !== "orbit") return;
+    await followOrbitCompletion(completionPorts(client, id));
+  } finally {
+    following.delete(key);
+  }
+}
+
+/** Retries whose admission this window sends, by start, so a re-run of the runner sends it once. */
+const admitting = new Set<string>();
+
+async function onceAdmitting(id: string, run: () => Promise<void>): Promise<void> {
+  if (admitting.has(id)) return;
+  admitting.add(id);
+  try {
+    await run();
+  } finally {
+    admitting.delete(id);
+  }
+}
+
+/**
+ * Retry of a failed completion, from any window: it only saves the Retry. The main window's
+ * runner sends it and then follows the new Operation, so two windows never send it twice.
+ */
+export function retrySavedOrbitCompletion(id: string): void {
+  markOrbitCompletionRetry({
+    read: () => readStored().find((entry) => entry.id === id) ?? null,
+    save: (next) =>
+      updateStarts((starts) => starts.map((entry) => (entry.id === id ? next : entry))),
+    now: Date.now,
+  });
+}
+
+/**
+ * A Retry whose answer a reload or quit cut off: the main window's runner sends it again under
+ * the saved key, so Orbit returns the Operation it may have admitted.
+ */
+export async function resumeSavedOrbitCompletionRetry(
+  client: OrbitGatewayClient,
+  id: string,
+): Promise<void> {
+  await onceAdmitting(id, () => admitOrbitCompletion(completionPorts(client, id)));
 }

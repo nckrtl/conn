@@ -40,7 +40,8 @@ function RowStatus({
   return (
     <span
       className={cn(
-        "flex w-6 shrink-0 items-center justify-center text-icon-muted",
+        "flex w-6 shrink-0 items-center justify-center",
+        status === "failed" ? "text-destructive-foreground" : "text-icon-muted",
         small && "[&_svg]:size-3.5",
         status === "pending" && "opacity-40",
       )}
@@ -82,7 +83,13 @@ function OrbitStageRow({ stage }: { stage: OrbitSetupViewStage }) {
     <WorkLogRow
       data-orbit-setup-stage={stage.id}
       data-orbit-setup-status={stage.status}
-      label={<RowLabel label={stage.label} status={stage.status} />}
+      label={
+        <RowLabel
+          label={stage.label}
+          // "Create Instance" shows the card's failure with its X only; its rows say where.
+          status={stage.id === "create" && stage.status === "failed" ? "done" : stage.status}
+        />
+      }
       trailing={
         <>
           {stage.detail ? (

@@ -614,7 +614,48 @@ describe("connection onboarding", () => {
         },
         credential: { token: "bearer-token" },
       });
+      expect(registration.target.labelSetByUser).toBe(true);
     }),
+  );
+
+  it.effect(
+    "Conn: saving the same name with a new URL does not mark the name as the person's",
+    () =>
+      Effect.gen(function* () {
+        const environmentId = EnvironmentId.make("environment-paired");
+        const entry = (labelSetByUser: boolean) =>
+          Option.some({
+            target: new BearerConnectionTarget({
+              environmentId,
+              label: "instance-1846",
+              connectionId: "bearer:environment-paired",
+              ...(labelSetByUser ? { labelSetByUser: true as const } : {}),
+            }),
+            profile: Option.some(
+              new BearerConnectionProfile({
+                connectionId: "bearer:environment-paired",
+                environmentId,
+                label: "instance-1846",
+                httpBaseUrl: "http://old.example.test/",
+                wsBaseUrl: "ws://old.example.test/",
+              }),
+            ),
+            enabled: true,
+          });
+        const update = (labelSetByUser: boolean) =>
+          prepareBearerConnectionUpdate({
+            input: {
+              environmentId,
+              label: "instance-1846",
+              httpBaseUrl: "http://new.example.test/",
+            },
+            entry: entry(labelSetByUser),
+            credential: Option.some(new BearerConnectionCredential({ token: "bearer-token" })),
+          });
+
+        expect((yield* update(false)).target.labelSetByUser).toBeUndefined();
+        expect((yield* update(true)).target.labelSetByUser).toBe(true);
+      }),
   );
 
   it.effect("prepares an SSH registration from the provisioned platform environment", () =>

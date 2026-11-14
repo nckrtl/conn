@@ -241,11 +241,15 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       }),
   });
   const connectionId = entry.target.connectionId;
+  // Conn: a name the person typed is theirs; the server's own name never replaces it. Saving the
+  // same name again (only the URL changed) keeps whatever mark it had.
+  const labelSetByUser = label !== entry.target.label || entry.target.labelSetByUser === true;
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
       environmentId: options.input.environmentId,
       label,
       connectionId,
+      ...(labelSetByUser ? { labelSetByUser: true as const } : {}),
     }),
     profile: new BearerConnectionProfile({
       connectionId,

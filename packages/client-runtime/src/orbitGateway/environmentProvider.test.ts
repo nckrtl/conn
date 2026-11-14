@@ -26,6 +26,7 @@ import {
   connectionRefusedCredential,
   createCredentialRefusalWatch,
   forgetRenewalFailure,
+  GONE_CONFIRM_MS,
   readSessionRenewals,
   recordRenewalFailed,
   renewalFailureReason,
@@ -139,7 +140,153 @@ describe("planEnvironmentProvider", () => {
         orbit: null,
         state,
       }),
-    ).toEqual({ enable: [], disable: [], pair: [], renew: [], state });
+    ).toEqual({ enable: [], disable: [], pair: [], renew: [], remove: [], state });
+  });
+
+  it("removes a saved Instance server once lists leave it out for GONE_CONFIRM_MS", () => {
+    const state: OrbitEnvironmentState = {
+      disabledByOrbit: [],
+      pairedByOrbit: ["host", "clone"],
+    };
+    const list = [saved("host"), saved("clone")];
+    const others = [orbit("host"), orbit("other", "registered", 9)];
+    // Listed: remembered as Instance 1846's server.
+    const seen = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: [...others, orbit("clone", "registered", 1846)],
+      state,
+      now: 1_000,
+    });
+    expect(seen.remove).toEqual([]);
+    // The Instance was destroyed outside Conn: the first list without it switches it off.
+    const first = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: others,
+      state: seen.state,
+      now: 2_000,
+    });
+    expect(first.remove).toEqual([]);
+    expect(first.disable).toEqual(["clone"]);
+    const afterMiss = [saved("host"), saved("clone", false)];
+    // A second list seconds later (a profile edit's sync) is no proof yet.
+    const soon = planEnvironmentProvider({
+      provider: "orbit",
+      saved: afterMiss,
+      orbit: others,
+      state: first.state,
+      now: 5_000,
+    });
+    expect(soon.remove).toEqual([]);
+    // A list GONE_CONFIRM_MS after the first miss removes it from this device.
+    const later = planEnvironmentProvider({
+      provider: "orbit",
+      saved: afterMiss,
+      orbit: others,
+      state: soon.state,
+      now: 2_000 + GONE_CONFIRM_MS,
+    });
+    expect(later.remove).toEqual([{ environmentId: "clone", instanceId: 1846 }]);
+    expect(later.disable).toEqual([]);
+    expect(later.state.pairedByOrbit).toEqual(["host"]);
+    expect(later.state.missingFromGateway).toEqual({});
+  });
+
+  it("removes nothing while the Gateway is out, or lists nothing", () => {
+    const state: OrbitEnvironmentState = {
+      disabledByOrbit: [],
+      pairedByOrbit: ["clone"],
+      instanceServers: { clone: 1846 },
+      missingFromGateway: { clone: 0 },
+    };
+    const list = [saved("clone", false)];
+    const now = GONE_CONFIRM_MS * 10;
+    const failed = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: null,
+      state,
+      now,
+    });
+    expect(failed.remove).toEqual([]);
+    expect(failed.state).toBe(state);
+    // An empty list (a Gateway that briefly lists nothing) is no proof either; the mark holds.
+    const empty = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: [],
+      state,
+      now,
+    });
+    expect(empty.remove).toEqual([]);
+    expect(empty.state.missingFromGateway).toEqual({ clone: 0 });
+    // Back in the list: the mark is dropped.
+    const back = planEnvironmentProvider({
+      provider: "orbit",
+      saved: list,
+      orbit: [orbit("clone", "registered", 1846)],
+      state,
+      now,
+    });
+    expect(back.remove).toEqual([]);
+    expect(back.state.missingFromGateway).toEqual({});
+    // A switch to Default drops the marks, so a later switch back counts again.
+    expect(
+      planEnvironmentProvider({ provider: "default", saved: list, orbit: null, state }).state
+        .missingFromGateway,
+    ).toEqual({});
+  });
+
+  it("never removes a host server, which only switches off", () => {
+    let state: OrbitEnvironmentState = { disabledByOrbit: [], pairedByOrbit: ["host"] };
+    let list = [saved("host")];
+    for (let run = 0; run < 3; run++) {
+      const plan = planEnvironmentProvider({
+        provider: "orbit",
+        saved: list,
+        orbit: [orbit("other-host"), orbit("clone", "registered", 7)],
+        state,
+        now: run * GONE_CONFIRM_MS,
+      });
+      expect(plan.remove).toEqual([]);
+      state = plan.state;
+      list = [saved("host", false)];
+    }
+    expect(state.missingFromGateway).toEqual({});
+  });
+
+  it("leaves the server of a clone a thread start holds", () => {
+    const state: OrbitEnvironmentState = {
+      disabledByOrbit: [],
+      pairedByOrbit: ["clone"],
+      instanceServers: { clone: 41 },
+      missingFromGateway: { clone: 0 },
+    };
+    const plan = planEnvironmentProvider({
+      provider: "orbit",
+      saved: [saved("clone")],
+      orbit: [orbit("host")],
+      state,
+      heldInstanceIds: [41],
+      now: GONE_CONFIRM_MS * 10,
+    });
+    expect(plan.remove).toEqual([]);
+  });
+
+  it("removes a switched-off clone this device knew before it remembered Instance servers", () => {
+    const state: OrbitEnvironmentState = { disabledByOrbit: [], pairedByOrbit: ["instance-1846"] };
+    const input = {
+      provider: "orbit" as const,
+      saved: [saved("instance-1846", false)],
+      orbit: [orbit("instance-2764", "registered", 2764)],
+      knownInstanceServers: ["instance-1846"],
+    };
+    const first = planEnvironmentProvider({ ...input, state, now: 0 });
+    expect(first.remove).toEqual([]);
+    expect(
+      planEnvironmentProvider({ ...input, state: first.state, now: GONE_CONFIRM_MS }).remove,
+    ).toEqual([{ environmentId: "instance-1846", instanceId: null }]);
   });
 
   it("restores exactly the earlier list on each switch, back and forth", () => {

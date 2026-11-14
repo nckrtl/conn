@@ -18,3 +18,5 @@ export * from "./profilePage.ts";
 export * from "./instanceGit.ts";
 export * from "./instanceRemoval.ts";
 export * from "./instanceWake.ts";
+export * from "./attachedThreads.ts";
+export * from "./threadIndex.ts";

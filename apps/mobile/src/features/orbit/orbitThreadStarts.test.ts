@@ -443,7 +443,7 @@ describe("the create's completion on the phone (same answers as the desktop)", (
     const row = orbitThreadStartRow(kept);
     expect(row.stage).toBe("setup");
     expect(row.rows?.map((entry) => `${entry.label}:${entry.status}`)).toContain(
-      "Copy the workspace:running",
+      "Publish the address:running",
     );
     expect(orbitCompletionSettled(kept)).toBe(false);
 
@@ -466,7 +466,7 @@ describe("the create's completion on the phone (same answers as the desktop)", (
       ],
       canRetry: true,
     });
-    expect(row.rows?.find((entry) => entry.id === "workspace")?.status).toBe("failed");
+    expect(row.rows?.find((entry) => entry.id === "address")?.status).toBe("failed");
     expect(failed.error).toBeNull();
     expect(failed.connected).toBe(true);
 

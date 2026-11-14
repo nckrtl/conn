@@ -2,7 +2,11 @@ import type { OrbitThreadIndex } from "@t3tools/client-runtime/orbit-gateway";
 import { EMPTY_ORBIT_THREAD_INDEX_STATE } from "@t3tools/client-runtime/orbit-gateway";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { createOrbitThreadIndex, useOrbitThreadIndexStore } from "./orbitThreadIndex";
+import {
+  createOrbitThreadIndex,
+  orbitListThreadInputs,
+  useOrbitThreadIndexStore,
+} from "./orbitThreadIndex";
 
 const ANSWER: OrbitThreadIndex = {
   rows: [
@@ -89,5 +93,56 @@ describe("createOrbitThreadIndex", () => {
       },
     });
     expect(useOrbitThreadIndexStore.getState().index).toBe(kept);
+  });
+
+  it("a read that answers after a newer one does not undo it", async () => {
+    const { index } = harness(true, ["inner-a"]);
+    const answers: Array<(value: OrbitThreadIndex) => void> = [];
+    let bothAsked: () => void = () => {};
+    const asked = new Promise<void>((resolve) => (bothAsked = resolve));
+    const client = {
+      threads: () =>
+        new Promise<OrbitThreadIndex>((resolve) => {
+          answers.push(resolve);
+          if (answers.length === 2) bothAsked();
+        }),
+    };
+    const older = index.load(client);
+    const newer = index.load(client);
+    await asked;
+    const at = (readAt: string, title: string): OrbitThreadIndex => ({
+      rows: [{ ...ANSWER.rows[0]!, title }],
+      environments: [{ ...ANSWER.environments[0]!, readAt }],
+    });
+    answers[1]!(at("2026-11-14T14:02:00Z", "Newer"));
+    await newer;
+    answers[0]!(at("2026-11-14T14:01:00Z", "Older"));
+    await older;
+    expect(useOrbitThreadIndexStore.getState().index.servers.get("inner-a")?.rows[0]?.title).toBe(
+      "Newer",
+    );
+  });
+});
+
+describe("orbitListThreadInputs (the Instances page's threads)", () => {
+  it("flag off: the live list itself, even with a held server and index rows", async () => {
+    useOrbitThreadIndexStore.setState({ index: EMPTY_ORBIT_THREAD_INDEX_STATE, held: new Set() });
+    const { index, client } = harness(true, ["inner-a"]);
+    await index.load(client);
+    const live = [
+      {
+        environmentId: "inner-a",
+        id: "t-cached",
+        title: "Cached",
+        updatedAt: "2026-11-14T09:00:00Z",
+        archivedAt: null,
+        working: false,
+      },
+    ];
+    const store = useOrbitThreadIndexStore.getState();
+    expect(orbitListThreadInputs(live, store, false)).toBe(live);
+    expect(orbitListThreadInputs(live, store, true).map((thread) => thread.title)).toEqual([
+      "From the index",
+    ]);
   });
 });

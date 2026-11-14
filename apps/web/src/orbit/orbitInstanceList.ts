@@ -30,7 +30,8 @@ export async function loadOrbitInstanceList(): Promise<void> {
   });
   const client = desktopOrbitGatewayClient();
   // Conn (flag `connAttachedServers` only): the threads of held-off servers, read with the list.
-  const index = loadOrbitThreadIndex(client).catch(() => {});
+  // Not awaited: the list never waits for the index.
+  void loadOrbitThreadIndex(client).catch(() => {});
   let next: OrbitInstanceListState;
   try {
     if (client === null) throw new Error("The Orbit Gateway is not available here.");
@@ -38,7 +39,6 @@ export async function loadOrbitInstanceList(): Promise<void> {
   } catch {
     next = { status: "unreachable" };
   }
-  await index;
   if (useOrbitInstanceListStore.getState().generation === current) {
     useOrbitInstanceListStore.setState({ state: next });
   }

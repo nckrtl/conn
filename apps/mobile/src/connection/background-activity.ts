@@ -1,4 +1,8 @@
-import { EnvironmentRegistry } from "@t3tools/client-runtime/connection";
+import {
+  EnvironmentRegistry,
+  activityReportTargets,
+  attachedServersEnabled,
+} from "@t3tools/client-runtime/connection";
 import { EnvironmentRpcSubscriptionObserver, request } from "@t3tools/client-runtime/rpc";
 import {
   type BackgroundScope,
@@ -58,9 +62,11 @@ export const layerReporter = Layer.effectDiscard(
     const report = Effect.gen(function* () {
       const observedAtMs = yield* Clock.currentTimeMillis;
       const active = appState === "active";
-      const entries = yield* SubscriptionRef.get(registry.entries);
+      // Conn: with `connAttachedServers` on, only connected servers get a report. The phone has
+      // no per-device override; it follows the shared default.
+      const targets = yield* activityReportTargets(registry, attachedServersEnabled(null));
       yield* Effect.forEach(
-        entries.keys(),
+        targets,
         (environmentId) =>
           registry
             .run(

@@ -17,6 +17,11 @@ import {
   reconcileEnvironmentProvider,
   useEnvironmentProvider,
 } from "./environmentProvider";
+import {
+  clearAttachedServers,
+  recordAttachedServers,
+  watchAttachedServersRecord,
+} from "./attachedServers";
 import { pruneWorkspaceCloneRefs } from "./cloneWorkspaceRefs";
 import { OrbitAppearanceSync } from "./OrbitAppearanceSync";
 import { getProfileSyncChannels, onLocalProfileChange } from "./profileSyncRegistry";
@@ -79,6 +84,8 @@ export function syncOrbitProfileNow(): Promise<void> {
 
 // Conn: every window's sleep controller reads the Gateway through this window's client.
 registerOrbitSleepClient(() => desktopOrbitGatewayClient());
+// Conn: every window applies the attached set the main window stores (flag `connAttachedServers`).
+watchAttachedServersRecord();
 
 /** The Gateway client over the desktop main process, or null outside the desktop app. */
 export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
@@ -189,10 +196,17 @@ function profileSyncController(): ProfileSyncController | null {
       // Everything syncs only while Orbit provides the environments.
       if (provider !== "orbit") {
         useOrbitProfileSyncStatus.setState(INITIAL_STATUS);
+        await clearAttachedServers();
         return;
       }
       pruneWorkspaceCloneRefs(provider, listed);
       const me = await client.me();
+      // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
+      if (listed !== null) {
+        await recordAttachedServers(client, me, listed).catch((error: unknown) => {
+          console.warn("Conn could not apply the attached set.", error);
+        });
+      }
       const result = await syncWorkspaceProfile(ports, me);
       useOrbitProfileSyncStatus.setState(
         result.kind === "unbound"

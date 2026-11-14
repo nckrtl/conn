@@ -38,6 +38,7 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { ConnectionParkSeed, type ParkReason, type ParkReasons } from "./parking.ts";
 import {
   PullRequestRoutingPermissions,
   pullRequestRoutingConnectionKey,
@@ -160,9 +161,23 @@ export class EnvironmentRegistry extends Context.Service<
     readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
     /**
      * Conn: holds an enabled environment off without changing the user's saved on/off choice,
-     * for an Orbit Instance that is asleep and not in use. Not persisted; a release connects it.
+     * for an Orbit Instance that is asleep and not in use. Not persisted. Same as
+     * `setParkReason(environmentId, "asleep", parked)`.
      */
     readonly setParked: (environmentId: EnvironmentId, parked: boolean) => Effect.Effect<void>;
+    /**
+     * Conn: adds or removes one reason to hold an enabled environment off. It connects only while
+     * it has no reason; each owner changes only its own. Kept for environments not registered yet.
+     */
+    readonly setParkReason: (
+      environmentId: EnvironmentId,
+      reason: ParkReason,
+      held: boolean,
+    ) => Effect.Effect<void>;
+    /** Conn: the reasons each environment is held off for now (only environments with one). */
+    readonly parkReasons: Effect.Effect<ParkReasons>;
+    /** Conn: environments whose connection is up now. */
+    readonly connectedEnvironmentIds: Effect.Effect<ReadonlySet<EnvironmentId>>;
     readonly setEnabled: (
       environmentId: EnvironmentId,
       enabled: boolean,
@@ -289,7 +304,13 @@ export const make = Effect.gen(function* () {
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
-  const parked = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
+  // Conn: seeded before any supervisor exists, so a held-off server never opens a socket at start.
+  const parkSeed = yield* (yield* ConnectionParkSeed).load;
+  const parked = yield* Ref.make<ParkReasons>(
+    new Map([...parkSeed].filter(([, reasons]) => reasons.size > 0)),
+  );
+  const isParked = (environmentId: EnvironmentId) =>
+    Ref.get(parked).pipe(Effect.map((current) => current.has(environmentId)));
 
   const withLeaseLock = <A, E, R>(
     environmentId: EnvironmentId,
@@ -375,7 +396,7 @@ export const make = Effect.gen(function* () {
             initiallyDesired:
               entry.enabled &&
               entry.unsupportedReason === undefined &&
-              !(yield* Ref.get(parked)).has(environmentId),
+              !(yield* isParked(environmentId)),
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
@@ -1062,25 +1083,45 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
       Effect.withSpan("EnvironmentRegistry.retryNow"),
     );
-  const setParked = (environmentId: EnvironmentId, hold: boolean) =>
+  const setParkReason = (environmentId: EnvironmentId, reason: ParkReason, held: boolean) =>
     withLeaseLock(
       environmentId,
       Effect.gen(function* () {
         const current = yield* Ref.get(parked);
-        if (current.has(environmentId) === hold) return;
-        const next = new Set(current);
-        if (hold) next.add(environmentId);
+        const reasons = current.get(environmentId) ?? new Set<ParkReason>();
+        if (reasons.has(reason) === held) return;
+        const wasHeld = reasons.size > 0;
+        const nextReasons = new Set(reasons);
+        if (held) nextReasons.add(reason);
+        else nextReasons.delete(reason);
+        const next = new Map(current);
+        if (nextReasons.size > 0) next.set(environmentId, nextReasons);
         else next.delete(environmentId);
         yield* Ref.set(parked, next);
+        // Only the first reason disconnects and only the last one's removal connects.
+        const isHeld = nextReasons.size > 0;
+        if (wasHeld === isHeld) return;
         const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
         if (lease === undefined) return;
-        if (hold) {
+        if (isHeld) {
           yield* lease.supervisor.disconnect;
         } else if (lease.entry.enabled && lease.entry.unsupportedReason === undefined) {
           yield* lease.supervisor.connect;
         }
       }),
-    ).pipe(Effect.withSpan("EnvironmentRegistry.setParked"));
+    ).pipe(Effect.withSpan("EnvironmentRegistry.setParkReason"));
+  const setParked = (environmentId: EnvironmentId, hold: boolean) =>
+    setParkReason(environmentId, "asleep", hold);
+  const parkReasons: Effect.Effect<ParkReasons> = Ref.get(parked);
+  const connectedEnvironmentIds = Effect.gen(function* () {
+    const connected = new Set<EnvironmentId>();
+    for (const [environmentId, lease] of yield* SubscriptionRef.get(serviceScopes)) {
+      if ((yield* SubscriptionRef.get(lease.supervisor.state)).phase === "connected") {
+        connected.add(environmentId);
+      }
+    }
+    return connected as ReadonlySet<EnvironmentId>;
+  });
   const setEnabled = Effect.fn("EnvironmentRegistry.setEnabled")(function* (
     environmentId: EnvironmentId,
     enabled: boolean,
@@ -1120,7 +1161,7 @@ export const make = Effect.gen(function* () {
           nextEntries.set(environmentId, next);
           return nextEntries;
         });
-        const held = (yield* Ref.get(parked)).has(environmentId);
+        const held = yield* isParked(environmentId);
         if (lease !== undefined) {
           yield* enabled && !held ? lease.supervisor.connect : lease.supervisor.disconnect;
         } else if (enabled) {
@@ -1203,7 +1244,7 @@ export const make = Effect.gen(function* () {
             new Map(current).set(environmentId, { ...lease, entry: next }),
           );
           if (error !== null) yield* lease.supervisor.disconnect;
-          else if (next.enabled && !(yield* Ref.get(parked)).has(environmentId))
+          else if (next.enabled && !(yield* isParked(environmentId)))
             yield* lease.supervisor.connect;
         }
         yield* SubscriptionRef.update(entries, (current) =>
@@ -1226,6 +1267,9 @@ export const make = Effect.gen(function* () {
     removeRelayEnvironments,
     retryNow,
     setParked,
+    setParkReason,
+    parkReasons,
+    connectedEnvironmentIds,
     setEnabled,
     setCompatibility,
     state,

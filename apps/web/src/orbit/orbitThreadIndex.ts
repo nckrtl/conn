@@ -42,6 +42,8 @@ function sameSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean
 }
 
 export function createOrbitThreadIndex(ports: OrbitThreadIndexPorts) {
+  // Only the newest load writes; an older answer could still change which servers are listed.
+  let generation = 0;
   /** Re-reads which servers are held off; with the flag off it forgets them. */
   const refreshHeld = async (): Promise<ReadonlySet<string>> => {
     const held = ports.enabled() ? await ports.heldNow() : new Set<string>();
@@ -57,6 +59,7 @@ export function createOrbitThreadIndex(ports: OrbitThreadIndexPorts) {
       if (useOrbitThreadIndexStore.getState().held.size > 0) await refreshHeld();
       return;
     }
+    const mine = ++generation;
     const held = await refreshHeld();
     if (client === null) return;
     const answer = await readOrbitThreadIndex({
@@ -64,7 +67,8 @@ export function createOrbitThreadIndex(ports: OrbitThreadIndexPorts) {
       held,
       threads: () => client.threads(),
     });
-    // Merged into the state as it is NOW: a read that answers after a newer one cannot undo it.
+    if (mine !== generation) return;
+    // Merged into the state as it is now, so the `read_at` check runs against the kept rows.
     const current = useOrbitThreadIndexStore.getState().index;
     const index = nextOrbitThreadIndexState(current, answer);
     if (index !== current) useOrbitThreadIndexStore.setState({ index });

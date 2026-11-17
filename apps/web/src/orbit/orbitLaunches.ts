@@ -4,7 +4,10 @@ import {
   createOrbitLaunchSubmissions,
   newOrbitLaunchAdmission,
   readLegacyOrbitLaunches,
+  recordLegacyOrbitPreview,
   resolveLegacyOrbitLaunch,
+  updateLegacyOrbitPreview,
+  type LegacyOrbitLaunch,
   type OrbitLaunch,
   type OrbitLaunchSubmission,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -46,12 +49,25 @@ export function readLegacyWebLaunches() {
   return readLegacyOrbitLaunches(window.localStorage.getItem(LEGACY_KEY));
 }
 
+function changeLegacyWebArchive(change: (raw: string) => string | null) {
+  return navigator.locks.request(LEGACY_KEY, () => {
+    const raw = window.localStorage.getItem(LEGACY_KEY);
+    if (raw === null) return;
+    const next = change(raw);
+    if (next === null) window.localStorage.removeItem(LEGACY_KEY);
+    else window.localStorage.setItem(LEGACY_KEY, next);
+  });
+}
+
 export function resolveLegacyWebLaunch(id: string) {
-  const raw = window.localStorage.getItem(LEGACY_KEY);
-  if (raw === null) return;
-  const remaining = resolveLegacyOrbitLaunch(raw, id);
-  if (remaining === null) window.localStorage.removeItem(LEGACY_KEY);
-  else window.localStorage.setItem(LEGACY_KEY, remaining);
+  return changeLegacyWebArchive((raw) => resolveLegacyOrbitLaunch(raw, id));
+}
+
+export async function updateLegacyWebPreview(row: LegacyOrbitLaunch, action: "refresh" | "retry") {
+  const client = desktopOrbitGatewayClient();
+  if (client === null || row.completion === null) throw new Error("This preview is unavailable.");
+  const operation = await updateLegacyOrbitPreview(client, row.completion, action);
+  await changeLegacyWebArchive((raw) => recordLegacyOrbitPreview(raw, row, operation));
 }
 
 export async function submitOrbitDraft(draftId: string, start: OrbitDraftStartInput) {
@@ -60,7 +76,7 @@ export async function submitOrbitDraft(draftId: string, start: OrbitDraftStartIn
   const scope = orbitLaunches.scope();
   if (scope === null) throw new Error("Connect to an Orbit profile before sending.");
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
-  const admission = newOrbitLaunchAdmission(randomUUID, {
+  const admission = newOrbitLaunchAdmission(randomUUID, scope, {
     project_id: start.project.id,
     ...(workspaceId == null ? {} : { workspace_id: workspaceId }),
     target: start.existing

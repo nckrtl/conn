@@ -47,12 +47,17 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
     const api = client()?.launches;
     if (api === undefined || scope === null || reading) return;
     const version = scopeVersion;
+    const { profileId } = scope;
     const requested = revision;
     reading = true;
     try {
       const launches = await api.list();
       if (version === scopeVersion && requested === revision) {
-        publish({ launches, loaded: true, error: null });
+        publish({
+          launches: launches.filter((launch) => launch.profile_id === profileId),
+          loaded: true,
+          error: null,
+        });
       }
     } catch (error) {
       if (version === scopeVersion && requested === revision) {
@@ -96,6 +101,12 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
     ) {
       throw new Error("Connect to the original Orbit profile and device before sending.");
     }
+    if (
+      admission.request.expected_profile_id !== expected.profileId ||
+      admission.request.expected_node_id !== expected.nodeId
+    ) {
+      throw new Error("This submission belongs to a different Orbit profile or device.");
+    }
     const version = scopeVersion;
     const me = await gateway.me();
     if (
@@ -111,7 +122,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       if (scopeVersion !== version)
         throw new Error("The Orbit profile changed while checking the launch.");
       if (previous) {
-        assertLaunchIdentity(previous, admission, expected.nodeId);
+        assertLaunchIdentity(previous, admission);
         apply(previous, version);
         return previous;
       }
@@ -120,7 +131,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       const accepted = await api.submit(admission);
       if (scopeVersion !== version)
         throw new Error("Orbit may have accepted the launch on your previous profile.");
-      assertLaunchIdentity(accepted, admission, expected.nodeId);
+      assertLaunchIdentity(accepted, admission);
       apply(accepted, version);
       return accepted;
     } catch (error) {
@@ -137,7 +148,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       if (scopeVersion !== version) throw error;
       const accepted = launches?.find((row) => row.launch_id === admission.id);
       if (accepted === undefined) throw error;
-      assertLaunchIdentity(accepted, admission, expected.nodeId);
+      assertLaunchIdentity(accepted, admission);
       apply(accepted, version);
       return accepted;
     }
@@ -161,7 +172,11 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
         action === "cancel"
           ? await api.cancel(id)
           : await api.retry(id, action === "retry_launch" ? "launch" : "application");
-      if (next.id !== id || next.launch_id !== launch.launch_id) {
+      if (
+        next.id !== id ||
+        next.launch_id !== launch.launch_id ||
+        next.profile_id !== launch.profile_id
+      ) {
         throw new Error("Orbit returned a different launch.");
       }
       apply(next, version);
@@ -195,14 +210,11 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
   };
 }
 
-function assertLaunchIdentity(
-  launch: OrbitLaunch,
-  admission: OrbitLaunchAdmission,
-  nodeId: number,
-) {
+function assertLaunchIdentity(launch: OrbitLaunch, admission: OrbitLaunchAdmission) {
   if (
     launch.launch_id !== admission.id ||
-    launch.initiator_node_id !== nodeId ||
+    launch.profile_id !== admission.request.expected_profile_id ||
+    launch.initiator_node_id !== admission.request.expected_node_id ||
     launch.project_id !== admission.request.project_id ||
     launch.source !== admission.request.source ||
     (launch.thread !== null &&

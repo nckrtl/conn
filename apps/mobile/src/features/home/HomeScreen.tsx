@@ -628,6 +628,14 @@ export function HomeScreen(props: HomeScreenProps) {
         "this environment");
   const emptyState = deriveHomeEmptyState(props.catalogState, props.projects.length);
 
+  const hasThreadRow = (environmentId: string, threadId: string) =>
+    threadListV2Items.some(
+      (row) =>
+        row.type === "v2-thread" &&
+        row.item.thread.environmentId === environmentId &&
+        row.item.thread.id === threadId,
+    );
+
   if (!hasAnyThreads) {
     return (
       <View className={containerClassName}>
@@ -646,7 +654,7 @@ export function HomeScreen(props: HomeScreenProps) {
             }}
           >
             <View className="w-full max-w-[430px]">
-              <OrbitThreadStartRows />
+              <OrbitThreadStartRows hasThreadRow={hasThreadRow} />
               <EmptyState
                 title={emptyState.title}
                 detail={emptyState.detail}
@@ -703,7 +711,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onProjectChange={props.onProjectChange}
         />
       ) : null}
-      <OrbitThreadStartRows />
+      <OrbitThreadStartRows hasThreadRow={hasThreadRow} />
     </>
   );
 

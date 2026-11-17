@@ -3,7 +3,7 @@ import {
   ORBIT_LAUNCH_PHASE_LABELS,
   ORBIT_LAUNCH_STAGES,
   orbitLaunchActionLabel,
-  orbitLaunchNeedsAttention,
+  orbitLaunchShowsInThreadList,
   type LegacyOrbitLaunch,
   type OrbitLaunch,
   type OrbitLaunchAction,
@@ -23,6 +23,7 @@ import {
   openMobileOrbitThread,
   readLegacyMobileLaunches,
   resolveLegacyMobileLaunch,
+  updateLegacyMobilePreview,
   useMobileOrbitLaunches,
 } from "./orbitThreadStartRuntime";
 
@@ -37,7 +38,11 @@ const stageStatus = {
   skipped: "Skipped",
 } as const;
 
-export function OrbitThreadStartRows() {
+export function OrbitThreadStartRows({
+  hasThreadRow,
+}: {
+  hasThreadRow: (environmentId: string, threadId: string) => boolean;
+}) {
   const gateway = useOrbitGateway();
   const snapshot = useMobileOrbitLaunches();
   const nodeId = gateway.node?.id ?? null;
@@ -95,7 +100,12 @@ export function OrbitThreadStartRows() {
     }
     setBusy(false);
   };
-  const rows = snapshot.launches.filter(orbitLaunchNeedsAttention);
+  const rows = snapshot.launches.filter((launch) =>
+    orbitLaunchShowsInThreadList(
+      launch,
+      launch.thread !== null && hasThreadRow(launch.thread.environment_id, launch.thread.thread_id),
+    ),
+  );
   const submissions = pending.filter(
     (item) => item.profileId === profileId && item.nodeId === nodeId,
   );
@@ -180,9 +190,16 @@ export function OrbitThreadStartRows() {
       {legacy.map((row) => (
         <View key={row.id} className="gap-2 border-b border-border-subtle px-4 py-3">
           <Text className="text-base text-foreground">Previous Orbit start · {row.project}</Text>
-          <Text className="text-sm text-foreground-muted">
-            Check the previous thread before starting again. This message may have been sent.
-          </Text>
+          {row.completion ? (
+            <Text className="text-sm text-foreground-muted">
+              Previous application preview · {row.completion.status}
+              {row.completion.error ? ` · ${row.completion.error}` : ""}
+            </Text>
+          ) : (
+            <Text className="text-sm text-foreground-muted">
+              Check the previous thread before starting again. This message may have been sent.
+            </Text>
+          )}
           {row.environmentId && row.threadId ? (
             <Button
               label="Open previous thread"
@@ -195,11 +212,42 @@ export function OrbitThreadStartRows() {
               }}
             />
           ) : null}
-          <Button
-            label="Copy saved message"
-            disabled={busy}
-            onPress={() => void run(() => Clipboard.setStringAsync(row.prompt))}
-          />
+          {row.completion ? (
+            <>
+              <Button
+                label="Refresh preview"
+                disabled={busy}
+                onPress={() =>
+                  void run(async () => {
+                    await updateLegacyMobilePreview(row, "refresh");
+                    setLegacy(await readLegacyMobileLaunches());
+                  })
+                }
+              />
+              {row.completion.retryable ? (
+                <Button
+                  label="Retry application"
+                  disabled={busy}
+                  onPress={() =>
+                    void run(async () => {
+                      await updateLegacyMobilePreview(row, "retry");
+                      setLegacy(await readLegacyMobileLaunches());
+                    })
+                  }
+                />
+              ) : null}
+            </>
+          ) : null}
+          {row.prompt !== null ? (
+            <Button
+              label="Copy saved message"
+              disabled={busy}
+              onPress={() => {
+                const prompt = row.prompt;
+                if (prompt !== null) void run(() => Clipboard.setStringAsync(prompt));
+              }}
+            />
+          ) : null}
           <Button
             label="Dismiss saved copy"
             disabled={busy}

@@ -1,6 +1,10 @@
 import * as Schema from "effect/Schema";
 
-import { OrbitGatewayError } from "./client.ts";
+import {
+  OrbitGatewayError,
+  type OrbitGatewayClient,
+  type OrbitGatewayOperation,
+} from "./client.ts";
 import type {
   OrbitLaunch,
   OrbitLaunchAdmission,
@@ -138,51 +142,131 @@ function sameInput(a: OrbitLaunchRequest, b: OrbitLaunchRequest): boolean {
   return JSON.stringify(input(a)) === JSON.stringify(input(b));
 }
 
+interface LegacyOrbitCompletion {
+  readonly instanceId: number;
+  readonly operationId: number;
+  readonly status: string;
+  readonly retryable: boolean;
+  readonly error: string | null;
+}
 export interface LegacyOrbitLaunch {
   readonly id: string;
   readonly project: string;
-  readonly prompt: string;
+  readonly prompt: string | null;
   readonly threadId: string | null;
   readonly environmentId: string | null;
+  readonly completion: LegacyOrbitCompletion | null;
+}
+
+function rowsInLegacyArchive(raw: string): unknown[] {
+  const data: unknown = JSON.parse(raw);
+  if (!Array.isArray(data)) throw new Error("Could not read the previous Orbit starts.");
+  return data;
+}
+
+function legacyCompletion(row: Record<string, unknown>): LegacyOrbitCompletion | null {
+  if (
+    typeof row.instanceId !== "number" ||
+    typeof row.completionOperationId !== "number" ||
+    !Number.isSafeInteger(row.instanceId) ||
+    row.instanceId <= 0 ||
+    !Number.isSafeInteger(row.completionOperationId) ||
+    row.completionOperationId <= 0 ||
+    row.completionStatus === "succeeded"
+  )
+    return null;
+  return {
+    instanceId: row.instanceId,
+    operationId: row.completionOperationId,
+    status: typeof row.completionStatus === "string" ? row.completionStatus : "unknown",
+    retryable: row.completionRetryable === true,
+    error: typeof row.completionErrorDetail === "string" ? row.completionErrorDetail : null,
+  };
 }
 
 export function readLegacyOrbitLaunches(raw: string | null): readonly LegacyOrbitLaunch[] {
   if (raw === null) return [];
-  const data: unknown = JSON.parse(raw);
-  if (!Array.isArray(data)) throw new Error("Could not read the previous Orbit starts.");
-  return data.flatMap((row: unknown) => {
-    if (
-      !row ||
-      typeof row !== "object" ||
-      !("id" in row) ||
-      !("message" in row) ||
-      typeof row.id !== "string" ||
-      typeof row.message !== "string" ||
-      ("sentAt" in row && typeof row.sentAt === "number")
-    ) {
+  return rowsInLegacyArchive(raw).flatMap((value) => {
+    if (!value || typeof value !== "object" || !("id" in value) || typeof value.id !== "string")
       return [];
-    }
+    const row = value as Record<string, unknown> & { id: string };
+    const sent = typeof row.sentAt === "number";
+    const completion = sent ? legacyCompletion(row) : null;
+    const prompt = !sent && typeof row.message === "string" ? row.message : null;
+    if (prompt === null && completion === null) return [];
     return [
       {
         id: row.id,
-        project:
-          "projectSlug" in row && typeof row.projectSlug === "string" ? row.projectSlug : "Orbit",
-        prompt: row.message,
-        threadId: "threadId" in row && typeof row.threadId === "string" ? row.threadId : null,
-        environmentId:
-          "environmentId" in row && typeof row.environmentId === "string"
-            ? row.environmentId
-            : null,
+        project: typeof row.projectSlug === "string" ? row.projectSlug : "Orbit",
+        prompt,
+        threadId: typeof row.threadId === "string" ? row.threadId : null,
+        environmentId: typeof row.environmentId === "string" ? row.environmentId : null,
+        completion,
       },
     ];
   });
 }
 
+function isRetryableLegacyPreview(operation: OrbitGatewayOperation): boolean {
+  return (
+    operation.recoveryRetryable === true &&
+    (operation.status === "failed" ||
+      operation.status === "interrupted" ||
+      operation.status === "cancelled")
+  );
+}
+
+/** Migration only. An explicit preview Retry never sends a thread or prompt. */
+export async function updateLegacyOrbitPreview(
+  client: Pick<OrbitGatewayClient, "operation" | "completeInstance">,
+  completion: LegacyOrbitCompletion,
+  action: "refresh" | "retry",
+): Promise<OrbitGatewayOperation> {
+  const check = (operation: OrbitGatewayOperation) => {
+    if (operation.kind !== "instance.complete" || operation.targetId !== completion.instanceId) {
+      throw new Error("Orbit returned a different preview operation.");
+    }
+    return operation;
+  };
+  const current = check(await client.operation(completion.operationId));
+  if (current.id !== completion.operationId)
+    throw new Error("Orbit returned a different preview operation.");
+  if (action === "refresh" || !isRetryableLegacyPreview(current)) return current;
+  return check(
+    await client.completeInstance(completion.instanceId, `conn:legacy-preview:${current.id}`),
+  );
+}
+
+export function recordLegacyOrbitPreview(
+  raw: string,
+  row: LegacyOrbitLaunch,
+  operation: OrbitGatewayOperation,
+): string {
+  return JSON.stringify(
+    rowsInLegacyArchive(raw).map((entry) => {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !("id" in entry) ||
+        entry.id !== row.id ||
+        !("completionOperationId" in entry) ||
+        entry.completionOperationId !== row.completion?.operationId
+      )
+        return entry;
+      return {
+        ...entry,
+        completionOperationId: operation.id,
+        completionStatus: operation.status,
+        completionRetryable: isRetryableLegacyPreview(operation),
+        completionErrorDetail: operation.error?.detail ?? null,
+      };
+    }),
+  );
+}
+
 /** Remove only the entry the user explicitly resolved, retaining opaque rows from older versions. */
 export function resolveLegacyOrbitLaunch(raw: string, id: string): string | null {
-  const data: unknown = JSON.parse(raw);
-  if (!Array.isArray(data)) throw new Error("Could not read the previous Orbit starts.");
-  const remaining = data.filter(
+  const remaining = rowsInLegacyArchive(raw).filter(
     (row: unknown) => !(row && typeof row === "object" && "id" in row && row.id === id),
   );
   return remaining.length === 0 ? null : JSON.stringify(remaining);

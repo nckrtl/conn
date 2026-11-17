@@ -11,6 +11,7 @@ import {
   orbitLaunchSubmissions,
   readLegacyWebLaunches,
   resolveLegacyWebLaunch,
+  updateLegacyWebPreview,
   useOrbitLaunchScope,
   useOrbitLaunches,
 } from "./orbitLaunches";
@@ -90,15 +91,36 @@ export function OrbitLaunchRecovery() {
     }
     setBusy(null);
   }
+  async function legacyPreview(row: LegacyOrbitLaunch, action: "refresh" | "retry") {
+    setBusy(row.id);
+    setError(null);
+    try {
+      await updateLegacyWebPreview(row, action);
+      setLegacy(readLegacyWebLaunches());
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Orbit did not confirm the preview.");
+    }
+    setBusy(null);
+  }
+
   return (
     <>
       {legacy.map((row) => (
         <details key={row.id} className="grid gap-1 px-2 py-1 text-ui">
           <summary>Previous Orbit start · {row.project}</summary>
-          <p className="text-muted-foreground">
-            Check the previous thread before starting again. This message may have been sent.
-          </p>
-          <p className="max-h-32 overflow-auto whitespace-pre-wrap">{row.prompt}</p>
+          {row.completion ? (
+            <p className="text-muted-foreground">
+              Previous application preview · {row.completion.status}
+              {row.completion.error ? ` · ${row.completion.error}` : ""}
+            </p>
+          ) : (
+            <p className="text-muted-foreground">
+              Check the previous thread before starting again. This message may have been sent.
+            </p>
+          )}
+          {row.prompt !== null ? (
+            <p className="max-h-32 overflow-auto whitespace-pre-wrap">{row.prompt}</p>
+          ) : null}
           {row.environmentId && row.threadId ? (
             <Link
               to="/$environmentId/$threadId"
@@ -108,28 +130,52 @@ export function OrbitLaunchRecovery() {
             </Link>
           ) : null}
           <div className="flex flex-wrap gap-1">
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() =>
-                void navigator.clipboard
-                  .writeText(row.prompt)
-                  .catch(() => setError("Could not copy the message."))
-              }
-            >
-              Copy message
-            </Button>
+            {row.completion ? (
+              <>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={busy !== null}
+                  onClick={() => void legacyPreview(row, "refresh")}
+                >
+                  Refresh preview
+                </Button>
+                {row.completion.retryable ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={busy !== null}
+                    onClick={() => void legacyPreview(row, "retry")}
+                  >
+                    Retry application
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+            {row.prompt !== null ? (
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  const prompt = row.prompt;
+                  if (prompt !== null)
+                    void navigator.clipboard
+                      .writeText(prompt)
+                      .catch(() => setError("Could not copy the message."));
+                }}
+              >
+                Copy message
+              </Button>
+            ) : null}
             <Button
               size="xs"
               variant="ghost-muted"
-              onClick={() => {
-                try {
-                  resolveLegacyWebLaunch(row.id);
-                  setLegacy(readLegacyWebLaunches());
-                } catch {
-                  setError("Could not dismiss the previous start.");
-                }
-              }}
+              disabled={busy !== null}
+              onClick={() =>
+                void resolveLegacyWebLaunch(row.id)
+                  .then(() => setLegacy(readLegacyWebLaunches()))
+                  .catch(() => setError("Could not dismiss the previous start."))
+              }
             >
               Dismiss saved copy
             </Button>

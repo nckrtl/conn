@@ -2,9 +2,12 @@ import {
   createOrbitLaunchObserver,
   createOrbitLaunchSubmissions,
   newOrbitLaunchAdmission,
-  orbitThreadInstanceName,
+  fitOrbitThreadInstanceName,
   readLegacyOrbitLaunches,
+  recordLegacyOrbitPreview,
   resolveLegacyOrbitLaunch,
+  updateLegacyOrbitPreview,
+  type LegacyOrbitLaunch,
   type OrbitGatewayProject,
   type OrbitLaunch,
   type OrbitLaunchSubmission,
@@ -62,17 +65,36 @@ export async function readLegacyMobileLaunches() {
   return readLegacyOrbitLaunches(file.exists ? await file.text() : null);
 }
 
-export async function resolveLegacyMobileLaunch(id: string) {
-  const file = await launchFile(LEGACY);
-  if (!file.exists) return;
-  const remaining = resolveLegacyOrbitLaunch(await file.text(), id);
-  if (remaining === null) file.delete();
-  else await writeFileAtomically(file, remaining);
+let legacyArchiveEdits = Promise.resolve();
+function changeLegacyMobileArchive(change: (raw: string) => string | null) {
+  const edit = legacyArchiveEdits.then(async () => {
+    const file = await launchFile(LEGACY);
+    if (!file.exists) return;
+    const next = change(await file.text());
+    if (next === null) file.delete();
+    else await writeFileAtomically(file, next);
+  });
+  legacyArchiveEdits = edit.catch(() => {});
+  return edit;
+}
+
+export function resolveLegacyMobileLaunch(id: string) {
+  return changeLegacyMobileArchive((raw) => resolveLegacyOrbitLaunch(raw, id));
+}
+
+export async function updateLegacyMobilePreview(
+  row: LegacyOrbitLaunch,
+  action: "refresh" | "retry",
+) {
+  if (row.completion === null) throw new Error("This preview is unavailable.");
+  const operation = await updateLegacyOrbitPreview(orbitGatewayClient, row.completion, action);
+  await changeLegacyMobileArchive((raw) => recordLegacyOrbitPreview(raw, row, operation));
 }
 
 export async function startOrbitThread(
   project: OrbitGatewayProject,
   message: string,
+  sheetKey: string,
 ): Promise<OrbitLaunch> {
   const current = orbitGatewayState();
   const profileId = current.node?.profile?.id;
@@ -80,28 +102,37 @@ export async function startOrbitThread(
   if (current.provider !== "orbit" || profileId === undefined || nodeId === undefined) {
     throw new Error("Connect to an Orbit profile before sending.");
   }
-  // The sheet has one draft. A second tap or a restart can only replay that same admission.
-  const draftId = "new-orbit-thread";
+  // A new sheet or project is a different draft. Unconfirmed sends remain in Home for recovery.
+  const draftId = `${sheetKey}:${project.id}`;
   const saved = (await mobileOrbitSubmissions.pending({ profileId, nodeId })).find(
     (row) => row.draftId === draftId,
   );
   const name =
     saved?.admission.request.target.kind === "new"
       ? saved.admission.request.target.name
-      : orbitThreadInstanceName(message, uuidv4().slice(0, 6));
+      : await fitOrbitThreadInstanceName(
+          orbitGatewayClient,
+          project.id,
+          message,
+          uuidv4().slice(0, 6),
+        );
   return mobileOrbitSubmissions.submit({
     profileId,
     nodeId,
     draftId,
-    admission: newOrbitLaunchAdmission(uuidv4, {
-      project_id: project.id,
-      ...(current.selectedWorkspaceId === null
-        ? {}
-        : { workspace_id: current.selectedWorkspaceId }),
-      target: { kind: "new", name },
-      prompt: message,
-      source: "mobile",
-    }),
+    admission: newOrbitLaunchAdmission(
+      uuidv4,
+      { profileId, nodeId },
+      {
+        project_id: project.id,
+        ...(current.selectedWorkspaceId === null
+          ? {}
+          : { workspace_id: current.selectedWorkspaceId }),
+        target: { kind: "new", name },
+        prompt: message,
+        source: "mobile",
+      },
+    ),
   });
 }
 

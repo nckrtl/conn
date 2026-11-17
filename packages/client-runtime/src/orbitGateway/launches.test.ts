@@ -1,14 +1,27 @@
+import { ProviderInstanceId } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 
-import { createOrbitGatewayClient, OrbitGatewayError } from "./client.ts";
+import {
+  createOrbitGatewayClient,
+  OrbitGatewayError,
+  type OrbitGatewayOperation,
+} from "./client.ts";
 import {
   createOrbitLaunchSubmissions,
   readLegacyOrbitLaunches,
+  recordLegacyOrbitPreview,
+  updateLegacyOrbitPreview,
   resolveLegacyOrbitLaunch,
   type OrbitLaunchSubmission,
 } from "./launchAdmission.ts";
 import { createOrbitLaunchObserver } from "./launchObserver.ts";
-import { newOrbitLaunchAdmission, type OrbitLaunch } from "./launches.ts";
+import {
+  newOrbitLaunchAdmission,
+  orbitLaunchShowsInThreadList,
+  type OrbitLaunch,
+} from "./launches.ts";
+
+import { fitOrbitThreadInstanceName } from "./threadStart.ts";
 
 const pending = { status: "pending", started_at: null, finished_at: null, error: null } as const;
 const unavailable = { available: false, reason: null, requires: null };
@@ -23,6 +36,7 @@ const fixture = (patch: Partial<OrbitLaunch> = {}): OrbitLaunch => ({
   poll_after_seconds: 10,
   error_code: null,
   launch_id: "launch-id",
+  profile_id: 12,
   project_id: 78,
   instance_id: null,
   workspace_id: null,
@@ -58,6 +72,7 @@ const request = newOrbitLaunchAdmission(
     const ids = ["launch-id", "command-id", "thread-id", "message-id"];
     return () => ids.shift()!;
   })(),
+  { nodeId: 7, profileId: 12 },
   {
     project_id: 78,
     workspace_id: "workspace",
@@ -228,9 +243,10 @@ it("replays an unconfirmed submission only on request and with the original key 
 it("does not rewrite a refused cancel as Cancelling and does not submit a stale-profile draft", async () => {
   const committed = fixture({
     phase: "dispatching",
+    profile_id: 1,
     actions: { ...fixture().actions, cancel: unavailable },
   });
-  let list = [fixture()];
+  let list = [fixture({ profile_id: 1 })];
   const transport = vi.fn(async ({ method }: { method: string }) =>
     method === "GET" ? wrap(list) : errorResponse("conn.launch_handoff_committed", 409),
   );
@@ -284,6 +300,7 @@ it("retains old unsent and ambiguous prompts for manual recovery and never touch
       threadId: "t-1",
       environmentId: "env-1",
       project: "Orbit",
+      completion: null,
     },
     {
       id: "no-ref",
@@ -291,7 +308,180 @@ it("retains old unsent and ambiguous prompts for manual recovery and never touch
       threadId: null,
       environmentId: null,
       project: "Orbit",
+      completion: null,
     },
   ]);
   expect(JSON.parse(resolveLegacyOrbitLaunch(raw, "old")!)).toEqual([sent, opaque, noRef]);
+});
+
+it("replays the original profile and Node even when the device is rebound after /me", async () => {
+  const expected = { nodeId: 7, profileId: 12 };
+  let profile = 12;
+  let checked = false;
+  let admitted = 0;
+  const transport = vi.fn(async (call: { path: string; method: string; body?: unknown }) => {
+    if (call.path === "/me") {
+      checked = true;
+      return wrap({
+        id: 7,
+        name: "Device",
+        profile: {
+          id: profile,
+          name: "Work",
+          settings_version: 1,
+          updated_at: "2026-11-17T12:00:00Z",
+        },
+      });
+    }
+    if (call.method === "GET") {
+      if (checked) profile = 13;
+      return wrap(profile === 13 ? [fixture({ profile_id: 13, launch_id: "other" })] : []);
+    }
+    const body = call.body as typeof request.request;
+    if (body.expected_profile_id !== profile || body.expected_node_id !== 7) {
+      return errorResponse("conn.launch_scope_changed", 409);
+    }
+    admitted += 1;
+    return wrap(fixture({ profile_id: profile }), 202);
+  });
+  const observer = createOrbitLaunchObserver(() => createOrbitGatewayClient(transport));
+  observer.setScope(expected);
+  try {
+    await expect(observer.submit(request, expected, true)).rejects.toMatchObject({
+      code: "conn.launch_scope_changed",
+    });
+    expect(admitted).toBe(0);
+    const post = transport.mock.calls.find(([call]) => call.method === "POST");
+    expect(post?.[0]).toMatchObject({ idempotencyKey: request.id, body: request.request });
+    await observer.refresh();
+    expect(observer.view().launches).toEqual([]);
+  } finally {
+    observer.setScope(null);
+  }
+});
+
+it("keeps a refused replay recoverable without preventing a different draft from sending", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  let stored: readonly OrbitLaunchSubmission[] = [];
+  const old = { ...scope, draftId: "first-sheet:78", admission: request };
+  const next = {
+    ...scope,
+    draftId: "second-sheet:101",
+    admission: { id: "other", request: { ...request.request, project_id: 101 } },
+  };
+  const submit = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("The original reply was lost"))
+    .mockRejectedValueOnce(
+      new OrbitGatewayError({
+        code: "not_found",
+        status: 404,
+        message: "Project removed",
+        details: {},
+      }),
+    )
+    .mockResolvedValueOnce(fixture({ launch_id: "other", project_id: 101 }));
+  const journal = createOrbitLaunchSubmissions(
+    {
+      load: async () => stored,
+      save: async (rows) => {
+        stored = rows;
+      },
+    },
+    submit,
+  );
+  await expect(journal.submit(old)).rejects.toThrow("original reply");
+  await expect(journal.replay(old)).rejects.toThrow("Project removed");
+  expect((await journal.submit(next)).launch_id).toBe("other");
+  expect(await journal.pending(scope)).toContainEqual(old);
+});
+
+it("retains Open thread for a ready launch until its canonical thread appears in the list", () => {
+  const initial = fixture();
+  const launch = fixture({
+    phase: "ready",
+    stages: { ...initial.stages, application_preview: { ...pending, status: "skipped" } },
+    thread: {
+      environment_id: "unpaired",
+      project_id: "clone",
+      thread_id: "thread-id",
+      message_id: "message-id",
+      model_selection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt" },
+      accepted_at: initial.created_at,
+    },
+  });
+  expect(orbitLaunchShowsInThreadList(launch, false)).toBe(true);
+  expect(orbitLaunchShowsInThreadList(launch, true)).toBe(false);
+});
+
+it("fits a generated mobile name before the admission body is frozen", async () => {
+  const checkInstanceName = vi.fn(async (_project: number, name: string) => ({
+    name,
+    available: name.length <= 20,
+    reason: name.length <= 20 ? null : ("domain_invalid" as const),
+    domain: null,
+  }));
+  const result = await fitOrbitThreadInstanceName(
+    { checkInstanceName },
+    78,
+    "Build an exceptionally complicated multistage integration",
+    "abcdef",
+  );
+  expect(checkInstanceName.mock.calls[0]?.[1]).toHaveLength(47);
+  expect(result.length).toBeLessThanOrEqual(20);
+  expect(result).toMatch(/-abcdef$/);
+  expect(checkInstanceName.mock.calls.map(([id]) => id)).toEqual([78, 78, 78]);
+});
+
+it("recovers a legacy preview using only its instance and operation, without the previously sent message", async () => {
+  const raw = JSON.stringify([
+    {
+      id: "sent",
+      message: "A previously accepted prompt",
+      threadId: "thread-a",
+      sentAt: 10,
+      instanceId: 20,
+      completionOperationId: 30,
+      completionStatus: "failed",
+      completionRetryable: true,
+    },
+  ]);
+  const row = readLegacyOrbitLaunches(raw)[0]!;
+  expect(row.prompt).toBeNull();
+  expect(row.completion).toMatchObject({ operationId: 30, retryable: true });
+  const failed: OrbitGatewayOperation = {
+    id: 30,
+    kind: "instance.complete",
+    targetId: 20,
+    status: "failed",
+    errorCode: "preview.failed",
+    pollAfterSeconds: null,
+    recoveryRetryable: true,
+  };
+  const operation = vi.fn().mockResolvedValue(failed);
+  const completeInstance = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("Reply lost"))
+    .mockResolvedValueOnce({
+      ...failed,
+      id: 34,
+      status: "queued",
+      recoveryRetryable: false,
+    });
+  const client = { operation, completeInstance };
+  await expect(updateLegacyOrbitPreview(client, row.completion!, "retry")).rejects.toThrow(
+    "Reply lost",
+  );
+  const retry = await updateLegacyOrbitPreview(client, row.completion!, "retry");
+  expect(completeInstance.mock.calls).toEqual([
+    [20, "conn:legacy-preview:30"],
+    [20, "conn:legacy-preview:30"],
+  ]);
+  expect(
+    readLegacyOrbitLaunches(recordLegacyOrbitPreview(raw, row, retry))[0]?.completion,
+  ).toMatchObject({
+    operationId: 34,
+    status: "queued",
+    retryable: false,
+  });
 });

@@ -26,6 +26,7 @@ it("shows a launch awaiting cleanup from Orbit and offers its current retry", as
     poll_after_seconds: 10,
     error_code: "resource.busy",
     launch_id: "launch-14",
+    profile_id: 12,
     project_id: 78,
     instance_id: 21,
     workspace_id: null,

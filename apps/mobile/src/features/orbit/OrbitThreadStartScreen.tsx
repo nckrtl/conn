@@ -2,7 +2,7 @@ import {
   startableOrbitProject,
   type OrbitGatewayProject,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { StackActions, useNavigation } from "@react-navigation/native";
+import { StackActions, useNavigation, useRoute } from "@react-navigation/native";
 import { useEffect, useRef, useState } from "react";
 import { Platform, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -26,6 +26,7 @@ import { orbitStartReturn } from "./orbitThreadStarts";
  */
 export function OrbitThreadStartScreen() {
   const navigation = useNavigation();
+  const { key: sheetKey } = useRoute();
   const insets = useSafeAreaInsets();
   const [projects, setProjects] = useState<readonly OrbitGatewayProject[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -61,7 +62,7 @@ export function OrbitThreadStartScreen() {
     setSendError(null);
     const { back } = orbitStartReturn(navigation.getState());
     try {
-      const launch = await startOrbitThread(project, text.trim());
+      const launch = await startOrbitThread(project, text.trim(), sheetKey);
       if (navigation.isFocused()) {
         navigation.dispatch(StackActions.pop(back));
         await mobileOrbitSubmissions.acknowledge(launch.launch_id).catch(() => {});

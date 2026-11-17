@@ -26,6 +26,7 @@ export const OrbitLaunch = Schema.Struct({
   poll_after_seconds: Schema.NullOr(Schema.Number),
   error_code: Text,
   launch_id: Schema.String,
+  profile_id: Id,
   project_id: Id,
   instance_id: Schema.NullOr(Id),
   workspace_id: Text,
@@ -76,6 +77,8 @@ export type OrbitLaunchStage = typeof Stage.Type;
 export type OrbitLaunchAction = keyof OrbitLaunch["actions"];
 
 export interface OrbitLaunchRequest {
+  readonly expected_profile_id: number;
+  readonly expected_node_id: number;
   readonly project_id: number;
   readonly workspace_id?: string;
   readonly target:
@@ -146,11 +149,22 @@ export function createOrbitLaunchClient(
 
 export function newOrbitLaunchAdmission(
   uuid: () => string,
-  input: Omit<OrbitLaunchRequest, "command_id" | "thread_id" | "message_id">,
+  scope: OrbitLaunchScope,
+  input: Omit<
+    OrbitLaunchRequest,
+    "expected_profile_id" | "expected_node_id" | "command_id" | "thread_id" | "message_id"
+  >,
 ): OrbitLaunchAdmission {
   return {
     id: uuid(),
-    request: { ...input, command_id: uuid(), thread_id: uuid(), message_id: uuid() },
+    request: {
+      ...input,
+      expected_profile_id: scope.profileId,
+      expected_node_id: scope.nodeId,
+      command_id: uuid(),
+      thread_id: uuid(),
+      message_id: uuid(),
+    },
   };
 }
 
@@ -191,5 +205,12 @@ export function orbitLaunchNeedsAttention(launch: OrbitLaunch): boolean {
       launch.stages.application_preview.status === "pending" ||
       launch.stages.application_preview.status === "running" ||
       launch.stages.application_preview.status === "failed")
+  );
+}
+
+export function orbitLaunchShowsInThreadList(launch: OrbitLaunch, threadListed: boolean): boolean {
+  return (
+    orbitLaunchNeedsAttention(launch) ||
+    (launch.phase === "ready" && launch.thread !== null && !threadListed)
   );
 }

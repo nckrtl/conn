@@ -36,12 +36,10 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentSession, readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
-import { heldOrbitInstanceIds, orbitThreadStartStore } from "./orbitThreadStartStore";
-import { addProjectRefToProfileWorkspace } from "./orbitWorkspaceRef";
 
 /**
  * The phone's view of the Orbit Gateway: Node, profile, workspaces and T3 servers. The phone edits
- * workspaces only to add a started thread's clone project (keepProjectInOrbitWorkspace).
+ * workspaces from the profile.
  * The appearance syncs both ways (orbitProfileSync). In Orbit mode it pairs the Gateway's servers
  * and switches off environments added by hand (see planEnvironmentProvider).
  */
@@ -246,12 +244,6 @@ const refusalWatch = createCredentialRefusalWatch({
   },
 });
 
-/** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
-export async function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
-  // The server is saved already; a lost record only means a later sync re-checks it.
-  await updateEnvironmentState((current) => recordPaired(current, environmentId)).catch(() => {});
-}
-
 /**
  * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets a
  * later refresh retry it if this attempt fails.
@@ -296,7 +288,6 @@ async function reconcileEnvironments(
     state: environmentState,
     lacksAccess,
     // Conn: a thread start pairs its own clone; the sync must not pair it a second time.
-    heldInstanceIds: heldOrbitInstanceIds(),
     requestedEnvironmentIds: [...requestedEnvironmentIds],
     renew: readSessionRenewals({ environmentIds: bearerIds, readConnection, readSession, now }),
     now,
@@ -331,8 +322,6 @@ async function reconcileEnvironments(
     );
     await updateEnvironmentState((current) => forgetOrbitEnvironment(current, environmentId));
   }
-  // Conn: until the saved thread starts load, the sync cannot tell which clones they hold.
-  if (!orbitThreadStartStore.loaded()) return;
   // Conn: a pairing follows a Gateway Operation for up to a minute. It runs after the refresh, so
   // the lists and a later refresh never wait for it; a refresh during a run starts no second run.
   // A refresh during a run plans again once the run ends, so a refusal seen meanwhile still renews.
@@ -446,28 +435,6 @@ export async function syncOrbitAppearanceNow(): Promise<void> {
     await syncOrbitAppearance(await client.me());
   } catch {
     // An unreachable Gateway syncs on a later run.
-  }
-}
-
-/**
- * Conn: adds a started thread's clone project to the profile workspace selected at Start, so the
- * workspace filter shows the thread. Failures leave the workspace as it was.
- */
-export async function keepProjectInOrbitWorkspace(
-  workspaceId: string | null,
-  projectRef: string,
-): Promise<void> {
-  if (workspaceId === null) return;
-  try {
-    // A start resumed at launch can send before the first refresh read the profile; a refresh
-    // could wait on another server's pairing, so read only the Node.
-    const node = state.node ?? (await client.me());
-    const profileId = node.profile?.id;
-    if (profileId === undefined) return;
-    const saved = await addProjectRefToProfileWorkspace(client, profileId, workspaceId, projectRef);
-    if (saved) set({ workspaces: saved.workspaces });
-  } catch {
-    // The thread is sent; a later Start or the desktop can still add the ref.
   }
 }
 

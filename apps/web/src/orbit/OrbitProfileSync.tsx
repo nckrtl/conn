@@ -1,8 +1,6 @@
 import {
   APPEARANCE_SECTION,
-  createOrbitGatewayClient,
   createProfileSync,
-  type OrbitGatewayClient,
   type OrbitGatewayWorkspace,
   type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -22,7 +20,7 @@ import {
   watchAttachedServersRecord,
 } from "./attachedServers";
 import { pruneWorkspaceCloneRefs } from "./cloneWorkspaceRefs";
-import { desktopOrbitGatewayTransport } from "./desktopOrbitGateway";
+import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { OrbitAppearanceSync } from "./OrbitAppearanceSync";
 import { getProfileSyncChannels, onLocalProfileChange } from "./profileSyncRegistry";
 import {
@@ -49,6 +47,8 @@ const LOCAL_EDIT_DEBOUNCE_MS = 1_500;
 export interface OrbitProfileSyncStatus {
   readonly phase: "off" | "unbound" | "synced" | "error";
   readonly profileName: string | null;
+  readonly profileId: number | null;
+  readonly nodeId: number | null;
   readonly error: string | null;
   readonly syncedAt: number | null;
   /**
@@ -62,6 +62,8 @@ export interface OrbitProfileSyncStatus {
 const INITIAL_STATUS: OrbitProfileSyncStatus = {
   phase: "off",
   profileName: null,
+  profileId: null,
+  nodeId: null,
   error: null,
   syncedAt: null,
   sections: "unknown",
@@ -87,11 +89,7 @@ registerOrbitSleepClient(() => desktopOrbitGatewayClient());
 // Conn: every window applies the attached set the main window stores (flag `connAttachedServers`).
 watchAttachedServersRecord();
 
-/** The Gateway client over the desktop main process, or null outside the desktop app. */
-export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
-  const transport = desktopOrbitGatewayTransport();
-  return transport ? createOrbitGatewayClient(transport) : null;
-}
+export { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 
 function toGateway(workspace: Workspace): OrbitGatewayWorkspace {
   return {
@@ -187,6 +185,7 @@ function profileSyncController(): ProfileSyncController | null {
       }
       pruneWorkspaceCloneRefs(provider, listed);
       const me = await client.me();
+      useOrbitProfileSyncStatus.setState({ profileId: me.profile?.id ?? null, nodeId: me.id });
       // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
       if (listed !== null) {
         await recordAttachedServers(client, me, listed).catch((error: unknown) => {

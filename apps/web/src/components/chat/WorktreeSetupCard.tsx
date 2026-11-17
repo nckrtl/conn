@@ -96,7 +96,7 @@ export function stageRowClassName(status: WorktreeSetupStage["status"]): string 
   }
 }
 
-export function ShimmerOverlay({ children }: { children: ReactNode }) {
+function ShimmerOverlay({ children }: { children: ReactNode }) {
   return (
     <span
       aria-hidden

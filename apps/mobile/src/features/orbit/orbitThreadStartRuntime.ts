@@ -1,201 +1,159 @@
-import type { OrbitGatewayProject } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  createOrbitLaunchObserver,
+  createOrbitLaunchSubmissions,
+  newOrbitLaunchAdmission,
+  orbitThreadInstanceName,
+  readLegacyOrbitLaunches,
+  resolveLegacyOrbitLaunch,
+  type OrbitGatewayProject,
+  type OrbitLaunch,
+  type OrbitLaunchSubmission,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import type { Atom } from "effect/reactivity";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { AppState } from "react-native";
+import { useSyncExternalStore } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
-import { connectPairingUrl } from "../../connection/onboarding";
+import { writeFileAtomically } from "../../lib/atomic-file";
 import { rootNavigationRef } from "../../lib/rootNavigation";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
-import { environmentProjects } from "../../state/projects";
-import { environmentServerConfigsAtom } from "../../state/server";
-import { threadEnvironment } from "../../state/threads";
 import { selectWorkspaceDetail } from "../layout/workspace/workspace-detail-selection";
 import { startOpeningDetail } from "../layout/workspace/useSelectWorkspaceDetail";
-import { scheduledTaskDefaultModel } from "../settings/scheduledTaskDraft";
+import { orbitGatewayClient } from "./orbitGatewayClient";
 import {
-  keepProjectInOrbitWorkspace,
+  connectOrbitEnvironment,
   orbitGatewayState,
-  recordOrbitThreadStartPaired,
   subscribeOrbitGateway,
 } from "./orbitGatewayStore";
-import { orbitGatewayClient } from "./orbitGatewayClient";
-import { orbitThreadStartStore } from "./orbitThreadStartStore";
-import {
-  beginOrbitThreadStart,
-  runSentOrbitThreadStart,
-  retrySavedOrbitCompletion,
-  runSavedOrbitThreadStart,
-  type MobileOrbitThreadStartPorts,
-} from "./orbitThreadStarts";
 
-/** Conn: wires the phone's thread starts in Orbit Projects to the app (FORK.md, "Orbit"). */
-
-/** The clone's T3 project: Orbit's create flow adds the container's workspace. */
-const ORBIT_CLONE_WORKSPACE = "/srv/workspace";
-const CLONE_READY_TIMEOUT_MS = 60_000;
-
-function waitFor<A>(atom: Atom.Atom<A>, predicate: (value: A) => boolean): Promise<boolean> {
-  if (predicate(appAtomRegistry.get(atom))) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const unsubscribe = appAtomRegistry.subscribe(atom, (value) => {
-      if (!predicate(value)) return;
-      clearTimeout(timeout);
-      unsubscribe();
-      resolve(true);
-    });
-    const timeout = setTimeout(() => {
-      unsubscribe();
-      resolve(false);
-    }, CLONE_READY_TIMEOUT_MS);
-  });
+async function launchFile(name: string) {
+  const { File, Paths } = await import("expo-file-system");
+  return new File(Paths.document, name);
 }
 
-function findCloneProject(environmentId: EnvironmentId) {
-  return appAtomRegistry
-    .get(environmentProjects.projectsAtom)
-    .find(
-      (project) =>
-        project.environmentId === environmentId && project.workspaceRoot === ORBIT_CLONE_WORKSPACE,
-    );
+const SUBMISSIONS = "orbit-launch-admissions.json";
+const LEGACY = "orbit-thread-starts.json";
+
+export const mobileOrbitLaunches = createOrbitLaunchObserver(() => orbitGatewayClient);
+export const mobileOrbitSubmissions = createOrbitLaunchSubmissions(
+  {
+    load: async () => {
+      const file = await launchFile(SUBMISSIONS);
+      return file.exists ? (JSON.parse(await file.text()) as OrbitLaunchSubmission[]) : [];
+    },
+    save: async (rows) => {
+      const file = await launchFile(SUBMISSIONS);
+      if (rows.length === 0) {
+        if (file.exists) file.delete();
+      } else await writeFileAtomically(file, JSON.stringify(rows));
+    },
+  },
+  (record, reconcile) => mobileOrbitLaunches.submit(record.admission, record, reconcile),
+);
+
+export function useMobileOrbitLaunches() {
+  return useSyncExternalStore(mobileOrbitLaunches.subscribe, mobileOrbitLaunches.view);
 }
 
-const ports: MobileOrbitThreadStartPorts = {
-  store: orbitThreadStartStore,
-  gateway: orbitGatewayClient,
-  orbitMode: () => orbitGatewayState().provider === "orbit",
-  catalogReady: () => waitFor(environmentCatalog.catalogValueAtom, (catalog) => catalog.isReady),
-  isSaved: (environmentId) =>
-    appAtomRegistry
-      .get(environmentCatalog.catalogValueAtom)
-      .entries.has(EnvironmentId.make(environmentId)),
-  connect: async (environmentId, pairingUrl) => {
-    const result = await runAtomCommand(
-      appAtomRegistry,
-      connectPairingUrl,
-      { pairingUrl },
-      { reportFailure: false },
-    );
-    if (result._tag !== "Success") {
-      const error = squashAtomCommandFailure(result);
-      throw new Error(
-        `Could not pair with the clone: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    await recordOrbitThreadStartPaired(environmentId);
-  },
-  firstMessage: {
-    waitForClone: async (environmentId) => {
-      const id = EnvironmentId.make(environmentId);
-      const found = await waitFor(
-        environmentProjects.projectsAtom,
-        () => findCloneProject(id) !== undefined,
-      );
-      const configured = await waitFor(environmentServerConfigsAtom, (configs) => configs.has(id));
-      const project = findCloneProject(id);
-      const config = appAtomRegistry.get(environmentServerConfigsAtom).get(id);
-      if (!found || !configured || project === undefined || config === undefined) return null;
-      return {
-        projectId: ProjectId.make(project.id),
-        modelSelection: scheduledTaskDefaultModel(config, project),
-      };
-    },
-    startTurn: async (environmentId, input) => {
-      const result = await runAtomCommand(
-        appAtomRegistry,
-        threadEnvironment.startTurn,
-        { environmentId: EnvironmentId.make(environmentId), input },
-        { reportFailure: false },
-      );
-      return result._tag === "Success"
-        ? { ok: true }
-        : { ok: false, error: squashAtomCommandFailure(result) };
-    },
-    now: () => new Date().toISOString(),
-  },
-  keepInWorkspace: keepProjectInOrbitWorkspace,
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  now: Date.now,
-};
+export async function readLegacyMobileLaunches() {
+  const file = await launchFile(LEGACY);
+  return readLegacyOrbitLaunches(file.exists ? await file.text() : null);
+}
 
-/**
- * The root route each start returned to in this app session. The thread opens on send only while
- * that route still shows, as on the desktop; after a restart it stays in the list.
- */
-const openOnSend = new Map<string, string>();
+export async function resolveLegacyMobileLaunch(id: string) {
+  const file = await launchFile(LEGACY);
+  if (!file.exists) return;
+  const remaining = resolveLegacyOrbitLaunch(await file.text(), id);
+  if (remaining === null) file.delete();
+  else await writeFileAtomically(file, remaining);
+}
 
-export function startOrbitThread(
+export async function startOrbitThread(
   project: OrbitGatewayProject,
   message: string,
-  returnRouteKey: string | undefined,
-): void {
-  const start = beginOrbitThreadStart(orbitThreadStartStore, {
-    project,
-    message,
-    workspaceId: orbitGatewayState().selectedWorkspaceId,
-    uuid: uuidv4,
-    now: Date.now(),
+): Promise<OrbitLaunch> {
+  const current = orbitGatewayState();
+  const profileId = current.node?.profile?.id;
+  const nodeId = current.node?.id;
+  if (current.provider !== "orbit" || profileId === undefined || nodeId === undefined) {
+    throw new Error("Connect to an Orbit profile before sending.");
+  }
+  // The sheet has one draft. A second tap or a restart can only replay that same admission.
+  const draftId = "new-orbit-thread";
+  const saved = (await mobileOrbitSubmissions.pending({ profileId, nodeId })).find(
+    (row) => row.draftId === draftId,
+  );
+  const name =
+    saved?.admission.request.target.kind === "new"
+      ? saved.admission.request.target.name
+      : orbitThreadInstanceName(message, uuidv4().slice(0, 6));
+  return mobileOrbitSubmissions.submit({
+    profileId,
+    nodeId,
+    draftId,
+    admission: newOrbitLaunchAdmission(uuidv4, {
+      project_id: project.id,
+      ...(current.selectedWorkspaceId === null
+        ? {}
+        : { workspace_id: current.selectedWorkspaceId }),
+      target: { kind: "new", name },
+      prompt: message,
+      source: "mobile",
+    }),
   });
-  if (returnRouteKey !== undefined) openOnSend.set(start.id, returnRouteKey);
 }
 
-function shownRootRouteKey(): string | undefined {
-  if (!rootNavigationRef.isReady()) return undefined;
-  const root = rootNavigationRef.getRootState();
-  return root?.routes[root.index]?.key;
-}
-
-function openThread(environmentId: string, threadId: string): void {
+export async function openMobileOrbitThread(
+  thread: Pick<NonNullable<OrbitLaunch["thread"]>, "environment_id" | "thread_id">,
+) {
+  const environmentId = EnvironmentId.make(thread.environment_id);
+  const entries = () => appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries;
+  if (!entries().has(environmentId)) {
+    const environment = (await orbitGatewayClient.environments()).find(
+      (row) => row.environmentId === environmentId,
+    );
+    if (environment === undefined || !(await connectOrbitEnvironment(environment))) {
+      throw new Error("Could not connect to this thread's environment.");
+    }
+  }
+  if (entries().get(environmentId)?.enabled === false) {
+    const result = await runAtomCommand(
+      appAtomRegistry,
+      environmentCatalog.setEnabled,
+      { environmentId, enabled: true },
+      { reportFailure: false },
+    );
+    if (result._tag !== "Success") throw squashAtomCommandFailure(result);
+  }
   const detail = {
     name: "Thread" as const,
-    params: { environmentId: EnvironmentId.make(environmentId), threadId: ThreadId.make(threadId) },
+    params: { environmentId, threadId: ThreadId.make(thread.thread_id) },
   };
   startOpeningDetail(detail);
-  // Aimed at the root stack, as linkToRootPath does; the focused nested navigator drops it.
   rootNavigationRef.dispatch({
     ...selectWorkspaceDetail(detail),
     target: rootNavigationRef.getRootState()?.key,
   });
 }
 
-function runReadyStarts(): void {
-  const gateway = orbitGatewayState();
-  if (!orbitThreadStartStore.loaded() || !gateway.providerLoaded || gateway.provider !== "orbit") {
-    return;
-  }
-  for (const start of orbitThreadStartStore.starts()) {
-    if (start.sentAt != null) {
-      // After the send the row follows the create's completion; it goes once nothing is left to show.
-      void runSentOrbitThreadStart(start, ports);
-      continue;
-    }
-    if (start.error !== null) continue;
-    void runSavedOrbitThreadStart(start.id, ports).then((sent) => {
-      // A null result also means "already running": only the run that sent may use the key.
-      if (sent === null) return;
-      const returnRouteKey = openOnSend.get(start.id);
-      openOnSend.delete(start.id);
-      if (returnRouteKey !== undefined && shownRootRouteKey() === returnRouteKey) {
-        openThread(sent.environmentId, sent.threadId);
-      }
-    });
-  }
-}
-
-/** Retry on a start row whose completion failed or was cancelled; the runner sends it. */
-export function retryOrbitCompletion(id: string): void {
-  retrySavedOrbitCompletion(id, ports);
-}
-
-/** Runs the saved starts now and whenever the list or the provider changes. */
-export function installOrbitThreadStarts(): () => void {
-  const disposers = [
-    orbitThreadStartStore.subscribe(runReadyStarts),
-    subscribeOrbitGateway(runReadyStarts),
-  ];
-  void orbitThreadStartStore.load();
+export function installOrbitLaunchObserver(): () => void {
+  const scope = () => {
+    const gateway = orbitGatewayState();
+    const node = gateway.node;
+    mobileOrbitLaunches.setScope(
+      AppState.currentState !== "background" && gateway.provider === "orbit" && node?.profile
+        ? { profileId: node.profile.id, nodeId: node.id }
+        : null,
+    );
+  };
+  const stop = subscribeOrbitGateway(scope);
+  const app = AppState.addEventListener("change", scope);
+  scope();
   return () => {
-    for (const dispose of disposers) dispose();
+    stop();
+    app.remove();
+    mobileOrbitLaunches.setScope(null);
   };
 }

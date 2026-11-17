@@ -17,7 +17,7 @@ import { ListSection } from "../../components/ui/ListSection";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { orbitGatewayClient } from "./orbitGatewayClient";
-import { startOrbitThread } from "./orbitThreadStartRuntime";
+import { mobileOrbitSubmissions, startOrbitThread } from "./orbitThreadStartRuntime";
 import { orbitStartReturn } from "./orbitThreadStarts";
 
 /**
@@ -32,6 +32,8 @@ export function OrbitThreadStartScreen() {
   const [chosenId, setChosenId] = useState<number | null>(null);
   const [text, setText] = useState("");
   const started = useRef(false);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway's Projects once when the screen opens
   useEffect(() => {
@@ -52,12 +54,23 @@ export function OrbitThreadStartScreen() {
     if (navigation.canGoBack()) navigation.goBack();
     else navigation.getParent()?.goBack();
   };
-  const start = () => {
+  const start = async () => {
     if (started.current || project === null || text.trim() === "") return;
     started.current = true;
-    const { back, returnRouteKey } = orbitStartReturn(navigation.getState());
-    startOrbitThread(project, text.trim(), returnRouteKey);
-    navigation.dispatch(StackActions.pop(back));
+    setSending(true);
+    setSendError(null);
+    const { back } = orbitStartReturn(navigation.getState());
+    try {
+      const launch = await startOrbitThread(project, text.trim());
+      if (navigation.isFocused()) {
+        navigation.dispatch(StackActions.pop(back));
+        await mobileOrbitSubmissions.acknowledge(launch.launch_id).catch(() => {});
+      }
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : "Orbit did not confirm the launch.");
+    }
+    started.current = false;
+    setSending(false);
   };
 
   return (
@@ -81,6 +94,7 @@ export function OrbitThreadStartScreen() {
             with this message.
           </Text>
           {loadError ? <ErrorBanner message={loadError} /> : null}
+          {sendError ? <ErrorBanner message={sendError} /> : null}
           <ListSection title="Project">
             {projects === null ? (
               loadError ? null : (
@@ -100,7 +114,9 @@ export function OrbitThreadStartScreen() {
                   description={entry.nodeName}
                   selected={entry.id === project?.id}
                   separated={index > 0}
-                  onPress={() => setChosenId(entry.id)}
+                  onPress={() => {
+                    if (!started.current) setChosenId(entry.id);
+                  }}
                 />
               ))
             )}
@@ -110,6 +126,7 @@ export function OrbitThreadStartScreen() {
               accessibilityLabel="First message"
               value={text}
               onChangeText={setText}
+              editable={!sending}
               multiline
               scrollEnabled
               textAlignVertical="top"
@@ -119,11 +136,11 @@ export function OrbitThreadStartScreen() {
             />
           </ListSection>
           <Button
-            label="Start thread"
+            label={sending ? "Sending…" : "Start thread"}
             tone="primary"
             fullWidth
-            disabled={!canStart}
-            onPress={start}
+            disabled={!canStart || sending}
+            onPress={() => void start()}
           />
         </ScrollView>
       </ScreenContent>

@@ -413,8 +413,8 @@ import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplat
 import { ConnIconScope } from "../icons/connIcon";
 import { useAnnotationWatchBanner } from "../annotations/useAnnotationWatchBanner";
 import { useOrbitEnvironmentInUse } from "../orbit/orbitInstanceSleep";
-import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
-import { useOrbitReady, withOrbitFirstMessage } from "../orbit/useOrbitReady";
+import { orbitThreadStartBlockedReason } from "../orbit/orbitLaunchAvailability";
+import { useOrbitReady } from "../orbit/useOrbitReady";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1627,10 +1627,7 @@ export default function ChatView(props: ChatViewProps) {
     isServerThread ? (displayedThreadRef?.environmentId ?? null) : null,
     isServerThread ? (displayedThreadRef?.threadId ?? null) : null,
   );
-  // Conn: a thread handed over from a pending Orbit start shows its first message before it loads.
-  const timelineEntries = isServerThread
-    ? withOrbitFirstMessage(serverTimelineEntries, orbitReady, threadDetailLoading)
-    : draftTimelineEntries;
+  const timelineEntries = isServerThread ? serverTimelineEntries : draftTimelineEntries;
   const timelineMessages = timelineEntries.flatMap((entry) =>
     entry.kind === "message" ? [entry.message] : [],
   );
@@ -2212,20 +2209,6 @@ export default function ChatView(props: ChatViewProps) {
     terminalUiState.terminalOpen,
     isCoarsePointer ? ignoreComposerFocus : focusComposerStable,
   );
-
-  // Conn: the Orbit lock ends when the Instance is ready; the box takes the focus it could not take on open.
-  const orbitComposerLocked = orbitReady?.locksComposer === true;
-  const orbitLockWasOn = useRef(false);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the composer once when the Orbit lock ends, on a fine pointer
-  useEffect(() => {
-    const wasOn = orbitLockWasOn.current;
-    orbitLockWasOn.current = orbitComposerLocked;
-    if (!wasOn || orbitComposerLocked || embedded || isCoarsePointer) return;
-    // Never take the focus from a field the user is typing in (terminal, browser bar, side chat).
-    const active = document.activeElement;
-    if (active !== null && active !== document.body) return;
-    focusComposerStable();
-  }, [orbitComposerLocked, embedded, isCoarsePointer, focusComposerStable]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window focus listener that refocuses the composer after the window regains focus on a fine pointer
   useEffect(() => {
@@ -3831,7 +3814,6 @@ export default function ChatView(props: ChatViewProps) {
                                               : projectCloneSendBlockReason)
                                 }
                                 isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
-                                inputLocked={orbitReady?.locksComposer === true}
                                 bannerItems={
                                   isDraftHeroState || composerBannerItems.length === 0
                                     ? EMPTY_COMPOSER_BANNER_ITEMS

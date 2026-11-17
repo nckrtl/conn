@@ -4,6 +4,7 @@ import {
   type OrbitConversationRef,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
@@ -21,25 +22,25 @@ import {
   copyTasksPanelWidth,
 } from "./taskNavigation.logic";
 
-async function prepareEnvironment(target: OrbitConversationRef) {
+export async function prepareOrbitThreadEnvironment(environmentId: EnvironmentId) {
   const transport = desktopOrbitGatewayTransport();
   const client = transport ? createOrbitGatewayClient(transport) : null;
-  await prepareOrbitConversationEnvironment(target.environmentId, {
+  await prepareOrbitConversationEnvironment(environmentId, {
     known: () =>
-      appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.has(target.environmentId),
+      appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.has(environmentId),
     environments: client ? () => client.environments() : null,
     connect: (environment) =>
       client ? connectOrbitEnvironment(client, environment) : Promise.resolve(false),
     enable: async () => {
       const entry = appAtomRegistry
         .get(environmentCatalog.catalogValueAtom)
-        .entries.get(target.environmentId);
+        .entries.get(environmentId);
       if (!entry) throw new Error("This environment is not paired on this device.");
       if (!entry.enabled) {
         const enabled = await runAtomCommand(
           appAtomRegistry,
           environmentCatalog.setEnabled,
-          { environmentId: target.environmentId, enabled: true },
+          { environmentId: environmentId, enabled: true },
           { reportFailure: false },
         );
         if (enabled._tag !== "Success") throw squashAtomCommandFailure(enabled);
@@ -78,7 +79,7 @@ export function useOrbitTaskNavigation(threadKey: string) {
       await openOrbitAgentConversation(ref, {
         source,
         isCurrent,
-        prepare: prepareEnvironment,
+        prepare: (target) => prepareOrbitThreadEnvironment(target.environmentId),
         handoff: (from, to) => {
           tasksPanelActions().handoff(scopedThreadKey(from), scopedThreadKey(to));
           copyTasksPanelWidth(scopedThreadKey(from), scopedThreadKey(to), window.localStorage);

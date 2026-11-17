@@ -291,7 +291,7 @@ import {
 } from "../orbit/orbitPaletteProjects";
 import { openOrbitDraft } from "../orbit/openOrbitDraft";
 import { orbitWakeSupported, useOrbitInstanceSleep } from "../orbit/orbitInstanceSleep";
-import { orbitThreadStartBlockedReason } from "../orbit/orbitThreadStarts";
+import { orbitThreadStartBlockedReason } from "../orbit/orbitLaunchAvailability";
 import { registerOrbitInstanceStepOpener } from "../orbit/orbitInstanceStep";
 import {
   buildOrbitInstanceRows,

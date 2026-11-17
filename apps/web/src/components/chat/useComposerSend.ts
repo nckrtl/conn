@@ -156,7 +156,8 @@ import {
   orbitDraftAttachmentsBlockedReason,
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
-import { orbitThreadStartBlockedReason, sendOrbitDraft } from "../../orbit/orbitThreadStarts";
+import { orbitThreadStartBlockedReason } from "../../orbit/orbitLaunchAvailability";
+import { orbitLaunchSubmissions, submitOrbitDraft } from "../../orbit/orbitLaunches";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -828,22 +829,46 @@ export function useComposerSend(input: ComposerSendInput) {
         return;
       }
       const composerDraft = useComposerDraftStore.getState().getComposerDraft(draftId);
-      sendOrbitDraft({
-        start: buildOrbitDraftStart({
-          target: orbitDraftTarget,
-          message: trimmed,
-          modelSelection: isOrbitDraftWithoutEnvironment(environmentId)
-            ? null
-            : ctxSelectedModelSelection,
-          runtimeMode,
-          interactionMode:
-            composerDraft?.interactionMode ??
-            draftThread?.interactionMode ??
-            DEFAULT_INTERACTION_MODE,
-        }),
-        openPending: (to) => navigate({ to }),
-        clearDraft: () => useComposerDraftStore.getState().clearDraftThread(draftId),
-      });
+      sendInFlightRef.current = true;
+      const accepted = await Promise.resolve()
+        .then(async () => {
+          const launch = await submitOrbitDraft(
+            draftId,
+            buildOrbitDraftStart({
+              target: orbitDraftTarget,
+              message: trimmed,
+              modelSelection: isOrbitDraftWithoutEnvironment(environmentId)
+                ? null
+                : ctxSelectedModelSelection,
+              runtimeMode,
+              interactionMode:
+                composerDraft?.interactionMode ??
+                draftThread?.interactionMode ??
+                DEFAULT_INTERACTION_MODE,
+            }),
+          );
+          const store = useComposerDraftStore.getState();
+          const savedDraft = store.getComposerDraft(draftId);
+          if (savedDraft !== null && savedDraft.prompt.trim() !== trimmed) return false;
+          if (currentRouteThreadKeyRef.current === routeThreadKey) {
+            await navigate({ to: "/orbit/$startId", params: { startId: launch.launch_id } });
+          }
+          store.clearDraftThread(draftId);
+          await orbitLaunchSubmissions.acknowledge(launch.launch_id).catch(() => {});
+          return true;
+        })
+        .catch((error: unknown) => {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not confirm the Orbit launch",
+              description: error instanceof Error ? error.message : String(error),
+            }),
+          );
+          return false;
+        });
+      sendInFlightRef.current = false;
+      if (!accepted) return;
       promptRef.current = "";
       composerRef.current?.resetCursorState();
       return;

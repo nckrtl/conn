@@ -13,7 +13,7 @@ import {
   orbitDraftProjectId,
   type OrbitDraftTarget,
 } from "./orbitDraft";
-import { orbitThreadStartBlockedReason } from "./orbitThreadStarts";
+import { orbitThreadStartBlockedReason } from "./orbitLaunchAvailability";
 
 /**
  * Opens the draft for a thread in a new Instance or an unpaired one; a paired Instance uses a normal

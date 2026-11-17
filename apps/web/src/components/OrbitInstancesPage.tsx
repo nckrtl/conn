@@ -3,7 +3,6 @@ import {
   filterOrbitInstances,
   groupOrbitInstances,
   joinOrbitInstanceThreads,
-  orbitCompletionPhase,
   orbitInstanceAvailability,
   orbitInstanceProjectOptions,
   type OrbitInstanceState,
@@ -41,7 +40,7 @@ import {
   type OrbitInstanceRemoval,
 } from "../orbit/orbitInstanceRemoval";
 import { desktopOrbitGatewayClient } from "../orbit/OrbitProfileSync";
-import { readStored as readStoredOrbitStarts } from "../orbit/orbitThreadStartStore";
+import { orbitLaunches } from "../orbit/orbitLaunches";
 import { readAttachedServersFlag } from "../orbit/attachedServersSeed";
 import { orbitListThreadInputs, useOrbitThreadIndexStore } from "../orbit/orbitThreadIndex";
 import { useVisibleThreadShells } from "../state/entities";
@@ -57,9 +56,12 @@ import { ProjectMonogram } from "./ProjectMonogram";
 
 /** Whether this device follows a setup (`instance.complete`) of the Instance that still runs. */
 function completionRunning(instanceId: number): boolean {
-  return readStoredOrbitStarts().some(
-    (start) => start.instanceId === instanceId && orbitCompletionPhase(start) === "running",
-  );
+  return orbitLaunches
+    .view()
+    .launches.some(
+      (start) =>
+        start.instance_id === instanceId && start.stages.application_preview.status === "running",
+    );
 }
 import { SettingsPageContainer, SettingsSection } from "./settings/settingsLayout";
 import { Button } from "./ui/button";

@@ -1,7 +1,8 @@
 import * as DateTime from "effect/DateTime";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import type { OrbitReadyView, OrbitSetupView } from "../../orbit/orbitSetupView";
+import type { OrbitLaunch } from "@t3tools/client-runtime/orbit-gateway";
+import type { OrbitReadyView } from "../../orbit/orbitSetupView";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import {
   isLiveSubagentTurnItem,
@@ -502,23 +503,11 @@ const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 
 export interface OrbitReadyTimelineInput {
   readonly view: OrbitReadyView;
-  /**
-   * The setup card while the create's completion runs or failed; null shows the "Instance ready"
-   * row (also on Gateways without a completion).
-   */
-  readonly setup?: OrbitSetupView | null;
-  readonly onRetry?: () => void;
-  readonly onDismiss?: () => void;
+  readonly launch?: OrbitLaunch | null;
+  readonly launchStale?: boolean;
   readonly threadRef: ScopedThreadRef;
-  /** The start's first message; the row follows it and is left out while it is not loaded. */
+  /** The accepted message anchors the row to the canonical conversation. */
   readonly messageId: string;
-  /**
-   * The first message as Conn sent it, shown until the thread's own copy loads, so the hand-over
-   * from the pending thread never drops the message or the card.
-   */
-  readonly firstMessage?: { readonly text: string; readonly createdAt: string } | null;
-  /** The composer stays disabled until the Instance is ready (the card folded), also on a failure. */
-  readonly locksComposer?: boolean;
 }
 
 export type MessagesTimelineRow = MessagesTimelineRowContent & {

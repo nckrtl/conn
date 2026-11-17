@@ -18,7 +18,7 @@ import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { useWorkspaceStore } from "../workspaceStore";
 import { randomUUID } from "../lib/utils";
 import { orbitThreadStartBlockedReason } from "./orbitLaunchAvailability";
-import type { OrbitDraftStartInput } from "./orbitDraft";
+import { orbitDraftLaunchTarget, type OrbitDraftStartInput } from "./orbitDraft";
 
 const SUBMISSIONS_KEY = "conn:orbit-launch-admissions:v1";
 const LEGACY_KEY = "conn:orbit-thread-starts:v1";
@@ -27,6 +27,15 @@ export const orbitLaunches = createOrbitLaunchObserver(desktopOrbitGatewayClient
 export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   {
     lock: (work) => navigator.locks.request(SUBMISSIONS_KEY, work),
+    lockDraft: (draftId, work) =>
+      navigator.locks.request(
+        `${SUBMISSIONS_KEY}:draft:${draftId}`,
+        { ifAvailable: true },
+        (lock) => {
+          if (lock === null) throw new Error("Conn is already checking this Orbit submission.");
+          return work();
+        },
+      ),
     load: async () =>
       JSON.parse(window.localStorage.getItem(SUBMISSIONS_KEY) ?? "[]") as OrbitLaunchSubmission[],
     save: async (rows) => {
@@ -79,13 +88,7 @@ export async function submitOrbitDraft(draftId: string, start: OrbitDraftStartIn
   const admission = newOrbitLaunchAdmission(randomUUID, scope, {
     project_id: start.project.id,
     ...(workspaceId == null ? {} : { workspace_id: workspaceId }),
-    target: start.existing
-      ? { kind: "existing", instance_id: start.existing.instanceId }
-      : {
-          kind: "new",
-          name: start.instanceName,
-          ...(start.branch == null ? {} : { branch: start.branch }),
-        },
+    target: orbitDraftLaunchTarget(start),
     prompt: start.message,
     ...(start.modelSelection == null ? {} : { model_selection: start.modelSelection }),
     ...(start.runtimeMode == null ? {} : { runtime_mode: start.runtimeMode }),

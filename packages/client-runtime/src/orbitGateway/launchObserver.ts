@@ -11,6 +11,14 @@ import {
 
 const isGatewayError = Schema.is(OrbitGatewayError);
 
+export class OrbitLaunchAdmissionRefused extends Schema.TaggedError<
+  OrbitLaunchAdmissionRefused,
+  { readonly brand: unique symbol }
+>()("OrbitLaunchAdmissionRefused", {
+  cause: OrbitGatewayError,
+  message: Schema.String,
+}) {}
+
 export interface OrbitLaunchView {
   readonly launches: readonly OrbitLaunch[];
   readonly loaded: boolean;
@@ -117,25 +125,45 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       throw new Error("This device's Orbit profile changed before sending.");
     }
     const api = gateway.launches;
+    const observed = () => view.launches.find((row) => row.launch_id === admission.id);
+    const accept = (launch: OrbitLaunch, before: OrbitLaunch | undefined) => {
+      assertLaunchIdentity(launch, admission);
+      const current = observed();
+      if (current !== before) {
+        void refresh();
+        if (current !== undefined) assertLaunchIdentity(current, admission);
+        return current ?? launch;
+      }
+      apply(launch, version);
+      return launch;
+    };
     if (reconcile) {
+      const before = observed();
       const previous = (await api.list()).find((row) => row.launch_id === admission.id);
       if (scopeVersion !== version)
         throw new Error("The Orbit profile changed while checking the launch.");
-      if (previous) {
-        assertLaunchIdentity(previous, admission);
-        apply(previous, version);
-        return previous;
+      if (previous) return accept(previous, before);
+      const current = observed();
+      if (current !== undefined) {
+        assertLaunchIdentity(current, admission);
+        return current;
       }
     }
+    const before = observed();
+    let accepted: OrbitLaunch;
     try {
-      const accepted = await api.submit(admission);
-      if (scopeVersion !== version)
-        throw new Error("Orbit may have accepted the launch on your previous profile.");
-      assertLaunchIdentity(accepted, admission);
-      apply(accepted, version);
-      return accepted;
+      accepted = await api.submit(admission);
     } catch (error) {
       // A lost response may have committed the launch. Check before the UI offers an identical replay.
+      if (scopeVersion !== version) throw error;
+      if (isGatewayError(error) && [400, 403, 404, 422].includes(error.status)) {
+        const current = observed();
+        if (current !== undefined) {
+          assertLaunchIdentity(current, admission);
+          return current;
+        }
+        throw new OrbitLaunchAdmissionRefused({ cause: error, message: error.message });
+      }
       if (
         isGatewayError(error) &&
         error.status > 0 &&
@@ -143,15 +171,20 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
         ![408, 425, 429].includes(error.status)
       )
         throw error;
-      if (scopeVersion !== version) throw error;
+      const beforeRead = observed();
+      if (beforeRead !== undefined) {
+        assertLaunchIdentity(beforeRead, admission);
+        return beforeRead;
+      }
       const launches = await api.list().catch(() => null);
       if (scopeVersion !== version) throw error;
-      const accepted = launches?.find((row) => row.launch_id === admission.id);
-      if (accepted === undefined) throw error;
-      assertLaunchIdentity(accepted, admission);
-      apply(accepted, version);
-      return accepted;
+      const recovered = observed() ?? launches?.find((row) => row.launch_id === admission.id);
+      if (recovered === undefined) throw error;
+      return accept(recovered, beforeRead);
     }
+    if (scopeVersion !== version)
+      throw new Error("Orbit may have accepted the launch on your previous profile.");
+    return accept(accepted, before);
   }
 
   async function act(id: number, action: OrbitLaunchAction) {

@@ -1,12 +1,26 @@
 import { expect, it, vi } from "vite-plus/test";
+import { newOrbitLaunchAdmission } from "@t3tools/client-runtime/orbit-gateway";
 
 const navigation = vi.hoisted(() => ({
   dispatch: vi.fn(),
   listeners: new Set<() => void>(),
 }));
-const gateway = vi.hoisted(() => ({ pair: vi.fn(), environments: vi.fn() }));
+const gateway = vi.hoisted(() => ({
+  pair: vi.fn(),
+  environments: vi.fn(),
+  state: vi.fn(),
+  checkInstanceName: vi.fn(),
+  fileText: vi.fn(),
+}));
 
 vi.mock("react-native", () => ({ AppState: {} }));
+vi.mock("expo-file-system", () => ({
+  Paths: { document: "document" },
+  File: class {
+    exists = true;
+    text = gateway.fileText;
+  },
+}));
 vi.mock("../../connection/catalog", () => ({ environmentCatalog: {} }));
 vi.mock("../../state/atom-registry", () => ({
   appAtomRegistry: { get: () => ({ entries: new Map() }) },
@@ -30,11 +44,45 @@ vi.mock("../layout/workspace/useSelectWorkspaceDetail", () => ({
   startOpeningDetail: () => {},
 }));
 vi.mock("./orbitGatewayClient", () => ({
-  orbitGatewayClient: { environments: gateway.environments },
+  orbitGatewayClient: {
+    environments: gateway.environments,
+    checkInstanceName: gateway.checkInstanceName,
+  },
 }));
-vi.mock("./orbitGatewayStore", () => ({ connectOrbitEnvironment: gateway.pair }));
+vi.mock("./orbitGatewayStore", () => ({
+  connectOrbitEnvironment: gateway.pair,
+  orbitGatewayState: gateway.state,
+}));
 
-import { openMobileOrbitThread } from "./orbitThreadStartRuntime";
+import { openMobileOrbitThread, startOrbitThread } from "./orbitThreadStartRuntime";
+
+it("does not send a name check for an unresolved draft after a profile or Node change", async () => {
+  const original = { nodeId: 7, profileId: 12 };
+  const prompt = "Private acquisition project";
+  const admission = newOrbitLaunchAdmission(() => "id", original, {
+    project_id: 78,
+    target: { kind: "new", name: "private-acquisition-project-abcdef" },
+    source: "mobile",
+    prompt,
+  });
+  gateway.checkInstanceName.mockClear();
+  gateway.fileText.mockResolvedValue(
+    JSON.stringify([{ ...original, draftId: "sheet:78", admission }]),
+  );
+  for (const scope of [
+    { nodeId: 7, profileId: 13 },
+    { nodeId: 8, profileId: 12 },
+  ]) {
+    gateway.state.mockReturnValue({
+      provider: "orbit",
+      node: { id: scope.nodeId, profile: { id: scope.profileId } },
+    });
+    await expect(startOrbitThread({ id: 78 }, prompt, "sheet")).rejects.toThrow(
+      "original Orbit profile and device",
+    );
+  }
+  expect(gateway.checkInstanceName).not.toHaveBeenCalled();
+});
 
 it("opens the canonical thread after pairing only if the user has not navigated away", async () => {
   navigation.dispatch.mockClear();

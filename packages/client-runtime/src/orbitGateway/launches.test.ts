@@ -20,7 +20,7 @@ import {
   resolveLegacyOrbitLaunch,
   type OrbitLaunchSubmission,
 } from "./launchAdmission.ts";
-import { createOrbitLaunchObserver } from "./launchObserver.ts";
+import { createOrbitLaunchObserver, OrbitLaunchAdmissionRefused } from "./launchObserver.ts";
 import { createOrbitLaunchThreadRowsAtom } from "./launchThreadRows.ts";
 import { newOrbitLaunchAdmission, type OrbitLaunch } from "./launches.ts";
 
@@ -446,11 +446,14 @@ it("keeps a refused replay recoverable and allows a corrected Send from the same
     .fn()
     .mockRejectedValueOnce(new Error("The original reply was lost"))
     .mockRejectedValueOnce(
-      new OrbitGatewayError({
-        code: "validation_failed",
-        status: 422,
+      new OrbitLaunchAdmissionRefused({
+        cause: new OrbitGatewayError({
+          code: "validation_failed",
+          status: 422,
+          message: "Project selection is invalid",
+          details: {},
+        }),
         message: "Project selection is invalid",
-        details: {},
       }),
     )
     .mockResolvedValueOnce(fixture({ launch_id: "other", project_id: 101 }));
@@ -468,8 +471,137 @@ it("keeps a refused replay recoverable and allows a corrected Send from the same
   await expect(journal.submit(corrected)).rejects.toThrow("Resolve the previous");
   await expect(journal.replay(old)).rejects.toThrow("Project selection is invalid");
   expect((await journal.submit(corrected)).launch_id).toBe("other");
-  expect(await journal.pending(scope)).toEqual([{ ...old, replayRefused: true }, corrected]);
+  expect(await journal.pending(scope)).toEqual([
+    { ...old, validationRefused: true, superseded: true },
+    corrected,
+  ]);
   expect(submit.mock.calls[2]).toEqual([corrected, false]);
+  await journal.acknowledge(corrected.admission.id);
+  await expect(journal.replay(old)).rejects.toThrow("already handled");
+  await expect(journal.submit(old)).rejects.toThrow("already refused");
+  expect(submit).toHaveBeenCalledTimes(3);
+});
+
+it("retains the same admission when a replay lookup is denied before the POST", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const draft = { ...scope, draftId: "draft", admission: request };
+  let stored: readonly OrbitLaunchSubmission[] = [];
+  let denyReads = false;
+  const list = vi.fn(async () =>
+    denyReads ? errorResponse("node_access.required", 403) : wrap([]),
+  );
+  const post = vi.fn(async () => {
+    throw new Error("An accepted POST lost its reply");
+  });
+  const gateway = createOrbitGatewayClient(async ({ method, path }) => {
+    if (path === "/me")
+      return wrap({
+        id: 7,
+        name: "Device",
+        profile: { id: 12, name: "Work", settings_version: 1, updated_at: "2026-11-17T12:00:00Z" },
+      });
+    return method === "GET" ? list() : post();
+  });
+  const observer = createOrbitLaunchObserver(() => gateway);
+  const journal = createOrbitLaunchSubmissions(
+    {
+      load: async () => stored,
+      save: async (rows) => {
+        stored = rows;
+      },
+    },
+    (row, reconcile) => observer.submit(row.admission, row, reconcile),
+  );
+  observer.setScope(scope);
+  try {
+    await expect(journal.submit(draft)).rejects.toThrow();
+    denyReads = true;
+    await expect(journal.replay(draft)).rejects.toMatchObject({ status: 403 });
+    denyReads = false;
+    const edited = {
+      ...draft,
+      admission: { id: "new", request: { ...request.request, prompt: "Edited" } },
+    };
+    await expect(journal.submit(edited)).rejects.toThrow("Resolve the previous");
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(stored).toEqual([draft]);
+  } finally {
+    observer.setScope(null);
+  }
+});
+
+it("clears a validation refusal on disk before a subsequent retry can lose its reply", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const draft = { ...scope, draftId: "draft", admission: request };
+  const edited = {
+    ...draft,
+    admission: { id: "new", request: { ...request.request, prompt: "Edited" } },
+  };
+  let stored: readonly OrbitLaunchSubmission[] = [{ ...draft, validationRefused: true }];
+  const entered = Promise.withResolvers<void>();
+  const reply = Promise.withResolvers<OrbitLaunch>();
+  const send = vi.fn(() => {
+    entered.resolve();
+    return reply.promise;
+  });
+  const journal = createOrbitLaunchSubmissions(
+    {
+      load: async () => stored,
+      save: async (rows) => {
+        stored = rows;
+      },
+    },
+    send,
+  );
+  const retry = journal.replay(draft);
+  await entered.promise;
+  expect(stored).toEqual([draft]);
+  await expect(journal.submit(edited)).rejects.toThrow("already checking");
+  reply.reject(new Error("Reply lost"));
+  await expect(retry).rejects.toThrow("Reply lost");
+  await expect(journal.submit(edited)).rejects.toThrow("Resolve the previous");
+  expect(send.mock.calls).toEqual([[expect.objectContaining({ admission: request }), true]]);
+});
+
+it("does not apply an older admission reply over a cancellation already received by polling", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const entered = Promise.withResolvers<void>();
+  const reply = Promise.withResolvers<ReturnType<typeof wrap>>();
+  const initial = Promise.withResolvers<void>();
+  const cancelled = fixture({
+    phase: "cancelled",
+    actions: { ...fixture().actions, cancel: unavailable },
+  });
+  let rows: readonly OrbitLaunch[] = [];
+  const gateway = createOrbitGatewayClient(async ({ path, method }) => {
+    if (path === "/me")
+      return wrap({
+        id: 7,
+        name: "Device",
+        profile: { id: 12, name: "Work", settings_version: 1, updated_at: "2026-11-17T12:00:00Z" },
+      });
+    if (method === "GET") return wrap(rows);
+    entered.resolve();
+    return reply.promise;
+  });
+  const observer = createOrbitLaunchObserver(() => gateway);
+  const stop = observer.subscribe(() => {
+    if (observer.view().loaded) initial.resolve();
+  });
+  observer.setScope(scope);
+  try {
+    await initial.promise;
+    const send = observer.submit(request, scope, false);
+    await entered.promise;
+    rows = [cancelled];
+    await observer.refresh();
+    reply.resolve(wrap(fixture(), 202));
+    expect(await send).toEqual(cancelled);
+    expect(observer.view().launches).toEqual([cancelled]);
+  } finally {
+    stop();
+    observer.setScope(null);
+  }
 });
 
 it("retains unpaired launch links and keeps archived launches off the list after a cold start", () => {
@@ -531,6 +663,8 @@ it("retains unpaired launch links and keeps archived launches off the list after
   registry.set(refs, []);
   expect(registry.get(rows).rows).toEqual([]);
   expect(registry.get(rows).snapshot.launches).toEqual([launch]);
+  registry.set(catalog, emptyCatalog);
+  expect(registry.get(rows).rows).toEqual([launch]);
 
   const restarted = AtomRegistry.make();
   const stopRestarted = restarted.mount(rows);

@@ -263,7 +263,7 @@ export function OrbitThreadStartRows() {
             <Text className="text-base text-foreground">
               {accepted
                 ? "Orbit accepted this submission"
-                : row.replayRefused
+                : row.validationRefused
                   ? "Orbit refused the retry"
                   : "Orbit submission unconfirmed"}
             </Text>
@@ -271,11 +271,18 @@ export function OrbitThreadStartRows() {
               {row.admission.request.prompt.split("\n")[0]}
             </Text>
             <Button
-              label={accepted ? "Acknowledge launch" : "Retry same submission"}
-              disabled={busy || snapshot.error !== null}
+              label={
+                accepted
+                  ? "Acknowledge launch"
+                  : row.superseded
+                    ? "Dismiss saved copy"
+                    : "Retry same submission"
+              }
+              disabled={busy || (!row.superseded && snapshot.error !== null)}
               onPress={() =>
                 void run(async () => {
-                  if (accepted) await mobileOrbitSubmissions.acknowledge(accepted.launch_id);
+                  if (accepted || row.superseded)
+                    await mobileOrbitSubmissions.acknowledge(row.admission.id);
                   else await mobileOrbitSubmissions.replay(row);
                 })
               }

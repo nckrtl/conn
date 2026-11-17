@@ -102,7 +102,7 @@ export async function updateLegacyMobilePreview(
 }
 
 export async function startOrbitThread(
-  project: OrbitGatewayProject,
+  project: Pick<OrbitGatewayProject, "id">,
   message: string,
   sheetKey: string,
 ): Promise<OrbitLaunch> {
@@ -114,9 +114,7 @@ export async function startOrbitThread(
   }
   // A new sheet or project is a different draft. Unconfirmed sends remain in Home for recovery.
   const draftId = `${sheetKey}:${project.id}`;
-  const saved = (await mobileOrbitSubmissions.pending({ profileId, nodeId })).find(
-    (row) => row.draftId === draftId,
-  );
+  const saved = await mobileOrbitSubmissions.draft(draftId, { profileId, nodeId });
   const name =
     saved?.admission.request.target.kind === "new"
       ? saved.admission.request.target.name

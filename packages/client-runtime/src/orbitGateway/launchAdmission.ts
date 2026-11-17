@@ -1,10 +1,7 @@
 import * as Schema from "effect/Schema";
 
-import {
-  OrbitGatewayError,
-  type OrbitGatewayClient,
-  type OrbitGatewayOperation,
-} from "./client.ts";
+import type { OrbitGatewayClient, OrbitGatewayOperation } from "./client.ts";
+import { OrbitLaunchAdmissionRefused } from "./launchObserver.ts";
 import type {
   OrbitLaunch,
   OrbitLaunchAdmission,
@@ -12,16 +9,18 @@ import type {
   OrbitLaunchScope,
 } from "./launches.ts";
 
-const isGatewayError = Schema.is(OrbitGatewayError);
+const isAdmissionRefused = Schema.is(OrbitLaunchAdmissionRefused);
 
 export interface OrbitLaunchSubmission extends OrbitLaunchScope {
   readonly draftId: string;
   readonly admission: OrbitLaunchAdmission;
-  readonly replayRefused?: true;
+  readonly validationRefused?: true;
+  readonly superseded?: true;
 }
 
 export interface OrbitLaunchSubmissionStorage {
   readonly lock?: <T>(work: () => Promise<T>) => Promise<T>;
+  readonly lockDraft?: <T>(draftId: string, work: () => Promise<T>) => Promise<T>;
   readonly load: () => Promise<readonly OrbitLaunchSubmission[]>;
   readonly save: (records: readonly OrbitLaunchSubmission[]) => Promise<void>;
 }
@@ -65,63 +64,94 @@ export function createOrbitLaunchSubmissions(
     }));
   }
 
-  const inFlight = new Map<string, Promise<OrbitLaunch>>();
-  function send(record: OrbitLaunchSubmission, reconcile: boolean): Promise<OrbitLaunch> {
-    const id = record.admission.id;
-    const current = inFlight.get(id);
-    if (current) return current;
-    const pending = (async () => {
-      try {
-        return await submit(record, reconcile);
-      } catch (error) {
-        if (isGatewayError(error) && [400, 403, 404, 422].includes(error.status)) {
-          if (reconcile) {
-            await update((records) => ({
-              records: records.map((row) =>
-                row.admission.id === id ? ({ ...row, replayRefused: true } as const) : row,
-              ),
-              result: undefined,
-            }));
-          } else {
-            await remove(id);
-          }
+  function latestAttempt(
+    records: readonly OrbitLaunchSubmission[],
+    draftId: string,
+    scope: OrbitLaunchScope,
+  ) {
+    const attempts = records.filter((row) => row.draftId === draftId);
+    if (attempts.some((row) => row.profileId !== scope.profileId || row.nodeId !== scope.nodeId)) {
+      throw new Error("Connect to the original Orbit profile and device to resolve this draft.");
+    }
+    return attempts.findLast((row) => !row.superseded);
+  }
+
+  const inFlight = new Set<string>();
+  async function withDraft<T>(draftId: string, work: () => Promise<T>): Promise<T> {
+    if (inFlight.has(draftId)) throw new Error("Conn is already checking this Orbit submission.");
+    inFlight.add(draftId);
+    try {
+      return await (storage.lockDraft ? storage.lockDraft(draftId, work) : work());
+    } finally {
+      inFlight.delete(draftId);
+    }
+  }
+
+  function clearRefusal(records: readonly OrbitLaunchSubmission[], saved: OrbitLaunchSubmission) {
+    if (!saved.validationRefused) return records;
+    const { validationRefused: _, ...pending } = saved;
+    return records.map((row) => (row === saved ? pending : row));
+  }
+
+  async function send(record: OrbitLaunchSubmission, reconcile: boolean): Promise<OrbitLaunch> {
+    try {
+      return await submit(record, reconcile);
+    } catch (error) {
+      if (isAdmissionRefused(error)) {
+        if (!reconcile) {
+          await remove(record.admission.id);
+        } else if (error.cause.status === 422) {
+          await update((records) => ({
+            records: records.map((row) =>
+              row.admission.id === record.admission.id
+                ? ({ ...row, validationRefused: true } as const)
+                : row,
+            ),
+            result: undefined,
+          }));
         }
-        throw error;
       }
-    })().finally(() => {
-      inFlight.delete(id);
-    });
-    inFlight.set(id, pending);
-    return pending;
+      throw error;
+    }
   }
 
   return {
-    async submit(record: OrbitLaunchSubmission) {
-      const saved = await update((records) => {
-        const attempts = records.filter((entry) => entry.draftId === record.draftId);
-        if (
-          attempts.some(
-            (entry) => entry.profileId !== record.profileId || entry.nodeId !== record.nodeId,
-          )
-        ) {
-          throw new Error(
-            "Connect to the original Orbit profile and device to resolve this draft.",
+    submit(record: OrbitLaunchSubmission) {
+      return withDraft(record.draftId, async () => {
+        const { saved, reconcile } = await update((records) => {
+          const latest = latestAttempt(records, record.draftId, record);
+          if (latest && sameInput(latest.admission.request, record.admission.request)) {
+            return {
+              records: clearRefusal(records, latest),
+              result: { saved: latest, reconcile: true },
+            };
+          }
+          if (latest && !latest.validationRefused) {
+            throw new Error(
+              "Resolve the previous Orbit submission before sending this edited draft.",
+            );
+          }
+          const previous = records.find(
+            (row) =>
+              row.draftId === record.draftId &&
+              row.superseded &&
+              sameInput(row.admission.request, record.admission.request),
           );
-        }
-        const matching = attempts.findLast((entry) =>
-          sameInput(entry.admission.request, record.admission.request),
-        );
-        if (matching !== undefined) return { records, result: { saved: matching, replay: true } };
-        const latest = attempts.at(-1);
-        if (latest !== undefined && !latest.replayRefused) {
-          throw new Error(
-            "Resolve the previous Orbit submission before sending this edited draft.",
-          );
-        }
-        return { records: [...records, record], result: { saved: record, replay: false } };
+          if (previous)
+            throw new Error("Orbit already refused this request. Change the draft before sending.");
+          const archive =
+            latest === undefined
+              ? records
+              : records.map((row) =>
+                  row === latest ? ({ ...row, superseded: true } as const) : row,
+                );
+          return { records: [...archive, record], result: { saved: record, reconcile: false } };
+        });
+        return send(saved, reconcile);
       });
-      return send(saved.saved, saved.replay);
     },
+    draft: (draftId: string, scope: OrbitLaunchScope) =>
+      update((records) => ({ records, result: latestAttempt(records, draftId, scope) })),
     pending: ({ profileId, nodeId }: OrbitLaunchScope) =>
       update((records) => ({
         records,
@@ -134,18 +164,17 @@ export function createOrbitLaunchSubmissions(
       };
     },
     acknowledge: remove,
-    async replay(record: OrbitLaunchSubmission) {
-      const saved = await update((records) => ({
-        records,
-        result: records.find(
-          (row) =>
-            row.admission.id === record.admission.id &&
-            row.profileId === record.profileId &&
-            row.nodeId === record.nodeId,
-        ),
-      }));
-      if (saved === undefined) throw new Error("This submission was already handled.");
-      return send(saved, true);
+    replay(record: OrbitLaunchSubmission) {
+      return withDraft(record.draftId, async () => {
+        const saved = await update((records) => {
+          const latest = latestAttempt(records, record.draftId, record);
+          if (latest?.admission.id !== record.admission.id) {
+            throw new Error("This submission was already handled.");
+          }
+          return { records: clearRefusal(records, latest), result: latest };
+        });
+        return send(saved, true);
+      });
     },
   };
 }

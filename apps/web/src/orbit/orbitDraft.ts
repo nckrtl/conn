@@ -3,6 +3,7 @@ import type {
   OrbitGatewayBranchSelection,
   OrbitGatewayProject,
   OrbitInstanceKind,
+  OrbitLaunchRequest,
 } from "@t3tools/client-runtime/orbit-gateway";
 import {
   EnvironmentId,
@@ -193,6 +194,33 @@ export interface OrbitDraftStartInput {
   readonly instanceDomainSuffix?: string | null;
   readonly branch: OrbitGatewayBranchSelection | null;
   readonly defaultBranch: string | null;
+}
+
+export function orbitDraftLaunchTarget(input: {
+  readonly existing: { readonly instanceId: number } | null;
+  readonly instanceName: string;
+  readonly branch?: OrbitGatewayBranchSelection | null;
+}): OrbitLaunchRequest["target"] {
+  return input.existing
+    ? { kind: "existing", instance_id: input.existing.instanceId }
+    : {
+        kind: "new",
+        name: input.instanceName,
+        ...(input.branch == null ? {} : { branch: input.branch }),
+      };
+}
+
+export function orbitDraftMatchesLaunch(
+  target: OrbitDraftTarget | null | undefined,
+  prompt: string | undefined,
+  request: Pick<OrbitLaunchRequest, "project_id" | "prompt" | "target">,
+): boolean {
+  return (
+    target != null &&
+    target.projectId === request.project_id &&
+    prompt?.trim() === request.prompt &&
+    JSON.stringify(orbitDraftLaunchTarget(target)) === JSON.stringify(request.target)
+  );
 }
 
 /**

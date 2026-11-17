@@ -6,7 +6,8 @@ import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
 import { Button } from "../components/ui/button";
-import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { composerDraftHasUserContent, DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { orbitDraftMatchesLaunch } from "./orbitDraft";
 import {
   orbitLaunchSubmissions,
   readLegacyWebLaunches,
@@ -72,14 +73,23 @@ export function OrbitLaunchRecovery() {
   );
 
   async function acknowledge(row: OrbitLaunchSubmission) {
-    const latest = (await orbitLaunchSubmissions.pending(row)).findLast(
-      (entry) => entry.draftId === row.draftId,
-    );
+    const latest = await orbitLaunchSubmissions.draft(row.draftId, row);
     const store = useComposerDraftStore.getState();
     const draftId = DraftId.make(row.draftId);
+    const draft = store.getComposerDraft(draftId);
+    const request = row.admission.request;
+    const currentModel = draft?.activeProvider
+      ? draft.modelSelectionByProvider[draft.activeProvider]
+      : undefined;
     if (
       latest?.admission.id === row.admission.id &&
-      store.getComposerDraft(draftId)?.prompt.trim() === row.admission.request.prompt
+      draft !== null &&
+      !composerDraftHasUserContent({ ...draft, prompt: "" }) &&
+      (draft.runtimeMode === null || draft.runtimeMode === request.runtime_mode) &&
+      (draft.interactionMode === null || draft.interactionMode === request.interaction_mode) &&
+      (!draft.modelSelectionExplicit ||
+        JSON.stringify(currentModel) === JSON.stringify(request.model_selection)) &&
+      orbitDraftMatchesLaunch(store.getDraftSession(draftId)?.orbitTarget, draft.prompt, request)
     ) {
       store.clearDraftThread(draftId);
     }
@@ -200,7 +210,7 @@ export function OrbitLaunchRecovery() {
             <p>
               {accepted
                 ? "Orbit accepted this submission"
-                : row.replayRefused
+                : row.validationRefused
                   ? "Orbit refused the retry"
                   : "Orbit submission unconfirmed"}
             </p>
@@ -219,9 +229,22 @@ export function OrbitLaunchRecovery() {
               >
                 Open recovered launch
               </Link>
+            ) : row.superseded ? (
+              <Button
+                size="xs"
+                variant="ghost-muted"
+                disabled={busy !== null}
+                onClick={() =>
+                  void orbitLaunchSubmissions
+                    .acknowledge(row.admission.id)
+                    .catch(() => setError("Could not dismiss the saved submission."))
+                }
+              >
+                Dismiss saved copy
+              </Button>
             ) : (
               <div>
-                {row.replayRefused ? (
+                {row.validationRefused ? (
                   <p className="text-muted-foreground">
                     You can edit the draft and send a correction. The original submission stays
                     here.

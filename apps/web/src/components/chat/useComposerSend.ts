@@ -154,6 +154,7 @@ import {
   buildOrbitDraftStart,
   isOrbitDraftWithoutEnvironment,
   orbitDraftAttachmentsBlockedReason,
+  orbitDraftTargetsEqual,
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
 import { orbitThreadStartBlockedReason } from "../../orbit/orbitLaunchAvailability";
@@ -847,13 +848,20 @@ export function useComposerSend(input: ComposerSendInput) {
                 DEFAULT_INTERACTION_MODE,
             }),
           );
-          const store = useComposerDraftStore.getState();
-          const savedDraft = store.getComposerDraft(draftId);
-          if (savedDraft !== null && savedDraft.prompt.trim() !== trimmed) return false;
+          const unchanged = () => {
+            const store = useComposerDraftStore.getState();
+            const savedDraft = store.getComposerDraft(draftId);
+            return (
+              savedDraft === composerDraft &&
+              orbitDraftTargetsEqual(store.getDraftSession(draftId)?.orbitTarget, orbitDraftTarget)
+            );
+          };
+          if (!unchanged()) return false;
           if (currentRouteThreadKeyRef.current === routeThreadKey) {
             await navigate({ to: "/orbit/$startId", params: { startId: launch.launch_id } });
           }
-          store.clearDraftThread(draftId);
+          if (!unchanged()) return false;
+          useComposerDraftStore.getState().clearDraftThread(draftId);
           await orbitLaunchSubmissions.acknowledge(launch.launch_id).catch(() => {});
           return true;
         })

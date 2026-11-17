@@ -34,6 +34,13 @@ export function createOrbitLaunchThreadRowsAtom(input: {
       const { thread } = launch;
       const needsAttention = orbitLaunchNeedsAttention(launch);
       if (thread === null) return needsAttention;
+      const environmentId = EnvironmentId.make(thread.environment_id);
+      const catalog = get(input.catalogValueAtom);
+      if (!catalog.isReady) return needsAttention;
+      if (catalog.entries.get(environmentId)?.enabled !== true) {
+        handedOff.delete(launch.launch_id);
+        return needsAttention || launch.phase === "ready";
+      }
       if (
         previousHandoffs.has(launch.launch_id) ||
         knownThreads.some(
@@ -45,21 +52,15 @@ export function createOrbitLaunchThreadRowsAtom(input: {
       }
       if (needsAttention || launch.phase !== "ready") return needsAttention;
 
-      const environmentId = EnvironmentId.make(thread.environment_id);
-      const catalog = get(input.catalogValueAtom);
-      if (!catalog.isReady) return false;
-      if (catalog.entries.get(environmentId)?.enabled === true) {
-        const archive = get(input.archivedSnapshotAtom(environmentId));
-        if (
-          AsyncResult.isSuccess(archive) &&
-          archive.value.threads.some((row) => row.id === thread.thread_id)
-        ) {
-          handedOff.add(launch.launch_id);
-          return false;
-        }
-        if (archive._tag === "Initial" || archive.waiting) return false;
+      const archive = get(input.archivedSnapshotAtom(environmentId));
+      if (
+        AsyncResult.isSuccess(archive) &&
+        archive.value.threads.some((row) => row.id === thread.thread_id)
+      ) {
+        handedOff.add(launch.launch_id);
+        return false;
       }
-      return true;
+      return archive._tag !== "Initial" && !archive.waiting;
     });
     return { snapshot, rows, handedOff };
   });

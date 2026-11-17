@@ -47,6 +47,8 @@ jobs:
           sparse-checkout: |
             /pnpm-workspace.yaml
             /.github/scripts/ci-changes.cjs
+            /.github/workflows/ci.yml
+            /.github/scripts/ci-check.test.cjs
             /.github/scripts/web-test.cjs
             /.github/scripts/web-test.test.cjs
             /.github/actions/ci-changes/
@@ -59,9 +61,8 @@ jobs:
         id: detect
         uses: ./.github/actions/ci-changes
 
-      # Cheap and always runs, so a change to the wrapper is tested even when no web test runs.
-      - name: Test the web test wrapper
-        run: node --test .github/scripts/web-test.test.cjs
+      - name: Test CI scripts
+        run: node --test .github/scripts/ci-check.test.cjs .github/scripts/web-test.test.cjs
 
   # Lint and the desktop build each get a runner so they run side by side.
   # Typecheck shares the build's install. Lint always runs: it formats every
@@ -222,6 +223,17 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node apps/desktop/scripts/verify-preload-bundle.mjs
 
+      # Knip reads the built tree while the fork's smoke checks wait for startup.
+      - name: Start unused code check
+        id: knip
+        if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' && steps.electron.outcome == 'success' }}
+        run: |
+          (
+            set +e
+            vp run knip:check
+            echo "$?" > "$RUNNER_TEMP/knip-status"
+          ) > "$RUNNER_TEMP/knip.log" 2>&1 < /dev/null &
+
       # The release launch check, run unpackaged against the same old-state fixture, for
       # startup and sidebar changes. Packaging and signing stay release-only.
       - name: Open the seeded thread in the built desktop app
@@ -284,7 +296,7 @@ jobs:
           cat "$RUNNER_TEMP/typecheck.log"
           exit "$(cat "$RUNNER_TEMP/typecheck-status")"
 
-      # Fork: the Lint job's checks, after the build so they do not slow it.
+      # Fork: the Lint job's checks.
       - name: Reject repository-owned PR assets
         if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' }}
         run: |
@@ -295,8 +307,11 @@ jobs:
           fi
 
       - name: Check unused code
-        if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' && steps.electron.outcome == 'success' }}
-        run: vp run knip:check
+        if: ${{ !cancelled() && steps.knip.outcome == 'success' }}
+        run: |
+          until test -s "$RUNNER_TEMP/knip-status"; do sleep 1; done
+          cat "$RUNNER_TEMP/knip.log"
+          exit "$(cat "$RUNNER_TEMP/knip-status")"
 
       - name: Check generated GitHub GraphQL operations
         if: ${{ !cancelled() && github.repository != 'pingdotgg/t3code' && steps.electron.outcome == 'success' }}
@@ -619,11 +634,15 @@ jobs:
           T3CODE_TRANSFER_BUDGET_REPORT_PATH: ${{ runner.temp }}/t3code-transfer-budget.md
           T3CODE_TRANSFER_BUDGET_RESULT_PATH: ${{ runner.temp }}/thread-transfer-result.json
           T3CODE_TRANSFER_BUDGET_SCENARIOS_PATH: ${{ runner.temp }}/thread-transfer-scenarios.json
-        # One process per file spends ~2s starting before its tests run; one file per vCPU overlaps that.
-        run: >-
-          vp run test:cached -- --shard ${{ matrix.shard }}/${{ strategy.job-total }} --concurrency 4
-          --uncached apps/server/integration/transferBudgetV2.integration.test.ts
-          --verify-hits 1 apps/server
+        run: |
+          lead=()
+          if [ "$GITHUB_REPOSITORY" != pingdotgg/t3code ]; then
+            lead=(--lead-file apps/server/src/git/GitManager.test.ts
+                  --lead-file apps/server/src/vcs/GitVcsDriverCore.test.ts)
+          fi
+          vp run test:cached -- --shard ${{ matrix.shard }}/${{ strategy.job-total }} --concurrency 4 \
+            --uncached apps/server/integration/transferBudgetV2.integration.test.ts \
+            --verify-hits 1 "${lead[@]}" apps/server
 
       - name: Save Vitest module cache
         if: github.event_name == 'push' && steps.changes.outputs.test_server != 'false'
@@ -803,12 +822,13 @@ jobs:
         run: |
           echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
           # A job may skip only when `changes` said every gate it represents was
-          # not needed. On the fork, Build runs Lint and Rust runs Release Smoke.
+          # not needed. Fork Build always runs Lint; fork Rust also runs Release Smoke.
           echo "$RESULTS" | jq -e '.changes.outputs as $gates
             | {build: ["build", "typecheck", "desktop_launch"], mobile_native_static_analysis: ["mobile_native"]} as $renamed
             | (env.FORK_CI == "true") as $fork
             | ($renamed + (if $fork then {rust: ["rust", "release_smoke"]} else {} end)) as $job_gates
-            | all(to_entries[];
+            | (if $fork then .build.result == "success" else true end)
+              and all(to_entries[];
                 .value.result == "success"
                 or (.value.result == "skipped"
                   and (($fork and (.key == "lint" or .key == "release_smoke"))

@@ -1616,7 +1616,7 @@ commit.
 
 Fork CI runs on GitHub-hosted Ubuntu and macOS. Upstream uses Blacksmith. The fork targets a five-minute full CI run from the first job start through Check. It fits the largest CI fan-out in GitHub's 20-job limit with eight server shards, five web shards, four package shards, Build and Typecheck, Rust and Release Smoke, and Mobile Native Static Analysis. Other workflows and runner queues can affect wall time.
 
-Build and Typecheck also runs Lint on every fork PR. One fork runner runs Rust and Release Smoke, each with its own change gate. Upstream still runs separate jobs. Full inputs such as CI setup, dependency patches, vendored mobile dependencies and manifests exercise all Linux checks. Pushes to main always run the Linux checks and also run native mobile analysis for affected files.
+Build and Typecheck also runs the fork's Lint checks. Check requires it to succeed even for docs-only changes. One fork runner runs Rust and Release Smoke, each with its own change gate. Upstream still runs separate jobs. Full inputs such as CI setup, dependency patches, vendored mobile dependencies and manifests exercise all Linux checks. Pushes to main always run the Linux checks and also run native mobile analysis for affected files.
 
 On a sync keep the fork-only workflow conditions and matrices in `.github/workflows/ci.yml`, including Check's skip rules and the package-shard filters. Keep the fork's `apps/server/src/testUtils/shardWeights.json` and refresh it from the per-file durations in Test Server logs when shards drift.
 

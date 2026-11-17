@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 
 import { runtime } from "../lib/runtime";
+import { MobileDatabase } from "./mobile-database";
 import * as MobilePreferences from "./mobile-preferences";
 import * as MobileStorage from "./mobile-storage";
 
@@ -23,6 +24,14 @@ const runPreferences = <A, E>(
 ) => runtime.runPromise(MobilePreferences.MobilePreferencesStore.pipe(Effect.flatMap(use)));
 
 export const loadPreferences = () => runPreferences((store) => store.load);
+export const loadLaunchAdmissionsJson = () =>
+  runtime.runPromise(
+    MobileDatabase.pipe(Effect.flatMap((database) => database.loadLaunchAdmissionsJson)),
+  );
+export const saveLaunchAdmissionsJson = (payload: string) =>
+  runtime.runPromise(
+    MobileDatabase.pipe(Effect.flatMap((database) => database.saveLaunchAdmissionsJson(payload))),
+  );
 export const savePreferencesPatch = (patch: Partial<MobilePreferences.Preferences>) =>
   runPreferences((store) => store.savePatch(patch));
 export const updatePreferences = (

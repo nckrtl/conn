@@ -22,6 +22,7 @@ import { environmentCatalog } from "../../connection/catalog";
 import { writeFileAtomically } from "../../lib/atomic-file";
 import { rootNavigationRef } from "../../lib/rootNavigation";
 import { uuidv4 } from "../../lib/uuid";
+import { loadLaunchAdmissionsJson, saveLaunchAdmissionsJson } from "../../persistence/imperative";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { environmentThreadShells } from "../../state/threads";
@@ -42,6 +43,27 @@ async function launchFile(name: string) {
 const SUBMISSIONS = "orbit-launch-admissions.json";
 const LEGACY = "orbit-thread-starts.json";
 
+function decodeLaunchAdmissions(raw: string): readonly OrbitLaunchSubmission[] {
+  const rows: unknown = JSON.parse(raw);
+  if (!Array.isArray(rows)) throw new Error("Could not read the Orbit submission journal.");
+  return rows;
+}
+
+async function loadMobileLaunchAdmissions() {
+  const saved = await loadLaunchAdmissionsJson();
+  if (saved !== null) return decodeLaunchAdmissions(saved);
+  const file = await launchFile(SUBMISSIONS);
+  if (!file.exists) return [];
+  const raw = await file.text();
+  const rows = decodeLaunchAdmissions(raw);
+  await saveLaunchAdmissionsJson(raw);
+  // SQLite's row, including an empty array, takes precedence if deleting the old file fails.
+  try {
+    file.delete();
+  } catch {}
+  return rows;
+}
+
 export const mobileOrbitLaunches = createOrbitLaunchObserver(() => orbitGatewayClient);
 const orbitLaunchRowsAtom = createOrbitLaunchThreadRowsAtom({
   observer: mobileOrbitLaunches,
@@ -52,16 +74,8 @@ const orbitLaunchRowsAtom = createOrbitLaunchThreadRowsAtom({
 });
 export const mobileOrbitSubmissions = createOrbitLaunchSubmissions(
   {
-    load: async () => {
-      const file = await launchFile(SUBMISSIONS);
-      return file.exists ? (JSON.parse(await file.text()) as OrbitLaunchSubmission[]) : [];
-    },
-    save: async (rows) => {
-      const file = await launchFile(SUBMISSIONS);
-      if (rows.length === 0) {
-        if (file.exists) file.delete();
-      } else await writeFileAtomically(file, JSON.stringify(rows));
-    },
+    load: loadMobileLaunchAdmissions,
+    save: (rows) => saveLaunchAdmissionsJson(JSON.stringify(rows)),
   },
   (record, reconcile) => mobileOrbitLaunches.submit(record.admission, record, reconcile),
 );

@@ -10,6 +10,8 @@ import {
 } from "./launches.ts";
 
 const isGatewayError = Schema.is(OrbitGatewayError);
+const isAccessDenial = (error: unknown) =>
+  isGatewayError(error) && [401, 403, 404, 409].includes(error.status);
 
 export class OrbitLaunchAdmissionRefused extends Schema.TaggedError<
   OrbitLaunchAdmissionRefused,
@@ -31,6 +33,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
   let view = EMPTY;
   let scope: OrbitLaunchScope | null = null;
   let scopeVersion = 0;
+  let accessVersion = 0;
   let revision = 0;
   let reading = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -39,6 +42,19 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
   function publish(next: OrbitLaunchView) {
     view = next;
     for (const listener of listeners) listener();
+  }
+
+  function publishReadFailure(error: unknown) {
+    const denied = isAccessDenial(error);
+    if (denied) {
+      accessVersion += 1;
+      revision += 1;
+    }
+    publish({
+      launches: denied ? [] : view.launches,
+      loaded: true,
+      error: error instanceof Error ? error.message : "Could not read Orbit launches.",
+    });
   }
 
   function schedule() {
@@ -69,12 +85,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       }
     } catch (error) {
       if (version === scopeVersion && requested === revision) {
-        const denied = isGatewayError(error) && [401, 403, 404, 409].includes(error.status);
-        publish({
-          launches: denied ? [] : view.launches,
-          loaded: true,
-          error: error instanceof Error ? error.message : "Could not read Orbit launches.",
-        });
+        publishReadFailure(error);
       }
     } finally {
       if (version === scopeVersion) {
@@ -116,6 +127,12 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       throw new Error("This submission belongs to a different Orbit profile or device.");
     }
     const version = scopeVersion;
+    const access = accessVersion;
+    const ensureAccess = () => {
+      if (access !== accessVersion) {
+        throw new Error("Orbit access changed before Conn could confirm this launch.");
+      }
+    };
     const me = await gateway.me();
     if (
       me.id !== expected.nodeId ||
@@ -124,9 +141,22 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
     ) {
       throw new Error("This device's Orbit profile changed before sending.");
     }
+    ensureAccess();
     const api = gateway.launches;
+    const readAdmissions = async () => {
+      try {
+        return await api.list();
+      } catch (error) {
+        if (version === scopeVersion && access === accessVersion && isAccessDenial(error)) {
+          publishReadFailure(error);
+          schedule();
+        }
+        throw error;
+      }
+    };
     const observed = () => view.launches.find((row) => row.launch_id === admission.id);
     const accept = (launch: OrbitLaunch, before: OrbitLaunch | undefined) => {
+      ensureAccess();
       assertLaunchIdentity(launch, admission);
       const current = observed();
       if (current !== before) {
@@ -139,9 +169,10 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
     };
     if (reconcile) {
       const before = observed();
-      const previous = (await api.list()).find((row) => row.launch_id === admission.id);
+      const previous = (await readAdmissions()).find((row) => row.launch_id === admission.id);
       if (scopeVersion !== version)
         throw new Error("The Orbit profile changed while checking the launch.");
+      ensureAccess();
       if (previous) return accept(previous, before);
       const current = observed();
       if (current !== undefined) {
@@ -156,6 +187,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
     } catch (error) {
       // A lost response may have committed the launch. Check before the UI offers an identical replay.
       if (scopeVersion !== version) throw error;
+      ensureAccess();
       if (isGatewayError(error) && [400, 403, 404, 422].includes(error.status)) {
         const current = observed();
         if (current !== undefined) {
@@ -176,8 +208,9 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
         assertLaunchIdentity(beforeRead, admission);
         return beforeRead;
       }
-      const launches = await api.list().catch(() => null);
+      const launches = await readAdmissions().catch(() => null);
       if (scopeVersion !== version) throw error;
+      ensureAccess();
       const recovered = observed() ?? launches?.find((row) => row.launch_id === admission.id);
       if (recovered === undefined) throw error;
       return accept(recovered, beforeRead);

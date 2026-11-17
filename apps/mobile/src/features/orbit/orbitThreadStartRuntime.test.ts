@@ -11,6 +11,9 @@ const gateway = vi.hoisted(() => ({
   state: vi.fn(),
   checkInstanceName: vi.fn(),
   fileText: vi.fn(),
+  fileDelete: vi.fn(),
+  loadJournal: vi.fn(),
+  saveJournal: vi.fn(),
 }));
 
 vi.mock("react-native", () => ({ AppState: {} }));
@@ -19,7 +22,12 @@ vi.mock("expo-file-system", () => ({
   File: class {
     exists = true;
     text = gateway.fileText;
+    delete = gateway.fileDelete;
   },
+}));
+vi.mock("../../persistence/imperative", () => ({
+  loadLaunchAdmissionsJson: gateway.loadJournal,
+  saveLaunchAdmissionsJson: gateway.saveJournal,
 }));
 vi.mock("../../connection/catalog", () => ({ environmentCatalog: {} }));
 vi.mock("../../state/atom-registry", () => ({
@@ -66,9 +74,19 @@ it("does not send a name check for an unresolved draft after a profile or Node c
     prompt,
   });
   gateway.checkInstanceName.mockClear();
-  gateway.fileText.mockResolvedValue(
-    JSON.stringify([{ ...original, draftId: "sheet:78", admission }]),
-  );
+  gateway.fileDelete.mockClear();
+  gateway.fileText.mockClear();
+  const raw = JSON.stringify([{ ...original, draftId: "sheet:78", admission }]);
+  gateway.fileText.mockResolvedValue(raw);
+  gateway.loadJournal.mockResolvedValue(null);
+  gateway.saveJournal.mockRejectedValueOnce(new Error("Journal write interrupted"));
+  gateway.state.mockReturnValue({ provider: "orbit", node: { id: 7, profile: { id: 13 } } });
+  await expect(startOrbitThread({ id: 78 }, prompt, "sheet")).rejects.toThrow("write interrupted");
+  expect(gateway.fileDelete).not.toHaveBeenCalled();
+  gateway.saveJournal.mockImplementationOnce(async (value: string) => {
+    expect(gateway.fileDelete).not.toHaveBeenCalled();
+    gateway.loadJournal.mockResolvedValue(value);
+  });
   for (const scope of [
     { nodeId: 7, profileId: 13 },
     { nodeId: 8, profileId: 12 },
@@ -81,6 +99,8 @@ it("does not send a name check for an unresolved draft after a profile or Node c
       "original Orbit profile and device",
     );
   }
+  expect(gateway.fileText).toHaveBeenCalledTimes(2);
+  expect(gateway.fileDelete).toHaveBeenCalledOnce();
   expect(gateway.checkInstanceName).not.toHaveBeenCalled();
 });
 

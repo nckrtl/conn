@@ -604,6 +604,60 @@ it("does not apply an older admission reply over a cancellation already received
   }
 });
 
+it("preserves the journal when a newer access denial precedes a delayed admission receipt", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const draft = { ...scope, draftId: "draft", admission: request };
+  let stored: readonly OrbitLaunchSubmission[] = [];
+  const entered = Promise.withResolvers<void>();
+  const reply = Promise.withResolvers<ReturnType<typeof wrap>>();
+  const initial = Promise.withResolvers<void>();
+  let list = wrap([]);
+  const post = vi.fn(() => {
+    entered.resolve();
+    return reply.promise;
+  });
+  const gateway = createOrbitGatewayClient(async ({ path, method }) => {
+    if (path === "/me")
+      return wrap({
+        id: 7,
+        name: "Device",
+        profile: { id: 12, name: "Work", settings_version: 1, updated_at: "2026-11-17T12:00:00Z" },
+      });
+    return method === "GET" ? list : post();
+  });
+  const observer = createOrbitLaunchObserver(() => gateway);
+  const journal = createOrbitLaunchSubmissions(
+    {
+      load: async () => stored,
+      save: async (rows) => {
+        stored = rows;
+      },
+    },
+    (row, reconcile) => observer.submit(row.admission, row, reconcile),
+  );
+  const stop = observer.subscribe(() => {
+    if (observer.view().loaded) initial.resolve();
+  });
+  observer.setScope(scope);
+  try {
+    await initial.promise;
+    const send = journal.submit(draft);
+    await entered.promise;
+    list = errorResponse("node_access.required", 403);
+    await observer.refresh();
+    reply.resolve(wrap(fixture(), 202));
+    await expect(send).rejects.toThrow("access changed");
+    expect(observer.view().launches).toEqual([]);
+    expect(await journal.pending(scope)).toEqual([draft]);
+    list = wrap([fixture()]);
+    await expect(journal.replay(draft)).resolves.toEqual(fixture());
+    expect(post).toHaveBeenCalledOnce();
+  } finally {
+    stop();
+    observer.setScope(null);
+  }
+});
+
 it("retains unpaired launch links and keeps archived launches off the list after a cold start", () => {
   const initial = fixture();
   const launch = fixture({

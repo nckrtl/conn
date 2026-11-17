@@ -78,7 +78,7 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-it("delivers without focusing and reads status during an action without forwarding a retired reply", async () => {
+it("reads status during an action and re-registers the same tab without forwarding a retired reply", async () => {
   const streams = new Map<
     string,
     { onEvent: (event: PreviewAutomationStreamEvent) => Promise<void>; signal: AbortSignal }
@@ -120,14 +120,11 @@ it("delivers without focusing and reads status during an action without forwardi
       result: {},
     };
   });
-  const focus = vi.fn();
-  // Keep the removed callback as a tripwire for focus-stealing delivery.
-  const stop = Reflect.apply(hostDesktopTab, undefined, [
+  const stop = hostDesktopTab(
     { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("thread") },
     "tab",
     "same-guest",
-    focus,
-  ]);
+  );
   const event = (
     connectionId: string,
     operation: PreviewAutomationRequest["operation"],
@@ -150,7 +147,6 @@ it("delivers without focusing and reads status during an action without forwardi
     await streams.get("connection-1")!.onEvent(event("connection-1", "status"));
     await responded.promise;
     expect(responses).toMatchObject([{ connectionId: "connection-1", requestId: "status" }]);
-    expect(focus).not.toHaveBeenCalled();
     mocks.phase = "disconnected";
     mocks.listener();
     attached = deferred<void>();

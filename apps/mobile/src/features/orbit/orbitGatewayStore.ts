@@ -5,6 +5,7 @@ import {
   forgetPairingRevoked,
   forgetRenewalFailure,
   isFinalPairingError,
+  isPairingRetrySafe,
   isPairingRevoked,
   isPairingRevokedError,
   parseEnvironmentProvider,
@@ -141,6 +142,12 @@ async function loadProvider(): Promise<void> {
     pairingIntents: recovery?.pairingIntents ?? [],
     interruptedRenewalIds: recovery?.interruptedRenewalIds ?? [],
   };
+  // Older failure records did not distinguish a refused request from lost issuance or redemption.
+  for (const [id, failure] of Object.entries(record.environments.renewalFailed ?? {})) {
+    if (failure.retrySafe !== true && !isPairingRevoked(record.environments, id)) {
+      record = interruptRenewal(record, id);
+    }
+  }
   set({
     provider: parseEnvironmentProvider(parsed.provider),
     providerLoaded: true,
@@ -214,6 +221,16 @@ function confirmPairing(current: ProviderRecord, environmentId: string): Provide
   };
 }
 
+function interruptRenewal(current: ProviderRecord, environmentId: string): ProviderRecord {
+  return {
+    ...current,
+    environments: forgetRenewalFailure(current.environments, environmentId),
+    interruptedRenewalIds: current.interruptedRenewalIds.includes(environmentId)
+      ? current.interruptedRenewalIds
+      : [...current.interruptedRenewalIds, environmentId],
+  };
+}
+
 function recoverPairingIntents(catalog: EnvironmentCatalogState): Promise<void> {
   if (!catalog.isReady || record.pairingIntents.length === 0) return Promise.resolve();
   return updateProviderRecord(
@@ -232,11 +249,8 @@ function recoverPairingIntents(catalog: EnvironmentCatalogState): Promise<void> 
           );
         if (saved) {
           next = confirmPairing(next, environmentId);
-        } else if (renewal && !next.interruptedRenewalIds.includes(environmentId)) {
-          next = {
-            ...next,
-            interruptedRenewalIds: [...next.interruptedRenewalIds, environmentId],
-          };
+        } else if (renewal) {
+          next = interruptRenewal(next, environmentId);
         }
         next = {
           ...next,
@@ -322,8 +336,10 @@ async function attemptPairing(
       { pairingOutcome: true },
     ).catch(() => {});
 
+  let linkReceived = false;
   try {
     const pairing = await client.pair(environmentId, { renew });
+    linkReceived = true;
     const result = await runAtomCommand(
       appAtomRegistry,
       connectPairingUrl,
@@ -338,20 +354,30 @@ async function attemptPairing(
   } catch (error) {
     await finish((current) => {
       let { environments } = current;
-      if (isPairingRevokedError(error)) {
-        environments = forgetRenewalFailure(
-          recordPairingRevoked(environments, environmentId, Date.now()),
-          environmentId,
-        );
-      } else {
-        if (isFinalPairingError(error))
-          environments = recordPairingRefused(environments, environment);
-        if (kind === "renew") {
-          environments = recordRenewalFailed(environments, environmentId, {
+      if (!linkReceived && isPairingRevokedError(error)) {
+        return {
+          ...current,
+          environments: forgetRenewalFailure(
+            recordPairingRevoked(environments, environmentId, Date.now()),
+            environmentId,
+          ),
+        };
+      }
+      if (renew && (linkReceived || !isPairingRetrySafe(error))) {
+        return interruptRenewal(current, environmentId);
+      }
+      if (!linkReceived && isFinalPairingError(error)) {
+        environments = recordPairingRefused(environments, environment);
+      }
+      if (renew) {
+        return {
+          ...current,
+          environments: recordRenewalFailed(environments, environmentId, {
             at: Date.now(),
             reason: renewalFailureReason(error),
-          });
-        }
+            retrySafe: true,
+          }),
+        };
       }
       return { ...current, environments };
     });
@@ -421,6 +447,9 @@ export function connectOrbitEnvironment(
 export function retryOrbitEnvironmentRenewal(
   environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
 ): Promise<boolean> {
+  if (record.environments.renewalFailed?.[environment.environmentId]?.retrySafe !== true) {
+    return Promise.resolve(false);
+  }
   return pairOne(environment, "renew");
 }
 
@@ -480,7 +509,9 @@ async function reconcileEnvironments(
   await updateEnvironmentState((current) =>
     plan.state.pairedByOrbit.reduce(recordPaired, {
       ...current,
-      disabledByOrbit: plan.state.disabledByOrbit,
+      disabledByOrbit: plan.state.disabledByOrbit.filter(
+        (id) => !current.pairedByOrbit.includes(id),
+      ),
       instanceServers: plan.state.instanceServers ?? {},
       missingFromGateway: plan.state.missingFromGateway ?? {},
     }),

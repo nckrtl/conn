@@ -55,6 +55,7 @@ export class OrbitGatewayError extends Schema.TaggedError<OrbitGatewayError>()(
     message: Schema.String,
     status: Schema.Number,
     details: Schema.Record(Schema.String, Schema.Unknown),
+    pairingOutcome: Schema.optionalKey(Schema.Literals(["unchanged", "unknown"])),
   },
 ) {}
 
@@ -574,6 +575,10 @@ export function createOrbitGatewayClient(
           message: `The Orbit Gateway could not finish ${path}: the Operation ${operation.status}.`,
           status: 0,
           details: { operation_id: operation.id },
+          pairingOutcome:
+            operation.status === "failed" && operation.error_code === "conn.session_rejected"
+              ? "unchanged"
+              : "unknown",
         });
       }
       if (now() >= deadline) {
@@ -588,7 +593,13 @@ export function createOrbitGatewayClient(
         typeof operation.poll_after_seconds === "number" ? operation.poll_after_seconds : null,
       );
       await sleep(Math.max(Math.min(wait, deadline - now()), 0));
-      operation = record(await call({ method: "GET", path: `/operations/${operation.id}` }));
+      operation = record(
+        await call({ method: "GET", path: `/operations/${operation.id}` }).catch(
+          (error: unknown) => {
+            throw withPairingOutcome(error, "unknown");
+          },
+        ),
+      );
     }
   };
 
@@ -642,13 +653,29 @@ export function createOrbitGatewayClient(
           path,
           timeoutMs: ADMISSION_TIMEOUT_MS,
           ...(pairOptions?.renew ? { body: { renew: true } } : {}),
+        }).catch((error: unknown) => {
+          // These admission checks run before the Gateway starts pairing.
+          if (
+            isOrbitGatewayError(error) &&
+            error.status === 409 &&
+            (error.code === "conn.session_expired" || error.code === "conn.gateway_missing")
+          ) {
+            throw withPairingOutcome(error, "unchanged");
+          }
+          throw error;
         }),
       );
       // The Gateway mints the link in an Operation (202). Follow it, then read the link once.
       if (typeof data?.pairing_url !== "string") {
         const result = record((await settle(data, path)).result);
         if (typeof result?.pairing_id !== "number") throw invalid(path);
-        data = record(await call({ method: "GET", path: `${path}/${result.pairing_id}` }));
+        data = record(
+          await call({ method: "GET", path: `${path}/${result.pairing_id}` }).catch(
+            (error: unknown) => {
+              throw withPairingOutcome(error, "unknown");
+            },
+          ),
+        );
       }
       return issuedPairing(data, path);
     },
@@ -997,10 +1024,28 @@ export function isFinalPairingError(error: unknown): boolean {
 
 /** Whether Orbit refused a renewal because this Node's pairing with the server is revoked. */
 export function isPairingRevokedError(error: unknown): boolean {
-  return isOrbitGatewayError(error) && error.code === PAIRING_REVOKED;
+  return (
+    isOrbitGatewayError(error) &&
+    error.code === PAIRING_REVOKED &&
+    error.pairingOutcome !== "unknown"
+  );
 }
 
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);
+
+/** Whether the Gateway confirmed that the failed attempt did not issue a pairing. */
+export function isPairingRetrySafe(error: unknown): boolean {
+  return isOrbitGatewayError(error) && error.pairingOutcome === "unchanged";
+}
+
+function withPairingOutcome(
+  error: unknown,
+  pairingOutcome: NonNullable<OrbitGatewayError["pairingOutcome"]>,
+): unknown {
+  if (!isOrbitGatewayError(error)) return error;
+  const { code, message, status, details } = error;
+  return new OrbitGatewayError({ code, message, status, details, pairingOutcome });
+}
 
 /** The message of an `OrbitGatewayError` whose reply carried no error envelope message. */
 export function gatewayFallbackMessage(status: number): string {

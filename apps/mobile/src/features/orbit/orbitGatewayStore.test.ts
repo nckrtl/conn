@@ -244,7 +244,12 @@ describe("Orbit Connect persistence", () => {
   it.each([0, 2])("retains revocation on reload (%s failed writes)", async (failWrites) => {
     vi.resetModules();
     vi.resetAllMocks();
-    let persisted = JSON.stringify({ provider: "orbit" });
+    let persisted = JSON.stringify({
+      provider: "orbit",
+      environments: {
+        renewalFailed: { beast: { at: 5, reason: "session_ended", retrySafe: true } },
+      },
+    });
     mocks.readProvider.mockImplementation(async () => persisted);
     let rejected = 0;
     const defaultSaves: string[] = [];
@@ -335,7 +340,7 @@ function setupRestart(pairedByOrbit = ["beast"]) {
     environments: {
       pairedByOrbit,
       revokedAt: { revoked: 7 },
-      renewalFailed: { beast: { at: 5, reason: "server_unreachable" } },
+      renewalFailed: { beast: { at: 5, reason: "session_ended", retrySafe: true } },
     },
   });
   let rejectWrite = (_next: SavedProvider) => false;

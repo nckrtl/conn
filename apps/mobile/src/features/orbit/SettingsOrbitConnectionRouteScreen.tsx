@@ -42,6 +42,7 @@ const NODE_STATES: Record<
   pairing: { label: "Pairing…", dot: "available" },
   expired: { label: "Registration expired", dot: "connecting" },
   revoked: { label: "Revoked in Orbit", dot: "error" },
+  renewal_interrupted: { label: "Renewal interrupted", dot: "connecting" },
   renewal_failed: { label: "Could not renew.", dot: "connecting" },
 };
 
@@ -137,7 +138,8 @@ function OrbitConnectionDetails({ gateway }: { readonly gateway: OrbitGatewaySta
       : orbitNodeServers({
           environments,
           paired: new Set(Object.keys(savedConnectionsById)),
-          revoked: new Set([...gateway.revokedEnvironmentIds, ...gateway.interruptedRenewalIds]),
+          revoked: new Set(gateway.revokedEnvironmentIds),
+          interruptedRenewals: new Set(gateway.interruptedRenewalIds),
           renewalFailed: new Map(
             Object.entries(gateway.renewalFailed).map(([id, failure]) => [id, failure.reason]),
           ),
@@ -218,12 +220,9 @@ function OrbitConnectionDetails({ gateway }: { readonly gateway: OrbitGatewaySta
                 label={entry.name || "Unnamed Node"}
                 description={description}
                 status={
-                  entry.state === "revoked" &&
-                  !gateway.revokedEnvironmentIds.includes(entry.environmentId)
-                    ? "Renewal interrupted"
-                    : entry.renewalFailure === null
-                      ? status.label
-                      : renewalFailureText(entry.renewalFailure)
+                  entry.renewalFailure === null
+                    ? status.label
+                    : renewalFailureText(entry.renewalFailure)
                 }
               />
             );

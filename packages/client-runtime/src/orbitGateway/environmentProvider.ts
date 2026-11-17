@@ -88,6 +88,7 @@ export type RenewalFailureReason =
 export interface RenewalFailure {
   readonly at: number;
   readonly reason: RenewalFailureReason;
+  readonly retrySafe?: true;
 }
 
 const RENEWAL_FAILURE_REASONS: readonly RenewalFailureReason[] = [
@@ -332,10 +333,10 @@ export function planEnvironmentProvider(input: {
 
   if (input.provider === "default") {
     for (const environment of saved) {
-      if (disabledByOrbit.has(environment.environmentId)) {
-        if (!environment.enabled) enable.push(environment.environmentId);
-      } else if (pairedByOrbit.has(environment.environmentId) && environment.enabled) {
-        disable.push(environment.environmentId);
+      if (pairedByOrbit.has(environment.environmentId)) {
+        if (environment.enabled) disable.push(environment.environmentId);
+      } else if (disabledByOrbit.has(environment.environmentId) && !environment.enabled) {
+        enable.push(environment.environmentId);
       }
     }
     return {
@@ -566,9 +567,14 @@ export function recordPaired(
   state: OrbitEnvironmentState,
   environmentId: string,
 ): OrbitEnvironmentState {
-  return state.pairedByOrbit.includes(environmentId)
+  const owned = state.pairedByOrbit.includes(environmentId);
+  return owned && !state.disabledByOrbit.includes(environmentId)
     ? state
-    : { ...state, pairedByOrbit: [...state.pairedByOrbit, environmentId] };
+    : {
+        ...state,
+        pairedByOrbit: owned ? state.pairedByOrbit : [...state.pairedByOrbit, environmentId],
+        disabledByOrbit: state.disabledByOrbit.filter((id) => id !== environmentId),
+      };
 }
 
 /** Conn: drops every record of a server Orbit removed, so no sync touches it again. */
@@ -635,13 +641,18 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     if (typeof value === "object" && value !== null) {
       for (const [id, entry] of Object.entries(value)) {
         if (typeof entry !== "object" || entry === null) continue;
-        const { at, reason } = entry as { at?: unknown; reason?: unknown };
+        const { at, reason, retrySafe } = entry as {
+          at?: unknown;
+          reason?: unknown;
+          retrySafe?: unknown;
+        };
         if (typeof at !== "number") continue;
         result[id] = {
           at,
           reason: RENEWAL_FAILURE_REASONS.includes(reason as RenewalFailureReason)
             ? (reason as RenewalFailureReason)
             : "unknown",
+          ...(retrySafe === true ? { retrySafe: true } : {}),
         };
       }
     }

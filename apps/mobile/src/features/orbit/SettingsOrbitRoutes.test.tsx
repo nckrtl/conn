@@ -35,7 +35,9 @@ vi.mock("../../state/use-remote-environment-registry", () => ({
     savedConnectionsById: { beast: { environmentId: "beast" } },
   }),
 }));
-vi.mock("../connection/ConnectionStatusDot", () => ({ ConnectionStatusDot: () => null }));
+vi.mock("../connection/ConnectionStatusDot", () => ({
+  ConnectionStatusDot: ({ state }: { state: string }) => <span data-state={state} />,
+}));
 vi.mock("../settings/components/SettingsScreen", () => ({ SettingsScreen: Children }));
 vi.mock("../settings/components/SettingsSection", () => ({ SettingsSection: Children }));
 vi.mock("../settings/components/SettingsRow", () => ({
@@ -103,7 +105,7 @@ it.each([
     revoked: false,
     interrupted: false,
     action: "Retry",
-    status: "Could not renew: the server is not reachable.",
+    status: "Could not renew: Orbit's session on this server ended.",
   },
   {
     revoked: true,
@@ -133,7 +135,7 @@ it.each([
       environments: [server],
       revokedEnvironmentIds: revoked ? ["beast"] : [],
       interruptedRenewalIds: interrupted ? ["beast"] : [],
-      renewalFailed: revoked ? {} : { beast: { at: 5, reason: "server_unreachable" } },
+      renewalFailed: revoked ? {} : { beast: { at: 5, reason: "session_ended", retrySafe: true } },
     } satisfies Partial<Omit<OrbitGatewayState, "node" | "environments">> & {
       node: { profile: null };
       environments: ReadonlyArray<typeof server>;
@@ -163,3 +165,34 @@ it.each([
     }
   },
 );
+
+it("distinguishes an interrupted renewal from confirmed revocation in Connection", async () => {
+  mocks.useGateway.mockReturnValue({
+    provider: "orbit",
+    providerLoaded: true,
+    revokedEnvironmentIds: ["shark"],
+    interruptedRenewalIds: ["beast"],
+    renewalFailed: {},
+  } satisfies Partial<OrbitGatewayState>);
+  mocks.me.mockResolvedValue({ id: 4, name: "phone", wireguardIp: "10.44.0.77", profile: null });
+  mocks.environments.mockResolvedValue(
+    ["beast", "shark"].map((id) => ({
+      environmentId: id,
+      label: id,
+      url: `https://${id}.example.test`,
+      instanceId: null,
+      instanceUrl: null,
+      projectId: null,
+      status: "registered",
+    })),
+  );
+  const screen = await renderScreen(<SettingsOrbitConnectionRouteScreen />);
+  try {
+    const text = screen.container.textContent ?? "";
+    expect(text).toMatch(/beast.*Renewal interrupted.*shark.*Revoked in Orbit/);
+    expect(screen.container.querySelector('[data-state="connecting"]')).not.toBeNull();
+    expect(screen.container.querySelector('[data-state="error"]')).not.toBeNull();
+  } finally {
+    await screen.dispose();
+  }
+});

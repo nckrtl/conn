@@ -305,7 +305,12 @@ describe("planEnvironmentProvider", () => {
 
     ({ list, state } = apply(
       list,
-      planEnvironmentProvider({ provider: "default", saved: list, orbit: servers, state }),
+      planEnvironmentProvider({
+        provider: "default",
+        saved: list,
+        orbit: servers,
+        state: { ...state, disabledByOrbit: [...state.disabledByOrbit, "beast"] },
+      }),
     ));
     expect(list.filter((entry) => entry.enabled).map((entry) => entry.environmentId)).toEqual([
       "laptop",

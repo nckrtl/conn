@@ -280,7 +280,7 @@ function OrbitServerRow({
         ? "Asleep"
         : null;
   const requiresConnect = revoked || renewalInterrupted;
-  const retryRenewal = !requiresConnect && renewalFailure !== undefined;
+  const retryRenewal = !requiresConnect && renewalFailure?.retrySafe === true;
   const canConnect = requiresConnect || (!connected && environment.instanceId !== null);
   const canRecover = unavailable === null && !connecting && (canConnect || retryRenewal);
   const recoveryStatus = revoked

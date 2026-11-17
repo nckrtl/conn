@@ -170,7 +170,13 @@ export function orbitConnectionChecks(probe: OrbitConnectionProbe): OrbitConnect
  * `revoked`: Orbit refused this device's renewal there; only an explicit Connect pairs it again.
  * `renewal_failed`: the last renewal failed (`renewalFailure` says why); a Retry renews now.
  */
-export type OrbitNodeState = "paired" | "pairing" | "expired" | "revoked" | "renewal_failed";
+export type OrbitNodeState =
+  | "paired"
+  | "pairing"
+  | "expired"
+  | "revoked"
+  | "renewal_interrupted"
+  | "renewal_failed";
 
 export interface OrbitNodeServer {
   readonly environmentId: string;
@@ -201,6 +207,8 @@ export function orbitNodeServers(input: {
   readonly paired: ReadonlySet<string>;
   /** Environment ids whose pairing Orbit revoked for this device. */
   readonly revoked?: ReadonlySet<string>;
+  /** Environment ids whose renewal may have issued a pairing that this device could not save. */
+  readonly interruptedRenewals?: ReadonlySet<string>;
   /** Environment ids whose last renewal failed, with the reason. */
   readonly renewalFailed?: ReadonlyMap<string, RenewalFailureReason>;
   readonly device: Pick<OrbitGatewayNode, "name" | "wireguardIp"> | null;
@@ -222,24 +230,24 @@ export function orbitNodeServers(input: {
     const address = addressOf(environment.url);
     const name = gatewayText(environment.nodeName) ?? gatewayText(environment.label) ?? address;
     const renewalFailure = input.renewalFailed?.get(environment.environmentId) ?? null;
-    nodes.push({
-      environmentId: environment.environmentId,
-      name,
-      address,
-      state:
-        environment.status === "session_expired"
-          ? "expired"
-          : input.revoked?.has(environment.environmentId)
-            ? "revoked"
+    const state =
+      environment.status === "session_expired"
+        ? "expired"
+        : input.revoked?.has(environment.environmentId)
+          ? "revoked"
+          : input.interruptedRenewals?.has(environment.environmentId)
+            ? "renewal_interrupted"
             : renewalFailure !== null
               ? "renewal_failed"
               : input.paired.has(environment.environmentId)
                 ? "paired"
-                : "pairing",
-      renewalFailure:
-        environment.status !== "session_expired" && !input.revoked?.has(environment.environmentId)
-          ? renewalFailure
-          : null,
+                : "pairing";
+    nodes.push({
+      environmentId: environment.environmentId,
+      name,
+      address,
+      state,
+      renewalFailure: state === "renewal_failed" ? renewalFailure : null,
       isThisDevice:
         input.device !== null &&
         ((deviceAddress !== null && address === deviceAddress) ||

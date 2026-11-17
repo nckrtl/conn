@@ -123,20 +123,21 @@ const requestedEnvironmentIds = new Set<string>();
 const pairings = new Map<string, Promise<boolean>>();
 let changingProvider: Promise<void> | null = null;
 
-// Apply each change to the latest saved records. A failed write leaves the previous state visible.
 let savingProvider = Promise.resolve();
 function updateEnvironmentState(
   change: (current: OrbitEnvironmentState) => OrbitEnvironmentState,
-  nextProvider?: EnvironmentProvider,
+  {
+    provider: nextProvider,
+    pairingOutcome = false,
+  }: { readonly provider?: EnvironmentProvider; readonly pairingOutcome?: boolean } = {},
 ): Promise<void> {
   const save = savingProvider.then(async () => {
     const provider = nextProvider ?? state.provider;
     const previous = environmentState;
     const environments = change(previous);
-    await SecureStore.setItemAsync(
-      PROVIDER_STORAGE_KEY,
-      JSON.stringify({ provider, environments }),
-    );
+    const persist = () =>
+      SecureStore.setItemAsync(PROVIDER_STORAGE_KEY, JSON.stringify({ provider, environments }));
+    if (!pairingOutcome) await persist();
     environmentState = environments;
     if (
       provider !== state.provider ||
@@ -149,6 +150,8 @@ function updateEnvironmentState(
         renewalFailed: environments.renewalFailed ?? {},
       });
     }
+    // Pairing outcomes already happened. Keep them for the next save even if the retry fails.
+    if (pairingOutcome) await persist().catch(persist);
   });
   savingProvider = save.catch(() => {});
   return save;
@@ -233,21 +236,26 @@ async function attemptPairing(
       return false;
     }
     // Onboarding has persisted the replacement session. Only now lift a revocation.
-    await updateEnvironmentState((current) => {
-      const paired = forgetRenewalFailure(recordPaired(current, environmentId), environmentId);
-      return kind === "connect" ? forgetPairingRevoked(paired, environmentId) : paired;
-    });
+    await updateEnvironmentState(
+      (current) => {
+        const paired = forgetRenewalFailure(recordPaired(current, environmentId), environmentId);
+        return kind === "connect" ? forgetPairingRevoked(paired, environmentId) : paired;
+      },
+      { pairingOutcome: true },
+    ).catch(() => {});
     requestedEnvironmentIds.delete(environmentId);
     return true;
   } catch (error) {
     // Revoked in Orbit: never again on its own. Unreachable: a later refresh. Refused: after the
     // server registers again.
     if (isPairingRevokedError(error)) {
-      await updateEnvironmentState((current) =>
-        forgetRenewalFailure(
-          recordPairingRevoked(current, environmentId, Date.now()),
-          environmentId,
-        ),
+      await updateEnvironmentState(
+        (current) =>
+          forgetRenewalFailure(
+            recordPairingRevoked(current, environmentId, Date.now()),
+            environmentId,
+          ),
+        { pairingOutcome: true },
       ).catch(() => {});
     } else {
       if (isFinalPairingError(error)) {
@@ -481,7 +489,7 @@ export function setEnvironmentProvider(provider: EnvironmentProvider): Promise<v
       await refreshing;
       // Pairing can enable a saved server. Drain it before Default reconciles the catalog.
       await Promise.all([pairingRun, ...pairings.values()]);
-      await updateEnvironmentState((current) => current, provider);
+      await updateEnvironmentState((current) => current, { provider });
     })
     .finally(() => {
       if (changingProvider === change) changingProvider = null;

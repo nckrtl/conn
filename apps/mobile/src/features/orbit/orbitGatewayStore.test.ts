@@ -1,4 +1,7 @@
-import { OrbitGatewayError } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  OrbitGatewayError,
+  type OrbitGatewayEnvironment,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -7,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   writeProvider: vi.fn(),
   me: vi.fn(async () => ({ profile: null })),
   profiles: vi.fn(async () => []),
-  environments: vi.fn(async () => []),
+  environments: vi.fn<() => Promise<readonly OrbitGatewayEnvironment[]>>(async () => []),
   pair: vi.fn(),
   saveSession: vi.fn(),
   catalog: vi.fn((): { isReady: boolean; entries?: Map<string, unknown> } => ({ isReady: false })),
@@ -37,6 +40,7 @@ vi.mock("../../connection/onboarding", () => ({ connectPairingUrl: {} }));
 vi.mock("../../state/atom-registry", () => ({
   appAtomRegistry: {
     get: (atom: string) => (atom === "catalog" ? mocks.catalog() : AsyncResult.initial()),
+    subscribe: () => () => {},
   },
 }));
 vi.mock("../../state/session", () => ({
@@ -56,6 +60,26 @@ vi.mock("./orbitThreadStartStore", () => ({
   heldOrbitInstanceIds: () => [],
   orbitThreadStartStore: { loaded: () => false },
 }));
+
+function gatewayServer(environmentId: string, instanceId: number | null): OrbitGatewayEnvironment {
+  return {
+    environmentId,
+    label: environmentId,
+    url: `https://${environmentId}.example.test`,
+    serverVersion: null,
+    registeredBy: null,
+    registeredAt: null,
+    status: "registered",
+    instanceId,
+    powerState: instanceId === null ? null : "running",
+    projectId: null,
+    projectName: null,
+    projectSlug: null,
+    instanceName: null,
+    nodeName: null,
+    instanceUrl: null,
+  };
+}
 
 describe("Orbit Connect persistence", () => {
   it("makes no Gateway calls when loading the saved Default provider", async () => {
@@ -116,11 +140,15 @@ describe("Orbit Connect persistence", () => {
     ]);
   });
 
-  it("drains a manual Connect through polling and session save before applying Default", async () => {
+  it.each([false, true])("drains Connect before Default (write fails: %s)", async (failWrite) => {
     vi.resetModules();
     vi.resetAllMocks();
-    mocks.readProvider.mockResolvedValue(JSON.stringify({ provider: "orbit" }));
+    let persisted = JSON.stringify({ provider: "orbit" });
+    mocks.readProvider.mockImplementation(async () => persisted);
     const entries = new Map<string, { enabled: boolean; target: { _tag: string } }>();
+    entries.set("manual", { enabled: true, target: { _tag: "BearerConnectionTarget" } });
+    const manual = gatewayServer("manual", null);
+    mocks.environments.mockResolvedValueOnce([manual]);
     mocks.catalog.mockReturnValue({ isReady: true, entries });
     mocks.setEnabled.mockImplementation(async ({ environmentId, enabled }) => {
       const entry = entries.get(environmentId);
@@ -128,8 +156,20 @@ describe("Orbit Connect persistence", () => {
       return { _tag: "Success" };
     });
     const events: string[] = [];
+    let rejected = false;
     mocks.writeProvider.mockImplementation(async (_key: string, value: string) => {
-      if (JSON.parse(value).provider === "default") events.push("Default saved");
+      const { provider, environments } = JSON.parse(value);
+      if (
+        failWrite &&
+        !rejected &&
+        provider === "orbit" &&
+        environments.pairedByOrbit.includes("clone")
+      ) {
+        rejected = true;
+        throw new Error("Ownership write failed");
+      }
+      if (provider === "default") events.push("Default saved");
+      persisted = value;
     });
     const pollStarted = Promise.withResolvers<void>();
     const polled = Promise.withResolvers<{ pairingUrl: string }>();
@@ -147,7 +187,7 @@ describe("Orbit Connect persistence", () => {
       events.push("session saved");
       return { _tag: "Success", value: "clone" };
     });
-    const store = await import("./orbitGatewayStore");
+    let store = await import("./orbitGatewayStore");
     await store.refreshOrbitGateway();
 
     const connect = store.connectOrbitEnvironment({ environmentId: "clone", registeredAt: null });
@@ -161,29 +201,65 @@ describe("Orbit Connect persistence", () => {
     const lateConnect = await store.connectOrbitEnvironment(other);
     saved.resolve();
 
-    expect(await connect).toBe(true);
+    const connected = await connect;
     await Promise.all([switchToDefault, foregroundRefresh]);
+    expect(rejected).toBe(failWrite);
     expect(events[0]).toBe("session saved");
     expect(events).toContain("Default saved");
     expect(store.orbitGatewayState()).toMatchObject({ provider: "default", phase: "idle" });
     expect(entries.get("clone")?.enabled).toBe(false);
+    expect(connected).toBe(true);
+    expect(JSON.parse(persisted).environments.pairedByOrbit).toEqual(["clone"]);
     expect(lateRetry).toBe(false);
     expect(lateConnect).toBe(false);
-    expect(mocks.pair.mock.calls).toEqual([["clone", { renew: false }]]);
     expect(mocks.me).toHaveBeenCalledTimes(1);
+
+    vi.resetModules();
+    store = await import("./orbitGatewayStore");
+    await store.refreshOrbitGateway();
+    expect(entries.get("clone")?.enabled).toBe(false);
+    mocks.environments.mockResolvedValueOnce([manual, gatewayServer("clone", 12)]);
+    await store.setEnvironmentProvider("orbit");
+    expect(entries.get("clone")?.enabled).toBe(true);
+    await store.setEnvironmentProvider("default");
+    expect(entries.get("clone")?.enabled).toBe(false);
+    expect(entries.get("manual")?.enabled).toBe(true);
+    expect(mocks.setEnabled.mock.calls).toEqual([
+      [{ environmentId: "clone", enabled: false }],
+      [{ environmentId: "clone", enabled: true }],
+      [{ environmentId: "clone", enabled: false }],
+    ]);
+    expect(mocks.pair.mock.calls).toEqual([["clone", { renew: false }]]);
   });
 
-  it("persists a revocation from an in-flight Retry before switching to Default", async () => {
+  it.each([false, true])("retains revocation on reload (write fails: %s)", async (failWrite) => {
     vi.resetModules();
     vi.resetAllMocks();
-    mocks.readProvider.mockResolvedValue(JSON.stringify({ provider: "orbit" }));
+    let persisted = JSON.stringify({ provider: "orbit" });
+    mocks.readProvider.mockImplementation(async () => persisted);
+    let rejected = false;
+    const defaultSaves: string[] = [];
+    mocks.writeProvider.mockImplementation(async (_key: string, value: string) => {
+      const { provider, environments } = JSON.parse(value);
+      if (
+        failWrite &&
+        !rejected &&
+        provider === "orbit" &&
+        environments.revokedAt.beast !== undefined
+      ) {
+        rejected = true;
+        throw new Error("Revocation write failed");
+      }
+      if (provider === "default") defaultSaves.push(value);
+      persisted = value;
+    });
     const retryStarted = Promise.withResolvers<void>();
     const retryResult = Promise.withResolvers<never>();
     mocks.pair.mockImplementationOnce(() => {
       retryStarted.resolve();
       return retryResult.promise;
     });
-    const store = await import("./orbitGatewayStore");
+    let store = await import("./orbitGatewayStore");
     await store.refreshOrbitGateway();
 
     const server = { environmentId: "beast", registeredAt: null };
@@ -201,19 +277,27 @@ describe("Orbit Connect persistence", () => {
 
     expect(await retry).toBe(false);
     await switchToDefault;
-    const firstDefault = mocks.writeProvider.mock.calls
-      .map(([, value]) => JSON.parse(value))
-      .find((saved) => saved.provider === "default");
+    expect(rejected).toBe(failWrite);
+    const firstDefault = JSON.parse(defaultSaves[0]!);
     expect(firstDefault.environments.revokedAt).toEqual({ beast: expect.any(Number) });
     expect(store.orbitGatewayState().revokedEnvironmentIds).toEqual(["beast"]);
     expect(mocks.saveSession).not.toHaveBeenCalled();
 
+    vi.resetModules();
+    store = await import("./orbitGatewayStore");
+    await store.refreshOrbitGateway();
+    expect(store.orbitGatewayState()).toMatchObject({
+      provider: "default",
+      revokedEnvironmentIds: ["beast"],
+    });
     await store.setEnvironmentProvider("orbit");
     expect(await store.retryOrbitEnvironmentRenewal(server)).toBe(false);
+    expect(mocks.pair).toHaveBeenCalledTimes(1);
     mocks.pair.mockResolvedValueOnce({ pairingUrl: "https://server.example.test/pair" });
     mocks.saveSession.mockResolvedValueOnce({ _tag: "Success", value: "beast" });
     expect(await store.connectOrbitEnvironment(server)).toBe(true);
     expect(store.orbitGatewayState().revokedEnvironmentIds).toEqual([]);
+    expect(JSON.parse(persisted).environments.revokedAt).toEqual({});
     expect(mocks.pair.mock.calls).toEqual([
       ["beast", { renew: true }],
       ["beast", { renew: false }],

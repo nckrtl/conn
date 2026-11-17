@@ -10,6 +10,9 @@ const INERT = [
   /^\.(agents|cursor|vscode|devcontainer|macroscope|repos)\//,
   /^[^/]+\.md$/,
   /^LICENSE$/,
+  // The Conn Server (Rust) has its own workflows (conn-server-*.yml); no Conn job reads it.
+  /^apps\/conn-server\//,
+  /^\.github\/workflows\/conn-server-/,
 ];
 
 // Shared test setup and vendored mobile dependencies affect every package.
@@ -17,6 +20,16 @@ const RUNS_EVERYTHING = [
   /^packages\/shared\/src\/(HostProcess|testing\/(longTempDir|providerEnv))\.ts$/,
   /^apps\/mobile\/deps\//,
 ];
+
+// Fork: the server imports only these client-runtime modules, so it depends on
+// them by file, not on the whole package. scripts/ci-changes-fork.test.ts
+// fails when the server's imports into client-runtime leave this list.
+const FORK_FILE_DEPS = {
+  t3: {
+    "@t3tools/client-runtime":
+      /^packages\/client-runtime\/src\/(orbitGateway\/client|state\/orchestrationV2Projection|threadPullRequests|sourceControlClients)\.ts$/,
+  },
+};
 
 // Includes cross-package reads absent from package.json dependencies.
 const EXTRA_OWNERS = [
@@ -29,6 +42,9 @@ const EXTRA_OWNERS = [
   [/^native\/libghostty-vt\//, ["@t3tools/web"]],
   // apps/server/src/cloud/ConnectReachability.test.ts checks the guide's headings.
   [/^docs\/user\/t3-connect-troubleshooting\.md$/, ["t3"]],
+  ...Object.entries(FORK_FILE_DEPS).flatMap(([name, deps]) =>
+    Object.values(deps).map((pattern) => [pattern, [name]]),
+  ),
 ];
 const RUST = /^native\/(resource-monitor|kde-snap-shot|hyprland-snap-shot)\//;
 
@@ -100,7 +116,8 @@ function readWorkspace() {
       deps: Object.keys(deps).filter(
         (dep) =>
           String(deps[dep]).startsWith("workspace:") &&
-          !BUILD_ONLY_DEPS[manifest.name]?.includes(dep),
+          !BUILD_ONLY_DEPS[manifest.name]?.includes(dep) &&
+          !FORK_FILE_DEPS[manifest.name]?.[dep],
       ),
     });
   }
@@ -206,6 +223,6 @@ function main() {
   for (const [key, value] of Object.entries(outputs)) console.log(`${key}=${value}`);
 }
 
-module.exports = { readWorkspace, decide };
+module.exports = { readWorkspace, decide, FORK_FILE_DEPS };
 
 if (require.main === module) main();

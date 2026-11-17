@@ -10,10 +10,11 @@
 # Never point a scheduled job at a versioned runtime path (…/runtime/versions/<version>/t3): runtimes
 # are pruned after every update and the job then fails with "No such file or directory". Instead name
 # the server's launchd job and this script reads the binary the server runs right now from that job's
-# ProgramArguments:0 (the same lookup t3-orbit-relink's plist does):
-#   --service-label LABEL  ~/Library/LaunchAgents/LABEL.plist, e.g. com.t3tools.t3code.service (mini),
+# first argument (t3-orbit-relink uses the same lookup through --print-cli):
+#   --service-label LABEL  the loaded job `launchctl print gui/<uid>/LABEL`, else
+#                          ~/Library/LaunchAgents/LABEL.plist, e.g. com.t3tools.t3code.service (mini),
 #                          com.nckrtl.conn-server (nick-vm) or com.nckrtl.t3-headless (nick headless).
-#   --service-plist PATH   any launchd plist.
+#   --service-plist PATH   any launchd plist (XML, binary or JSON; read with plutil).
 #   T3_SERVER_LABEL / T3_SERVER_PLIST in the environment work the same way.
 # On Linux pass a stable launcher instead, e.g. ~/.local/bin/t3 (a symlink the updater repoints).
 # --print-cli prints the resolved T3 CLI command and exits without contacting anything.
@@ -22,12 +23,13 @@ set -eu
 usage() { echo "usage: t3-orbit-register [--service-label LABEL | --service-plist PATH] [--print-cli] URL [T3 CLI COMMAND...]" >&2; exit 64; }
 
 service_plist=${T3_SERVER_PLIST:-}
-[ -n "$service_plist" ] || [ -z "${T3_SERVER_LABEL:-}" ] || service_plist="$HOME/Library/LaunchAgents/$T3_SERVER_LABEL.plist"
+service_label=
+[ -n "$service_plist" ] || [ -z "${T3_SERVER_LABEL:-}" ] || { service_label=$T3_SERVER_LABEL; service_plist="$HOME/Library/LaunchAgents/$T3_SERVER_LABEL.plist"; }
 print_cli=0
 while [ $# -gt 0 ]; do
     case "$1" in
-        --service-label) [ $# -ge 2 ] || usage; service_plist="$HOME/Library/LaunchAgents/$2.plist"; shift 2 ;;
-        --service-plist) [ $# -ge 2 ] || usage; service_plist=$2; shift 2 ;;
+        --service-label) [ $# -ge 2 ] || usage; service_label=$2; service_plist="$HOME/Library/LaunchAgents/$2.plist"; shift 2 ;;
+        --service-plist) [ $# -ge 2 ] || usage; service_label=; service_plist=$2; shift 2 ;;
         --print-cli) print_cli=1; shift ;;
         --) shift; break ;;
         -*) usage ;;
@@ -39,32 +41,36 @@ done
 url=${1%/}
 shift
 
-# Prints ProgramArguments:<index> of a launchd plist, or nothing.
-plist_arg() {
-    if [ -x /usr/libexec/PlistBuddy ]; then
-        /usr/libexec/PlistBuddy -c "Print :ProgramArguments:$2" "$1" 2>/dev/null || true
+# Prints the job's arguments, one per line, or nothing. The loaded launchd job comes first: it is what
+# runs now, and it still answers when the plist file on disk is damaged or rewritten in another format.
+job_args() {
+    if [ -n "$service_label" ] && command -v launchctl >/dev/null 2>&1; then
+        args=$(launchctl print "gui/$(id -u)/$service_label" 2>/dev/null \
+            | awk '/^\targuments = \{$/ { on = 1; next } on && /^\t\}$/ { exit } on { sub(/^[ \t]+/, ""); print }') || args=
+        [ -z "$args" ] || { printf '%s\n' "$args"; return 0; }
+    fi
+    [ -r "$service_plist" ] || return 0
+    if command -v plutil >/dev/null 2>&1; then
+        # plutil reads XML, binary and JSON plists; PlistBuddy reads no JSON.
+        n=$(plutil -extract ProgramArguments raw "$service_plist" 2>/dev/null) || n=
+        case "$n" in
+            ''|*[!0-9]*) ;;
+            *) i=0; while [ "$i" -lt "$n" ]; do plutil -extract "ProgramArguments.$i" raw "$service_plist" 2>/dev/null || true; i=$((i + 1)); done ;;
+        esac
     else
         python3 -c 'import plistlib,sys
-a = plistlib.load(open(sys.argv[1], "rb")).get("ProgramArguments") or []
-i = int(sys.argv[2])
-print(a[i] if i < len(a) else "")' "$1" "$2" 2>/dev/null || true
+for a in plistlib.load(open(sys.argv[1], "rb")).get("ProgramArguments") or []: print(a)' "$service_plist" 2>/dev/null || true
     fi
 }
 
 if [ -n "$service_plist" ]; then
     [ $# -eq 0 ] || { echo "t3-orbit-register: give either a server job or a T3 CLI command, not both." >&2; exit 64; }
-    [ -r "$service_plist" ] || { echo "t3-orbit-register: cannot read the server's launchd job $service_plist." >&2; exit 66; }
+    args=$(job_args)
+    [ -n "$args" ] || [ -r "$service_plist" ] || { echo "t3-orbit-register: cannot read the server's launchd job ${service_label:-$service_plist}." >&2; exit 66; }
     # Skip an `env [VAR=value…]` wrapper so the binary itself is found.
-    i=0
-    cli=$(plist_arg "$service_plist" 0)
-    case "$cli" in env|*/env)
-        while :; do
-            i=$((i + 1))
-            cli=$(plist_arg "$service_plist" "$i")
-            case "$cli" in *=*) continue ;; *) break ;; esac
-        done ;;
-    esac
-    [ -n "$cli" ] || { echo "t3-orbit-register: $service_plist has no ProgramArguments." >&2; exit 65; }
+    cli=$(printf '%s\n' "$args" | awk 'NR == 1 && ($0 == "env" || $0 ~ /\/env$/) { wrapped = 1; next }
+        wrapped && /=/ { next } { print; exit }')
+    [ -n "$cli" ] || { echo "t3-orbit-register: ${service_label:-$service_plist} has no ProgramArguments." >&2; exit 65; }
     [ -x "$cli" ] || { echo "t3-orbit-register: the server job runs $cli, which is not an executable file." >&2; exit 69; }
     set -- "$cli"
 else

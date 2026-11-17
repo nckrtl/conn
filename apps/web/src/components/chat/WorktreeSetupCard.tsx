@@ -46,7 +46,7 @@ function LiveElapsed({ startedAt }: { startedAt: string }) {
 }
 
 /** A finished duration, or a ticking one while setup is still running. */
-export function Elapsed({
+function Elapsed({
   startedAt,
   endedAt,
   live,
@@ -201,7 +201,7 @@ function StageRow({
       trailing={
         <>
           {trailing ? (
-            <span className="min-w-0 truncate text-xs text-muted-foreground tabular-nums">
+            <span className="max-w-1/2 min-w-0 truncate text-xs text-muted-foreground tabular-nums">
               {trailing}
             </span>
           ) : null}

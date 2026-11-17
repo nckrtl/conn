@@ -35,6 +35,73 @@ file before you merge upstream, build, or change shared UI. Upstream's
   covered unless they call those scripts (or the packaging/sign entrypoints)
   before copying a bundle into `/Applications`.
 
+## Upstream scope
+
+Conn ships to three targets (Nick, 2026-11-16). The nightly sync follows upstream only for
+what serves them.
+
+| Target      | Platform        | Built from                                                                                                                       |
+| ----------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Desktop app | macOS           | `apps/desktop`, `apps/web`                                                                                                       |
+| iPhone app  | iOS             | `apps/mobile`                                                                                                                    |
+| Servers     | Linux and macOS | `apps/server`, the T3 server on Nick's machines; `apps/conn-server`, the Conn Server, on Linux in Orbit containers (macOS later) |
+
+Out of scope: Windows, Android and the Linux desktop app (AppImage, deb, AUR), the hosted web
+app (app.t3.codes and its previews), the T3 Connect relay (`infra/relay`), and the marketing
+site (`apps/marketing`). Only GitHub is used as a source-control host: GitLab, Forgejo,
+Bitbucket, Azure DevOps, GitCafe and Cursor origin are out of scope. For the Conn Server, also
+every area that `apps/conn-server/docs/orbit-profile.md` rates "not needed".
+
+Ports follow the same scope. The GUI must work properly on macOS and iOS only, and the Conn
+Server runs on Linux only. When leaving out another platform or host makes a port clearly
+simpler, leave it out and name it in the sync notes or the PR.
+
+Keep the upstream-only workflows listed under [Pull request runners](#pull-request-runners).
+Their entry jobs, or their callers for reusable workflows, skip this fork. On a sync, take
+upstream's version and keep those repository checks. Deleting them would cause repeated
+modify/delete conflicts (Nick, 2026-11-16).
+
+How the sync applies it:
+
+1. **Merge everything, build only what we ship.** The sync still merges `upstream/main` whole.
+   Picking commits would make every later merge harder. Out-of-scope code comes in, but
+   nothing builds, tests or fixes it.
+2. **Out of scope never holds a sync.** A conflict only in out-of-scope code takes upstream's
+   side. A build or test failure only there is noted in the sync notes and left alone.
+3. **In scope holds a sync, as before.** That covers the desktop and iPhone builds, the T3
+   server, and the Conn Server's checks.
+4. **The sync notes say what was skipped.** Each sync lists the out-of-scope areas its
+   upstream range touched, in one line per area, in the `FORK.md` sync notes.
+
+## Conn Server
+
+`apps/conn-server` is the Conn Server: our own Rust server behind the T3 client contract. It
+came in with its history from `hardimpactdev/conn-server` on 2026-11-15. Its own `AGENTS.md`
+and `README.md` apply there. It is not a pnpm workspace package, and Conn's builds, desktop
+and mobile apps do not use it. Its tools read the contract, the web client and `apps/server`
+from this tree.
+
+- **Checks.** Pull requests and `main`/`sync/**` pushes share each workflow's path filter.
+  `conn-server-ci.yml` checks changes to `apps/conn-server` or its workflow;
+  `conn-server-checks.yml` also checks `apps/server`, `apps/web` and `packages`.
+- **The nightly sync follows it** (Nick, 2026-11-16; this replaces the 2026-11-15 skip). On
+  its `sync/*` branch, after the merge, the sync runs `apps/conn-server/tools/follow-conn.sh
+  --capture`. It ports the upstream server changes in scope, as the T3 server makes them:
+  the areas `docs/orbit-profile.md` rates needed or useful. ForkBot does this port. It regenerates what is
+  generated, and every triggered Conn Server workflow must pass on the sync branch before the merge.
+  An in-scope change that cannot be ported that night becomes a known difference with its
+  reason, in the check's known list and in `apps/conn-server/docs/status.md`. A check is never
+  weakened to pass. An out-of-scope change needs no port; if it turns a check red, the fix
+  is to the check's scope, with the reason. `apps/conn-server/docs/upkeep.md` has the steps.
+- **Release.** A tag `conn-server-v<version>` (the `conn-server` crate's version) runs
+  `conn-server-release.yml`. It makes a GitHub Release on `nckrtl/conn` with
+  `conn-server-<version>-linux-x64.tar.gz` and its `.sha256`, not marked Latest; Orbit
+  downloads it. Conn's `release.yml` takes only `v*.*.*` tags, so neither starts the other.
+- **Exclusions.** Root Vite+ format, lint and test configs ignore `apps/conn-server/**`,
+  `.github/scripts/ci-changes.cjs` treats it and the `conn-server-*` workflows as inert for
+  Conn's CI, and `.gitignore` re-includes `apps/conn-server/helpers/sdk-host/build/`. On a
+  sync, keep these lines.
+
 ## What the fork changes
 
 Paths below are relative to the repository root unless a source list gives
@@ -80,7 +147,12 @@ behavior and draws the shell inside it: `AppRouteModal` is the frosted frame,
 `AppRouteModalHeader` the transparent 44px header, `AppRouteModalCard` the inset
 card, and `APP_ROUTE_MODAL_NAV_CLASS` the inset Settings nav beside the card.
 On a conflict there, take upstream's routing and dismissal logic and keep these
-four pieces.
+four pieces. The modal floats over the app, not over the desktop: its frame uses
+`--shell-modal-fill` (94%, which `html.electron-macos` does not thin like
+`--shell-fill`), and its backdrop is `DialogBackdrop variant="app"`
+(`app-modal-backdrop`: 80% `--background` and the glass blur), so a bright
+browser page behind it neither tints the frame nor stays readable. Small dialogs
+and the palette keep the lighter `dialog-backdrop`.
 
 The terminal's actions float in a `ToolbarGroup` over its top right corner, and
 the dark chat composer is a step lighter than the chat card (`--shell-composer`).
@@ -221,6 +293,16 @@ the sync, with the usual back-off, until the app restarts. Pairings made before 
 nothing revokes them. `planEnvironmentProvider` takes the phone's requested ids; web and mobile
 share one pairing step (`pairOne`), and a second call for a server joins the one in flight.
 
+A saved Instance server that two successful, non-empty Gateway lists in a row leave out, at
+least `GONE_CONFIRM_MS` (2 min) apart, is removed from the device (`plan.remove`): its Instance is gone, and Orbit may give its address to a
+new Instance. Web removes it as the Orbit panel removes an Instance (catalog, pairing records,
+Orbit facts, thread starts); mobile removes the catalog entry and the pairing records. A server
+counts as an Instance's when a list showed it with an `instance_id` (`instanceServers`, also the
+web's remembered clone ids). Two lists and a minimum time, because only an explicit Connect pairs a
+removed clone again, and a profile edit runs a second sync within seconds. A failed read or an
+empty list removes nothing; host servers only switch off; a clone a thread start holds stays.
+Losing access to a Node, or another Gateway, removes its clones the same way.
+
 An old worktree-based Instance's checkout sits beside the Project's `default` checkout
 (`<apps>/<project>/t3code-<8 hex>`, older ones `t3-<8 hex>`). `isOrbitCheckout`
 (`apps/web/src/orbit/orbitCheckout.ts`) recognizes that path, so deleting such a thread never
@@ -285,7 +367,16 @@ and says dependencies come from the default branch when the code is not that bra
 (`OrbitPendingThreadView.tsx`) shows the message and a setup card built on the client from the
 saved start and the runner's reads of the create Operation (`orbitSetupView.ts`), since the clone's
 server does not exist yet. The worktree setup contract is untouched. A pending start also shows as
-a sidebar row (`OrbitPendingThreadList.tsx`) and survives a reload.
+a sidebar row (`OrbitPendingThreadList.tsx`) and survives a reload. While "Create Instance" runs it
+shows five rows of Orbit's create steps (`orbitCreateRows.ts`: Orbit's step `group` when sent, else
+the step name; an unknown step stays with the row that ran). Orbit fills step times only once the
+Operation ended, so each row is timed from when the runner first saw it change, saved in the
+start's `createRows`, and Orbit's times replace those at the end. The running card has Details and
+Cancel; Cancel asks Orbit to cancel an admitted create (`POST /operations/{id}/cancel`), then
+drops the start; an admitted Instance stays. A Cancel after the create was sent but before Orbit
+answered, in any window, marks the start (`cancelRequested`, hidden from the sidebar); the main
+window's runner repeats the admission under the same key, cancels the Operation and drops the
+start, or keeps it as failed when the cancel fails. A start with no create sent is dropped at once.
 
 **Runner.** `OrbitThreadStartRunner`, mounted once in the main window's root route, runs every
 saved start (`orbitThreadStarts.ts` on the shared `runOrbitThreadStart`): Orbit creates a clone of
@@ -321,10 +412,13 @@ first turn uses the clone's default and the ready area says so.
 
 **Failures.** A failed start offers Retry (from the last saved step), Change name (for refusals
 that made no Instance, such as `instance.name_taken` and `route.domain_invalid`; reopens the draft with the message and model, then the Instance step) and
-Dismiss, which drops only the saved start on this device. Conn removes no Instance; Instances are
-removed in Orbit. A create that failed with `instance.container_process_inactive` (a Project process
-did not stay up, named by `result.process_failure.unit`) offers no Retry on the desktop or the
-phone: the kept Instance keeps the broken process, so only remove and create again works.
+Dismiss, which drops only the saved start on this device; it removes no Instance (the Orbit
+panel's Instances page does). A create that failed with `instance.container_process_inactive` (a Project process
+did not stay up, named by `result.process_failure.unit`) offers Retry on the desktop and the phone
+only when the Operation's `result.recovery.requires` is `project_process_definition`: Orbit then
+retries with the Project's current process definitions, and the card says to change or remove the
+process first. Without it (older Gateways) the kept Instance keeps the broken process, so the card
+offers no Retry and says to remove the Instance and create it again.
 
 Still waiting for Orbit: the Node menu ("Run on") and
 starting a stopped Instance (stopped Instances stay disabled).
@@ -365,13 +459,19 @@ stops the server. Old clones without `ORBIT_PROJECT_ID` have no descriptor. The 
 `/srv/workspace` project comes from Orbit, which adds it with `t3 project add --title`.
 
 The Orbit panel is a modal like Settings, with its own nav: Instances, Connection and Profile
-(the profile and its sync). Instances lists every Instance this device can reach, by Orbit Project,
+(the profile this device follows). Instances lists every Instance this device can reach, by Orbit Project,
 never a default: today from the Gateway's environments named from its Projects, later from Orbit's
 flat `GET /conn/instances`. Only `listOrbitInstances` in `client-runtime/src/orbitGateway/instanceList.ts`
 reads the source; grouping, search, the Project filter and the join with local threads beside it
 are pure, so mobile reuses them. "New thread in this Instance" does what the palette's Instance
-step does (`openOrbitInstanceById`). Removing an Instance and its Git state wait for Orbit (a
-destroy handle for Conn and Git state per Instance). Conn picks up the Orbit connection from the
+step does (`openOrbitInstanceById`). The bin button removes an Instance through
+`POST /conn/instances/{id}/destroy` (`removeOrbitInstance`, one `Idempotency-Key` per attempt) and
+follows its `instance.destroy` Operation; any 404 counts as already removed. The list carries no
+Git state yet, so the first request goes without `acknowledge_unsaved`, and Orbit's 409
+`instance.unsaved_work` (always `state: "unknown"` for now) makes the dialog ask for the tick. Every
+other refusal (a default or checkout Instance, a busy one, …) stays on the row with Orbit's message
+and Retry. After a remove, `cleanUpRemovedOrbitInstance` drops the saved starts, pairings, servers
+and their threads. The phone has no remove yet. Conn picks up the Orbit connection from the
 machine (tunnel, root CA and Node are set up outside Conn), so Connection has no Gateway address
 field and no set-up flow. It shows this device's Node name and WireGuard address with Reload,
 three checks read from one `me` call (Gateway reachable, certificate trusted, device known), the
@@ -423,9 +523,12 @@ The profile also carries:
   glass, motion, diffs and timestamps.
 
 Conn writes each section with `PATCH /profiles/{id}/settings`. Version conflicts
-merge per key or theme. The first sync adopts the profile or seeds an empty one.
-Previous values remain available in the Orbit panel › Profile › Profile sync ›
-Restore previous settings. Each part can be switched off per device.
+merge per key or theme. A profile is one set of settings: every part always syncs, and
+nothing can be switched off, forced or restored per device. The first sync with a profile,
+also after a switch in the Orbit panel › Profile, adopts the profile or seeds an empty one,
+with no confirmation; a switch first sends this device's unsent edits to the profile it
+leaves (`switchOrbitProfile`). "New profile…" in the profile menu makes a profile from
+this device.
 
 An environment's `t3 theme set` is not a user choice and never syncs.
 `orbit/themeOrigin.ts` wraps both calls in `useDefaultTheme.ts`. Themes a device
@@ -448,8 +551,9 @@ Sources:
   `OrbitAppearanceSync.tsx`, `appearanceProfileSync.ts`,
   `deviceSettingsSync.ts`, `profileSync*.ts`, `themeOrigin.ts`,
   `workspaceProfileSync.ts`.
-- Web (`apps/web/src/`): `components/settings/OrbitSettings.tsx` (Profile sync, on the
-  Orbit panel's Profile page), `hooks/useDefaultTheme.ts` (two wrapped calls).
+- Web (`apps/web/src/`): `components/OrbitProfilePage.tsx` (the Orbit panel's Profile
+  page; its logic is `orbitGateway/profilePage.ts`), `hooks/useDefaultTheme.ts` (two
+  wrapped calls).
 - Gateway PATCH IPC: `apps/desktop/src/ipc/methods/orbitGateway.ts`,
   `packages/contracts/src/ipc.ts` (`orbitGatewaySend`).
 - Mobile (`apps/mobile/src/`): `features/orbit/*`,
@@ -965,7 +1069,13 @@ ID again.
 `t3 environment link-orbit <id>` links a server that Orbit lists without a pairing code in
 an agent's transcript. The server asks the Gateway for a pairing as its own Node, follows the
 Operation (one pairing per call), takes the code from the link and calls `PeerLinks.link` with
-the Gateway's URL for that server. It prints only the outcome, or `<code>: <message>`. There is
+the Gateway's URL for that server. It prints only the outcome, or `<code>: <message>`.
+
+Stale records never take a link: a switched-off saved server offers no addresses
+(`linkableMachines` in `packages/client-runtime/src/linkRequest.ts`), so a card for an address
+that Orbit gave to a new Instance links whatever answers there now. When a saved server still
+claims the address, `PeerLinks.answeringAs` names both: `<url> now answers as <label> (<id>),
+not <expected>.` There is
 no MCP tool for it: agents that orchestrate Orbit clones run `t3` in a shell, and a tool would
 add to every agent's tool list. A peer with Linked environments off refuses with
 `peer_disabled` (`PEER_LINKS_OFF_DESCRIPTION`), shown as `target_links_off`. The server reuses
@@ -986,7 +1096,9 @@ because the Gateway's admin session expires.
 
 The script needs the T3 CLI of the server that is running now. On macOS, give
 it the server's launchd job with `--service-label LABEL`. At every run it reads
-`ProgramArguments:0` of `~/Library/LaunchAgents/LABEL.plist`, skipping an
+the first argument of the loaded job (`launchctl print gui/<uid>/LABEL`). Only
+when launchd does not know the job does it read `ProgramArguments` of
+`~/Library/LaunchAgents/LABEL.plist` with `plutil`. It skips an
 `env VAR=value` wrapper. The label differs per host:
 
 - mini: `com.t3tools.t3code.service`.
@@ -1012,6 +1124,12 @@ unit runs the `~/.local/bin/t3` launcher symlink, which updates repoint.
 > without contacting anything. `sh scripts/orbit/t3-orbit-register.test.sh`
 > checks the lookup offline.
 
+> [!WARNING]
+> On 2026-11-06 a hand-run `plutil -extract ProgramArguments json FILE`
+> (without `-o -`) rewrote the server plists on mini and nick-vm as bare JSON
+> arrays. PlistBuddy could not read them, so registration failed until
+> 2026-11-13. The lookup now asks launchd first.
+
 Sources:
 
 - `scripts/orbit/t3-orbit-register`,
@@ -1030,7 +1148,10 @@ then links again with the same addresses and access.
 Install the script in `~/.local/bin`, next to `t3-orbit-register` (see Orbit
 registration), and its
 `scripts/orbit/com.nckrtl.t3-orbit-relink.plist` in `~/Library/LaunchAgents`. It
-runs daily and logs to `~/Library/Logs/t3-orbit-relink.log`. The recorded mini
+runs daily and logs to `~/Library/Logs/t3-orbit-relink.log`. Its
+`--service-label LABEL` finds the T3 CLI with the same lookup as
+`t3-orbit-register` (set the label of the host's server job). A failed
+`environment list` fails the run. The recorded mini
 setup links nick, beast and shark with full access.
 
 It also renews links whose status is already `expired`. On Linux hosts install
@@ -1162,8 +1283,10 @@ Sources:
    them:
    - `apps/server/src/persistence/Migrations.ts`: keep Conn's
      `reconcileConnPeerLinksMigration` call in `runMigrations`, before
-     upstream's `assertV2MigrationsCanRun`, and keep `070_PeerLinks` after
-     upstream's IDs (move it past any new upstream ID and extend the reconcile).
+     upstream's `assertV2MigrationsCanRun`, behind the same `hasPending` gate
+     as upstream's V2-preview reconcile (the CLI must not take the write lock
+     on a current schema), and keep `070_PeerLinks` after upstream's IDs (move
+     it past any new upstream ID and extend the reconcile).
    - `apps/web/src/components/chat/ChatComposer.tsx`: take upstream's draft
      changes, but keep `composerEnvironmentContexts` from `composerDraft`.
    - Composer: upstream's composer redesign (#25869) is adopted as of
@@ -1413,6 +1536,51 @@ Merge of upstream `4ae66e2e86` (427 commits). Decisions worth keeping in mind:
 - `agentContextBudget.json` `mcpToolListJsonBytes` is 57,796 with the fork's
   toolkits.
 
+### Upstream sync: 2026-11-16
+
+Merge of upstream `6b7027b1f4` (302 commits). Decisions worth keeping in mind:
+
+- Upstream #32764 makes `McpToolAccess.toLayer` die unless every thread-bound
+  declaration's tool carries `McpSchema.EnabledWhen` =
+  `McpInvocationContext.hiddenFromOutsideClients`. Conn's annotations,
+  credentials (Vault) and panels toolkits now carry it on every tool; a new
+  fork tool that acts as the calling thread needs it too, or the server's MCP
+  layer fails to build. Outside clients get "Tool not found" for them.
+- Upstream moved the mobile thread sync status from the composer pill to the
+  header (#37076); the sync took that, so `ThreadDetailScreen.tsx` no longer
+  takes `threadSyncStatus`. The fork's `connectionCheckOnly` and
+  `<ConnSymbolScope>` stay.
+- `react-native-screens` is on upstream's `5.0.0-t3.57` with Conn's rebuilt
+  `-conn.tgz`; the Conn patch applied without changes.
+- `useCloseAppModal({ replace })` keeps the fork's option; upstream's fallback
+  now always replaces the history entry.
+- `agentContextBudget.json` `mcpToolListJsonBytes` is 59,401 with the fork's
+  toolkits.
+
+### Upstream sync: 2026-11-17
+
+Merge of upstream `9e32c95576` (139 commits). Decisions worth keeping in mind:
+
+- `Migrations.ts`: upstream gates the V2-preview reconcile on `hasPending`
+  (#37564); Conn's PeerLinks reconcile takes the same gate. No migration id
+  changed: the registry equals upstream's (1-96).
+- Upstream #31396 moved `resolveDesktopSshCliRunner` into
+  `apps/desktop/src/ssh/DesktopSshEnvironment.ts`; Conn's
+  `upstreamReleaseVersion(appVersion)` archive version moved with it.
+- Mobile composer: upstream's animated compact/multiline editor (#37562) with
+  Conn's Dynamic Type text and measured `expandedToolbarReserve`.
+- Mobile thread status: upstream's rework (#37508, #37767, #37797); Conn keeps
+  `connectionCheckOnly` so a connecting pill floats over the feed.
+- Upstream #37500 removed `isSidebarHiddenThread`; `OrbitInstancesPage`
+  filters with `isListedThreadLineage`.
+- `react-native-screens` is on upstream's `5.0.0-t3.58` with a rebuilt
+  `-conn.tgz`; the Conn patch applied without changes.
+- Conn Server followed (see `apps/conn-server/docs/status.md`).
+- Out of scope, taken as upstream without build or test: GitLab
+  (`packages/source-control-gitlab`), Azure DevOps
+  (`packages/source-control-azure-devops`), Android (`AppSymbol.android.tsx`),
+  Windows PATH probe (#37632), Forgejo/Gitea links (#37703).
+
 ### Vendored dependency patches
 
 Upstream vendors some dependencies as tarballs in `apps/mobile/deps`, which pnpm
@@ -1454,10 +1622,12 @@ commit.
 
 ## Pull request runners
 
-Public forks use GitHub-hosted Ubuntu and macOS runners for the main CI and native fingerprint checks. Upstream keeps its Blacksmith labels. The fork does not register runners or require a Blacksmith installation; server shards run at most four at a time. The 4 vCPU runners are about half as fast as upstream's 8 vCPU ones, so the fork also splits two jobs that fit upstream's 10 minute limit only on 8 vCPU: Test Web runs as two shards, and Test runs as three (`@t3tools/mobile`, `@t3tools/oxlint-plugin-t3code`, and every other package). Upstream's matrix keeps one job each, so on a sync keep the fork's `strategy`, `name` and shard parts of the steps: the `--shard` argument in Test Web, and in Test the `SHARD_ONLY`/`SHARD_SKIP` filters and the `if: matrix.shard.index == 1` steps.
+Public forks use GitHub-hosted Ubuntu and macOS runners for the main CI and native fingerprint checks. Upstream keeps its Blacksmith labels. The fork does not register runners or require a Blacksmith installation. No job may wait on a check that runs longer than 5 minutes, so the server tests run as ten shards that all start at once (upstream: eight), and `apps/server/src/testUtils/shardWeights.json` holds file times measured on the fork's runners. Upstream's weights come from a faster machine and record the git-heavy `GitManager.test.ts` and `GitVcsDriverCore.test.ts` at 7-14 s, while they take about 115 s each here, so two shards ran 6.5 minutes. On a sync keep the fork's weights file (regenerate it from a fork CI run when it drifts). The 4 vCPU runners are about half as fast as upstream's 8 vCPU ones, so the fork splits two jobs that upstream runs as one: Test Web runs as four shards, and Test runs as four (`@t3tools/mobile`, `@t3tools/oxlint-plugin-t3code`, `@t3tools/desktop` with `@t3tools/shared` and `@t3tools/client-runtime`, and every other package). The splits live only on the fork side of each `github.repository == 'pingdotgg/t3code' && … || …` matrix expression, so on a sync keep the fork's side of those expressions, the `name`, and the shard parts of the steps: the `--shard` argument in Test Web, and in Test the `SHARD_ONLY`/`SHARD_SKIP` filters and the `if: matrix.shard.index == 1` steps.
+
+The fork's server imports a few client-runtime modules (`apps/server/src/orbit/OrbitEnvironmentLink.ts` uses the Orbit Gateway client), which upstream's server does not. `FORK_FILE_DEPS` in `.github/scripts/ci-changes.cjs` makes the server depend on those files, not on the whole package, so a client-runtime change elsewhere skips the server shards. `scripts/ci-changes-fork.test.ts` walks the server's imports into client-runtime (failing on any it cannot resolve) and fails when one leaves that list, or when client-runtime gains a workspace dependency the server lacks. On a sync keep `FORK_FILE_DEPS`, its `EXTRA_OWNERS` line and its `readWorkspace` filter.
 
 The fork also skips upstream's `setup-apt-mirrors` action and installs the browser secret helper's libraries with `.github/scripts/fork-apt-install.sh`. On 2026-11-11 Canonical's nameservers stopped answering, the runners could not resolve `*.ubuntu.com`, and every Build and Test job hit its limit in apt. The script skips apt when the packages are installed (`libsecret-1-dev` is not on GitHub's image). Otherwise it tries azure.archive.ubuntu.com, mirrors.edge.kernel.org and archive.ubuntu.com in turn. It skips a host that does not resolve and gives each mirror 60 s, with private signed noble main and universe indexes, 5 s network timeouts and no retries. The Finish step waits at most 240 s and always prints the log. On a sync keep the `github.repository` conditions on the `setup-apt-mirrors` step and in both Start steps, and the bounded wait in both Finish steps (it applies upstream too).
 
-Test Web runs its tests through `.github/scripts/web-test-retry.cjs`. Headless Chromium sometimes drops its vitest connection (`VITEST_BROWSER_CONNECTION_CLOSED`) with no failed test, which held merges twice in November 2026. When a shard fails with that error and no failed test, failed file, assertion or other unhandled error, the wrapper runs it once more. A second such failure ends the job with "Infrastructure failure: browser connection closed twice; not a test failure." in the log and job summary. Any real failure fails at once. The fork's Test Web limit is 20 minutes to leave room for the retry. The Changes job runs the wrapper's tests (`web-test-retry.test.cjs`). On a sync keep the wrapper in the Test step, the fork's `timeout-minutes` expression, and the two sparse-checkout lines and test step in Changes.
+Test Web runs its tests through `.github/scripts/web-test.cjs`. Headless Chromium on the GitHub-hosted runners sometimes drops its vitest connection (`VITEST_BROWSER_CONNECTION_CLOSED`) with no failed test, several times a day, during a different file each time. A check that fails on infrastructure is not a gate, but a test that crashes the page every time must stay red. So when the only problem is that error (no failed test, failed file, assertion or other unhandled error), the wrapper reruns only the files that did not finish, including the one that closed, and passes with a warning annotation if they pass. It fails if the browser closes again, if Vitest printed no summary, or if no file had passed. `web-test-reporter.mjs` records the shard's files (sharded with Vitest's own sequencer) and each finished file, so the list survives the crash. The Changes job runs the wrapper's tests (`web-test.test.cjs`). On a sync keep the wrapper in the Test step, and the two sparse-checkout lines and test step in Changes.
 
-Upstream-only workflows need upstream's Blacksmith runners and secrets (relay, web, EAS and macOS previews, showcase screenshots, Windows tests), and the fork has neither. Their entry jobs check `github.repository == 'pingdotgg/t3code'`, so they skip in the fork instead of queueing forever; jobs that depend on them skip too. This covers `relay-preview.yml`, `relay-preview-cleanup.yml` (its daily schedule queued forever before), `web-preview.yml`, `mobile-eas-preview.yml`, `mobile-eas-preview-fork.yml`, `desktop-macos-preview.yml`, `desktop-macos-preview-publish.yml` (the `resolve` job), `mobile-showcase-screenshots.yml` and `windows-tests.yml`. Release, deploy and AUR workflows already have this check or are disabled in the fork. On a sync keep these conditions, and check new upstream workflows for Blacksmith labels.
+Upstream-only workflows need upstream's Blacksmith runners and secrets (relay, web, EAS and macOS previews, showcase screenshots, Windows tests), and the fork has neither. Their entry jobs check `github.repository == 'pingdotgg/t3code'`, so they skip in the fork instead of queueing forever; jobs that depend on them skip too. This covers `relay-preview.yml`, `relay-preview-cleanup.yml` (its daily schedule queued forever before), `web-preview.yml`, `mobile-eas-preview.yml`, `mobile-eas-preview-fork.yml`, `desktop-macos-preview.yml`, `desktop-macos-preview-publish.yml` (the `resolve` job), `mobile-showcase-screenshots.yml`, `windows-tests.yml`, `mobile-android-apk.yml`, `publish-aur.yml`, `deploy-relay.yml` and `release.yml` (the `resolve_commit` job). `release-desktop.yml` has no check of its own: only `release.yml` and `desktop-macos-preview-publish.yml` call it, and both skip here. On a sync keep these conditions, and check new upstream workflows for Blacksmith labels.

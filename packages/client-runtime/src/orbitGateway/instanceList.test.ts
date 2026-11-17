@@ -207,7 +207,16 @@ describe("orbitInstanceAvailability", () => {
       label: null,
       blockedReason: null,
     });
+    // Conn wakes an asleep Instance when a thread starts in it; the row keeps its state word.
     expect(orbitInstanceAvailability(row({ id: 2, name: "b", powerState: "stopped" }))).toEqual({
+      state: "stopped",
+      label: "Stopped",
+      blockedReason: null,
+    });
+    // An older Gateway without the wake route: today's blocking reason.
+    expect(
+      orbitInstanceAvailability(row({ id: 2, name: "b", powerState: "stopped" }), false),
+    ).toEqual({
       state: "stopped",
       label: "Stopped",
       blockedReason: "Orbit cannot start a stopped Instance yet",

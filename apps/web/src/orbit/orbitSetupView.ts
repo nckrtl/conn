@@ -8,11 +8,18 @@ import {
   ORBIT_NAME_DOMAIN_INVALID_TEXT,
   ORBIT_PLACEMENT_CONFLICT,
   ORBIT_ROUTE_DOMAIN_INVALID,
+  ORBIT_SETUP_FAILED_TITLE,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
-  orbitSetupReadyMs,
+  ORBIT_WORKSPACE_FAILED_TEXT,
+  orbitCompletionFailure,
+  orbitCompletionPhase,
+  orbitErrorDetailText,
+  orbitProcessFailureText,
   orbitSetupStages,
   orbitThreadStartCanRetry,
   orbitThreadStartCreatedInstance,
+  type OrbitCreateRowId,
+  type OrbitCreateRowStatus,
   type OrbitGatewayOperation,
   type OrbitSetupStageId,
   type OrbitSetupStageStatus,
@@ -30,14 +37,31 @@ export interface OrbitSetupViewStage {
   readonly status: OrbitSetupStageStatus;
   /** "Create Instance": the Node. */
   readonly detail: string | null;
-  /** "Create Instance": the clone step that runs or failed. */
-  readonly subDetail: string | null;
-  readonly startedAt: string | null;
-  readonly endedAt: string | null;
+  /** "Create Instance": its four rows until the address is live, or where the setup failed. */
+  readonly rows: readonly OrbitSetupViewRow[] | null;
+}
+
+export interface OrbitSetupViewRow {
+  readonly id: OrbitCreateRowId;
+  readonly label: string;
+  readonly status: OrbitCreateRowStatus;
+  /** "Publish the address": the address, without its scheme. */
+  readonly detail: string | null;
+}
+
+/** The running card's Details: what the start asked for, before Orbit answered. */
+export interface OrbitSetupDetails {
+  readonly instanceName: string;
+  readonly nodeName: string;
+  readonly branch: string;
+  readonly baseBranch: string | null;
+  readonly url: string | null;
 }
 
 export interface OrbitSetupView {
   readonly phase: "running" | "done" | "failed";
+  /** The failed card's title: "Instance setup cancelled" for a completion cancelled outside a removal. */
+  readonly failedTitle: string;
   readonly stages: readonly OrbitSetupViewStage[];
   readonly error: string | null;
   /** Orbit's code and detail line under the error, as `code · detail`, when Orbit sent a detail. */
@@ -52,11 +76,23 @@ export interface OrbitSetupView {
   readonly openInstance: { readonly id: number; readonly name: string } | null;
   /** The start made an Instance: Dismiss leaves it, and the card says so unless the error does. */
   readonly instanceStays: boolean;
+  readonly details: OrbitSetupDetails;
+  /** Cancel waits for Orbit to admit the create, so it can be cancelled. */
+  readonly cancelling: boolean;
+  /**
+   * Details and Cancel show while the start runs before the thread opens. Once the thread is
+   * open, the card only follows the address: no Details, no Cancel (the way to stop a completion
+   * is to remove the Instance).
+   */
+  readonly canCancel: boolean;
 }
 
-export const ORBIT_SETUP_FAILED_TITLE = "Instance setup failed";
+export {
+  ORBIT_INSTANCE_STAYS_LINE,
+  ORBIT_SETUP_CANCELLED_TITLE,
+  ORBIT_SETUP_FAILED_TITLE,
+} from "@t3tools/client-runtime/orbit-gateway";
 export const ORBIT_SETUP_RUNNING_TITLE = "Setting up Instance…";
-export const ORBIT_INSTANCE_STAYS_LINE = "The Instance stays; remove it in Orbit.";
 const NAME_TAKEN = "instance.name_taken";
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -92,7 +128,10 @@ interface OrbitStartFailure {
  * where Orbit made nothing; the two create step codes come from a failed Operation whose Instance
  * stays, so they offer no Change name or Change branch.
  */
-export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
+export function orbitStartFailure(
+  start: OrbitThreadStart,
+  canRetry: boolean = orbitThreadStartCanRetry(start),
+): OrbitStartFailure {
   const none = { changeName: false, changeBranch: false, openInstance: null };
   const madeNothing = !orbitThreadStartCreatedInstance(start);
   const details = record(start.errorDetails);
@@ -146,23 +185,16 @@ export function orbitStartFailure(start: OrbitThreadStart): OrbitStartFailure {
         message: `Orbit could not create ${start.instanceName}: the clone operation failed on ${start.nodeName}.`,
       };
     case ORBIT_CREATE_WORKSPACE_FAILED:
-      return { ...none, message: "Orbit could not set up the workspace." };
-    case ORBIT_CONTAINER_PROCESS_INACTIVE: {
-      const unit = start.errorProcessUnit?.trim();
-      return {
-        ...none,
-        message: `A process of this Project did not start${unit ? `: ${unit}` : ""}. Fix the Project, remove this Instance in Orbit, then create it again.`,
-      };
-    }
+      return { ...none, message: ORBIT_WORKSPACE_FAILED_TEXT };
+    case ORBIT_CONTAINER_PROCESS_INACTIVE:
+      return { ...none, message: orbitProcessFailureText(start.errorProcessUnit, canRetry) };
     default:
       return { ...none, message: start.error };
   }
 }
 
 function orbitErrorDetailLine(start: OrbitThreadStart): string | null {
-  const detail = start.errorDetail?.trim();
-  if (!detail) return null;
-  return start.errorCode ? `${start.errorCode} · ${detail}` : detail;
+  return orbitErrorDetailText(start.errorCode, start.errorDetail);
 }
 
 const STAGE_LABELS: Readonly<Record<OrbitSetupStageId, string>> = {
@@ -171,29 +203,42 @@ const STAGE_LABELS: Readonly<Record<OrbitSetupStageId, string>> = {
   agent: "Start agent",
 };
 
-function iso(ms: number | null): string | null {
-  return ms === null ? null : new Date(ms).toISOString();
-}
-
 export function orbitSetupView(
   start: OrbitThreadStart,
   create: OrbitGatewayOperation | null = null,
 ): OrbitSetupView {
+  const completion = orbitCompletionPhase(start);
+  const details = orbitSetupDetails(start);
+  const host = details.url?.replace(/^https?:\/\//, "") ?? null;
   const stages = orbitSetupStages({ start, create }).map((stage): OrbitSetupViewStage => ({
     id: stage.id,
     label: STAGE_LABELS[stage.id],
     status: stage.status,
     detail: stage.detail,
-    subDetail: stage.subDetail,
-    startedAt: iso(stage.startedAt),
-    endedAt: iso(stage.finishedAt),
+    rows:
+      stage.rows?.map((row) => ({
+        id: row.id,
+        label: row.label,
+        status: row.status,
+        detail: row.id === "address" ? host : null,
+      })) ?? null,
   }));
-  const phase = start.error !== null ? "failed" : start.sentAt != null ? "done" : "running";
+  const completionFailure = start.error === null ? orbitCompletionFailure(start) : null;
+  if (completionFailure !== null) {
+    return { ...orbitCompletionFailedView(completionFailure), stages, details };
+  }
+  const phase =
+    start.error !== null
+      ? "failed"
+      : start.sentAt != null && (completion === "none" || completion === "succeeded")
+        ? "done"
+        : "running";
   const failed = phase === "failed";
   const newInstance = start.orbitInstanceKind !== "existing";
   const failure = failed ? orbitStartFailure(start) : null;
   return {
     phase,
+    failedTitle: ORBIT_SETUP_FAILED_TITLE,
     stages,
     error: failure?.message ?? start.error,
     errorDetailLine: failed ? orbitErrorDetailLine(start) : null,
@@ -205,13 +250,51 @@ export function orbitSetupView(
       failed &&
       orbitThreadStartCreatedInstance(start) &&
       start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE,
+    details,
+    cancelling: phase === "running" && start.cancelRequested === true,
+    canCancel: phase === "running" && start.sentAt == null,
+  };
+}
+
+/**
+ * The card of a start whose completion failed, or was cancelled outside a removal: the create,
+ * Connect and Start agent stay done, the thread stays usable, and Retry asks Orbit for a new
+ * completion. No Change name, Change branch or Open: the Instance exists and works.
+ */
+function orbitCompletionFailedView(
+  failure: NonNullable<ReturnType<typeof orbitCompletionFailure>>,
+): Omit<OrbitSetupView, "stages" | "details"> {
+  return {
+    phase: "failed",
+    failedTitle: failure.title,
+    error: failure.message,
+    errorDetailLine: failure.detailLine,
+    canRetry: failure.canRetry,
+    canChangeName: false,
+    canChangeBranch: false,
+    openInstance: null,
+    instanceStays: failure.instanceStays,
+    cancelling: false,
+    canCancel: false,
+  };
+}
+
+function orbitSetupDetails(start: OrbitThreadStart): OrbitSetupDetails {
+  const branch = start.branch ?? null;
+  const suffix = start.instanceDomainSuffix ?? null;
+  return {
+    instanceName: start.instanceName,
+    nodeName: start.nodeName,
+    branch: requestedBranch(start),
+    baseBranch: branch?.mode === "new" ? branch.from : null,
+    url: suffix
+      ? `https://${start.instanceName}${suffix.startsWith(".") ? "" : "."}${suffix}`
+      : null,
   };
 }
 
 /** What the real thread shows above the agent's work once the start handed over. */
 export interface OrbitReadyView {
-  /** "Instance ready", with the setup's time when it is known. */
-  readonly readyMs: number | null;
   readonly instanceName: string;
   readonly nodeName: string;
   readonly url: string | null;
@@ -243,7 +326,6 @@ function checksOutOtherCode(start: OrbitThreadStart): boolean {
 export function orbitReadyView(start: OrbitThreadStart, url: string | null): OrbitReadyView {
   const fallback = start.modelFallback ?? null;
   return {
-    readyMs: orbitSetupReadyMs(start),
     instanceName: start.instanceName,
     nodeName: start.nodeName,
     url,

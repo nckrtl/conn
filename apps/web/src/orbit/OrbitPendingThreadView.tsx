@@ -18,12 +18,19 @@ import { buildThreadRouteParams } from "../threadRoutes";
 import type { DraftId } from "../composerDraftStore";
 import { openOrbitDraft } from "./openOrbitDraft";
 import { openOrbitInstanceById } from "./openOrbitInstance";
+import { OrbitPendingComposer } from "./OrbitPendingComposer";
 import { requestOrbitBranchMenu, takeOrbitBranchMenuRequest } from "./orbitBranchControl";
 import { readOrbitEnvironments } from "./orbitPaletteProjects";
 import type { OrbitDraftTarget } from "./orbitDraft";
 import { openOrbitInstanceStep } from "./orbitInstanceStep";
-import { orbitSetupView } from "./orbitSetupView";
+import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
 import {
+  ORBIT_INSTANCE_STAYS_LINE,
+  ORBIT_SETUP_CANCELLED_TITLE,
+  orbitSetupView,
+} from "./orbitSetupView";
+import {
+  cancelOrbitThreadStart,
   dismissOrbitThreadStart,
   orbitThreadStartBlockedReason,
   retryOrbitThreadStart,
@@ -169,6 +176,29 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
     });
   };
 
+  const cancel = async () => {
+    try {
+      const { instanceStays, requested } = await cancelOrbitThreadStart(
+        desktopOrbitGatewayClient(),
+        start.id,
+      );
+      void navigate({ to: "/", replace: true });
+      // A requested cancel ends once Orbit admitted the create; the runner reports it then.
+      if (requested) return;
+      toastManager.add({
+        type: "info",
+        title: ORBIT_SETUP_CANCELLED_TITLE,
+        ...(instanceStays ? { description: ORBIT_INSTANCE_STAYS_LINE } : {}),
+      });
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Could not cancel the Instance setup",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   return (
     <PendingThreadShell
       startId={start.id}
@@ -184,8 +214,9 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
       }
     >
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
-        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-4 pt-6">
-          <div className="flex justify-end pb-4">
+        {/* Laid out as the real thread's timeline, so the hand-over does not move the card. */}
+        <div className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col px-3 pt-6">
+          <div className="flex justify-end pb-12">
             <div
               data-orbit-pending-message
               className="max-w-[80%] rounded-bubble border-t border-t-(--message-highlight)! bg-message px-4 pt-2.5 pb-3 text-sm whitespace-pre-wrap text-message-foreground"
@@ -203,9 +234,12 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
               dismissOrbitThreadStart(start.id);
               void navigate({ to: "/", replace: true });
             }}
+            onCancel={() => void cancel()}
           />
         </div>
       </div>
+      {/* The prompt box from the moment of send, disabled until the Instance is ready. */}
+      <OrbitPendingComposer startId={start.id} />
     </PendingThreadShell>
   );
 }

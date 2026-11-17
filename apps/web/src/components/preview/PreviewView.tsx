@@ -1,4 +1,5 @@
 import { BrowserAnnotationControl } from "~/annotations/BrowserAnnotationControl";
+import { CredentialKeyButton } from "~/credentials/CredentialKeyButton";
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
@@ -11,6 +12,7 @@ import {
 import {
   AuthOrchestrationOperateScope,
   DEFAULT_BROWSER_PROFILE_ID,
+  INCOGNITO_BROWSER_PROFILE_ID,
   FILL_PREVIEW_VIEWPORT,
   type PreviewAnnotationPayload,
   type ScopedThreadRef,
@@ -35,6 +37,7 @@ import {
 } from "~/browserHistoryStore";
 import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
 import { capturePreviewAnnotationScreenshot } from "~/lib/previewAnnotation";
+import { readComposerImageBytes } from "../chat/composerAttachmentFiles";
 import { ensureLocalApi } from "~/localApi";
 import { getClientSettings } from "~/hooks/useSettings";
 import {
@@ -81,7 +84,6 @@ import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
 import { isBrowserSettingsReadError } from "~/browser/openFileInPreview";
 import { PreviewFileNotShown, PreviewUnreachable } from "./PreviewUnreachable";
 import { revealInFileExplorerLabel } from "./fileExplorerLabel";
-import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
 import { Badge } from "~/components/ui/badge";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { alternatePreviewRuntime, useRendersServerTabNatively } from "~/browser/previewRuntime";
@@ -148,12 +150,16 @@ function ServerTabFileNotShown(props: {
   );
 }
 
-function focusPreviewPage(runtimeTabId: string) {
-  const active = document.activeElement;
-  if (active && active !== document.body && !active.closest("[data-preview-panel-mode]")) return;
+function focusPreviewWebview(runtimeTabId: string) {
   document
     .querySelector<HTMLElement>(`[data-preview-viewport="${CSS.escape(runtimeTabId)}"] webview`)
     ?.focus();
+}
+
+function focusPreviewPage(runtimeTabId: string) {
+  const active = document.activeElement;
+  if (active && active !== document.body && !active.closest("[data-preview-panel-mode]")) return;
+  focusPreviewWebview(runtimeTabId);
 }
 
 export function PreviewView({
@@ -210,6 +216,7 @@ export function PreviewView({
   const serverSurfaceRef = useRef<ServerBrowserHandle | null>(null);
   const runServerAnnotation = (active: boolean, dictation: { startUrl: string; stopUrl: string }) =>
     serverSurfaceRef.current?.annotation(active, dictation.startUrl, dictation.stopUrl) ?? false;
+  const serverSurfaceBoxRef = useRef<HTMLDivElement | null>(null);
   const [serverAspectRatioLocked, setServerAspectRatioLocked] = useState(false);
   const [serverToolbarWidth, setServerToolbarWidth] = useState(0);
   const serverToolbarShown =
@@ -230,14 +237,19 @@ export function PreviewView({
   const desktopOverlay =
     tabId && !isServerTab ? (previewState.desktopByTabId[tabId] ?? null) : null;
   const layoutZoomFactor = useBrowserLayoutZoomFactor(desktopOverlay?.zoomFactor ?? 1);
-  const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
+  // A new Electron tab is Idle until its first URL commits, while the server already has it Loading.
+  const desktopNavStatus =
+    !serverOwnsRendering && desktopOverlay?.navStatus._tag !== "Idle"
+      ? desktopOverlay?.navStatus
+      : undefined;
+  const navStatus = desktopNavStatus ?? snapshot?.navStatus ?? { _tag: "Idle" as const };
   const url = navStatus._tag === "Idle" ? "" : navStatus.url;
   const loading = desktopOverlay?.loading ?? navStatus._tag === "Loading";
   const canGoBack = desktopOverlay?.canGoBack ?? snapshot?.canGoBack ?? false;
   const canGoForward = desktopOverlay?.canGoForward ?? snapshot?.canGoForward ?? false;
   const refreshDisabled = navStatus._tag === "Idle";
   const isUnreachable = navStatus._tag === "LoadFailed";
-  const showEmptyState = shouldShowPreviewEmptyState(snapshot);
+  const showEmptyState = navStatus._tag === "Idle";
   const serverStreamPending =
     isServerTab && !showEmptyState && !isUnreachable && serverFrameTabId !== runtimeTabId;
   const controller = desktopOverlay?.controller ?? "none";
@@ -250,18 +262,19 @@ export function PreviewView({
     runtimeTabId ? (state.byTabId[runtimeTabId]?.rect ?? null) : null,
   );
 
+  /** Resolves to the profile of the tab that loaded the URL, or null when nothing opened. */
   const navigateToResolvedUrl = async (resolvedUrl: string) => {
     if (isServerTab && serverSurfaceRef.current) {
-      if (serverInputDisabled) return false;
+      if (serverInputDisabled) return null;
       serverSurfaceRef.current.navigate(resolvedUrl);
       rememberPreviewUrl(threadRef, resolvedUrl);
-      return true;
+      return activeProfileId;
     }
     if (runtimeTabId && previewBridge) {
       await previewBridge.navigate(runtimeTabId, resolvedUrl);
       rememberPreviewUrl(threadRef, resolvedUrl);
       focusPreviewPage(runtimeTabId);
-      return true;
+      return activeProfileId;
     }
     const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -274,13 +287,19 @@ export function PreviewView({
         });
       }
     }
-    return result._tag === "Success";
+    return result._tag === "Success"
+      ? (result.value.profileId ?? DEFAULT_BROWSER_PROFILE_ID)
+      : null;
   };
+
+  // Incognito visits stay out of the project's persisted history.
+  const isHistoryProfile = (profileId: string | null) =>
+    profileId !== null && profileId !== INCOGNITO_BROWSER_PROFILE_ID;
 
   const handleSubmitUrl = async (next: string) => {
     try {
       const resolved = resolveAddressBarInput(next, resolveSearchUrlTemplate(getClientSettings()));
-      if (await navigateToResolvedUrl(resolved)) {
+      if (isHistoryProfile(await navigateToResolvedUrl(resolved))) {
         recordVisitForThread(threadRef, resolved);
       }
     } catch (error) {
@@ -302,7 +321,7 @@ export function PreviewView({
         isServerTab || !previewBridge
           ? normalizePreviewUrl(next)
           : resolveDiscoveredServerUrl(threadRef.environmentId, next);
-      if (await navigateToResolvedUrl(resolved)) {
+      if (isHistoryProfile(await navigateToResolvedUrl(resolved))) {
         recordVisitForThread(threadRef, next);
       }
     } catch (error) {
@@ -321,6 +340,11 @@ export function PreviewView({
   const handleRefresh = () => {
     if (isServerTab) serverSurfaceRef.current?.reload();
     else if (previewBridge && runtimeTabId) void previewBridge.refresh(runtimeTabId);
+  };
+
+  const handleStopLoading = () => {
+    if (isServerTab) serverSurfaceRef.current?.stopLoading();
+    else if (previewBridge && runtimeTabId) void previewBridge.stopLoading(runtimeTabId);
   };
 
   const adjustServerTab = async (change: Omit<PreviewAdjustInput, "threadId" | "tabId">) => {
@@ -404,7 +428,10 @@ export function PreviewView({
       target,
       browserResponsiveViewportForToggle({
         defaults: browserDefaults,
-        panelRect,
+        // Only BrowserSurfaceSlot publishes a store rect; streamed tabs measure their own box.
+        panelRect: isServerTab
+          ? (serverSurfaceBoxRef.current?.getBoundingClientRect() ?? null)
+          : panelRect,
         zoomFactor: isServerTab ? serverZoomFactor : layoutZoomFactor,
       }),
     ).catch(() => undefined);
@@ -818,6 +845,9 @@ export function PreviewView({
           readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
       );
       if (pickRequest.cancelled) return;
+      // Main's WebContents.focus() cannot move the embedder's DOM focus into a guest, so key
+      // presses would stay in the app; only focusing the <webview> element hands them to the page.
+      focusPreviewWebview(runtimeTabId);
       const result = await bridge.pickElement(runtimeTabId, voice);
       if (!result || pickRequest.cancelled) return;
       // The accepted pick must survive further clicks, tab changes, and unmount; stop cancellation here.
@@ -833,6 +863,7 @@ export function PreviewView({
       const capture = capturePreviewAnnotationScreenshot(picked);
       const cropDropped = screenshotFailed || capture.status === "failed";
       const annotation = capture.status === "failed" ? { ...picked, screenshot: null } : picked;
+      if (capture.status === "captured") await readComposerImageBytes(capture.file);
       addPreviewAnnotation(threadRef, annotation);
       if (cropDropped) {
         toastManager.add(
@@ -931,6 +962,9 @@ export function PreviewView({
     // shortcuts from the guest as menu actions instead.
     const unsubscribeMenu = window.desktopBridge?.onMenuAction((action) => {
       if (action === "preview.focusUrl") onPreviewAction("focus-url");
+      if (action === "preview.zoomIn") onPreviewAction("zoom-in");
+      if (action === "preview.zoomOut") onPreviewAction("zoom-out");
+      if (action === "preview.resetZoom") onPreviewAction("reset-zoom");
       if (action === "preview.find") onPreviewAction("find");
     });
     return () => {
@@ -964,6 +998,7 @@ export function PreviewView({
         onBack={handleBack}
         onForward={handleForward}
         onRefresh={handleRefresh}
+        onStopLoading={handleStopLoading}
         onSubmit={(next) => void handleSubmitUrl(next)}
         onOpenInBrowser={tabId ? handleOpenInBrowser : undefined}
         onCapture={previewBridge && tabId && !isServerTab ? handleCapture : undefined}
@@ -990,6 +1025,18 @@ export function PreviewView({
               </TooltipTrigger>
               <TooltipPopup side="top">{activeProfileName}</TooltipPopup>
             </Tooltip>
+          ) : null
+        }
+        credentialAction={
+          previewBridge && tabId && runtimeTabId ? (
+            <CredentialKeyButton
+              threadRef={threadRef}
+              tabId={tabId}
+              runtimeTabId={runtimeTabId}
+              pageUrl={url || null}
+              loading={loading || navStatus._tag !== "Success"}
+              visible={visible && !isUnreachable}
+            />
           ) : null
         }
         annotationAction={
@@ -1059,6 +1106,7 @@ export function PreviewView({
               </div>
             ) : null}
             <div
+              ref={serverSurfaceBoxRef}
               className={cn(
                 "absolute inset-x-0 bottom-0",
                 (showEmptyState || isUnreachable) && "invisible",

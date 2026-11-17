@@ -1,5 +1,13 @@
 import {
+  admitOrbitCompletion,
+  cancelOrbitCompletion,
+  cancelOrbitCreate,
+  followOrbitCompletion,
+  markOrbitCompletionRetry,
   newOrbitThreadStart,
+  OPERATION_TERMINAL_STATUSES,
+  type OrbitCompletionPorts,
+  orbitThreadStartCreatedInstance,
   retryOrbitThreadStartRecord,
   runOrbitThreadStart,
   type OrbitModelFallback,
@@ -25,6 +33,7 @@ import { threadEnvironment } from "../state/threads";
 import { waitForAtomValue } from "../state/waitForAtomValue";
 import { keepProjectInWorkspace, useWorkspaceStore } from "../workspaceStore";
 import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
+import { wakeOrbitInstanceForStart } from "./orbitInstanceSleep";
 import type { OrbitDraftStartInput } from "./orbitDraft";
 import {
   readStored,
@@ -32,6 +41,7 @@ import {
   saveStart,
   updateStarts,
 } from "./orbitThreadStartStore";
+import { rememberOrbitComposerControls } from "./orbitComposerControls";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
 
@@ -94,6 +104,8 @@ export function sendOrbitDraft(input: {
 }): OrbitThreadStart | null {
   if (orbitThreadStartBlockedReason() !== null) return null;
   const start = saveOrbitDraftStart(input.start);
+  // The pending thread's disabled prompt box shows the same model controls as the draft did.
+  rememberOrbitComposerControls(start.id);
   void Promise.resolve(input.openPending(orbitPendingThreadPath(start.id)))
     .finally(input.clearDraft)
     .catch(() => {});
@@ -109,6 +121,55 @@ export function retryOrbitThreadStart(id: string): void {
 export function dismissOrbitThreadStart(id: string): void {
   updateStarts((starts) => starts.filter((start) => start.id !== id));
 }
+
+/**
+ * Cancels Orbit's admitted create, or its completion once it succeeded, then drops the start; a
+ * failed cancel keeps it and throws. A create sent but not answered only marks the start
+ * (`requested`): the main window's runner cancels it once admitted. The Instance stays.
+ */
+export async function cancelOrbitThreadStart(
+  client: OrbitGatewayClient | null,
+  id: string,
+): Promise<{ readonly instanceStays: boolean; readonly requested: boolean }> {
+  const start = readStored().find((entry) => entry.id === id);
+  if (start === undefined) return { instanceStays: false, requested: false };
+  const admitting =
+    start.environmentId === null && start.createOperationId === null && start.createKey != null;
+  if (admitting) {
+    updateStarts((starts) =>
+      starts.map((entry) => (entry.id === id ? { ...entry, cancelRequested: true } : entry)),
+    );
+    return { instanceStays: true, requested: true };
+  }
+  if (start.createOperationId !== null && start.environmentId === null) {
+    if (client === null) throw new Error(NO_GATEWAY_TEXT);
+    await cancelOrbitCreate(client, start.createOperationId);
+  } else if (completionStillRuns(start)) {
+    // The create succeeded but the thread has not opened: its completion is what still runs.
+    if (client === null) throw new Error(NO_GATEWAY_TEXT);
+    await cancelOrbitCompletion(client, start.completionOperationId!);
+  }
+  dismissOrbitThreadStart(id);
+  return { instanceStays: orbitThreadStartCreatedInstance(start), requested: false };
+}
+
+const NO_GATEWAY_TEXT = "Conn cannot reach the Orbit Gateway from this window.";
+
+/**
+ * A Cancel before the thread opened, after the create succeeded. The saved status stays "queued"
+ * until the thread opens; a completion that ended meanwhile is read back by the cancel.
+ */
+function completionStillRuns(start: OrbitThreadStart): boolean {
+  return (
+    start.environmentId !== null &&
+    start.sentAt == null &&
+    typeof start.completionOperationId === "number" &&
+    (start.completionStatus == null || !OPERATION_TERMINAL_STATUSES.has(start.completionStatus))
+  );
+}
+
+const cancelRequested = (id: string) =>
+  readStored().find((entry) => entry.id === id)?.cancelRequested === true;
 
 function isSaved(environmentId: string): boolean {
   return appAtomRegistry
@@ -196,6 +257,8 @@ const running = new Set<string>();
 export async function runSavedOrbitThreadStart(
   client: OrbitGatewayClient,
   id: string,
+  /** `onCancelled`: the runner cancelled the create a Cancel during admission asked for. */
+  options: { readonly onCancelled?: () => void } = {},
 ): Promise<{ readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null> {
   const start = readStored().find((entry) => entry.id === id);
   if (start !== undefined && start.sentAt != null && !start.pendingThread) {
@@ -226,12 +289,19 @@ export async function runSavedOrbitThreadStart(
     let environmentId: string | null = null;
     const sent = await runOrbitThreadStart(start, {
       client,
-      save: saveStart,
+      // Only the UI sets a Cancel request, so a save of the runner's copy keeps it.
+      save: (next) => saveStart({ ...next, cancelRequested: cancelRequested(id) }),
+      cancelRequested: () => cancelRequested(id),
+      cancelled: () => {
+        dismissOrbitThreadStart(id);
+        options.onCancelled?.();
+      },
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
       stopped,
       isSaved,
       connect,
+      wake: (instanceId) => wakeOrbitInstanceForStart(client, instanceId),
       onCreateOperation: (operation) => recordCreateOperation(id, operation),
       send: async (ready) => {
         environmentId = ready.environmentId;
@@ -257,4 +327,78 @@ export async function runSavedOrbitThreadStart(
   } finally {
     running.delete(id);
   }
+}
+
+/** Completions this window follows, by start and Operation, so a re-run of the runner follows each once. */
+const following = new Set<string>();
+
+function completionPorts(client: OrbitGatewayClient, id: string): OrbitCompletionPorts {
+  return {
+    client,
+    read: () => readStored().find((entry) => entry.id === id) ?? null,
+    // Saves only a start that is still there: a Dismiss in another window wins.
+    save: (next) =>
+      updateStarts((starts) => starts.map((entry) => (entry.id === id ? next : entry))),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: Date.now,
+  };
+}
+
+/**
+ * Follows a sent start's completion (main window's runner only). Other windows render the saved
+ * rows and status; a restart resumes from the saved Operation id.
+ */
+export async function followSavedOrbitCompletion(
+  client: OrbitGatewayClient,
+  id: string,
+): Promise<void> {
+  const operationId = readStored().find((entry) => entry.id === id)?.completionOperationId;
+  if (operationId == null) return;
+  const key = `${id}:${operationId}`;
+  if (following.has(key)) return;
+  following.add(key);
+  try {
+    // Only Orbit-mode windows follow; a switch to Default pauses it until Orbit mode is back.
+    if (useEnvironmentProvider.getState().provider !== "orbit") return;
+    await followOrbitCompletion(completionPorts(client, id));
+  } finally {
+    following.delete(key);
+  }
+}
+
+/** Retries whose admission this window sends, by start, so a re-run of the runner sends it once. */
+const admitting = new Set<string>();
+
+async function onceAdmitting(id: string, run: () => Promise<void>): Promise<void> {
+  if (admitting.has(id)) return;
+  admitting.add(id);
+  try {
+    await run();
+  } finally {
+    admitting.delete(id);
+  }
+}
+
+/**
+ * Retry of a failed completion, from any window: it only saves the Retry. The main window's
+ * runner sends it and then follows the new Operation, so two windows never send it twice.
+ */
+export function retrySavedOrbitCompletion(id: string): void {
+  markOrbitCompletionRetry({
+    read: () => readStored().find((entry) => entry.id === id) ?? null,
+    save: (next) =>
+      updateStarts((starts) => starts.map((entry) => (entry.id === id ? next : entry))),
+    now: Date.now,
+  });
+}
+
+/**
+ * A Retry whose answer a reload or quit cut off: the main window's runner sends it again under
+ * the saved key, so Orbit returns the Operation it may have admitted.
+ */
+export async function resumeSavedOrbitCompletionRetry(
+  client: OrbitGatewayClient,
+  id: string,
+): Promise<void> {
+  await onceAdmitting(id, () => admitOrbitCompletion(completionPorts(client, id)));
 }

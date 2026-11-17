@@ -7,6 +7,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
+import type { ParkReason } from "../connection/parking.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import {
   PullRequestRoutingPermissions,
@@ -192,6 +193,45 @@ export function createEnvironmentCatalogAtoms<R, E>(
       ),
   });
 
+  /** Conn: holds an asleep Orbit Instance's connection off, or lets it connect again. */
+  const setParked = createRuntimeCommand(runtime, {
+    label: "environment-catalog:set-parked",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (input: { readonly environmentId: EnvironmentIdType; readonly parked: boolean }) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.setParked(input.environmentId, input.parked)),
+      ),
+  });
+
+  /** Conn: adds or removes one reason to hold an environment's connection off. */
+  const setParkReason = createRuntimeCommand(runtime, {
+    label: "environment-catalog:set-park-reason",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (input: {
+      readonly environmentId: EnvironmentIdType;
+      readonly reason: ParkReason;
+      readonly held: boolean;
+    }) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) =>
+          registry.setParkReason(input.environmentId, input.reason, input.held),
+        ),
+      ),
+  });
+
+  /** Conn: the reasons each environment is held off for now. */
+  const parkReasons = createRuntimeCommand(runtime, {
+    label: "environment-catalog:park-reasons",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: () =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) => registry.parkReasons),
+      ),
+  });
+
   return {
     catalogAtom,
     catalogValueAtom,
@@ -208,5 +248,8 @@ export function createEnvironmentCatalogAtoms<R, E>(
     removeRelayEnvironments,
     retryNow,
     setEnabled,
+    setParked,
+    setParkReason,
+    parkReasons,
   };
 }

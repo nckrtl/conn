@@ -9,6 +9,7 @@ import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 
 import { hasCloudPublicConfig } from "../features/cloud/publicConfig";
 import { useConnectionController } from "../features/connection/useConnectionController";
+import { useRetryEnvironment } from "../features/connection/useRetryEnvironment";
 import { environmentPresentations } from "./presentation";
 import { useWorkspaceConnectionState, useWorkspaceEnvironments } from "./workspace";
 import type { SavedRemoteConnection } from "../lib/connection";
@@ -100,7 +101,7 @@ const EMPTY_RUNTIME_STATE_ATOM = Atom.make<EnvironmentRuntimeState | null>(null)
   Atom.withLabel("mobile:environment-runtime-state:empty"),
 );
 
-const savedConnectionsByIdAtom = Atom.make((get) => {
+export const savedConnectionsByIdAtom = Atom.make((get) => {
   const catalog = get(environmentCatalog.catalogValueAtom);
   return Object.fromEntries(
     [...catalog.entries.keys()].flatMap((environmentId) => {
@@ -166,13 +167,16 @@ export function useRemoteConnections() {
   const onConnectPress = (pairingUrl?: string, expectedEnvironmentId?: EnvironmentId) =>
     pairEnvironment(pairingUrl ?? connectionPairingUrl, expectedEnvironmentId);
 
-  const onReconnectEnvironment = (environmentId: EnvironmentId) =>
-    controller.retryEnvironment(environmentId);
+  const onReconnectEnvironment = useRetryEnvironment();
   const onSetEnvironmentEnabled = (environmentId: EnvironmentId, enabled: boolean) =>
     controller.setEnvironmentEnabled(environmentId, enabled);
   const onUpdateEnvironment = (
     environmentId: EnvironmentId,
-    updates: { readonly label: string; readonly displayUrl: string },
+    updates: {
+      readonly label: string;
+      readonly displayUrl: string;
+      readonly openedLabel?: string;
+    },
   ) => controller.updateEnvironment(environmentId, updates);
 
   const onRemoveEnvironmentPress = (environmentId: EnvironmentId) => {

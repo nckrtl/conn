@@ -9,6 +9,7 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readProjects } from "../state/entities";
 import { carryComposerDraft } from "./carryComposerDraft";
 import { openOrbitDraft } from "./openOrbitDraft";
+import { orbitWakeSupported } from "./orbitInstanceSleep";
 import { orbitThreadStartBlockedReason } from "./orbitThreadStarts";
 import {
   buildOrbitInstanceRows,
@@ -84,6 +85,7 @@ export async function openOrbitInstanceById(input: {
     pairedEnvironmentIds: new Set(
       appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.keys(),
     ),
+    canWake: orbitWakeSupported(),
   }).find((entry) => entry.instanceId === input.instance.id);
   if (row === undefined) {
     return {

@@ -12,6 +12,8 @@ packages/*/dist
 .env
 .env.local
 build/
+# The Conn Server's SDK host keeps its build manifest in a folder named build.
+!/apps/conn-server/helpers/sdk-host/build/
 .logs/
 release/
 release-mock/
@@ -49,3 +51,5 @@ node_modules/
 
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+
+/packages/ssh/.ssh-launcher-test-*/

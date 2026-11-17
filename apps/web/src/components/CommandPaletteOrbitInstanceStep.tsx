@@ -124,7 +124,7 @@ export function useOrbitInstanceStep(input: {
   };
 }
 
-/** "New instance": the name field with the domain suffix, the plus, and the line under it. */
+/** "New instance": the name field, the plus, and the line under it. The name is unique per Project; the address is only a by-product, so it is not shown. */
 export function OrbitNewInstanceSection(props: {
   readonly project: OrbitStepProject;
   readonly step: OrbitInstanceStep;
@@ -163,16 +163,11 @@ export function OrbitNewInstanceSection(props: {
               create();
             }}
           />
-          {props.project.domainSuffix ? (
-            <span className="shrink-0 text-muted-foreground text-sm">
-              {props.project.domainSuffix}
-            </span>
-          ) : null}
         </span>
         <button
           type="button"
           aria-label="Create instance"
-          className="relative flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-md bg-foreground/8 text-muted-foreground outline-none hover:bg-foreground/12 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-default disabled:opacity-64 pointer-coarse:after:absolute pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11"
+          className="relative flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-md bg-foreground/8 text-muted-foreground outline-none enabled:hover:bg-foreground/12 enabled:hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-default disabled:opacity-64 pointer-coarse:after:absolute pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11"
           disabled={!step.hint.plusEnabled}
           onClick={create}
         >

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { isAllowedConnQuery, resolveConnUrl } from "./orbitGateway.ts";
+import { isAllowedConnQuery, resolveConnUrl, resolveRootUrl } from "./orbitGateway.ts";
 
 describe("resolveConnUrl", () => {
   it("keeps ordinary Conn paths below the prefix", () => {
     expect(resolveConnUrl("/me")?.pathname).toBe("/api/v1/conn/me");
+    expect(resolveConnUrl("/instances/41/destroy")?.pathname).toBe(
+      "/api/v1/conn/instances/41/destroy",
+    );
     expect(resolveConnUrl("/profiles/1/settings")?.pathname).toBe(
       "/api/v1/conn/profiles/1/settings",
     );
@@ -55,6 +58,17 @@ describe("isAllowedConnQuery", () => {
     expect(isAllowedConnQuery(get("/projects/66/branches", { query: "feature/Login" }))).toBe(true);
     expect(isAllowedConnQuery(get("/projects/66/branches", { query: "a".repeat(200) }))).toBe(true);
     expect(isAllowedConnQuery(get("/projects/66/branches"))).toBe(true);
+    expect(isAllowedConnQuery(get("/tasks", { project: "78", limit: "100" }))).toBe(true);
+    expect(
+      isAllowedConnQuery(
+        get("/tasks", {
+          project: "78",
+          instance: "3599",
+          status: "waiting_for_review",
+          cursor: "5700",
+        }),
+      ),
+    ).toBe(true);
   });
 
   it.each([
@@ -80,8 +94,68 @@ describe("isAllowedConnQuery", () => {
     ["another key on branches", get("/projects/66/branches", { name: "main" })],
     ["an extra key on branches", get("/projects/66/branches", { query: "a", limit: "5" })],
     ["branches of a non-numeric project", get("/projects/x/branches", { query: "a" })],
+    ["another key on tasks", get("/tasks", { project: "78", search: "a" })],
+    ["a task list limit over 100", get("/tasks", { limit: "101" })],
+    ["a non-numeric task cursor", get("/tasks", { cursor: "abc" })],
+    ["a query on one task", get("/tasks/5753", { project: "78" })],
     ["a POST", { method: "POST" as const, path: "/projects", query: { include_unavailable: "1" } }],
   ])("refuses %s", (_label, request) => {
     expect(isAllowedConnQuery(request)).toBe(false);
+  });
+});
+
+describe("resolveRootUrl", () => {
+  it("allows the exact lifecycle and Tasks realtime routes below /api/v1", () => {
+    expect(resolveRootUrl({ method: "POST", path: "/instances/41/wake" })?.toString()).toBe(
+      "https://gateway.orbit/api/v1/instances/41/wake",
+    );
+    expect(resolveRootUrl({ method: "GET", path: "/operations/501" })?.toString()).toBe(
+      "https://gateway.orbit/api/v1/operations/501",
+    );
+    expect(resolveRootUrl({ method: "GET", path: "/realtime" })?.pathname).toBe("/api/v1/realtime");
+    expect(
+      resolveRootUrl({
+        method: "POST",
+        path: "/broadcasting/auth",
+        body: JSON.stringify({ socket_id: "123.456", channel_name: "private-orbit" }),
+      })?.pathname,
+    ).toBe("/api/v1/broadcasting/auth");
+  });
+
+  it.each([
+    { method: "GET", path: "/instances/41/wake" },
+    { method: "POST", path: "/realtime" },
+    { method: "GET", path: "/broadcasting/auth" },
+    { method: "POST", path: "/broadcasting/auth" },
+    {
+      method: "POST",
+      path: "/broadcasting/auth",
+      body: JSON.stringify({ socket_id: "1.2", channel_name: "private-admin" }),
+    },
+    {
+      method: "POST",
+      path: "/broadcasting/auth",
+      body: JSON.stringify({ socket_id: "bad", channel_name: "private-orbit" }),
+    },
+    {
+      method: "POST",
+      path: "/broadcasting/auth",
+      body: JSON.stringify({ socket_id: "1.2", channel_name: "private-orbit", extra: true }),
+    },
+    { method: "POST", path: "/instances/41/sleep" },
+    { method: "POST", path: "/instances/41/destroy" },
+    { method: "POST", path: "/operations/501" },
+    { method: "POST", path: "/operations/501/cancel" },
+    { method: "GET", path: "/instances/0/wake" },
+    { method: "POST", path: "/instances/41/wake/../../nodes" },
+    { method: "POST", path: "/conn/instances/41/destroy" },
+  ] as const)("refuses $method $path", (request) => {
+    expect(resolveRootUrl(request)).toBeNull();
+  });
+
+  it("refuses a query on an allowed call", () => {
+    expect(
+      resolveRootUrl({ method: "GET", path: "/operations/501", query: { include: "steps" } }),
+    ).toBeNull();
   });
 });

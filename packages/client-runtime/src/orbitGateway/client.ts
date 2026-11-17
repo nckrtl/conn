@@ -25,6 +25,11 @@ export interface OrbitGatewayRequest {
   readonly timeoutMs?: number;
   /** Sent as `Idempotency-Key`: the same key and input return the same Operation. */
   readonly idempotencyKey?: string;
+  /**
+   * Conn: `path` is below `/api/v1`, not `/api/v1/conn`. The desktop permits only exact lifecycle
+   * and private Tasks realtime calls.
+   */
+  readonly root?: true;
 }
 
 export interface OrbitGatewayResponse {
@@ -134,6 +139,8 @@ export interface OrbitGatewayProject {
   readonly name: string;
   readonly nodeId: number;
   readonly nodeName: string;
+  /** The Project's domain after the Instance name, as listed; the phone shows the address with it. */
+  readonly instanceDomainSuffix?: string | null;
 }
 
 /** One start check of a Project, in Orbit's order. `code` and `message` come only with a fail. */
@@ -175,6 +182,7 @@ export function startableOrbitProject(
     name: listing.name,
     nodeId: listing.nodeId,
     nodeName: listing.nodeName,
+    instanceDomainSuffix: listing.instanceDomainSuffix,
   };
 }
 
@@ -241,10 +249,13 @@ export const ORBIT_ROUTE_DOMAIN_INVALID = "route.domain_invalid";
 export const ORBIT_CREATE_CLONE_FAILED = "instance.create_clone_failed";
 export const ORBIT_CREATE_WORKSPACE_FAILED = "instance.create_workspace_failed";
 /**
- * A Project process of the new Instance did not stay up. The kept Instance keeps the broken
- * process, so a Retry fails the same way; only remove and create again works.
+ * A Project process of the new Instance did not stay up. Older Gateways keep the broken process
+ * on the kept Instance, so a Retry fails the same way; newer ones retry with the Project's current
+ * process definitions and say so with `ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION`.
  */
 export const ORBIT_CONTAINER_PROCESS_INACTIVE = "instance.container_process_inactive";
+/** `result.recovery.requires` of a failed create that a Retry fixes after the Project's process changes. */
+export const ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION = "project_process_definition";
 
 export interface OrbitGatewayProjectsOptions {
   /**
@@ -282,6 +293,23 @@ export interface OrbitGatewayOperation {
   readonly result?: Readonly<Record<string, unknown>> | null;
   /** `result.process_failure.unit`: the Project process that did not stay up, when Orbit names it. */
   readonly processFailureUnit?: string | null;
+  /** `result.recovery.retry.requires`: what must change before a Retry of a retained create works. */
+  readonly recoveryRequires?: string | null;
+  /** `result.recovery.retry` is present: Orbit takes a Retry of this Operation's target. */
+  readonly recoveryRetryable?: boolean;
+  /**
+   * `result.completion_operation_id` of a create: the `instance.complete` Operation that sets up
+   * the rest after the thread is usable. Absent on older Gateways.
+   */
+  readonly completionOperationId?: number | null;
+  /** `input.route_id` of a create: null when the Project has no Route; absent when not sent. */
+  readonly routeId?: number | null;
+  /** `result.failed_step`: the phase of a failed completion, such as `workspace` or `route`. */
+  readonly resultFailedStep?: string | null;
+  /** A cancel was asked, for example by a removal. */
+  readonly cancelRequested?: boolean;
+  /** True while Orbit names a place in its task queue (`capacity_wait`); absent when not sent. */
+  readonly capacityWait?: boolean;
 }
 
 export interface OrbitGatewayOperationError {
@@ -294,6 +322,8 @@ export interface OrbitGatewayOperationError {
 /** One step of an Operation. `status` is the Gateway's own word; unknown values pass through. */
 export interface OrbitGatewayOperationStep {
   readonly name: string;
+  /** Orbit's stable group of a create step, such as `container`; absent on older Gateways. */
+  readonly group?: string | null;
   readonly job: string | null;
   readonly status: string;
   readonly startedAt: string | null;
@@ -335,10 +365,20 @@ export interface OrbitGatewayClient {
   ) => Promise<OrbitGatewaySettings>;
   readonly environments: () => Promise<readonly OrbitGatewayEnvironment[]>;
   /**
-   * Mints a one-time pairing link to the server for this device. The Gateway mints it in an
-   * Operation; this follows the Operation and reads the link, which the Gateway hands out once.
+   * Conn: the Gateway's thread index of every container server this Node may see
+   * (`GET /conn/threads`, unfiltered, so it never reads a server through). Use
+   * `readOrbitThreadIndex`.
    */
-  readonly pair: (environmentId: string) => Promise<OrbitGatewayPairing>;
+  readonly threads: () => Promise<OrbitThreadIndex>;
+  /**
+   * Mints a one-time pairing link to the server for this device, following the Gateway's
+   * Operation. `renew`: an automatic pairing of a saved server, which Orbit refuses with 409
+   * `conn.pairing_revoked` once this Node's pairing there is revoked (older Gateways ignore it).
+   */
+  readonly pair: (
+    environmentId: string,
+    options?: OrbitGatewayPairOptions,
+  ) => Promise<OrbitGatewayPairing>;
   /** The Projects this device sees; `startableOrbitProject` keeps those a thread can start in. */
   readonly projects: (
     options?: OrbitGatewayProjectsOptions,
@@ -368,8 +408,19 @@ export interface OrbitGatewayClient {
    * name, fails with 502 `source.head_unavailable`.
    */
   readonly branches: (projectId: number, query: string) => Promise<OrbitGatewayBranches>;
+  /**
+   * Admits a new `instance.complete` for a clone whose completion failed or was cancelled
+   * (`POST /conn/instances/{id}/complete`). The same key returns the same Operation; refusals are
+   * 409 `instance.complete_unavailable` and `operation.target_busy`.
+   */
+  readonly completeInstance: (
+    instanceId: number,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayOperation>;
   /** Reads an Operation this device started through the Conn layer. */
   readonly operation: (operationId: number) => Promise<OrbitGatewayOperation>;
+  /** Asks Orbit to stop an Operation this device started; the stop may still be pending. */
+  readonly cancelOperation: (operationId: number) => Promise<OrbitGatewayOperation>;
   /**
    * Admits a pairing with the server; the Operation's `targetId` is the pairing. Admission copies
    * a secret to Swamp, so it has the create's limit; the same key returns the same Operation.
@@ -380,9 +431,53 @@ export interface OrbitGatewayClient {
   ) => Promise<OrbitGatewayOperation>;
   /** Reads the link of a pairing whose Operation succeeded. The Gateway hands it out once. */
   readonly readPairing: (environmentId: string, pairingId: number) => Promise<OrbitGatewayPairing>;
+  /**
+   * Conn: asks Orbit to destroy an Instance (handle A, not live yet); the Operation's kind is
+   * `instance.destroy`. Without `acknowledgeUnsaved`, Orbit refuses an Instance with unsaved work
+   * or an unreadable Git state (409 `instance.unsaved_work`). Use `removeOrbitInstance`.
+   */
+  readonly destroyInstance: (
+    instanceId: number,
+    acknowledgeUnsaved: boolean,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayOperation>;
+  /**
+   * Conn: reads one Instance's work state before a remove (`GET /conn/instances/{id}/work`).
+   * Throws like every call; an older Gateway answers 404. Use `readOrbitInstanceGit`.
+   */
+  readonly instanceGit: (instanceId: number, timeoutMs: number) => Promise<unknown>;
+  /**
+   * Conn: asks Orbit to wake an asleep Instance (`POST /api/v1/instances/{id}/wake`, outside the
+   * Conn layer). The answer's Operation may already have ended. Use `createOrbitInstanceWaker`.
+   */
+  readonly wakeInstance: (
+    instanceId: number,
+    idempotencyKey: string,
+  ) => Promise<OrbitGatewayWakeOperation>;
+  /** Conn: reads a wake's Operation (`GET /api/v1/operations/{id}`; the Conn read does not serve it). */
+  readonly wakeOperation: (operationId: number) => Promise<OrbitGatewayWakeOperation>;
+}
+
+/** Conn: an `instance.wake` Operation. Its statuses include `pending`, which the Conn layer never sends. */
+export interface OrbitGatewayWakeOperation {
+  readonly id: number;
+  readonly status: string;
+  readonly errorCode: string | null;
+  readonly pollAfterSeconds: number | null;
 }
 
 export const SETTINGS_VERSION_CONFLICT = "conn.settings_version_conflict";
+
+export interface OrbitGatewayPairOptions {
+  /** Sends `{"renew": true}`: a background renewal, which a revoked pairing stops. */
+  readonly renew?: boolean;
+}
+
+/**
+ * Orbit's answer to a renewal when this Node's newest pairing with the server is revoked. Final:
+ * only an explicit Connect pairs that server again.
+ */
+const PAIRING_REVOKED = "conn.pairing_revoked";
 
 /** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
 export const OPERATION_TIMEOUT_MS = 60_000;
@@ -410,6 +505,7 @@ const FINAL_PAIRING_ERROR_CODES: ReadonlySet<string> = new Set([
   "conn.session_rejected",
   "conn.request_refused",
   "conn.response_invalid",
+  PAIRING_REVOKED,
 ]);
 
 export interface OrbitGatewayClientOptions {
@@ -447,7 +543,7 @@ export function createOrbitGatewayClient(
         message:
           typeof error?.message === "string"
             ? error.message
-            : `The Orbit Gateway answered ${response.status}.`,
+            : gatewayFallbackMessage(response.status),
         status: response.status,
         details: record(error?.details) ?? {},
       });
@@ -532,9 +628,22 @@ export function createOrbitGatewayClient(
       ),
     environments: async () =>
       list(await call({ method: "GET", path: "/environments" }), "/environments", environment),
-    pair: async (environmentId) => {
+    threads: async () => {
+      const envelope = await callEnvelope({ method: "GET", path: "/threads" });
+      const index = parseOrbitThreadIndex(envelope.data, envelope.meta);
+      if (index === null) throw invalid("/threads");
+      return index;
+    },
+    pair: async (environmentId, pairOptions) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
-      let data = record(await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS }));
+      let data = record(
+        await call({
+          method: "POST",
+          path,
+          timeoutMs: ADMISSION_TIMEOUT_MS,
+          ...(pairOptions?.renew ? { body: { renew: true } } : {}),
+        }),
+      );
       // The Gateway mints the link in an Operation (202). Follow it, then read the link once.
       if (typeof data?.pairing_url !== "string") {
         const result = record((await settle(data, path)).result);
@@ -593,6 +702,10 @@ export function createOrbitGatewayClient(
       const path = `/operations/${operationId}`;
       return operation(await call({ method: "GET", path }), path);
     },
+    cancelOperation: async (operationId) => {
+      const path = `/operations/${operationId}/cancel`;
+      return operation(await call({ method: "POST", path, body: {} }), path);
+    },
     startPairing: async (environmentId, idempotencyKey) => {
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings`;
       return operation(
@@ -604,6 +717,50 @@ export function createOrbitGatewayClient(
       const path = `/environments/${encodeURIComponent(environmentId)}/pairings/${pairingId}`;
       return issuedPairing(await call({ method: "GET", path }), path);
     },
+    completeInstance: async (instanceId, idempotencyKey) => {
+      const path = `/instances/${instanceId}/complete`;
+      return operation(
+        await call({ method: "POST", path, timeoutMs: ADMISSION_TIMEOUT_MS, idempotencyKey }),
+        path,
+      );
+    },
+    destroyInstance: async (instanceId, acknowledgeUnsaved, idempotencyKey) => {
+      const path = `/instances/${instanceId}/destroy`;
+      return operation(
+        await call({
+          method: "POST",
+          path,
+          body: { acknowledge_unsaved: acknowledgeUnsaved },
+          timeoutMs: ADMISSION_TIMEOUT_MS,
+          idempotencyKey,
+        }),
+        path,
+      );
+    },
+    instanceGit: async (instanceId, timeoutMs) =>
+      call({ method: "GET", path: `/instances/${instanceId}/work`, timeoutMs }),
+    wakeInstance: async (instanceId, idempotencyKey) => {
+      const path = `/instances/${instanceId}/wake`;
+      return wakeOperation(
+        await call({ method: "POST", path, body: {}, idempotencyKey, root: true }),
+        path,
+      );
+    },
+    wakeOperation: async (operationId) => {
+      const path = `/operations/${operationId}`;
+      return wakeOperation(await call({ method: "GET", path, root: true }), path);
+    },
+  };
+}
+
+function wakeOperation(value: unknown, path: string): OrbitGatewayWakeOperation {
+  const data = record(value);
+  if (typeof data?.id !== "number" || typeof data.status !== "string") throw invalid(path);
+  return {
+    id: data.id,
+    status: data.status,
+    errorCode: typeof data.error_code === "string" ? data.error_code : null,
+    pollAfterSeconds: typeof data.poll_after_seconds === "number" ? data.poll_after_seconds : null,
   };
 }
 
@@ -658,12 +815,48 @@ function operation(value: unknown, path: string): OrbitGatewayOperation {
     ...("error" in data ? { error: operationError(data.error) } : {}),
     ...("result" in data ? { result: record(data.result) } : {}),
     ...processFailure(data.result),
+    ...recovery(data.result),
+    ...completionFields(data),
+    ...("capacity_wait" in data ? { capacityWait: record(data.capacity_wait) !== null } : {}),
   };
 }
 
 function processFailure(result: unknown): { processFailureUnit?: string | null } {
   const failure = record(record(result)?.process_failure);
   return failure === null ? {} : { processFailureUnit: optionalText(failure.unit) };
+}
+
+/** The Gateway writes `requires` under `recovery.retry` (Orbit's InstanceCompleteProjection). */
+function recovery(result: unknown): {
+  recoveryRequires?: string | null;
+  recoveryRetryable?: boolean;
+} {
+  const value = record(record(result)?.recovery);
+  if (value === null) return {};
+  const retry = record(value.retry);
+  return { recoveryRequires: optionalText(retry?.requires), recoveryRetryable: retry !== null };
+}
+
+function completionFields(data: Record<string, unknown>): Partial<OrbitGatewayOperation> {
+  const result = record(data.result);
+  const input = record(data.input);
+  return {
+    ...(result !== null && "completion_operation_id" in result
+      ? {
+          completionOperationId:
+            typeof result.completion_operation_id === "number"
+              ? result.completion_operation_id
+              : null,
+        }
+      : {}),
+    ...(input !== null && "route_id" in input
+      ? { routeId: typeof input.route_id === "number" ? input.route_id : null }
+      : {}),
+    ...(result !== null && "failed_step" in result
+      ? { resultFailedStep: optionalText(result.failed_step) }
+      : {}),
+    ...("cancel_requested" in data ? { cancelRequested: data.cancel_requested === true } : {}),
+  };
 }
 
 function operationStep(value: unknown): OrbitGatewayOperationStep[] {
@@ -674,6 +867,7 @@ function operationStep(value: unknown): OrbitGatewayOperationStep[] {
   return [
     {
       name,
+      ...(data !== null && "group" in data ? { group: optionalText(data.group) } : {}),
       job: optionalText(data?.job),
       status,
       startedAt: optionalText(data?.started_at),
@@ -801,7 +995,17 @@ export function isFinalPairingError(error: unknown): boolean {
   return isOrbitGatewayError(error) && FINAL_PAIRING_ERROR_CODES.has(error.code);
 }
 
+/** Whether Orbit refused a renewal because this Node's pairing with the server is revoked. */
+export function isPairingRevokedError(error: unknown): boolean {
+  return isOrbitGatewayError(error) && error.code === PAIRING_REVOKED;
+}
+
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);
+
+/** The message of an `OrbitGatewayError` whose reply carried no error envelope message. */
+export function gatewayFallbackMessage(status: number): string {
+  return `The Orbit Gateway answered ${status}.`;
+}
 
 /** A string the way the Gateway stores it: trimmed, and null when nothing is left. */
 export function gatewayText(value: string | null | undefined): string | null {
@@ -880,14 +1084,17 @@ function node(value: unknown, path: string): OrbitGatewayNode {
   if (
     typeof data?.id !== "number" ||
     typeof data.name !== "string" ||
-    typeof data.wireguard_ip !== "string"
+    (data.wireguard_ip !== undefined &&
+      data.wireguard_ip !== null &&
+      typeof data.wireguard_ip !== "string")
   ) {
     throw invalid(path);
   }
   return {
     id: data.id,
     name: data.name,
-    wireguardIp: data.wireguard_ip,
+    // A Node without an address reads as "" so the Connection page can say the device is not known.
+    wireguardIp: gatewayText(data.wireguard_ip) ?? "",
     profile:
       data.profile === null || data.profile === undefined ? null : profile(data.profile, path),
   };
@@ -1003,4 +1210,89 @@ function environment(value: unknown, path: string): OrbitGatewayEnvironment {
 /** A trimmed string, or null for anything else (absent, empty or another type). */
 function optionalText(value: unknown): string | null {
   return typeof value === "string" ? gatewayText(value) : null;
+}
+
+// Conn (thread-index plan, C3): the answer of `GET /conn/threads`.
+/** One thread of the index, as the Gateway lists it. */
+export interface OrbitThreadIndexRow {
+  readonly environmentId: string;
+  readonly instanceId: number;
+  readonly projectId: number;
+  readonly threadId: string;
+  readonly title: string;
+  /** T3's thread status (`idle`, `running`, `completed`, …); null until the Gateway read the server. */
+  readonly state: string | null;
+  readonly needsInput: boolean;
+  readonly lastUserMessageAt: string | null;
+  readonly lastRunCompletedAt: string | null;
+  readonly seenAt: string;
+}
+
+/** One covered server of the index (`meta.environments`). */
+export interface OrbitThreadIndexEnvironment {
+  readonly environmentId: string;
+  readonly instanceId: number;
+  readonly powerState: string;
+  /** When the Gateway last read this server; null when it never did. */
+  readonly readAt: string | null;
+  readonly readError: string | null;
+}
+
+export interface OrbitThreadIndex {
+  readonly rows: readonly OrbitThreadIndexRow[];
+  readonly environments: readonly OrbitThreadIndexEnvironment[];
+}
+
+const indexNullableString = (value: unknown): string | null =>
+  typeof value === "string" ? value : null;
+
+function indexRow(value: unknown): OrbitThreadIndexRow | null {
+  const data = record(value);
+  if (
+    typeof data?.environment_id !== "string" ||
+    typeof data.instance_id !== "number" ||
+    typeof data.project_id !== "number" ||
+    typeof data.thread_id !== "string" ||
+    typeof data.title !== "string" ||
+    typeof data.seen_at !== "string"
+  ) {
+    return null;
+  }
+  return {
+    environmentId: data.environment_id,
+    instanceId: data.instance_id,
+    projectId: data.project_id,
+    threadId: data.thread_id,
+    title: data.title,
+    state: indexNullableString(data.state),
+    needsInput: data.needs_input === true,
+    lastUserMessageAt: indexNullableString(data.last_user_message_at),
+    lastRunCompletedAt: indexNullableString(data.last_run_completed_at),
+    seenAt: data.seen_at,
+  };
+}
+
+function indexEnvironment(value: unknown): OrbitThreadIndexEnvironment | null {
+  const data = record(value);
+  if (typeof data?.environment_id !== "string" || typeof data.instance_id !== "number") return null;
+  return {
+    environmentId: data.environment_id,
+    instanceId: data.instance_id,
+    powerState: typeof data.power_state === "string" ? data.power_state : "running",
+    readAt: indexNullableString(data.read_at),
+    readError: indexNullableString(data.read_error),
+  };
+}
+
+/**
+ * Reads the envelope's `data` and `meta.environments`; null when either is not a list. A row or
+ * server entry that is not one is left out, so one odd row does not hide the rest.
+ */
+export function parseOrbitThreadIndex(data: unknown, meta: unknown): OrbitThreadIndex | null {
+  const environments = record(meta)?.environments;
+  if (!Array.isArray(data) || !Array.isArray(environments)) return null;
+  return {
+    rows: data.flatMap((entry) => indexRow(entry) ?? []),
+    environments: environments.flatMap((entry) => indexEnvironment(entry) ?? []),
+  };
 }

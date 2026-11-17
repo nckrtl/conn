@@ -26,6 +26,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { useAtomValue } from "@effect/atom-react";
 import { shortcutLabelForCommand } from "../keybindings";
 import { primaryServerKeybindingsAtom } from "../state/server";
+import { useInstanceLinkContextMenu } from "../orbit/useInstanceLinkContextMenu";
 
 export function OrbitInstanceUrlChip({
   url,
@@ -35,6 +36,7 @@ export function OrbitInstanceUrlChip({
   threadRef: ScopedThreadRef;
 }) {
   const openLink = useOpenLink(threadRef);
+  const showLinkMenu = useInstanceLinkContextMenu(threadRef);
   const host = url.replace(/^https?:\/\//, "").replace(/\/$/, "");
   return (
     <Tooltip>
@@ -50,6 +52,7 @@ export function OrbitInstanceUrlChip({
                   event.preventDefault();
                   void openLink(url, { event }).catch((error: unknown) => console.error(error));
                 }}
+                onContextMenu={(event) => showLinkMenu(event, url)}
               />
             }
           />

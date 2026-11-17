@@ -1,4 +1,4 @@
-import { EnvironmentRegistry } from "@t3tools/client-runtime/connection";
+import { EnvironmentRegistry, activityReportTargets } from "@t3tools/client-runtime/connection";
 import {
   EnvironmentRpcSubscriptionObserver,
   request,
@@ -19,6 +19,7 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
+import { readAttachedServersFlag } from "../orbit/attachedServersSeed";
 import { randomUUID } from "./utils";
 
 const CLIENT_ID_STORAGE_KEY = "t3.backgroundActivity.clientId";
@@ -195,9 +196,10 @@ export const layer = Layer.effectDiscard(
 
     const report = Effect.gen(function* () {
       const observedAtMs = yield* Clock.currentTimeMillis;
-      const entries = yield* SubscriptionRef.get(registry.entries);
+      // Conn: with `connAttachedServers` on, only connected servers get a report.
+      const targets = yield* activityReportTargets(registry, readAttachedServersFlag());
       yield* Effect.forEach(
-        entries.keys(),
+        targets,
         (environmentId) =>
           registry
             .run(

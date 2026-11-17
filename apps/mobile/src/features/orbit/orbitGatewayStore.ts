@@ -1,6 +1,10 @@
 import {
+  createCredentialRefusalWatch,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
+  forgetOrbitEnvironment,
+  forgetPairingRevoked,
   isFinalPairingError,
+  isPairingRevokedError,
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
   planEnvironmentProvider,
@@ -8,6 +12,9 @@ import {
   recordPaired,
   recordPairingAttempt,
   recordPairingRefused,
+  recordPairingRevoked,
+  readSessionRenewals,
+  recordRenewal,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayEnvironment,
@@ -17,6 +24,8 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AuthAccessWriteScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import { AsyncResult } from "effect/reactivity";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
@@ -24,7 +33,7 @@ import { AppState } from "react-native";
 import { environmentCatalog } from "../../connection/catalog";
 import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
-import { readEnvironmentLacksScope } from "../../state/session";
+import { environmentSession, readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
 import { heldOrbitInstanceIds, orbitThreadStartStore } from "./orbitThreadStartStore";
@@ -49,6 +58,8 @@ export interface OrbitGatewayState {
   readonly error: string | null;
   /** The workspace the thread list is scoped to on this device, or null for all projects. */
   readonly selectedWorkspaceId: string | null;
+  /** Conn: servers whose pairing Orbit revoked for this phone; only Connect pairs them again. */
+  readonly revokedEnvironmentIds: readonly string[];
 }
 
 const PROVIDER_STORAGE_KEY = "t3code.environment-provider.v1";
@@ -65,6 +76,7 @@ let state: OrbitGatewayState = {
   workspaces: [],
   error: null,
   selectedWorkspaceId: null,
+  revokedEnvironmentIds: [],
 };
 const listeners = new Set<() => void>();
 
@@ -95,7 +107,11 @@ async function loadProvider(): Promise<void> {
     const raw = await SecureStore.getItemAsync(PROVIDER_STORAGE_KEY);
     const parsed = raw === null ? {} : (JSON.parse(raw) as Record<string, unknown>);
     environmentState = parseOrbitEnvironmentState(parsed.environments);
-    set({ provider: parseEnvironmentProvider(parsed.provider), providerLoaded: true });
+    set({
+      provider: parseEnvironmentProvider(parsed.provider),
+      providerLoaded: true,
+      revokedEnvironmentIds: Object.keys(environmentState.revokedAt ?? {}),
+    });
   } catch {
     set({ providerLoaded: true });
   }
@@ -108,9 +124,20 @@ const pairings = new Map<string, Promise<boolean>>();
 async function updateEnvironmentState(
   change: (current: OrbitEnvironmentState) => OrbitEnvironmentState,
 ): Promise<void> {
+  const previous = environmentState;
   environmentState = change(environmentState);
+  if (environmentState.revokedAt !== previous.revokedAt) {
+    set({ revokedEnvironmentIds: Object.keys(environmentState.revokedAt ?? {}) });
+  }
   await saveProvider();
 }
+
+/**
+ * Conn: why this phone pairs a server. `new`: not saved yet. `access`: saved, but its session
+ * cannot manage access. `renew`: saved, and its session ends soon or has ended. `connect`: the
+ * user asked for it (the only kind that pairs a server Orbit revoked again).
+ */
+type PairingKind = "new" | "access" | "renew" | "connect";
 
 /**
  * Conn: pairs this device with one Orbit server and records the attempt and its result. Resolves
@@ -118,32 +145,45 @@ async function updateEnvironmentState(
  */
 function pairOne(
   environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
-  isSaved: boolean,
+  kind: PairingKind,
 ): Promise<boolean> {
   const { environmentId } = environment;
   const running = pairings.get(environmentId);
   if (running) return running;
-  const pairing = attemptPairing(environment, isSaved).finally(() =>
-    pairings.delete(environmentId),
-  );
+  const pairing = attemptPairing(environment, kind).finally(() => pairings.delete(environmentId));
   pairings.set(environmentId, pairing);
   return pairing;
 }
 
 async function attemptPairing(
   environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
-  isSaved: boolean,
+  kind: PairingKind,
 ): Promise<boolean> {
   const { environmentId } = environment;
   const now = Date.now();
   try {
     // Saved before the attempt, so a restart during the pairing still backs off.
-    await updateEnvironmentState((current) =>
-      isSaved
-        ? recordAccessPairing(current, environmentId, now)
-        : recordPairingAttempt(current, environmentId, now),
-    );
-    const pairing = await client.pair(environmentId);
+    await updateEnvironmentState((current) => {
+      switch (kind) {
+        case "new":
+          return recordPairingAttempt(current, environmentId, now);
+        case "access":
+          return recordAccessPairing(current, environmentId, now);
+        case "renew":
+          return recordRenewal(current, environmentId, now);
+        case "connect":
+          // Backs off like a new server, so a failed Connect is not retried on every refresh.
+          return recordPairingAttempt(
+            forgetPairingRevoked(current, environmentId),
+            environmentId,
+            now,
+          );
+      }
+    });
+    // Every automatic pairing of a saved server is a renewal to Orbit, so a revoke stops it.
+    const pairing = await client.pair(environmentId, {
+      renew: kind === "access" || kind === "renew",
+    });
     const result = await runAtomCommand(
       appAtomRegistry,
       connectPairingUrl,
@@ -155,8 +195,13 @@ async function attemptPairing(
     await updateEnvironmentState((current) => recordPaired(current, environmentId));
     return true;
   } catch (error) {
-    // An unreachable server pairs on a later refresh; a refused one after it registers again.
-    if (isFinalPairingError(error)) {
+    // Revoked in Orbit: never again on its own. Unreachable: a later refresh. Refused: after the
+    // server registers again.
+    if (isPairingRevokedError(error)) {
+      await updateEnvironmentState((current) =>
+        recordPairingRevoked(current, environmentId, Date.now()),
+      ).catch(() => {});
+    } else if (isFinalPairingError(error)) {
       await updateEnvironmentState((current) => recordPairingRefused(current, environment)).catch(
         () => {},
       );
@@ -164,6 +209,42 @@ async function attemptPairing(
     return false;
   }
 }
+
+/** Conn: a saved server's connection, as the shared renewal reader and refusal watch read it. */
+function readConnection(environmentId: string) {
+  return Option.getOrNull(
+    AsyncResult.value(
+      appAtomRegistry.get(environmentCatalog.stateAtom(environmentId as EnvironmentId)),
+    ),
+  );
+}
+
+/** Conn: a saved server's session, or null while it is unread or failed. */
+function readSession(environmentId: string) {
+  const result = appAtomRegistry.get(
+    environmentSession.sessionStateAtom(environmentId as EnvironmentId),
+  );
+  return result._tag === "Failure" ? null : Option.getOrNull(AsyncResult.value(result));
+}
+
+/**
+ * Conn: watches each saved Orbit server's connection. A refused credential arrives seconds after
+ * the refresh that the app's return to the front started, so that refresh cannot see it; the watch
+ * runs one more refresh as soon as the server refuses. The planner's backoff keeps it to one
+ * renewal.
+ */
+const refusalWatch = createCredentialRefusalWatch({
+  subscribe: (environmentId, listener) =>
+    appAtomRegistry.subscribe(
+      environmentCatalog.stateAtom(environmentId as EnvironmentId),
+      (result) => listener(Option.getOrNull(AsyncResult.value(result))),
+    ),
+  onRefused: () => {
+    if (state.provider !== "orbit") return;
+    // A running refresh may have read the state before the refusal: run one after it.
+    void (refreshing ?? Promise.resolve()).then(() => refreshOrbitGateway());
+  },
+});
 
 /** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
 export async function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
@@ -179,7 +260,7 @@ export function connectOrbitEnvironment(
   environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
 ): Promise<boolean> {
   requestedEnvironmentIds.add(environment.environmentId);
-  return pairOne(environment, false);
+  return pairOne(environment, "connect");
 }
 
 /** Switches the saved environments to match the provider, pairing Orbit servers as needed. */
@@ -200,6 +281,14 @@ async function reconcileEnvironments(
       readEnvironmentLacksScope(entry.environmentId as EnvironmentId, AuthAccessWriteScope),
     )
     .map((entry) => entry.environmentId);
+  const now = Date.now();
+  // Conn: only bearer sessions, the kind a pairing gives; a new pairing cannot fix a relay or SSH
+  // connection's sign-in.
+  const bearerIds = [...catalog.entries.entries()]
+    .filter(([, entry]) => entry.target._tag === "BearerConnectionTarget")
+    .map(([environmentId]) => String(environmentId));
+  const orbitIds = new Set((orbit ?? []).map((entry) => entry.environmentId));
+  refusalWatch.watch(bearerIds.filter((environmentId) => orbitIds.has(environmentId)));
   const plan = planEnvironmentProvider({
     provider: state.provider,
     saved,
@@ -209,7 +298,8 @@ async function reconcileEnvironments(
     // Conn: a thread start pairs its own clone; the sync must not pair it a second time.
     heldInstanceIds: heldOrbitInstanceIds(),
     requestedEnvironmentIds: [...requestedEnvironmentIds],
-    now: Date.now(),
+    renew: readSessionRenewals({ environmentIds: bearerIds, readConnection, readSession, now }),
+    now,
   });
   const savedIds = new Set(saved.map((entry) => entry.environmentId));
   const setEnabled = (environmentId: string, enabled: boolean) =>
@@ -226,14 +316,68 @@ async function reconcileEnvironments(
     plan.state.pairedByOrbit.reduce(recordPaired, {
       ...current,
       disabledByOrbit: plan.state.disabledByOrbit,
+      instanceServers: plan.state.instanceServers ?? {},
+      missingFromGateway: plan.state.missingFromGateway ?? {},
     }),
   );
+  // Conn: the server of an Instance the Gateway's lists left out long enough is gone; Orbit may give
+  // its address to a new Instance. Removed from this device as the desktop's Orbit panel does.
+  for (const { environmentId } of plan.remove) {
+    await runAtomCommand(
+      appAtomRegistry,
+      environmentCatalog.remove,
+      environmentId as EnvironmentId,
+      { reportFailure: false },
+    );
+    await updateEnvironmentState((current) => forgetOrbitEnvironment(current, environmentId));
+  }
   // Conn: until the saved thread starts load, the sync cannot tell which clones they hold.
   if (!orbitThreadStartStore.loaded()) return;
-  // One server per refresh: pairing waits for a Gateway Operation, and the refresh waits too.
-  const environmentId = plan.pair.find((id) => !pairings.has(id));
-  const environment = orbit?.find((entry) => entry.environmentId === environmentId);
-  if (environment) await pairOne(environment, savedIds.has(environment.environmentId));
+  // Conn: a pairing follows a Gateway Operation for up to a minute. It runs after the refresh, so
+  // the lists and a later refresh never wait for it; a refresh during a run starts no second run.
+  // A refresh during a run plans again once the run ends, so a refusal seen meanwhile still renews.
+  if (pairingRun) {
+    pairingAgain = true;
+    return;
+  }
+  const provider = state.provider;
+  pairingRun = runPairings(orbit ?? [], plan.renew, plan.pair, savedIds).finally(() => {
+    pairingRun = null;
+    // A switch of provider during the run re-applies the new one; a refresh during it plans again.
+    if (state.provider !== provider || (pairingAgain && state.provider === "orbit")) {
+      pairingAgain = false;
+      void refreshOrbitGateway();
+    }
+    pairingAgain = false;
+  });
+}
+
+let pairingRun: Promise<void> | null = null;
+let pairingAgain = false;
+
+/** Conn: the pairings one refresh planned, run after it. */
+async function runPairings(
+  orbit: readonly OrbitGatewayEnvironment[],
+  renewIds: readonly string[],
+  pairIds: readonly string[],
+  savedIds: ReadonlySet<string>,
+): Promise<void> {
+  // Every renewal of this refresh, one after another, so all servers work again after one app
+  // open without a burst of Gateway Operations.
+  const renew = new Set(renewIds);
+  for (const entry of orbit) {
+    // A switch to Default mode during the run stops it before the next pairing.
+    if (state.provider !== "orbit") return;
+    if (renew.has(entry.environmentId) && !pairings.has(entry.environmentId)) {
+      await pairOne(entry, "renew");
+    }
+  }
+  // One other server per refresh.
+  const environmentId = pairIds.find((id) => !renew.has(id) && !pairings.has(id));
+  const environment = orbit.find((entry) => entry.environmentId === environmentId);
+  if (environment && state.provider === "orbit") {
+    await pairOne(environment, savedIds.has(environment.environmentId) ? "access" : "new");
+  }
 }
 
 let refreshing: Promise<void> | null = null;
@@ -274,6 +418,8 @@ export function refreshOrbitGateway(): Promise<void> {
 /** Chooses where this device's environments come from and applies it at once. */
 export async function setEnvironmentProvider(provider: EnvironmentProvider): Promise<void> {
   if (refreshing) await refreshing;
+  // Conn: a pairing in flight saves its server; let it end before the switch reconciles.
+  if (pairingRun) await pairingRun;
   set({ provider });
   await saveProvider();
   await refreshOrbitGateway();

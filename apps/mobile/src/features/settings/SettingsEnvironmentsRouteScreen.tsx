@@ -4,7 +4,8 @@ import { useAtomValue } from "@effect/atom-react";
 import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useRef, useState } from "react";
-import { RefreshControl, View } from "react-native";
+import { View } from "react-native";
+import { RefreshControl } from "../../components/ui/RefreshControl";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -73,7 +74,11 @@ export function SettingsEnvironmentsRouteScreen() {
   };
   const handleUpdateEnvironment = (
     environmentId: EnvironmentId,
-    updates: { readonly label: string; readonly displayUrl: string },
+    updates: {
+      readonly label: string;
+      readonly displayUrl: string;
+      readonly openedLabel?: string;
+    },
   ) => {
     if (!SHOWCASE_ENABLED) return onUpdateEnvironment(environmentId, updates);
     const actualEnvironment = environmentSections.localEnvironments.find(

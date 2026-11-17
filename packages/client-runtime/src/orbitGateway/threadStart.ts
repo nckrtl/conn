@@ -1,3 +1,4 @@
+import type { OrbitInstanceWakeOutcome } from "./instanceWake.ts";
 import {
   ModelSelection,
   ProviderInteractionMode,
@@ -12,6 +13,7 @@ import {
   OPERATION_TIMEOUT_MS,
   ORBIT_BRANCH_EXISTS,
   ORBIT_CONTAINER_PROCESS_INACTIVE,
+  ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION,
   ORBIT_BRANCH_IN_USE,
   ORBIT_BRANCH_NOT_FOUND,
   ORBIT_PLACEMENT_CONFLICT,
@@ -24,6 +26,13 @@ import {
   type OrbitGatewayOperation,
   type OrbitGatewayProject,
 } from "./client.ts";
+import {
+  observeOrbitCreateRows,
+  readSavedOrbitCreateRows,
+  stopRunningOrbitCreateRows,
+  sameOrbitCreateRows,
+  type OrbitCreateRows,
+} from "./orbitCreateRows.ts";
 
 /**
  * Conn: a thread started in an Orbit Project (Orbit's docs/cli/instance/container/thread.mmd). The
@@ -84,6 +93,7 @@ export interface OrbitThreadStart {
   /**
    * The start opened a pending thread (the palette flow). It stays saved after the send, so the
    * real thread finds it by `threadId` for its "Instance ready" row. Older and dialog starts lack it.
+   * The phone sets it after the send when the create has a completion, for its start row.
    */
   readonly pendingThread?: boolean;
   /** Display facts for the pending thread and Change name; null on older rows. */
@@ -104,6 +114,8 @@ export interface OrbitThreadStart {
   readonly errorDetail?: string | null;
   /** The Project process that did not stay up, from a failed create's `result.process_failure`. */
   readonly errorProcessUnit?: string | null;
+  /** What a failed create needs before a Retry works (`result.recovery.requires`); null when unsaid. */
+  readonly errorRecoveryRequires?: string | null;
   /** The create's result: the branch the Instance checked out and the base it was cut from. */
   readonly resultBranch?: string | null;
   readonly resultBaseBranch?: string | null;
@@ -112,6 +124,32 @@ export interface OrbitThreadStart {
    * Before the create the runner may shorten that name's slug, keeping the suffix.
    */
   readonly nameSuffix?: string | null;
+  /**
+   * The rows under "Create Instance", saved as the runner reads the create Operation, so the card
+   * shows them after a reload; null on older rows.
+   */
+  readonly createRows?: OrbitCreateRows | null;
+  /**
+   * Cancel came while the create was being admitted: the runner cancels the Operation Orbit
+   * admits, then drops the start. Only the UI sets it; Retry clears it.
+   */
+  readonly cancelRequested?: boolean;
+  /**
+   * The create's `instance.complete` (Orbit release 2030): it sets up the workspace and the address
+   * after the thread is usable. Null or missing on older Gateways: then nothing follows the create.
+   * Its outcome is saved here, never in `error`, so `connected` and the composer stay as they are.
+   */
+  readonly completionOperationId?: number | null;
+  /** The key of the last Retry of the completion, saved before the call. */
+  readonly completionKey?: string | null;
+  readonly completionStatus?: OrbitGatewayOperation["status"] | null;
+  readonly completionErrorCode?: string | null;
+  readonly completionErrorDetail?: string | null;
+  readonly completionProcessUnit?: string | null;
+  /** `result.recovery.retry.requires` of the failed completion. */
+  readonly completionRequires?: string | null;
+  /** `result.recovery.retry` was present: Orbit takes a Retry. */
+  readonly completionRetryable?: boolean;
 }
 
 /** A name whose address `<name>.<project domain>` Orbit refuses (check or create). */
@@ -159,7 +197,10 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
       typeof row.id !== "string" ||
       typeof row.commandId !== "string" ||
       typeof row.threadId !== "string" ||
-      typeof row.projectId !== "number"
+      typeof row.projectId !== "number" ||
+      // A start the palette's plus saved without a message (conn#79) no longer runs: every new
+      // Instance starts with a first prompt.
+      (typeof row.message === "string" && row.message.trim() === "")
     ) {
       return [];
     }
@@ -193,13 +234,38 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
             : null,
         errorDetail: typeof row.errorDetail === "string" ? row.errorDetail : null,
         errorProcessUnit: typeof row.errorProcessUnit === "string" ? row.errorProcessUnit : null,
+        errorRecoveryRequires:
+          typeof row.errorRecoveryRequires === "string" ? row.errorRecoveryRequires : null,
         resultBranch: typeof row.resultBranch === "string" ? row.resultBranch : null,
         resultBaseBranch: typeof row.resultBaseBranch === "string" ? row.resultBaseBranch : null,
         nameSuffix: typeof row.nameSuffix === "string" ? row.nameSuffix : null,
+        createRows: readSavedOrbitCreateRows(row.createRows),
+        cancelRequested: row.cancelRequested === true,
+        completionOperationId:
+          typeof row.completionOperationId === "number" ? row.completionOperationId : null,
+        completionKey: typeof row.completionKey === "string" ? row.completionKey : null,
+        completionStatus: OPERATION_STATUS_WORDS.has(row.completionStatus as string)
+          ? (row.completionStatus as OrbitGatewayOperation["status"])
+          : null,
+        completionErrorCode: optionalString(row.completionErrorCode),
+        completionErrorDetail: optionalString(row.completionErrorDetail),
+        completionProcessUnit: optionalString(row.completionProcessUnit),
+        completionRequires: optionalString(row.completionRequires),
+        completionRetryable: row.completionRetryable === true,
       },
     ];
   });
 }
+
+const OPERATION_STATUS_WORDS: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "waiting",
+  ...OPERATION_TERMINAL_STATUSES,
+]);
+
+const optionalString = (value: unknown): string | null =>
+  typeof value === "string" ? value : null;
 
 /** A saved branch choice, or null for none or a broken one. */
 function readBranchSelection(value: unknown): OrbitGatewayBranchSelection | null {
@@ -239,21 +305,29 @@ export function retryOrbitThreadStartRecord(
     errorDetails: null,
     errorDetail: null,
     errorProcessUnit: null,
+    errorRecoveryRequires: null,
+    cancelRequested: false,
   };
   const createAgain = next.environmentId === null;
   return {
     ...next,
     ...(createAgain && next.createOperationId === null
-      ? { createStartedAt: null, createFinishedAt: null }
+      ? { createStartedAt: null, createFinishedAt: null, createRows: null }
       : {}),
     ...(next.connected ? {} : { connectStartedAt: null, connectFinishedAt: null }),
     ...(next.sentAt == null ? { agentStartedAt: null } : {}),
   };
 }
 
-/** Retry runs the start again; a process that did not stay up fails the same way on the kept Instance. */
+/**
+ * Retry runs the start again. A process that did not stay up fails the same way on the kept
+ * Instance, unless Orbit says the retry takes the Project's current process definitions.
+ */
 export function orbitThreadStartCanRetry(start: OrbitThreadStart): boolean {
-  return start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE;
+  return (
+    start.errorCode !== ORBIT_CONTAINER_PROCESS_INACTIVE ||
+    start.errorRecoveryRequires === ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION
+  );
 }
 
 /**
@@ -278,8 +352,17 @@ export interface OrbitThreadStartPorts {
   readonly stopped: () => boolean;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
+  /** Whether the user pressed Cancel while the create was being admitted. */
+  readonly cancelRequested?: () => boolean;
+  /** The runner cancelled the create Orbit admitted for a Cancel; the start is to be dropped. */
+  readonly cancelled?: () => void;
   /** Each read of the create Operation, for the setup card's clone step. */
   readonly onCreateOperation?: (operation: OrbitGatewayOperation) => void;
+  /**
+   * Conn: wakes an asleep Instance before Conn pairs with or connects to it. Without it, an asleep
+   * Instance stops the start as before.
+   */
+  readonly wake?: (instanceId: number) => Promise<OrbitInstanceWakeOutcome>;
   /** Opens a one-time pairing link and saves the server. */
   readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
   /**
@@ -401,9 +484,12 @@ export function newOrbitThreadStart(input: {
     errorDetails: null,
     errorDetail: null,
     errorProcessUnit: null,
+    errorRecoveryRequires: null,
     resultBranch: null,
     resultBaseBranch: null,
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
+    createRows: null,
+    completionOperationId: null,
   };
 }
 
@@ -456,6 +542,70 @@ function isTargetBusy(error: unknown): boolean {
   );
 }
 
+type OrbitCancelClient = Pick<OrbitGatewayClient, "cancelOperation" | "operation">;
+
+/**
+ * Asks Orbit to stop an Operation. A refusal because it already ended reads it: the read
+ * Operation is returned when it ended; else the refusal stands.
+ */
+async function cancelOrRead(
+  client: OrbitCancelClient,
+  operationId: number,
+): Promise<OrbitGatewayOperation> {
+  try {
+    return await client.cancelOperation(operationId);
+  } catch (error) {
+    const read = await client.operation(operationId).catch(() => null);
+    if (read === null || !OPERATION_TERMINAL_STATUSES.has(read.status)) throw error;
+    return read;
+  }
+}
+
+/**
+ * Cancels a start's `instance.complete` (Orbit release 2063). A completion that already ended is
+ * left as it is; any other refusal throws.
+ */
+export async function cancelOrbitCompletion(
+  client: OrbitCancelClient,
+  completionOperationId: number,
+): Promise<void> {
+  await cancelOrRead(client, completionOperationId);
+}
+
+/**
+ * Cancels a start's create (Orbit release 2063). A create that already succeeded has admitted its
+ * completion (`result.completion_operation_id`): that one is cancelled too. A create that ended
+ * otherwise needs nothing more; a refusal of a create that still runs (such as an older
+ * Gateway's 404) throws.
+ */
+export async function cancelOrbitCreate(
+  client: OrbitCancelClient,
+  createOperationId: number,
+): Promise<void> {
+  const create = await cancelOrRead(client, createOperationId);
+  if (create.status === "succeeded" && typeof create.completionOperationId === "number") {
+    await cancelOrbitCompletion(client, create.completionOperationId);
+  }
+}
+
+/** Conn: the start's text for an asleep Instance when Conn cannot wake it (no port, older Gateway). */
+const ORBIT_CLONE_ASLEEP_TEXT = "The clone is asleep. Conn cannot wake it yet.";
+
+/** Conn: wakes the Instance through the port, or fails the step as an asleep clone did before. */
+async function wakeClone(ports: OrbitThreadStartPorts, instanceId: number): Promise<void> {
+  const outcome = ports.wake === undefined ? null : await ports.wake(instanceId);
+  if (outcome?.kind === "awake") return;
+  if (outcome === null || outcome.kind === "unsupported") {
+    throw stepFailed(ORBIT_CLONE_ASLEEP_TEXT, {});
+  }
+  throw stepFailed(
+    `Orbit could not wake the clone (${outcome.code}).`,
+    {},
+    outcome.code,
+    outcome.message,
+  );
+}
+
 function stepFailed(
   message: string,
   reset: Partial<OrbitThreadStart>,
@@ -500,6 +650,7 @@ export async function runOrbitThreadStart(
     errorDetails: null,
     errorDetail: null,
     errorProcessUnit: null,
+    errorRecoveryRequires: null,
   };
   const update = (patch: Partial<OrbitThreadStart>) => {
     current = { ...current, ...patch };
@@ -521,11 +672,13 @@ export async function runOrbitThreadStart(
       operation: OrbitGatewayOperation | null,
     ) => StepFailed,
     observe?: (operation: OrbitGatewayOperation) => void,
+    beforeRead?: () => Promise<void>,
   ): Promise<OrbitGatewayOperation> => {
     const deadline = ports.now() + timeoutMs;
     let outageSince: number | null = null;
     for (;;) {
       checkStopped();
+      await beforeRead?.();
       let operation;
       try {
         operation = await ports.client.operation(operationId);
@@ -571,6 +724,21 @@ export async function runOrbitThreadStart(
       await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
     }
   };
+  /** A Cancel that came during admission cancels the admitted create, then ends the start. */
+  const cancelIfRequested = async (operationId: number) => {
+    if (!ports.cancelRequested?.()) return;
+    try {
+      await cancelOrbitCreate(ports.client, operationId);
+    } catch (error) {
+      throw stepFailed(
+        `Orbit could not cancel the create: ${error instanceof Error ? error.message : String(error)}`,
+        {},
+        isOrbitGatewayError(error) ? error.code : null,
+      );
+    }
+    ports.cancelled?.();
+    throw new Stopped();
+  };
   const newKey = (step: string) => `conn-thread-start:${current.id}:${step}:${ports.now()}`;
 
   /**
@@ -608,7 +776,12 @@ export async function runOrbitThreadStart(
         // counts from now. A repeat under the saved key keeps the first time.
         const begin = current.createKey
           ? stamp("createStartedAt")
-          : { createKey: newKey("create"), createStartedAt: ports.now(), createFinishedAt: null };
+          : {
+              createKey: newKey("create"),
+              createStartedAt: ports.now(),
+              createFinishedAt: null,
+              createRows: null,
+            };
         if (Object.keys(begin).length > 0) update(begin);
         let operation;
         try {
@@ -644,6 +817,7 @@ export async function runOrbitThreadStart(
           );
         }
         update({ createOperationId: operation.id, instanceId: operation.targetId });
+        await cancelIfRequested(operation.id);
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
@@ -656,11 +830,17 @@ export async function runOrbitThreadStart(
             {
               ...(code === "operation.timeout" ? {} : { createOperationId: null, createKey: null }),
               errorProcessUnit: operation?.processFailureUnit ?? null,
+              errorRecoveryRequires: operation?.recoveryRequires ?? null,
             },
             code,
             detail,
           ),
-        ports.onCreateOperation,
+        (operation) => {
+          const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
+          if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
+          ports.onCreateOperation?.(operation);
+        },
+        () => cancelIfRequested(current.createOperationId!),
       );
       const server = (await ports.client.environments()).find(
         (environment) => environment.instanceId === current.instanceId,
@@ -671,14 +851,16 @@ export async function runOrbitThreadStart(
       if (server.status !== "registered") {
         throw stepFailed("The clone's T3 server registration expired.", {});
       }
-      if (server.powerState === "stopped") {
-        throw stepFailed("The clone is asleep. Conn cannot wake it yet.", {});
-      }
+      if (server.powerState === "stopped") await wakeClone(ports, current.instanceId!);
       const result = created.result ?? null;
       update({
         environmentId: server.environmentId,
         resultBranch: typeof result?.branch === "string" ? result.branch : null,
         resultBaseBranch: typeof result?.base_branch === "string" ? result.base_branch : null,
+        // The completion runs on; the thread opens without waiting for it.
+        ...(typeof created.completionOperationId === "number"
+          ? { completionOperationId: created.completionOperationId, completionStatus: "queued" }
+          : {}),
         ...stamp("createFinishedAt"),
       });
     }
@@ -697,6 +879,18 @@ export async function runOrbitThreadStart(
           });
         }
         if (current.pairingOperationId === null) {
+          // Conn: an existing Instance may be asleep; its server cannot mint a link until it wakes.
+          if (
+            ports.wake !== undefined &&
+            current.orbitInstanceKind === "existing" &&
+            current.instanceId !== null
+          ) {
+            // A failed read changes nothing: the pairing then fails or succeeds as before.
+            const listed = (await ports.client.environments().catch(() => [])).find(
+              (environment) => environment.environmentId === environmentId,
+            );
+            if (listed?.powerState === "stopped") await wakeClone(ports, current.instanceId);
+          }
           if (!current.pairingKey) update({ pairingKey: newKey("pairing") });
           const operation = await admit(ports.now() + PAIRING_ADMISSION_MS, () =>
             ports.client.startPairing(environmentId, current.pairingKey!),
@@ -745,7 +939,13 @@ export async function runOrbitThreadStart(
   } catch (error) {
     // A start stopped mid-step ends without an error, so it resumes if it comes back.
     if (isStopped(error) || ports.stopped()) return false;
+    // A create that timed out, or lost the Gateway, stops the row that ran at this time.
+    const stoppedRows =
+      current.environmentId === null && (!isStepFailed(error) || error.code === "operation.timeout")
+        ? stopRunningOrbitCreateRows(current.createRows ?? null, ports.now())
+        : null;
     update({
+      ...(stoppedRows ? { createRows: stoppedRows } : {}),
       ...(isStepFailed(error) ? (error.reset as Partial<OrbitThreadStart>) : {}),
       error: error instanceof Error ? error.message : String(error),
       errorCode: isStepFailed(error) ? error.code : isOrbitGatewayError(error) ? error.code : null,

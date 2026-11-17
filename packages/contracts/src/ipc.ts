@@ -85,6 +85,11 @@ export const ContextMenuItemSchema: Schema.Codec<ContextMenuItemSchemaType> = Sc
   ),
 });
 
+// Native menus opened from the keyboard select their first item, which is what
+// moves a screen reader into the menu. Electron assumes a mouse unless told.
+export const ContextMenuSource = Schema.Literals(["mouse", "keyboard"]);
+export type ContextMenuSource = typeof ContextMenuSource.Type;
+
 export type DesktopUpdateStatus =
   | "disabled"
   | "idle"
@@ -352,6 +357,7 @@ export const DesktopUpdateStateSchema = Schema.Struct({
   errorContext: Schema.NullOr(Schema.Literals(["check", "download", "install"])),
   canRetry: Schema.Boolean,
   notAppliedVersion: Schema.optionalKey(Schema.String),
+  channelBlockedByPolicy: Schema.optionalKey(Schema.Literal(true)),
 });
 
 /** The desktop app's `t3` command on PATH, managed from Settings. */
@@ -1128,6 +1134,10 @@ export const DesktopPreviewSetAudioMutedInputSchema = Schema.Struct({
   audioMuted: Schema.Boolean,
 });
 
+export const DesktopPreviewSetCaptureDrawnInputSchema = Schema.Struct({
+  tabId: DesktopPreviewTabIdSchema,
+  drawn: Schema.Boolean,
+});
 export const DesktopPreviewAnnotationThemeInputSchema = Schema.Struct({
   theme: DesktopPreviewAnnotationThemeSchema,
 });
@@ -1289,6 +1299,8 @@ export interface DesktopOrbitGatewayRequest {
   /** Overrides the default 15 s limit, up to 120 s. */
   readonly timeoutMs?: number;
   readonly idempotencyKey?: string;
+  /** Conn: `path` is below `/api/v1`; the main process allows only an Instance wake and an Operation read. */
+  readonly root?: true;
 }
 
 export interface DesktopOrbitGatewayResponse {
@@ -1456,9 +1468,11 @@ export interface DesktopMcpEvent {
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
-  getRelayTelemetryEnabled: () => boolean;
+  /** `null` until the desktop host has read the login shell's environment; ask again later. */
+  getRelayTelemetryEnabled: () => boolean | null;
   getPathForFile: (file: File) => string;
   getClientPlatform: () => string;
+  restartAudioService?: () => Promise<boolean>;
   setNotificationBadge: (badge: { count: number; image: string | null }) => Promise<void>;
   onNotificationBadgeClear: (listener: () => void) => () => void;
   onTrackpadScrollBegin: (listener: () => void) => () => void;
@@ -1543,15 +1557,19 @@ export interface DesktopBridge {
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
+  /** Maps a Windows path to the one a local backend (`primary` or `wsl:…`) sees; null when it cannot. */
+  toLocalBackendPath: (backendId: string, windowsPath: string) => Promise<string | null>;
   pickProjectFavicon: (initialPath?: string) => Promise<string | null>;
   pickThemeFiles: () => Promise<readonly PickedThemeFile[] | null>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },
+    source?: ContextMenuSource,
   ) => Promise<T | null>;
   receiveProviderAuthCallback: (authorizationUrl: string) => Promise<string>;
   cancelProviderAuthCallback: (authorizationUrl: string) => Promise<void>;
+  startFileDrag: (input: { environmentId: EnvironmentId; path: string }) => Promise<boolean>;
   openExternal: (url: string) => Promise<boolean>;
   /** Reads http(s) media in the main process, outside renderer CORS and CSP; null on network failure. */
   readMedia: (url: string) => Promise<DesktopMediaRead | null>;
@@ -1675,6 +1693,7 @@ export interface DesktopPreviewBridge {
   goBack: (tabId: string) => Promise<void>;
   goForward: (tabId: string) => Promise<void>;
   refresh: (tabId: string) => Promise<void>;
+  stopLoading: (tabId: string) => Promise<void>;
   zoomIn: (tabId: string) => Promise<void>;
   zoomOut: (tabId: string) => Promise<void>;
   resetZoom: (tabId: string) => Promise<void>;
@@ -1701,6 +1720,8 @@ export interface DesktopPreviewBridge {
   stopFindInPage: (tabId: string) => Promise<void>;
   /** Tells the tab's server whether its webview is on screen. */
   setShown: (tabId: string, shown: boolean) => Promise<void>;
+  /** Tells the tab's server whether its webview is drawn at full detail for a capture. */
+  setCaptureDrawn: (tabId: string, drawn: boolean) => Promise<void>;
   /** Open the guest webview's DevTools (detached). */
   openDevTools: (tabId: string) => Promise<void>;
   /** Drop cookies + storage data for the preview partition (all tabs). */
@@ -1797,6 +1818,7 @@ export interface LocalApi {
     show: <T extends string>(
       items: readonly ContextMenuItem<T>[],
       position?: { x: number; y: number },
+      source?: ContextMenuSource,
     ) => Promise<T | null>;
     close: () => Promise<void>;
   };

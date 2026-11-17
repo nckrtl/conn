@@ -6,9 +6,9 @@ import { DEFAULT_ORBIT_GATEWAY_URL } from "@t3tools/client-runtime/orbit-gateway
 import * as DesktopIpc from "../DesktopIpc.ts";
 import { ORBIT_GATEWAY_SEND_CHANNEL } from "../channels.ts";
 
-// Calls the Conn layer of the Orbit Gateway for the renderer's profile sync. It runs in the
+// Calls the Orbit Gateway for profile sync and Tasks. It runs in the
 // main process because the Gateway refuses requests that carry a page `Origin`, and Chromium's
-// network stack trusts the Orbit root CA from the keychain. Only paths below /api/v1/conn are sent.
+// network stack trusts the Orbit root CA from the keychain. Root calls use the exact allowlist.
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const CONN_PREFIX = "/api/v1/conn";
@@ -26,6 +26,8 @@ const OrbitGatewayRequest = Schema.Struct({
   idempotencyKey: Schema.optional(
     Schema.String.check(Schema.isPattern(/^[A-Za-z0-9:._-]{1,128}$/)),
   ),
+  /** Conn: a path below `/api/v1`; only the calls in `ROOT_CALLS` go out this way. */
+  root: Schema.optional(Schema.Literal(true)),
 });
 
 const OrbitGatewayResponse = Schema.Struct({
@@ -67,8 +69,50 @@ export function resolveConnUrl(path: string): URL | null {
   return inside && url.origin === new URL(DEFAULT_ORBIT_GATEWAY_URL).origin ? url : null;
 }
 
+/**
+ * Exact calls outside `/api/v1/conn`: lifecycle reads/wake and the private Tasks summary channel.
+ * None takes a query; channel authentication also restricts its body.
+ */
+const ROOT_CALLS: ReadonlyArray<{ readonly method: "GET" | "POST"; readonly pattern: RegExp }> = [
+  { method: "POST", pattern: /^\/instances\/[1-9][0-9]{0,15}\/wake$/ },
+  { method: "GET", pattern: /^\/operations\/[1-9][0-9]{0,15}$/ },
+  { method: "GET", pattern: /^\/realtime$/ },
+  { method: "POST", pattern: /^\/broadcasting\/auth$/ },
+];
+
+/** The Gateway URL of an allowed call below `/api/v1`, or null for anything else. */
+export function resolveRootUrl(
+  request: Pick<typeof OrbitGatewayRequest.Type, "method" | "path" | "query"> & {
+    readonly body?: string | null;
+  },
+): URL | null {
+  if (Object.keys(request.query ?? {}).length > 0) return null;
+  if (request.path === "/broadcasting/auth") {
+    try {
+      const body: unknown = JSON.parse(request.body ?? "null");
+      if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+      const data = body as Record<string, unknown>;
+      if (
+        Object.keys(data).length !== 2 ||
+        data.channel_name !== "private-orbit" ||
+        typeof data.socket_id !== "string" ||
+        !/^[0-9]{1,20}\.[0-9]{1,20}$/.test(data.socket_id)
+      )
+        return null;
+    } catch {
+      return null;
+    }
+  }
+  const allowed = ROOT_CALLS.some(
+    (call) => call.method === request.method && call.pattern.test(request.path),
+  );
+  return allowed ? new URL(`${DEFAULT_ORBIT_GATEWAY_URL}/api/v1${request.path}`) : null;
+}
+
 /** Orbit's Instance name rule allows at most 63 characters; anything longer is no name to check. */
 const isNameCheckValue = (value: string) => /^[a-z0-9-]{1,63}$/.test(value);
+
+const isOrbitId = (value: string) => /^[1-9][0-9]{0,15}$/.test(value);
 
 /** A branch search: a bounded, printable substring; Orbit itself answers an invalid ref with 502. */
 const ORBIT_BRANCH_QUERY_MAX_LENGTH = 200;
@@ -85,6 +129,8 @@ const CONN_QUERIES: ReadonlyArray<{
   readonly method: "GET";
   readonly pattern: RegExp;
   readonly query: Readonly<Record<string, (value: string) => boolean>>;
+  /** Any subset of the keys may be sent, instead of all of them. */
+  readonly optional?: true;
 }> = [
   // The palette's Project list, with the Projects in which threads cannot start yet.
   { method: "GET", pattern: /^\/projects$/, query: { include_unavailable: (v) => v === "1" } },
@@ -100,6 +146,19 @@ const CONN_QUERIES: ReadonlyArray<{
     pattern: /^\/projects\/[1-9][0-9]{0,15}\/branches$/,
     query: { query: isBranchQueryValue },
   },
+  // The Tasks panel's list: optional filters and paging.
+  {
+    method: "GET",
+    pattern: /^\/tasks$/,
+    query: {
+      project: isOrbitId,
+      instance: isOrbitId,
+      status: (v) => /^[a-z_]{1,32}$/.test(v),
+      limit: (v) => /^[1-9][0-9]?$|^100$/.test(v),
+      cursor: isOrbitId,
+    },
+    optional: true,
+  },
 ];
 
 /** Whether the request's query may go to the Gateway; no query always may. */
@@ -113,18 +172,19 @@ export function isAllowedConnQuery(
   );
   if (spec === undefined) return false;
   const wanted = Object.keys(spec.query);
-  if (keys.length !== wanted.length || !keys.every((key) => wanted.includes(key))) return false;
-  return wanted.every((key) => spec.query[key]!(request.query![key]!));
+  if (!keys.every((key) => wanted.includes(key))) return false;
+  if (spec.optional !== true && keys.length !== wanted.length) return false;
+  return keys.every((key) => spec.query[key]!(request.query![key]!));
 }
 
 async function send(
   request: typeof OrbitGatewayRequest.Type,
 ): Promise<typeof OrbitGatewayResponse.Type> {
-  const url = resolveConnUrl(request.path);
+  const url = request.root === true ? resolveRootUrl(request) : resolveConnUrl(request.path);
   if (url === null) {
     return { error: "That Gateway path is not allowed.", status: 0, body: "" };
   }
-  if (!isAllowedConnQuery(request)) {
+  if (request.root !== true && !isAllowedConnQuery(request)) {
     return { error: "That Gateway query is not allowed.", status: 0, body: "" };
   }
   for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, value);

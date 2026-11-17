@@ -41,6 +41,8 @@ const layerProvidedClientConnection = layerSnapshotLoader.pipe(
       usageLimitsCommand: true,
       providerCatalogsOnDemand: true,
       environmentThemes: true,
+      providerCatalogDigests: true,
+      providerStatusDeltas: true,
     }),
   ),
   Layer.provideMerge(

@@ -2,10 +2,12 @@ import * as Schema from "effect/Schema";
 
 import {
   OrbitGatewayError,
+  gatewayFallbackMessage,
   gatewayText,
   type OrbitGatewayEnvironment,
   type OrbitGatewayNode,
 } from "./client.ts";
+import type { RenewalFailureReason } from "./environmentProvider.ts";
 
 /**
  * Conn: the Orbit panel's Connection page, shared by desktop and mobile. Conn picks up the Orbit
@@ -21,8 +23,12 @@ export interface OrbitConnectionCheck {
   readonly message: string;
 }
 
-/** The result of the Gateway's `me` call, which runs all three checks at once. */
+/**
+ * The result of the Gateway's `me` call, which runs all three checks at once. `unavailable`: there
+ * is no Orbit client (outside the desktop app), so nothing is checked.
+ */
 export type OrbitConnectionProbe =
+  | { readonly status: "unavailable" }
   | { readonly status: "checking" }
   | { readonly status: "ok"; readonly node: OrbitGatewayNode }
   | { readonly status: "error"; readonly error: unknown };
@@ -48,6 +54,26 @@ const PEER_IDENTITY_UNKNOWN = "peer.identity_unknown";
 const NODE_ACCESS_REQUIRED = "node_access.required";
 
 const isGatewayError = Schema.is(OrbitGatewayError);
+
+const UNKNOWN_DEVICE =
+  "Orbit does not know this WireGuard address as an active Node. Add this device as a Node with the Orbit CLI, then Reload.";
+
+/**
+ * The line under this device's Node name: its WireGuard address, or, when `me` named none, the same
+ * line the Connection page's Device known check shows.
+ */
+export function orbitSignedInText(node: Pick<OrbitGatewayNode, "wireguardIp">): string {
+  const address = gatewayText(node.wireguardIp);
+  return address === null ? UNKNOWN_DEVICE : `Signed in to gateway.orbit as ${address}`;
+}
+
+/** The Gateway answered but failed (HTTP 5xx): its own message, or Conn's when it sent none. */
+function serverErrorMessage(error: OrbitGatewayError): string {
+  const text = gatewayText(error.message);
+  return text && text !== gatewayFallbackMessage(error.status)
+    ? text
+    : `gateway.orbit answered with an error (HTTP ${error.status}). Try Reload later.`;
+}
 
 /**
  * Chromium's TLS failures (`net::ERR_CERT_AUTHORITY_INVALID`, `net::ERR_SSL_PROTOCOL_ERROR`, …)
@@ -77,11 +103,7 @@ function failedCheck(error: unknown): { key: OrbitConnectionCheckKey; message: s
     };
   }
   if (error.code === PEER_IDENTITY_UNKNOWN) {
-    return {
-      key: "device",
-      message:
-        "Orbit does not know this WireGuard address as an active Node. Add this device as a Node with the Orbit CLI, then Reload.",
-    };
+    return { key: "device", message: UNKNOWN_DEVICE };
   }
   if (error.code === NODE_ACCESS_REQUIRED) {
     return {
@@ -107,14 +129,32 @@ export function orbitConnectionChecks(probe: OrbitConnectionProbe): OrbitConnect
     message: string,
   ): OrbitConnectionCheck => ({ key, label: LABELS[key], state, message });
 
+  if (probe.status === "unavailable") {
+    return ORDER.map((key) => check(key, "not_checked", ""));
+  }
   if (probe.status === "checking") {
     return ORDER.map((key) => check(key, "checking", "Checking…"));
   }
   if (probe.status === "ok") {
+    if (gatewayText(probe.node.wireguardIp) === null) {
+      return [
+        check("gateway", "pass", PASSED.gateway),
+        check("certificate", "pass", PASSED.certificate),
+        check("device", "fail", UNKNOWN_DEVICE),
+      ];
+    }
     return [
       check("gateway", "pass", PASSED.gateway),
       check("certificate", "pass", PASSED.certificate),
       check("device", "pass", `Orbit knows this WireGuard address as the Node ${probe.node.name}.`),
+    ];
+  }
+  if (isGatewayError(probe.error) && probe.error.status >= 500) {
+    // The Gateway answered over trusted TLS, so it could not check the device: not the device's fault.
+    return [
+      check("gateway", "pass", PASSED.gateway),
+      check("certificate", "pass", PASSED.certificate),
+      check("device", "not_checked", serverErrorMessage(probe.error)),
     ];
   }
   const failed = failedCheck(probe.error);
@@ -126,13 +166,19 @@ export function orbitConnectionChecks(probe: OrbitConnectionProbe): OrbitConnect
   });
 }
 
-export type OrbitNodeState = "paired" | "pairing" | "expired";
+/**
+ * `revoked`: Orbit refused this device's renewal there; only an explicit Connect pairs it again.
+ * `renewal_failed`: the last renewal failed (`renewalFailure` says why); a Retry renews now.
+ */
+export type OrbitNodeState = "paired" | "pairing" | "expired" | "revoked" | "renewal_failed";
 
 export interface OrbitNodeServer {
   readonly environmentId: string;
   readonly name: string;
   readonly address: string;
   readonly state: OrbitNodeState;
+  /** Why the last renewal failed, when `state` is `renewal_failed`; else null. */
+  readonly renewalFailure: RenewalFailureReason | null;
   readonly isThisDevice: boolean;
 }
 
@@ -153,10 +199,16 @@ export function orbitNodeServers(input: {
   readonly environments: readonly OrbitGatewayEnvironment[];
   /** Environment ids this device has paired. */
   readonly paired: ReadonlySet<string>;
+  /** Environment ids whose pairing Orbit revoked for this device. */
+  readonly revoked?: ReadonlySet<string>;
+  /** Environment ids whose last renewal failed, with the reason. */
+  readonly renewalFailed?: ReadonlyMap<string, RenewalFailureReason>;
   readonly device: Pick<OrbitGatewayNode, "name" | "wireguardIp"> | null;
 }): OrbitNodeServer[] {
   const seen = new Set<string>();
   const nodes: OrbitNodeServer[] = [];
+  // An empty address must not match a server whose URL does not parse to a host.
+  const deviceAddress = gatewayText(input.device?.wireguardIp);
   for (const environment of input.environments) {
     if (
       environment.instanceId !== null ||
@@ -169,6 +221,7 @@ export function orbitNodeServers(input: {
     seen.add(environment.environmentId);
     const address = addressOf(environment.url);
     const name = gatewayText(environment.nodeName) ?? gatewayText(environment.label) ?? address;
+    const renewalFailure = input.renewalFailed?.get(environment.environmentId) ?? null;
     nodes.push({
       environmentId: environment.environmentId,
       name,
@@ -176,12 +229,20 @@ export function orbitNodeServers(input: {
       state:
         environment.status === "session_expired"
           ? "expired"
-          : input.paired.has(environment.environmentId)
-            ? "paired"
-            : "pairing",
+          : input.revoked?.has(environment.environmentId)
+            ? "revoked"
+            : renewalFailure !== null
+              ? "renewal_failed"
+              : input.paired.has(environment.environmentId)
+                ? "paired"
+                : "pairing",
+      renewalFailure:
+        environment.status !== "session_expired" && !input.revoked?.has(environment.environmentId)
+          ? renewalFailure
+          : null,
       isThisDevice:
         input.device !== null &&
-        (address === input.device.wireguardIp ||
+        ((deviceAddress !== null && address === deviceAddress) ||
           gatewayText(environment.nodeName) === input.device.name),
     });
   }

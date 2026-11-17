@@ -1,4 +1,5 @@
 import {
+  EMPTY_ORBIT_ENVIRONMENT_STATE,
   OrbitGatewayError,
   type OrbitGatewayClient,
   type OrbitGatewayEnvironment,
@@ -9,10 +10,9 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 import { act, render, stubGlobal } from "../../test/render";
-import { setEnvironmentProvider } from "../orbit/environmentProvider";
-import { useOrbitProfileSyncStatus } from "../orbit/OrbitProfileSync";
+import { setEnvironmentProvider, useEnvironmentProvider } from "../orbit/environmentProvider";
 import { OrbitPanelLayout } from "./OrbitPanel";
-import { OrbitConnectionPage, OrbitProfilePage } from "./settings/OrbitSettings";
+import { OrbitConnectionPage } from "./settings/OrbitSettings";
 import { RailActions } from "./sidebar/WorkspaceRail";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -152,45 +152,6 @@ describe("Orbit panel", () => {
     expect(screen.router?.state.location.hash).toBe("environment-provider");
   });
 
-  it("shows the profile and its sync on Profile", async () => {
-    using _env = setup("orbit");
-    await using _screen = await render(
-      <SidebarProvider>
-        <OrbitPanelLayout>
-          <OrbitProfilePage />
-        </OrbitPanelLayout>
-      </SidebarProvider>,
-      { router: "/orbit/profile" },
-    );
-    await expect.element(page.getByRole("combobox", { name: "Profile" })).toHaveTextContent("Work");
-    await expect.element(page.getByRole("heading", { name: "Profile sync" })).toBeVisible();
-    await expect.element(page.getByRole("textbox", { name: "New profile name" })).toBeVisible();
-    await expect
-      .element(page.getByRole("heading", { name: "Nodes", exact: true }))
-      .not.toBeInTheDocument();
-  });
-
-  it("shows a failed reload on Profile, with Reload", async () => {
-    using _env = setup("orbit");
-    await using _screen = await render(
-      <SidebarProvider>
-        <OrbitPanelLayout>
-          <OrbitProfilePage />
-        </OrbitPanelLayout>
-      </SidebarProvider>,
-      { router: "/orbit/profile" },
-    );
-    await expect.element(page.getByRole("heading", { name: "Profile sync" })).toBeVisible();
-    await expect.element(page.getByRole("button", { name: "Reload" })).not.toBeInTheDocument();
-    (gateway.client as { me: () => Promise<never> }).me = async () => {
-      throw new Error("gateway.orbit timed out");
-    };
-    await act(() => useOrbitProfileSyncStatus.setState({ syncedAt: 1 }));
-    await expect.element(page.getByText("gateway.orbit timed out")).toBeVisible();
-    await expect.element(page.getByRole("button", { name: "Reload" })).toBeVisible();
-    await act(() => useOrbitProfileSyncStatus.setState({ syncedAt: null }));
-  });
-
   it("shows a failed check and the ones after it, and Reload runs the checks again", async () => {
     using _env = setup("orbit");
     let calls = 0;
@@ -249,6 +210,81 @@ describe("Orbit panel", () => {
     await expect.element(page.getByText("Signed in to gateway.orbit as 10.44.0.12")).toBeVisible();
     await expect.element(page.getByText("10.44.0.3", { exact: true })).toBeVisible();
     expect(calls).toBe(2);
+  });
+
+  const FAILED_AT = Date.parse("2026-12-13T10:00:00Z");
+
+  it("shows a failed renewal in plain words with a Retry that renews the server now", async () => {
+    using _env = setup("orbit");
+    useEnvironmentProvider.setState({
+      state: {
+        ...EMPTY_ORBIT_ENVIRONMENT_STATE,
+        renewalFailed: { "host-mini": { at: FAILED_AT, reason: "orbit_unreachable" } },
+      },
+    });
+    const pair = vi.fn(async () => {
+      throw new OrbitGatewayError({
+        code: "conn.session_expired",
+        message: "The Gateway's admin session on mini expired.",
+        status: 409,
+        details: {},
+      });
+    });
+    (gateway.client as { pair?: OrbitGatewayClient["pair"] }).pair = pair;
+    try {
+      await using _screen = await render(
+        <SidebarProvider>
+          <OrbitPanelLayout>
+            <OrbitConnectionPage />
+          </OrbitPanelLayout>
+        </SidebarProvider>,
+        { router: "/orbit/connection" },
+      );
+      await expect
+        .element(page.getByText("Could not renew: Orbit is not reachable."))
+        .toBeVisible();
+      await userEvent.click(page.getByRole("button", { name: "Retry" }));
+      await expect
+        .element(page.getByText("Could not renew: Orbit's session on this server ended."))
+        .toBeVisible();
+      expect(pair).toHaveBeenCalledWith("host-mini", { renew: true });
+      expect(document.body.textContent).not.toContain("conn.session_expired");
+
+      await act(() =>
+        useEnvironmentProvider.setState({
+          state: {
+            ...EMPTY_ORBIT_ENVIRONMENT_STATE,
+            renewalFailed: { "host-mini": { at: FAILED_AT, reason: "unknown" } },
+          },
+        }),
+      );
+      await expect.element(page.getByText("Could not renew.", { exact: true })).toBeVisible();
+      await expect.element(page.getByRole("button", { name: "Retry" })).toBeVisible();
+    } finally {
+      useEnvironmentProvider.setState({ state: EMPTY_ORBIT_ENVIRONMENT_STATE });
+    }
+  });
+
+  it("settles the checks as not checked when there is no Orbit client", async () => {
+    using _env = setup("orbit");
+    gateway.client = null;
+    await using _screen = await render(
+      <SidebarProvider>
+        <OrbitPanelLayout>
+          <OrbitConnectionPage />
+        </OrbitPanelLayout>
+      </SidebarProvider>,
+      { router: "/orbit/connection" },
+    );
+    await vi.waitFor(() =>
+      expect(
+        [...document.querySelectorAll("[data-check] [data-check-state]")].map((badge) =>
+          badge.getAttribute("data-check-state"),
+        ),
+      ).toEqual(["not_checked", "not_checked", "not_checked"]),
+    );
+    await expect.element(page.getByRole("button", { name: "Reload" })).toBeDisabled();
+    await expect.element(page.getByText("Nodes not available")).toBeVisible();
   });
 
   it("closes when environments stop coming from Orbit", async () => {

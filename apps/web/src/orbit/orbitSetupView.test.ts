@@ -64,10 +64,19 @@ const op = (progress: Partial<OrbitGatewayOperation>): OrbitGatewayOperation => 
   ...progress,
 });
 
-/** Each card row as `label:status`, plus the Node and the clone step where shown. */
+/** Each card row as `label:status`, plus the Node and the create rows that left pending. */
 function rows(start: OrbitThreadStart, create: OrbitGatewayOperation | null = null) {
   return orbitSetupView(start, create).stages.map((stage) =>
-    [`${stage.label}:${stage.status}`, stage.detail, stage.subDetail].filter(Boolean).join(" "),
+    [
+      `${stage.label}:${stage.status}`,
+      stage.detail,
+      stage.rows
+        ?.filter((row) => row.status !== "pending")
+        .map((row) => `${row.label}:${row.status}`)
+        .join(", "),
+    ]
+      .filter(Boolean)
+      .join(" "),
   );
 }
 
@@ -80,41 +89,20 @@ describe("orbitSetupView", () => {
       ["Create Instance:pending beast", "Connect:pending", "Start agent:pending"],
     ],
     [
-      "new, create running with empty steps[]",
-      creating,
-      op({ steps: [], currentStep: "clone-workspace" }),
+      "new, create running with saved rows",
+      {
+        ...creating,
+        createRows: {
+          container: { status: "done", startedAt: 1_000, finishedAt: 4_000 },
+          address: { status: "running", startedAt: 1_200, finishedAt: null },
+        },
+      },
+      null,
       [
-        "Create Instance:running beast Copying the workspace",
+        "Create Instance:running beast Copy the container:done, Publish the address:running",
         "Connect:pending",
         "Start agent:pending",
       ],
-    ],
-    [
-      "new, create running with filled steps[] and no current step",
-      creating,
-      op({
-        steps: [
-          {
-            name: "clone-container",
-            job: "clone",
-            status: "succeeded",
-            startedAt: null,
-            finishedAt: null,
-          },
-          { name: "clone-t3", job: "clone", status: "running", startedAt: null, finishedAt: null },
-        ],
-      }),
-      [
-        "Create Instance:running beast Starting the T3 server",
-        "Connect:pending",
-        "Start agent:pending",
-      ],
-    ],
-    [
-      "new, unknown step gives no sub-detail",
-      creating,
-      op({ currentStep: "clone-sessions" }),
-      ["Create Instance:running beast", "Connect:pending", "Start agent:pending"],
     ],
     [
       "new, connecting",
@@ -127,11 +115,7 @@ describe("orbitSetupView", () => {
       "new, create failed",
       { ...creating, error: "Orbit could not create the clone.", errorCode: "instance.t3_unready" },
       op({ status: "failed", failedStep: "clone-t3" }),
-      [
-        "Create Instance:failed beast Starting the T3 server",
-        "Connect:pending",
-        "Start agent:pending",
-      ],
+      ["Create Instance:failed beast", "Connect:pending", "Start agent:pending"],
     ],
     ["existing, saved", existing, null, ["Connect:pending", "Start agent:pending"]],
     [
@@ -142,6 +126,22 @@ describe("orbitSetupView", () => {
     ],
   ])("%s", (_name, start, create, expected) => {
     expect(rows(start, create)).toEqual(expected);
+  });
+
+  it("gives the running card its Details: what the start asked for", () => {
+    expect(
+      orbitSetupView({
+        ...creating,
+        branch: { mode: "new", from: "develop" },
+        instanceDomainSuffix: ".create-bench.test",
+      }).details,
+    ).toEqual({
+      instanceName: "pricing-page",
+      nodeName: "beast",
+      branch: "pricing-page",
+      baseBranch: "develop",
+      url: "https://pricing-page.create-bench.test",
+    });
   });
 
   it("offers Change name only for a taken name, and says the Instance stays only when one was made", () => {
@@ -324,6 +324,45 @@ describe("orbitSetupView for branch refusals", () => {
       },
     ],
     [
+      "a Project process did not start, Orbit retries with the current definitions",
+      {
+        ...stepFailed("instance.container_process_inactive"),
+        errorProcessUnit: "conn-web.service",
+        errorRecoveryRequires: "project_process_definition",
+      },
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start: conn-web.service. Change or remove this process in the Project's Orbit settings, then retry.",
+      },
+    ],
+    [
+      "a Project process did not start, Orbit retries, unit unknown",
+      {
+        ...stepFailed("instance.container_process_inactive"),
+        errorRecoveryRequires: "project_process_definition",
+      },
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start. Change or remove this process in the Project's Orbit settings, then retry.",
+      },
+    ],
+    [
+      "a Project process did not start, Orbit names an unknown requirement",
+      {
+        ...stepFailed("instance.container_process_inactive"),
+        errorProcessUnit: "conn-web.service",
+        errorRecoveryRequires: "something_new",
+      },
+      {
+        ...quiet,
+        error:
+          "A process of this Project did not start: conn-web.service. Fix the Project, remove this Instance in Orbit, then create it again.",
+        retry: false,
+      },
+    ],
+    [
       "create cancelled",
       stepFailed("operation.cancelled"),
       { ...quiet, error: "Orbit could not create the clone (operation.cancelled).", stays: true },
@@ -355,9 +394,8 @@ describe("orbitSetupView for branch refusals", () => {
 });
 
 describe("orbitReadyView", () => {
-  it("times the setup from the create to the sent message and builds Conn's ready line", () => {
+  it("builds Conn's ready line, with no setup time", () => {
     expect(orbitReadyView(sent, "https://pricing-page.nckrtl.test")).toEqual({
-      readyMs: 12_000,
       instanceName: "pricing-page",
       nodeName: "beast",
       url: "https://pricing-page.nckrtl.test",
@@ -416,5 +454,183 @@ describe("orbitReadyView", () => {
     expect(orbitReadyView(fallback, null).modelFallbackLine).toBe(
       "This Instance does not offer claude-opus-5-5, so the agent uses gpt-5.5.",
     );
+  });
+});
+
+describe("orbitSetupView with the create's completion (release 2030)", () => {
+  const rows = {
+    container: { status: "done" as const, startedAt: 1_000, finishedAt: 4_000 },
+    address: { status: "running" as const, startedAt: 9_000, finishedAt: null },
+    t3: { status: "done" as const, startedAt: 3_000, finishedAt: 6_000 },
+    register: { status: "done" as const, startedAt: 6_000, finishedAt: 9_000 },
+  };
+  const following: OrbitThreadStart = {
+    ...sent,
+    completionOperationId: 106,
+    completionStatus: "running",
+    createRows: rows,
+  };
+  const rowStatuses = (start: OrbitThreadStart) =>
+    orbitSetupView(start).stages[0]!.rows?.map((row) => `${row.id}:${row.status}`) ?? null;
+  const failed = (extra: Partial<OrbitThreadStart>): OrbitThreadStart => ({
+    ...following,
+    completionStatus: "failed",
+    completionRetryable: true,
+    createRows: { ...rows, address: { ...rows.address, status: "failed", finishedAt: 14_000 } },
+    ...extra,
+  });
+
+  it("storyboard 6: header and address spin, Connect and Start agent done, no Cancel", () => {
+    const view = orbitSetupView(following);
+    expect(view.phase).toBe("running");
+    expect(view.stages.map((stage) => `${stage.id}:${stage.status}`)).toEqual([
+      "create:running",
+      "connect:done",
+      "agent:done",
+    ]);
+    expect(rowStatuses(following)).toEqual([
+      "container:done",
+      "address:running",
+      "t3:done",
+      "register:done",
+    ]);
+    expect(view.stages[0]!.rows?.[1]?.detail).toBe(
+      view.details.url?.replace("https://", "") ?? null,
+    );
+    expect(view.canCancel).toBe(false);
+    expect(view.canRetry).toBe(false);
+  });
+
+  it("before the send, the pending card keeps Cancel while the completion runs (storyboard 4, 5)", () => {
+    const connecting = {
+      ...pairing,
+      completionOperationId: 106,
+      completionStatus: "queued" as const,
+    };
+    expect(orbitSetupView(connecting).canCancel).toBe(true);
+    expect(orbitSetupView(connecting).stages[0]!.status).toBe("running");
+    expect(orbitSetupView(pairing).canCancel).toBe(true);
+    expect(orbitSetupView(creating).canCancel).toBe(true);
+  });
+
+  it("state 4: a succeeded completion is today's done card (the ready row)", () => {
+    const view = orbitSetupView({ ...following, completionStatus: "succeeded" });
+    expect(view.phase).toBe("done");
+    expect(view.stages[0]!.rows).toBeNull();
+  });
+
+  it("state 5: the failed row, Conn's workspace message, the detail line, Retry and Dismiss", () => {
+    const start = failed({
+      completionErrorCode: "instance.create_workspace_failed",
+      completionErrorDetail: "composer exit 1",
+    });
+    const view = orbitSetupView(start);
+    expect(view).toMatchObject({
+      phase: "failed",
+      failedTitle: "Instance setup failed",
+      error: "Orbit could not set up the workspace.",
+      errorDetailLine: "instance.create_workspace_failed · composer exit 1",
+      canRetry: true,
+      canChangeName: false,
+      canChangeBranch: false,
+      openInstance: null,
+      instanceStays: true,
+      canCancel: false,
+    });
+    expect(rowStatuses(start)).toEqual([
+      "container:done",
+      "address:failed",
+      "t3:done",
+      "register:done",
+    ]);
+    // failures.html 6: the header fails, Connect and Start agent stay done.
+    expect(view.stages.map((stage) => stage.status)).toEqual(["failed", "done", "done"]);
+  });
+
+  it("Q2: a code without a Conn message shows only the detail line, or the code alone", () => {
+    const route = orbitSetupView(
+      failed({ completionErrorCode: "instance.create_route_failed", completionErrorDetail: "dns" }),
+    );
+    expect(route.error).toBeNull();
+    expect(route.errorDetailLine).toBe("instance.create_route_failed · dns");
+    const bare = orbitSetupView(failed({ completionErrorCode: "operation.admission_failed" }));
+    expect(bare.error).toBeNull();
+    expect(bare.errorDetailLine).toBe("operation.admission_failed");
+  });
+
+  it("Q7: a process that did not start says \u2026then retry while Orbit offers a Retry", () => {
+    const view = orbitSetupView(
+      failed({
+        completionErrorCode: "instance.container_process_inactive",
+        completionProcessUnit: "conn-web.service",
+      }),
+    );
+    expect(view.error).toBe(
+      "A process of this Project did not start: conn-web.service. Change or remove this process in the Project's Orbit settings, then retry.",
+    );
+    expect(view.canRetry).toBe(true);
+  });
+
+  it("Q7: the process line says \u2026then retry also without `requires`", () => {
+    const view = orbitSetupView(
+      failed({
+        completionErrorCode: "instance.container_process_inactive",
+        completionProcessUnit: "conn-web.service",
+        completionRequires: null,
+      }),
+    );
+    expect(view.error).toContain("then retry.");
+    expect(view.error).not.toContain("create it again");
+  });
+
+  it("Q4: a cancel outside a removal is titled Instance setup cancelled, with Retry and Dismiss", () => {
+    const view = orbitSetupView(
+      failed({ completionStatus: "cancelled", completionErrorCode: "operation.cancelled" }),
+    );
+    expect(view).toMatchObject({
+      phase: "failed",
+      failedTitle: "Instance setup cancelled",
+      error: null,
+      errorDetailLine: "operation.cancelled",
+      canRetry: true,
+      canCancel: false,
+    });
+    expect(orbitSetupView(failed({})).failedTitle).toBe("Instance setup failed");
+    expect(orbitSetupView(creating).failedTitle).toBe("Instance setup failed");
+  });
+
+  it("state 12: a completion refused at admission fails the card at once", () => {
+    const view = orbitSetupView(
+      failed({ completionErrorCode: "instance.complete_unavailable", completionErrorDetail: null }),
+    );
+    expect(view.phase).toBe("failed");
+    expect(view.canRetry).toBe(true);
+  });
+
+  it("state 6: Retry running shows the running card again, also before Orbit answered", () => {
+    const view = orbitSetupView({ ...following, completionStatus: "queued" });
+    expect(view.phase).toBe("running");
+    expect(view.canCancel).toBe(false);
+    const admitting = orbitSetupView({
+      ...following,
+      completionOperationId: null,
+      completionKey: "k",
+      completionStatus: "queued",
+    });
+    expect(admitting.phase).toBe("running");
+    expect(admitting.canCancel).toBe(false);
+    expect(admitting.stages[0]!.rows).not.toBeNull();
+  });
+
+  it("state 8: a removal's cancel shows nothing new", () => {
+    const view = orbitSetupView({ ...following, completionStatus: "cancelled" });
+    expect(view.phase).toBe("running");
+    expect(view.error).toBeNull();
+  });
+
+  it("state 11: an older Gateway without a completion keeps today's done card", () => {
+    const view = orbitSetupView(sent);
+    expect(view.phase).toBe("done");
+    expect(view.canCancel).toBe(false);
   });
 });

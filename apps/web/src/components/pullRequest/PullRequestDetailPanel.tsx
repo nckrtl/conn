@@ -473,6 +473,13 @@ export function PullRequestDetailPanel({
   } else if (!tabMountState.tabs.has(tab)) {
     setTabMountState({ key: tabScopeKey, tabs: new Set(tabMountState.tabs).add(tab) });
   }
+  // A pointer on the Code tab reads the page it opens on; only intent costs the host a read.
+  const [codeIntentKey, setCodeIntentKey] = useState<string | null>(null);
+  useEnvironmentQuery(
+    codeIntentKey === pullRequestKey && !mountedTabs.has("code")
+      ? pullRequestEnvironment.diff({ environmentId, input: { ...reference } })
+      : null,
+  );
   // Each tab restores the condensed state its own scrolling left behind.
   const [condensedByTab, setCondensedByTab] = useState<
     Partial<Record<PullRequestDetailTab, boolean>>
@@ -536,7 +543,6 @@ export function PullRequestDetailPanel({
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { copyToClipboard: copyReference } = useCopyToClipboard<string>({
     target: `${terminology.singular} reference`,
-    onCopy: (label) => toastManager.add({ type: "success", title: `${label} copied` }),
     onError: (error, label) =>
       toastManager.add({
         type: "error",
@@ -1199,6 +1205,7 @@ export function PullRequestDetailPanel({
         state: detail.state,
         isDraft: detail.isDraft,
         finding,
+        inThisThread: attachTarget !== null,
       }),
     );
   };
@@ -1219,6 +1226,7 @@ export function PullRequestDetailPanel({
         comments: detail.comments,
         checks: checksStale ? [] : detail.checks,
         commentsTruncated: detail.commentsTruncated,
+        inThisThread: attachTarget !== null,
       }),
     );
   };
@@ -1231,6 +1239,7 @@ export function PullRequestDetailPanel({
         url: handoffSummary.url,
         headBranch: handoffSummary.headBranch,
         baseBranch: handoffSummary.baseBranch,
+        inThisThread: attachTarget !== null,
       }),
     });
   };
@@ -1649,7 +1658,6 @@ export function PullRequestDetailPanel({
                     pullRequestKey={pullRequestKey}
                     detail={detail}
                     canWriteSourceControl={canWriteSourceControl}
-                    onSaved={refreshDetail}
                   />
                 }
                 author={
@@ -1714,7 +1722,9 @@ export function PullRequestDetailPanel({
             value={tab}
             onValueChange={selectTab}
             onTabIntent={(item) => {
-              if (item === "code") void loadCodeTab();
+              if (item !== "code") return;
+              void loadCodeTab();
+              setCodeIntentKey(pullRequestKey);
             }}
           >
             {tab === "summary" ? (

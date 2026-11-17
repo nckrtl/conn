@@ -62,6 +62,7 @@ export class DesktopTabRunner {
   private closed = false;
   private closing: Promise<void> | undefined;
   private dialog: Dialog | null = null;
+  private resolvingDialogs = 0;
   private fileChooser: FileChooser | null = null;
   private lastViewport: { width: number; height: number } | null = null;
   private setting: PreviewViewportSetting;
@@ -84,14 +85,12 @@ export class DesktopTabRunner {
   private readonly redact: <A>(value: A) => A;
   private readonly changed: (active: boolean) => void;
   private readonly pointer: PageOperations.PointerReporter;
-  private readonly focus: () => void;
   constructor(
     binding: DesktopTabBinding,
     connectionId: string,
     changed: (active: boolean) => void,
     redact: <A>(value: A) => A = (value) => value,
     pointer: PageOperations.PointerReporter = async () => {},
-    focus: () => void = () => {},
   ) {
     this.binding = binding;
     this.setting = binding.snapshot.viewport ?? { _tag: "fill" };
@@ -100,16 +99,21 @@ export class DesktopTabRunner {
     this.changed = changed;
     this.redact = redact;
     this.pointer = pointer;
-    this.focus = focus;
   }
 
   async attach(
     target: CdpRelayTarget,
     events: {
       on: (listener: (method: string, params: unknown, sessionId: string) => void) => () => void;
+      interceptDialogs?: (agentOwnsPage: () => boolean) => () => void;
     },
   ) {
     this.target = target;
+    const restoreDialogs = events.interceptDialogs?.(() => this.ownsDialogs());
+    if (restoreDialogs)
+      await Effect.runPromise(
+        Effect.addFinalizer(() => Effect.sync(restoreDialogs)).pipe(Scope.provide(this.scope)),
+      );
     const unsubscribe = events.on((method, params, sessionId) => {
       if (method === "Page.javascriptDialogClosed") this.dialog = null;
       if (!sessionId) {
@@ -126,11 +130,27 @@ export class DesktopTabRunner {
     await Effect.runPromise(
       Effect.addFinalizer(() => Effect.sync(unsubscribe)).pipe(Scope.provide(this.scope)),
     );
+    await Effect.runPromise(
+      Effect.acquireRelease(
+        Effect.promise(() =>
+          target.send("Emulation.setFocusEmulationEnabled", { enabled: true }, undefined),
+        ),
+        () =>
+          Effect.promise(() =>
+            target
+              .send("Emulation.setFocusEmulationEnabled", { enabled: false }, undefined)
+              .catch(() => undefined),
+          ),
+      ).pipe(Scope.provide(this.scope)),
+    );
     const endpoint = await this.openEndpoint(target);
     // The manager retains the debugger between connections. Re-enabling Runtime
     // must announce existing contexts to this fresh Playwright connection.
     await target.send("Runtime.disable", {}, undefined);
     this.browser = await chromium.connectOverCDP(endpoint);
+    this.browser.once("disconnected", () => {
+      void this.close();
+    });
     const pages = this.browser.contexts().flatMap((context) => context.pages());
     if (pages.length !== 1) throw new Error("Desktop tab relay requires exactly one page.");
     this.page = pages[0]!;
@@ -138,10 +158,7 @@ export class DesktopTabRunner {
       void this.close();
     });
     this.page.on("dialog", (dialog) => {
-      this.dialog = dialog;
-    });
-    this.page.on("filechooser", (chooser) => {
-      this.fileChooser = chooser;
+      if (this.ownsDialogs()) this.dialog = dialog;
     });
     this.lastViewport = await this.viewport();
     this.report();
@@ -280,6 +297,16 @@ export class DesktopTabRunner {
     this.changed(this.acting);
   }
 
+  private ownsDialogs() {
+    return (
+      !this.closed &&
+      (this.acting ||
+        this.resolvingDialogs > 0 ||
+        this.dialog !== null ||
+        this.publicEndpoints.size > 0)
+    );
+  }
+
   close() {
     return (this.closing ??= this.shutdown());
   }
@@ -289,6 +316,8 @@ export class DesktopTabRunner {
     const draining = this.control.close();
     this.acting = false;
     this.report();
+    await this.dialog?.dismiss().catch(() => undefined);
+    this.dialog = null;
     for (const close of this.closeClients) close();
     await this.revokePublicEndpoints();
     await this.browser?.close();
@@ -379,7 +408,10 @@ export class DesktopTabRunner {
             }
           : null,
         fileChooser: this.fileChooser
-          ? { multiple: this.fileChooser.isMultiple(), accept: "" }
+          ? {
+              multiple: this.fileChooser.isMultiple(),
+              accept: (await this.fileChooser.element().getAttribute("accept")) ?? "",
+            }
           : null,
         control: {
           owner: this.acting ? "agent" : "unclaimed",
@@ -446,10 +478,15 @@ export class DesktopTabRunner {
       const input = decodeDialog(request.input);
       const dialog = this.dialog;
       if (!dialog) throw new Error("No dialog is pending.");
-      if (input.accept) await dialog.accept(input.promptText);
-      else await dialog.dismiss();
-      if (this.dialog === dialog) this.dialog = null;
-      return this.execute({ ...request, operation: "status" });
+      this.resolvingDialogs++;
+      try {
+        if (input.accept) await dialog.accept(input.promptText);
+        else await dialog.dismiss();
+        if (this.dialog === dialog) this.dialog = null;
+        return await this.execute({ ...request, operation: "status" });
+      } finally {
+        this.resolvingDialogs--;
+      }
     }
     return this.control.agent(request.agentSessionId ?? "agent", async () => {
       if (this.dialog)
@@ -457,10 +494,21 @@ export class DesktopTabRunner {
           message: "A browser dialog is pending. Read preview_status and use preview_dialog first.",
           reason: "dialogPending",
         });
-      this.focus();
       await this.redactText(null);
       this.acting = true;
       this.report();
+      const onFileChooser = (chooser: FileChooser) => {
+        this.fileChooser = chooser;
+      };
+      const pendingChoosers: Promise<FileChooser>[] = [];
+      const onCdpEvent = (method: string) => {
+        if (method !== "Page.fileChooserOpened") return;
+        const pending = page.waitForEvent("filechooser", { timeout: request.timeoutMs });
+        pendingChoosers.push(pending);
+        void pending.catch(() => {});
+      };
+      this.listeners.add(onCdpEvent);
+      page.on("filechooser", onFileChooser);
       try {
         switch (request.operation) {
           case "navigate": {
@@ -581,8 +629,15 @@ export class DesktopTabRunner {
         }
         return {};
       } finally {
-        this.acting = false;
-        this.report();
+        try {
+          // Playwright resolves the input element after the CDP event and click have returned.
+          await Promise.all(pendingChoosers);
+        } finally {
+          this.listeners.delete(onCdpEvent);
+          page.off("filechooser", onFileChooser);
+          this.acting = false;
+          this.report();
+        }
       }
     });
   }

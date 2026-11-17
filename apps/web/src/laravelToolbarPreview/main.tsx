@@ -45,6 +45,7 @@ function Preview() {
           onBack={noop}
           onForward={noop}
           onRefresh={noop}
+          onStopLoading={noop}
           onSubmit={noop}
           onOpenInBrowser={noop}
           onCapture={noop}

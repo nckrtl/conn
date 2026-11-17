@@ -38,7 +38,6 @@ export function useConnectionController() {
   const updateBearer = useAtomCommand(updateBearerConnection, { reportFailure: false });
   const registerEnvironment = useAtomCommand(environmentCatalog.register, "environment register");
   const removeEnvironmentMutation = useAtomCommand(environmentCatalog.remove, "environment remove");
-  const retryEnvironmentMutation = useAtomCommand(environmentCatalog.retryNow, "environment retry");
   const setEnvironmentEnabledMutation = useAtomCommand(
     environmentCatalog.setEnabled,
     "environment toggle",
@@ -84,18 +83,21 @@ export function useConnectionController() {
     );
   const removeEnvironment = (environmentId: EnvironmentId) =>
     removeEnvironmentMutation(environmentId);
-  const retryEnvironment = (environmentId: EnvironmentId) =>
-    retryEnvironmentMutation(environmentId);
   const setEnvironmentEnabled = (environmentId: EnvironmentId, enabled: boolean) =>
     setEnvironmentEnabledMutation({ environmentId, enabled });
   const updateEnvironment = (
     environmentId: EnvironmentId,
-    updates: { readonly label: string; readonly displayUrl: string },
+    updates: {
+      readonly label: string;
+      readonly displayUrl: string;
+      readonly openedLabel?: string;
+    },
   ) =>
     updateBearer({
       environmentId,
       label: updates.label,
       httpBaseUrl: updates.displayUrl,
+      ...(updates.openedLabel === undefined ? {} : { openedLabel: updates.openedLabel }),
     });
 
   return {
@@ -111,7 +113,6 @@ export function useConnectionController() {
     connectPairingUrl,
     connectRelayEnvironment,
     removeEnvironment,
-    retryEnvironment,
     setEnvironmentEnabled,
     updateEnvironment,
     refreshRelayEnvironments,

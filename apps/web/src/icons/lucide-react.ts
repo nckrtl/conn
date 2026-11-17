@@ -5,6 +5,7 @@
  */
 import { AlarmIcon as PhAlarm } from "@phosphor-icons/react/dist/csr/Alarm";
 import { ArchiveIcon as PhArchive } from "@phosphor-icons/react/dist/csr/Archive";
+import { ArrowBendUpLeftIcon as PhArrowBendUpLeft } from "@phosphor-icons/react/dist/csr/ArrowBendUpLeft";
 import { ArrowBendUpRightIcon as PhArrowBendUpRight } from "@phosphor-icons/react/dist/csr/ArrowBendUpRight";
 import { ArrowCircleUpIcon as PhArrowCircleUp } from "@phosphor-icons/react/dist/csr/ArrowCircleUp";
 import { ArrowClockwiseIcon as PhArrowClockwise } from "@phosphor-icons/react/dist/csr/ArrowClockwise";
@@ -388,6 +389,7 @@ import {
   MousePointer2Icon as LuMousePointer2,
   MousePointerClickIcon as LuMousePointerClick,
   OctagonAlertIcon as LuOctagonAlert,
+  OctagonXIcon as LuOctagonX,
   PackageIcon as LuPackage,
   PackagePlusIcon as LuPackagePlus,
   PaintbrushIcon as LuPaintbrush,
@@ -418,6 +420,7 @@ import {
   RadioTowerIcon as LuRadioTower,
   Redo2Icon as LuRedo2,
   RefreshCwIcon as LuRefreshCw,
+  ReplyIcon as LuReply,
   RocketIcon as LuRocket,
   RotateCcwIcon as LuRotateCcw,
   RotateCwIcon as LuRotateCw,
@@ -924,8 +927,12 @@ export const PinOffIcon = connIcon(PhPushPinSlash, LuPinOff, "pin-off"),
   PinOff = PinOffIcon;
 export const PauseIcon = connIcon(PhPause, LuPause, "pause"),
   Pause = PauseIcon;
+export const OctagonXIcon = connIcon(PhProhibit, LuOctagonX, "octagon-x"),
+  OctagonX = OctagonXIcon;
 export const PlayIcon = connIcon(PhPlay, LuPlay, "play"),
   Play = PlayIcon;
+export const ReplyIcon = connIcon(PhArrowBendUpLeft, LuReply, "reply"),
+  Reply = ReplyIcon;
 export const ScanIcon = connIcon(PhScan, LuScan, "scan"),
   Scan = ScanIcon;
 export const PlugIcon = connIcon(PhPlug, LuPlug, "plug"),

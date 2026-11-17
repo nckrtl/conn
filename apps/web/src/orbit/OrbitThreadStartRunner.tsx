@@ -1,4 +1,8 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  orbitCompletionNeedsAdmission,
+  orbitCompletionNeedsFollow,
+} from "@t3tools/client-runtime/orbit-gateway";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
 
@@ -6,7 +10,13 @@ import { toastManager } from "../components/ui/toast";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useOrbitThreadsAvailable } from "./environmentProvider";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
-import { orbitPendingThreadPath, runSavedOrbitThreadStart } from "./orbitThreadStarts";
+import { ORBIT_INSTANCE_STAYS_LINE, ORBIT_SETUP_CANCELLED_TITLE } from "./orbitSetupView";
+import {
+  followSavedOrbitCompletion,
+  orbitPendingThreadPath,
+  resumeSavedOrbitCompletionRetry,
+  runSavedOrbitThreadStart,
+} from "./orbitThreadStarts";
 import { useOrbitThreadStarts } from "./orbitThreadStartStore";
 
 /**
@@ -24,9 +34,21 @@ export function OrbitThreadStartRunner() {
     const client = desktopOrbitGatewayClient();
     if (!available || client === null) return;
     for (const start of starts) {
+      // The create's completion runs on after the send; the thread's card follows it.
+      if (orbitCompletionNeedsFollow(start)) void followSavedOrbitCompletion(client, start.id);
+      if (orbitCompletionNeedsAdmission(start)) {
+        void resumeSavedOrbitCompletionRetry(client, start.id);
+      }
       // A sent start is kept only for its thread's ready row.
       if (start.error !== null || (start.sentAt != null && start.pendingThread)) continue;
-      void runSavedOrbitThreadStart(client, start.id).then((sent) => {
+      void runSavedOrbitThreadStart(client, start.id, {
+        onCancelled: () =>
+          toastManager.add({
+            type: "info",
+            title: ORBIT_SETUP_CANCELLED_TITLE,
+            description: ORBIT_INSTANCE_STAYS_LINE,
+          }),
+      }).then((sent) => {
         if (router.state.location.pathname === orbitPendingThreadPath(start.id)) return;
         if (sent !== null) {
           const id = toastManager.add({

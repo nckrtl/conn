@@ -64,6 +64,23 @@ export function saveStart(start: OrbitThreadStart): void {
   updateStarts((starts) => starts.map((entry) => (entry.id === start.id ? start : entry)));
 }
 
+/**
+ * Conn: drops the saved starts of an Instance Orbit destroyed, sent or not. Without the Instance id
+ * (a server the Gateway no longer lists), only the starts of its servers.
+ */
+export function dropOrbitInstanceStarts(
+  instanceId: number | null,
+  environmentIds: readonly string[],
+): void {
+  updateStarts((starts) =>
+    starts.filter(
+      (start) =>
+        (instanceId === null || start.instanceId !== instanceId) &&
+        (start.environmentId === null || !environmentIds.includes(start.environmentId)),
+    ),
+  );
+}
+
 /** Instances whose server a start pairs with itself; the environment sync leaves them alone. */
 export function heldOrbitInstanceIds(): number[] {
   return readStored().flatMap((start) =>

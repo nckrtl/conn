@@ -166,14 +166,16 @@ describe("createOrbitTasksClient", () => {
   it.each([
     [403, "peer.identity_unknown", "not-a-node"],
     [403, "node_access.required", "access-required"],
-    [404, "extension.disabled", "extension-disabled"],
+    [409, "extension.disabled", "extension-disabled"],
     [404, "http.404", "not-found"],
     [500, "server.error", "unreachable"],
   ])("maps %i %s to %s", async (status, code, reason) => {
     const client = createOrbitTasksClient(
       transport(status, { status, error: { code, message: "Refused.", details: {} } }),
     );
-    expect(await client.getTask(1)).toEqual({ status: "error", reason, message: "Refused." });
+    const expected = { status: "error", reason, message: "Refused." };
+    expect.soft(await client.listTasks()).toEqual(expected);
+    expect.soft(await client.getTask(1)).toEqual(expected);
   });
 
   it("reports a failed transport and an off-contract body", async () => {

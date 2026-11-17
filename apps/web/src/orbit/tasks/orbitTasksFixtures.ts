@@ -301,7 +301,7 @@ export function fixtureOrbitTasksTransport(
       case "access-required":
         return failure(403, "node_access.required", "This Node has no access to the Gateway.");
       case "extension-disabled":
-        return failure(404, "extension.disabled", "The Tasks extension is disabled.");
+        return failure(409, "extension.disabled", "The Tasks extension is disabled.");
       case "unreachable":
         throw new Error("connect ECONNREFUSED");
     }

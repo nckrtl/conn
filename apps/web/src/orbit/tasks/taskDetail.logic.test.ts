@@ -182,7 +182,7 @@ describe("task detail", () => {
       { status: 404, code: "http.404", reason: "not-found" },
       { status: 403, code: "node_access.required", reason: "access-required" },
       { status: 403, code: "peer.identity_unknown", reason: "not-a-node" },
-      { status: 404, code: "extension.disabled", reason: "extension-disabled" },
+      { status: 409, code: "extension.disabled", reason: "extension-disabled" },
     ]) {
       client.invalidate({ kind: "list" });
       await settle(index++, error);

@@ -149,7 +149,7 @@ export type OrbitTasksErrorReason =
   | "not-a-node"
   /** 403 `node_access.required`: no access edge, or it was revoked. */
   | "access-required"
-  /** 404 `extension.disabled`: the Conn or Tasks extension is off. */
+  /** 409 `extension.disabled`: the Conn or Tasks extension is off. */
   | "extension-disabled"
   /** 404 `http.404`: no such task, or a subtask id. */
   | "not-found"

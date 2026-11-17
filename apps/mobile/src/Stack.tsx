@@ -131,7 +131,8 @@ import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNo
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsLabsRouteScreen } from "./features/settings/ThreadSettingsSections";
 import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
-import { openSettings, settingsOpenIn } from "./features/settings/settings-navigation";
+import { openSettings, settingsOpenOverWorkspace } from "./features/settings/settings-navigation";
+import { SETTINGS_LIST_PRESENTATION } from "./features/settings/settings-sheet";
 import { DEFAULT_SETTINGS_PAGE } from "./features/layout/workspace/workspace-tab-navigation";
 import {
   isWorkspaceOverlayRoute,
@@ -166,6 +167,7 @@ const SETTINGS_SCREENS = {
     options: {
       ...pageRoute({ title: "Settings", itemStyle: "standard", root: true }),
       ...(Platform.OS === "android" ? { animation: "none" as const } : {}),
+      ...SETTINGS_LIST_PRESENTATION,
     },
   }),
   SettingsEnvironments: createNativeStackScreen({
@@ -389,10 +391,8 @@ function RootStackLayout(props: {
 }) {
   const pathname = rootPathnameFromState(props.state);
   const workspaceLocation = workspaceLocationFromState(props.state);
-  const settingsOpen = settingsOpenIn(
-    props.state.routes
-      .slice(0, props.state.index + 1)
-      .filter((route) => !isWorkspaceOverlayRoute(route.name)),
+  const settingsOpen = settingsOpenOverWorkspace(
+    props.state.routes.slice(0, props.state.index + 1),
   );
   // The flow follows the draft route even while a pushed Thread covers it, so
   // its state lives exactly as long as the route.

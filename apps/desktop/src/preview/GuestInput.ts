@@ -21,7 +21,7 @@ const FOCUSED_DOCUMENT = `(() => {
 const EDITING_COMMANDS = new Set(["selectAll", "undo", "redo"]);
 
 const CROSS_SITE_FOCUS_MESSAGE =
-  "The page's focus is inside a cross-site frame, which takes typed input only while the preview has focus. Click the field first.";
+  "Background keyboard input into a cross-site frame is not supported.";
 
 const ARROW_KEYS: Record<string, string> = {
   ArrowUp: "Up",
@@ -183,6 +183,10 @@ export const sendPageCommand = async (
   if (method === "Page.reload") {
     if (params["ignoreCache"] === true) webContents.reloadIgnoringCache();
     else webContents.reload();
+    return {};
+  }
+  if (method === "Page.stopLoading") {
+    webContents.stop();
     return {};
   }
   if (!FOCUS_ROUTED_INPUT.has(method) || webContents.focusedFrame) {

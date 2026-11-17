@@ -4,14 +4,15 @@ import { useRef, useState, type ComponentProps, type ReactNode } from "react";
 
 import { cn } from "../lib/utils";
 import { useCloseAppModal } from "./sidebar/mainAppLocation";
+import { GlobalVoiceInputIndicator } from "./chat/GlobalVoiceInputIndicator";
 import { Button } from "./ui/button";
 import { DialogBackdrop } from "./ui/dialog";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 /**
- * Large modal for Settings and Usage; Esc, close or a backdrop press returns to the opener.
- * Keyboard guards that skip dialogs exempt `[data-app-modal]`. Conn: frosted shell frame with
- * `AppRouteModalHeader` over `AppRouteModalCard`, optional `APP_ROUTE_MODAL_NAV_CLASS` beside it.
+ * Large modal for Settings, Usage and Orbit; Esc, close or a backdrop press returns to the opener.
+ * Keyboard guards that skip dialogs exempt `[data-app-modal]`. Its fill (`--shell-modal-fill`)
+ * ignores the macOS glass thinning of `--shell-fill`, so a bright page behind it cannot tint it.
  */
 export function AppRouteModal({ label, children }: { label: string; children: ReactNode }) {
   const closeAppModal = useCloseAppModal();
@@ -27,8 +28,18 @@ export function AppRouteModal({ label, children }: { label: string; children: Re
       open={open}
       // Portaled layers outside this tree (toasts, Clerk, confirm dialogs) are not backdrop presses.
       disablePointerDismissal
-      onOpenChange={(nextOpen) => {
+      onOpenChange={(nextOpen, eventDetails) => {
         if (nextOpen) return;
+        // Esc from a layer outside Base UI (Clerk's modals) is that layer's to handle.
+        const target = eventDetails.event.target;
+        if (
+          eventDetails.reason === "escape-key" &&
+          target !== document.body &&
+          target instanceof Node &&
+          !popupRef.current?.contains(target)
+        ) {
+          return eventDetails.cancel();
+        }
         // Closing unmounts a focused field without a blur, so commit-on-blur rows would
         // drop what was typed. Blur first so they commit.
         const focused = document.activeElement;
@@ -40,9 +51,11 @@ export function AppRouteModal({ label, children }: { label: string; children: Re
       }}
     >
       <DialogPrimitive.Portal>
-        <DialogBackdrop />
+        <DialogBackdrop variant="app" />
         <DialogPrimitive.Viewport
-          className="fixed inset-0 z-50 flex items-center justify-center sm:p-6 lg:p-10"
+          // Electron hit-tests drag regions under the backdrop regardless of z-index; without
+          // this, presses above the modal move the window instead of dismissing it.
+          className="fixed inset-0 z-50 flex items-center justify-center [-webkit-app-region:no-drag] sm:p-6 lg:p-10"
           onPointerDown={(event) => {
             backdropPressRef.current = event.target === event.currentTarget;
           }}
@@ -58,9 +71,10 @@ export function AppRouteModal({ label, children }: { label: string; children: Re
             aria-label={label}
             data-slot="dialog-popup"
             data-app-modal=""
-            className="relative flex size-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--shell-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate) max-sm:pt-safe max-sm:pb-safe text-foreground outline-none transition-[opacity,scale] duration-150 ease-out [-webkit-app-region:no-drag] data-ending-style:scale-[0.985] data-ending-style:opacity-0 data-starting-style:scale-[0.985] data-starting-style:opacity-0 sm:max-h-[60rem] sm:max-w-[80rem] sm:rounded-(--window-radius) sm:border sm:shadow-2xl/40"
+            className="relative flex size-full min-h-0 min-w-0 flex-col overflow-hidden bg-(--shell-modal-fill) backdrop-blur-(--shell-blur) backdrop-saturate-(--shell-saturate) max-sm:pt-safe max-sm:pb-safe text-foreground outline-none transition-[opacity,scale] duration-100 ease-out [-webkit-app-region:no-drag] data-ending-style:scale-[0.985] data-ending-style:opacity-0 data-starting-style:scale-[0.985] data-starting-style:opacity-0 sm:max-h-[60rem] sm:max-w-[80rem] sm:rounded-(--window-radius) sm:border sm:shadow-2xl/40"
           >
             {children}
+            <GlobalVoiceInputIndicator />
           </DialogPrimitive.Popup>
         </DialogPrimitive.Viewport>
       </DialogPrimitive.Portal>

@@ -2,10 +2,10 @@ import {
   listOrbitInstances,
   type OrbitInstanceListRow,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { useEffect } from "react";
 import { create } from "zustand";
 
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
+import { loadOrbitThreadIndex } from "./orbitThreadIndex";
 
 export type OrbitInstanceListState =
   | { readonly status: "loading" }
@@ -29,6 +29,9 @@ export async function loadOrbitInstanceList(): Promise<void> {
     state: state.status === "loaded" ? state : { status: "loading" },
   });
   const client = desktopOrbitGatewayClient();
+  // Conn (flag `connAttachedServers` only): the threads of held-off servers, read with the list.
+  // Not awaited: the list never waits for the index.
+  void loadOrbitThreadIndex(client).catch(() => {});
   let next: OrbitInstanceListState;
   try {
     if (client === null) throw new Error("The Orbit Gateway is not available here.");
@@ -39,13 +42,4 @@ export async function loadOrbitInstanceList(): Promise<void> {
   if (useOrbitInstanceListStore.getState().generation === current) {
     useOrbitInstanceListStore.setState({ state: next });
   }
-}
-
-/** Reads the list each time the page opens. */
-export function useOrbitInstanceList(): OrbitInstanceListState {
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Gateway each time the Instances page opens
-  useEffect(() => {
-    void loadOrbitInstanceList();
-  }, []);
-  return useOrbitInstanceListStore((store) => store.state);
 }

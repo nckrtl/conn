@@ -1,4 +1,4 @@
-import { useRoute } from "@react-navigation/native";
+import { useNavigation, useRoute } from "@react-navigation/native";
 import type { ReactNode } from "react";
 import { View } from "react-native";
 
@@ -9,6 +9,8 @@ import { useWorkspaceTabs } from "../../layout/workspace/WorkspaceTabsContext";
 import { useDeviceType } from "../../../native/native-layout-metrics";
 import { useCompactWorkspaceTabs } from "../../layout/workspace/useSystemWorkspaceTabBar";
 import { useSettingsPageBack } from "../useSettingsPageBack";
+import { SETTINGS_OPENS_AS_SHEET, settingsSheetClosedState } from "../settings-sheet";
+import { resetRootStack } from "../../../lib/root-stack-reset";
 import {
   ScreenScrollViewBottomInset,
   ScreenScrollViewSurface,
@@ -29,10 +31,16 @@ export function SettingsScreen(
   const workspace = useWorkspaceTabs();
   const deviceType = useDeviceType();
   const compactTabs = useCompactWorkspaceTabs();
+  const navigation = useNavigation();
   const back = useSettingsPageBack();
   const cover = deviceType === "duo-folded";
   // Opened as a workspace tab, the Settings list has nothing to go back to.
   const workspaceRoot = props.workspaceRoot || (workspace !== null && route.name === "Settings");
+  // iPhone: the Settings list leads its sheet, so it closes the sheet with every page in it.
+  const closeSheet =
+    SETTINGS_OPENS_AS_SHEET && route.name === "Settings"
+      ? () => resetRootStack(navigation, settingsSheetClosedState)
+      : undefined;
 
   const surfaceClassName = workspaceRoot || cover ? "bg-screen" : "bg-sheet";
 
@@ -46,6 +54,8 @@ export function SettingsScreen(
         trailing={props.trailing}
         menus={props.menus}
         onBack={workspaceRoot ? undefined : back}
+        onClose={closeSheet}
+        closeAccessibilityLabel={closeSheet ? "Close settings" : undefined}
         guardBack={props.guardBack}
         hideBottomBorder
       />

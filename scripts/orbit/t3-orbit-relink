@@ -1,20 +1,29 @@
 #!/bin/sh
 # Renews this host's linked environments through the Orbit Gateway before they expire.
 #
-#   t3-orbit-relink [T3 CLI COMMAND...]
+#   t3-orbit-relink [--service-label LABEL] [T3 CLI COMMAND...]
 #
 # A link holds a session on the other environment that ends after 30 days, and nothing renews it.
 # For each link that expires within RENEW_DAYS (default 10), this asks the Gateway for a pairing
 # link to that environment (the Gateway holds an admin session on every registered T3 server) and
 # links again with the same addresses and access. Linking again replaces the old link.
-# The T3 CLI command defaults to `t3`. Run it daily, like t3-orbit-register (see FORK.md).
+# The T3 CLI command defaults to `t3`. With --service-label, the CLI is the binary that launchd job runs
+# now, found by t3-orbit-register --print-cli (installed next to this script). Run it daily, like
+# t3-orbit-register (see FORK.md).
 set -eu
 
+if [ "${1:-}" = --service-label ]; then
+    [ $# -eq 2 ] || { echo "usage: t3-orbit-relink [--service-label LABEL] [T3 CLI COMMAND...]" >&2; exit 64; }
+    cli=$(sh "$(dirname "$0")/t3-orbit-register" --service-label "$2" --print-cli http://unused) || exit $?
+    set -- "$cli"
+fi
 [ $# -ge 1 ] || set -- t3
 gateway=${ORBIT_GATEWAY_URL:-https://gateway.orbit}
 renew_days=${RENEW_DAYS:-10}
 
-due=$("$@" environment list --json | jq -c --argjson days "$renew_days" '
+# A failed list must fail the run, not read as "no link expires".
+links=$("$@" environment list --json) || { echo "t3-orbit-relink: \`$* environment list\` failed." >&2; exit 1; }
+due=$(printf '%s' "$links" | jq -c --argjson days "$renew_days" '
   (now + $days * 86400) as $deadline
   | .[]
   | select(.status == "expired" or (.expiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) <= $deadline)')

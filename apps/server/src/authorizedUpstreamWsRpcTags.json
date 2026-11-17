@@ -98,6 +98,7 @@
   "pullRequests.invalidate",
   "pullRequests.reportState",
   "pullRequests.subscribeRefreshes",
+  "pullRequests.subscribeLinkedThreadRefreshes",
   "pullRequests.reviewerCandidates",
   "pullRequests.requestReviewers",
   "pullRequests.labelCandidates",

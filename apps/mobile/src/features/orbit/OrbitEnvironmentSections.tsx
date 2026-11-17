@@ -253,6 +253,7 @@ export function OrbitEnvironmentSections() {
               <OrbitServerStatus
                 environment={environment}
                 connected={connected.has(environment.environmentId)}
+                revoked={gateway.revokedEnvironmentIds.includes(environment.environmentId)}
               />
             </View>
           ))}
@@ -269,6 +270,8 @@ export function OrbitEnvironmentSections() {
 function OrbitServerStatus(props: {
   readonly environment: OrbitGatewayEnvironment;
   readonly connected: boolean;
+  /** Conn: Orbit revoked this phone's pairing; only Connect pairs it again. */
+  readonly revoked: boolean;
 }) {
   const { environment } = props;
   const [connecting, setConnecting] = useState(false);
@@ -278,11 +281,13 @@ function OrbitServerStatus(props: {
       ? "Registration expired"
       : environment.powerState === "stopped"
         ? "Asleep"
-        : props.connected
-          ? "Paired"
-          : environment.instanceId === null || connecting
-            ? "Pairing…"
-            : null;
+        : props.revoked && !connecting
+          ? null
+          : props.connected
+            ? "Paired"
+            : environment.instanceId === null || connecting
+              ? "Pairing…"
+              : null;
   if (status !== null) return <Text className="text-sm text-foreground-muted">{status}</Text>;
 
   const connect = async () => {
@@ -294,7 +299,7 @@ function OrbitServerStatus(props: {
   return (
     <View className="flex-row items-center gap-3">
       <Text className="text-sm text-foreground-muted">
-        {failed ? "Could not pair" : "Not connected"}
+        {failed ? "Could not pair" : props.revoked ? "Revoked in Orbit" : "Not connected"}
       </Text>
       <ConnectionSheetButton compact icon="link" label="Connect" onPress={() => void connect()} />
     </View>

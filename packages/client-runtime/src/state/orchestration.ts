@@ -38,7 +38,7 @@ import { fetchEnvironmentThreadTranscript } from "./threadTranscriptHttp.ts";
 export function createOrchestrationEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | HttpClient.HttpClient | R, E>,
   options: {
-    /** Re-checks `threadTitles` when one of their threads leaves the shell. */
+    /** Re-checks `threadTitles` when one of their threads leaves the shell, and the archive on any removal. */
     readonly shellState?: (
       environmentId: EnvironmentId,
     ) => Atom.Atom<Pick<EnvironmentShellState, "removedAt">>;
@@ -111,13 +111,25 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
         if (config.threadLinkMetadata === true) {
           return yield* request(ORCHESTRATION_V2_WS_METHODS.getThreadLinkMetadata, input);
         }
-        const titles = yield* request(ORCHESTRATION_V2_WS_METHODS.getThreadTitles, input);
-        return Object.fromEntries(
-          Object.entries(titles).map(([id, title]) => [
-            id,
-            { title, projectId: null } satisfies OrchestrationV2ThreadLinkMetadata,
-          ]),
+        // Stock servers expose the projection read, but neither fork metadata RPC.
+        const entries = yield* Effect.forEach(input.threadIds, (threadId) =>
+          request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId }).pipe(
+            Effect.map(({ thread }) =>
+              thread.deletedAt === null
+                ? [
+                    [
+                      threadId,
+                      {
+                        title: thread.title,
+                        projectId: thread.projectId,
+                      } satisfies OrchestrationV2ThreadLinkMetadata,
+                    ] as const,
+                  ]
+                : [],
+            ),
+          ),
         );
+        return Object.fromEntries(entries.flat());
       }),
     }),
     threadTranscript: createEnvironmentCommand(runtime, {
@@ -233,12 +245,19 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     threadSearch: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:thread-search",
       tag: ORCHESTRATION_V2_WS_METHODS.searchThreads,
-      staleTimeMs: 30_000,
-      idleTtlMs: 60_000,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
     }),
     archivedShellSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:archived-shell-snapshot",
       tag: ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
+      // The shell reports archiving a thread, and deleting or changing an archived one, as a removal,
+      // and replaces `removedAt` on each one.
+      refreshTrigger: ({ environmentId }) => {
+        if (shellState === undefined) return undefined;
+        const state = shellState(environmentId);
+        return Atom.make((get) => get(state).removedAt);
+      },
     }),
     threadFamily: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:thread-family-for-delete",

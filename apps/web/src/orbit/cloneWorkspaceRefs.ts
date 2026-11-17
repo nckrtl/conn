@@ -69,6 +69,11 @@ function rememberIds(current: readonly string[], added: readonly string[]): stri
   return unique.slice(Math.max(0, unique.length - MAX_REMEMBERED));
 }
 
+/** Conn: the clone server ids this device remembers from Gateway lists (see above). */
+export function rememberedCloneEnvironmentIds(): string[] {
+  return readRemembered();
+}
+
 function readRemembered(): string[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");

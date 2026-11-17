@@ -3,6 +3,7 @@ import {
   createOrbitGatewayClient,
   orbitGatewayPathWithQuery,
   isFinalPairingError,
+  isPairingRevokedError,
   OrbitGatewayError,
   startableOrbitProject,
   type OrbitGatewayRequest,
@@ -429,6 +430,29 @@ describe("createOrbitGatewayClient", () => {
       expect(requests[0]?.timeoutMs).toBe(60_000);
     });
 
+    it("sends renew only for a renewal, and reports a revoked pairing as final", async () => {
+      const { requests, transport } = scripted([
+        [201, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
+        [201, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
+      ]);
+      const client = createOrbitGatewayClient(transport);
+      await client.pair("env-spike");
+      await client.pair("env-spike", { renew: true });
+      expect(requests[0]?.body).toBeUndefined();
+      expect(requests[1]?.body).toEqual({ renew: true });
+
+      const revoked = createOrbitGatewayClient(async () => ({
+        status: 409,
+        body: JSON.stringify({
+          status: 409,
+          error: { code: "conn.pairing_revoked", message: "Revoked.", details: {} },
+        }),
+      }));
+      const failure = await revoked.pair("env-spike", { renew: true }).catch((error) => error);
+      expect(isPairingRevokedError(failure)).toBe(true);
+      expect(isFinalPairingError(failure)).toBe(true);
+    });
+
     it("still accepts a Gateway that answers with the link at once", async () => {
       const { requests, transport } = scripted([
         [201, { pairing, pairing_url: "http://10.44.0.7:3801/pair#token=ABC" }],
@@ -474,6 +498,9 @@ describe("createOrbitGatewayClient", () => {
       expect(isFinalPairingError(error("conn.session_rejected"))).toBe(true);
       expect(isFinalPairingError(error("conn.request_refused"))).toBe(true);
       expect(isFinalPairingError(error("conn.response_invalid"))).toBe(true);
+      expect(isFinalPairingError(error("conn.pairing_revoked"))).toBe(true);
+      expect(isPairingRevokedError(error("conn.pairing_revoked"))).toBe(true);
+      expect(isPairingRevokedError(error("conn.session_rejected"))).toBe(false);
       expect(isFinalPairingError(error("conn.pairing_outcome_unknown"))).toBe(false);
       expect(isFinalPairingError(error("gateway.unreachable"))).toBe(false);
       expect(isFinalPairingError(new Error("conn.session_rejected"))).toBe(false);
@@ -606,11 +633,18 @@ describe("createOrbitGatewayClient", () => {
             started_at: "2026-11-11T20:37:04.739Z",
             finished_at: "2026-11-11T20:37:11.045Z",
           },
-          { name: "clone-t3", job: "clone", status: "failed", started_at: null },
+          { name: "clone-t3", group: "t3", job: "clone", status: "failed", started_at: null },
           { name: "clone-next", status: "paused-by-orbit", job: 3 },
           { name: 7, status: "running" },
           "clone-odd",
         ],
+      },
+      "POST /operations/100/cancel": {
+        id: 100,
+        kind: "instance.create",
+        status: "running",
+        target_id: 41,
+        poll_after_seconds: 2,
       },
       // A Project process did not stay up: Orbit names its unit; other facts are optional.
       "GET /operations/101": {
@@ -640,8 +674,59 @@ describe("createOrbitGatewayClient", () => {
         error_code: "instance.container_process_inactive",
         result: {
           process_failure: { unit: "conn-web.service" },
+          // The Gateway's shape (InstanceCompleteProjection): `requires` is under `retry`.
+          recovery: {
+            state: "retained_for_retry",
+            retry: {
+              command: "instance:complete",
+              instance_id: 41,
+              new_idempotency_key: true,
+              requires: "project_process_definition",
+            },
+          },
+        },
+      },
+      // The shape Conn used to read: `requires` beside `retry` is not Orbit's.
+      "GET /operations/104": {
+        id: 104,
+        kind: "instance.create",
+        status: "failed",
+        target_id: 41,
+        result: {
           recovery: { state: "retained_for_retry", requires: "project_process_definition" },
         },
+      },
+      // Release 2030: a create that ends at a usable thread names its completion.
+      "GET /operations/105": {
+        id: 105,
+        kind: "instance.create",
+        status: "succeeded",
+        target_id: 41,
+        input: { route_id: 77 },
+        result: { instance_id: 41, completion_operation_id: 106 },
+      },
+      "GET /operations/106": {
+        id: 106,
+        kind: "instance.complete",
+        status: "failed",
+        target_id: 41,
+        failed_step: "clone-services",
+        error_code: "instance.create_workspace_failed",
+        cancel_requested: false,
+        result: {
+          failed_step: "workspace",
+          recovery: {
+            state: "retained_for_retry",
+            retry: { command: "instance:complete", instance_id: 41, new_idempotency_key: true },
+          },
+        },
+      },
+      "POST /instances/41/complete": {
+        id: 107,
+        kind: "instance.complete",
+        status: "queued",
+        target_id: 41,
+        poll_after_seconds: 2,
       },
     };
     const client = createOrbitGatewayClient(async (request) => {
@@ -740,9 +825,23 @@ describe("createOrbitGatewayClient", () => {
       },
     ]);
     expect(projects.map(startableOrbitProject)).toEqual([
-      { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" },
+      {
+        id: 3,
+        slug: "mealou",
+        name: "Mealou",
+        nodeId: 7,
+        nodeName: "beast",
+        instanceDomainSuffix: null,
+      },
       null,
-      { id: 5, slug: "nckrtl", name: "nckrtl", nodeId: 7, nodeName: "beast" },
+      {
+        id: 5,
+        slug: "nckrtl",
+        name: "nckrtl",
+        nodeId: 7,
+        nodeName: "beast",
+        instanceDomainSuffix: ".nckrtl.test",
+      },
     ]);
     await expect(client.createThreadInstance(3, "fix-k3j9", "key-1")).resolves.toEqual({
       id: 100,
@@ -759,6 +858,15 @@ describe("createOrbitGatewayClient", () => {
       timeoutMs: 60_000,
       idempotencyKey: "key-1",
     });
+    await expect(client.cancelOperation(100)).resolves.toMatchObject({
+      id: 100,
+      status: "running",
+    });
+    expect(requests.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/operations/100/cancel",
+      body: {},
+    });
     await expect(client.operation(101)).resolves.toMatchObject({
       errorCode: "instance.container_process_inactive",
       processFailureUnit: "conn-web.service",
@@ -768,6 +876,36 @@ describe("createOrbitGatewayClient", () => {
     await expect(client.operation(102)).resolves.not.toHaveProperty("recoveryRequires");
     await expect(client.operation(103)).resolves.toMatchObject({
       recoveryRequires: "project_process_definition",
+      recoveryRetryable: true,
+    });
+    await expect(client.operation(104)).resolves.toMatchObject({
+      recoveryRequires: null,
+      recoveryRetryable: false,
+    });
+    await expect(client.operation(105)).resolves.toMatchObject({
+      completionOperationId: 106,
+      routeId: 77,
+    });
+    // An older Gateway's create names no completion.
+    await expect(client.operation(103)).resolves.not.toHaveProperty("completionOperationId");
+    await expect(client.operation(106)).resolves.toMatchObject({
+      kind: "instance.complete",
+      failedStep: "clone-services",
+      resultFailedStep: "workspace",
+      cancelRequested: false,
+      recoveryRequires: null,
+      recoveryRetryable: true,
+    });
+    await expect(client.completeInstance(41, "key-c")).resolves.toMatchObject({
+      id: 107,
+      kind: "instance.complete",
+      status: "queued",
+    });
+    expect(requests.at(-1)).toEqual({
+      method: "POST",
+      path: "/instances/41/complete",
+      timeoutMs: 60_000,
+      idempotencyKey: "key-c",
     });
     // An unknown step status passes through; a step without a name or status is dropped.
     await expect(client.operation(100)).resolves.toEqual({
@@ -794,7 +932,14 @@ describe("createOrbitGatewayClient", () => {
           startedAt: "2026-11-11T20:37:04.739Z",
           finishedAt: "2026-11-11T20:37:11.045Z",
         },
-        { name: "clone-t3", job: "clone", status: "failed", startedAt: null, finishedAt: null },
+        {
+          name: "clone-t3",
+          group: "t3",
+          job: "clone",
+          status: "failed",
+          startedAt: null,
+          finishedAt: null,
+        },
         {
           name: "clone-next",
           job: null,

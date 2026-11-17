@@ -26,8 +26,9 @@ function rightClick(element: Element): boolean {
     new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 4, clientY: 4 }),
   );
 }
-import type { OrbitSetupView } from "~/orbit/orbitSetupView";
-import { OrbitReadyRow, OrbitSetupCard } from "./OrbitSetupCard";
+import type { OrbitCreateRowId } from "@t3tools/client-runtime/orbit-gateway";
+import type { OrbitSetupView, OrbitSetupViewStage } from "~/orbit/orbitSetupView";
+import { OrbitReadyRow, OrbitSetupCard, OrbitThreadSetupRow } from "./OrbitSetupCard";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
 
 const NOW = new Date("2026-10-26T12:00:10.000Z");
@@ -108,15 +109,24 @@ const orbitStage = (
   id: "create" | "connect" | "agent",
   label: string,
   status: "pending" | "running" | "done" | "failed",
-  extra: { detail?: string; subDetail?: string } = {},
+  extra: { detail?: string; rows?: OrbitSetupViewStage["rows"] } = {},
 ) => ({
   id,
   label,
   status,
   detail: extra.detail ?? null,
-  subDetail: extra.subDetail ?? null,
-  startedAt: status === "pending" ? null : "2026-10-26T12:00:00.000Z",
-  endedAt: status === "done" || status === "failed" ? "2026-10-26T12:00:04.000Z" : null,
+  rows: extra.rows ?? null,
+});
+
+const orbitRow = (
+  id: OrbitCreateRowId,
+  label: string,
+  status: "pending" | "running" | "done" | "failed",
+) => ({
+  id,
+  label,
+  status,
+  detail: id === "address" ? "meetup.nckrtl.test" : null,
 });
 
 function orbitCard(
@@ -127,14 +137,21 @@ function orbitCard(
     branch: vi.fn(),
     open: vi.fn(),
     dismiss: vi.fn(),
+    cancel: vi.fn(),
   },
 ) {
   const value: OrbitSetupView = {
     phase: "running",
+    failedTitle: "Instance setup failed",
     stages: [
       orbitStage("create", "Create Instance", "running", {
         detail: "beast",
-        subDetail: "Copying the container",
+        rows: [
+          orbitRow("container", "Copy the container", "done"),
+          orbitRow("address", "Publish the address", "running"),
+          orbitRow("t3", "Start the T3 server", "pending"),
+          orbitRow("register", "Register with Orbit", "pending"),
+        ],
       }),
       orbitStage("connect", "Connect", "pending"),
       orbitStage("agent", "Start agent", "pending"),
@@ -146,6 +163,15 @@ function orbitCard(
     canChangeBranch: false,
     openInstance: null,
     instanceStays: false,
+    details: {
+      instanceName: "meetup",
+      nodeName: "beast",
+      branch: "meetup",
+      baseBranch: null,
+      url: "https://meetup.nckrtl.test",
+    },
+    cancelling: false,
+    canCancel: true,
     ...view,
   };
   return {
@@ -158,18 +184,177 @@ function orbitCard(
         onChangeBranch={actions.branch}
         onOpenInstance={actions.open}
         onDismiss={actions.dismiss}
+        onCancel={actions.cancel}
       />
     ),
   };
 }
 
-it("shows a running Orbit setup with the Node and the clone step, and no actions", async () => {
-  await using screen = await render(orbitCard({}).element);
+it("shows a running Orbit setup with the create rows, Details closed and Cancel", async () => {
+  const card = orbitCard({});
+  await using screen = await render(<div style={{ width: 640 }}>{card.element}</div>);
   const section = screen.getByRole("region", { name: "Instance setup" });
-  await expect.element(screen.getByText("Copying the container")).toBeVisible();
   expect(section.element().textContent).toContain("Create Instancebeast");
+  const rows = screen.container.querySelectorAll("[data-orbit-create-row]");
+  expect([...rows].map((row) => row.getAttribute("data-orbit-create-status"))).toEqual([
+    "done",
+    "running",
+    "pending",
+    "pending",
+  ]);
+  await expect.element(screen.getByText("Copy the container")).toBeVisible();
+  // No timings anywhere; the address row shows the address, dimmed, before its icon.
+  expect(section.element().textContent).not.toMatch(/\d+(ms|s)\b/);
+  expect(section.element().textContent).toContain("Publish the addressmeetup.nckrtl.test");
+  // Every status icon sits at the right end of its row.
+  for (const row of section
+    .element()
+    .querySelectorAll<HTMLElement>("[data-orbit-create-row], [data-orbit-setup-stage]")) {
+    const icon = row.querySelector<HTMLElement>("[data-orbit-row-icon]")!;
+    expect(row.getBoundingClientRect().right - icon.getBoundingClientRect().right).toBeLessThan(4);
+    // One icon size, 16 px, for main rows and sub rows.
+    const svg = icon.querySelector<SVGElement>("svg")!;
+    expect(getComputedStyle(svg).width).toBe("16px");
+  }
   expect(section.element().textContent).not.toContain("Instance setup failed");
   expect(screen.getByRole("button", { name: "Retry" }).query()).toBeNull();
+
+  const details = screen.getByRole("button", { name: "Details" });
+  await expect.element(details).toHaveAttribute("aria-expanded", "false");
+  expect(screen.container.querySelector("[data-orbit-setup-details]")).toBeNull();
+  await details.click();
+  await expect.element(screen.getByText("https://meetup.nckrtl.test")).toBeVisible();
+
+  await screen.getByRole("button", { name: "Cancel" }).click();
+  expect(card.actions.cancel).toHaveBeenCalledOnce();
+});
+
+it("in the thread, follows the completion: no Cancel while it runs, Retry and Dismiss when it failed", async () => {
+  const threadRef = {
+    environmentId: EnvironmentId.make("env-41"),
+    threadId: ThreadId.make("thread-1"),
+  };
+  const readyView = {
+    instanceName: "meetup",
+    nodeName: "beast",
+    url: null,
+    readyLine: "Your Instance is ready.",
+    modelFallbackLine: null,
+    branch: null,
+    baseBranch: null,
+    dependenciesLine: null,
+  };
+  const completionRows = (address: "running" | "failed") => [
+    orbitRow("container", "Copy the container", "done"),
+    orbitRow("address", "Publish the address", address),
+    orbitRow("t3", "Start the T3 server", "done"),
+    orbitRow("register", "Register with Orbit", "done"),
+  ];
+  const doneStages = (address: "running" | "failed") => [
+    orbitStage("create", "Create Instance", address, {
+      detail: "beast",
+      rows: completionRows(address),
+    }),
+    orbitStage("connect", "Connect", "done"),
+    orbitStage("agent", "Start agent", "done"),
+  ];
+  const running = orbitCard({ stages: doneStages("running"), canCancel: false });
+  const retry = vi.fn();
+  const dismiss = vi.fn();
+  await using screen = await render(
+    <OrbitThreadSetupRow
+      ready={{
+        view: readyView,
+        threadRef,
+        messageId: "m1",
+        setup: (running.element.props as { view: OrbitSetupView }).view,
+      }}
+    />,
+  );
+  await expect.element(screen.getByText("Publish the address")).toBeVisible();
+  expect(screen.getByText("Copy the workspace").query()).toBeNull();
+  // In the thread the card only follows the address: no Details, no Cancel (storyboard 6).
+  expect(screen.getByRole("button", { name: "Cancel" }).query()).toBeNull();
+  expect(screen.getByRole("button", { name: "Details" }).query()).toBeNull();
+  expect(screen.getByText("Instance ready").query()).toBeNull();
+
+  const failed = orbitCard({
+    phase: "failed",
+    stages: doneStages("failed"),
+    canCancel: false,
+    canRetry: true,
+    instanceStays: true,
+    errorDetailLine: "instance.create_route_failed · dns",
+  });
+  await screen.rerender(
+    <OrbitThreadSetupRow
+      ready={{
+        view: readyView,
+        threadRef,
+        messageId: "m1",
+        setup: (failed.element.props as { view: OrbitSetupView }).view,
+        onRetry: retry,
+        onDismiss: dismiss,
+      }}
+    />,
+  );
+  await expect.element(screen.getByText("Instance setup failed")).toBeVisible();
+  const statuses = [...screen.container.querySelectorAll("[data-orbit-create-row]")].map(
+    (row) =>
+      `${row.getAttribute("data-orbit-create-row")}:${row.getAttribute("data-orbit-create-status")}`,
+  );
+  expect(statuses).toContain("address:failed");
+  expect(screen.getByRole("button", { name: "Change name" }).query()).toBeNull();
+  await screen.getByRole("button", { name: "Retry" }).click();
+  await screen.getByRole("button", { name: "Dismiss" }).click();
+  expect(retry).toHaveBeenCalledOnce();
+  expect(dismiss).toHaveBeenCalledOnce();
+
+  // A completion cancelled outside a removal: the same card under the cancelled title (Q4).
+  const cancelled = orbitCard({
+    phase: "failed",
+    failedTitle: "Instance setup cancelled",
+    stages: doneStages("failed"),
+    canCancel: false,
+    canRetry: true,
+    instanceStays: true,
+    errorDetailLine: "operation.cancelled",
+  });
+  await screen.rerender(
+    <OrbitThreadSetupRow
+      ready={{
+        view: readyView,
+        threadRef,
+        messageId: "m1",
+        setup: (cancelled.element.props as { view: OrbitSetupView }).view,
+        onRetry: retry,
+        onDismiss: dismiss,
+      }}
+    />,
+  );
+  await expect.element(screen.getByText("Instance setup cancelled")).toBeVisible();
+  expect(screen.getByText("Instance setup failed").query()).toBeNull();
+  await expect.element(screen.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Dismiss" })).toBeVisible();
+
+  await screen.rerender(
+    <OrbitThreadSetupRow ready={{ view: readyView, threadRef, messageId: "m1", setup: null }} />,
+  );
+  await expect.element(screen.getByText("Instance ready")).toBeVisible();
+});
+
+it("folds the create rows once the stage is done", async () => {
+  await using screen = await render(
+    orbitCard({
+      stages: [
+        orbitStage("create", "Create Instance", "done", { detail: "beast" }),
+        orbitStage("connect", "Connect", "running"),
+        orbitStage("agent", "Start agent", "pending"),
+      ],
+    }).element,
+  );
+  await expect.element(screen.getByText("Connect")).toBeVisible();
+  expect(screen.container.querySelector("[data-orbit-create-row]")).toBeNull();
 });
 
 it("shows a done Orbit setup with every stage checked", async () => {
@@ -304,7 +489,6 @@ it("folds a finished Orbit start to Instance ready with Details open and Conn's 
     threadId: ThreadId.make("thread-1"),
   };
   const view = {
-    readyMs: 12_000,
     instanceName: "pricing-page",
     nodeName: "beast",
     url: "https://pricing-page.create-bench.test",
@@ -316,6 +500,10 @@ it("folds a finished Orbit start to Instance ready with Details open and Conn's 
   };
   await using screen = await render(<OrbitReadyRow view={view} threadRef={threadRef} />);
   await expect.element(screen.getByText("Instance ready")).toBeVisible();
+  // No timing on the ready row (storyboard 7).
+  expect(screen.container.querySelector("[data-orbit-setup-stage]")?.textContent).toBe(
+    "Instance ready",
+  );
   await expect
     .element(screen.getByRole("button", { name: "Details" }))
     .toHaveAttribute("aria-expanded", "true");
@@ -339,7 +527,6 @@ it("gives the ready line and Preview chip the chat link menu for the Instance ad
     threadId: ThreadId.make("thread-1"),
   };
   const view = {
-    readyMs: 64_000,
     instanceName: "meetup",
     nodeName: "beast",
     url,

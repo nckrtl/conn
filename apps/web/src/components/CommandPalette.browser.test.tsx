@@ -1,3 +1,4 @@
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -17,11 +18,38 @@ import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gate
 const entities = vi.hoisted(() => ({
   projects: [] as ReadonlyArray<Project>,
   threads: [] as ReadonlyArray<Thread>,
+  delegatedUnderParent: new Set<string>() as ReadonlySet<string>,
+  handleNewThread: vi.fn(async () => undefined),
 }));
+vi.mock("../state/server", async (original) => {
+  const actual = await original<typeof import("../state/server")>();
+  const { Atom } = await import("effect/reactivity");
+  const { compileResolvedKeybindingsConfig } = await import("@t3tools/shared/keybindings");
+  const { THREAD_JUMP_KEYBINDING_COMMANDS } = await import("@t3tools/contracts");
+  // The default jump bindings are desktop-only; these hold in the browser too.
+  const jumpBindings = compileResolvedKeybindingsConfig(
+    THREAD_JUMP_KEYBINDING_COMMANDS.map((command, index) => ({
+      key: `mod+${index + 1}`,
+      command,
+    })),
+  );
+  return { ...actual, primaryServerKeybindingsAtom: Atom.make(jumpBindings) };
+});
+vi.mock("../hooks/useHandleNewThread", async (original) => {
+  const actual = await original<typeof import("../hooks/useHandleNewThread")>();
+  return {
+    ...actual,
+    useHandleNewThread: () => ({
+      ...actual.useHandleNewThread(),
+      handleNewThread: entities.handleNewThread,
+    }),
+  };
+});
 vi.mock("../state/entities", async (original) => ({
   ...(await original<typeof import("../state/entities")>()),
   useProjects: () => entities.projects,
   useVisibleThreadShells: () => entities.threads,
+  useDelegatedUnderParent: () => entities.delegatedUnderParent,
 }));
 
 const orbit = vi.hoisted(() => ({
@@ -66,13 +94,7 @@ function orbitEnvironment(
   };
 }
 
-function setup(
-  state: {
-    projects?: ReadonlyArray<Project>;
-    threads?: ReadonlyArray<Thread>;
-    orbit?: OrbitPaletteProjectsState;
-  } = {},
-) {
+function setup(state: Partial<typeof entities> & { orbit?: OrbitPaletteProjectsState } = {}) {
   // Earlier browser test files share this origin's localStorage; a remembered project
   // that is not listed here hides the default "New thread in <project>" row.
   removeLocalStorageItem(LAST_USED_PROJECT_STORAGE_KEY);
@@ -83,6 +105,22 @@ function setup(
   orbit.retry.mockReset();
   orbit.checkInstanceName.mockReset();
   orbit.openOrbitDraft.mockReset();
+  entities.delegatedUnderParent = state.delegatedUnderParent ?? new Set();
+  entities.handleNewThread.mockClear();
+}
+
+function makeProject(title: string): Project {
+  return {
+    id: ProjectId.make(title),
+    environmentId: EnvironmentId.make("local"),
+    title,
+    workspaceRoot: `/work/${title}`,
+    repositoryIdentity: null,
+    defaultModelSelection: null,
+    createdAt: "2026-03-01T00:00:00.000Z",
+    updatedAt: "2026-03-01T00:00:00.000Z",
+    scripts: [],
+  };
 }
 
 describe("CommandPalette open intents", () => {
@@ -132,7 +170,9 @@ describe("CommandPalette open intents", () => {
       document.dispatchEvent(pointer("pointerup", 50, window.innerHeight - 30));
     });
     expect(onDrop).toHaveBeenCalledOnce();
-    expect((onDrop.mock.calls[0]![0] as CustomEvent).detail).toEqual([{ environmentId, threadId }]);
+    expect((onDrop.mock.calls[0]![0] as CustomEvent).detail).toEqual([
+      { environmentId, threadId, title: "Drag this thread" },
+    ]);
     expect(screen.router?.state.location.pathname).toBe(pathname);
   });
 
@@ -189,11 +229,13 @@ describe("CommandPalette open intents", () => {
     await expect.element(input).toHaveValue("acme");
   });
 
-  it("opens a searched project's latest listed thread, not a newer subagent", async () => {
+  it("opens a searched project's latest listed thread, not a newer subagent, delegated task, or parked thread", async () => {
     const environmentId = EnvironmentId.make("local");
     const projectId = ProjectId.make("acme");
     const parentId = ThreadId.make("parent");
+    const delegatedId = ThreadId.make("delegated");
     setup({
+      delegatedUnderParent: new Set([threadKey({ environmentId, threadId: delegatedId })]),
       projects: [
         {
           id: projectId,
@@ -224,6 +266,26 @@ describe("CommandPalette open intents", () => {
             parentThreadId: parentId,
             relationshipToParent: "subagent",
           },
+        }),
+        makeThreadFixture({
+          id: delegatedId,
+          environmentId,
+          projectId,
+          latestUserMessageAt: "2026-03-04T00:00:00.000Z",
+        }),
+        makeThreadFixture({
+          id: ThreadId.make("settled"),
+          environmentId,
+          projectId,
+          latestUserMessageAt: "2026-03-05T00:00:00.000Z",
+          settledOverride: "settled",
+        }),
+        makeThreadFixture({
+          id: ThreadId.make("snoozed"),
+          environmentId,
+          projectId,
+          latestUserMessageAt: "2026-03-06T00:00:00.000Z",
+          snoozedUntil: "2999-01-01T00:00:00.000Z",
         }),
       ],
     });
@@ -350,7 +412,7 @@ describe("CommandPalette open intents", () => {
     const nameField = page.getByRole("textbox", { name: "Instance name" });
     await expect.element(nameField).toBeVisible();
     await expect.element(page.getByRole("option", { name: /fix/ })).toBeVisible();
-    await expect.element(page.getByText("Becomes the branch and the domain.")).toBeVisible();
+    await expect.element(page.getByText("Becomes the branch.")).toBeVisible();
 
     await userEvent.type(nameField, "fix");
     await expect.element(page.getByText("fix is taken in nckrtl.")).toBeVisible();
@@ -361,14 +423,14 @@ describe("CommandPalette open intents", () => {
       .toBeVisible();
     await userEvent.clear(nameField);
     await userEvent.type(nameField, "pricing");
-    await expect.element(page.getByText("pricing.nckrtl.test is available.")).toBeVisible();
+    await expect.element(page.getByText("pricing is available.")).toBeVisible();
     await userEvent.clear(nameField);
 
     const search = page.getByPlaceholder("Search instances…");
     await userEvent.type(search, "New Page");
     await expect.element(page.getByText("Nothing found.")).toBeVisible();
     await expect.element(nameField).toHaveValue("new-page");
-    await expect.element(page.getByText("new-page.nckrtl.test is available.")).toBeVisible();
+    await expect.element(page.getByText("new-page is available.")).toBeVisible();
     await userEvent.keyboard("{Enter}");
     await vi.waitFor(() => expect(orbit.openOrbitDraft).toHaveBeenCalledOnce());
     expect(orbit.openOrbitDraft.mock.calls[0]![1]).toMatchObject({
@@ -404,7 +466,8 @@ describe("CommandPalette open intents", () => {
     );
     const nameField = page.getByRole("textbox", { name: "Instance name" });
     await expect.element(nameField).toHaveValue("pricing");
-    await expect.element(page.getByText(".nckrtl.test")).toBeVisible();
+    // The name alone: no address suffix after the field.
+    await expect.element(page.getByText(".nckrtl.test")).not.toBeInTheDocument();
     await expect.element(page.getByText("pricing is available.")).toBeVisible();
     // The list is still loading: skeleton rows under the label, the name field already works.
     await expect.element(page.getByText("Existing instances")).toBeVisible();
@@ -433,5 +496,24 @@ describe("CommandPalette open intents", () => {
     await userEvent.keyboard("{Enter}");
     await vi.waitFor(() => expect(orbit.retry).toHaveBeenCalledOnce());
     expect(orbit.openOrbitDraft).not.toHaveBeenCalled();
+  });
+
+  it("numbers filtered New thread in... rows from 1 and jumps to them", async () => {
+    using _platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    setup({ projects: [makeProject("server"), makeProject("lima")] });
+    await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
+
+    openCommandPalette({ open: "new-thread-in" });
+    await userEvent.fill(page.getByPlaceholder("Search..."), "li");
+    await expect.element(page.getByRole("option", { name: /server/ })).not.toBeInTheDocument();
+    await expect.element(page.getByRole("option", { name: /lima/ })).toMatchTextContent("Ctrl+1");
+    await userEvent.keyboard("{Control>}1{/Control}");
+
+    await vi.waitFor(() =>
+      expect(entities.handleNewThread).toHaveBeenCalledWith({
+        environmentId: EnvironmentId.make("local"),
+        projectId: ProjectId.make("lima"),
+      }),
+    );
   });
 });

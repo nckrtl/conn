@@ -238,7 +238,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     linear-gradient(
       to top,
       transparent 0 var(--chat-composer-attachment-overlap),
-      rgb(0 0 0 / 18%) var(--chat-composer-attachment-overlap),
+      var(--chat-composer-attached-seam, rgb(0 0 0 / 18%)) var(--chat-composer-attachment-overlap),
       transparent calc(var(--chat-composer-attachment-overlap) + 10px)
     );
   --color-zinc-25: oklch(99.2% 0 0);
@@ -493,6 +493,14 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   @variant dark {
     background: color-mix(in srgb, var(--background) 64%, transparent);
   }
+}
+
+/* The app modals cover the whole window, the browser page included: a bright page under the
+   lighter dialog-backdrop stays orange and its large text readable. */
+@utility app-modal-backdrop {
+  background: color-mix(in srgb, var(--background) 80%, transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
 }
 
 @utility dropdown-glass {
@@ -2685,6 +2693,10 @@ html {
   --shell-blur: 40px;
   --shell-saturate: 1.6;
   --shell-fill: color-mix(in srgb, var(--sidebar) 88%, transparent);
+  /* The frame of the app modals (Settings, Usage, Orbit). They float over the app, not over
+     the desktop, so they keep this fill when html.electron-macos thins --shell-fill for the
+     native glass: a bright page behind them must not tint them. Same 94% as --shell-overlay. */
+  --shell-modal-fill: color-mix(in srgb, var(--sidebar) 94%, transparent);
   --shell-panel: color-mix(in oklab, var(--sidebar) 40%, var(--background));
   /* Chat and right-panel cards share the thread panel's opaque color, so they
      can re-root --background on it for everything inside. */
@@ -2748,6 +2760,11 @@ html {
   --shell-fill: color-mix(
     in srgb,
     color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 86%,
+    transparent
+  );
+  --shell-modal-fill: color-mix(
+    in srgb,
+    color-mix(in oklab, var(--sidebar) 92%, var(--foreground)) 94%,
     transparent
   );
   --shell-panel: var(--sidebar);
@@ -2946,6 +2963,7 @@ html.electron-macos.dark {
   html.electron-macos,
   html.electron-macos.dark {
     --shell-fill: var(--sidebar);
+    --shell-modal-fill: var(--sidebar);
     --shell-inner-fill: var(--shell-card);
   }
 }
@@ -2967,11 +2985,19 @@ html.dark[data-theme-id] [data-app-sidebar] {
 }
 
 /* A workspace area with no control of its own takes F6 focus itself; keep that visible.
-   workspaceFocus.ts marks those, since :focus-visible also matches a clicked area after a key press. */
+   workspaceFocus.ts marks those, since :focus-visible also matches a clicked area after a key press.
+   The conversation's timeline takes it instead, and its top fade mask would hide its own ring. */
 [data-workspace-area]:focus-visible {
   outline: none;
 }
-[data-workspace-keyboard-focus]:focus {
+[data-workspace-keyboard-focus]:focus,
+[data-workspace-area="conversation"]:has(
+  .messages-timeline-scroll[data-workspace-keyboard-focus]:focus
+) {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
+}
+
+.messages-timeline-scroll:focus-visible {
+  outline: none;
 }

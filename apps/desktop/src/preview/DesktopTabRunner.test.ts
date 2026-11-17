@@ -2,7 +2,14 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import * as NodeEvents from "node:events";
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Dialog,
+  type Page,
+} from "playwright-core";
 import {
   beforeAll,
   afterAll,
@@ -25,6 +32,7 @@ import {
   redactSensitiveValues,
 } from "@t3tools/shared/credentialFill";
 import { DesktopTabRunner } from "./DesktopTabRunner.ts";
+import { interceptNativeDialogs } from "./NativeDialogs.ts";
 
 const binding = {
   environmentId: EnvironmentId.make("fixture-environment"),
@@ -61,10 +69,15 @@ describe("desktop tab runner", () => {
   let reports: boolean[];
   let remembered: string[];
   let commands: string[];
+  let focusEmulation: boolean[];
   let stallScreenshot = false;
   let nativeCapture: ((scale: number) => Promise<string>) | undefined;
   let attachRunner: () => Promise<void>;
   let screenshotStarted: (() => void) | undefined;
+  let nativeContents: NodeEvents.EventEmitter & { debugger: NodeEvents.EventEmitter };
+  let nativeDialog: ReturnType<typeof vi.fn<() => void>>;
+  let ownsDialogs: () => boolean;
+  let originalDialog: Dialog | null;
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true });
   });
@@ -75,16 +88,26 @@ describe("desktop tab runner", () => {
     context = await browser.newContext();
     page = await context.newPage();
     // The native debugger has no second Playwright client auto-dismissing dialogs.
-    page.on("dialog", () => {});
+    originalDialog = null;
+    page.on("dialog", (dialog) => {
+      originalDialog = dialog;
+    });
     await page.setContent(
       '<input id="password" type="password"><input id="name"><button onclick="this.textContent=\'Done\'">Send</button>',
     );
     reports = [];
     remembered = [];
     commands = [];
+    focusEmulation = [];
     stallScreenshot = false;
     nativeCapture = undefined;
     screenshotStarted = undefined;
+    nativeContents = Object.assign(new NodeEvents.EventEmitter(), {
+      debugger: new NodeEvents.EventEmitter(),
+    });
+    nativeDialog = vi.fn();
+    nativeContents.on("-run-dialog", nativeDialog);
+    ownsDialogs = () => false;
     runner = new DesktopTabRunner(
       binding,
       "connection-1",
@@ -99,12 +122,16 @@ describe("desktop tab runner", () => {
         {
           send: (method, params) => {
             commands.push(method);
+            if (method === "Emulation.setFocusEmulationEnabled")
+              focusEmulation.push(params["enabled"] as boolean);
             if (stallScreenshot && method === "Page.captureScreenshot") {
               screenshotStarted?.();
               return new Promise(() => {});
             }
             return cdp.send(method as Parameters<typeof cdp.send>[0], params as never);
           },
+          receivesScreencast: () => true,
+          ackScreencastFrame: () => {},
           targetId: async () => (await cdp.send("Target.getTargetInfo")).targetInfo.targetId,
           url: () => page.url(),
           title: () => "Fixture",
@@ -113,9 +140,18 @@ describe("desktop tab runner", () => {
           ...(nativeCapture ? { captureScreenshot: nativeCapture } : {}),
         },
         {
+          interceptDialogs: (agentOwnsPage) => {
+            ownsDialogs = agentOwnsPage;
+            return interceptNativeDialogs(nativeContents, agentOwnsPage);
+          },
           on: (listener) => {
-            const forward = (event: { method: string; params: unknown }) =>
+            const forward = (event: { method: string; params: unknown }) => {
               listener(event.method, event.params, "");
+              if (event.method === "Page.javascriptDialogOpening")
+                nativeContents.emit("-run-dialog", event.params, vi.fn());
+              if (event.method === "Page.javascriptDialogClosed") originalDialog = null;
+              nativeContents.debugger.emit("message", {}, event.method, event.params);
+            };
             // The native debugger emits the same page events the CDP client receives.
             const methods = [
               "Page.frameNavigated",
@@ -144,11 +180,13 @@ describe("desktop tab runner", () => {
     await attachRunner();
   });
   afterEach(async () => {
+    await originalDialog?.dismiss().catch(() => undefined);
     await runner?.close();
     await context?.close();
   });
 
   it("uses shared snapshot text, refs, and a screenshot of the attached page", async () => {
+    expect(focusEmulation).toEqual([true]);
     const result = await runner.respond(request("snapshot"));
     expect(result.ok).toBe(true);
     const snapshot = result.result as { accessibilityTree: string; screenshot: { data: string } };
@@ -164,10 +202,14 @@ describe("desktop tab runner", () => {
       true,
     );
     expect(await page.locator("#name").inputValue()).toBe("Fixture");
+    expect((await runner.respond(request("press", { key: "!" }))).ok).toBe(true);
+    expect(await page.locator("#name").inputValue()).toBe("Fixture!");
     expect(await runner.respond(request("evaluate", { expression: "1+1" }))).toMatchObject({
       ok: true,
       result: 2,
     });
+    await runner.close();
+    expect(focusEmulation).toEqual([true, false]);
   });
 
   it("captures snapshots through the native adapter when the guest's CDP capture stalls", async () => {
@@ -243,22 +285,62 @@ describe("desktop tab runner", () => {
     );
   });
 
-  it("reports and resolves a prompt without queueing behind the click", async () => {
-    await page.setContent(
-      `<button onclick="document.querySelector('p').textContent=prompt('Name?', 'Default')">Prompt</button><p></p>`,
-    );
-    expect((await runner.respond(request("click", { locator: "button" }))).ok).toBe(true);
-    expect(await runner.respond(request("status"))).toMatchObject({
-      ok: true,
-      result: { dialog: { type: "prompt", message: "Name?", defaultValue: "Default" } },
-    });
-    expect((await runner.respond(request("dialog", { accept: true, promptText: "Nick" }))).ok).toBe(
-      true,
-    );
-    expect(await page.locator("p").textContent()).toBe("Nick");
+  it.each(["alert", "confirm", "prompt"] as const)(
+    "reports and resolves %s without queueing behind the click",
+    async (type) => {
+      await page.setContent(
+        `<button onclick="document.querySelector('p').textContent=${type}('Name?', 'Default') ?? ''">Dialog</button><p></p>`,
+      );
+      expect(ownsDialogs()).toBe(false);
+      expect((await runner.respond(request("click", { locator: "button" }))).ok).toBe(true);
+      expect(nativeDialog).not.toHaveBeenCalled();
+      expect(ownsDialogs()).toBe(true);
+      expect(await runner.respond(request("status"))).toMatchObject({
+        ok: true,
+        result: {
+          dialog: { type, message: "Name?", defaultValue: type === "prompt" ? "Default" : "" },
+        },
+      });
+      expect(
+        (await runner.respond(request("dialog", { accept: true, promptText: "Nick" }))).ok,
+      ).toBe(true);
+      expect(ownsDialogs()).toBe(false);
+      expect(await page.locator("p").textContent()).toBe(
+        type === "prompt" ? "Nick" : type === "confirm" ? "true" : "",
+      );
+
+      const humanDialog = page.waitForEvent("dialog");
+      const humanClick = page.locator("button").click();
+      await (await humanDialog).dismiss();
+      await humanClick;
+      expect(nativeDialog).toHaveBeenCalledTimes(1);
+      nativeDialog.mockClear();
+
+      await runner.respond(request("click", { locator: "button" }));
+      expect((await runner.respond(request("dialog", { accept: false }))).ok).toBe(true);
+      expect(await page.locator("p").textContent()).toBe(type === "confirm" ? "false" : "");
+
+      await runner.respond(request("click", { locator: "button" }));
+      // Closing the host must release the renderer before the next host attaches.
+      await runner.close();
+      expect(ownsDialogs()).toBe(false);
+      expect(commands.filter((method) => method === "Page.handleJavaScriptDialog")).toHaveLength(3);
+      expect(await page.locator("p").textContent()).toBe(type === "confirm" ? "false" : "");
+    },
+  );
+
+  it("keeps a second dialog opened by resolving the first under agent control", async () => {
+    await page.setContent(`<button onclick="alert('First'); alert('Second')">Dialogs</button>`);
     await runner.respond(request("click", { locator: "button" }));
-    expect((await runner.respond(request("dialog", { accept: false }))).ok).toBe(true);
-    expect(await page.locator("p").textContent()).toBe("");
+    expect(await runner.respond(request("dialog", { accept: true }))).toMatchObject({
+      ok: true,
+      result: { dialog: { type: "alert", message: "Second" } },
+    });
+    expect(nativeDialog).not.toHaveBeenCalled();
+    expect(await runner.respond(request("dialog", { accept: true }))).toMatchObject({
+      ok: true,
+      result: { dialog: null },
+    });
   });
 
   it("uploads directly and through the page's intercepted file picker", async () => {
@@ -268,25 +350,66 @@ describe("desktop tab runner", () => {
     const path = NodePath.join(directory, "fixture.txt");
     try {
       await NodeFSP.writeFile(path, "Desktop upload fixture");
-      await page.setContent('<input id="file" type="file">');
+      await page.setContent(
+        `<input id="file" type="file" accept="text/plain,.txt" hidden>
+        <button onclick="document.querySelector('#file').click()">Choose file</button>`,
+      );
       expect(
         (await runner.respond(request("upload", { locator: "#file", paths: [path] }))).ok,
       ).toBe(true);
       expect(
         await page.locator("#file").evaluate((e: HTMLInputElement) => e.files?.[0]?.name),
       ).toBe("fixture.txt");
-      await runner.respond(request("click", { locator: "#file" }));
+      await runner.respond(request("click", { locator: "button" }));
       expect(await runner.respond(request("status"))).toMatchObject({
         ok: true,
-        result: { fileChooser: { multiple: false } },
+        result: { fileChooser: { multiple: false, accept: "text/plain,.txt" } },
+      });
+      expect((await runner.respond(request("upload", { paths: [path] }))).ok).toBe(true);
+      expect(
+        await page.locator("#file").evaluate((e: HTMLInputElement) => e.files?.[0]?.name),
+      ).toBe("fixture.txt");
+      await page.locator("#file").evaluate((e: HTMLInputElement) => {
+        e.multiple = true;
+      });
+      await runner.respond(request("click", { locator: "button" }));
+      expect(await runner.respond(request("status"))).toMatchObject({
+        ok: true,
+        result: { fileChooser: { multiple: true, accept: "text/plain,.txt" } },
       });
       expect((await runner.respond(request("upload", { paths: [] }))).ok).toBe(true);
+      expect(await runner.respond(request("status"))).toMatchObject({
+        ok: true,
+        result: { fileChooser: null },
+      });
       expect(await page.locator("#file").evaluate((e: HTMLInputElement) => e.files?.length)).toBe(
         0,
       );
+      await page.locator("button").click();
+      expect(await runner.respond(request("status"))).toMatchObject({
+        ok: true,
+        result: { fileChooser: null },
+      });
     } finally {
       await NodeFSP.rm(directory, { recursive: true });
     }
+  });
+
+  it("does not intercept file pickers outside agent actions, including after a failed action", async () => {
+    await page.setContent('<input id="file" type="file">');
+    await page.locator("#file").click();
+    expect(await runner.respond(request("status"))).toMatchObject({
+      ok: true,
+      result: { fileChooser: null },
+    });
+    expect((await runner.respond(request("click", { locator: "#missing", timeoutMs: 1 }))).ok).toBe(
+      false,
+    );
+    await page.locator("#file").click();
+    expect(await runner.respond(request("status"))).toMatchObject({
+      ok: true,
+      result: { fileChooser: null },
+    });
   });
 
   it("resizes CSS layout and emulates page appearance", async () => {
@@ -325,6 +448,7 @@ describe("desktop tab runner", () => {
       ).ok,
     ).toBe(false);
     const first = await getEndpoint();
+    expect(ownsDialogs()).toBe(true);
     const second = await getEndpoint();
     expect(first).not.toBe(second);
     expect(first).toMatch(/^ws:\/\/127\.0\.0\.1:\d+\/[\w-]{32}$/);
@@ -359,6 +483,7 @@ describe("desktop tab runner", () => {
     );
     await runner.close();
     await disconnected;
+    expect(ownsDialogs()).toBe(false);
     await expect(chromium.connectOverCDP(second, { timeout: 500 })).rejects.toThrow();
     expect(page.isClosed()).toBe(false);
   });

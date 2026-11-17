@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, type ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -38,6 +38,7 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import { ConnectionParkSeed, type ParkReason, type ParkReasons } from "./parking.ts";
 import {
   PullRequestRoutingPermissions,
   pullRequestRoutingConnectionKey,
@@ -55,6 +56,7 @@ import {
   upsertRoute,
   type ReportedEndpoint,
 } from "./routes.ts";
+import { entryWithServerLabel, routesWithUserLabel } from "./serverLabel.ts";
 
 const isSshConnectionProfile = Schema.is(SshConnectionProfile);
 
@@ -158,6 +160,25 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * Conn: holds an enabled environment off without changing the user's saved on/off choice,
+     * for an Orbit Instance that is asleep and not in use. Not persisted. Same as
+     * `setParkReason(environmentId, "asleep", parked)`.
+     */
+    readonly setParked: (environmentId: EnvironmentId, parked: boolean) => Effect.Effect<void>;
+    /**
+     * Conn: adds or removes one reason to hold an enabled environment off. It connects only while
+     * it has no reason; each owner changes only its own. Kept for environments not registered yet.
+     */
+    readonly setParkReason: (
+      environmentId: EnvironmentId,
+      reason: ParkReason,
+      held: boolean,
+    ) => Effect.Effect<void>;
+    /** Conn: the reasons each environment is held off for now (only environments with one). */
+    readonly parkReasons: Effect.Effect<ParkReasons>;
+    /** Conn: environments whose connection is up now. */
+    readonly connectedEnvironmentIds: Effect.Effect<ReadonlySet<EnvironmentId>>;
     readonly setEnabled: (
       environmentId: EnvironmentId,
       enabled: boolean,
@@ -284,6 +305,13 @@ export const make = Effect.gen(function* () {
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
+  // Conn: seeded before any supervisor exists, so a held-off server never opens a socket at start.
+  const parkSeed = yield* (yield* ConnectionParkSeed).load;
+  const parked = yield* Ref.make<ParkReasons>(
+    new Map([...parkSeed].filter(([, reasons]) => reasons.size > 0)),
+  );
+  const isParked = (environmentId: EnvironmentId) =>
+    Ref.get(parked).pipe(Effect.map((current) => current.has(environmentId)));
 
   const withLeaseLock = <A, E, R>(
     environmentId: EnvironmentId,
@@ -366,8 +394,15 @@ export const make = Effect.gen(function* () {
           const supervisor = yield* EnvironmentSupervisor.make(entry, {
             // Seed the intent to avoid publishing a false switched-off state
             // before an enabled, compatible environment starts connecting.
-            initiallyDesired: entry.enabled && entry.unsupportedReason === undefined,
+            initiallyDesired:
+              entry.enabled &&
+              entry.unsupportedReason === undefined &&
+              !(yield* isParked(environmentId)),
             learnRoutes: (input) => learnRoutes({ environmentId, ...input }),
+            learnLabel: (descriptor) => learnLabel({ environmentId, descriptor }),
+            latestEntry: SubscriptionRef.get(entries).pipe(
+              Effect.map((current) => Option.fromUndefinedOr(current.get(environmentId))),
+            ),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
             Effect.provideService(ConnectionDriver.ConnectionDriver, driver),
@@ -584,7 +619,10 @@ export const make = Effect.gen(function* () {
               existing !== sameAddress ||
               connectionRouteId(existing.target) === connectionRouteId(route.target),
           );
-          const next = withRoutes(previous, upsertRoute(routes, route));
+          const next = withRoutes(
+            previous,
+            routesWithUserLabel(previous, route.target, upsertRoute(routes, route)),
+          );
           if (next.addressesChanged) {
             yield* forgetRoutingTrust(environmentId, "register-connection");
           }
@@ -911,6 +949,47 @@ export const make = Effect.gen(function* () {
       Effect.ignore,
     );
 
+  /**
+   * Conn: a saved environment takes the name its server presents on a connection that verified
+   * the same environment id. A name the person chose stays (see `entryWithServerLabel`). The live
+   * supervisor keeps running; only its entry is replaced, as for learned routes.
+   */
+  const learnLabel = Effect.fn("EnvironmentRegistry.learnLabel")(function* (input: {
+    readonly environmentId: EnvironmentId;
+    readonly descriptor: ExecutionEnvironmentDescriptor;
+  }) {
+    return yield* withLeaseLock(
+      input.environmentId,
+      Effect.gen(function* () {
+        if ((yield* Ref.get(platformEnvironmentIds)).has(input.environmentId)) {
+          return Option.none<ConnectionCatalogEntry>();
+        }
+        const entry = (yield* SubscriptionRef.get(entries)).get(input.environmentId);
+        if (entry === undefined) return Option.none<ConnectionCatalogEntry>();
+        const next = entryWithServerLabel(entry, input.environmentId, input.descriptor);
+        if (next === null) return Option.none<ConnectionCatalogEntry>();
+        yield* registrations.setRoutes(input.environmentId, persistedRoutes(next));
+        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(input.environmentId);
+        if (lease !== undefined) {
+          yield* SubscriptionRef.update(serviceScopes, (current) =>
+            new Map(current).set(input.environmentId, { ...lease, entry: next }),
+          );
+        }
+        yield* SubscriptionRef.update(entries, (current) =>
+          new Map(current).set(input.environmentId, next),
+        );
+        return Option.some(next);
+      }),
+    ).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Could not save the name the environment presents.", {
+          environmentId: input.environmentId,
+          error,
+        }).pipe(Effect.as(Option.none<ConnectionCatalogEntry>())),
+      ),
+    );
+  });
+
   // Plain HTTP routes are unusable from an HTTPS page, which blocks mixed content.
   const allowInsecureRoutes =
     typeof globalThis.location === "undefined" || globalThis.location.protocol !== "https:";
@@ -1053,6 +1132,45 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }),
       Effect.withSpan("EnvironmentRegistry.retryNow"),
     );
+  const setParkReason = (environmentId: EnvironmentId, reason: ParkReason, held: boolean) =>
+    withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const current = yield* Ref.get(parked);
+        const reasons = current.get(environmentId) ?? new Set<ParkReason>();
+        if (reasons.has(reason) === held) return;
+        const wasHeld = reasons.size > 0;
+        const nextReasons = new Set(reasons);
+        if (held) nextReasons.add(reason);
+        else nextReasons.delete(reason);
+        const next = new Map(current);
+        if (nextReasons.size > 0) next.set(environmentId, nextReasons);
+        else next.delete(environmentId);
+        yield* Ref.set(parked, next);
+        // Only the first reason disconnects and only the last one's removal connects.
+        const isHeld = nextReasons.size > 0;
+        if (wasHeld === isHeld) return;
+        const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+        if (lease === undefined) return;
+        if (isHeld) {
+          yield* lease.supervisor.disconnect;
+        } else if (lease.entry.enabled && lease.entry.unsupportedReason === undefined) {
+          yield* lease.supervisor.connect;
+        }
+      }),
+    ).pipe(Effect.withSpan("EnvironmentRegistry.setParkReason"));
+  const setParked = (environmentId: EnvironmentId, hold: boolean) =>
+    setParkReason(environmentId, "asleep", hold);
+  const parkReasons: Effect.Effect<ParkReasons> = Ref.get(parked);
+  const connectedEnvironmentIds = Effect.gen(function* () {
+    const connected = new Set<EnvironmentId>();
+    for (const [environmentId, lease] of yield* SubscriptionRef.get(serviceScopes)) {
+      if ((yield* SubscriptionRef.get(lease.supervisor.state)).phase === "connected") {
+        connected.add(environmentId);
+      }
+    }
+    return connected as ReadonlySet<EnvironmentId>;
+  });
   const setEnabled = Effect.fn("EnvironmentRegistry.setEnabled")(function* (
     environmentId: EnvironmentId,
     enabled: boolean,
@@ -1092,8 +1210,9 @@ export const make = Effect.gen(function* () {
           nextEntries.set(environmentId, next);
           return nextEntries;
         });
+        const held = yield* isParked(environmentId);
         if (lease !== undefined) {
-          yield* enabled ? lease.supervisor.connect : lease.supervisor.disconnect;
+          yield* enabled && !held ? lease.supervisor.connect : lease.supervisor.disconnect;
         } else if (enabled) {
           yield* createServiceScope(next);
         }
@@ -1174,7 +1293,8 @@ export const make = Effect.gen(function* () {
             new Map(current).set(environmentId, { ...lease, entry: next }),
           );
           if (error !== null) yield* lease.supervisor.disconnect;
-          else if (next.enabled) yield* lease.supervisor.connect;
+          else if (next.enabled && !(yield* isParked(environmentId)))
+            yield* lease.supervisor.connect;
         }
         yield* SubscriptionRef.update(entries, (current) =>
           new Map(current).set(environmentId, next),
@@ -1195,6 +1315,10 @@ export const make = Effect.gen(function* () {
     reorderRoutes,
     removeRelayEnvironments,
     retryNow,
+    setParked,
+    setParkReason,
+    parkReasons,
+    connectedEnvironmentIds,
     setEnabled,
     setCompatibility,
     state,

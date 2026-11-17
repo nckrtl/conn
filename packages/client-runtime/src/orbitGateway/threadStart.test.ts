@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -10,6 +11,8 @@ import {
   type OrbitGatewayOperation,
 } from "./client.ts";
 import {
+  cancelOrbitCompletion,
+  cancelOrbitCreate,
   newOrbitThreadStart,
   orbitThreadInstanceName,
   orbitThreadStartCanRetry,
@@ -19,6 +22,8 @@ import {
   runOrbitThreadStart,
   type OrbitThreadStart,
 } from "./threadStart.ts";
+
+const isGatewayError = Schema.is(OrbitGatewayError);
 
 const project = { id: 3, slug: "mealou", name: "Mealou", nodeId: 7, nodeName: "beast" };
 
@@ -62,6 +67,8 @@ function gateway(script: {
   readonly pairingLost?: ReadonlyArray<number>;
   /** The succeeded create Operation's result. */
   readonly createResult?: Record<string, unknown>;
+  /** Parsed fields of the succeeded create, such as its completion (release 2030). */
+  readonly createExtra?: Partial<OrbitGatewayOperation>;
   /** Orbit's `error.detail` on a failed Operation. */
   readonly failedDetail?: string;
   /** The failed create's error code and its `result.process_failure.unit`. */
@@ -71,6 +78,8 @@ function gateway(script: {
   readonly failedRequires?: string;
   /** Answers each name check with a reason (null: available), or throws for a failed check. */
   readonly nameCheck?: (name: string) => string | null;
+  /** The cancel of an Operation fails with this error. */
+  readonly cancelFails?: OrbitGatewayError;
 }) {
   const calls: string[] = [];
   const keys: string[] = [];
@@ -140,9 +149,18 @@ function gateway(script: {
           error: { code: read.errorCode, message: null, detail: script.failedDetail },
         };
       }
-      return id === 100 && status === "succeeded" && script.createResult
-        ? { ...read, result: script.createResult }
+      return id === 100 && status === "succeeded" && (script.createResult || script.createExtra)
+        ? {
+            ...read,
+            ...(script.createResult ? { result: script.createResult } : {}),
+            ...script.createExtra,
+          }
         : read;
+    },
+    cancelOperation: async (id: number) => {
+      calls.push(`cancel ${id}`);
+      if (script.cancelFails) throw script.cancelFails;
+      return op(id, 41, "running");
     },
     environments: async () => {
       calls.push("environments");
@@ -278,6 +296,16 @@ describe("readOrbitThreadStarts", () => {
       resultBranch: null,
       resultBaseBranch: null,
       nameSuffix: null,
+      createRows: null,
+      cancelRequested: false,
+      completionOperationId: null,
+      completionKey: null,
+      completionStatus: null,
+      completionErrorCode: null,
+      completionErrorDetail: null,
+      completionProcessUnit: null,
+      completionRequires: null,
+      completionRetryable: false,
     });
 
     const { client, calls } = gateway({});
@@ -344,6 +372,12 @@ describe("readOrbitThreadStarts", () => {
     });
     expect(readOrbitThreadStarts({ starts: [] })).toEqual([]);
   });
+
+  it("drops a start the palette's plus saved without a message (conn#79): it no longer runs", () => {
+    expect(readOrbitThreadStarts([{ ...v1Row, message: "" }])).toEqual([]);
+    expect(readOrbitThreadStarts([{ ...v1Row, message: "  " }])).toEqual([]);
+    expect(readOrbitThreadStarts([v1Row])).toHaveLength(1);
+  });
 });
 
 describe("runOrbitThreadStart", () => {
@@ -380,6 +414,170 @@ describe("runOrbitThreadStart", () => {
       agentStartedAt: expect.any(Number),
       sentAt: expect.any(Number),
     });
+    // The create's rows are saved as the runner reads the Operation.
+    expect(run.saves.at(-1)!.createRows?.register?.status).toBe("done");
+  });
+
+  describe("Cancel while the create is admitted", () => {
+    const cancelPorts = (client: OrbitGatewayClient, requested: () => boolean) => {
+      const run = ports(client);
+      const cancelled: string[] = [];
+      return {
+        run,
+        cancelled,
+        ports: { ...run.ports, cancelRequested: requested, cancelled: () => cancelled.push("x") },
+      };
+    };
+
+    it("cancels the Operation Orbit admitted, then ends the start", async () => {
+      const { client, calls } = gateway({});
+      const cancel = cancelPorts(client, () => true);
+      expect(await runOrbitThreadStart(fresh(), cancel.ports)).toBe(false);
+      expect(calls).toEqual(["create 3 fix-the-login-bug-on-ios-k3j9", "cancel 100"]);
+      expect(cancel.cancelled).toHaveLength(1);
+      expect(cancel.run.saves.at(-1)!.error).toBeNull();
+    });
+
+    it("cancels a create it already follows once the request arrives", async () => {
+      const { client, calls } = gateway({ create: ["running", "running", "succeeded"] });
+      const cancel = cancelPorts(client, () => calls.includes("operation 100"));
+      expect(await runOrbitThreadStart(fresh(), cancel.ports)).toBe(false);
+      expect(calls).toEqual([
+        "create 3 fix-the-login-bug-on-ios-k3j9",
+        "operation 100",
+        "cancel 100",
+      ]);
+      expect(cancel.cancelled).toHaveLength(1);
+    });
+
+    it("keeps the start with the kept Instance when the cancel fails", async () => {
+      const { client } = gateway({
+        cancelFails: new OrbitGatewayError({
+          code: "operation.not_cancellable",
+          message: "Too late to cancel.",
+          status: 409,
+          details: {},
+        }),
+      });
+      const cancel = cancelPorts(client, () => true);
+      expect(await runOrbitThreadStart(fresh(), cancel.ports)).toBe(false);
+      expect(cancel.cancelled).toEqual([]);
+      expect(cancel.run.saves.at(-1)).toMatchObject({
+        instanceId: 41,
+        createOperationId: 100,
+        errorCode: "operation.not_cancellable",
+        error: expect.stringContaining("could not cancel"),
+      });
+    });
+  });
+
+  describe("Cancel of a create that already succeeded (Orbit release 2063)", () => {
+    /** Each cancel and read answers from `answers` by Operation id; an Error is thrown. */
+    const fake = (
+      answers: Record<string, OrbitGatewayOperation | OrbitGatewayError>,
+    ): { client: OrbitGatewayClient; calls: string[] } => {
+      const calls: string[] = [];
+      const answer = (key: string) => {
+        calls.push(key);
+        const value = answers[key];
+        if (value === undefined) throw new Error(`unexpected ${key}`);
+        if (isGatewayError(value)) throw value;
+        return value;
+      };
+      const client = {
+        cancelOperation: async (id: number) => answer(`cancel ${id}`),
+        operation: async (id: number) => answer(`operation ${id}`),
+      } as unknown as OrbitGatewayClient;
+      return { client, calls };
+    };
+    const notFound = new OrbitGatewayError({
+      code: "operation.not_found",
+      message: "Not found.",
+      status: 404,
+      details: {},
+    });
+    const ended = new OrbitGatewayError({
+      code: "operation.not_cancellable",
+      message: "The Operation already ended.",
+      status: 409,
+      details: {},
+    });
+
+    it("cancels the completion the succeeded create names", async () => {
+      const { client, calls } = fake({
+        "cancel 100": { ...op(100, 41, "succeeded"), completionOperationId: 101 },
+        "cancel 101": { ...op(101, 41, "running"), cancelRequested: true },
+      });
+      await cancelOrbitCreate(client, 100);
+      expect(calls).toEqual(["cancel 100", "cancel 101"]);
+    });
+
+    it("stops after a running or cancelled create: nothing else is cancelled", async () => {
+      const running = fake({ "cancel 100": { ...op(100, 41, "running"), cancelRequested: true } });
+      await cancelOrbitCreate(running.client, 100);
+      expect(running.calls).toEqual(["cancel 100"]);
+      // A second click: Orbit answers the create cancelled again.
+      const again = fake({ "cancel 100": op(100, 41, "cancelled") });
+      await cancelOrbitCreate(again.client, 100);
+      expect(again.calls).toEqual(["cancel 100"]);
+    });
+
+    it("reads a create whose cancel was refused because it ended, and cancels its completion", async () => {
+      const { client, calls } = fake({
+        "cancel 100": ended,
+        "operation 100": { ...op(100, 41, "succeeded"), completionOperationId: 101 },
+        "cancel 101": op(101, 41, "running"),
+      });
+      await cancelOrbitCreate(client, 100);
+      expect(calls).toEqual(["cancel 100", "operation 100", "cancel 101"]);
+    });
+
+    it("keeps a refusal of a create that still runs, such as an older Gateway's 404", async () => {
+      const { client, calls } = fake({
+        "cancel 100": notFound,
+        "operation 100": op(100, 41, "running"),
+      });
+      await expect(cancelOrbitCreate(client, 100)).rejects.toBe(notFound);
+      expect(calls).toEqual(["cancel 100", "operation 100"]);
+      // Another Node's Operation: the read is refused too, and the cancel's refusal stands.
+      const foreign = fake({ "cancel 100": notFound, "operation 100": notFound });
+      await expect(cancelOrbitCreate(foreign.client, 100)).rejects.toBe(notFound);
+    });
+
+    it("leaves a completion that already ended, and keeps a refusal of one that runs", async () => {
+      const done = fake({ "cancel 101": ended, "operation 101": op(101, 41, "succeeded") });
+      await cancelOrbitCompletion(done.client, 101);
+      expect(done.calls).toEqual(["cancel 101", "operation 101"]);
+      const refused = fake({ "cancel 101": notFound, "operation 101": op(101, 41, "running") });
+      await expect(cancelOrbitCompletion(refused.client, 101)).rejects.toBe(notFound);
+    });
+
+    it("the runner cancels the completion of a create that succeeded as the Cancel arrived", async () => {
+      const { client, calls } = gateway({});
+      const cancelled: string[] = [];
+      const run = ports(client);
+      const cancels: number[] = [];
+      const racing = {
+        ...client,
+        cancelOperation: async (id: number) => {
+          cancels.push(id);
+          return id === 100
+            ? { ...op(100, 41, "succeeded"), completionOperationId: 101 }
+            : op(101, 41, "running");
+        },
+      } as OrbitGatewayClient;
+      expect(
+        await runOrbitThreadStart(fresh(), {
+          ...run.ports,
+          client: racing,
+          cancelRequested: () => true,
+          cancelled: () => cancelled.push("x"),
+        }),
+      ).toBe(false);
+      expect(calls).toEqual(["create 3 fix-the-login-bug-on-ios-k3j9"]);
+      expect(cancels).toEqual([100, 101]);
+      expect(cancelled).toHaveLength(1);
+    });
   });
 
   it("starts in an existing Instance without a create, and pairs with it", async () => {
@@ -409,6 +607,37 @@ describe("runOrbitThreadStart", () => {
     expect(calls).toEqual(["pair env-41", "operation 200", "operation 200", "read env-41 9"]);
     expect(run.sent).toEqual(["env-41 thread-2 Add a dark mode"]);
     expect(run.saves.at(-1)).toMatchObject({ createStartedAt: null, createKey: null });
+  });
+
+  it("wakes an asleep existing Instance before it pairs, and leaves an awake one alone", async () => {
+    const existing = (id: string) =>
+      newOrbitThreadStart({
+        id,
+        project,
+        message: "Add a dark mode",
+        suffix: "unused",
+        threadId: `thread-${id}`,
+        messageId: `message-${id}`,
+        commandId: `command-${id}`,
+        now: 0,
+        existing: { instanceId: 41, environmentId: "env-41", name: "dark-mode", nodeName: "shark" },
+      });
+    const woken: number[] = [];
+    const wake = async (instanceId: number) => {
+      woken.push(instanceId);
+      return { kind: "awake" as const };
+    };
+
+    const asleep = gateway({ servers: [server(41, "stopped")] });
+    const asleepRun = ports(asleep.client);
+    expect(await runOrbitThreadStart(existing("s3"), { ...asleepRun.ports, wake })).toBe(true);
+    expect(woken).toEqual([41]);
+    expect(asleep.calls.slice(0, 2)).toEqual(["environments", "pair env-41"]);
+
+    const awake = gateway({});
+    const awakeRun = ports(awake.client);
+    expect(await runOrbitThreadStart(existing("s4"), { ...awakeRun.ports, wake })).toBe(true);
+    expect(woken).toEqual([41]);
   });
 
   it("keeps a taken name's code and drops its key, so a new name is created anew", async () => {
@@ -611,6 +840,12 @@ describe("runOrbitThreadStart", () => {
     const [reloaded] = readOrbitThreadStarts(JSON.parse(JSON.stringify([stopped])));
     expect(reloaded!.errorDetail).toBe("Argument list too long");
     expect(retryOrbitThreadStartRecord(stopped).errorDetail).toBeNull();
+    expect(
+      retryOrbitThreadStartRecord({
+        ...stopped,
+        createRows: { container: { status: "failed", startedAt: 1, finishedAt: 2 } },
+      }).createRows,
+    ).toBeNull();
 
     const retry = gateway({});
     const retryRun = ports(retry.client);
@@ -928,9 +1163,20 @@ describe("runOrbitThreadStart", () => {
     expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(62_000);
 
     const create = gateway({ create: ["running"] });
-    const slow = ports(create.client);
+    const read = create.client.operation;
+    const slow = ports({
+      ...create.client,
+      operation: async (id: number) => ({ ...(await read(id)), currentStep: "clone-workspace" }),
+    } as OrbitGatewayClient);
     expect(await runOrbitThreadStart(fresh(), slow.ports)).toBe(false);
-    expect(slow.saves.at(-1)).toMatchObject({ createOperationId: 100, environmentId: null });
+    const stopped = slow.saves.at(-1)!;
+    expect(stopped).toMatchObject({ createOperationId: 100, environmentId: null });
+    // The row that ran turns red with the time the create stopped; the address did not start.
+    expect(stopped.createRows?.t3).toMatchObject({
+      status: "failed",
+      finishedAt: slow.ports.now(),
+    });
+    expect(stopped.createRows?.address?.status).toBe("pending");
   });
 
   it("never polls faster than every 0.5 s", async () => {
@@ -1061,7 +1307,7 @@ describe("runOrbitThreadStart", () => {
     expect(again.sent).toHaveLength(1);
   });
 
-  it("stops on a clone whose container is asleep", async () => {
+  it("stops on a clone whose container is asleep when Conn cannot wake it", async () => {
     const { client } = gateway({ servers: [server(41, "stopped")] });
     const run = ports(client);
 
@@ -1069,7 +1315,46 @@ describe("runOrbitThreadStart", () => {
 
     expect(run.saves.at(-1)).toMatchObject({
       environmentId: null,
-      error: expect.stringContaining("asleep"),
+      error: "The clone is asleep. Conn cannot wake it yet.",
+    });
+  });
+
+  it("wakes an asleep clone once and goes on to pair with it", async () => {
+    const { client, calls } = gateway({ servers: [server(41, "stopped")] });
+    const run = ports(client);
+    const woken: number[] = [];
+    const wake = async (instanceId: number) => {
+      woken.push(instanceId);
+      return { kind: "awake" as const };
+    };
+
+    expect(await runOrbitThreadStart(fresh(), { ...run.ports, wake })).toBe(true);
+
+    expect(woken).toEqual([41]);
+    expect(calls).toContain("pair env-41");
+    expect(run.sent).toHaveLength(1);
+  });
+
+  it("shows a failed wake, and keeps today's text on a Gateway without the wake route", async () => {
+    const failed = gateway({ servers: [server(41, "stopped")] });
+    const failedRun = ports(failed.client);
+    const wakeFails = async () =>
+      ({ kind: "failed", code: "instance.t3_unready", message: "T3 was slow." }) as const;
+    expect(await runOrbitThreadStart(fresh(), { ...failedRun.ports, wake: wakeFails })).toBe(false);
+    expect(failedRun.saves.at(-1)).toMatchObject({
+      error: "Orbit could not wake the clone (instance.t3_unready).",
+      errorCode: "instance.t3_unready",
+    });
+    expect(failed.calls).not.toContain("pair env-41");
+
+    const older = gateway({ servers: [server(41, "stopped")] });
+    const olderRun = ports(older.client);
+    const unsupported = async () => ({ kind: "unsupported" }) as const;
+    expect(await runOrbitThreadStart(fresh(), { ...olderRun.ports, wake: unsupported })).toBe(
+      false,
+    );
+    expect(olderRun.saves.at(-1)).toMatchObject({
+      error: "The clone is asleep. Conn cannot wake it yet.",
     });
   });
 
@@ -1272,5 +1557,33 @@ describe("orbitThreadStartCreatedInstance", () => {
         environmentId: "env-41",
       }),
     ).toBe(false);
+  });
+});
+
+describe("runOrbitThreadStart with a completion (release 2030)", () => {
+  it("opens the thread at create success and saves the completion, not an error", async () => {
+    const { client } = gateway({ createExtra: { completionOperationId: 106, routeId: 77 } });
+    const run = ports(client);
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+    const last = run.saves.at(-1)!;
+    expect(run.sent).toHaveLength(1);
+    expect(last).toMatchObject({
+      connected: true,
+      error: null,
+      completionOperationId: 106,
+      completionStatus: "queued",
+    });
+    expect(last.sentAt).not.toBeNull();
+    expect(last.createRows?.address?.status).toBe("running");
+    expect(last.createRows?.t3?.status).toBe("done");
+  });
+
+  it("an older Gateway's create names no completion: all rows done, nothing to follow", async () => {
+    const { client } = gateway({});
+    const run = ports(client);
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+    const last = run.saves.at(-1)!;
+    expect(last.completionOperationId).toBeNull();
+    expect(last.completionStatus).toBeUndefined();
   });
 });

@@ -1,4 +1,12 @@
 import type { OrbitGatewayOperation } from "./client.ts";
+import {
+  ORBIT_CREATE_ROW_IDS,
+  ORBIT_CREATE_ROW_LABELS,
+  orbitFailedCreateAddressStatus,
+  type OrbitCreateRowId,
+  type OrbitCreateRowStatus,
+} from "./orbitCreateRows.ts";
+import { orbitCompletionPhase } from "./orbitCompletion.ts";
 import type { OrbitThreadStart } from "./threadStart.ts";
 
 /**
@@ -15,47 +23,68 @@ export interface OrbitSetupStage {
   readonly finishedAt: number | null;
   /** "create": the Node the clone lands on. */
   readonly detail: string | null;
-  /** "create": the clone step that runs, or where it failed; none for a step Conn does not know. */
-  readonly subDetail: string | null;
+  /** "create": the rows of Orbit's create steps while it runs or where it failed; else null. */
+  readonly rows: readonly OrbitSetupCreateRow[] | null;
   /** Set on the failed stage only. */
   readonly error: string | null;
   readonly errorCode: string | null;
 }
 
-const CLONE_STEP_LABELS: Readonly<Record<string, string>> = {
-  "clone-container": "Copying the container",
-  "clone-workspace": "Copying the workspace",
-  "clone-t3": "Starting the T3 server",
-  "clone-register": "Registering with Orbit",
-};
-
-function cloneStepLabel(step: string | null | undefined): string | null {
-  return step && Object.hasOwn(CLONE_STEP_LABELS, step) ? CLONE_STEP_LABELS[step]! : null;
+export interface OrbitSetupCreateRow {
+  readonly id: OrbitCreateRowId;
+  readonly label: string;
+  readonly status: OrbitCreateRowStatus;
+  readonly startedAt: number | null;
+  readonly finishedAt: number | null;
 }
 
-function createSubDetail(
-  operation: OrbitGatewayOperation | null,
-  status: OrbitSetupStageStatus,
-): string | null {
-  if (operation === null) return null;
-  const steps = operation.steps ?? [];
-  if (status === "running") {
-    return cloneStepLabel(
-      operation.currentStep ?? steps.findLast((step) => step.status === "running")?.name,
-    );
-  }
-  if (status === "failed") {
-    return cloneStepLabel(
-      operation.failedStep ?? steps.find((step) => step.status === "failed")?.name,
-    );
-  }
-  return null;
+/**
+ * The rows under "Create Instance": all four while the setup runs or failed, also after the create
+ * while its completion runs or failed (the address row follows it), and on a create refused before
+ * Orbit admitted it (all pending). They fold away once the setup is done.
+ */
+function createRows(start: OrbitThreadStart): OrbitSetupCreateRow[] {
+  const saved = start.createRows ?? null;
+  // With a completion the address row is its phase, whatever an older build saved.
+  const completion = orbitCompletionPhase(start);
+  const addressOfCompletion: OrbitCreateRowStatus | null =
+    completion === "running" ? "running" : completion === "failed" ? "failed" : null;
+  const createFailed = start.error !== null && start.environmentId === null;
+  const sequential = ["container", "t3", "register"] as const;
+  const failedHere = createFailed && !sequential.some((id) => saved?.[id]?.status === "failed");
+  // A failure the Operation never named (a timeout, a lost Gateway) stops the row that ran.
+  const stopped = failedHere
+    ? sequential.findLast((id) => saved?.[id]?.status === "running")
+    : undefined;
+  return ORBIT_CREATE_ROW_IDS.map((id) => {
+    const row = saved?.[id];
+    const status: OrbitCreateRowStatus =
+      id === stopped
+        ? "failed"
+        : id === "address" && addressOfCompletion !== null
+          ? addressOfCompletion
+          : // The unnamed failure that stopped a row: no terminal read, so no route_publication.
+            id === "address" && stopped !== undefined && row?.status === "running"
+            ? orbitFailedCreateAddressStatus({
+                createStatus: "failed",
+                routePublication: null,
+                completionStatus: null,
+              })
+            : (row?.status ?? "pending");
+    return {
+      id,
+      label: ORBIT_CREATE_ROW_LABELS[id],
+      status,
+      startedAt: row?.startedAt ?? null,
+      finishedAt: id === stopped ? (start.createFinishedAt ?? null) : (row?.finishedAt ?? null),
+    };
+  });
 }
 
 /**
  * The stages of a start: Create Instance, Connect, Start agent; a start in an existing Instance
  * has only Connect and Start agent. The pairing state comes from the start record. `create` is the
- * latest read of the create Operation, when there is one; it gives the clone step.
+ * latest read of the create Operation, when there is one.
  */
 export function orbitSetupStages(input: {
   readonly start: OrbitThreadStart;
@@ -80,25 +109,32 @@ export function orbitSetupStages(input: {
     startedAt: number | null | undefined,
     finishedAt: number | null | undefined,
     detail: string | null = null,
-    subDetail: string | null = null,
+    rows: readonly OrbitSetupCreateRow[] | null = null,
   ): OrbitSetupStage => ({
     id,
     status: failedAt === id ? "failed" : status,
     startedAt: startedAt ?? null,
     finishedAt: finishedAt ?? null,
     detail,
-    subDetail,
+    rows,
     error: failedAt === id ? start.error : null,
     errorCode: failedAt === id ? errorCode : null,
   });
 
   const stages: OrbitSetupStage[] = [];
   if (start.orbitInstanceKind !== "existing") {
+    const completion = orbitCompletionPhase(start);
+    // A succeeded create read whose completion the runner has not saved yet.
+    const completionAhead =
+      completion === "none" && typeof create?.completionOperationId === "number";
+    // The header spins until the address is live, and shows the card's failure wherever it is.
     const status: OrbitSetupStageStatus =
-      failedAt === "create"
+      start.error !== null || completion === "failed"
         ? "failed"
         : start.environmentId !== null || create?.status === "succeeded"
-          ? "done"
+          ? completion === "running" || completionAhead
+            ? "running"
+            : "done"
           : start.createStartedAt != null || start.createOperationId !== null || create !== null
             ? "running"
             : "pending";
@@ -109,7 +145,7 @@ export function orbitSetupStages(input: {
         start.createStartedAt,
         start.createFinishedAt,
         start.nodeName,
-        createSubDetail(create, status),
+        status === "done" ? null : createRows(start),
       ),
     );
   }
@@ -133,20 +169,4 @@ export function orbitSetupStages(input: {
     ),
   );
   return stages;
-}
-
-/**
- * How long the setup took, for "Instance ready <N>s": the sum of the stages, so time a failed
- * start waited for Retry does not count. Null until the message is sent or when a time is
- * missing (older rows).
- */
-export function orbitSetupReadyMs(start: OrbitThreadStart): number | null {
-  const span = (from: number | null | undefined, to: number | null | undefined) =>
-    from == null || to == null ? null : Math.max(0, to - from);
-  const connect = span(start.connectStartedAt, start.connectFinishedAt);
-  const agent = span(start.agentStartedAt, start.sentAt);
-  if (connect === null || agent === null) return null;
-  if (start.orbitInstanceKind === "existing") return connect + agent;
-  const create = span(start.createStartedAt, start.createFinishedAt);
-  return create === null ? null : create + connect + agent;
 }

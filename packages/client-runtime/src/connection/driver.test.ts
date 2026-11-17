@@ -1,16 +1,23 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import * as ConnectionDriver from "./driver.ts";
-import { ConnectionTransientError, SshConnectionTarget, type PreparedConnection } from "./model.ts";
+import {
+  ConnectionBlockedError,
+  ConnectionTransientError,
+  SshConnectionTarget,
+  type PreparedConnection,
+} from "./model.ts";
 import * as ConnectionResolver from "./resolver.ts";
 
 const sshTarget = (connectionId: string) =>
@@ -69,6 +76,38 @@ describe("ConnectionDriver", () => {
         "preparing",
         "opening",
       ]);
+    }),
+  );
+
+  // Conn: a saved server answers 401 for an ended session while a learned route (an address
+  // this network cannot reach) stays silent. The refusal must reach the supervisor; waiting on
+  // the silent route turned it into a setup timeout, so the session was never renewed.
+  it.effect("reports a credential refusal without waiting on a silent route", () =>
+    Effect.gen(function* () {
+      const refused = new ConnectionBlockedError({
+        reason: "authentication",
+        detail: "The environment credential is invalid.",
+      });
+      const attempt = yield* ConnectionDriver.connectOverRoutes(
+        ENTRY,
+        (route) =>
+          route.target === ENTRY.target
+            ? Effect.succeed("answered" as const)
+            : Effect.sleep("2500 millis").pipe(Effect.as("silent" as const)),
+        (route) => (route.target === ENTRY.target ? Effect.fail(refused) : Effect.never),
+      ).pipe(
+        Effect.scoped,
+        Effect.flip,
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () => Effect.succeed("still waiting" as const),
+        }),
+        Effect.forkChild,
+      );
+
+      yield* TestClock.adjust("1 minute");
+
+      expect(yield* Fiber.join(attempt)).toBe(refused);
     }),
   );
 });

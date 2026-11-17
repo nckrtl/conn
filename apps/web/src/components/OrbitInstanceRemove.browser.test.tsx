@@ -35,7 +35,7 @@ describe("OrbitInstanceRemoveDialog", () => {
     await userEvent.click(page.getByText("Remove it anyway. This work is lost."));
     await expect.element(remove).toBeEnabled();
     await userEvent.click(remove);
-    expect(onConfirm).toHaveBeenCalledWith(true);
+    expect(onConfirm).toHaveBeenCalledWith(true, expect.objectContaining({ state: "known" }));
   });
 
   it("asks once for a clean Instance, and asks for the tick again on Orbit's newer state", async () => {
@@ -47,7 +47,7 @@ describe("OrbitInstanceRemoveDialog", () => {
     const remove = page.getByRole("button", { name: "Remove Instance" });
     await expect.element(page.getByRole("checkbox")).not.toBeInTheDocument();
     await userEvent.click(remove);
-    expect(onConfirm).toHaveBeenCalledWith(false);
+    expect(onConfirm).toHaveBeenCalledWith(false, expect.objectContaining({ state: "known" }));
 
     // Orbit answered `instance.unsaved_work`: the same dialog now needs the tick.
     await screen.rerender(
@@ -64,7 +64,7 @@ describe("OrbitInstanceRemoveDialog", () => {
     await userEvent.click(page.getByText("Remove it anyway. Any unsaved work is lost."));
     await expect.element(remove).toBeEnabled();
     await userEvent.click(remove);
-    expect(onConfirm).toHaveBeenLastCalledWith(true);
+    expect(onConfirm).toHaveBeenLastCalledWith(true, { state: "unknown", reason: null });
   });
 
   it("replaces the bin button while removing, so a remove cannot start twice", async () => {
@@ -75,7 +75,7 @@ describe("OrbitInstanceRemoveDialog", () => {
         <OrbitInstanceGitLine git={parseOrbitInstanceGit({ state: "unknown" })} />
         <OrbitInstanceRemoveAction removing={failure === null} onRemove={onRemove} />
         {failure === null ? null : (
-          <OrbitInstanceRemoveFailure message={failure} onRetry={onRetry} />
+          <OrbitInstanceRemoveFailure refused message={failure} onRetry={onRetry} />
         )}
       </div>
     );

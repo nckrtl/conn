@@ -14,7 +14,7 @@ const ORBIT_DEFAULT_INSTANCE_NAME = "default";
 const NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 export const ORBIT_NAME_FORMAT_ERROR = "Use letters, numbers and single dashes.";
-export const ORBIT_NAME_HINT = "Becomes the branch and the domain.";
+export const ORBIT_NAME_HINT = "Becomes the branch.";
 export const ORBIT_NAME_EMPTY_ERROR = "Enter an instance name.";
 export const ORBIT_NAME_CHECKING = "Checking…";
 export const ORBIT_NAME_CHECK_UNAVAILABLE =
@@ -134,7 +134,7 @@ export function orbitNameHint(input: {
   if (answer.available) {
     return {
       tone: "ok",
-      text: `${answer.domain ?? name} is available.`,
+      text: `${name} is available.`,
       plusEnabled: true,
       canCreate: true,
     };
@@ -196,7 +196,10 @@ export interface OrbitInstanceRow {
   readonly lastUsedAt: string | null;
 }
 
+/** An older Gateway cannot wake an Instance, so its asleep rows cannot be picked. */
 export const ORBIT_INSTANCE_STOPPED_REASON = "Stopped. Orbit cannot start it from Conn yet.";
+/** Conn: the state word of an asleep Instance that Conn wakes when it is picked. */
+export const ORBIT_INSTANCE_STOPPED_LABEL = "Stopped";
 export const ORBIT_INSTANCE_EXPIRED_REASON = "Must register with Orbit again";
 
 function hostOf(url: string | null): string | null {
@@ -222,6 +225,8 @@ export function buildOrbitInstanceRows(input: {
     readonly archivedAt: string | null;
   }>;
   readonly pairedEnvironmentIds: ReadonlySet<string>;
+  /** Conn: false on an older Gateway without the wake route; an asleep row is then not pickable. */
+  readonly canWake?: boolean;
 }): OrbitInstanceRow[] {
   const byInstance = new Map<number, OrbitGatewayEnvironment>();
   for (const environment of input.environments) {
@@ -261,7 +266,7 @@ export function buildOrbitInstanceRows(input: {
       disabledReason:
         state === "expired"
           ? ORBIT_INSTANCE_EXPIRED_REASON
-          : state === "stopped"
+          : state === "stopped" && input.canWake === false
             ? ORBIT_INSTANCE_STOPPED_REASON
             : null,
       paired: input.pairedEnvironmentIds.has(environment.environmentId),
@@ -283,6 +288,7 @@ export function orbitInstanceRowSubline(row: OrbitInstanceRow): string {
   const parts = [row.nodeName];
   if (row.disabledReason !== null)
     return [...parts, row.disabledReason].filter(Boolean).join(" · ");
+  if (row.state === "stopped") parts.push(ORBIT_INSTANCE_STOPPED_LABEL);
   parts.push(row.domain);
   parts.push(
     `${row.threadCount === 0 ? "no" : row.threadCount} thread${row.threadCount === 1 ? "" : "s"}`,

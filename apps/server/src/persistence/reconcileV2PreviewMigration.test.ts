@@ -68,6 +68,15 @@ describe("V2 preview upgrade", () => {
         [85, "TurnItemCounts"],
         [86, "QueuedTurnInputIndex"],
         [87, "ProjectionProjectsCustomTitle"],
+        [88, "TurnItemTypeStatusIndex"],
+        [89, "ShellThreadReadIndexes"],
+        [90, "AuthConnectDevices"],
+        [91, "AuthConnectDeniedRequests"],
+        [92, "QueuedTurnInputIndexJsonValid"],
+        [93, "ProviderTurnAttemptIndex"],
+        [94, "TurnItemMessageOrdinalIndex"],
+        [95, "TurnItemInlineWorkOutput"],
+        [96, "RepairStaleTitleRegeneration"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -178,6 +187,15 @@ describe("V2 preview upgrade", () => {
         [85, "TurnItemCounts"],
         [86, "QueuedTurnInputIndex"],
         [87, "ProjectionProjectsCustomTitle"],
+        [88, "TurnItemTypeStatusIndex"],
+        [89, "ShellThreadReadIndexes"],
+        [90, "AuthConnectDevices"],
+        [91, "AuthConnectDeniedRequests"],
+        [92, "QueuedTurnInputIndexJsonValid"],
+        [93, "ProviderTurnAttemptIndex"],
+        [94, "TurnItemMessageOrdinalIndex"],
+        [95, "TurnItemInlineWorkOutput"],
+        [96, "RepairStaleTitleRegeneration"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -235,6 +253,12 @@ const assertReconciled = Effect.gen(function* () {
   );
   assert.strictEqual((yield* sql`SELECT * FROM peer_environment_links`).length, 1);
 });
+/** The released migrations after `id`, as `runMigrations` reports them; later upstream syncs add to it. */
+const releasedAfter = (id: number) =>
+  migrationManifest
+    .filter(([entryId]) => entryId > id)
+    .map(([entryId, name]): [number, string] => [entryId, name]);
+
 describe("Conn PeerLinks upgrade", () => {
   it.effect("moves PeerLinks from 61 to 70 and runs the migrations it displaced", () =>
     Effect.gen(function* () {
@@ -253,23 +277,7 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -290,23 +298,7 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -326,23 +318,7 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -361,23 +337,7 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -395,23 +355,7 @@ describe("Conn PeerLinks upgrade", () => {
         [67, "WebhookDedupe"],
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -426,23 +370,7 @@ describe("Conn PeerLinks upgrade", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [68, "ShellStopRequestIndex"],
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -456,23 +384,7 @@ describe("Conn PeerLinks upgrade", () => {
       yield* seedPeerLink;
       assert.deepStrictEqual(yield* runMigrations(), [
         [69, "ThreadMessageSearch"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "ScheduledTaskThreadMode"],
-        [81, "ProjectionMessageSearchText"],
-        [82, "TurnItemConversationIndex"],
-        [83, "CommandReadIndexes"],
-        [84, "LastExecutedRunIndex"],
-        [85, "TurnItemCounts"],
-        [86, "QueuedTurnInputIndex"],
-        [87, "ProjectionProjectsCustomTitle"],
+        ...releasedAfter(70),
       ]);
       yield* assertReconciled;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),

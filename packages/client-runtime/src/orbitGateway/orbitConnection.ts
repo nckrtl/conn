@@ -7,6 +7,7 @@ import {
   type OrbitGatewayEnvironment,
   type OrbitGatewayNode,
 } from "./client.ts";
+import type { RenewalFailureReason } from "./environmentProvider.ts";
 
 /**
  * Conn: the Orbit panel's Connection page, shared by desktop and mobile. Conn picks up the Orbit
@@ -165,13 +166,19 @@ export function orbitConnectionChecks(probe: OrbitConnectionProbe): OrbitConnect
   });
 }
 
-export type OrbitNodeState = "paired" | "pairing" | "expired";
+/**
+ * `revoked`: Orbit refused this device's renewal there; only an explicit Connect pairs it again.
+ * `renewal_failed`: the last renewal failed (`renewalFailure` says why); a Retry renews now.
+ */
+export type OrbitNodeState = "paired" | "pairing" | "expired" | "revoked" | "renewal_failed";
 
 export interface OrbitNodeServer {
   readonly environmentId: string;
   readonly name: string;
   readonly address: string;
   readonly state: OrbitNodeState;
+  /** Why the last renewal failed, when `state` is `renewal_failed`; else null. */
+  readonly renewalFailure: RenewalFailureReason | null;
   readonly isThisDevice: boolean;
 }
 
@@ -192,6 +199,10 @@ export function orbitNodeServers(input: {
   readonly environments: readonly OrbitGatewayEnvironment[];
   /** Environment ids this device has paired. */
   readonly paired: ReadonlySet<string>;
+  /** Environment ids whose pairing Orbit revoked for this device. */
+  readonly revoked?: ReadonlySet<string>;
+  /** Environment ids whose last renewal failed, with the reason. */
+  readonly renewalFailed?: ReadonlyMap<string, RenewalFailureReason>;
   readonly device: Pick<OrbitGatewayNode, "name" | "wireguardIp"> | null;
 }): OrbitNodeServer[] {
   const seen = new Set<string>();
@@ -210,6 +221,7 @@ export function orbitNodeServers(input: {
     seen.add(environment.environmentId);
     const address = addressOf(environment.url);
     const name = gatewayText(environment.nodeName) ?? gatewayText(environment.label) ?? address;
+    const renewalFailure = input.renewalFailed?.get(environment.environmentId) ?? null;
     nodes.push({
       environmentId: environment.environmentId,
       name,
@@ -217,9 +229,17 @@ export function orbitNodeServers(input: {
       state:
         environment.status === "session_expired"
           ? "expired"
-          : input.paired.has(environment.environmentId)
-            ? "paired"
-            : "pairing",
+          : input.revoked?.has(environment.environmentId)
+            ? "revoked"
+            : renewalFailure !== null
+              ? "renewal_failed"
+              : input.paired.has(environment.environmentId)
+                ? "paired"
+                : "pairing",
+      renewalFailure:
+        environment.status !== "session_expired" && !input.revoked?.has(environment.environmentId)
+          ? renewalFailure
+          : null,
       isThisDevice:
         input.device !== null &&
         ((deviceAddress !== null && address === deviceAddress) ||

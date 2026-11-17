@@ -3,7 +3,6 @@ import {
   createOrbitGatewayClient,
   createProfileSync,
   type OrbitGatewayClient,
-  type OrbitGatewayTransport,
   type OrbitGatewayWorkspace,
   type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -12,8 +11,18 @@ import { create } from "zustand";
 
 import { useWorkspaceStore } from "../workspaceStore";
 import { WORKSPACE_COLORS, type Workspace, type WorkspaceColor } from "../workspaces.logic";
-import { reconcileEnvironmentProvider, useEnvironmentProvider } from "./environmentProvider";
+import {
+  onOrbitCredentialRefused,
+  reconcileEnvironmentProvider,
+  useEnvironmentProvider,
+} from "./environmentProvider";
+import {
+  clearAttachedServers,
+  recordAttachedServers,
+  watchAttachedServersRecord,
+} from "./attachedServers";
 import { pruneWorkspaceCloneRefs } from "./cloneWorkspaceRefs";
+import { desktopOrbitGatewayTransport } from "./desktopOrbitGateway";
 import { OrbitAppearanceSync } from "./OrbitAppearanceSync";
 import { getProfileSyncChannels, onLocalProfileChange } from "./profileSyncRegistry";
 import {
@@ -21,6 +30,7 @@ import {
   loadSectionState,
   saveSectionState,
 } from "./profileSyncStorage";
+import { registerOrbitSleepClient } from "./orbitInstanceSleep";
 import { createSerialRunner } from "./serialRunner";
 import { trackNonUserThemeChanges } from "./themeOrigin";
 import {
@@ -72,23 +82,15 @@ export function syncOrbitProfileNow(): Promise<void> {
   return requestSync?.() ?? Promise.resolve();
 }
 
+// Conn: every window's sleep controller reads the Gateway through this window's client.
+registerOrbitSleepClient(() => desktopOrbitGatewayClient());
+// Conn: every window applies the attached set the main window stores (flag `connAttachedServers`).
+watchAttachedServersRecord();
+
 /** The Gateway client over the desktop main process, or null outside the desktop app. */
 export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
-  const send = window.desktopBridge?.orbitGatewaySend;
-  if (!send) return null;
-  const transport: OrbitGatewayTransport = async (request) => {
-    const response = await send({
-      method: request.method,
-      path: request.path,
-      body: request.body === undefined ? null : JSON.stringify(request.body),
-      ...(request.query === undefined ? {} : { query: request.query }),
-      ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
-      ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }),
-    });
-    if (response.error !== null) throw new Error(response.error);
-    return { status: response.status, body: response.body };
-  };
-  return createOrbitGatewayClient(transport);
+  const transport = desktopOrbitGatewayTransport();
+  return transport ? createOrbitGatewayClient(transport) : null;
 }
 
 function toGateway(workspace: Workspace): OrbitGatewayWorkspace {
@@ -180,10 +182,17 @@ function profileSyncController(): ProfileSyncController | null {
       // Everything syncs only while Orbit provides the environments.
       if (provider !== "orbit") {
         useOrbitProfileSyncStatus.setState(INITIAL_STATUS);
+        await clearAttachedServers();
         return;
       }
       pruneWorkspaceCloneRefs(provider, listed);
       const me = await client.me();
+      // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
+      if (listed !== null) {
+        await recordAttachedServers(client, me, listed).catch((error: unknown) => {
+          console.warn("Conn could not apply the attached set.", error);
+        });
+      }
       const result = await syncWorkspaceProfile(ports, me);
       useOrbitProfileSyncStatus.setState(
         result.kind === "unbound"
@@ -251,6 +260,9 @@ export function OrbitProfileSync() {
       if (state.workspaces !== previous.workspaces) scheduleEditSync();
     });
     const unsubscribeLocalChange = onLocalProfileChange(scheduleEditSync);
+    // Conn: a server that starts refusing this device's credential is renewed now, not at the
+    // next poll.
+    const unsubscribeRefused = onOrbitCredentialRefused(run);
     // A theme the environment pushed is not the user's pick: it stays on this device.
     const unsubscribeDefaultTheme = trackNonUserThemeChanges(() =>
       sync.beginNonUserChange(APPEARANCE_SECTION),
@@ -269,6 +281,7 @@ export function OrbitProfileSync() {
       unsubscribeProvider();
       unsubscribe();
       unsubscribeLocalChange();
+      unsubscribeRefused();
       unsubscribeDefaultTheme();
       clearInterval(interval);
       if (editTimer) clearTimeout(editTimer);

@@ -1,7 +1,9 @@
 import {
   orbitInstanceGitLine,
+  orbitInstanceRemoveAcknowledgesGit,
   orbitInstanceRemoveText,
   type OrbitInstanceGitState,
+  type OrbitInstanceRemoveProgress,
   type OrbitInstanceRemoveTarget,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { CheckIcon, Trash2Icon, CircleAlertIcon } from "lucide-react";
@@ -44,6 +46,31 @@ export function OrbitInstanceGitLine({ git }: { readonly git: OrbitInstanceGitSt
   );
 }
 
+/**
+ * Spec Q3, decided by the owner (2026-11-14): while a removal waits for the Instance's setup to
+ * stop, the row shows nothing extra, as for any removal: null keeps the row's facts.
+ */
+export function orbitRemoveWaitTextBehindCompletion(): string | null {
+  return null;
+}
+
+/**
+ * The row's second line while Orbit removes the Instance: its queue place or a plain step; null
+ * keeps the row's facts (no step yet, or a step without plain words).
+ */
+export function orbitInstanceRemovingText(
+  progress: OrbitInstanceRemoveProgress | null,
+  /** The Instance's setup (its `instance.complete`) still runs: Orbit stops it before removing. */
+  completionRunning = false,
+): string | null {
+  if (progress?.kind === "waiting" && completionRunning) {
+    return orbitRemoveWaitTextBehindCompletion();
+  }
+  if (progress?.kind === "waiting") return "Waiting for another removal to finish";
+  if (progress?.kind === "running") return progress.step;
+  return null;
+}
+
 /** The row's bin button, or "Removing…" while Orbit removes the Instance. */
 export function OrbitInstanceRemoveAction(props: {
   readonly removing: boolean;
@@ -77,15 +104,21 @@ export function OrbitInstanceRemoveAction(props: {
   );
 }
 
-/** A failed remove stays on the row with Retry. */
+/**
+ * A failed remove stays on the row with Retry, which sends the destroy again with the same tick.
+ * "Could not remove" when Orbit refused before it started; "Removal failed" when it started.
+ */
 export function OrbitInstanceRemoveFailure(props: {
+  readonly refused: boolean;
   readonly message: string;
   readonly onRetry: () => void;
 }) {
   return (
     <span className="flex items-center gap-1.5 text-destructive-foreground text-xs" role="alert">
       <CircleAlertIcon aria-hidden className="size-3 shrink-0" />
-      <span className="min-w-0">Could not remove: {props.message}</span>
+      <span className="min-w-0">
+        {props.refused ? "Could not remove" : "Removal failed"}: {props.message}
+      </span>
       <button
         type="button"
         className="shrink-0 text-foreground underline underline-offset-2 hover:no-underline"
@@ -99,11 +132,15 @@ export function OrbitInstanceRemoveFailure(props: {
 
 function RemoveDialogBody(props: {
   readonly target: OrbitInstanceRemoveTarget;
-  readonly onConfirm: (acknowledgeUnsaved: boolean) => void;
+  readonly checking: boolean;
+  readonly onConfirm: (
+    acknowledgeUnsaved: boolean,
+    shownGit: OrbitInstanceGitState | undefined,
+  ) => void;
 }) {
   const text = orbitInstanceRemoveText(props.target);
   const [acknowledged, setAcknowledged] = useState(false);
-  const blocked = text.acknowledge !== null && !acknowledged;
+  const blocked = props.checking || (text.acknowledge !== null && !acknowledged);
   return (
     <>
       <AlertDialogHeader>
@@ -148,10 +185,13 @@ function RemoveDialogBody(props: {
         <Button
           variant="destructive"
           disabled={blocked}
-          // Without the list's Git state the tick covers only the working threads; Orbit's
-          // `instance.unsaved_work` then asks about the Git state itself.
+          // A tick that only stops working threads (no Git facts, clean, or no Git state) keeps
+          // Orbit's own read at the destroy: `instance.unsaved_work` then asks again.
           onClick={() =>
-            props.onConfirm(text.acknowledge !== null && props.target.git !== undefined)
+            props.onConfirm(
+              text.acknowledge !== null && orbitInstanceRemoveAcknowledgesGit(props.target.git),
+              props.target.git,
+            )
           }
         >
           Remove Instance
@@ -163,12 +203,18 @@ function RemoveDialogBody(props: {
 
 /**
  * Remove always asks once. Unsaved work, a working thread or an unknown Git state also needs the
- * tick; Remove Instance stays off until it is set. `onConfirm` gets whether the tick was asked.
+ * tick; Remove Instance stays off until it is set, and while `checking` (Orbit's Git read when the
+ * dialog opened, at most a short moment). `onConfirm` gets whether the tick was asked.
  */
 export function OrbitInstanceRemoveDialog(props: {
   readonly target: OrbitInstanceRemoveTarget | null;
+  readonly checking?: boolean;
   readonly onCancel: () => void;
-  readonly onConfirm: (acknowledgeUnsaved: boolean) => void;
+  /** `shownGit`: the Git state the dialog showed at the click. */
+  readonly onConfirm: (
+    acknowledgeUnsaved: boolean,
+    shownGit: OrbitInstanceGitState | undefined,
+  ) => void;
 }) {
   const { target } = props;
   return (
@@ -184,6 +230,7 @@ export function OrbitInstanceRemoveDialog(props: {
           <RemoveDialogBody
             key={`${target.name}:${JSON.stringify(target.git)}:${target.workingCount}`}
             target={target}
+            checking={props.checking === true}
             onConfirm={props.onConfirm}
           />
         )}

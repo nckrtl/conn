@@ -94,15 +94,22 @@ it("keeps client-runtime's workspace dependencies within the server's", () => {
   expect(workspaceDeps("packages/client-runtime").filter((name) => !server.has(name))).toEqual([]);
 });
 
-it("runs Rust and Release Smoke only for the files they read, except on main pushes", () => {
-  const packages = readWorkspace();
-  const jobs = (file: string, full = false) => {
-    const { rust, release_smoke } = decide([file], packages, full).outputs;
-    return { rust, release_smoke };
-  };
-  expect(jobs(".github/workflows/ci.yml")).toEqual({ rust: false, release_smoke: false });
-  expect(jobs("apps/web/package.json")).toEqual({ rust: false, release_smoke: true });
-  expect(jobs("scripts/release-smoke.ts")).toEqual({ rust: false, release_smoke: true });
-  expect(jobs("native/resource-monitor/src/main.rs").rust).toBe(true);
-  expect(jobs(".github/workflows/ci.yml", true)).toEqual({ rust: true, release_smoke: true });
+it.each([
+  "patches/electron-updater@6.8.9.patch",
+  "apps/mobile/deps/react-native-screens-5.0.0-t3.58-conn.tgz",
+  ".github/actions/setup-ci-deps/action.yml",
+  ".github/workflows/ci.yml",
+  "apps/web/package.json",
+])("runs the full Linux checks when %s changes", (file) => {
+  expect(decide([file], readWorkspace(), false).outputs).toMatchObject({
+    typecheck: true,
+    build: true,
+    desktop_launch: true,
+    test: true,
+    test_packages: "",
+    test_web: true,
+    test_server: true,
+    rust: true,
+    release_smoke: true,
+  });
 });

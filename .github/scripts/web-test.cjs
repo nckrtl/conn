@@ -90,6 +90,7 @@ function readRecord(file) {
 }
 
 const key = ({ file, project }) => `${project}:${file}`;
+const isDone = ({ state }) => state === "passed" || state === "skipped";
 
 // Returns the step's exit code. `rerun(files)` runs the given test files once more.
 async function decide(first, record, rerun, log = console.log) {
@@ -105,9 +106,7 @@ async function decide(first, record, rerun, log = console.log) {
   const counts = output.match(SUMMARY);
   if (!counts) return fail(`The browser connection closed before Vitest's summary.${where}`);
   const summaryPassed = Number(counts[1].match(/(\d+) passed/)?.[1] ?? 0);
-  const done = new Set(
-    record.finished.filter((f) => f.state === "passed" || f.state === "skipped").map(key),
-  );
+  const done = new Set(record.finished.filter(isDone).map(key));
   const passed = record.finished.filter((f) => f.state === "passed").length;
   const failed = record.finished.find((f) => f.state === "failed");
   if (failed) return fail(`${failed.file} failed before the browser connection closed.`);
@@ -127,15 +126,12 @@ async function decide(first, record, rerun, log = console.log) {
   );
   const second = await rerun(files);
   const verdict = classify(second.output, second.code);
-  const rerunCounts = stripAnsi(second.output).match(SUMMARY)?.[1] ?? "";
-  const rerunDone = [...rerunCounts.matchAll(/(\d+) (?:passed|skipped)/g)].reduce(
-    (sum, [, n]) => sum + Number(n),
-    0,
-  );
-  if (verdict === "pass" && rerunDone < files.length) {
-    return fail(`The rerun finished ${rerunDone} of the ${files.length} unfinished test files.`);
-  }
   if (verdict === "pass") {
+    const rerunDone = new Set(second.record.finished.filter(isDone).map(key));
+    const missing = unfinished.filter((spec) => !rerunDone.has(key(spec)));
+    if (missing.length > 0) {
+      return fail(`The rerun did not finish ${missing[0].file} (${missing[0].project}).`);
+    }
     summary(
       `⚠️ ${INFRA_MESSAGE}${where} The ${files.length} unfinished test files passed on a rerun.`,
     );
@@ -169,11 +165,18 @@ async function main() {
     ["run", "--filter", "@t3tools/web", "test", `--shard=${shard}`, ...reporters],
     { env: { ...process.env, WEB_TEST_RECORD: recordFile } },
   );
-  const code = await decide(first, readRecord(recordFile), (files) => {
+  const code = await decide(first, readRecord(recordFile), async (files) => {
     console.log(`\n=== Rerun of ${files.length} unfinished test files ===\n`);
-    return runOnce("vp", ["test", "run", "--project", "unit", "--project", "browser", ...files], {
-      cwd: path.join(__dirname, "../../apps/web"),
-    });
+    const rerunRecord = `${recordFile}.rerun`;
+    const result = await runOnce(
+      "vp",
+      ["test", "run", "--project", "unit", "--project", "browser", ...reporters, ...files],
+      {
+        cwd: path.join(__dirname, "../../apps/web"),
+        env: { ...process.env, WEB_TEST_RECORD: rerunRecord },
+      },
+    );
+    return { ...result, record: readRecord(rerunRecord) };
   });
   process.exit(code);
 }

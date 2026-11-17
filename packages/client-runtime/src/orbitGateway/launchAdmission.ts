@@ -142,13 +142,15 @@ function sameInput(a: OrbitLaunchRequest, b: OrbitLaunchRequest): boolean {
   return JSON.stringify(input(a)) === JSON.stringify(input(b));
 }
 
-interface LegacyOrbitCompletion {
+type LegacyOrbitCompletion = {
   readonly instanceId: number;
-  readonly operationId: number;
   readonly status: string;
   readonly retryable: boolean;
   readonly error: string | null;
-}
+} & (
+  | { readonly operationId: number; readonly retryKey: null }
+  | { readonly operationId: null; readonly retryKey: string }
+);
 export interface LegacyOrbitLaunch {
   readonly id: string;
   readonly project: string;
@@ -164,24 +166,43 @@ function rowsInLegacyArchive(raw: string): unknown[] {
   return data;
 }
 
-function legacyCompletion(row: Record<string, unknown>): LegacyOrbitCompletion | null {
+function legacyCompletion(
+  row: Record<string, unknown> & { id: string },
+): LegacyOrbitCompletion | null {
   if (
     typeof row.instanceId !== "number" ||
-    typeof row.completionOperationId !== "number" ||
     !Number.isSafeInteger(row.instanceId) ||
     row.instanceId <= 0 ||
-    !Number.isSafeInteger(row.completionOperationId) ||
-    row.completionOperationId <= 0 ||
     row.completionStatus === "succeeded"
   )
     return null;
-  return {
+  const preview = {
     instanceId: row.instanceId,
-    operationId: row.completionOperationId,
     status: typeof row.completionStatus === "string" ? row.completionStatus : "unknown",
-    retryable: row.completionRetryable === true,
     error: typeof row.completionErrorDetail === "string" ? row.completionErrorDetail : null,
   };
+  if (
+    typeof row.completionOperationId === "number" &&
+    Number.isSafeInteger(row.completionOperationId) &&
+    row.completionOperationId > 0
+  ) {
+    return {
+      ...preview,
+      operationId: row.completionOperationId,
+      retryKey: null,
+      retryable: row.completionRetryable === true,
+    };
+  }
+  const prefix = `conn-thread-start:${row.id}:complete:`;
+  if (
+    row.completionOperationId === null &&
+    typeof row.completionKey === "string" &&
+    row.completionKey.startsWith(prefix) &&
+    /^\d+$/.test(row.completionKey.slice(prefix.length))
+  ) {
+    return { ...preview, operationId: null, retryKey: row.completionKey, retryable: true };
+  }
+  return null;
 }
 
 export function readLegacyOrbitLaunches(raw: string | null): readonly LegacyOrbitLaunch[] {
@@ -228,6 +249,10 @@ export async function updateLegacyOrbitPreview(
     }
     return operation;
   };
+  if (completion.operationId === null) {
+    if (action === "refresh") throw new Error("Resume the saved preview retry first.");
+    return check(await client.completeInstance(completion.instanceId, completion.retryKey));
+  }
   const current = check(await client.operation(completion.operationId));
   if (current.id !== completion.operationId)
     throw new Error("Orbit returned a different preview operation.");
@@ -242,20 +267,29 @@ export function recordLegacyOrbitPreview(
   row: LegacyOrbitLaunch,
   operation: OrbitGatewayOperation,
 ): string {
+  const completion = row.completion;
   return JSON.stringify(
     rowsInLegacyArchive(raw).map((entry) => {
       if (
+        completion === null ||
         !entry ||
         typeof entry !== "object" ||
         !("id" in entry) ||
-        entry.id !== row.id ||
-        !("completionOperationId" in entry) ||
-        entry.completionOperationId !== row.completion?.operationId
+        entry.id !== row.id
+      )
+        return entry;
+      const saved = legacyCompletion(entry as Record<string, unknown> & { id: string });
+      if (
+        saved === null ||
+        saved.instanceId !== completion.instanceId ||
+        saved.operationId !== completion.operationId ||
+        saved.retryKey !== completion.retryKey
       )
         return entry;
       return {
         ...entry,
         completionOperationId: operation.id,
+        completionKey: null,
         completionStatus: operation.status,
         completionRetryable: isRetryableLegacyPreview(operation),
         completionErrorDetail: operation.error?.detail ?? null,

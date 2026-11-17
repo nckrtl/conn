@@ -110,7 +110,8 @@ export function OrbitLaunchRecovery() {
           <summary>Previous Orbit start · {row.project}</summary>
           {row.completion ? (
             <p className="text-muted-foreground">
-              Previous application preview · {row.completion.status}
+              Previous application preview ·{" "}
+              {row.completion.operationId === null ? "Retry unconfirmed" : row.completion.status}
               {row.completion.error ? ` · ${row.completion.error}` : ""}
             </p>
           ) : (
@@ -132,14 +133,16 @@ export function OrbitLaunchRecovery() {
           <div className="flex flex-wrap gap-1">
             {row.completion ? (
               <>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={busy !== null}
-                  onClick={() => void legacyPreview(row, "refresh")}
-                >
-                  Refresh preview
-                </Button>
+                {row.completion.operationId !== null ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={busy !== null}
+                    onClick={() => void legacyPreview(row, "refresh")}
+                  >
+                    Refresh preview
+                  </Button>
+                ) : null}
                 {row.completion.retryable ? (
                   <Button
                     size="xs"
@@ -147,7 +150,9 @@ export function OrbitLaunchRecovery() {
                     disabled={busy !== null}
                     onClick={() => void legacyPreview(row, "retry")}
                   >
-                    Retry application
+                    {row.completion.operationId === null
+                      ? "Resume preview retry"
+                      : "Retry application"}
                   </Button>
                 ) : null}
               </>

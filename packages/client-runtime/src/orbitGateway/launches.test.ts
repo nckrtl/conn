@@ -17,7 +17,7 @@ import {
 import { createOrbitLaunchObserver } from "./launchObserver.ts";
 import {
   newOrbitLaunchAdmission,
-  orbitLaunchShowsInThreadList,
+  reconcileOrbitLaunchThreadRows,
   type OrbitLaunch,
 } from "./launches.ts";
 
@@ -396,7 +396,7 @@ it("keeps a refused replay recoverable without preventing a different draft from
   expect(await journal.pending(scope)).toContainEqual(old);
 });
 
-it("retains Open thread for a ready launch until its canonical thread appears in the list", () => {
+it("keeps Open thread until the canonical thread appears and keeps it hidden after archive", () => {
   const initial = fixture();
   const launch = fixture({
     phase: "ready",
@@ -410,8 +410,69 @@ it("retains Open thread for a ready launch until its canonical thread appears in
       accepted_at: initial.created_at,
     },
   });
-  expect(orbitLaunchShowsInThreadList(launch, false)).toBe(true);
-  expect(orbitLaunchShowsInThreadList(launch, true)).toBe(false);
+  const unknown = reconcileOrbitLaunchThreadRows(
+    [launch],
+    [{ environmentId: "other", threadId: "thread-id" }],
+    new Set(),
+  );
+  expect(unknown.rows).toEqual([launch]);
+  const paired = reconcileOrbitLaunchThreadRows(
+    [launch],
+    [{ environmentId: "unpaired", threadId: "thread-id" }],
+    unknown.handedOff,
+  );
+  expect(paired.rows).toEqual([]);
+  expect(reconcileOrbitLaunchThreadRows([launch], [], paired.handedOff).rows).toEqual([]);
+
+  const failedPreview = {
+    ...launch,
+    stages: { ...launch.stages, application_preview: { ...pending, status: "failed" as const } },
+  };
+  expect(reconcileOrbitLaunchThreadRows([failedPreview], [], paired.handedOff).rows).toEqual([
+    failedPreview,
+  ]);
+  expect(reconcileOrbitLaunchThreadRows([], [], paired.handedOff).handedOff.size).toBe(0);
+});
+
+it("resumes an old preview retry with the saved key when its operation ID was never received", async () => {
+  const saved = {
+    id: "sent",
+    message: "A previously accepted prompt",
+    sentAt: 10,
+    instanceId: 20,
+    completionOperationId: null,
+    completionKey: "conn-thread-start:sent:complete:1234",
+    completionStatus: "queued",
+    completionRetryable: false,
+  };
+  const raw = JSON.stringify([saved]);
+  const row = readLegacyOrbitLaunches(raw)[0]!;
+  expect(row.prompt).toBeNull();
+  expect(row.completion).toMatchObject({ operationId: null, retryable: true });
+  const accepted: OrbitGatewayOperation = {
+    id: 34,
+    kind: "instance.complete",
+    targetId: 20,
+    status: "queued",
+    errorCode: null,
+    pollAfterSeconds: 1,
+  };
+  const operation = vi.fn().mockResolvedValue(accepted);
+  const completeInstance = vi.fn().mockResolvedValue(accepted);
+  const client = { operation, completeInstance };
+  const retry = await updateLegacyOrbitPreview(client, row.completion!, "retry");
+  expect(completeInstance.mock.calls).toEqual([[20, saved.completionKey]]);
+  expect(operation).not.toHaveBeenCalled();
+
+  const newer = { ...saved, completionKey: "conn-thread-start:sent:complete:4567" };
+  const newerRaw = JSON.stringify([newer]);
+  expect(recordLegacyOrbitPreview(newerRaw, row, retry)).toBe(newerRaw);
+
+  const recorded = readLegacyOrbitLaunches(recordLegacyOrbitPreview(raw, row, retry))[0]!;
+  expect(recorded.completion).toMatchObject({ operationId: 34, retryable: false });
+  await updateLegacyOrbitPreview(client, recorded.completion!, "refresh");
+  expect(operation.mock.calls).toEqual([[34]]);
+  expect(completeInstance).toHaveBeenCalledTimes(1);
 });
 
 it("fits a generated mobile name before the admission body is frozen", async () => {

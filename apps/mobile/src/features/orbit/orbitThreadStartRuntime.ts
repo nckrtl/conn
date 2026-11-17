@@ -1,9 +1,11 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   createOrbitLaunchObserver,
   createOrbitLaunchSubmissions,
   newOrbitLaunchAdmission,
   fitOrbitThreadInstanceName,
   readLegacyOrbitLaunches,
+  reconcileOrbitLaunchThreadRows,
   recordLegacyOrbitPreview,
   resolveLegacyOrbitLaunch,
   updateLegacyOrbitPreview,
@@ -14,14 +16,15 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
 import { AppState } from "react-native";
-import { useSyncExternalStore } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
 import { writeFileAtomically } from "../../lib/atomic-file";
 import { rootNavigationRef } from "../../lib/rootNavigation";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentThreadShells } from "../../state/threads";
 import { selectWorkspaceDetail } from "../layout/workspace/workspace-detail-selection";
 import { startOpeningDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import { orbitGatewayClient } from "./orbitGatewayClient";
@@ -40,6 +43,30 @@ const SUBMISSIONS = "orbit-launch-admissions.json";
 const LEGACY = "orbit-thread-starts.json";
 
 export const mobileOrbitLaunches = createOrbitLaunchObserver(() => orbitGatewayClient);
+const orbitLaunchViewAtom = Atom.make((get) => {
+  get.addFinalizer(mobileOrbitLaunches.subscribe(() => get.setSelf(mobileOrbitLaunches.view())));
+  return mobileOrbitLaunches.view();
+});
+const orbitLaunchRowsAtom = Atom.make((get) => {
+  const snapshot = get(orbitLaunchViewAtom);
+  const previous = get.self<{ handedOff: ReadonlySet<string> }>();
+  const previousHandoffs = previous._tag === "Some" ? previous.value.handedOff : new Set<string>();
+  const knownThreads =
+    snapshot.launches.length > 0 ? get(environmentThreadShells.threadRefsAtom) : [];
+  const { rows, handedOff } = reconcileOrbitLaunchThreadRows(
+    snapshot.launches,
+    knownThreads,
+    previousHandoffs,
+  );
+  return {
+    ...snapshot,
+    launches: rows,
+    handedOff:
+      snapshot.loaded && snapshot.error === null
+        ? handedOff
+        : new Set([...previousHandoffs, ...handedOff]),
+  };
+});
 export const mobileOrbitSubmissions = createOrbitLaunchSubmissions(
   {
     load: async () => {
@@ -57,7 +84,7 @@ export const mobileOrbitSubmissions = createOrbitLaunchSubmissions(
 );
 
 export function useMobileOrbitLaunches() {
-  return useSyncExternalStore(mobileOrbitLaunches.subscribe, mobileOrbitLaunches.view);
+  return useAtomValue(orbitLaunchRowsAtom);
 }
 
 export async function readLegacyMobileLaunches() {
@@ -170,6 +197,8 @@ export async function openMobileOrbitThread(
 }
 
 export function installOrbitLaunchObserver(): () => void {
+  // The active shell forgets archived threads, even while Home is unmounted.
+  const stopRows = appAtomRegistry.mount(orbitLaunchRowsAtom);
   const scope = () => {
     const gateway = orbitGatewayState();
     const node = gateway.node;
@@ -184,6 +213,7 @@ export function installOrbitLaunchObserver(): () => void {
   scope();
   return () => {
     stop();
+    stopRows();
     app.remove();
     mobileOrbitLaunches.setScope(null);
   };

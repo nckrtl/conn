@@ -3,7 +3,6 @@ import {
   ORBIT_LAUNCH_PHASE_LABELS,
   ORBIT_LAUNCH_STAGES,
   orbitLaunchActionLabel,
-  orbitLaunchShowsInThreadList,
   type LegacyOrbitLaunch,
   type OrbitLaunch,
   type OrbitLaunchAction,
@@ -38,11 +37,7 @@ const stageStatus = {
   skipped: "Skipped",
 } as const;
 
-export function OrbitThreadStartRows({
-  hasThreadRow,
-}: {
-  hasThreadRow: (environmentId: string, threadId: string) => boolean;
-}) {
+export function OrbitThreadStartRows() {
   const gateway = useOrbitGateway();
   const snapshot = useMobileOrbitLaunches();
   const nodeId = gateway.node?.id ?? null;
@@ -100,12 +95,7 @@ export function OrbitThreadStartRows({
     }
     setBusy(false);
   };
-  const rows = snapshot.launches.filter((launch) =>
-    orbitLaunchShowsInThreadList(
-      launch,
-      launch.thread !== null && hasThreadRow(launch.thread.environment_id, launch.thread.thread_id),
-    ),
-  );
+  const rows = snapshot.launches;
   const submissions = pending.filter(
     (item) => item.profileId === profileId && item.nodeId === nodeId,
   );
@@ -192,7 +182,8 @@ export function OrbitThreadStartRows({
           <Text className="text-base text-foreground">Previous Orbit start · {row.project}</Text>
           {row.completion ? (
             <Text className="text-sm text-foreground-muted">
-              Previous application preview · {row.completion.status}
+              Previous application preview ·{" "}
+              {row.completion.operationId === null ? "Retry unconfirmed" : row.completion.status}
               {row.completion.error ? ` · ${row.completion.error}` : ""}
             </Text>
           ) : (
@@ -214,19 +205,25 @@ export function OrbitThreadStartRows({
           ) : null}
           {row.completion ? (
             <>
-              <Button
-                label="Refresh preview"
-                disabled={busy}
-                onPress={() =>
-                  void run(async () => {
-                    await updateLegacyMobilePreview(row, "refresh");
-                    setLegacy(await readLegacyMobileLaunches());
-                  })
-                }
-              />
+              {row.completion.operationId !== null ? (
+                <Button
+                  label="Refresh preview"
+                  disabled={busy}
+                  onPress={() =>
+                    void run(async () => {
+                      await updateLegacyMobilePreview(row, "refresh");
+                      setLegacy(await readLegacyMobileLaunches());
+                    })
+                  }
+                />
+              ) : null}
               {row.completion.retryable ? (
                 <Button
-                  label="Retry application"
+                  label={
+                    row.completion.operationId === null
+                      ? "Resume preview retry"
+                      : "Retry application"
+                  }
                   disabled={busy}
                   onPress={() =>
                     void run(async () => {

@@ -146,11 +146,19 @@ describe("task detail", () => {
     };
     const seen: Array<OrbitTasksResult<OrbitTaskDetail>> = [];
     const stop = observeOrbitTask(observedClient, 482, (result) => seen.push(result));
-    const settle = async (index: number, error = false) => {
+    const settle = async (
+      index: number,
+      error: false | true | { status: number; code: string } = false,
+    ) => {
       const entry = pending[index]!;
       entry.resolve(
         error
-          ? { status: 503, body: "unavailable" }
+          ? error === true
+            ? { status: 503, body: "unavailable" }
+            : {
+                status: error.status,
+                body: JSON.stringify({ error: { code: error.code, message: error.code } }),
+              }
           : await base({ method: "GET", path: "/tasks/482" }),
       );
       await reads[index];
@@ -169,12 +177,27 @@ describe("task detail", () => {
     expect(seen).toHaveLength(1);
     await settle(3);
     expect(seen).toHaveLength(2);
+    let index = 4;
+    for (const error of [
+      { status: 404, code: "http.404", reason: "not-found" },
+      { status: 403, code: "node_access.required", reason: "access-required" },
+      { status: 403, code: "peer.identity_unknown", reason: "not-a-node" },
+      { status: 404, code: "extension.disabled", reason: "extension-disabled" },
+    ]) {
+      client.invalidate({ kind: "list" });
+      await settle(index++, error);
+      expect(seen.at(-1)).toMatchObject({ status: "error", reason: error.reason });
+      client.invalidate({ kind: "list" });
+      await settle(index++);
+      expect(seen.at(-1)?.status).toBe("ok");
+    }
+    const observed = seen.length;
     client.invalidate({ kind: "list" });
     stop();
-    await settle(4);
+    await settle(index);
     client.invalidate({ kind: "list" });
-    expect(pending).toHaveLength(5);
-    expect(seen).toHaveLength(2);
+    expect(pending).toHaveLength(index + 1);
+    expect(seen).toHaveLength(observed);
   });
 
   it("reports initial errors and recovers on the next invalidation", async () => {

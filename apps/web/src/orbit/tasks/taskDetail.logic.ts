@@ -303,7 +303,12 @@ export function observeOrbitTask(
     const current = ++request;
     const result = await client.getTask(taskId);
     if (disposed || current !== request) return;
-    if (result.status === "error" && hasTask) return;
+    if (
+      result.status === "error" &&
+      hasTask &&
+      (result.reason === "unreachable" || result.reason === "invalid-response")
+    )
+      return;
     hasTask = result.status === "ok";
     onResult(result);
   };

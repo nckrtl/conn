@@ -64,7 +64,7 @@ type TaskState = { readonly status: "loading" } | OrbitTasksResult<OrbitTaskDeta
 
 /**
  * One task's detail. Re-reads when the client invalidates this task or the list, keeping what it
- * shows until the answer; a failed re-read keeps the last good task on screen.
+ * shows until the answer; a transient read failure keeps the last good task on screen.
  */
 function useOrbitTask(taskId: number) {
   const [state, setState] = useState<{ taskId: number; value: TaskState; attempt: number }>({

@@ -5,6 +5,7 @@ import {
   forgetPairingRevoked,
   forgetRenewalFailure,
   isFinalPairingError,
+  isPairingRevoked,
   isPairingRevokedError,
   parseEnvironmentProvider,
   parseOrbitEnvironmentState,
@@ -101,13 +102,6 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function saveProvider(): Promise<void> {
-  await SecureStore.setItemAsync(
-    PROVIDER_STORAGE_KEY,
-    JSON.stringify({ provider: state.provider, environments: environmentState }),
-  );
-}
-
 async function loadProvider(): Promise<void> {
   try {
     const raw = await SecureStore.getItemAsync(PROVIDER_STORAGE_KEY);
@@ -128,21 +122,35 @@ async function loadProvider(): Promise<void> {
 const requestedEnvironmentIds = new Set<string>();
 const pairings = new Map<string, Promise<boolean>>();
 
-async function updateEnvironmentState(
+// Apply each change to the latest saved records. A failed write leaves the previous state visible.
+let savingProvider = Promise.resolve();
+function updateEnvironmentState(
   change: (current: OrbitEnvironmentState) => OrbitEnvironmentState,
+  nextProvider?: EnvironmentProvider,
 ): Promise<void> {
-  const previous = environmentState;
-  environmentState = change(environmentState);
-  if (
-    environmentState.revokedAt !== previous.revokedAt ||
-    environmentState.renewalFailed !== previous.renewalFailed
-  ) {
-    set({
-      revokedEnvironmentIds: Object.keys(environmentState.revokedAt ?? {}),
-      renewalFailed: environmentState.renewalFailed ?? {},
-    });
-  }
-  await saveProvider();
+  const save = savingProvider.then(async () => {
+    const provider = nextProvider ?? state.provider;
+    const previous = environmentState;
+    const environments = change(previous);
+    await SecureStore.setItemAsync(
+      PROVIDER_STORAGE_KEY,
+      JSON.stringify({ provider, environments }),
+    );
+    environmentState = environments;
+    if (
+      provider !== state.provider ||
+      environments.revokedAt !== previous.revokedAt ||
+      environments.renewalFailed !== previous.renewalFailed
+    ) {
+      set({
+        provider,
+        revokedEnvironmentIds: Object.keys(environments.revokedAt ?? {}),
+        renewalFailed: environments.renewalFailed ?? {},
+      });
+    }
+  });
+  savingProvider = save.catch(() => {});
+  return save;
 }
 
 function recordFailedRenewal(environmentId: string, error: unknown): Promise<void> {
@@ -170,6 +178,12 @@ function pairOne(
   kind: PairingKind,
 ): Promise<boolean> {
   const { environmentId } = environment;
+  if (
+    state.provider !== "orbit" ||
+    (kind !== "connect" && isPairingRevoked(environmentState, environmentId))
+  ) {
+    return Promise.resolve(false);
+  }
   const running = pairings.get(environmentId);
   if (running) return running;
   const pairing = attemptPairing(environment, kind).finally(() => pairings.delete(environmentId));
@@ -195,13 +209,10 @@ async function attemptPairing(
           return recordRenewal(current, environmentId, now);
         case "connect":
           // Backs off like a new server, so a failed Connect is not retried on every refresh.
-          return recordPairingAttempt(
-            forgetPairingRevoked(current, environmentId),
-            environmentId,
-            now,
-          );
+          return recordPairingAttempt(current, environmentId, now);
       }
     });
+    if (state.provider !== "orbit") return false;
     // Every automatic pairing of a saved server is a renewal to Orbit, so a revoke stops it.
     const pairing = await client.pair(environmentId, {
       renew: kind === "access" || kind === "renew",
@@ -209,7 +220,7 @@ async function attemptPairing(
     const result = await runAtomCommand(
       appAtomRegistry,
       connectPairingUrl,
-      { pairingUrl: pairing.pairingUrl },
+      { pairingUrl: pairing.pairingUrl, expectedEnvironmentId: environmentId as EnvironmentId },
       { reportFailure: false },
     );
     if (result._tag !== "Success") {
@@ -218,10 +229,12 @@ async function attemptPairing(
       }
       return false;
     }
+    // Onboarding has persisted the replacement session. Only now lift a revocation.
+    await updateEnvironmentState((current) => {
+      const paired = forgetRenewalFailure(recordPaired(current, environmentId), environmentId);
+      return kind === "connect" ? forgetPairingRevoked(paired, environmentId) : paired;
+    });
     requestedEnvironmentIds.delete(environmentId);
-    await updateEnvironmentState((current) =>
-      forgetRenewalFailure(recordPaired(current, environmentId), environmentId),
-    );
     return true;
   } catch (error) {
     // Revoked in Orbit: never again on its own. Unreachable: a later refresh. Refused: after the
@@ -290,14 +303,21 @@ export async function recordOrbitThreadStartPaired(environmentId: string): Promi
 }
 
 /**
- * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets a
- * later refresh retry it if this attempt fails.
+ * Conn: Connect in Settings › Environments pairs a server explicitly. A later refresh may retry
+ * a new server, but a revoked server still needs Connect if this attempt fails.
  */
 export function connectOrbitEnvironment(
   environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
 ): Promise<boolean> {
   requestedEnvironmentIds.add(environment.environmentId);
   return pairOne(environment, "connect");
+}
+
+/** Retries a failed renewal now, with Orbit's revocation check. */
+export function retryOrbitEnvironmentRenewal(
+  environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
+): Promise<boolean> {
+  return pairOne(environment, "renew");
 }
 
 /** Switches the saved environments to match the provider, pairing Orbit servers as needed. */
@@ -457,8 +477,7 @@ export async function setEnvironmentProvider(provider: EnvironmentProvider): Pro
   if (refreshing) await refreshing;
   // Conn: a pairing in flight saves its server; let it end before the switch reconciles.
   if (pairingRun) await pairingRun;
-  set({ provider });
-  await saveProvider();
+  await updateEnvironmentState((current) => current, provider);
   await refreshOrbitGateway();
 }
 

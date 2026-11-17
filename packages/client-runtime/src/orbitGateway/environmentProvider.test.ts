@@ -521,6 +521,7 @@ describe("session renewal", () => {
     expect(planEnvironmentProvider({ ...later, renew: [], lacksAccess: ["beast"] }).pair).toEqual(
       [],
     );
+    expect(planEnvironmentProvider({ ...later, saved: [], renew: [] }).pair).not.toContain("beast");
     const connected = forgetPairingRevoked(revoked, "beast");
     expect(isPairingRevoked(connected, "beast")).toBe(false);
     expect(planEnvironmentProvider(input(connected)).renew).toEqual(["beast", "mini", "shark"]);

@@ -417,6 +417,8 @@ export function planEnvironmentProvider(input: {
       // An asleep Instance's server cannot mint a pairing link.
       if (environment.powerState === "stopped") return false;
       const id = environment.environmentId;
+      // Conn: a revoked pairing is never renewed; only an explicit Connect pairs it again.
+      if (state.revokedAt?.[id] !== undefined) return false;
       if (!savedIds.has(id)) {
         if (environment.instanceId !== null && !requested.has(id)) return false;
         const refusedAt = state.pairRefusedAt?.[id];
@@ -424,8 +426,6 @@ export function planEnvironmentProvider(input: {
         const lastAttempt = state.pairAttemptedAt?.[id];
         return lastAttempt === undefined || now - lastAttempt >= PAIRING_RETRY_MS;
       }
-      // Conn: a revoked pairing is never renewed; only an explicit Connect pairs it again.
-      if (state.revokedAt?.[id] !== undefined) return false;
       // Conn: a session that ends soon or has ended is renewed, unless T3 refused this
       // registration's pairing for good (it is tried again once the server registers again).
       const reason = renewals.get(id);
@@ -511,7 +511,7 @@ export function recordPairingRevoked(
   return { ...state, revokedAt: { ...state.revokedAt, [environmentId]: now } };
 }
 
-/** Conn: an explicit Connect lifts the revoked state, so the server pairs (and renews) again. */
+/** Conn: lifts the revoked state once an explicit Connect has saved the replacement session. */
 export function forgetPairingRevoked(
   state: OrbitEnvironmentState,
   environmentId: string,

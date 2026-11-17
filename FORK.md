@@ -489,8 +489,10 @@ On the phone, Settings starts with an Orbit row while the Environments provider 
 Settings › Orbit › Connection checks the Gateway, certificate and device identity. React Native
 can report both tunnel and certificate failures as "Network request failed", so the Gateway check
 explains both causes and leaves the certificate check pending a response. Nodes shows revoked
-pairings and failed renewals for this phone. Manage profiles, workspaces and manual connections
-in Settings › Environments.
+pairings and failed renewals for this phone. In Settings › Environments, Retry renews a failed
+session immediately and still respects Orbit revocation. For a revoked server, Connect stays
+available until the phone saves a replacement session. Background refresh skips revoked pairings.
+Environments also manages profiles, workspaces and manual connections.
 
 Sources:
 

@@ -6,6 +6,7 @@ import {
   type OrbitLaunch,
   type OrbitLaunchAction,
   type OrbitLaunchAdmission,
+  type OrbitLaunchClient,
   type OrbitLaunchScope,
 } from "./launches.ts";
 
@@ -34,7 +35,10 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
   let scope: OrbitLaunchScope | null = null;
   let scopeVersion = 0;
   let accessVersion = 0;
-  let revision = 0;
+  let accessDenied = false;
+  let readSequence = 0;
+  let accessEvidenceSequence = 0;
+  let launchRevision = 0;
   let reading = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const listeners = new Set<() => void>();
@@ -42,19 +46,6 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
   function publish(next: OrbitLaunchView) {
     view = next;
     for (const listener of listeners) listener();
-  }
-
-  function publishReadFailure(error: unknown) {
-    const denied = isAccessDenial(error);
-    if (denied) {
-      accessVersion += 1;
-      revision += 1;
-    }
-    publish({
-      launches: denied ? [] : view.launches,
-      loaded: true,
-      error: error instanceof Error ? error.message : "Could not read Orbit launches.",
-    });
   }
 
   function schedule() {
@@ -67,37 +58,71 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
     timer = setTimeout(() => void refresh(), delay);
   }
 
-  async function refresh() {
-    const api = client()?.launches;
-    if (api === undefined || scope === null || reading) return;
-    const version = scopeVersion;
-    const { profileId } = scope;
-    const requested = revision;
-    reading = true;
+  async function readLaunches(
+    api: OrbitLaunchClient,
+    profileId: number,
+    version: number,
+    purpose: "refresh" | "reconcile",
+  ) {
+    const access = accessVersion;
+    const sequence = ++readSequence;
+    const requested = launchRevision;
+    const canUpdatePoll = () => purpose === "refresh" && requested === launchRevision;
+    // List responses establish access independently of admission and action receipts.
+    const isCurrent = () =>
+      version === scopeVersion && access === accessVersion && sequence > accessEvidenceSequence;
     try {
       const launches = await api.list();
-      if (version === scopeVersion && requested === revision) {
-        publish({
-          launches: launches.filter((launch) => launch.profile_id === profileId),
-          loaded: true,
-          error: null,
-        });
+      if (isCurrent()) {
+        accessEvidenceSequence = sequence;
+        const restored = accessDenied;
+        accessDenied = false;
+        if (restored || canUpdatePoll()) {
+          publish({
+            launches: launches.filter((launch) => launch.profile_id === profileId),
+            loaded: true,
+            error: null,
+          });
+          if (purpose === "reconcile") schedule();
+        }
       }
+      return launches;
     } catch (error) {
-      if (version === scopeVersion && requested === revision) {
-        publishReadFailure(error);
+      if (isCurrent()) {
+        const denied = isAccessDenial(error);
+        if (denied) {
+          accessEvidenceSequence = sequence;
+          accessVersion += 1;
+          accessDenied = true;
+        }
+        if (denied || (!accessDenied && canUpdatePoll())) {
+          publish({
+            launches: denied ? [] : view.launches,
+            loaded: true,
+            error: error instanceof Error ? error.message : "Could not read Orbit launches.",
+          });
+          if (purpose === "reconcile") schedule();
+        }
       }
+      throw error;
     } finally {
-      if (version === scopeVersion) {
+      if (purpose === "refresh" && version === scopeVersion) {
         reading = false;
         schedule();
       }
     }
   }
 
+  async function refresh() {
+    const api = client()?.launches;
+    if (api === undefined || scope === null || reading) return;
+    reading = true;
+    await readLaunches(api, scope.profileId, scopeVersion, "refresh").catch(() => {});
+  }
+
   function apply(launch: OrbitLaunch, version: number) {
     if (version !== scopeVersion) return;
-    revision += 1;
+    launchRevision += 1;
     const index = view.launches.findIndex((row) => row.id === launch.id);
     const launches =
       index < 0
@@ -143,22 +168,13 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
     }
     ensureAccess();
     const api = gateway.launches;
-    const readAdmissions = async () => {
-      try {
-        return await api.list();
-      } catch (error) {
-        if (version === scopeVersion && access === accessVersion && isAccessDenial(error)) {
-          publishReadFailure(error);
-          schedule();
-        }
-        throw error;
-      }
-    };
+    const readAdmissions = () => readLaunches(api, expected.profileId, version, "reconcile");
     const observed = () => view.launches.find((row) => row.launch_id === admission.id);
     const accept = (launch: OrbitLaunch, before: OrbitLaunch | undefined) => {
       ensureAccess();
       assertLaunchIdentity(launch, admission);
       const current = observed();
+      if (current === launch) return launch;
       if (current !== before) {
         void refresh();
         if (current !== undefined) assertLaunchIdentity(current, admission);
@@ -167,7 +183,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       apply(launch, version);
       return launch;
     };
-    if (reconcile) {
+    if (reconcile || accessDenied) {
       const before = observed();
       const previous = (await readAdmissions()).find((row) => row.launch_id === admission.id);
       if (scopeVersion !== version)
@@ -268,6 +284,7 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       if (next?.profileId === scope?.profileId && next?.nodeId === scope?.nodeId) return;
       scope = next;
       scopeVersion += 1;
+      accessDenied = false;
       reading = false;
       clearTimeout(timer);
       publish(EMPTY);

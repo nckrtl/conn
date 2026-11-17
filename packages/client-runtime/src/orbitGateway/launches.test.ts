@@ -604,26 +604,56 @@ it("does not apply an older admission reply over a cancellation already received
   }
 });
 
-it("preserves the journal when a newer access denial precedes a delayed admission receipt", async () => {
+it("honors a poll denial between two admission receipts and recovers the saved launch", async () => {
   const scope = { nodeId: 7, profileId: 12 };
-  const draft = { ...scope, draftId: "draft", admission: request };
+  const draftA = { ...scope, draftId: "draft-a", admission: request };
+  const draftB = {
+    ...scope,
+    draftId: "draft-b",
+    admission: {
+      id: "second-launch",
+      request: {
+        ...request.request,
+        command_id: "command-b",
+        thread_id: "thread-b",
+        message_id: "message-b",
+      },
+    },
+  };
+  const launchA = fixture();
+  const launchB = fixture({ id: 42, launch_id: draftB.admission.id });
   let stored: readonly OrbitLaunchSubmission[] = [];
-  const entered = Promise.withResolvers<void>();
-  const reply = Promise.withResolvers<ReturnType<typeof wrap>>();
   const initial = Promise.withResolvers<void>();
-  let list = wrap([]);
-  const post = vi.fn(() => {
-    entered.resolve();
-    return reply.promise;
+  const enteredA = Promise.withResolvers<void>();
+  const enteredB = Promise.withResolvers<void>();
+  const enteredPoll = Promise.withResolvers<void>();
+  const replyA = Promise.withResolvers<ReturnType<typeof wrap>>();
+  const replyB = Promise.withResolvers<ReturnType<typeof wrap>>();
+  const poll = Promise.withResolvers<ReturnType<typeof wrap>>();
+  const list = vi
+    .fn()
+    .mockResolvedValueOnce(wrap([]))
+    .mockImplementationOnce(() => {
+      enteredPoll.resolve();
+      return poll.promise;
+    })
+    .mockResolvedValue(wrap([launchA, launchB]));
+  const post = vi.fn((idempotencyKey: string | undefined) => {
+    if (idempotencyKey === request.id) {
+      enteredA.resolve();
+      return replyA.promise;
+    }
+    enteredB.resolve();
+    return replyB.promise;
   });
-  const gateway = createOrbitGatewayClient(async ({ path, method }) => {
+  const gateway = createOrbitGatewayClient(async ({ path, method, idempotencyKey }) => {
     if (path === "/me")
       return wrap({
         id: 7,
         name: "Device",
         profile: { id: 12, name: "Work", settings_version: 1, updated_at: "2026-11-17T12:00:00Z" },
       });
-    return method === "GET" ? list : post();
+    return method === "GET" ? list() : post(idempotencyKey);
   });
   const observer = createOrbitLaunchObserver(() => gateway);
   const journal = createOrbitLaunchSubmissions(
@@ -638,20 +668,39 @@ it("preserves the journal when a newer access denial precedes a delayed admissio
   const stop = observer.subscribe(() => {
     if (observer.view().loaded) initial.resolve();
   });
+  const clearDraft = vi.fn();
   observer.setScope(scope);
   try {
     await initial.promise;
-    const send = journal.submit(draft);
-    await entered.promise;
-    list = errorResponse("node_access.required", 403);
-    await observer.refresh();
-    reply.resolve(wrap(fixture(), 202));
-    await expect(send).rejects.toThrow("access changed");
-    expect(observer.view().launches).toEqual([]);
-    expect(await journal.pending(scope)).toEqual([draft]);
-    list = wrap([fixture()]);
-    await expect(journal.replay(draft)).resolves.toEqual(fixture());
-    expect(post).toHaveBeenCalledOnce();
+    const sendA = journal.submit(draftA).then(async (launch) => {
+      clearDraft();
+      await journal.acknowledge(launch.launch_id);
+    });
+    const sendB = journal.submit(draftB);
+    await Promise.all([enteredA.promise, enteredB.promise]);
+    const refreshing = observer.refresh();
+    await enteredPoll.promise;
+    replyB.resolve(wrap(launchB, 202));
+    await expect(sendB).resolves.toEqual(launchB);
+    poll.resolve(errorResponse("node_access.required", 403));
+    await refreshing;
+    replyA.resolve(wrap(launchA, 202));
+    await expect(sendA).rejects.toThrow("access changed");
+    expect(observer.view()).toEqual({ launches: [], loaded: true, error: "node_access.required" });
+    expect(clearDraft).not.toHaveBeenCalled();
+    expect(await journal.pending(scope)).toEqual([draftA, draftB]);
+
+    const olderPoll = Promise.withResolvers<ReturnType<typeof wrap>>();
+    list.mockReturnValueOnce(olderPoll.promise);
+    const checking = observer.refresh();
+    const recovered = await journal.replay(draftA);
+    olderPoll.resolve(errorResponse("node_access.required", 403));
+    await checking;
+    expect(recovered).toEqual(launchA);
+    expect(observer.view()).toEqual({ launches: [launchA, launchB], loaded: true, error: null });
+    await journal.acknowledge(recovered.launch_id);
+    expect(await journal.pending(scope)).toEqual([draftB]);
+    expect(post.mock.calls).toEqual([[request.id], [draftB.admission.id]]);
   } finally {
     stop();
     observer.setScope(null);

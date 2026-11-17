@@ -121,6 +121,7 @@ async function loadProvider(): Promise<void> {
 /** Conn: clones the user asked to connect in Settings; refreshes retry them in this session. */
 const requestedEnvironmentIds = new Set<string>();
 const pairings = new Map<string, Promise<boolean>>();
+let changingProvider: Promise<void> | null = null;
 
 // Apply each change to the latest saved records. A failed write leaves the previous state visible.
 let savingProvider = Promise.resolve();
@@ -180,10 +181,12 @@ function pairOne(
   const { environmentId } = environment;
   if (
     state.provider !== "orbit" ||
+    changingProvider ||
     (kind !== "connect" && isPairingRevoked(environmentState, environmentId))
   ) {
     return Promise.resolve(false);
   }
+  if (kind === "connect") requestedEnvironmentIds.add(environmentId);
   const running = pairings.get(environmentId);
   if (running) return running;
   const pairing = attemptPairing(environment, kind).finally(() => pairings.delete(environmentId));
@@ -309,7 +312,6 @@ export async function recordOrbitThreadStartPaired(environmentId: string): Promi
 export function connectOrbitEnvironment(
   environment: Pick<OrbitGatewayEnvironment, "environmentId" | "registeredAt">,
 ): Promise<boolean> {
-  requestedEnvironmentIds.add(environment.environmentId);
   return pairOne(environment, "connect");
 }
 
@@ -389,7 +391,7 @@ async function reconcileEnvironments(
     await updateEnvironmentState((current) => forgetOrbitEnvironment(current, environmentId));
   }
   // Conn: until the saved thread starts load, the sync cannot tell which clones they hold.
-  if (!orbitThreadStartStore.loaded()) return;
+  if (state.provider !== "orbit" || changingProvider || !orbitThreadStartStore.loaded()) return;
   // Conn: a pairing follows a Gateway Operation for up to a minute. It runs after the refresh, so
   // the lists and a later refresh never wait for it; a refresh during a run starts no second run.
   // A refresh during a run plans again once the run ends, so a refusal seen meanwhile still renews.
@@ -397,15 +399,11 @@ async function reconcileEnvironments(
     pairingAgain = true;
     return;
   }
-  const provider = state.provider;
   pairingRun = runPairings(orbit ?? [], plan.renew, plan.pair, savedIds).finally(() => {
     pairingRun = null;
-    // A switch of provider during the run re-applies the new one; a refresh during it plans again.
-    if (state.provider !== provider || (pairingAgain && state.provider === "orbit")) {
-      pairingAgain = false;
-      void refreshOrbitGateway();
-    }
+    const refreshAgain = pairingAgain;
     pairingAgain = false;
+    if (refreshAgain) void refreshOrbitGateway();
   });
 }
 
@@ -424,7 +422,7 @@ async function runPairings(
   const renew = new Set(renewIds);
   for (const entry of orbit) {
     // A switch to Default mode during the run stops it before the next pairing.
-    if (state.provider !== "orbit") return;
+    if (changingProvider) return;
     if (renew.has(entry.environmentId) && !pairings.has(entry.environmentId)) {
       await pairOne(entry, "renew");
     }
@@ -432,7 +430,7 @@ async function runPairings(
   // One other server per refresh.
   const environmentId = pairIds.find((id) => !renew.has(id) && !pairings.has(id));
   const environment = orbit.find((entry) => entry.environmentId === environmentId);
-  if (environment && state.provider === "orbit") {
+  if (environment) {
     await pairOne(environment, savedIds.has(environment.environmentId) ? "access" : "new");
   }
 }
@@ -444,6 +442,9 @@ let refreshing: Promise<void> | null = null;
  * the bound profile's workspaces; Default mode makes no Gateway call.
  */
 export function refreshOrbitGateway(): Promise<void> {
+  if (changingProvider) {
+    return changingProvider.then(refreshOrbitGateway, refreshOrbitGateway);
+  }
   if (refreshing) return refreshing;
   refreshing = (async () => {
     try {
@@ -473,12 +474,20 @@ export function refreshOrbitGateway(): Promise<void> {
 }
 
 /** Chooses where this device's environments come from and applies it at once. */
-export async function setEnvironmentProvider(provider: EnvironmentProvider): Promise<void> {
-  if (refreshing) await refreshing;
-  // Conn: a pairing in flight saves its server; let it end before the switch reconciles.
-  if (pairingRun) await pairingRun;
-  await updateEnvironmentState((current) => current, provider);
-  await refreshOrbitGateway();
+export function setEnvironmentProvider(provider: EnvironmentProvider): Promise<void> {
+  const change = (changingProvider ?? Promise.resolve())
+    .catch(() => {})
+    .then(async () => {
+      await refreshing;
+      // Pairing can enable a saved server. Drain it before Default reconciles the catalog.
+      await Promise.all([pairingRun, ...pairings.values()]);
+      await updateEnvironmentState((current) => current, provider);
+    })
+    .finally(() => {
+      if (changingProvider === change) changingProvider = null;
+    });
+  changingProvider = change;
+  return change.then(refreshOrbitGateway);
 }
 
 /** Binds this device to a profile, creating it first when `profile` is a new name. */

@@ -97,7 +97,8 @@ export interface OrbitSubtask {
     readonly type: string;
     readonly description: string;
   }>;
-  readonly status: OrbitSubtaskStatus;
+  /** "unknown": a status this contract version does not name. */
+  readonly status: OrbitSubtaskStatus | "unknown";
   readonly attention: OrbitTaskAttention | null;
   /** Orbit's agent record id, matching an `OrbitTaskAgent.id`. */
   readonly currentImplementerAgentId: number | null;
@@ -113,7 +114,8 @@ export interface OrbitConversationRef {
 export interface OrbitTaskAgent {
   /** Orbit's agent-thread record id. Never a Conn thread id. */
   readonly id: number;
-  readonly role: "implementer" | "reviewer";
+  /** "unknown": a role this contract version does not name. */
+  readonly role: "implementer" | "reviewer" | "unknown";
   readonly subtaskIds: ReadonlyArray<number>;
   /** False for earlier attempts. */
   readonly current: boolean;
@@ -122,8 +124,8 @@ export interface OrbitTaskAgent {
   readonly provider: string | null;
   readonly model: string | null;
   readonly effort: string | null;
-  /** Null before Orbit's first observation. */
-  readonly state: "idle" | "working" | "asking_for_input" | "done" | "failed" | null;
+  /** Null before Orbit's first observation; "unknown" for a state this contract does not name. */
+  readonly state: "idle" | "working" | "asking_for_input" | "done" | "failed" | "unknown" | null;
   readonly needsInput: boolean;
   readonly createdAt: string;
   readonly observedAt: string | null;
@@ -171,6 +173,8 @@ export interface OrbitTasksListQuery {
 
 export interface OrbitTasksPage {
   readonly tasks: ReadonlyArray<OrbitTaskSummary>;
+  /** Rows left out because they did not match the contract, such as an unknown status. */
+  readonly skipped: number;
   readonly nextCursor: number | null;
 }
 

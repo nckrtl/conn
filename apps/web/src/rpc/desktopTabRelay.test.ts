@@ -78,7 +78,7 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-it("reads status during an action and re-registers the same tab without forwarding a retired reply", async () => {
+it("delivers without focusing and reads status during an action without forwarding a retired reply", async () => {
   const streams = new Map<
     string,
     { onEvent: (event: PreviewAutomationStreamEvent) => Promise<void>; signal: AbortSignal }
@@ -120,12 +120,14 @@ it("reads status during an action and re-registers the same tab without forwardi
       result: {},
     };
   });
-  const stop = hostDesktopTab(
+  const focus = vi.fn();
+  // Keep the removed callback as a tripwire for focus-stealing delivery.
+  const stop = Reflect.apply(hostDesktopTab, undefined, [
     { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("thread") },
     "tab",
     "same-guest",
-    () => {},
-  );
+    focus,
+  ]);
   const event = (
     connectionId: string,
     operation: PreviewAutomationRequest["operation"],
@@ -148,6 +150,7 @@ it("reads status during an action and re-registers the same tab without forwardi
     await streams.get("connection-1")!.onEvent(event("connection-1", "status"));
     await responded.promise;
     expect(responses).toMatchObject([{ connectionId: "connection-1", requestId: "status" }]);
+    expect(focus).not.toHaveBeenCalled();
     mocks.phase = "disconnected";
     mocks.listener();
     attached = deferred<void>();
@@ -196,7 +199,6 @@ it("retries a registration that overlaps a disconnect without another user actio
     { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("thread") },
     "tab",
     "same-guest",
-    () => {},
   );
   try {
     await vi.advanceTimersByTimeAsync(0);
@@ -260,7 +262,6 @@ it("publishes viewport and appearance choices and rehosts the same guest when th
     { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("thread") },
     "tab",
     "same-guest",
-    () => {},
   );
   try {
     await attached.promise;
@@ -325,7 +326,6 @@ it("re-registers after a timeout eviction completes the host stream while the en
     { environmentId: EnvironmentId.make("environment"), threadId: ThreadId.make("thread") },
     "tab",
     "same-guest",
-    () => {},
   );
   try {
     await vi.advanceTimersByTimeAsync(0);

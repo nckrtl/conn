@@ -204,7 +204,7 @@ function SettingsList(props: { readonly connections: readonly SettingsListRow[] 
               icon: undefined,
               leading: <OrbitLogo size={24} />,
               label: "Orbit",
-              target: "SettingsOrbit" as const,
+              target: "SettingsOrbit",
             },
           ],
         },

@@ -48,6 +48,13 @@ export function settingsOpenOverWorkspace(routes: readonly { readonly name: stri
   );
 }
 
+function restoreOrbitConnectionParent(routes: RouteLike[], existing?: RouteLike): void {
+  const connection = routes.findIndex((route) => route.name === "SettingsOrbitConnection");
+  if (connection > 0 && routes[connection - 1]?.name === "Settings") {
+    routes.splice(connection, 0, existing ?? { name: "SettingsOrbit" });
+  }
+}
+
 /**
  * A `settings/...` link names only its page, so put the Settings tab's route under it. A bare
  * `settings` link opens `page` beside the list when the window has columns.
@@ -64,6 +71,7 @@ export function restoreSettingsLinkState(
   if (list < 0) routes.splice(first, 0, { name: "Settings" });
   const top = routes.at(-1);
   if (page && top?.name === "Settings") routes.push({ name: page });
+  restoreOrbitConnectionParent(routes);
   return routes.length === state.routes.length
     ? state
     : { ...state, index: routes.length - 1, routes };
@@ -140,11 +148,16 @@ export function settingsLinkAction(
   const top = link.routes.at(-1);
   if (!current || !top || top.state || !isSettingsRoute(top.name)) return undefined;
   const page = top.name === "Settings" ? undefined : (top.name as SettingsPageName);
+  const payload = isWorkspaceOverlayRoute("Settings")
+    ? settingsSheetNavigationState(current, page, top.params)
+    : settingsNavigationState(current, page, top.params);
+  restoreOrbitConnectionParent(
+    payload.routes,
+    current.routes.find((route) => route.name === "SettingsOrbit"),
+  );
   return {
     type: "RESET" as const,
-    payload: isWorkspaceOverlayRoute("Settings")
-      ? settingsSheetNavigationState(current, page, top.params)
-      : settingsNavigationState(current, page, top.params),
+    payload: { ...payload, index: payload.routes.length - 1 },
     target: current.key,
   };
 }

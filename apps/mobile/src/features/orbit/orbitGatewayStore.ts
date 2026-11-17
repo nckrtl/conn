@@ -3,6 +3,7 @@ import {
   EMPTY_ORBIT_ENVIRONMENT_STATE,
   forgetOrbitEnvironment,
   forgetPairingRevoked,
+  forgetRenewalFailure,
   isFinalPairingError,
   isPairingRevokedError,
   parseEnvironmentProvider,
@@ -15,14 +16,17 @@ import {
   recordPairingRevoked,
   readSessionRenewals,
   recordRenewal,
+  recordRenewalFailed,
+  renewalFailureReason,
   type EnvironmentProvider,
   type OrbitEnvironmentState,
   type OrbitGatewayEnvironment,
   type OrbitGatewayNode,
   type OrbitGatewayProfile,
   type OrbitGatewayWorkspace,
+  type RenewalFailure,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { AuthAccessWriteScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
@@ -60,6 +64,7 @@ export interface OrbitGatewayState {
   readonly selectedWorkspaceId: string | null;
   /** Conn: servers whose pairing Orbit revoked for this phone; only Connect pairs them again. */
   readonly revokedEnvironmentIds: readonly string[];
+  readonly renewalFailed: Readonly<Record<string, RenewalFailure>>;
 }
 
 const PROVIDER_STORAGE_KEY = "t3code.environment-provider.v1";
@@ -77,6 +82,7 @@ let state: OrbitGatewayState = {
   error: null,
   selectedWorkspaceId: null,
   revokedEnvironmentIds: [],
+  renewalFailed: {},
 };
 const listeners = new Set<() => void>();
 
@@ -111,6 +117,7 @@ async function loadProvider(): Promise<void> {
       provider: parseEnvironmentProvider(parsed.provider),
       providerLoaded: true,
       revokedEnvironmentIds: Object.keys(environmentState.revokedAt ?? {}),
+      renewalFailed: environmentState.renewalFailed ?? {},
     });
   } catch {
     set({ providerLoaded: true });
@@ -126,10 +133,25 @@ async function updateEnvironmentState(
 ): Promise<void> {
   const previous = environmentState;
   environmentState = change(environmentState);
-  if (environmentState.revokedAt !== previous.revokedAt) {
-    set({ revokedEnvironmentIds: Object.keys(environmentState.revokedAt ?? {}) });
+  if (
+    environmentState.revokedAt !== previous.revokedAt ||
+    environmentState.renewalFailed !== previous.renewalFailed
+  ) {
+    set({
+      revokedEnvironmentIds: Object.keys(environmentState.revokedAt ?? {}),
+      renewalFailed: environmentState.renewalFailed ?? {},
+    });
   }
   await saveProvider();
+}
+
+function recordFailedRenewal(environmentId: string, error: unknown): Promise<void> {
+  return updateEnvironmentState((current) =>
+    recordRenewalFailed(current, environmentId, {
+      at: Date.now(),
+      reason: renewalFailureReason(error),
+    }),
+  ).catch(() => {});
 }
 
 /**
@@ -190,21 +212,34 @@ async function attemptPairing(
       { pairingUrl: pairing.pairingUrl },
       { reportFailure: false },
     );
-    if (result._tag !== "Success") return false;
+    if (result._tag !== "Success") {
+      if (kind === "renew") {
+        await recordFailedRenewal(environmentId, squashAtomCommandFailure(result));
+      }
+      return false;
+    }
     requestedEnvironmentIds.delete(environmentId);
-    await updateEnvironmentState((current) => recordPaired(current, environmentId));
+    await updateEnvironmentState((current) =>
+      forgetRenewalFailure(recordPaired(current, environmentId), environmentId),
+    );
     return true;
   } catch (error) {
     // Revoked in Orbit: never again on its own. Unreachable: a later refresh. Refused: after the
     // server registers again.
     if (isPairingRevokedError(error)) {
       await updateEnvironmentState((current) =>
-        recordPairingRevoked(current, environmentId, Date.now()),
+        forgetRenewalFailure(
+          recordPairingRevoked(current, environmentId, Date.now()),
+          environmentId,
+        ),
       ).catch(() => {});
-    } else if (isFinalPairingError(error)) {
-      await updateEnvironmentState((current) => recordPairingRefused(current, environment)).catch(
-        () => {},
-      );
+    } else {
+      if (isFinalPairingError(error)) {
+        await updateEnvironmentState((current) => recordPairingRefused(current, environment)).catch(
+          () => {},
+        );
+      }
+      if (kind === "renew") await recordFailedRenewal(environmentId, error);
     }
     return false;
   }
@@ -249,7 +284,9 @@ const refusalWatch = createCredentialRefusalWatch({
 /** Conn: a thread start paired with its clone's server, which Orbit provides like any other. */
 export async function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
   // The server is saved already; a lost record only means a later sync re-checks it.
-  await updateEnvironmentState((current) => recordPaired(current, environmentId)).catch(() => {});
+  await updateEnvironmentState((current) =>
+    forgetRenewalFailure(recordPaired(current, environmentId), environmentId),
+  ).catch(() => {});
 }
 
 /**

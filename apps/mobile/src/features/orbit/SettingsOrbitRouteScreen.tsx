@@ -1,5 +1,7 @@
+import { gatewayText } from "@t3tools/client-runtime/orbit-gateway";
 import { useNavigation } from "@react-navigation/native";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
+import { ActivityIndicator } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SettingsRow } from "../settings/components/SettingsRow";
@@ -24,16 +26,31 @@ export function SettingsOrbitRouteScreen() {
         contentContainerClassName="gap-6 px-5 pt-4"
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
-        <SettingsSection footer="Orbit shows here while this phone takes its environments from Orbit.">
-          <SettingsRow
-            icon={undefined}
-            label="Connection"
-            value={gateway.phase === "ready" ? "Connected" : undefined}
-            valuePosition="trailing"
-            // Not a `target`: one more page there makes SettingsRow's navigate union too wide to check.
-            onPress={() => navigation.navigate("SettingsOrbitConnection")}
-          />
-        </SettingsSection>
+        {!gateway.providerLoaded ? (
+          <ActivityIndicator />
+        ) : gateway.provider === "orbit" ? (
+          <SettingsSection footer="Orbit shows here while this phone takes its environments from Orbit.">
+            <SettingsRow
+              icon={undefined}
+              label="Connection"
+              value={
+                gateway.phase === "ready" && gatewayText(gateway.node?.wireguardIp) !== null
+                  ? "Connected"
+                  : undefined
+              }
+              valuePosition="trailing"
+              onPress={() => navigation.navigate("SettingsOrbitConnection")}
+            />
+          </SettingsSection>
+        ) : (
+          <SettingsSection footer="Choose Orbit as the Provider to show its connection.">
+            <SettingsRow
+              icon="desktopcomputer"
+              label="Environments"
+              target="SettingsEnvironments"
+            />
+          </SettingsSection>
+        )}
       </ScrollView>
     </SettingsScreen>
   );

@@ -1,5 +1,7 @@
 import {
+  gatewayText,
   orbitNodeServers,
+  renewalFailureText,
   type OrbitConnectionCheckState,
   type OrbitConnectionProbe,
   type OrbitGatewayEnvironment,
@@ -13,13 +15,16 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
-import { ConnectionStatusDot } from "../connection/ConnectionStatusDot";
+import {
+  ConnectionStatusDot,
+  type ConnectionStatusDotState,
+} from "../connection/ConnectionStatusDot";
 import { SettingsRow } from "../settings/components/SettingsRow";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { ConnectionSheetButton } from "./OrbitSheetButton";
 import { orbitGatewayClient } from "./orbitGatewayClient";
-import { useOrbitGateway } from "./orbitGatewayStore";
+import { useOrbitGateway, type OrbitGatewayState } from "./orbitGatewayStore";
 import { phoneOrbitConnectionChecks } from "./orbitPhoneConnection";
 
 const CHECK_LABELS: Record<OrbitConnectionCheckState, string> = {
@@ -31,18 +36,20 @@ const CHECK_LABELS: Record<OrbitConnectionCheckState, string> = {
 
 const NODE_STATES: Record<
   OrbitNodeState,
-  { readonly label: string; readonly dot: "connected" | "available" | "connecting" }
+  { readonly label: string; readonly dot: ConnectionStatusDotState }
 > = {
   paired: { label: "Paired", dot: "connected" },
   pairing: { label: "Pairing…", dot: "available" },
   expired: { label: "Registration expired", dot: "connecting" },
+  revoked: { label: "Revoked in Orbit", dot: "error" },
+  renewal_failed: { label: "Could not renew.", dot: "connecting" },
 };
 
 /**
  * The Gateway's answer to `me` (which runs the three checks) and its server list, read on open and
  * on Reload. It calls the Gateway itself and leaves the app's Orbit store alone.
  */
-function useOrbitConnection(enabled: boolean) {
+function useOrbitConnection() {
   const [probe, setProbe] = useState<OrbitConnectionProbe>({ status: "checking" });
   const [environments, setEnvironments] = useState<readonly OrbitGatewayEnvironment[] | null>(null);
   const latest = useRef(0);
@@ -62,16 +69,18 @@ function useOrbitConnection(enabled: boolean) {
   };
 
   const load = () => {
-    if (!enabled) return;
     setProbe({ status: "checking" });
     void read(++latest.current);
   };
 
   const readOnOpen = useEffectEvent(() => void read(++latest.current));
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Orbit Gateway when the page opens or Orbit mode turns on; Reload reads it again
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Orbit Gateway on mount; Reload reads it again
   useEffect(() => {
-    if (enabled) readOnOpen();
-  }, [enabled]);
+    readOnOpen();
+    return () => {
+      latest.current += 1;
+    };
+  }, []);
 
   return { probe, environments, load };
 }
@@ -83,22 +92,7 @@ function useOrbitConnection(enabled: boolean) {
  */
 export function SettingsOrbitConnectionRouteScreen() {
   const insets = useSafeAreaInsets();
-  const orbitMode = useOrbitGateway().provider === "orbit";
-  const { probe, environments, load } = useOrbitConnection(orbitMode);
-  const { savedConnectionsById } = useSavedRemoteConnections();
-
-  const node = probe.status === "ok" ? probe.node : null;
-  const checks = phoneOrbitConnectionChecks(probe);
-  const nodes =
-    environments === null
-      ? null
-      : orbitNodeServers({
-          environments,
-          paired: new Set(
-            Object.values(savedConnectionsById).map((entry) => String(entry.environmentId)),
-          ),
-          device: node,
-        });
+  const gateway = useOrbitGateway();
 
   return (
     <SettingsScreen title="Connection">
@@ -109,85 +103,10 @@ export function SettingsOrbitConnectionRouteScreen() {
         contentContainerClassName="gap-6 px-5 pt-4"
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
-        {orbitMode ? (
-          <>
-            <SettingsSection footer="This phone reaches Orbit through its WireGuard tunnel. Conn has no Gateway setting.">
-              <InfoRow
-                label={node?.name ?? "This phone"}
-                description={
-                  node
-                    ? `gateway.orbit · ${node.wireguardIp}`
-                    : probe.status === "checking"
-                      ? "Connecting to gateway.orbit…"
-                      : "The Node name and WireGuard address show once all checks pass."
-                }
-                trailing={
-                  <ConnectionSheetButton
-                    compact
-                    icon="arrow.clockwise"
-                    label="Reload"
-                    disabled={probe.status === "checking"}
-                    onPress={load}
-                  />
-                }
-              />
-            </SettingsSection>
-
-            <SettingsSection>
-              {checks.map((check, index) => (
-                <InfoRow
-                  key={check.key}
-                  first={index === 0}
-                  label={check.label}
-                  // A passed check needs no explanation; the others say what to do.
-                  description={check.state === "pass" ? undefined : check.message}
-                  trailing={<CheckState state={check.state} />}
-                />
-              ))}
-            </SettingsSection>
-
-            <SettingsSection
-              title="Nodes"
-              footer="The Nodes that run a T3 server. Conn pairs with them automatically."
-            >
-              {nodes === null ? (
-                <InfoRow
-                  label={probe.status === "checking" ? "Loading…" : "Nodes not available"}
-                  description={
-                    probe.status === "checking"
-                      ? "Reading the Nodes from gateway.orbit."
-                      : probe.status === "ok"
-                        ? "The Gateway did not send its list of servers. Reload to try again."
-                        : "The Nodes show once the Gateway answers. Reload to try again."
-                  }
-                />
-              ) : nodes.length === 0 ? (
-                <InfoRow
-                  label="No Nodes yet"
-                  description="A Node's T3 server registers itself with the Gateway."
-                />
-              ) : (
-                nodes.map((entry, index) => (
-                  <InfoRow
-                    key={entry.environmentId}
-                    first={index === 0}
-                    leading={
-                      <ConnectionStatusDot state={NODE_STATES[entry.state].dot} pulse={false} />
-                    }
-                    label={entry.name}
-                    description={
-                      entry.isThisDevice ? `This phone · ${entry.address}` : entry.address
-                    }
-                    trailing={
-                      <Text className="text-sm text-foreground-muted">
-                        {NODE_STATES[entry.state].label}
-                      </Text>
-                    }
-                  />
-                ))
-              )}
-            </SettingsSection>
-          </>
+        {!gateway.providerLoaded ? (
+          <ActivityIndicator />
+        ) : gateway.provider === "orbit" ? (
+          <OrbitConnectionDetails gateway={gateway} />
         ) : (
           <SettingsSection>
             <InfoRow
@@ -205,9 +124,117 @@ export function SettingsOrbitConnectionRouteScreen() {
   );
 }
 
+function OrbitConnectionDetails({ gateway }: { readonly gateway: OrbitGatewayState }) {
+  const { probe, environments, load } = useOrbitConnection();
+  const { savedConnectionsById } = useSavedRemoteConnections();
+
+  const node = probe.status === "ok" ? probe.node : null;
+  const address = gatewayText(node?.wireguardIp);
+  const checks = phoneOrbitConnectionChecks(probe);
+  const nodes =
+    environments === null
+      ? null
+      : orbitNodeServers({
+          environments,
+          paired: new Set(Object.keys(savedConnectionsById)),
+          revoked: new Set(gateway.revokedEnvironmentIds),
+          renewalFailed: new Map(
+            Object.entries(gateway.renewalFailed).map(([id, failure]) => [id, failure.reason]),
+          ),
+          device: node,
+        });
+
+  return (
+    <>
+      <SettingsSection footer="This phone reaches Orbit through its WireGuard tunnel. Conn has no Gateway setting.">
+        <InfoRow
+          label={gatewayText(node?.name) ?? "This phone"}
+          description={
+            address !== null
+              ? `gateway.orbit · ${address}`
+              : probe.status === "checking"
+                ? "Connecting to gateway.orbit…"
+                : undefined
+          }
+          trailing={
+            <ConnectionSheetButton
+              compact
+              icon="arrow.clockwise"
+              label="Reload"
+              disabled={probe.status === "checking"}
+              onPress={load}
+            />
+          }
+        />
+      </SettingsSection>
+
+      <SettingsSection>
+        {checks.map((check, index) => (
+          <InfoRow
+            key={check.key}
+            first={index === 0}
+            label={check.label}
+            // A passed check needs no explanation; the others say what to do.
+            description={check.state === "pass" ? undefined : check.message}
+            trailing={<CheckState state={check.state} />}
+          />
+        ))}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Nodes"
+        footer="The Nodes that run a T3 server. Conn pairs with them automatically."
+      >
+        {nodes === null ? (
+          <InfoRow
+            label={probe.status === "checking" ? "Loading…" : "Nodes not available"}
+            description={
+              probe.status === "checking"
+                ? "Reading the Nodes from gateway.orbit."
+                : probe.status === "ok"
+                  ? "The Gateway did not send its list of servers. Reload to try again."
+                  : "The Nodes show once the Gateway answers. Reload to try again."
+            }
+          />
+        ) : nodes.length === 0 ? (
+          <InfoRow
+            label="No Nodes yet"
+            description="A Node's T3 server registers itself with the Gateway."
+          />
+        ) : (
+          nodes.map((entry, index) => {
+            const status = NODE_STATES[entry.state];
+            const description = [
+              entry.isThisDevice ? "This phone" : null,
+              gatewayText(entry.address),
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            return (
+              <InfoRow
+                key={entry.environmentId}
+                first={index === 0}
+                leading={<ConnectionStatusDot state={status.dot} pulse={false} />}
+                label={entry.name || "Unnamed Node"}
+                description={description}
+                status={
+                  entry.renewalFailure === null
+                    ? status.label
+                    : renewalFailureText(entry.renewalFailure)
+                }
+              />
+            );
+          })
+        )}
+      </SettingsSection>
+    </>
+  );
+}
+
 function InfoRow(props: {
   readonly label: string;
   readonly description?: string;
+  readonly status?: string;
   readonly leading?: ReactNode;
   readonly trailing?: ReactNode;
   readonly first?: boolean;
@@ -225,6 +252,9 @@ function InfoRow(props: {
         <Text className="text-lg text-foreground">{props.label}</Text>
         {props.description ? (
           <Text className="text-sm leading-normal text-foreground-muted">{props.description}</Text>
+        ) : null}
+        {props.status ? (
+          <Text className="text-sm leading-normal text-foreground-muted">{props.status}</Text>
         ) : null}
       </View>
       {props.trailing}

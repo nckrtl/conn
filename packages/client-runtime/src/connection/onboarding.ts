@@ -39,6 +39,7 @@ export interface PairingConnectionInput {
   readonly host?: string;
   readonly pairingCode?: string;
   readonly expectedEnvironmentId?: EnvironmentId;
+  readonly orbitPairingAttemptId?: string;
 }
 
 export interface SshConnectionInput {
@@ -125,6 +126,9 @@ export const preparePairingRegistration = Effect.fn(
       environmentId: descriptor.environmentId,
       label: descriptor.label,
       connectionId,
+      ...(input.orbitPairingAttemptId === undefined
+        ? {}
+        : { orbitPairingAttemptId: input.orbitPairingAttemptId }),
     }),
     profile: new BearerConnectionProfile({
       connectionId,
@@ -165,12 +169,24 @@ const registerPairingConnection = Effect.fn(
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
   const knownAddressOnly = input.expectedEnvironmentId === undefined;
   if (!(yield* registry.register(registration, { knownAddressOnly }))) {
+    if (input.orbitPairingAttemptId !== undefined) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "This environment is managed by the app and cannot be paired again.",
+      });
+    }
     return registration.target.environmentId;
   }
   yield* registry.setCompatibility(registration.target.environmentId, null);
-  yield* registry
+  const enable = registry
     .setEnabled(registration.target.environmentId, true)
     .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
+  // Orbit can enable the environment at the next refresh. The credential is already durable.
+  yield* input.orbitPairingAttemptId === undefined
+    ? enable
+    : enable.pipe(
+        Effect.catch((error) => Effect.logWarning("Could not enable Orbit environment", error)),
+      );
   return registration.target.environmentId;
 });
 
@@ -255,9 +271,8 @@ export const prepareBearerConnectionUpdate = Effect.fn(
   const labelSetByUser = edited || entry.target.labelSetByUser === true;
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
-      environmentId: options.input.environmentId,
+      ...entry.target,
       label,
-      connectionId,
       ...(labelSetByUser ? { labelSetByUser: true as const } : {}),
     }),
     profile: new BearerConnectionProfile({

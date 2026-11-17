@@ -101,50 +101,65 @@ it.each([
 it.each([
   {
     revoked: false,
+    interrupted: false,
     action: "Retry",
     status: "Could not renew: the server is not reachable.",
   },
   {
     revoked: true,
+    interrupted: false,
     action: "Connect",
     status: "Revoked in Orbit",
   },
-])("offers $action after a saved server's session fails", async ({ revoked, action, status }) => {
-  const server = {
-    environmentId: "beast",
-    instanceId: null,
-    label: "Beast",
-    status: "registered",
-    url: "https://beast.example.test",
-  };
-  mocks.useGateway.mockReturnValue({
-    node: { profile: null },
-    profiles: [],
-    environments: [server],
-    revokedEnvironmentIds: revoked ? ["beast"] : [],
-    renewalFailed: revoked ? {} : { beast: { at: 5, reason: "server_unreachable" } },
-  } satisfies Partial<Omit<OrbitGatewayState, "node" | "environments">> & {
-    node: { profile: null };
-    environments: ReadonlyArray<typeof server>;
-  });
-  const recover = revoked ? mocks.connect : mocks.retry;
-  recover.mockResolvedValueOnce(false);
-  const screen = await renderScreen(<OrbitEnvironmentSections />);
-  try {
-    const button = () =>
-      [...screen.container.querySelectorAll("button")].find(
-        (entry) => entry.textContent === action,
-      );
-    expect(screen.container.textContent).toContain(status);
-    expect(screen.container.textContent).not.toContain("Paired");
-    expect(button()).toBeDefined();
+  {
+    revoked: false,
+    interrupted: true,
+    action: "Connect",
+    status: "Renewal interrupted",
+  },
+])(
+  "offers $action after a saved server's session fails ($status)",
+  async ({ revoked, interrupted, action, status }) => {
+    const server = {
+      environmentId: "beast",
+      instanceId: null,
+      label: "Beast",
+      status: "registered",
+      url: "https://beast.example.test",
+    };
+    mocks.useGateway.mockReturnValue({
+      node: { profile: null },
+      profiles: [],
+      environments: [server],
+      revokedEnvironmentIds: revoked ? ["beast"] : [],
+      interruptedRenewalIds: interrupted ? ["beast"] : [],
+      renewalFailed: revoked ? {} : { beast: { at: 5, reason: "server_unreachable" } },
+    } satisfies Partial<Omit<OrbitGatewayState, "node" | "environments">> & {
+      node: { profile: null };
+      environments: ReadonlyArray<typeof server>;
+    });
+    const recover = revoked || interrupted ? mocks.connect : mocks.retry;
+    recover.mockClear();
+    recover.mockResolvedValueOnce(false);
+    const screen = await renderScreen(<OrbitEnvironmentSections />);
+    try {
+      const button = (label = action) =>
+        [...screen.container.querySelectorAll("button")].find(
+          (entry) => entry.textContent === label,
+        );
+      expect(screen.container.textContent).toContain(status);
+      expect(screen.container.textContent).not.toContain("Paired");
+      expect(button()).toBeDefined();
+      expect(button(action === "Connect" ? "Retry" : "Connect")).toBeUndefined();
 
-    await act(async () => button()?.click());
+      await act(async () => button()?.click());
 
-    expect(recover).toHaveBeenCalledWith(server);
-    expect(screen.container.textContent).toContain(status);
-    expect(button()).toBeDefined();
-  } finally {
-    await screen.dispose();
-  }
-});
+      expect(recover).toHaveBeenCalledWith(server);
+      expect(screen.container.textContent).toContain(status);
+      expect(button()).toBeDefined();
+      expect(button(action === "Connect" ? "Retry" : "Connect")).toBeUndefined();
+    } finally {
+      await screen.dispose();
+    }
+  },
+);

@@ -491,7 +491,8 @@ can report both tunnel and certificate failures as "Network request failed", so 
 explains both causes and leaves the certificate check pending a response. Nodes shows revoked
 pairings and failed renewals for this phone. In Settings › Environments, Retry renews a failed
 session immediately and still respects Orbit revocation. For a revoked server, Connect stays
-available until the phone saves a replacement session. Background refresh skips revoked pairings.
+available until the phone saves a replacement session. If the app restarts before it can confirm
+a renewal, use Connect to recover it. Background refresh skips these pairings.
 Environments also manages profiles, workspaces and manual connections.
 
 Sources:

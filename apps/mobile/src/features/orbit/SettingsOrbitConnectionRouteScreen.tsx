@@ -137,7 +137,7 @@ function OrbitConnectionDetails({ gateway }: { readonly gateway: OrbitGatewaySta
       : orbitNodeServers({
           environments,
           paired: new Set(Object.keys(savedConnectionsById)),
-          revoked: new Set(gateway.revokedEnvironmentIds),
+          revoked: new Set([...gateway.revokedEnvironmentIds, ...gateway.interruptedRenewalIds]),
           renewalFailed: new Map(
             Object.entries(gateway.renewalFailed).map(([id, failure]) => [id, failure.reason]),
           ),
@@ -218,9 +218,12 @@ function OrbitConnectionDetails({ gateway }: { readonly gateway: OrbitGatewaySta
                 label={entry.name || "Unnamed Node"}
                 description={description}
                 status={
-                  entry.renewalFailure === null
-                    ? status.label
-                    : renewalFailureText(entry.renewalFailure)
+                  entry.state === "revoked" &&
+                  !gateway.revokedEnvironmentIds.includes(entry.environmentId)
+                    ? "Renewal interrupted"
+                    : entry.renewalFailure === null
+                      ? status.label
+                      : renewalFailureText(entry.renewalFailure)
                 }
               />
             );

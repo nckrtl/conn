@@ -10,19 +10,22 @@ import { connectionAtomRuntime } from "./runtime";
 
 const onboardingScheduler = createAtomCommandScheduler();
 
+interface ConnectPairingUrlInput {
+  readonly pairingUrl: string;
+  readonly expectedEnvironmentId?: EnvironmentId;
+  readonly orbitPairingAttemptId?: string;
+}
+
 export const connectPairingUrl = createRuntimeCommand(connectionAtomRuntime, {
   label: "mobile:connection:connect-pairing-url",
   scheduler: onboardingScheduler,
   concurrency: {
     mode: "singleFlight",
     // The same link used for another machine needs its own expected-machine check.
-    key: (input: { readonly pairingUrl: string; readonly expectedEnvironmentId?: EnvironmentId }) =>
-      JSON.stringify([input.pairingUrl, input.expectedEnvironmentId ?? null]),
+    key: (input: ConnectPairingUrlInput) =>
+      JSON.stringify([input.pairingUrl, input.expectedEnvironmentId, input.orbitPairingAttemptId]),
   },
-  execute: (input: {
-    readonly pairingUrl: string;
-    readonly expectedEnvironmentId?: EnvironmentId;
-  }) =>
+  execute: (input: ConnectPairingUrlInput) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
     ),

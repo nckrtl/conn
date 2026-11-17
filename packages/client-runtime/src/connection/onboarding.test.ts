@@ -404,12 +404,17 @@ describe("connection onboarding", () => {
         host: "lan.example.test",
         pairingCode: "pairing-token",
         expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+        orbitPairingAttemptId: "orbit-attempt",
       });
 
       const entry = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID);
-      expect(entry === undefined ? [] : connectionRoutes(entry).map(routeHttpBaseUrl)).toEqual(
+      const routes = entry === undefined ? [] : connectionRoutes(entry);
+      expect(routes.map(routeHttpBaseUrl)).toEqual(
         expect.arrayContaining(["https://remote.example.test/", "https://lan.example.test/"]),
       );
+      expect(
+        routes.find((route) => routeHttpBaseUrl(route) === "https://lan.example.test/")?.target,
+      ).toMatchObject({ orbitPairingAttemptId: "orbit-attempt" });
     }).pipe(Effect.provide(layerPairingOnboarding())),
   );
 

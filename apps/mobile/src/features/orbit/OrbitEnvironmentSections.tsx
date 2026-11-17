@@ -245,6 +245,7 @@ export function OrbitEnvironmentSections() {
               first={index === 0}
               connected={connected.has(environment.environmentId)}
               revoked={gateway.revokedEnvironmentIds.includes(environment.environmentId)}
+              renewalInterrupted={gateway.interruptedRenewalIds.includes(environment.environmentId)}
               renewalFailure={gateway.renewalFailed[environment.environmentId]}
             />
           ))}
@@ -260,12 +261,14 @@ function OrbitServerRow({
   first,
   connected,
   revoked,
+  renewalInterrupted,
   renewalFailure,
 }: {
   readonly environment: OrbitGatewayEnvironment;
   readonly first: boolean;
   readonly connected: boolean;
   readonly revoked: boolean;
+  readonly renewalInterrupted: boolean;
   readonly renewalFailure: RenewalFailure | undefined;
 }) {
   const [connecting, setConnecting] = useState(false);
@@ -276,14 +279,17 @@ function OrbitServerRow({
       : environment.powerState === "stopped"
         ? "Asleep"
         : null;
-  const retryRenewal = !revoked && renewalFailure !== undefined;
-  const canConnect = revoked || (!connected && environment.instanceId !== null);
+  const requiresConnect = revoked || renewalInterrupted;
+  const retryRenewal = !requiresConnect && renewalFailure !== undefined;
+  const canConnect = requiresConnect || (!connected && environment.instanceId !== null);
   const canRecover = unavailable === null && !connecting && (canConnect || retryRenewal);
   const recoveryStatus = revoked
     ? "Revoked in Orbit"
-    : renewalFailure
-      ? renewalFailureText(renewalFailure.reason)
-      : "Not connected";
+    : renewalInterrupted
+      ? "Renewal interrupted"
+      : renewalFailure
+        ? renewalFailureText(renewalFailure.reason)
+        : "Not connected";
   const status = unavailable ?? (connecting || !connected ? "Pairing…" : "Paired");
 
   const connect = async () => {
@@ -312,10 +318,10 @@ function OrbitServerRow({
         </Text>
         {canRecover ? (
           <Text className="text-sm text-foreground-muted">
-            {connectFailed && !revoked ? "Could not connect. Try again." : recoveryStatus}
+            {connectFailed && !requiresConnect ? "Could not connect. Try again." : recoveryStatus}
           </Text>
         ) : null}
-        {canRecover && revoked && connectFailed ? (
+        {canRecover && requiresConnect && connectFailed ? (
           <Text className="text-sm text-foreground-muted">Could not connect. Try again.</Text>
         ) : null}
       </View>

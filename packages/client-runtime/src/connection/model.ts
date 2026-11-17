@@ -26,6 +26,7 @@ export class BearerConnectionTarget extends Schema.TaggedClass<BearerConnectionT
   {
     ...ConnectionTargetBase,
     connectionId: Schema.String,
+    orbitPairingAttemptId: Schema.optionalKey(Schema.String),
   },
 ) {}
 

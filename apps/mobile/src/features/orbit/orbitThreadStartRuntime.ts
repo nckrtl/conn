@@ -2,10 +2,10 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   createOrbitLaunchObserver,
   createOrbitLaunchSubmissions,
+  createOrbitLaunchThreadRowsAtom,
   newOrbitLaunchAdmission,
   fitOrbitThreadInstanceName,
   readLegacyOrbitLaunches,
-  reconcileOrbitLaunchThreadRows,
   recordLegacyOrbitPreview,
   resolveLegacyOrbitLaunch,
   updateLegacyOrbitPreview,
@@ -16,7 +16,6 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { Atom } from "effect/reactivity";
 import { AppState } from "react-native";
 
 import { environmentCatalog } from "../../connection/catalog";
@@ -24,6 +23,7 @@ import { writeFileAtomically } from "../../lib/atomic-file";
 import { rootNavigationRef } from "../../lib/rootNavigation";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { orchestrationEnvironment } from "../../state/orchestration";
 import { environmentThreadShells } from "../../state/threads";
 import { selectWorkspaceDetail } from "../layout/workspace/workspace-detail-selection";
 import { startOpeningDetail } from "../layout/workspace/useSelectWorkspaceDetail";
@@ -43,29 +43,12 @@ const SUBMISSIONS = "orbit-launch-admissions.json";
 const LEGACY = "orbit-thread-starts.json";
 
 export const mobileOrbitLaunches = createOrbitLaunchObserver(() => orbitGatewayClient);
-const orbitLaunchViewAtom = Atom.make((get) => {
-  get.addFinalizer(mobileOrbitLaunches.subscribe(() => get.setSelf(mobileOrbitLaunches.view())));
-  return mobileOrbitLaunches.view();
-});
-const orbitLaunchRowsAtom = Atom.make((get) => {
-  const snapshot = get(orbitLaunchViewAtom);
-  const previous = get.self<{ handedOff: ReadonlySet<string> }>();
-  const previousHandoffs = previous._tag === "Some" ? previous.value.handedOff : new Set<string>();
-  const knownThreads =
-    snapshot.launches.length > 0 ? get(environmentThreadShells.threadRefsAtom) : [];
-  const { rows, handedOff } = reconcileOrbitLaunchThreadRows(
-    snapshot.launches,
-    knownThreads,
-    previousHandoffs,
-  );
-  return {
-    ...snapshot,
-    launches: rows,
-    handedOff:
-      snapshot.loaded && snapshot.error === null
-        ? handedOff
-        : new Set([...previousHandoffs, ...handedOff]),
-  };
+const orbitLaunchRowsAtom = createOrbitLaunchThreadRowsAtom({
+  observer: mobileOrbitLaunches,
+  threadRefsAtom: environmentThreadShells.threadRefsAtom,
+  catalogValueAtom: environmentCatalog.catalogValueAtom,
+  archivedSnapshotAtom: (environmentId) =>
+    orchestrationEnvironment.archivedShellSnapshot({ environmentId, input: {} }),
 });
 export const mobileOrbitSubmissions = createOrbitLaunchSubmissions(
   {
@@ -166,34 +149,42 @@ export async function startOrbitThread(
 export async function openMobileOrbitThread(
   thread: Pick<NonNullable<OrbitLaunch["thread"]>, "environment_id" | "thread_id">,
 ) {
-  const environmentId = EnvironmentId.make(thread.environment_id);
-  const entries = () => appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries;
-  if (!entries().has(environmentId)) {
-    const environment = (await orbitGatewayClient.environments()).find(
-      (row) => row.environmentId === environmentId,
-    );
-    if (environment === undefined || !(await connectOrbitEnvironment(environment))) {
-      throw new Error("Could not connect to this thread's environment.");
-    }
-  }
-  if (entries().get(environmentId)?.enabled === false) {
-    const result = await runAtomCommand(
-      appAtomRegistry,
-      environmentCatalog.setEnabled,
-      { environmentId, enabled: true },
-      { reportFailure: false },
-    );
-    if (result._tag !== "Success") throw squashAtomCommandFailure(result);
-  }
-  const detail = {
-    name: "Thread" as const,
-    params: { environmentId, threadId: ThreadId.make(thread.thread_id) },
-  };
-  startOpeningDetail(detail);
-  rootNavigationRef.dispatch({
-    ...selectWorkspaceDetail(detail),
-    target: rootNavigationRef.getRootState()?.key,
+  const origin = rootNavigationRef.getRootState();
+  if (origin === undefined) return;
+  let navigated = false;
+  const stop = rootNavigationRef.addListener("state", () => {
+    navigated = true;
   });
+  try {
+    const environmentId = EnvironmentId.make(thread.environment_id);
+    const entries = () => appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries;
+    if (!entries().has(environmentId)) {
+      const environment = (await orbitGatewayClient.environments()).find(
+        (row) => row.environmentId === environmentId,
+      );
+      if (environment === undefined || !(await connectOrbitEnvironment(environment))) {
+        throw new Error("Could not connect to this thread's environment.");
+      }
+    }
+    if (entries().get(environmentId)?.enabled === false) {
+      const result = await runAtomCommand(
+        appAtomRegistry,
+        environmentCatalog.setEnabled,
+        { environmentId, enabled: true },
+        { reportFailure: false },
+      );
+      if (result._tag !== "Success") throw squashAtomCommandFailure(result);
+    }
+    if (navigated) return;
+    const detail = {
+      name: "Thread" as const,
+      params: { environmentId, threadId: ThreadId.make(thread.thread_id) },
+    };
+    startOpeningDetail(detail);
+    rootNavigationRef.dispatch({ ...selectWorkspaceDetail(detail), target: origin.key });
+  } finally {
+    stop();
+  }
 }
 
 export function installOrbitLaunchObserver(): () => void {

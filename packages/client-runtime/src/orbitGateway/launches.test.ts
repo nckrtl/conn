@@ -1,4 +1,10 @@
-import { ProviderInstanceId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationV2ArchivedShellSnapshot,
+} from "@t3tools/contracts";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 
 import {
@@ -15,12 +21,10 @@ import {
   type OrbitLaunchSubmission,
 } from "./launchAdmission.ts";
 import { createOrbitLaunchObserver } from "./launchObserver.ts";
-import {
-  newOrbitLaunchAdmission,
-  reconcileOrbitLaunchThreadRows,
-  type OrbitLaunch,
-} from "./launches.ts";
+import { createOrbitLaunchThreadRowsAtom } from "./launchThreadRows.ts";
+import { newOrbitLaunchAdmission, type OrbitLaunch } from "./launches.ts";
 
+import { v2Now, v2ThreadShell } from "../state/orchestrationV2TestFixtures.ts";
 import { fitOrbitThreadInstanceName } from "./threadStart.ts";
 
 const pending = { status: "pending", started_at: null, finished_at: null, error: null } as const;
@@ -240,6 +244,45 @@ it("replays an unconfirmed submission only on request and with the original key 
   }
 });
 
+it("keeps the draft on the original profile and Node after a lost reply", async () => {
+  const original = { nodeId: 7, profileId: 12, draftId: "draft", admission: request };
+  let stored: readonly OrbitLaunchSubmission[] = [];
+  const send = vi.fn().mockRejectedValueOnce(new Error("Reply lost")).mockResolvedValue(fixture());
+  const journal = createOrbitLaunchSubmissions(
+    {
+      load: async () => stored,
+      save: async (rows) => {
+        stored = rows;
+      },
+    },
+    send,
+  );
+  await expect(journal.submit(original)).rejects.toThrow("Reply lost");
+  for (const scope of [
+    { nodeId: 7, profileId: 13 },
+    { nodeId: 8, profileId: 12 },
+  ]) {
+    await expect(
+      journal.submit({
+        ...original,
+        ...scope,
+        admission: {
+          id: "new-key",
+          request: {
+            ...request.request,
+            expected_node_id: scope.nodeId,
+            expected_profile_id: scope.profileId,
+          },
+        },
+      }),
+    ).rejects.toThrow("original Orbit profile and device");
+    expect(await journal.pending(scope)).toEqual([]);
+  }
+  expect(send.mock.calls).toEqual([[original, false]]);
+  await expect(journal.submit(original)).resolves.toEqual(fixture());
+  expect(send.mock.calls[1]).toEqual([original, true]);
+});
+
 it("does not rewrite a refused cancel as Cancelling and does not submit a stale-profile draft", async () => {
   const committed = fixture({
     phase: "dispatching",
@@ -275,6 +318,36 @@ it("does not rewrite a refused cancel as Cancelling and does not submit a stale-
       "original Orbit profile and device",
     );
     expect(transport.mock.calls.filter(([call]) => call.method === "POST")).toHaveLength(1);
+  } finally {
+    stop();
+    observer.setScope(null);
+  }
+});
+
+it("retains newer polled progress when an older action response arrives", async () => {
+  const started = Promise.withResolvers<void>();
+  const cancel = Promise.withResolvers<ReturnType<typeof wrap>>();
+  const initialized = Promise.withResolvers<void>();
+  let list = [fixture()];
+  const gateway = createOrbitGatewayClient(async ({ method }) => {
+    if (method === "GET") return wrap(list);
+    started.resolve();
+    return cancel.promise;
+  });
+  const observer = createOrbitLaunchObserver(() => gateway);
+  const stop = observer.subscribe(() => {
+    if (observer.view().loaded) initialized.resolve();
+  });
+  observer.setScope({ nodeId: 7, profileId: 12 });
+  try {
+    await initialized.promise;
+    const acting = observer.act(41, "cancel");
+    await started.promise;
+    list = [fixture({ phase: "cancelled", cancel_requested: true })];
+    await observer.refresh();
+    cancel.resolve(wrap(fixture({ phase: "cancelling", cancel_requested: true }), 202));
+    await acting;
+    expect(observer.view().launches[0]?.phase).toBe("cancelled");
   } finally {
     stop();
     observer.setScope(null);
@@ -360,7 +433,7 @@ it("replays the original profile and Node even when the device is rebound after 
   }
 });
 
-it("keeps a refused replay recoverable without preventing a different draft from sending", async () => {
+it("keeps a refused replay recoverable and allows a corrected Send from the same draft", async () => {
   const scope = { nodeId: 7, profileId: 12 };
   let stored: readonly OrbitLaunchSubmission[] = [];
   const old = { ...scope, draftId: "first-sheet:78", admission: request };
@@ -374,9 +447,9 @@ it("keeps a refused replay recoverable without preventing a different draft from
     .mockRejectedValueOnce(new Error("The original reply was lost"))
     .mockRejectedValueOnce(
       new OrbitGatewayError({
-        code: "not_found",
-        status: 404,
-        message: "Project removed",
+        code: "validation_failed",
+        status: 422,
+        message: "Project selection is invalid",
         details: {},
       }),
     )
@@ -391,12 +464,15 @@ it("keeps a refused replay recoverable without preventing a different draft from
     submit,
   );
   await expect(journal.submit(old)).rejects.toThrow("original reply");
-  await expect(journal.replay(old)).rejects.toThrow("Project removed");
-  expect((await journal.submit(next)).launch_id).toBe("other");
-  expect(await journal.pending(scope)).toContainEqual(old);
+  const corrected = { ...next, draftId: old.draftId };
+  await expect(journal.submit(corrected)).rejects.toThrow("Resolve the previous");
+  await expect(journal.replay(old)).rejects.toThrow("Project selection is invalid");
+  expect((await journal.submit(corrected)).launch_id).toBe("other");
+  expect(await journal.pending(scope)).toEqual([{ ...old, replayRefused: true }, corrected]);
+  expect(submit.mock.calls[2]).toEqual([corrected, false]);
 });
 
-it("keeps Open thread until the canonical thread appears and keeps it hidden after archive", () => {
+it("retains unpaired launch links and keeps archived launches off the list after a cold start", () => {
   const initial = fixture();
   const launch = fixture({
     phase: "ready",
@@ -410,28 +486,72 @@ it("keeps Open thread until the canonical thread appears and keeps it hidden aft
       accepted_at: initial.created_at,
     },
   });
-  const unknown = reconcileOrbitLaunchThreadRows(
-    [launch],
-    [{ environmentId: "other", threadId: "thread-id" }],
-    new Set(),
+  const environmentId = EnvironmentId.make("unpaired");
+  const threadId = ThreadId.make("thread-id");
+  const refs = Atom.make<readonly { environmentId: EnvironmentId; threadId: ThreadId }[]>([
+    { environmentId: EnvironmentId.make("other"), threadId },
+  ]);
+  const emptyCatalog = { isReady: true, entries: new Map<EnvironmentId, { enabled: boolean }>() };
+  const pairedCatalog = { isReady: true, entries: new Map([[environmentId, { enabled: true }]]) };
+  const catalog = Atom.make(emptyCatalog);
+  const archive = Atom.make<AsyncResult.AsyncResult<OrchestrationV2ArchivedShellSnapshot, Error>>(
+    AsyncResult.initial(true),
   );
-  expect(unknown.rows).toEqual([launch]);
-  const paired = reconcileOrbitLaunchThreadRows(
-    [launch],
-    [{ environmentId: "unpaired", threadId: "thread-id" }],
-    unknown.handedOff,
-  );
-  expect(paired.rows).toEqual([]);
-  expect(reconcileOrbitLaunchThreadRows([launch], [], paired.handedOff).rows).toEqual([]);
+  const archiveSnapshot = { schemaVersion: 2, snapshotSequence: 10, projects: [], threads: [] };
+  const archived = AsyncResult.success({
+    ...archiveSnapshot,
+    threads: [{ ...v2ThreadShell, id: threadId, archivedAt: v2Now }],
+  });
+  const lookupArchive = vi.fn(() => archive);
+  let snapshot = { launches: [launch], error: null, loaded: true };
+  const onSnapshot = new Set<() => void>();
+  const rows = createOrbitLaunchThreadRowsAtom({
+    observer: {
+      view: () => snapshot,
+      subscribe: (listener) => {
+        onSnapshot.add(listener);
+        return () => {
+          onSnapshot.delete(listener);
+        };
+      },
+    },
+    threadRefsAtom: refs,
+    catalogValueAtom: catalog,
+    archivedSnapshotAtom: lookupArchive,
+  });
+  const registry = AtomRegistry.make();
+  const stop = registry.mount(rows);
+  expect(registry.get(rows).rows).toEqual([launch]);
+  expect(lookupArchive).not.toHaveBeenCalled();
+  registry.set(catalog, pairedCatalog);
+  registry.set(archive, AsyncResult.success(archiveSnapshot));
+  expect(registry.get(rows).rows).toEqual([launch]);
+  registry.set(refs, [{ environmentId, threadId }]);
+  expect(registry.get(rows).rows).toEqual([]);
+  registry.set(refs, []);
+  expect(registry.get(rows).rows).toEqual([]);
+  expect(registry.get(rows).snapshot.launches).toEqual([launch]);
 
+  const restarted = AtomRegistry.make();
+  const stopRestarted = restarted.mount(rows);
+  restarted.set(catalog, { ...emptyCatalog, isReady: false });
+  expect(restarted.get(rows).rows).toEqual([]);
+  restarted.set(catalog, pairedCatalog);
+  expect(restarted.get(rows).rows).toEqual([]);
+  restarted.set(archive, archived);
+  expect(restarted.get(rows).rows).toEqual([]);
+  expect(restarted.get(rows).snapshot.launches).toEqual([launch]);
   const failedPreview = {
     ...launch,
     stages: { ...launch.stages, application_preview: { ...pending, status: "failed" as const } },
   };
-  expect(reconcileOrbitLaunchThreadRows([failedPreview], [], paired.handedOff).rows).toEqual([
-    failedPreview,
-  ]);
-  expect(reconcileOrbitLaunchThreadRows([], [], paired.handedOff).handedOff.size).toBe(0);
+  snapshot = { ...snapshot, launches: [failedPreview] };
+  for (const listener of onSnapshot) listener();
+  expect(restarted.get(rows).rows).toEqual([failedPreview]);
+  stopRestarted();
+  stop();
+  restarted.dispose();
+  registry.dispose();
 });
 
 it("resumes an old preview retry with the saved key when its operation ID was never received", async () => {

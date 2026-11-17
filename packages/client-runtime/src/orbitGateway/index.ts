@@ -19,4 +19,5 @@ export * from "./tasksClient.ts";
 export * from "./tasksRealtime.ts";
 export * from "./launches.ts";
 export * from "./launchObserver.ts";
+export * from "./launchThreadRows.ts";
 export * from "./launchAdmission.ts";

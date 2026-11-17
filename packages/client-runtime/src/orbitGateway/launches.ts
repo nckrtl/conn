@@ -207,26 +207,3 @@ export function orbitLaunchNeedsAttention(launch: OrbitLaunch): boolean {
       launch.stages.application_preview.status === "failed")
   );
 }
-
-export function reconcileOrbitLaunchThreadRows(
-  launches: readonly OrbitLaunch[],
-  knownThreads: ReadonlyArray<{ environmentId: string; threadId: string }>,
-  previousHandoffs: ReadonlySet<string>,
-) {
-  const handedOff = new Set<string>();
-  const rows = launches.filter((launch) => {
-    const { thread } = launch;
-    const hasThread =
-      thread !== null &&
-      (previousHandoffs.has(launch.launch_id) ||
-        knownThreads.some(
-          (ref) => ref.environmentId === thread.environment_id && ref.threadId === thread.thread_id,
-        ));
-    if (hasThread) handedOff.add(launch.launch_id);
-    return (
-      orbitLaunchNeedsAttention(launch) ||
-      (launch.phase === "ready" && thread !== null && !hasThread)
-    );
-  });
-  return { rows, handedOff };
-}

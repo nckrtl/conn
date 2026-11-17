@@ -72,9 +72,15 @@ export function OrbitLaunchRecovery() {
   );
 
   async function acknowledge(row: OrbitLaunchSubmission) {
+    const latest = (await orbitLaunchSubmissions.pending(row)).findLast(
+      (entry) => entry.draftId === row.draftId,
+    );
     const store = useComposerDraftStore.getState();
     const draftId = DraftId.make(row.draftId);
-    if (store.getComposerDraft(draftId)?.prompt.trim() === row.admission.request.prompt) {
+    if (
+      latest?.admission.id === row.admission.id &&
+      store.getComposerDraft(draftId)?.prompt.trim() === row.admission.request.prompt
+    ) {
       store.clearDraftThread(draftId);
     }
     await orbitLaunchSubmissions.acknowledge(row.admission.id);
@@ -191,7 +197,13 @@ export function OrbitLaunchRecovery() {
         const accepted = snapshot.launches.find((launch) => launch.launch_id === row.admission.id);
         return (
           <div key={row.admission.id} className="grid gap-1 px-2 py-1 text-ui">
-            <p>{accepted ? "Orbit accepted this submission" : "Orbit submission unconfirmed"}</p>
+            <p>
+              {accepted
+                ? "Orbit accepted this submission"
+                : row.replayRefused
+                  ? "Orbit refused the retry"
+                  : "Orbit submission unconfirmed"}
+            </p>
             <p className="truncate text-muted-foreground">
               {row.admission.request.prompt.split("\n")[0]}
             </p>
@@ -209,6 +221,12 @@ export function OrbitLaunchRecovery() {
               </Link>
             ) : (
               <div>
+                {row.replayRefused ? (
+                  <p className="text-muted-foreground">
+                    You can edit the draft and send a correction. The original submission stays
+                    here.
+                  </p>
+                ) : null}
                 <Button
                   size="xs"
                   variant="outline"

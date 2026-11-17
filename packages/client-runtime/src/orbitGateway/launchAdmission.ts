@@ -17,6 +17,7 @@ const isGatewayError = Schema.is(OrbitGatewayError);
 export interface OrbitLaunchSubmission extends OrbitLaunchScope {
   readonly draftId: string;
   readonly admission: OrbitLaunchAdmission;
+  readonly replayRefused?: true;
 }
 
 export interface OrbitLaunchSubmissionStorage {
@@ -73,8 +74,18 @@ export function createOrbitLaunchSubmissions(
       try {
         return await submit(record, reconcile);
       } catch (error) {
-        if (!reconcile && isGatewayError(error) && [400, 403, 404, 422].includes(error.status))
-          await remove(id);
+        if (isGatewayError(error) && [400, 403, 404, 422].includes(error.status)) {
+          if (reconcile) {
+            await update((records) => ({
+              records: records.map((row) =>
+                row.admission.id === id ? ({ ...row, replayRefused: true } as const) : row,
+              ),
+              result: undefined,
+            }));
+          } else {
+            await remove(id);
+          }
+        }
         throw error;
       }
     })().finally(() => {
@@ -87,20 +98,27 @@ export function createOrbitLaunchSubmissions(
   return {
     async submit(record: OrbitLaunchSubmission) {
       const saved = await update((records) => {
-        const previous = records.find(
-          (entry) =>
-            entry.profileId === record.profileId &&
-            entry.nodeId === record.nodeId &&
-            entry.draftId === record.draftId,
+        const attempts = records.filter((entry) => entry.draftId === record.draftId);
+        if (
+          attempts.some(
+            (entry) => entry.profileId !== record.profileId || entry.nodeId !== record.nodeId,
+          )
+        ) {
+          throw new Error(
+            "Connect to the original Orbit profile and device to resolve this draft.",
+          );
+        }
+        const matching = attempts.findLast((entry) =>
+          sameInput(entry.admission.request, record.admission.request),
         );
-        if (previous === undefined)
-          return { records: [...records, record], result: { saved: record, replay: false } };
-        if (!sameInput(previous.admission.request, record.admission.request)) {
+        if (matching !== undefined) return { records, result: { saved: matching, replay: true } };
+        const latest = attempts.at(-1);
+        if (latest !== undefined && !latest.replayRefused) {
           throw new Error(
             "Resolve the previous Orbit submission before sending this edited draft.",
           );
         }
-        return { records, result: { saved: previous, replay: true } };
+        return { records: [...records, record], result: { saved: record, replay: false } };
       });
       return send(saved.saved, saved.replay);
     },

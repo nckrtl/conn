@@ -179,7 +179,10 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
       ) {
         throw new Error("Orbit returned a different launch.");
       }
-      apply(next, version);
+      if (version === scopeVersion) {
+        if (view.launches.find((row) => row.id === id) === launch) apply(next, version);
+        else void refresh();
+      }
     } catch (error) {
       void refresh();
       throw error;

@@ -39,7 +39,7 @@ const stageStatus = {
 
 export function OrbitThreadStartRows() {
   const gateway = useOrbitGateway();
-  const snapshot = useMobileOrbitLaunches();
+  const { snapshot, rows } = useMobileOrbitLaunches();
   const nodeId = gateway.node?.id ?? null;
   const profileId = gateway.node?.profile?.id ?? null;
   const [legacy, setLegacy] = useState<readonly LegacyOrbitLaunch[]>([]);
@@ -95,7 +95,6 @@ export function OrbitThreadStartRows() {
     }
     setBusy(false);
   };
-  const rows = snapshot.launches;
   const submissions = pending.filter(
     (item) => item.profileId === profileId && item.nodeId === nodeId,
   );
@@ -262,7 +261,11 @@ export function OrbitThreadStartRows() {
         return (
           <View key={row.admission.id} className="gap-2 border-b border-border-subtle px-4 py-3">
             <Text className="text-base text-foreground">
-              {accepted ? "Orbit accepted this submission" : "Orbit submission unconfirmed"}
+              {accepted
+                ? "Orbit accepted this submission"
+                : row.replayRefused
+                  ? "Orbit refused the retry"
+                  : "Orbit submission unconfirmed"}
             </Text>
             <Text numberOfLines={1} className="text-sm text-foreground-muted">
               {row.admission.request.prompt.split("\n")[0]}

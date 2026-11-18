@@ -262,6 +262,8 @@ function profileSyncController(): ProfileSyncController | null {
   /** The last reads each run shares with the other, so neither needs a second Gateway call. */
   let lastMe: OrbitGatewayNode | null = null;
   let lastListed: readonly OrbitGatewayEnvironment[] | null = null;
+  /** Set while the follow-up read for an edit made during a read is queued. */
+  let followUpQueued = false;
 
   const recordAttached = async (
     me: OrbitGatewayNode,
@@ -376,6 +378,15 @@ function profileSyncController(): ProfileSyncController | null {
       });
       // Not applied in full: the reconciler retries rather than count this version as read.
       throw error;
+    }
+    // An edit during this read can end equal to the old base (A, B, A while a PATCH is in
+    // flight), so its debounce saw nothing; the read's answer made it dirty: send it now.
+    // One follow-up at most, so a value that never settles cannot keep reading.
+    if (isCurrent() && !followUpQueued && controller?.hasLocalChanges()) {
+      followUpQueued = true;
+      void controller.profile.reconcile();
+    } else {
+      followUpQueued = false;
     }
     return {
       profileId: me.profile.id,

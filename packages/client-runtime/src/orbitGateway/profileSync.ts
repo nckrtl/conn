@@ -397,6 +397,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
    * what to send. A change the engine just applied from the profile is not one.
    */
   function hasLocalChanges(): boolean {
+    if (now() < unsupportedUntil) return false;
     const saved = ports.loadState();
     return ports.channels().some((channel) => {
       const section = saved?.sections[channel.name];
@@ -404,6 +405,8 @@ export function createProfileSync(ports: ProfileSyncPorts) {
       if (local === null) return false;
       const mark = saved?.ignored[channel.name];
       if (mark !== undefined && jsonEqual(local, mark)) return false;
+      // A value the Gateway refused stays unsent until the device changes it.
+      if (jsonEqual(rejected.get(channel.name), local)) return false;
       return section === undefined || !jsonEqual(local, section.base ?? undefined);
     });
   }

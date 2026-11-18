@@ -477,6 +477,7 @@ describe("profile sync engine", () => {
     fake.gateway.patchStatus = 422;
     await expect(mac.sync()).rejects.toMatchObject({ status: 422 });
     const attempts = fake.gateway.patches.length;
+    expect(mac.engine.hasLocalChanges()).toBe(false);
     await mac.sync();
     expect(fake.gateway.patches).toHaveLength(attempts);
     fake.gateway.patchStatus = null;

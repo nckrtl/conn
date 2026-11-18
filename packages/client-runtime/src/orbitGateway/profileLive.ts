@@ -100,6 +100,12 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
     const current = scope();
     if (channel === null || current === null) {
       unfollow();
+      // The contract re-reads discovery at each compare also while unbound; nothing subscribes.
+      if (channel === null && current !== null) {
+        void ports
+          .transport({ method: "GET", path: "/realtime", timeoutMs: 10_000 })
+          .catch(() => {});
+      }
       return;
     }
     if (followed?.channel === channel && followed.scope === current) return;
@@ -144,8 +150,11 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
     scope,
     refresh: async (isCurrent) => {
       let binding: ProfileBinding | null;
+      let observed = false;
       const observe = (channel: string | null): void => {
-        if (isCurrent()) follow(channel);
+        if (!isCurrent()) return;
+        observed = true;
+        follow(channel);
       };
       try {
         binding = await ports.refresh(isCurrent, observe);
@@ -157,7 +166,8 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
         readRetryMs = RETRY_MIN_MS;
         clearTimeout(readRetry);
         readRetry = undefined;
-        follow(binding?.channel ?? null);
+        // The adapter already followed what this read's `/me` named.
+        if (!observed) follow(binding?.channel ?? null);
       }
       return binding;
     },

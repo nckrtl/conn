@@ -431,6 +431,13 @@ describe("Orbit profile live subscription", () => {
     gateway.profileId = null;
     await live.reconcile();
     expect(open()).toHaveLength(0);
+    // Unbound: each compare still reads discovery, as the contract asks.
+    const discovery = () =>
+      gateway.requests.filter((request) => request.path === "/realtime").length;
+    await vi.advanceTimersByTimeAsync(ORBIT_PROFILE_CHECK_MS);
+    const before = discovery();
+    await vi.advanceTimersByTimeAsync(3 * ORBIT_PROFILE_CHECK_MS);
+    expect(discovery()).toBe(before + 3);
     live.dispose();
   });
 

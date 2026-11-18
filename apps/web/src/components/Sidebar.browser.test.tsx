@@ -33,6 +33,8 @@ import { newOrbitThreadStart } from "@t3tools/client-runtime/orbit-gateway";
 import { useOrbitThreadsAvailable } from "../orbit/environmentProvider";
 import { OrbitPendingThreadList } from "../orbit/OrbitPendingThreadList";
 import { updateStarts } from "../orbit/orbitThreadStartStore";
+import { bindSidebarHiddenProfile } from "../orbit/sidebarHiddenThreads";
+import { unloadedOlderSettledCount } from "@t3tools/client-runtime/state/threads";
 import Sidebar from "./Sidebar";
 import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "./Sidebar.logic";
 import { SortableThreadRow } from "./sidebar/SidebarThreadRow";
@@ -40,7 +42,11 @@ import { SidebarProvider } from "./ui/sidebar";
 
 vi.mock(import("../state/olderSettledShelf"), async (original) => {
   const actual = await original();
-  return { ...actual, useOlderSettledShelf: vi.fn(actual.useOlderSettledShelf) };
+  return {
+    ...actual,
+    useOlderSettledShelf: vi.fn(actual.useOlderSettledShelf),
+    useUnloadedOlderSettled: vi.fn(actual.useUnloadedOlderSettled),
+  };
 });
 vi.mock("../state/entities", { spy: true });
 vi.mock("../hooks/useHandleNewThread", { spy: true });
@@ -467,5 +473,149 @@ describe("sidebar settled pagination", () => {
     const loadedRows = screen.container.querySelectorAll("[data-thread-item]").length;
     await act(() => moreButton.click());
     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(loadedRows);
+  });
+});
+
+describe("sidebar settled shelf with hidden threads", () => {
+  const local = EnvironmentId.make("local");
+  const settled = (projectId: ProjectId, id: string, settledAt: string) =>
+    makeThreadFixture({
+      environmentId: local,
+      projectId,
+      id: ThreadId.make(id),
+      title: id,
+      settledOverride: "settled",
+      settledAt,
+    });
+
+  /** Renders the shelf over one environment whose shell left older settled threads out. */
+  async function renderShelf(input: {
+    readonly threads: EnvironmentThreadShell[];
+    readonly older: Record<string, number>;
+    readonly hidden: string[];
+  }) {
+    const stack = new AsyncDisposableStack();
+    const projects = Object.keys(input.older).map(project);
+    const route = threadShell(projects[0]!.id, 100);
+    const older = {
+      before: "2026-01-05T00:00:00.000Z",
+      beforeMs: Date.parse("2026-01-05T00:00:00.000Z"),
+      counts: new Map(
+        Object.entries(input.older).map(([id, count]) => [ProjectId.make(id), count]),
+      ),
+    };
+    const originalShelf = vi.mocked(shelfHooks.useOlderSettledShelf).getMockImplementation()!;
+    stack.use(
+      vi.spyOn(shelfHooks, "useOlderSettledShelf").mockImplementation((shelfInput) => {
+        const shelf = originalShelf(shelfInput);
+        return {
+          ...shelf,
+          unloadedCount: (threads, only = shelf.scopes) =>
+            unloadedOlderSettledCount({ olderSettled: () => older, scopes: only, threads }),
+        };
+      }),
+    );
+    window.localStorage.setItem(
+      "t3code:sidebar-hidden-threads:v2:agreed:1",
+      JSON.stringify(input.hidden.map((id) => `local:${id}`)),
+    );
+    bindSidebarHiddenProfile(1);
+    stack.defer(() => {
+      window.localStorage.removeItem("t3code:sidebar-hidden-threads:v2:agreed:1");
+      bindSidebarHiddenProfile(null);
+    });
+    vi.mocked(useProjects).mockReturnValue(projects);
+    vi.mocked(useQuietThreadShells).mockReturnValue([route, ...input.threads]);
+    vi.mocked(useThreadRouteTarget).mockReturnValue({
+      kind: "server",
+      threadRef: { environmentId: local, threadId: route.id },
+    });
+    vi.mocked(useHandleNewThread).mockReturnValue({
+      activeDraftThread: null,
+      activeThread: null,
+      defaultProjectRef: { environmentId: local, projectId: projects[0]!.id },
+      defaultProjectFallbackReady: true,
+      handleNewThread: vi.fn().mockResolvedValue(null),
+      routeDraftId: null,
+      routeThreadRef: { environmentId: local, threadId: route.id },
+    });
+    vi.mocked(useServerConfigs).mockReturnValue(
+      new Map([
+        [
+          local,
+          {
+            scratchWorkspaceRoot: null,
+            shellThreadFamilies: false,
+          } as unknown as EnvironmentServerConfig,
+        ],
+      ]),
+    );
+    const screen = stack.use(
+      await render(
+        <SidebarProvider style={{ height: 600, minHeight: 600 }}>
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </SidebarProvider>,
+      ),
+    );
+    const shelf = screen.container.querySelector<HTMLElement>(
+      '[data-sidebar-row="shelf:settled"]',
+    )!;
+    if (shelf.getAttribute("aria-expanded") === "false") await act(() => shelf.click());
+    const owned = stack.move();
+    return {
+      count: () => shelf.querySelector(".tabular-nums")?.textContent,
+      more: () =>
+        screen.container.querySelector('[data-sidebar-row="settled:more"]')?.textContent ?? null,
+      [Symbol.asyncDispose]: () => owned.disposeAsync(),
+    };
+  }
+
+  const p1 = ProjectId.make("p1");
+
+  it("counts and pages an ordinary shelf without marks", async () => {
+    await using shelf = await renderShelf({
+      threads: [settled(p1, "s1", "2026-01-10T00:00:00.000Z")],
+      older: { p1: 1 },
+      hidden: [],
+    });
+    await vi.waitFor(() => expect(shelf.more()).toBe("Show 1 more"));
+    expect(shelf.count()).toBe("2");
+  });
+
+  it("offers no more when the only older thread was read and is hidden", async () => {
+    await using shelf = await renderShelf({
+      threads: [
+        settled(p1, "s1", "2026-01-10T00:00:00.000Z"),
+        settled(p1, "o1", "2026-01-01T00:00:00.000Z"),
+      ],
+      older: { p1: 1 },
+      hidden: ["o1"],
+    });
+    await vi.waitFor(() => expect(shelf.count()).toBe("1"));
+    expect(shelf.more()).toBeNull();
+  });
+
+  it("pages towards a visible older thread past a hidden one in another project", async () => {
+    // o1 in p1 is hidden but not read yet; p2 has one visible older thread.
+    {
+      await using shelf = await renderShelf({
+        threads: [settled(p1, "s1", "2026-01-10T00:00:00.000Z")],
+        older: { p1: 1, p2: 1 },
+        hidden: ["o1"],
+      });
+      await vi.waitFor(() => expect(shelf.more()).toBe("Show more"));
+      expect(shelf.count()).toBe("2");
+    }
+    // Once o1 is read, the count is exact.
+    await using shelf = await renderShelf({
+      threads: [
+        settled(p1, "s1", "2026-01-10T00:00:00.000Z"),
+        settled(p1, "o1", "2026-01-01T00:00:00.000Z"),
+      ],
+      older: { p1: 1, p2: 1 },
+      hidden: ["o1"],
+    });
+    await vi.waitFor(() => expect(shelf.more()).toBe("Show 1 more"));
+    expect(shelf.count()).toBe("2");
   });
 });

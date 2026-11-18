@@ -236,7 +236,9 @@ export function bindSidebarHiddenProfile(profileId: number | null | typeof OFF):
       write(opKey(NO_PROFILE, key), undefined);
     }
   }
+  // A confirmed unbound device has no cached profile: after Orbit off and on, rows wait.
   if (isProfile(next)) write(LAST_KEY, next);
+  else if (next === NO_PROFILE) write(LAST_KEY, undefined);
   write(ACTIVE_KEY, next);
   refresh();
   resumeSweeps();
@@ -466,7 +468,15 @@ export function watchSidebarHiddenThreads(): void {
     if (event.key !== null && !event.key.startsWith(PREFIX)) return;
     const before = useSidebarHiddenThreads.getState().active;
     refresh();
-    if (useSidebarHiddenThreads.getState().active !== before) resumeSweeps();
+    // Every window sweeps a committed hold, so one closed mid-read leaves no orphan. A sweep marks
+    // only unmarked threads and drops the holds, so the window that reads second finds no work.
+    if (
+      useSidebarHiddenThreads.getState().active !== before ||
+      event.key === null ||
+      event.key.startsWith(`${PREFIX}attempt:`)
+    ) {
+      resumeSweeps();
+    }
     // Another window's edit: the main window's sync sends it.
     if (event.key?.startsWith(`${PREFIX}op:`)) notifyLocalProfileChange();
   });

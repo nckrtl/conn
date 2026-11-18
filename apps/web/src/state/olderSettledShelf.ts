@@ -67,9 +67,12 @@ export function useOlderSettledShelf(input: {
     pages,
     grow: (next: ReadonlyMap<EnvironmentId, number>) => setRequested({ scopeKey, pages: next }),
     isListed: (thread: EnvironmentThreadShell) => isListedSettledThread(thread.source, frontier),
+    scopes,
     /** Older settled threads in scope that are not local; add it to the local Settled rows. */
-    unloadedCount: (threads: ReadonlyArray<EnvironmentThreadShell>) =>
-      unloadedOlderSettledCount({ olderSettled: olderOf, scopes, threads }),
+    unloadedCount: (
+      threads: ReadonlyArray<EnvironmentThreadShell>,
+      only: ReadonlyArray<OlderSettledScope> = scopes,
+    ) => unloadedOlderSettledCount({ olderSettled: olderOf, scopes: only, threads }),
     loading: loaded.some(({ scope }) => pagesOf(scope.environmentId)?.status === "pending"),
     failed: loaded.some(({ scope }) => pagesOf(scope.environmentId)?.status === "failed"),
     retry: () => {
@@ -96,6 +99,34 @@ export function useOlderSettledShelfGrowth(
   useEffect(() => {
     if (wanted !== pages) grow(wanted);
   }, [wanted, pages, grow]);
+}
+
+/**
+ * Conn: per project, the older settled threads the client does not hold, from each environment's
+ * cut; reads no pages. `threads` are every row held, hidden ones included.
+ */
+export function useUnloadedOlderSettled(
+  environmentIds: ReadonlyArray<EnvironmentId>,
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+): (project: { readonly environmentId: string; readonly id: string }) => number {
+  const shelf = useAtomValue(
+    olderSettledThreads.shelfAtom(
+      sortOlderSettledScopes(
+        environmentIds.map((environmentId) => ({ environmentId, projectIds: null })),
+      ).map((scope) => ({ scope, pages: 0 })),
+    ),
+  );
+  return (project) =>
+    unloadedOlderSettledCount({
+      olderSettled: (environmentId) => shelf.get(environmentId)?.older ?? null,
+      scopes: [
+        {
+          environmentId: project.environmentId as EnvironmentId,
+          projectIds: [project.id as ProjectId],
+        },
+      ],
+      threads,
+    });
 }
 
 /**

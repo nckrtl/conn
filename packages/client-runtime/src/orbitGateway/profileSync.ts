@@ -45,6 +45,8 @@ export interface ProfileSyncChannel {
   readonly empty?: JsonObject;
   /** For `rebases`: intents wait, so the run reads the profile instead of trusting its copy. */
   readonly hasPending?: () => boolean;
+  /** For `rebases`: whether a value the Gateway returned is one this channel can read. */
+  readonly accepts?: (value: JsonObject) => boolean;
 }
 
 export interface ProfileSyncSectionState {
@@ -365,9 +367,11 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         if (typeof saved.sections?.[name]?.version !== "number") {
           throw unconfirmed(name, "the reply has no section version");
         }
+        // Also an empty set must come back explicitly: an absent value may be a partial reply.
         const written = remoteSection(saved, name).value;
-        if (written === null && !jsonEqual(push.value, push.channel.empty ?? {})) {
-          throw unconfirmed(name, "the reply has no section value");
+        if (written === null) throw unconfirmed(name, "the reply has no section value");
+        if (push.channel.accepts?.(written) === false) {
+          throw unconfirmed(name, "the reply's section value is malformed");
         }
       }
       meta = saved.sections ?? meta;

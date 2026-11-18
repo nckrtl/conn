@@ -152,6 +152,7 @@ export function createSidebarHiddenThreadsChannel(
     rebases: true,
     empty: sidebarHiddenThreadsSection([]),
     hasPending: () => host.read().ops.size > 0,
+    accepts: (value) => parseSidebarHiddenThreads(value) !== null,
     readLocal: () => {
       const { agreed, ops } = host.read();
       return sidebarHiddenThreadsSection(applySidebarHiddenIntents(agreed, ops));

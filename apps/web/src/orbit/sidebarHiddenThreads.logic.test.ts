@@ -6,6 +6,8 @@ import {
   NO_SIDEBAR_HIDDEN_MARKS,
   planSidebarPeek,
   sidebarHiddenMarks,
+  sidebarSettledCount,
+  unresolvedSidebarHiddenCount,
   withoutSidebarHiddenProjects,
 } from "./sidebarHiddenThreads.logic";
 
@@ -47,6 +49,33 @@ describe("sidebar hidden marks", () => {
     // Its projects stay out of the list and the scope menu too, also an empty one.
     const groups = [group(["local", "p1"]), group(["clone", "p1"]), group(["clone", "empty"])];
     expect(withoutSidebarHiddenProjects(groups, threads, marks)).toEqual([groups[0]]);
+  });
+
+  it("keeps a project with unloaded older threads, and counts them without overstating", () => {
+    const marks = sidebarHiddenMarks({
+      agreed: ["local:a-loaded", "local:b-loaded", "local:b-older"],
+      ops: new Map(),
+      attempts: [],
+      unhydrated: [],
+    });
+    const threads = [thread("local", "a-loaded", "a"), thread("local", "b-loaded", "b")];
+    const groups = [group(["local", "a"]), group(["local", "b"])];
+    // a has one older thread not loaded yet; b has none left.
+    const unloaded = (project: { readonly id: string }) => (project.id === "a" ? 1 : 0);
+    expect(withoutSidebarHiddenProjects(groups, threads, marks, unloaded)).toEqual([groups[0]]);
+    // Once a's older thread loaded and is hidden too, a goes.
+    expect(withoutSidebarHiddenProjects(groups, threads, marks, () => 0)).toEqual([]);
+
+    // b-older is hidden but not held: it may be the one older thread the server counts.
+    const held = new Set(threads.map((row) => `${row.environmentId}:${row.id}`));
+    expect(unresolvedSidebarHiddenCount(marks, "local", held)).toBe(1);
+    expect(unresolvedSidebarHiddenCount(marks, "clone", held)).toBe(0);
+    expect(
+      sidebarSettledCount({ listed: 2, scopes: [{ unloaded: 1, unresolvedHidden: 1 }] }),
+    ).toEqual({ atLeast: 2, upTo: 3 });
+    expect(
+      sidebarSettledCount({ listed: 2, scopes: [{ unloaded: 3, unresolvedHidden: 0 }] }),
+    ).toEqual({ atLeast: 5, upTo: 5 });
   });
 
   it("leaves an already listed or paired target where it is", () => {

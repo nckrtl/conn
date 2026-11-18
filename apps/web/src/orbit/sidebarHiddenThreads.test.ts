@@ -174,6 +174,8 @@ function fakeGateway(initial: string[] = []) {
     refuse: false,
     /** A reply that leaves the section out, though the write landed. */
     omitReply: false,
+    /** A reply with the section's version but without its value, or with a malformed one. */
+    replyValue: "written" as "written" | "absent" | "malformed",
   };
   const read = (): OrbitGatewaySettings => ({
     profileId: 1,
@@ -213,7 +215,12 @@ function fakeGateway(initial: string[] = []) {
       }
       gateway.version += 1;
       gateway.value = section.value as typeof gateway.value;
-      return gateway.omitReply ? { ...read(), document: {}, sections: {} } : read();
+      if (gateway.omitReply) return { ...read(), document: {}, sections: {} };
+      if (gateway.replyValue === "absent") return { ...read(), document: {} };
+      if (gateway.replyValue === "malformed") {
+        return { ...read(), document: { sidebarHiddenThreads: { schema: 1 } } };
+      }
+      return read();
     },
   };
   const me = (): OrbitGatewayNode =>
@@ -411,6 +418,36 @@ describe("sidebar hidden threads store", () => {
     expect(hidden(a, "clone", "recent")).toBe(true);
   });
 
+  it("finishes a peek whose extra window closed during the read, in the main window", async () => {
+    const { open, broadcast } = setup();
+    const main = await open();
+    const extra = await open();
+    const fake = fakeGateway();
+    const sync = mainSync(main, fake);
+    await sync();
+    broadcast(main);
+    extra.module
+      .beginSidebarPeek(ref("target"), { targetListed: false, environmentSurfaced: true })
+      .commit();
+    // The extra window closes before its environment connects: its sweep goes with it.
+    fixture.shellListeners.clear();
+    broadcast(extra);
+    expect(hidden(main, "clone", "older")).toBe(true);
+    fixture.inventory.set("clone", [["target", "older", "idle-child"]]);
+    liveShell("clone");
+    await settle();
+    expect(fixture.inventoryReads).toBe(1);
+    expect(main.module.useSidebarHiddenThreads.getState().marks.environments.size).toBe(0);
+    expect(hidden(main, "clone", "created-later")).toBe(false);
+    await sync();
+    expect(threads(fake)).toEqual(["target", "older", "idle-child"]);
+    // Another storage event finds no hold: no second read.
+    broadcast(extra);
+    liveShell("clone");
+    await settle();
+    expect(fixture.inventoryReads).toBe(1);
+  });
+
   it("holds through failed and slow inventory reads, and a show during the read wins", async () => {
     vi.useFakeTimers();
     const { open } = setup();
@@ -560,6 +597,25 @@ describe("sidebar hidden threads store", () => {
     expect(opsOf(storage)).toEqual([]);
     expect(fake.gateway.patches).toHaveLength(2);
     expect(threads(fake)).toEqual(["x"]);
+    // The last mark goes: the empty set lands, but a reply without it or with a malformed one
+    // confirms nothing, so the show stays until a read shows the empty set.
+    for (const replyValue of ["absent", "malformed"] as const) {
+      fake.gateway.replyValue = "written";
+      main.module.hideSidebarThread(ref("x"));
+      await sync();
+      main.module.showSidebarThread(ref("x"));
+      fake.gateway.replyValue = replyValue;
+      await expect(sync()).rejects.toThrow(/did not confirm/);
+      expect(opsOf(storage)).toHaveLength(1);
+      expect(hidden(main, "clone", "x")).toBe(false);
+      // The next read holds the empty set: that retires the show, without another write.
+      const patches = fake.gateway.patches.length;
+      await sync();
+      expect(fake.gateway.patches).toHaveLength(patches);
+      expect(opsOf(storage)).toEqual([]);
+      expect(threads(fake)).toEqual([]);
+      expect(hidden(main, "clone", "x")).toBe(false);
+    }
   });
 
   it("binds nothing from a /me that answered across Orbit off and on", async () => {

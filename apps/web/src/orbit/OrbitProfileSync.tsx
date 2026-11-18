@@ -237,6 +237,12 @@ function profileSyncController(): ProfileSyncController | null {
   });
 
   const providerRuns = createProviderRunGuard();
+  // Conn: Orbit off unbinds the sidebar's marks at once; a queued run may never see the off spell.
+  useEnvironmentProvider.subscribe((state, previous) => {
+    if (state.provider !== previous.provider && state.provider !== "orbit") {
+      bindSidebarHiddenProfile("off");
+    }
+  });
 
   const runOnce = async (): Promise<void> => {
     const current = providerRuns.begin();

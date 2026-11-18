@@ -99,13 +99,51 @@ interface MarkedProjectGroup {
 }
 
 /**
- * Leaves out project groups whose threads are all hidden. An empty group stays, unless each of its
- * environments is one a peek holds or whose marks are still unknown.
+ * Hidden marks of an environment that no held row resolves: rows of older pages not read yet, or
+ * left out of the shell. Each may be one of the older settled threads the server still counts.
+ */
+export function unresolvedSidebarHiddenCount(
+  marks: SidebarHiddenMarks,
+  environmentId: string,
+  heldKeys: ReadonlySet<string>,
+): number {
+  const prefix = `${environmentId}:`;
+  let count = 0;
+  for (const key of marks.keys) if (key.startsWith(prefix) && !heldKeys.has(key)) count += 1;
+  return count;
+}
+
+/**
+ * The Settled shelf's size: listed rows plus the server's unloaded older ones per scope. Unresolved
+ * hidden marks may be among those, so `atLeast` leaves them out and `upTo` keeps them; the shelf
+ * pages while `upTo` exceeds what it lists, and says a number only once both agree.
+ */
+export function sidebarSettledCount(input: {
+  readonly listed: number;
+  readonly scopes: ReadonlyArray<{ readonly unloaded: number; readonly unresolvedHidden: number }>;
+}): { readonly atLeast: number; readonly upTo: number } {
+  let atLeast = input.listed;
+  let upTo = input.listed;
+  for (const { unloaded, unresolvedHidden } of input.scopes) {
+    upTo += unloaded;
+    atLeast += Math.max(0, unloaded - unresolvedHidden);
+  }
+  return { atLeast, upTo };
+}
+
+/**
+ * Leaves out project groups whose threads are all hidden. A group with older settled threads not
+ * loaded yet stays: one of them may show. An empty group stays, unless each of its environments
+ * is one a peek holds or whose marks are still unknown.
  */
 export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
   groups: readonly T[],
   threads: readonly MarkedThread[],
   marks: SidebarHiddenMarks,
+  unloadedOlder: (project: {
+    readonly environmentId: string;
+    readonly id: string;
+  }) => number = () => 0,
 ): T[] {
   if (marks.keys.size === 0 && marks.environments.size === 0) return [...groups];
   const projectThreads = new Map<string, { total: number; hidden: number }>();
@@ -120,12 +158,14 @@ export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
   return groups.filter((group) => {
     let total = 0;
     let hidden = 0;
+    let unloaded = 0;
     for (const project of group.memberProjects) {
       const entry = projectThreads.get(`${project.environmentId}:${project.id}`);
       total += entry?.total ?? 0;
       hidden += entry?.hidden ?? 0;
+      unloaded += unloadedOlder(project);
     }
-    if (total > 0) return hidden < total;
+    if (total > 0) return hidden < total || unloaded > 0;
     return !(
       group.memberProjects.length > 0 &&
       group.memberProjects.every((project) => marks.environments.has(project.environmentId))

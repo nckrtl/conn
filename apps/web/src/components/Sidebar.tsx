@@ -144,6 +144,8 @@ import {
 import {
   hidesSidebarEnvironmentInventory,
   isSidebarHiddenThread,
+  sidebarSettledCount,
+  unresolvedSidebarHiddenCount,
   withoutSidebarHiddenProjects,
   type SidebarHiddenMarks,
 } from "../orbit/sidebarHiddenThreads.logic";
@@ -172,7 +174,11 @@ import { environmentPresentations } from "../state/presentation";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
-import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../state/olderSettledShelf";
+import {
+  useOlderSettledShelf,
+  useOlderSettledShelfGrowth,
+  useUnloadedOlderSettled,
+} from "../state/olderSettledShelf";
 import { useThreadSearch } from "../state/queries";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
@@ -531,8 +537,24 @@ function useSidebarThreads(input: {
   });
   const listedSettledThreads = settledThreads.filter(olderSettledShelf.isListed);
   useOlderSettledShelfGrowth(olderSettledShelf, listedSettledThreads);
-  const settledCount =
-    settledThreads.length + olderSettledShelf.unloadedCount(partition.visibleThreads);
+  // Conn: hidden rows the client holds are no unloaded older thread; hidden ones it cannot place
+  // yet keep the label from a number until paging resolves them.
+  const heldKeys = new Set(threads.map(threadShellKey));
+  const heldThreads = [
+    ...partition.visibleThreads,
+    ...threads.filter(
+      (thread) => thread.archivedAt === null && isSidebarHiddenThread(hiddenMarks, thread),
+    ),
+  ];
+  const settledSize = sidebarSettledCount({
+    listed: settledThreads.length,
+    scopes: olderSettledShelf.scopes.map((scope) => ({
+      unloaded: olderSettledShelf.unloadedCount(heldThreads, [scope]),
+      unresolvedHidden: unresolvedSidebarHiddenCount(hiddenMarks, scope.environmentId, heldKeys),
+    })),
+  });
+  const settledCount = settledSize.upTo;
+  const settledCountKnown = settledSize.atLeast === settledSize.upTo;
   const visibleSettledThreads = (() => {
     const visible = listedSettledThreads.slice(0, settledVisibleCount);
     if (
@@ -607,6 +629,8 @@ function useSidebarThreads(input: {
     ],
     settledVisibleCount,
     settledCount,
+    settledLabelCount: settledSize.atLeast,
+    settledCountKnown,
     olderSettledShelf,
     hiddenSettledCount: Math.max(0, settledCount - visibleSettledThreads.length),
     showMoreSettled: () =>
@@ -850,10 +874,12 @@ function useSidebarLookups() {
   // Conn: a project whose threads are all hidden from the sidebar leaves its list and scope menu.
   // A scope already on it stays narrowed: scope resolution reads every group.
   const allProjectGroups = useSidebarProjectGroups();
+  const quietThreads = useQuietThreadShells();
   const projectGroups = withoutSidebarHiddenProjects(
     allProjectGroups,
-    useQuietThreadShells(),
+    quietThreads,
     useSidebarHiddenThreads((state) => state.marks),
+    useUnloadedOlderSettled([...serverConfigs.keys()], quietThreads),
   );
   const environmentLabelById = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
@@ -1289,8 +1315,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   });
   const scopedProjectGroups = revealWidensScope ? [] : chosenProjectGroups;
   const scopedProjectRefs = scopedProjectGroups.flatMap((project) => project.memberProjectRefs);
+  // Conn: membership from every group, so a project whose loaded rows are hidden keeps its scope.
   const scopedProjectKeys = resolveScopedProjectKeys({
-    projectGroups,
+    projectGroups: allProjectGroups,
     workspace: activeWorkspace,
     scopedProjectGroups,
   });
@@ -1430,6 +1457,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     searchableThreads,
     settledVisibleCount,
     settledCount,
+    settledLabelCount,
+    settledCountKnown,
     olderSettledShelf,
     hiddenSettledCount,
     showMoreSettled,
@@ -3782,7 +3811,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                       "mt-auto",
                                   )}
                                   label={gt("Settled", { $context: "sidebar section" })}
-                                  count={settledCount}
+                                  count={settledLabelCount}
                                   dragging={from !== null}
                                   isDropTarget={dragTargetSection === "settled"}
                                   toggle={{
@@ -3834,12 +3863,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               ? gt("Loading")
                               : olderSettledShelf.failed
                                 ? gt("Could not load older threads. Retry")
-                                : gt(
-                                    "{count, plural, one {Show {count} more} other {Show {count} more}}",
-                                    {
-                                      count: Math.min(hiddenSettledCount, SETTLED_TAIL_PAGE_COUNT),
-                                    },
-                                  )}
+                                : !settledCountKnown
+                                  ? gt("Show more")
+                                  : gt(
+                                      "{count, plural, one {Show {count} more} other {Show {count} more}}",
+                                      {
+                                        count: Math.min(
+                                          hiddenSettledCount,
+                                          SETTLED_TAIL_PAGE_COUNT,
+                                        ),
+                                      },
+                                    )}
                           </button>
                         </li>
                       ) : null}

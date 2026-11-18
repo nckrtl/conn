@@ -1128,6 +1128,20 @@ impl Engine for SqliteEngine {
         })
     }
 
+    fn thread_ever_deleted(&self, thread_id: &str) -> BoxFuture<'_, Result<bool, String>> {
+        let thread_id = thread_id.to_owned();
+        Box::pin(async move {
+            self.inner
+                .db(move |store| -> Result<bool, String> {
+                    let tx = store.tx()?;
+                    let deleted = tx.thread_ever_deleted(&thread_id);
+                    tx.rollback();
+                    deleted
+                })
+                .await
+        })
+    }
+
     fn dispatch_guarded(
         &self,
         command: Command,

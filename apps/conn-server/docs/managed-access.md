@@ -139,8 +139,10 @@ The worker may call only `orchestration.dispatchCommand`, `orchestration.getThre
 and `orchestration.subscribeThread`. Reads need a thread of the admitted project; a
 subscription ends when its thread is deleted or names another project. An earlier turn's
 other thread is cut to its frozen message, the run it started, and that run's nodes and
-requests, with the thread's title, branch, worktree and times blanked or taken from that
-evidence; a different body, several runs, or another recorded run is refused instead.
+requests, with a thread rebuilt from an allowlist (title "Earlier turn", the run's model,
+no branch, worktree, tags or later provider thread, times from that evidence); a
+different body, no run or several runs, or another recorded run is refused instead. A
+thread ID that was ever deleted is never read or written by a worker.
 Refusals are the scope check's `EnvironmentAuthorizationError`. A guarded create never
 takes an ID that was ever used, deleted or not. Each write must match the grant, and the engine checks ownership and the
 project in the command's own transaction (`conn_engine::DispatchGuard`). The commit itself
@@ -154,7 +156,7 @@ own task, so a caller that disconnects mid-commit does not strand its run.
 | --- | --- |
 | `thread.create` | The admitted thread and command ID, exactly the frozen body (no other field, `null` counts as absent), and the thread does not exist |
 | `message.dispatch` | The admitted message ID, command ID and text digest; only the fields of a plain message (no model, fresh context, sender or steer); no attachments; `start_immediately`; no active or queued run; the message is new. It starts its own run or is refused |
-| `run.interrupt` | The admitted stop command ID of one message; a live run that message started; the message's stored text has the frozen digest; it started exactly one run; any recorded run ID matches; never `holdQueue` |
+| `run.interrupt` | The admitted stop command ID of one message; an active (never a queued) run that message started; the message's stored text has the frozen digest; it started exactly one run; any recorded run ID matches; never `holdQueue` |
 | `runtime-request.respond` | Decision `cancel` only, the stored question's cancel command ID, a request of the admitted thread, still pending, `user_input`, its node owned by the stored run |
 
 A guarded command whose ID already has a receipt is refused: one accept per command, and a

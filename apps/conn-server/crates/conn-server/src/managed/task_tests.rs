@@ -438,7 +438,10 @@ async fn an_earlier_turns_thread_shows_only_its_settlement_evidence() {
     assert_eq!(view["messages"].as_array().unwrap().len(), 1, "{view}");
     assert_eq!(runs(&view).len(), 1, "{view}");
     assert!(view["turnItems"].as_array().unwrap().is_empty());
-    assert_eq!(view["thread"]["title"], "", "no thread details: {view}");
+    assert_eq!(
+        view["thread"]["title"], "Earlier turn",
+        "no thread details: {view}"
+    );
     // It stops exactly that run, by its admitted stop ID.
     let mut stop_it = stop("stop-r1", &r1["id"]);
     stop_it["threadId"] = json!(earlier_thread);
@@ -727,7 +730,8 @@ async fn refusals_and_settlement_reads_decode_as_the_client_expects() {
         .expect("settlement read");
     let decoded: Result<ProjectionSuccess, _> = conn_contract::from_json(view.clone());
     assert!(decoded.is_ok(), "{decoded:?}\n{view}");
-    assert_eq!(view["thread"]["title"], "");
+    assert_eq!(view["thread"]["title"], "Earlier turn");
+    assert!(view["thread"]["branch"].is_null() && view["thread"].get("tags").is_none());
     let refused = read(&mut w, 2, "another-thread").await.unwrap_err();
     let error: Result<ProjectionError, _> = conn_contract::from_json(typed_error(&refused));
     assert!(error.is_ok(), "{refused}");
@@ -788,4 +792,61 @@ async fn a_deleted_thread_id_is_never_taken_over_or_followed() {
     // A guarded create never takes over a used ID.
     let mut w2 = worker(&lab, grant("m1", "do it", true)).await;
     assert!(dispatch(&mut w2, 1, create_command()).await.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_queued_earlier_run_is_never_cancelled_by_a_stop() {
+    let lab = Lab::start().await;
+    let earlier_thread = "reviewer-thread";
+    let mut create = create_command();
+    create["commandId"] = json!("person-create-r");
+    create["threadId"] = json!(earlier_thread);
+    person(&lab, create).await;
+    let on_earlier = |command_id: &str, message_id: &str, text: &str| {
+        let mut command = dispatch_command(command_id, message_id, text);
+        command["threadId"] = json!(earlier_thread);
+        command
+    };
+    person(&lab, on_earlier("pr1", "r1", "hang")).await;
+    until_run(&lab, earlier_thread, "r1", "running").await;
+    person(&lab, on_earlier("pr2", "r2", "later")).await;
+    let queued = until_run(&lab, earlier_thread, "r2", "queued").await;
+    let mut g = grant("m1", "do it", true);
+    g["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "r2", "text_sha256": sha("later"),
+        "interrupt_command_id": "stop-r2"}]);
+    let mut w = worker(&lab, g).await;
+    let mut stop_it = stop("stop-r2", &queued["id"]);
+    stop_it["threadId"] = json!(earlier_thread);
+    assert!(dispatch(&mut w, 1, stop_it).await.is_err());
+    until_run(&lab, earlier_thread, "r2", "queued").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_thread_id_reused_after_deletion_is_never_read_or_written() {
+    let lab = Lab::start().await;
+    // A thread in another project, deleted, then created again with the same ID here.
+    let mut foreign = create_command();
+    foreign["commandId"] = json!("person-create-a");
+    foreign["projectId"] = json!(conn_engine::SqliteEngine::project_id_for("/tmp/q"));
+    person(&lab, foreign).await;
+    person_sends(&lab, "old", "an old secret").await;
+    until_run(&lab, THREAD, "old", "completed").await;
+    person(
+        &lab,
+        json!({"type": "thread.delete", "commandId": "person-delete", "threadId": THREAD}),
+    )
+    .await;
+    let mut again = create_command();
+    again["commandId"] = json!("person-create-b");
+    person(&lab, again).await;
+    let mut w = worker(&lab, grant("m1", "do it", false)).await;
+    assert!(
+        read(&mut w, 1, THREAD).await.is_err(),
+        "the old rows are never shown"
+    );
+    assert!(
+        dispatch(&mut w, 2, dispatch_command("cmd-m1", "m1", "do it"))
+            .await
+            .is_err()
+    );
 }

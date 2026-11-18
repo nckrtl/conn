@@ -10,7 +10,7 @@
 use serde_json::Value;
 
 use crate::{
-    commands::{CommandError, active_run, is_live, queued_runs, reject},
+    commands::{CommandError, active_run, is_active, queued_runs, reject},
     store::Tx,
 };
 
@@ -31,7 +31,7 @@ pub enum GuardRule {
     /// `message.dispatch`: no run of the thread is active or queued, and the message is new.
     /// The message then starts its own run at once; it never queues or steers.
     ExclusiveStart,
-    /// `run.interrupt`: a live run that exactly one of these messages started, the message's
+    /// `run.interrupt`: an active run that exactly one of these messages started, the message's
     /// stored text has the frozen digest, it started no other run, and any recorded run ID
     /// is this run.
     OwnRun(Vec<OwnedMessage>),
@@ -66,6 +66,9 @@ fn sha256_hex(text: &str) -> String {
 
 /// The thread exists and belongs to `project_id`.
 fn bound_thread(tx: &Tx<'_>, thread_id: &str, project_id: &str) -> Result<(), CommandError> {
+    if tx.thread_ever_deleted(thread_id)? {
+        return reject("The thread ID was deleted before; it is not the admitted thread.");
+    }
     match tx.thread(thread_id)? {
         Some(thread) if thread["projectId"] == project_id => Ok(()),
         Some(_) => reject("The thread belongs to another project."),
@@ -133,8 +136,9 @@ pub(crate) fn check(
             let Some(run) = tx.entity(thread_id, "runs", run_id)? else {
                 return reject(format!("Run {run_id} does not exist."));
             };
-            if !is_live(&run) {
-                return reject("The run has already ended.");
+            // Only a run that started: a queued row is never cancelled through a stop.
+            if !is_active(&run) {
+                return reject("The run is not active.");
             }
             let from = run["userMessageId"].as_str().unwrap_or_default();
             let Some(owned) = messages.iter().find(|m| m.message_id == from) else {

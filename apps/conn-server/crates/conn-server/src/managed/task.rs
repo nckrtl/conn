@@ -323,11 +323,15 @@ impl TaskGrant {
                 .into_iter()
                 .filter(|r| r["userMessageId"] == earlier.message_id.as_str())
                 .collect();
-            if started.len() > 1 {
-                return Err("the earlier message started several runs".into());
-            }
-            if let (Some(run), Some(recorded)) = (started.first(), &earlier.run_id)
-                && run["id"] != recorded.as_str()
+            // Exactly one run, and the recorded one if there is a record: anything else
+            // leaves the earlier turn unsettled, and shows nothing.
+            let [run] = started.as_slice() else {
+                return Err("the earlier message did not start exactly one run".into());
+            };
+            if earlier
+                .run_id
+                .as_ref()
+                .is_some_and(|recorded| run["id"] != recorded.as_str())
             {
                 return Err("the earlier run is not the recorded one".into());
             }
@@ -377,28 +381,41 @@ impl TaskGrant {
                 }
             }
         }
-        // The thread stays a valid `OrchestrationV2AppThread`; what names or locates the
-        // other role's work is blanked, and its times come from the evidence only.
+        // The thread is rebuilt from an allowlist: a valid `OrchestrationV2AppThread` that
+        // names no title, branch, worktree, tag, pin or later provider thread of the other
+        // role. Its model is the evidence run's; its times come from the evidence only.
         let created = object["thread"]["createdAt"].clone();
-        let latest = latest.map_or(created, Value::from);
-        if let Some(thread) = object.get_mut("thread").and_then(Value::as_object_mut) {
-            thread.insert("title".into(), json!(""));
-            for key in [
-                "branch",
-                "worktreePath",
-                "lastVisitedAt",
-                "snoozedAt",
-                "snoozedUntil",
-            ] {
-                if thread.contains_key(key) {
-                    thread.insert(key.into(), Value::Null);
-                }
-            }
-            if thread.contains_key("pullRequests") {
-                thread.insert("pullRequests".into(), json!([]));
-            }
-            thread.insert("updatedAt".into(), latest.clone());
-        }
+        let latest = latest.map_or(created.clone(), Value::from);
+        let source = object["thread"].clone();
+        let run = object["runs"]
+            .as_array()
+            .and_then(|r| r.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        object.insert(
+            "thread".into(),
+            json!({
+                "id": source["id"],
+                "projectId": source["projectId"],
+                "title": "Earlier turn",
+                "createdBy": source["createdBy"],
+                "creationSource": source["creationSource"],
+                "providerInstanceId": run["providerInstanceId"],
+                "modelSelection": run["modelSelection"],
+                "runtimeMode": source["runtimeMode"],
+                "interactionMode": source["interactionMode"],
+                "branch": null,
+                "worktreePath": null,
+                "activeProviderThreadId": null,
+                "lineage": {"parentThreadId": null, "relationshipToParent": null,
+                    "rootThreadId": source["id"]},
+                "forkedFrom": null,
+                "createdAt": created,
+                "updatedAt": latest,
+                "archivedAt": null,
+                "deletedAt": null,
+            }),
+        );
         object.insert("updatedAt".into(), latest);
         Ok(projection)
     }
@@ -445,6 +462,14 @@ async fn read_thread(
 ) -> Result<Value, Failure> {
     if !grant.may_read(thread_id.as_str()) {
         return Err(outside("not an admitted thread", READ));
+    }
+    // A thread ID that was deleted before may carry another thread's rows: never read it.
+    if engine
+        .thread_ever_deleted(thread_id.as_str())
+        .await
+        .unwrap_or(true)
+    {
+        return Err(outside("the thread ID was deleted before", READ));
     }
     let projection = engine
         .get_thread_projection(thread_id.clone())

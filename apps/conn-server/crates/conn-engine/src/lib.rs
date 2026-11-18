@@ -321,6 +321,12 @@ pub trait Engine: Send + Sync {
         ))))
     }
 
+    /// Whether a thread with this ID was ever deleted, so its ID may carry an earlier
+    /// thread's rows. An engine that cannot tell answers `true`.
+    fn thread_ever_deleted(&self, _thread_id: &str) -> BoxFuture<'_, Result<bool, String>> {
+        Box::pin(std::future::ready(Ok(true)))
+    }
+
     /// The shell stream: projects and thread summaries. Starts with a `snapshot` item (or
     /// replays from `afterSequence`), then `synchronized`, then live updates.
     fn subscribe_shell(

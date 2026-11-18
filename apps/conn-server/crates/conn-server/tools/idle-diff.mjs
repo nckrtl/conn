@@ -510,9 +510,10 @@ const KNOWN = {
   "a turn being stopped": {
     intermittent: true,
     reason:
-      "with the provider's answer to turn/interrupt held, T3 may already mark the run " +
-      "interrupted, while Conn ends it only when the provider answers (or its 10 s stop " +
-      "timeout passes); seen on a slow CI runner (run 44382517419)",
+      "with the provider's reply to turn/interrupt held, T3 reported the run interrupted " +
+      "(cause not proven), while Conn ends a stopped run only on the provider's terminal " +
+      "event: it awaits the reply, then up to 10 s for the terminal, and past that marks the " +
+      "Stop unresponsive and keeps the run open; seen on a slow CI runner (run 44382517419)",
     lines: [
       'FAIL orbit.rows[0].activityRunStatus: T3 null / Conn "running"',
       'FAIL orbit.rows[0].latestRunCompletedAt: T3 "<time>" / Conn null',
@@ -529,6 +530,12 @@ function record(pair, { state, lines, info, notes, summary, orbitSends = true })
   const unreached = notes.filter((note) => note.startsWith("T3 "));
   lines.push(...unreached.map((note) => `FAIL ${note}`));
   const known = KNOWN[state];
+  // A known difference is excused only in the state it names: a side that missed its gate
+  // never reached that state, so it fails, whichever side it is.
+  if (known) {
+    const missed = notes.filter((note) => note.startsWith("Conn ") && note.includes("did not reach"));
+    lines.push(...missed.map((note) => `FAIL ${note}`));
+  }
   let verdict;
   if (!orbitSends) verdict = info.length === 0 ? "same" : "info";
   else if (known === undefined) verdict = lines.length === 0 ? "same" : "DIFF";

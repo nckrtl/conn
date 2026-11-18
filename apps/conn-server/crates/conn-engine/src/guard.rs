@@ -194,6 +194,9 @@ pub(crate) fn check(
             let Some(owned) = messages.iter().find(|m| m.message_id == from) else {
                 return reject("The run was not started from an admitted message.");
             };
+            if owned.require_started && run["startedAt"].is_null() {
+                return reject("The earlier run has not started.");
+            }
             if owned
                 .run_id
                 .as_deref()
@@ -246,5 +249,82 @@ pub(crate) fn check(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::store::{Draft, Store};
+
+    /// An earlier turn's stop needs a run that started: one still `starting` (provider start
+    /// pending, `startedAt` null) is refused, so its settlement evidence survives.
+    #[test]
+    fn an_earlier_turns_stop_waits_for_the_run_to_start() {
+        let dir = std::env::temp_dir().join(format!("conn-guard-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let mut tx = store.tx().unwrap();
+        tx.append(Draft::new(
+            "t1",
+            "thread.created",
+            json!({"id": "t1", "projectId": "p"}),
+        ))
+        .unwrap();
+        tx.append(Draft::new(
+            "t1",
+            "message.updated",
+            json!({"id": "m1", "threadId": "t1", "role": "user", "text": "go", "attachments": [],
+                   "createdBy": "user", "creationSource": "web"}),
+        ))
+        .unwrap();
+        let run = |status: &str, started: serde_json::Value| {
+            json!({"id": "r1", "threadId": "t1", "status": status, "startedAt": started,
+                   "userMessageId": "m1", "ordinal": 1})
+        };
+        tx.append(
+            Draft::new(
+                "t1",
+                "run.created",
+                run("starting", serde_json::Value::Null),
+            )
+            .run(Some("r1")),
+        )
+        .unwrap();
+        let owned = |require_started| DispatchGuard {
+            project_id: "p".into(),
+            rule: GuardRule::OwnRun(vec![OwnedMessage {
+                message_id: "m1".into(),
+                text_sha256: sha256_hex("go"),
+                run_id: None,
+                created_by: "user".into(),
+                creation_source: "web".into(),
+                require_started,
+            }]),
+        };
+        let stop =
+            json!({"type": "run.interrupt", "commandId": "c", "threadId": "t1", "runId": "r1"});
+        assert!(check(&tx, &owned(true), &stop).is_err(), "not started yet");
+        assert!(
+            check(&tx, &owned(false), &stop).is_ok(),
+            "the current turn's own run may stop"
+        );
+        tx.append(
+            Draft::new(
+                "t1",
+                "run.updated",
+                run("running", json!("2026-11-18T00:00:00.000Z")),
+            )
+            .run(Some("r1")),
+        )
+        .unwrap();
+        assert!(
+            check(&tx, &owned(true), &stop).is_ok(),
+            "started: the stop is allowed"
+        );
+        tx.rollback();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

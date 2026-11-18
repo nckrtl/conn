@@ -43,10 +43,14 @@ export interface OrbitProfileLivePorts {
   /** The local scope (for example the provider), or null while profile sync is off. */
   readonly scope: () => string | null;
   /**
-   * The existing authoritative refresh. Resolves to the binding it applied, with the channel the
-   * same `/me` read named. Must not apply anything once `isCurrent()` is false.
+   * The existing authoritative refresh. Resolves to the binding it applied. Calls `observe` with
+   * the channel as soon as `/me` answers, so a rotation is followed even when a later step fails.
+   * Must not apply anything once `isCurrent()` is false.
    */
-  readonly refresh: (isCurrent: () => boolean) => Promise<ProfileBinding | null>;
+  readonly refresh: (
+    isCurrent: () => boolean,
+    observe: (channel: string | null) => void,
+  ) => Promise<ProfileBinding | null>;
   readonly onError?: (error: unknown) => void;
   readonly socket?: (url: string) => OrbitRealtimeSocket;
   readonly checkIntervalMs?: number;
@@ -60,9 +64,15 @@ interface Followed {
 
 const isOrbitGatewayError = Schema.is(OrbitGatewayError);
 
-/** A Gateway answer that means this device may no longer read the profile. */
+/** A Gateway answer that means this device may no longer read the profile (or Conn is off). */
 function accessWithdrawn(error: unknown): boolean {
-  return isOrbitGatewayError(error) && (error.status === 401 || error.status === 403);
+  return (
+    isOrbitGatewayError(error) &&
+    (error.status === 401 ||
+      error.status === 403 ||
+      error.status === 404 ||
+      error.code === "extension.disabled")
+  );
 }
 
 export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
@@ -134,8 +144,11 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
     scope,
     refresh: async (isCurrent) => {
       let binding: ProfileBinding | null;
+      const observe = (channel: string | null): void => {
+        if (isCurrent()) follow(channel);
+      };
       try {
-        binding = await ports.refresh(isCurrent);
+        binding = await ports.refresh(isCurrent, observe);
       } catch (error) {
         if (isCurrent() && accessWithdrawn(error)) unfollow();
         throw error;

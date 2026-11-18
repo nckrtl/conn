@@ -296,6 +296,26 @@ describe("profile sync engine", () => {
     expect(fake.gateway.patches).toHaveLength(patches);
   });
 
+  it("still pulls another section that changed while its own PATCH was in flight", async () => {
+    const fake = fakeGateway();
+    const mac = makeDevice(fake);
+    await mac.sync();
+    const staleMe = fake.me();
+    // Another device writes the appearance after the mac read /me.
+    const appearance = fake.gateway.sections.get("appearance")!;
+    fake.gateway.sections.set("appearance", {
+      version: appearance.version + 1,
+      value: { schema: 1, mode: "dark", contrast: 100 },
+      updatedBy: "phone",
+    });
+    fake.gateway.version += 1;
+    mac.memory.settings.size = 18;
+    await mac.engine.run(staleMe);
+    expect(fake.gateway.patches.at(-1)).toHaveProperty(["devices.desktop"]);
+    await mac.sync();
+    expect(mac.memory.appearance).toMatchObject({ mode: "dark" });
+  });
+
   it("lets the device in front of the user win when both edit the same key", async () => {
     const fake = fakeGateway();
     const mac = makeDevice(fake, { settings: { font: "Inter", size: 15 } });

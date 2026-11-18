@@ -328,7 +328,16 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         outcomes[name] =
           push.kind === "seed" ? "seeded" : push.kind === "merge" ? "merged" : "pushed";
       }
-      commit(saved.version);
+      // The document version covers every section. Count it as read only when no other section
+      // this device follows moved while the PATCH was in flight; otherwise the next run reads it.
+      const pushed = new Set(pushes.map((push) => push.channel.name));
+      const othersCurrent =
+        saved.sections === null ||
+        readable.every(
+          ({ name }) =>
+            pushed.has(name) || remoteSection(saved, name).version === sections[name]?.version,
+        );
+      commit(othersCurrent ? saved.version : state.profileVersion);
       return { kind: "synced", outcomes, sections: meta };
     }
     throw conflict;

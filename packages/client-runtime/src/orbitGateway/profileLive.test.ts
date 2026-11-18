@@ -34,6 +34,10 @@ function fakeGateway() {
     version: 5,
     keyNumber: 1,
     access: true,
+    /** The refusal while `access` is false: a withdrawn peer, or the `conn` switch turned off. */
+    refusal: { status: 403, code: "peer.identity_unknown" },
+    /** A failing step after `/me` (the settings read) in the client's refresh. */
+    failAfterMe: false,
     reverb: true,
     reads: 0,
     /** While set, `/me` answers with the state at request time once this settles. */
@@ -47,10 +51,8 @@ function fakeGateway() {
   const transport: OrbitGatewayTransport = async (request) => {
     gateway.requests.push(request);
     if (!gateway.access) {
-      return json(
-        { status: 403, error: { code: "peer.identity_unknown", message: "no", details: {} } },
-        403,
-      );
+      const { status, code } = gateway.refusal;
+      return json({ status, error: { code, message: "no", details: {} } }, status);
     }
     if (request.root) throw new Error("Conn profile realtime must stay under /api/v1/conn");
     switch (request.path) {
@@ -180,9 +182,12 @@ function harness(options: { scope?: { value: string | null } } = {}) {
     transport: fake.transport,
     scope: () => local.value,
     socket: fake.socket,
-    refresh: async (isCurrent) => {
+    refresh: async (isCurrent, observe) => {
       const me = await client.me();
-      if (!isCurrent() || me.profile === null) return null;
+      if (!isCurrent()) return null;
+      observe(me.profileChannel ?? null);
+      if (fake.gateway.failAfterMe) throw new Error("settings failed");
+      if (me.profile === null) return null;
       applied.push(me.profile.settingsVersion);
       return {
         profileId: me.profile.id,
@@ -297,6 +302,21 @@ describe("Orbit profile live subscription", () => {
     live.dispose();
   });
 
+  it("follows a rotated key even when the rest of that refresh fails", async () => {
+    using _clock = clock();
+    const { gateway, live, rotate, open } = harness();
+    await live.resume();
+    await vi.advanceTimersByTimeAsync(0);
+    const first = open()[0]!;
+    rotate();
+    gateway.failAfterMe = true;
+    await live.reconcile();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.closed).toBe(true);
+    expect(open()[0]!.subscribedTo).toBe(`private-conn-profile.${key(2)}`);
+    live.dispose();
+  });
+
   it("never applies an old binding's socket after a switch from A to B and back to A", async () => {
     using _clock = clock();
     const { gateway, live, applied, rotate, open } = harness();
@@ -390,11 +410,15 @@ describe("Orbit profile live subscription", () => {
     live.dispose();
   });
 
-  it("stops the subscription when access or the binding is withdrawn", async () => {
+  it.each([
+    { status: 403, code: "peer.identity_unknown" },
+    { status: 409, code: "extension.disabled" },
+  ])("stops the subscription when access or the binding is withdrawn ($code)", async (refusal) => {
     using _clock = clock();
     const { gateway, live, open } = harness();
     await live.resume();
     await vi.advanceTimersByTimeAsync(0);
+    gateway.refusal = refusal;
     gateway.access = false;
     await live.reconcile();
     expect(open()).toHaveLength(0);

@@ -390,10 +390,14 @@ let appliedWorkspaces: { readonly profileId: number; readonly version: number } 
  * One authoritative profile read for the shared subscription: the Node, the workspaces when the
  * version moved, and the appearance. Applies nothing once `isCurrent()` is false.
  */
-async function refreshOrbitProfile(isCurrent: () => boolean): Promise<ProfileBinding | null> {
+async function refreshOrbitProfile(
+  isCurrent: () => boolean,
+  observe: (channel: string | null) => void,
+): Promise<ProfileBinding | null> {
   if (state.provider !== "orbit") return null;
   const node = await client.me();
   if (!isCurrent()) return null;
+  observe(node.profileChannel ?? null);
   const profile = node.profile;
   if (profile === null) {
     appliedWorkspaces = null;
@@ -406,8 +410,16 @@ async function refreshOrbitProfile(isCurrent: () => boolean): Promise<ProfileBin
   ) {
     const settings = await client.settings(profile.id);
     if (!isCurrent()) return null;
-    appliedWorkspaces = { profileId: settings.profileId, version: settings.version };
-    set({ node, workspaces: settings.workspaces });
+    // A workspace write of this phone may have landed a newer version meanwhile: never go back.
+    if (
+      appliedWorkspaces?.profileId !== settings.profileId ||
+      appliedWorkspaces.version <= settings.version
+    ) {
+      appliedWorkspaces = { profileId: settings.profileId, version: settings.version };
+      set({ node, workspaces: settings.workspaces });
+    } else {
+      set({ node });
+    }
   } else {
     set({ node });
   }
@@ -429,7 +441,8 @@ const profileLive = createOrbitProfileLive({
   transport: orbitGatewayTransport,
   scope: () => (state.provider === "orbit" ? "orbit" : null),
   refresh: refreshOrbitProfile,
-  onError: (error) => console.warn("[orbit] profile read failed", error),
+  // Only a current read reports here; the refresh shows it as the Gateway's error.
+  onError: (error) => set({ error: message(error) }),
 });
 
 /**
@@ -447,18 +460,14 @@ export function refreshOrbitGateway(): Promise<void> {
         return;
       }
       set({ phase: "loading", error: null });
-      const [node, profiles, environments] = await Promise.all([
-        client.me(),
+      // The Node, workspaces and appearance come from the profile read, which runs one at a time
+      // with the notices' reads, so an older answer never replaces a newer one.
+      const [profiles, environments] = await Promise.all([
         client.profiles(),
         client.environments(),
+        profileLive.reconcile(),
       ]);
-      const settings = node.profile ? await client.settings(node.profile.id) : null;
-      appliedWorkspaces = settings
-        ? { profileId: settings.profileId, version: settings.version }
-        : null;
-      const workspaces = settings?.workspaces ?? [];
-      set({ phase: "ready", node, profiles, environments, workspaces });
-      void syncOrbitAppearance(node);
+      set({ phase: state.error === null ? "ready" : "error", profiles, environments });
       await reconcileEnvironments(environments);
     } catch (error) {
       set({ phase: "error", error: message(error) });
@@ -477,7 +486,6 @@ export async function setEnvironmentProvider(provider: EnvironmentProvider): Pro
   set({ provider });
   await saveProvider();
   await refreshOrbitGateway();
-  void profileLive.reconcile();
 }
 
 /** Binds this device to a profile, creating it first when `profile` is a new name. */
@@ -491,9 +499,8 @@ export async function chooseOrbitProfile(
     await client.bindProfile(id);
   } catch (error) {
     set({ error: message(error) });
-    throw error;
-  } finally {
     void profileLive.reconcile();
+    throw error;
   }
   await refreshOrbitGateway();
 }
@@ -577,12 +584,13 @@ export function useOrbitGateway(): OrbitGatewayState {
   useEffect(() => {
     if (started) return;
     started = true;
-    void refreshOrbitGateway();
+    // Resumed first, so the refresh's profile read (after the provider loads) subscribes.
     if (AppState.currentState === "active") void profileLive.resume();
+    void refreshOrbitGateway();
     AppState.addEventListener("change", (next) => {
       if (next === "active") {
-        void refreshOrbitGateway();
         void profileLive.resume();
+        void refreshOrbitGateway();
       } else if (next === "background") {
         profileLive.pause();
       }

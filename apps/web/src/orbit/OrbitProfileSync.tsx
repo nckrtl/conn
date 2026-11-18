@@ -158,6 +158,10 @@ function writeLocal(workspaces: readonly OrbitGatewayWorkspace[]): void {
   }));
 }
 
+/** A Gateway call a profile read skips because a newer scope replaced it. */
+const obsoleteRead = (): Promise<never> =>
+  Promise.reject(new Error("The profile read is obsolete."));
+
 interface ProfileSyncController {
   /** Environment work: servers, credentials, clone references and the attached set. */
   readonly refreshEnvironments: () => Promise<void>;
@@ -179,9 +183,17 @@ function profileSyncController(): ProfileSyncController | null {
   if (!transport) return null;
   const client = createOrbitGatewayClient(transport);
   forgetRemovedProfileSyncKeys();
-  /** The workspace sync for one read: once that read is obsolete it applies nothing here. */
+  /**
+   * The workspace sync for one read: once that read is obsolete it applies nothing here and sends
+   * nothing more to the Gateway, also not a conflict retry.
+   */
   const workspacePorts = (isCurrent: () => boolean): WorkspaceProfileSyncPorts => ({
-    client,
+    client: {
+      ...client,
+      settings: (profileId) => (isCurrent() ? client.settings(profileId) : obsoleteRead()),
+      replaceWorkspaces: (...args) =>
+        isCurrent() ? client.replaceWorkspaces(...args) : obsoleteRead(),
+    },
     readLocal: () => useWorkspaceStore.getState().workspaces.map(toGateway),
     writeLocal: (workspaces) => {
       if (isCurrent()) writeLocal(workspaces);
@@ -246,7 +258,10 @@ function profileSyncController(): ProfileSyncController | null {
   };
 
   /** One authoritative profile read and write-back; applies nothing once `isCurrent()` is false. */
-  const profileOnce = async (isCurrent: () => boolean): Promise<ProfileBinding | null> => {
+  const profileOnce = async (
+    isCurrent: () => boolean,
+    observe: (channel: string | null) => void,
+  ): Promise<ProfileBinding | null> => {
     if (!inOrbit()) return null;
     let me: OrbitGatewayNode;
     try {
@@ -262,11 +277,13 @@ function profileSyncController(): ProfileSyncController | null {
       throw error;
     }
     if (!isCurrent() || !inOrbit()) return null;
+    observe(me.profileChannel ?? null);
     lastMe = me;
     if (lastListed !== null) await recordAttached(me, lastListed);
     if (!isCurrent()) return null;
     try {
       const result = await syncWorkspaceProfile(workspacePorts(isCurrent), me);
+      if (!isCurrent()) return null;
       useOrbitProfileSyncStatus.setState(
         result.kind === "unbound"
           ? { phase: "unbound", profileName: null, error: null, syncedAt: Date.now() }
@@ -279,6 +296,7 @@ function profileSyncController(): ProfileSyncController | null {
       );
       if (result.kind === "unbound" || me.profile === null) return null;
     } catch (error) {
+      if (!isCurrent()) return null;
       useOrbitProfileSyncStatus.setState((status) => ({
         ...status,
         phase: "error",
@@ -289,12 +307,14 @@ function profileSyncController(): ProfileSyncController | null {
     // A failure in the sections must not hide that the workspaces synced.
     try {
       const synced = await sections.run(me, isCurrent);
+      if (synced.kind === "superseded") return null;
       if (synced.kind === "unsupported") {
         useOrbitProfileSyncStatus.setState({ sections: "unsupported", sectionsError: null });
       } else if (synced.kind === "synced") {
         useOrbitProfileSyncStatus.setState({ sections: "supported", sectionsError: null });
       }
     } catch (error) {
+      if (!isCurrent()) return null;
       useOrbitProfileSyncStatus.setState({
         sectionsError: error instanceof Error ? error.message : String(error),
       });
@@ -313,7 +333,7 @@ function profileSyncController(): ProfileSyncController | null {
     profile: createOrbitProfileLive({
       transport,
       scope: () => (inOrbit() ? "orbit" : null),
-      refresh: (isCurrent) => exclusive(() => profileOnce(isCurrent)),
+      refresh: (isCurrent, observe) => exclusive(() => profileOnce(isCurrent, observe)),
     }),
     beginNonUserChange: sections.beginNonUserChange,
   };

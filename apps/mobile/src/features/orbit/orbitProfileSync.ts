@@ -88,15 +88,16 @@ const engine = createProfileSync({
 
 /**
  * Syncs the appearance for a node the caller just read; nothing applies once `isCurrent()` is
- * false. Resolves false when the run failed, so a profile read does not count it as applied.
+ * false. Resolves false when the run failed or applied nothing, so a profile read does not count
+ * its version as applied.
  */
 export async function syncOrbitAppearance(
   node: OrbitGatewayNode,
   isCurrent: () => boolean = () => true,
 ): Promise<boolean> {
   try {
-    await engine.run(node, isCurrent);
-    return true;
+    // Idle: the preferences are not readable yet, so nothing was applied.
+    return (await engine.run(node, isCurrent)).kind !== "idle";
   } catch (error) {
     console.warn("[orbit] appearance sync failed", error);
     return false;

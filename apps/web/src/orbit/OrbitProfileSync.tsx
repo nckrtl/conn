@@ -1,9 +1,13 @@
 import {
   APPEARANCE_SECTION,
   createOrbitGatewayClient,
+  createOrbitProfileLive,
   createProfileSync,
   type OrbitGatewayClient,
+  type OrbitGatewayEnvironment,
+  type OrbitGatewayNode,
   type OrbitGatewayWorkspace,
+  type ProfileBinding,
   type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useEffect } from "react";
@@ -41,7 +45,11 @@ import {
 } from "./workspaceProfileSync";
 
 const STATE_STORAGE_KEY = "t3code:orbit-profile-sync:v1";
-/** Probe cadence: GET /me about every 15 s while the window has focus, every 30 s otherwise. */
+/**
+ * Environment cadence: the server list, credential renewal, clone references and the attached set
+ * about every 15 s while the window has focus, every 30 s otherwise. Profile changes no longer
+ * ride on it: they arrive as `conn.profile.updated` notices (see createOrbitProfileLive).
+ */
 const FOCUSED_PROBE_MS = 15_000;
 const BACKGROUND_PROBE_MS = 30_000;
 const LOCAL_EDIT_DEBOUNCE_MS = 1_500;
@@ -72,6 +80,7 @@ const INITIAL_STATUS: OrbitProfileSyncStatus = {
 export const useOrbitProfileSyncStatus = create<OrbitProfileSyncStatus>(() => INITIAL_STATUS);
 
 let requestSync: (() => Promise<void>) | null = null;
+let beforeRebind: (() => void) | null = null;
 
 /**
  * Runs the profile sync now and settles once a run that started after this call has finished, so
@@ -80,6 +89,11 @@ let requestSync: (() => Promise<void>) | null = null;
  */
 export function syncOrbitProfileNow(): Promise<void> {
   return requestSync?.() ?? Promise.resolve();
+}
+
+/** Before this device binds another profile: drops the old binding's channel and reads. */
+export function orbitProfileRebinding(): void {
+  beforeRebind?.();
 }
 
 // Conn: every window's sleep controller reads the Gateway through this window's client.
@@ -145,7 +159,10 @@ function writeLocal(workspaces: readonly OrbitGatewayWorkspace[]): void {
 }
 
 interface ProfileSyncController {
-  readonly trigger: () => Promise<void>;
+  /** Environment work: servers, credentials, clone references and the attached set. */
+  readonly refreshEnvironments: () => Promise<void>;
+  /** Follows the bound profile; `reconcile()` runs one authoritative profile read. */
+  readonly profile: ReturnType<typeof createOrbitProfileLive>;
   readonly beginNonUserChange: (name: ProfileSectionName) => () => void;
 }
 
@@ -158,16 +175,22 @@ let controller: ProfileSyncController | null = null;
  */
 function profileSyncController(): ProfileSyncController | null {
   if (controller) return controller;
-  const client = desktopOrbitGatewayClient();
-  if (!client) return null;
+  const transport = desktopOrbitGatewayTransport();
+  if (!transport) return null;
+  const client = createOrbitGatewayClient(transport);
   forgetRemovedProfileSyncKeys();
-  const ports: WorkspaceProfileSyncPorts = {
+  /** The workspace sync for one read: once that read is obsolete it applies nothing here. */
+  const workspacePorts = (isCurrent: () => boolean): WorkspaceProfileSyncPorts => ({
     client,
     readLocal: () => useWorkspaceStore.getState().workspaces.map(toGateway),
-    writeLocal,
+    writeLocal: (workspaces) => {
+      if (isCurrent()) writeLocal(workspaces);
+    },
     loadState,
-    saveState,
-  };
+    saveState: (state) => {
+      if (isCurrent()) saveState(state);
+    },
+  });
   const sections = createProfileSync({
     client,
     channels: getProfileSyncChannels,
@@ -175,49 +198,43 @@ function profileSyncController(): ProfileSyncController | null {
     saveState: saveSectionState,
   });
 
-  const runOnce = async (): Promise<void> => {
+  // Both runs touch the attached set and the profile state: one at a time.
+  let queue: Promise<unknown> = Promise.resolve();
+  const exclusive = <T,>(task: () => Promise<T>): Promise<T> => {
+    const result = queue.then(task);
+    queue = result.catch(() => undefined);
+    return result;
+  };
+  const inOrbit = (): boolean => useEnvironmentProvider.getState().provider === "orbit";
+  /** The last reads each run shares with the other, so neither needs a second Gateway call. */
+  let lastMe: OrbitGatewayNode | null = null;
+  let lastListed: readonly OrbitGatewayEnvironment[] | null = null;
+
+  const recordAttached = async (
+    me: OrbitGatewayNode,
+    listed: readonly OrbitGatewayEnvironment[],
+  ): Promise<void> => {
+    // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
+    await recordAttachedServers(client, me, listed).catch((error: unknown) => {
+      console.warn("Conn could not apply the attached set.", error);
+    });
+  };
+
+  const environmentsOnce = async (): Promise<void> => {
     try {
       const listed = await reconcileEnvironmentProvider(client);
       const { provider } = useEnvironmentProvider.getState();
       // Everything syncs only while Orbit provides the environments.
       if (provider !== "orbit") {
+        lastMe = null;
+        lastListed = null;
         useOrbitProfileSyncStatus.setState(INITIAL_STATUS);
         await clearAttachedServers();
         return;
       }
       pruneWorkspaceCloneRefs(provider, listed);
-      const me = await client.me();
-      // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
-      if (listed !== null) {
-        await recordAttachedServers(client, me, listed).catch((error: unknown) => {
-          console.warn("Conn could not apply the attached set.", error);
-        });
-      }
-      const result = await syncWorkspaceProfile(ports, me);
-      useOrbitProfileSyncStatus.setState(
-        result.kind === "unbound"
-          ? { phase: "unbound", profileName: null, error: null, syncedAt: Date.now() }
-          : {
-              phase: "synced",
-              profileName: result.profileName,
-              error: null,
-              syncedAt: Date.now(),
-            },
-      );
-      if (result.kind === "unbound") return;
-      // A failure in the sections must not hide that the workspaces synced.
-      try {
-        const synced = await sections.run(me);
-        if (synced.kind === "unsupported") {
-          useOrbitProfileSyncStatus.setState({ sections: "unsupported", sectionsError: null });
-        } else if (synced.kind === "synced") {
-          useOrbitProfileSyncStatus.setState({ sections: "supported", sectionsError: null });
-        }
-      } catch (error) {
-        useOrbitProfileSyncStatus.setState({
-          sectionsError: error instanceof Error ? error.message : String(error),
-        });
-      }
+      lastListed = listed;
+      if (listed !== null && lastMe !== null) await recordAttached(lastMe, listed);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       useOrbitProfileSyncStatus.setState((status) => ({
@@ -228,8 +245,76 @@ function profileSyncController(): ProfileSyncController | null {
     }
   };
 
+  /** One authoritative profile read and write-back; applies nothing once `isCurrent()` is false. */
+  const profileOnce = async (isCurrent: () => boolean): Promise<ProfileBinding | null> => {
+    if (!inOrbit()) return null;
+    let me: OrbitGatewayNode;
+    try {
+      me = await client.me();
+    } catch (error) {
+      if (isCurrent()) {
+        useOrbitProfileSyncStatus.setState((status) => ({
+          ...status,
+          phase: "error",
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      }
+      throw error;
+    }
+    if (!isCurrent() || !inOrbit()) return null;
+    lastMe = me;
+    if (lastListed !== null) await recordAttached(me, lastListed);
+    if (!isCurrent()) return null;
+    try {
+      const result = await syncWorkspaceProfile(workspacePorts(isCurrent), me);
+      useOrbitProfileSyncStatus.setState(
+        result.kind === "unbound"
+          ? { phase: "unbound", profileName: null, error: null, syncedAt: Date.now() }
+          : {
+              phase: "synced",
+              profileName: result.profileName,
+              error: null,
+              syncedAt: Date.now(),
+            },
+      );
+      if (result.kind === "unbound" || me.profile === null) return null;
+    } catch (error) {
+      useOrbitProfileSyncStatus.setState((status) => ({
+        ...status,
+        phase: "error",
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
+    }
+    // A failure in the sections must not hide that the workspaces synced.
+    try {
+      const synced = await sections.run(me, isCurrent);
+      if (synced.kind === "unsupported") {
+        useOrbitProfileSyncStatus.setState({ sections: "unsupported", sectionsError: null });
+      } else if (synced.kind === "synced") {
+        useOrbitProfileSyncStatus.setState({ sections: "supported", sectionsError: null });
+      }
+    } catch (error) {
+      useOrbitProfileSyncStatus.setState({
+        sectionsError: error instanceof Error ? error.message : String(error),
+      });
+      // Not applied in full: the reconciler retries rather than count this version as read.
+      throw error;
+    }
+    return {
+      profileId: me.profile.id,
+      version: me.profile.settingsVersion,
+      channel: me.profileChannel ?? null,
+    };
+  };
+
   controller = {
-    trigger: createSerialRunner(runOnce),
+    refreshEnvironments: createSerialRunner(() => exclusive(environmentsOnce)),
+    profile: createOrbitProfileLive({
+      transport,
+      scope: () => (inOrbit() ? "orbit" : null),
+      refresh: (isCurrent) => exclusive(() => profileOnce(isCurrent)),
+    }),
     beginNonUserChange: sections.beginNonUserChange,
   };
   return controller;
@@ -242,19 +327,24 @@ function profileSyncController(): ProfileSyncController | null {
  */
 export function OrbitProfileSync() {
   const available = !!window.desktopBridge?.orbitGatewaySend;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes the profile sync engine to store changes, focus and a poll timer while mounted
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes the profile sync to store changes, focus, network and the environment timer while mounted
   useEffect(() => {
     const sync = profileSyncController();
     if (!sync) return;
-    const run = (): void => void sync.trigger();
+    const refreshEnvironments = (): void => void sync.refreshEnvironments();
+    const reconcileProfile = (): void => void sync.profile.reconcile();
+    const refreshAll = (): void => {
+      refreshEnvironments();
+      reconcileProfile();
+    };
 
     const unsubscribeProvider = useEnvironmentProvider.subscribe((state, previous) => {
-      if (state.provider !== previous.provider) run();
+      if (state.provider !== previous.provider) refreshAll();
     });
     let editTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleEditSync = (): void => {
       if (editTimer) clearTimeout(editTimer);
-      editTimer = setTimeout(run, LOCAL_EDIT_DEBOUNCE_MS);
+      editTimer = setTimeout(reconcileProfile, LOCAL_EDIT_DEBOUNCE_MS);
     };
     const unsubscribe = useWorkspaceStore.subscribe((state, previous) => {
       if (state.workspaces !== previous.workspaces) scheduleEditSync();
@@ -262,22 +352,31 @@ export function OrbitProfileSync() {
     const unsubscribeLocalChange = onLocalProfileChange(scheduleEditSync);
     // Conn: a server that starts refusing this device's credential is renewed now, not at the
     // next poll.
-    const unsubscribeRefused = onOrbitCredentialRefused(run);
+    const unsubscribeRefused = onOrbitCredentialRefused(refreshEnvironments);
     // A theme the environment pushed is not the user's pick: it stays on this device.
     const unsubscribeDefaultTheme = trackNonUserThemeChanges(() =>
       sync.beginNonUserChange(APPEARANCE_SECTION),
     );
-    requestSync = sync.trigger;
+    requestSync = () => sync.profile.reconcile();
+    beforeRebind = () => sync.profile.invalidate();
     let ticks = 0;
     const interval = setInterval(() => {
       ticks += 1;
-      if (document.hasFocus() || ticks % (BACKGROUND_PROBE_MS / FOCUSED_PROBE_MS) === 0) run();
+      if (document.hasFocus() || ticks % (BACKGROUND_PROBE_MS / FOCUSED_PROBE_MS) === 0) {
+        refreshEnvironments();
+      }
     }, FOCUSED_PROBE_MS);
-    window.addEventListener("focus", run);
-    run();
+    // Lifecycle: focus and a network that comes back read the profile again; the shared
+    // subscription keeps its own low-frequency check against dropped notices.
+    window.addEventListener("focus", refreshAll);
+    window.addEventListener("online", refreshAll);
+    refreshEnvironments();
+    void sync.profile.resume();
 
     return () => {
       requestSync = null;
+      beforeRebind = null;
+      sync.profile.pause();
       unsubscribeProvider();
       unsubscribe();
       unsubscribeLocalChange();
@@ -285,7 +384,8 @@ export function OrbitProfileSync() {
       unsubscribeDefaultTheme();
       clearInterval(interval);
       if (editTimer) clearTimeout(editTimer);
-      window.removeEventListener("focus", run);
+      window.removeEventListener("focus", refreshAll);
+      window.removeEventListener("online", refreshAll);
     };
   }, []);
   return available ? <OrbitAppearanceSync /> : null;

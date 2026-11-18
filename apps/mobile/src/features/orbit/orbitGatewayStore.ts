@@ -1,5 +1,6 @@
 import {
   createCredentialRefusalWatch,
+  createOrbitProfileLive,
   EMPTY_ORBIT_ENVIRONMENT_STATE,
   forgetOrbitEnvironment,
   forgetPairingRevoked,
@@ -21,6 +22,7 @@ import {
   type OrbitGatewayNode,
   type OrbitGatewayProfile,
   type OrbitGatewayWorkspace,
+  type ProfileBinding,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AuthAccessWriteScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
@@ -34,7 +36,7 @@ import { environmentCatalog } from "../../connection/catalog";
 import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentSession, readEnvironmentLacksScope } from "../../state/session";
-import { orbitGatewayClient as client } from "./orbitGatewayClient";
+import { orbitGatewayClient as client, orbitGatewayTransport } from "./orbitGatewayClient";
 import { syncOrbitAppearance } from "./orbitProfileSync";
 import { heldOrbitInstanceIds, orbitThreadStartStore } from "./orbitThreadStartStore";
 import { addProjectRefToProfileWorkspace } from "./orbitWorkspaceRef";
@@ -381,6 +383,54 @@ async function runPairings(
 }
 
 let refreshing: Promise<void> | null = null;
+/** The profile version whose workspaces this phone shows, so a profile read skips an equal one. */
+let appliedWorkspaces: { readonly profileId: number; readonly version: number } | null = null;
+
+/**
+ * One authoritative profile read for the shared subscription: the Node, the workspaces when the
+ * version moved, and the appearance. Applies nothing once `isCurrent()` is false.
+ */
+async function refreshOrbitProfile(isCurrent: () => boolean): Promise<ProfileBinding | null> {
+  if (state.provider !== "orbit") return null;
+  const node = await client.me();
+  if (!isCurrent()) return null;
+  const profile = node.profile;
+  if (profile === null) {
+    appliedWorkspaces = null;
+    set({ node, workspaces: [] });
+    return null;
+  }
+  if (
+    appliedWorkspaces?.profileId !== profile.id ||
+    appliedWorkspaces.version < profile.settingsVersion
+  ) {
+    const settings = await client.settings(profile.id);
+    if (!isCurrent()) return null;
+    appliedWorkspaces = { profileId: settings.profileId, version: settings.version };
+    set({ node, workspaces: settings.workspaces });
+  } else {
+    set({ node });
+  }
+  if (!(await syncOrbitAppearance(node, isCurrent))) {
+    throw new Error("The Orbit appearance did not sync.");
+  }
+  return {
+    profileId: profile.id,
+    version: profile.settingsVersion,
+    channel: node.profileChannel ?? null,
+  };
+}
+
+/**
+ * Follows the bound profile while the app is in front: `conn.profile.updated` notices, a read on
+ * foreground and reconnect, and the shared low-frequency check against dropped notices.
+ */
+const profileLive = createOrbitProfileLive({
+  transport: orbitGatewayTransport,
+  scope: () => (state.provider === "orbit" ? "orbit" : null),
+  refresh: refreshOrbitProfile,
+  onError: (error) => console.warn("[orbit] profile read failed", error),
+});
 
 /**
  * Applies the environment provider. In Orbit mode it also reads the node, profiles, servers, and
@@ -402,7 +452,11 @@ export function refreshOrbitGateway(): Promise<void> {
         client.profiles(),
         client.environments(),
       ]);
-      const workspaces = node.profile ? (await client.settings(node.profile.id)).workspaces : [];
+      const settings = node.profile ? await client.settings(node.profile.id) : null;
+      appliedWorkspaces = settings
+        ? { profileId: settings.profileId, version: settings.version }
+        : null;
+      const workspaces = settings?.workspaces ?? [];
       set({ phase: "ready", node, profiles, environments, workspaces });
       void syncOrbitAppearance(node);
       await reconcileEnvironments(environments);
@@ -423,6 +477,7 @@ export async function setEnvironmentProvider(provider: EnvironmentProvider): Pro
   set({ provider });
   await saveProvider();
   await refreshOrbitGateway();
+  void profileLive.reconcile();
 }
 
 /** Binds this device to a profile, creating it first when `profile` is a new name. */
@@ -431,10 +486,14 @@ export async function chooseOrbitProfile(
 ): Promise<void> {
   try {
     const id = "id" in profile ? profile.id : (await client.createProfile(profile.name)).id;
+    // The old binding's channel and any read in flight must not apply to the new one.
+    profileLive.invalidate();
     await client.bindProfile(id);
   } catch (error) {
     set({ error: message(error) });
     throw error;
+  } finally {
+    void profileLive.reconcile();
   }
   await refreshOrbitGateway();
 }
@@ -465,7 +524,10 @@ export async function keepProjectInOrbitWorkspace(
     const profileId = node.profile?.id;
     if (profileId === undefined) return;
     const saved = await addProjectRefToProfileWorkspace(client, profileId, workspaceId, projectRef);
-    if (saved) set({ workspaces: saved.workspaces });
+    if (saved) {
+      appliedWorkspaces = { profileId: saved.profileId, version: saved.version };
+      set({ workspaces: saved.workspaces });
+    }
   } catch {
     // The thread is sent; a later Start or the desktop can still add the ref.
   }
@@ -504,25 +566,27 @@ export function orbitGatewayState(): OrbitGatewayState {
 }
 
 let started = false;
-/** How often an open app checks the profile for another device's appearance change. */
-const APPEARANCE_PROBE_MS = 30_000;
 
 /**
  * The Gateway state. The first use loads it, and it reloads whenever the app comes to the front.
- * While the app is in front it also checks the profile's appearance every 30 seconds.
+ * Profile changes from other devices arrive through the shared subscription while the app is in
+ * front; in the background the socket and its check stop.
  */
 export function useOrbitGateway(): OrbitGatewayState {
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts the app-wide AppState listener and appearance timer once
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts the app-wide AppState listener and the profile subscription once
   useEffect(() => {
     if (started) return;
     started = true;
     void refreshOrbitGateway();
+    if (AppState.currentState === "active") void profileLive.resume();
     AppState.addEventListener("change", (next) => {
-      if (next === "active") void refreshOrbitGateway();
+      if (next === "active") {
+        void refreshOrbitGateway();
+        void profileLive.resume();
+      } else if (next === "background") {
+        profileLive.pause();
+      }
     });
-    setInterval(() => {
-      if (AppState.currentState === "active" && !refreshing) void syncOrbitAppearanceNow();
-    }, APPEARANCE_PROBE_MS);
   }, []);
   return useSyncExternalStore(subscribeOrbitGateway, () => state);
 }

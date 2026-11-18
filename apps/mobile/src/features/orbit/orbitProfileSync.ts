@@ -86,11 +86,19 @@ const engine = createProfileSync({
   saveState,
 });
 
-/** Syncs the appearance for a node the caller just read. Failures wait for the next run. */
-export async function syncOrbitAppearance(node: OrbitGatewayNode): Promise<void> {
+/**
+ * Syncs the appearance for a node the caller just read; nothing applies once `isCurrent()` is
+ * false. Resolves false when the run failed, so a profile read does not count it as applied.
+ */
+export async function syncOrbitAppearance(
+  node: OrbitGatewayNode,
+  isCurrent: () => boolean = () => true,
+): Promise<boolean> {
   try {
-    await engine.run(node);
+    await engine.run(node, isCurrent);
+    return true;
   } catch (error) {
     console.warn("[orbit] appearance sync failed", error);
+    return false;
   }
 }

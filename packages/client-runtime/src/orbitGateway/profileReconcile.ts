@@ -8,6 +8,8 @@ export interface ProfileBinding {
   readonly profileId: number;
   /** The settings document version the device holds after the read. */
   readonly version: number;
+  /** The private channel `/me` named for this binding, or null when it named none. */
+  readonly channel?: string | null;
 }
 
 export interface ProfileChangeNotice {

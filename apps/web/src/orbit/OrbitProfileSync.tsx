@@ -188,6 +188,11 @@ interface ProfileSyncController {
   readonly refreshEnvironments: () => Promise<void>;
   /** Whether a local edit is waiting to go out (workspaces or a section). */
   readonly hasLocalChanges: () => boolean;
+  /**
+   * Whether a local-edit trigger needs a profile read: always while a read runs (its answer can
+   * move the base under the edit), otherwise only when a change is waiting.
+   */
+  readonly editNeedsRead: () => boolean;
   /** Follows the bound profile; `reconcile()` runs one authoritative profile read. */
   readonly profile: ReturnType<typeof createOrbitProfileLive>;
   /** Around a bind: the old binding's channel, reads and environment record become obsolete. */
@@ -264,6 +269,8 @@ function profileSyncController(): ProfileSyncController | null {
   let lastListed: readonly OrbitGatewayEnvironment[] | null = null;
   /** Set while the follow-up read for an edit made during a read is queued. */
   let followUpQueued = false;
+  /** Profile reads running now; an edit during one always gets a read after it. */
+  let profileReads = 0;
 
   const recordAttached = async (
     me: OrbitGatewayNode,
@@ -401,8 +408,17 @@ function profileSyncController(): ProfileSyncController | null {
       transport,
       // Held while another window binds, so no read can apply the binding it leaves.
       scope: () => (inOrbit() && heldBinds.size === 0 ? "orbit" : null),
-      refresh: (isCurrent, observe) => exclusive(() => profileOnce(isCurrent, observe)),
+      refresh: (isCurrent, observe) =>
+        exclusive(async () => {
+          profileReads += 1;
+          try {
+            return await profileOnce(isCurrent, observe);
+          } finally {
+            profileReads -= 1;
+          }
+        }),
     }),
+    editNeedsRead: () => profileReads > 0 || controller?.hasLocalChanges() === true,
     hasLocalChanges: () =>
       hasWorkspaceChanges({
         readLocal: () => useWorkspaceStore.getState().workspaces.map(toGateway),
@@ -457,7 +473,7 @@ export function OrbitProfileSync() {
       if (editTimer) clearTimeout(editTimer);
       // Applying the profile's own change also lands here: read only for a real local edit.
       editTimer = setTimeout(() => {
-        if (sync.hasLocalChanges()) reconcileProfile();
+        if (sync.editNeedsRead()) reconcileProfile();
       }, LOCAL_EDIT_DEBOUNCE_MS);
     };
     const unsubscribe = useWorkspaceStore.subscribe((state, previous) => {

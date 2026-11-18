@@ -840,3 +840,50 @@ async fn a_stalled_reader_is_cut_at_the_fence_and_acknowledged() {
         ms(acked - committed)
     );
 }
+
+/// The ACK bodies meet the merged Gateway's `/ack` rules (Orbit `d023758a54f9`,
+/// `ConnManagedTargetRequest`): an integer revision of at least 1; `notice_received_at`
+/// present; `observed` with fence and close times and no `recovered_at`, close not before
+/// fence; `recovered` with only `recovered_at`; every time RFC 3339 with an offset.
+#[test]
+fn ack_bodies_meet_the_gateway_rules() {
+    use super::authority::{Ack, AckKind};
+    let rfc3339 = |v: &Value| {
+        v.as_str()
+            .and_then(conn_support::time::millis_from_iso)
+            .is_some()
+    };
+    let observed = super::ack_body(&Ack {
+        revision: 3,
+        kind: AckKind::Observed,
+        notice_received_ms: None,
+        fenced_ms: Some(1_800_000_000_100),
+        handlers_closed_ms: Some(1_800_000_000_100),
+        recovered_ms: None,
+    });
+    assert!(observed["revision"].is_u64() && observed["revision"].as_u64() >= Some(1));
+    assert_eq!(observed["kind"], "observed");
+    assert!(
+        observed
+            .as_object()
+            .unwrap()
+            .contains_key("notice_received_at")
+    );
+    assert!(observed["notice_received_at"].is_null());
+    assert!(rfc3339(&observed["fenced_at"]) && rfc3339(&observed["handlers_closed_at"]));
+    assert!(observed["handlers_closed_at"].as_str() >= observed["fenced_at"].as_str());
+    assert!(observed["recovered_at"].is_null());
+    let recovered = super::ack_body(&Ack {
+        revision: 4,
+        kind: AckKind::Recovered,
+        notice_received_ms: None,
+        fenced_ms: None,
+        handlers_closed_ms: None,
+        recovered_ms: Some(1_800_000_000_200),
+    });
+    assert_eq!(recovered["kind"], "recovered");
+    assert!(rfc3339(&recovered["recovered_at"]));
+    for key in ["notice_received_at", "fenced_at", "handlers_closed_at"] {
+        assert!(recovered.as_object().unwrap().contains_key(key) && recovered[key].is_null());
+    }
+}

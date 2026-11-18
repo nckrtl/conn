@@ -504,6 +504,23 @@ async fn lease_timer(shared: Arc<Shared>) {
     }
 }
 
+/// The `/ack` request body: every time key is present, `null` where the kind has none, as
+/// the Gateway's `ConnManagedTargetRequest` requires.
+pub fn ack_body(ack: &authority::Ack) -> Value {
+    let iso = |ms: Option<u64>| ms.map(conn_support::time::iso_from_ms);
+    serde_json::json!({
+        "revision": ack.revision,
+        "kind": match ack.kind {
+            authority::AckKind::Observed => "observed",
+            authority::AckKind::Recovered => "recovered",
+        },
+        "notice_received_at": iso(ack.notice_received_ms),
+        "fenced_at": iso(ack.fenced_ms),
+        "handlers_closed_at": iso(ack.handlers_closed_ms),
+        "recovered_at": iso(ack.recovered_ms),
+    })
+}
+
 async fn ack_loop(shared: Arc<Shared>, gateway: Arc<dyn Gateway>) {
     loop {
         let ack = shared.with(|a| {
@@ -520,18 +537,7 @@ async fn ack_loop(shared: Arc<Shared>, gateway: Arc<dyn Gateway>) {
             }
             continue;
         };
-        let iso = |ms: Option<u64>| ms.map(conn_support::time::iso_from_ms);
-        let body = serde_json::json!({
-            "revision": ack.revision,
-            "kind": match ack.kind {
-                authority::AckKind::Observed => "observed",
-                authority::AckKind::Recovered => "recovered",
-            },
-            "notice_received_at": iso(ack.notice_received_ms),
-            "fenced_at": iso(ack.fenced_ms),
-            "handlers_closed_at": iso(ack.handlers_closed_ms),
-            "recovered_at": iso(ack.recovered_ms),
-        });
+        let body = ack_body(&ack);
         let result = bounded(gateway.ack(body)).await;
         if let Err(GatewayError::Refused { code, .. }) = &result
             && code == "conn.managed_generation_mismatch"

@@ -26,20 +26,31 @@ export function sidebarHiddenThreadKey(environmentId: string, threadId: string):
 }
 
 function isRefPart(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.trim() === value;
+  return typeof value === "string" && value.length > 0 && value.length <= 255 && !/\s/.test(value);
 }
 
 /** The section's thread keys in order, without duplicates; null when the value is not one. */
 export function parseSidebarHiddenThreads(value: unknown): string[] | null {
-  if (!isJsonObject(value) || typeof value.schema !== "number") return null;
+  if (
+    !isJsonObject(value) ||
+    typeof value.schema !== "number" ||
+    !Number.isInteger(value.schema) ||
+    value.schema < 1 ||
+    value.schema > 1000
+  )
+    return null;
   if (!Array.isArray(value.threads)) return null;
   const keys = new Set<string>();
   for (const entry of value.threads) {
-    if (!isJsonObject(entry)) continue;
+    if (!isJsonObject(entry)) return null;
     const { environmentId, threadId } = entry;
     // The key's first ":" separates the parts, so an environment id never holds one.
-    if (!isRefPart(environmentId) || !isRefPart(threadId) || environmentId.includes(":")) continue;
-    keys.add(sidebarHiddenThreadKey(environmentId, threadId));
+    if (!isRefPart(environmentId) || !isRefPart(threadId) || environmentId.includes(":")) {
+      return null;
+    }
+    const key = sidebarHiddenThreadKey(environmentId, threadId);
+    if (keys.has(key)) return null;
+    keys.add(key);
   }
   return [...keys];
 }

@@ -48,7 +48,9 @@ describe("sidebar hidden marks", () => {
     expect(visible(threads, marks)).toEqual(["local:mine"]);
     // Its projects stay out of the list and the scope menu too, also an empty one.
     const groups = [group(["local", "p1"]), group(["clone", "p1"]), group(["clone", "empty"])];
-    expect(withoutSidebarHiddenProjects(groups, threads, marks)).toEqual([groups[0]]);
+    const unloaded = (project: { environmentId: string }) =>
+      project.environmentId === "clone" ? 1 : 0;
+    expect(withoutSidebarHiddenProjects(groups, threads, marks, unloaded)).toEqual([groups[0]]);
   });
 
   it("keeps a project with unloaded older threads, and counts them without overstating", () => {

@@ -182,6 +182,7 @@ function fakeGateway(initial: string[] = []) {
     omitReply: false,
     /** A reply with the section's version but without its value, or with a malformed one. */
     replyValue: "written" as "written" | "absent" | "malformed",
+    omitRead: false,
   };
   const read = (): OrbitGatewaySettings => ({
     profileId: 1,
@@ -196,7 +197,8 @@ function fakeGateway(initial: string[] = []) {
   const client = {
     settings: async () => {
       await gateway.beforeSettings;
-      return read();
+      const settings = read();
+      return gateway.omitRead ? { ...settings, document: {} } : settings;
     },
     patchSections: async (_id: number, patch: Record<string, OrbitGatewaySectionPatch>) => {
       gateway.patches.push(patch);
@@ -224,7 +226,10 @@ function fakeGateway(initial: string[] = []) {
       if (gateway.omitReply) return { ...read(), document: {}, sections: {} };
       if (gateway.replyValue === "absent") return { ...read(), document: {} };
       if (gateway.replyValue === "malformed") {
-        return { ...read(), document: { sidebarHiddenThreads: { schema: 1 } } };
+        return {
+          ...read(),
+          document: { sidebarHiddenThreads: { schema: 1, threads: [{ environmentId: "clone" }] } },
+        };
       }
       return read();
     },
@@ -640,8 +645,13 @@ describe("sidebar hidden threads store", () => {
       await expect(sync()).rejects.toThrow(/did not confirm/);
       expect(opsOf(storage)).toHaveLength(1);
       expect(hidden(main, "clone", "x")).toBe(false);
-      // The next read holds the empty set: that retires the show, without another write.
       const patches = fake.gateway.patches.length;
+      fake.gateway.omitRead = true;
+      await expect(sync()).rejects.toThrow(/did not confirm/);
+      expect(opsOf(storage)).toHaveLength(1);
+      expect(fake.gateway.patches).toHaveLength(patches);
+      // Only an explicit empty set retires the show.
+      fake.gateway.omitRead = false;
       await sync();
       expect(fake.gateway.patches).toHaveLength(patches);
       expect(opsOf(storage)).toEqual([]);

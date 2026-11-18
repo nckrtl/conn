@@ -163,7 +163,7 @@ export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
       const entry = projectThreads.get(`${project.environmentId}:${project.id}`);
       total += entry?.total ?? 0;
       hidden += entry?.hidden ?? 0;
-      unloaded += unloadedOlder(project);
+      if (!marks.environments.has(project.environmentId)) unloaded += unloadedOlder(project);
     }
     if (total > 0) return hidden < total || unloaded > 0;
     return !(

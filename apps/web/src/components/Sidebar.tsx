@@ -629,7 +629,7 @@ function useSidebarThreads(input: {
     ],
     settledVisibleCount,
     settledCount,
-    settledLabelCount: settledSize.atLeast,
+    settledLabelCount: settledCountKnown ? settledSize.atLeast : null,
     settledCountKnown,
     olderSettledShelf,
     hiddenSettledCount: Math.max(0, settledCount - visibleSettledThreads.length),

@@ -234,6 +234,19 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         if (channel.rebases === true) {
           // Rebased every run, also when the device's value equals `base`: an intent the profile
           // already satisfies is the only kind that retires without a write.
+          if (remote !== null && channel.accepts !== undefined) {
+            if (profileSide.value === null) {
+              if (
+                profileSide.version !== 0 ||
+                (known?.version ?? 0) !== 0 ||
+                Object.hasOwn(remote.document, name)
+              ) {
+                throw unconfirmed(name, "the read has no section value");
+              }
+            } else if (!channel.accepts(profileSide.value)) {
+              throw unconfirmed(name, "the read's section value is malformed");
+            }
+          }
           const current = profileSide.value ?? channel.empty ?? {};
           const value = toGatewayForm(channel.merge(null, toGatewayForm(local), current));
           if (jsonEqual(value, current)) {

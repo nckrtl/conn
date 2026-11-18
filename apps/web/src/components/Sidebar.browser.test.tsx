@@ -604,7 +604,7 @@ describe("sidebar settled shelf with hidden threads", () => {
         hidden: ["o1"],
       });
       await vi.waitFor(() => expect(shelf.more()).toBe("Show more"));
-      expect(shelf.count()).toBe("2");
+      expect(shelf.count()).toBeUndefined();
     }
     // Once o1 is read, the count is exact.
     await using shelf = await renderShelf({

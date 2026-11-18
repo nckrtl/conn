@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   applyOtherWindowComposerDrafts,
   COMPOSER_DRAFT_STORAGE_KEY,
+  flushComposerDraftPersistence,
   useComposerDraftStore,
 } from "./composerDraftStore";
 import { RecentKeyChanges } from "./lib/desktopWindowContext";
@@ -51,6 +52,20 @@ describe("applyOtherWindowComposerDrafts", () => {
   afterEach(() => {
     vi.useRealTimers();
     reset();
+  });
+
+  it("stores the cleared draft before the debounce so a restart cannot restore it", async () => {
+    useComposerDraftStore.getState().setPrompt(first, "accepted by Orbit");
+    await otherWindowWrite(() => {});
+    const storage = useComposerDraftStore.persist.getOptions().storage!;
+    useComposerDraftStore.getState().clearDraftThread(first);
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
+      "accepted by Orbit",
+    );
+    flushComposerDraftPersistence();
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).not.toContain(
+      "accepted by Orbit",
+    );
   });
 
   it("takes in drafts another window added, changed or sent", async () => {

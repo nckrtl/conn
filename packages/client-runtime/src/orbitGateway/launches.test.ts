@@ -433,6 +433,88 @@ it("replays the original profile and Node even when the device is rebound after 
   }
 });
 
+it("withdraws the old scope when a second Send detects a rebind during admission", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const started = Promise.withResolvers<void>();
+  const posted = Promise.withResolvers<ReturnType<typeof wrap>>();
+  let profileId = scope.profileId;
+  const gateway = createOrbitGatewayClient(async ({ path, method }) => {
+    if (path === "/me") {
+      return wrap({
+        id: 7,
+        name: "Device",
+        profile: {
+          id: profileId,
+          name: "Work",
+          settings_version: 1,
+          updated_at: "2026-11-17T12:00:00Z",
+        },
+      });
+    }
+    if (method === "GET") return wrap([]);
+    started.resolve();
+    return posted.promise;
+  });
+  const observer = createOrbitLaunchObserver(() => gateway);
+  observer.setScope(scope);
+  try {
+    const first = observer.submit(request, scope, false);
+    const result = expect(first).rejects.toThrow("previous profile");
+    await started.promise;
+    profileId = 13;
+    await expect(observer.submit(request, scope, false)).rejects.toThrow("profile changed");
+    expect(observer.scope()).toBeNull();
+    posted.resolve(wrap(fixture(), 202));
+    await result;
+    expect(observer.view().launches).toEqual([]);
+    expect(observer.canAcknowledge({ ...scope, admission: request })).toBe(false);
+  } finally {
+    observer.setScope(null);
+  }
+});
+
+it("keeps a first mobile refusal recoverable after restart and guards journal acknowledgement", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const original = { ...scope, draftId: "sheet:78", admission: request };
+  const refused = new OrbitLaunchAdmissionRefused({
+    cause: new OrbitGatewayError({
+      code: "validation_failed",
+      status: 422,
+      message: "Invalid selection",
+      details: {},
+    }),
+    message: "Invalid selection",
+  });
+  let stored: readonly OrbitLaunchSubmission[] = [];
+  const storage = {
+    load: async () => stored,
+    save: async (rows: readonly OrbitLaunchSubmission[]) => {
+      stored = rows;
+    },
+  };
+  const first = createOrbitLaunchSubmissions(storage, vi.fn().mockRejectedValue(refused));
+  await expect(first.submit(original)).rejects.toThrow("Invalid selection");
+  const corrected = {
+    ...original,
+    admission: { id: "corrected", request: { ...request.request, prompt: "Corrected message" } },
+  };
+  const restart = createOrbitLaunchSubmissions(
+    storage,
+    vi.fn().mockResolvedValue(fixture({ launch_id: corrected.admission.id })),
+  );
+  expect(await restart.pending(scope)).toEqual([{ ...original, validationRefused: true }]);
+  await expect(restart.submit(corrected)).resolves.toMatchObject({ launch_id: "corrected" });
+  expect(await restart.acknowledge("corrected", () => false)).toBe(false);
+  await expect(
+    restart.acknowledge("corrected", () => {
+      throw new Error("Draft write interrupted");
+    }),
+  ).rejects.toThrow("Draft write interrupted");
+  expect(await restart.draft(original.draftId, scope)).toEqual(corrected);
+  expect(await restart.acknowledge("corrected", () => true)).toBe(true);
+  expect(await restart.draft(original.draftId, scope)).toBeUndefined();
+});
+
 it("keeps a refused replay recoverable and allows a corrected Send from the same draft", async () => {
   const scope = { nodeId: 7, profileId: 12 };
   let stored: readonly OrbitLaunchSubmission[] = [];

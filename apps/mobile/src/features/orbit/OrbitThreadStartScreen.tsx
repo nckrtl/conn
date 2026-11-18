@@ -2,8 +2,14 @@ import {
   resolveOrbitLaunchError,
   startableOrbitProject,
   type OrbitGatewayProject,
+  type OrbitLaunchSubmission,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { StackActions, useNavigation, useRoute } from "@react-navigation/native";
+import {
+  StackActions,
+  useNavigation,
+  useRoute,
+  type StaticScreenProps,
+} from "@react-navigation/native";
 import { T, msg, useGT } from "gt-react-native";
 import { useEffect, useRef, useState } from "react";
 import { Platform, TextInput, View } from "react-native";
@@ -20,22 +26,34 @@ import { ScreenContent } from "../../components/ui/ScreenContent";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { m } from "../../i18n/messages";
 import { orbitGatewayClient } from "./orbitGatewayClient";
-import { mobileOrbitSubmissions, startOrbitThread } from "./orbitThreadStartRuntime";
+import { useOrbitGateway } from "./orbitGatewayStore";
+import {
+  acknowledgeMobileOrbitLaunch,
+  mobileOrbitSubmissions,
+  startOrbitThread,
+} from "./orbitThreadStartRuntime";
 import { orbitStartReturn } from "./orbitThreadStarts";
 
 /**
  * Conn: starts a thread in an Orbit Project. Orbit creates a clone of the Project's default
  * Instance, and the thread starts there with the first message (FORK.md, "Orbit").
  */
-export function OrbitThreadStartScreen() {
+export function OrbitThreadStartScreen({
+  route,
+}: StaticScreenProps<{ readonly refusedAdmissionId: string } | undefined>) {
   const gt = useGT();
   const navigation = useNavigation();
   const { key: sheetKey } = useRoute();
+  const refusedAdmissionId = route.params?.refusedAdmissionId;
+  const gateway = useOrbitGateway();
+  const profileId = gateway.node?.profile?.id;
+  const nodeId = gateway.node?.id;
   const insets = useSafeAreaInsets();
   const [projects, setProjects] = useState<readonly OrbitGatewayProject[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [chosenId, setChosenId] = useState<number | null>(null);
   const [text, setText] = useState("");
+  const [recovery, setRecovery] = useState<OrbitLaunchSubmission | null>(null);
   const started = useRef(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -54,23 +72,56 @@ export function OrbitThreadStartScreen() {
     };
   }, []);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reopen a refused message from the current profile's durable journal
+  useEffect(() => {
+    if (refusedAdmissionId === undefined || profileId === undefined || nodeId === undefined) return;
+    let current = true;
+    void mobileOrbitSubmissions.pending({ profileId, nodeId }).then(
+      (records) => {
+        if (!current) return;
+        const record = records.find(
+          (row) =>
+            row.admission.id === refusedAdmissionId && row.validationRefused && !row.superseded,
+        );
+        if (record === undefined) {
+          setSendError(m(msg("This submission was already handled.")));
+          return;
+        }
+        setRecovery(record);
+        setChosenId(record.admission.request.project_id);
+        setText(record.admission.request.prompt);
+      },
+      () => {
+        if (current) setSendError(m(msg("Conn could not read its Orbit submission journal.")));
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [refusedAdmissionId, profileId, nodeId]);
+
+  const canEdit =
+    refusedAdmissionId === undefined ||
+    (recovery?.admission.id === refusedAdmissionId &&
+      recovery.profileId === profileId &&
+      recovery.nodeId === nodeId);
   const project = projects?.find((entry) => entry.id === chosenId) ?? projects?.[0] ?? null;
-  const canStart = project !== null && text.trim() !== "";
+  const canStart = canEdit && project !== null && text.trim() !== "";
   const goBack = () => {
     if (navigation.canGoBack()) navigation.goBack();
     else navigation.getParent()?.goBack();
   };
   const start = async () => {
-    if (started.current || project === null || text.trim() === "") return;
+    if (started.current || !canStart || project === null) return;
     started.current = true;
     setSending(true);
     setSendError(null);
     const { back } = orbitStartReturn(navigation.getState());
     try {
-      const launch = await startOrbitThread(project, text.trim(), sheetKey);
+      const launch = await startOrbitThread(project, text.trim(), sheetKey, recovery ?? undefined);
       if (navigation.isFocused()) {
         navigation.dispatch(StackActions.pop(back));
-        await mobileOrbitSubmissions.acknowledge(launch.launch_id).catch(() => {});
+        await acknowledgeMobileOrbitLaunch(launch.launch_id).catch(() => {});
       }
     } catch (error) {
       setSendError(resolveOrbitLaunchError(error, msg("Orbit did not confirm the launch."), m));
@@ -136,7 +187,7 @@ export function OrbitThreadStartScreen() {
               accessibilityLabel={gt("First message")}
               value={text}
               onChangeText={setText}
-              editable={!sending}
+              editable={canEdit && !sending}
               multiline
               scrollEnabled
               textAlignVertical="top"

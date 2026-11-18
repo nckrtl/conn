@@ -57,13 +57,14 @@ export function createOrbitLaunchSubmissions(
     return updated;
   }
 
-  function remove(id: string) {
-    return update((records) => ({
-      records: records.some(({ admission }) => admission.id === id)
-        ? records.filter(({ admission }) => admission.id !== id)
-        : records,
-      result: undefined,
-    }));
+  function remove(id: string, ready?: (record: OrbitLaunchSubmission) => boolean) {
+    return update((records) => {
+      const record = records.find(({ admission }) => admission.id === id);
+      if (record === undefined || (ready !== undefined && !ready(record))) {
+        return { records, result: false };
+      }
+      return { records: records.filter((row) => row !== record), result: true };
+    });
   }
 
   function latestAttempt(
@@ -103,9 +104,10 @@ export function createOrbitLaunchSubmissions(
       return await submit(record, reconcile);
     } catch (error) {
       if (isAdmissionRefused(error)) {
-        if (!reconcile) {
-          await remove(record.admission.id);
-        } else if (error.cause.status === 422) {
+        if (
+          error.cause.status === 422 &&
+          (reconcile || record.admission.request.source === "mobile")
+        ) {
           await update((records) => ({
             records: records.map((row) =>
               row.admission.id === record.admission.id
@@ -114,6 +116,8 @@ export function createOrbitLaunchSubmissions(
             ),
             result: undefined,
           }));
+        } else if (!reconcile) {
+          await remove(record.admission.id);
         }
       }
       throw error;

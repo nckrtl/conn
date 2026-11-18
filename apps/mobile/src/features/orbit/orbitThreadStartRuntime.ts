@@ -84,6 +84,10 @@ export const mobileOrbitSubmissions = createOrbitLaunchSubmissions(
   (record, reconcile) => mobileOrbitLaunches.submit(record.admission, record, reconcile),
 );
 
+export function acknowledgeMobileOrbitLaunch(launchId: string) {
+  return mobileOrbitSubmissions.acknowledge(launchId, mobileOrbitLaunches.canAcknowledge);
+}
+
 export function useMobileOrbitLaunches() {
   return useAtomValue(orbitLaunchRowsAtom);
 }
@@ -124,6 +128,7 @@ export async function startOrbitThread(
   project: Pick<OrbitGatewayProject, "id">,
   message: string,
   sheetKey: string,
+  recovery?: OrbitLaunchSubmission,
 ): Promise<OrbitLaunch> {
   const current = orbitGatewayState();
   const profileId = current.node?.profile?.id;
@@ -131,11 +136,22 @@ export async function startOrbitThread(
   if (current.provider !== "orbit" || profileId === undefined || nodeId === undefined) {
     throw OrbitLaunchCopyError.fromCopy(msg("Connect to an Orbit profile before sending."));
   }
-  // A new sheet or project is a different draft. Unconfirmed sends remain in Home for recovery.
-  const draftId = `${sheetKey}:${project.id}`;
+  if (recovery && (recovery.profileId !== profileId || recovery.nodeId !== nodeId)) {
+    throw OrbitLaunchCopyError.fromCopy(
+      msg("Connect to the original Orbit profile and device before sending."),
+    );
+  }
+  // A new sheet or project is a different draft unless the user opened a refused submission.
+  const draftId = recovery?.draftId ?? `${sheetKey}:${project.id}`;
   const saved = await mobileOrbitSubmissions.draft(draftId, { profileId, nodeId });
+  if (recovery && saved === undefined) {
+    throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
+  }
   const name =
-    saved?.admission.request.target.kind === "new"
+    saved?.admission.request.target.kind === "new" &&
+    (!saved.validationRefused ||
+      (saved.admission.request.project_id === project.id &&
+        saved.admission.request.prompt === message))
       ? saved.admission.request.target.name
       : await fitOrbitThreadInstanceName(
           orbitGatewayClient,

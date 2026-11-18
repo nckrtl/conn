@@ -11,6 +11,7 @@ import {
   type OrbitLaunchAction,
   type OrbitLaunchSubmission,
 } from "@t3tools/client-runtime/orbit-gateway";
+import { useNavigation } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import { T, msg, useGT, useMessages } from "gt-react-native";
 import { useEffect, useState } from "react";
@@ -22,6 +23,7 @@ import { ErrorBanner } from "../../components/ui/ErrorBanner";
 import { m } from "../../i18n/messages";
 import { useOrbitGateway } from "./orbitGatewayStore";
 import {
+  acknowledgeMobileOrbitLaunch,
   mobileOrbitLaunches,
   mobileOrbitSubmissions,
   openMobileOrbitThread,
@@ -35,6 +37,7 @@ const actionIds = Object.keys(ORBIT_LAUNCH_ACTION_LABELS) as OrbitLaunchAction[]
 const stageIds = Object.keys(ORBIT_LAUNCH_STAGES) as Array<keyof OrbitLaunch["stages"]>;
 export function OrbitThreadStartRows() {
   const gt = useGT();
+  const navigation = useNavigation();
   const messages = useMessages();
   const gateway = useOrbitGateway();
   const { snapshot, rows } = useMobileOrbitLaunches();
@@ -286,7 +289,7 @@ export function OrbitThreadStartRows() {
               {accepted
                 ? gt("Orbit accepted this submission")
                 : row.validationRefused
-                  ? gt("Orbit refused the retry")
+                  ? gt("Orbit refused the submission")
                   : gt("Orbit submission unconfirmed")}
             </Text>
             <Text numberOfLines={1} className="text-sm text-foreground-muted">
@@ -298,14 +301,21 @@ export function OrbitThreadStartRows() {
                   ? gt("Acknowledge launch")
                   : row.superseded
                     ? gt("Dismiss saved copy")
-                    : gt("Retry same submission")
+                    : row.validationRefused
+                      ? gt("Edit")
+                      : gt("Retry same submission")
               }
               disabled={busy || (!row.superseded && snapshot.error !== null)}
               onPress={() =>
                 void run(
                   async () => {
-                    if (accepted || row.superseded)
+                    if (accepted) await acknowledgeMobileOrbitLaunch(accepted.launch_id);
+                    else if (row.superseded)
                       await mobileOrbitSubmissions.acknowledge(row.admission.id);
+                    else if (row.validationRefused)
+                      navigation.navigate("NewOrbitThread", {
+                        refusedAdmissionId: row.admission.id,
+                      });
                     else await mobileOrbitSubmissions.replay(row);
                   },
                   accepted || row.superseded

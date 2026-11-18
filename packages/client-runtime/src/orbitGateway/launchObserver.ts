@@ -168,6 +168,31 @@ export function createOrbitLaunchObserver(
     schedule();
   }
 
+  function setScope(next: OrbitLaunchScope | null) {
+    if (next?.profileId === scope?.profileId && next?.nodeId === scope?.nodeId) return;
+    scope = next;
+    scopeVersion += 1;
+    accessDenied = false;
+    reading = false;
+    clearTimeout(timer);
+    publish(EMPTY);
+    void refresh();
+  }
+
+  function canAcknowledge(record: OrbitLaunchScope & { admission: OrbitLaunchAdmission }) {
+    return (
+      scope?.profileId === record.profileId &&
+      scope.nodeId === record.nodeId &&
+      !accessDenied &&
+      view.launches.some(
+        (launch) =>
+          launch.launch_id === record.admission.id &&
+          launch.profile_id === record.profileId &&
+          launch.initiator_node_id === record.nodeId,
+      )
+    );
+  }
+
   async function submit(
     admission: OrbitLaunchAdmission,
     expected: OrbitLaunchScope,
@@ -201,11 +226,9 @@ export function createOrbitLaunchObserver(
       }
     };
     const me = await gateway.me();
-    if (
-      me.id !== expected.nodeId ||
-      me.profile?.id !== expected.profileId ||
-      scopeVersion !== version
-    ) {
+    const rebound = me.id !== expected.nodeId || me.profile?.id !== expected.profileId;
+    if (rebound && scopeVersion === version) setScope(null);
+    if (rebound || scopeVersion !== version) {
       throw OrbitLaunchCopyError.fromCopy(
         msg("This device's Orbit profile changed before sending."),
       );
@@ -328,16 +351,8 @@ export function createOrbitLaunchObserver(
         listeners.delete(listener);
       };
     },
-    setScope: (next: OrbitLaunchScope | null) => {
-      if (next?.profileId === scope?.profileId && next?.nodeId === scope?.nodeId) return;
-      scope = next;
-      scopeVersion += 1;
-      accessDenied = false;
-      reading = false;
-      clearTimeout(timer);
-      publish(EMPTY);
-      void refresh();
-    },
+    setScope,
+    canAcknowledge,
     refresh,
     submit,
     act,

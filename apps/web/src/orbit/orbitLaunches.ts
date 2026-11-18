@@ -16,6 +16,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { msg } from "gt-react";
 import { useSyncExternalStore } from "react";
 
+import { flushComposerDraftPersistence } from "../composerDraftStore";
 import { m } from "../i18n/messages";
 import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -51,6 +52,15 @@ export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   },
   (record, reconcile) => orbitLaunches.submit(record.admission, record, reconcile),
 );
+
+export function acknowledgeOrbitDraft(launchId: string, updateDraft: () => boolean) {
+  return orbitLaunchSubmissions.acknowledge(launchId, (record) => {
+    if (!orbitLaunches.canAcknowledge(record) || !updateDraft()) return false;
+    // A restart must see the draft update before it loses the accepted submission key.
+    flushComposerDraftPersistence();
+    return true;
+  });
+}
 
 export function useOrbitLaunches() {
   return useSyncExternalStore(orbitLaunches.subscribe, orbitLaunches.view, orbitLaunches.view);

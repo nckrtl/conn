@@ -162,7 +162,7 @@ import {
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
 import { orbitThreadStartBlockedReason } from "../../orbit/orbitLaunchAvailability";
-import { orbitLaunchSubmissions, submitOrbitDraft } from "../../orbit/orbitLaunches";
+import { acknowledgeOrbitDraft, submitOrbitDraft } from "../../orbit/orbitLaunches";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -886,10 +886,11 @@ export function useComposerSend(input: ComposerSendInput) {
           if (currentRouteThreadKeyRef.current === routeThreadKey) {
             await navigate({ to: "/orbit/$startId", params: { startId: launch.launch_id } });
           }
-          if (!unchanged()) return false;
-          useComposerDraftStore.getState().clearDraftThread(draftId);
-          await orbitLaunchSubmissions.acknowledge(launch.launch_id).catch(() => {});
-          return true;
+          return acknowledgeOrbitDraft(launch.launch_id, () => {
+            if (!unchanged()) return false;
+            useComposerDraftStore.getState().clearDraftThread(draftId);
+            return true;
+          });
         })
         .catch((error: unknown) => {
           toastManager.add(

@@ -13,6 +13,7 @@ import { composerDraftHasUserContent, DraftId, useComposerDraftStore } from "../
 import { m } from "../i18n/messages";
 import { orbitDraftMatchesLaunch } from "./orbitDraft";
 import {
+  acknowledgeOrbitDraft,
   orbitLaunchSubmissions,
   readLegacyWebLaunches,
   resolveLegacyWebLaunch,
@@ -82,28 +83,28 @@ export function OrbitLaunchRecovery() {
     (item) => item.profileId === profileId && item.nodeId === nodeId,
   );
 
-  async function acknowledge(row: OrbitLaunchSubmission) {
-    const latest = await orbitLaunchSubmissions.draft(row.draftId, row);
-    const store = useComposerDraftStore.getState();
-    const draftId = DraftId.make(row.draftId);
-    const draft = store.getComposerDraft(draftId);
-    const request = row.admission.request;
-    const currentModel = draft?.activeProvider
-      ? draft.modelSelectionByProvider[draft.activeProvider]
-      : undefined;
-    if (
-      latest?.admission.id === row.admission.id &&
-      draft !== null &&
-      !composerDraftHasUserContent({ ...draft, prompt: "" }) &&
-      (draft.runtimeMode === null || draft.runtimeMode === request.runtime_mode) &&
-      (draft.interactionMode === null || draft.interactionMode === request.interaction_mode) &&
-      (!draft.modelSelectionExplicit ||
-        JSON.stringify(currentModel) === JSON.stringify(request.model_selection)) &&
-      orbitDraftMatchesLaunch(store.getDraftSession(draftId)?.orbitTarget, draft.prompt, request)
-    ) {
-      store.clearDraftThread(draftId);
-    }
-    await orbitLaunchSubmissions.acknowledge(row.admission.id);
+  function acknowledge(row: OrbitLaunchSubmission) {
+    return acknowledgeOrbitDraft(row.admission.id, () => {
+      const store = useComposerDraftStore.getState();
+      const draftId = DraftId.make(row.draftId);
+      const draft = store.getComposerDraft(draftId);
+      const request = row.admission.request;
+      const currentModel = draft?.activeProvider
+        ? draft.modelSelectionByProvider[draft.activeProvider]
+        : undefined;
+      if (
+        draft !== null &&
+        !composerDraftHasUserContent({ ...draft, prompt: "" }) &&
+        (draft.runtimeMode === null || draft.runtimeMode === request.runtime_mode) &&
+        (draft.interactionMode === null || draft.interactionMode === request.interaction_mode) &&
+        (!draft.modelSelectionExplicit ||
+          JSON.stringify(currentModel) === JSON.stringify(request.model_selection)) &&
+        orbitDraftMatchesLaunch(store.getDraftSession(draftId)?.orbitTarget, draft.prompt, request)
+      ) {
+        store.clearDraftThread(draftId);
+      }
+      return true;
+    });
   }
 
   async function replay(item: OrbitLaunchSubmission) {

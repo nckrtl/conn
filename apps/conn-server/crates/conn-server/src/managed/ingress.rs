@@ -357,6 +357,15 @@ async fn ws(
     // The socket itself is fenced with the handler: the upgraded connection keeps it.
     let handle = Arc::new(handle);
     conn.slot.attach(handle.clone());
+    // A task worker gets its grant's allowlist, and its writes commit through its handler;
+    // a reader gets the reader table.
+    let table = match super::task::TaskGrant::from_claims(&principal.claims) {
+        Some(grant) => match state.app.engine.clone() {
+            Some(engine) => Arc::new(super::task::table(engine, Arc::new(grant), handle.clone())),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        },
+        None => state.table.clone(),
+    };
     // The handler is registered before the upgrade completes: a fence that lands now closes
     // the socket on its first check.
     let options = SessionOptions {
@@ -365,14 +374,6 @@ async fn ws(
         idle_timeout: Duration::from_secs(60),
         context,
         gate: Some(SessionGate(handle)),
-    };
-    // A task worker gets its grant's allowlist; a reader the reader table.
-    let table = match super::task::TaskGrant::from_claims(&principal.claims) {
-        Some(grant) => match state.app.engine.clone() {
-            Some(engine) => Arc::new(super::task::table(engine, Arc::new(grant))),
-            None => return StatusCode::NOT_FOUND.into_response(),
-        },
-        None => state.table.clone(),
     };
     upgrade
         .max_message_size(crate::http::MAX_MESSAGE_BYTES)

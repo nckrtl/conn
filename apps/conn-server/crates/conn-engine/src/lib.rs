@@ -66,7 +66,7 @@ pub use engine::{
     CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, ProjectConfig, RuntimePolicyOverride,
     SqliteEngine,
 };
-pub use guard::DispatchGuard;
+pub use guard::{CommitGate, DispatchGuard, GuardRule, OwnedMessage};
 pub use streaming::ResponseStreamingMode;
 
 /// What a [`TitleGenerator`] titles: the first message of a new thread, or a whole thread whose
@@ -314,6 +314,7 @@ pub trait Engine: Send + Sync {
         &self,
         _command: Command,
         _guard: DispatchGuard,
+        _commit_gate: Option<std::sync::Arc<dyn CommitGate>>,
     ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>> {
         Box::pin(std::future::ready(Err(EngineError::Internal(
             "this engine cannot check command ownership".into(),

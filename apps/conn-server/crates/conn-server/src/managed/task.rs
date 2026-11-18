@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use conn_contract::{Command, SubscribeThreadInput, ThreadId, to_json};
-use conn_engine::{DispatchGuard, Engine, EngineError};
+use conn_engine::{CommitGate, DispatchGuard, Engine, EngineError, GuardRule, OwnedMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -34,8 +34,10 @@ pub const GRANT_FIELD: &str = "task_grant";
 #[serde(deny_unknown_fields)]
 pub struct FrozenCreate {
     pub command_id: String,
-    /// Every field the command must carry with exactly this value: project, title,
-    /// provider instance, model and options, as Orbit froze them.
+    /// The complete command body apart from `type`, `commandId` and `threadId`: project,
+    /// title, provider instance, model and options, runtime and interaction mode, branch,
+    /// worktree path, attribution. The command must carry exactly these fields (a `null`
+    /// field counts as absent) and no other.
     pub body: serde_json::Map<String, Value>,
 }
 
@@ -47,23 +49,61 @@ pub struct FrozenMessage {
     pub message_id: String,
     /// SHA-256 of the message text, lowercase hex.
     pub text_sha256: String,
+    /// The command ID of the one `run.interrupt` that may stop this message's run.
+    pub interrupt_command_id: String,
 }
 
-/// An earlier, unsettled turn this one may settle: read its thread, stop only its run.
+/// An earlier, unsettled turn this one may settle: read the evidence of its frozen message,
+/// and stop only the run that message started.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EarlierTurn {
     pub thread_id: String,
     pub message_id: String,
+    pub text_sha256: String,
+    /// The run the earlier worker recorded, if it did.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    pub interrupt_command_id: String,
 }
 
-/// A stored question whose request the answer turn may cancel.
+/// A stored question of the admitted thread whose request the answer turn may cancel.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StoredQuestion {
     pub thread_id: String,
     pub request_id: String,
     pub owner_run_id: String,
+    pub cancel_command_id: String,
+}
+
+/// The fields a task `message.dispatch` may carry. Any other field with a value (a model
+/// selection, a fresh context, a sender, a steer) is refused.
+const MESSAGE_FIELDS: [&str; 9] = [
+    "type",
+    "commandId",
+    "threadId",
+    "messageId",
+    "text",
+    "attachments",
+    "createdBy",
+    "creationSource",
+    "dispatchMode",
+];
+
+/// `value`'s object fields without the `null` ones.
+fn present(value: &Value) -> serde_json::Map<String, Value> {
+    value
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+fn is_digest(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// The `task_grant` claim.
@@ -111,29 +151,41 @@ impl TaskGrant {
             && non_empty(&grant.thread_id)
             && non_empty(&message.command_id)
             && non_empty(&message.message_id)
-            && message.text_sha256.len() == 64
-            && message
-                .text_sha256
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && non_empty(&message.interrupt_command_id)
+            && is_digest(&message.text_sha256)
             && grant.create.as_ref().is_none_or(|create| {
                 non_empty(&create.command_id)
                     && create.body.get("projectId") == Some(&json!(grant.project_id))
+                    && !create.body.keys().any(|k| {
+                        matches!(k.as_str(), "type" | "commandId" | "threadId" | "initialMessage")
+                    })
+            })
+            && grant.earlier.iter().all(|e| {
+                non_empty(&e.thread_id)
+                    && non_empty(&e.message_id)
+                    && non_empty(&e.interrupt_command_id)
+                    && is_digest(&e.text_sha256)
+            })
+            // A stored question belongs to the thread this turn answers.
+            && grant.questions.iter().all(|q| {
+                q.thread_id == grant.thread_id
+                    && non_empty(&q.request_id)
+                    && non_empty(&q.owner_run_id)
+                    && non_empty(&q.cancel_command_id)
             });
         well_formed.then_some(grant)
-    }
-
-    fn earlier_messages_on(&self, thread_id: &str) -> Vec<String> {
-        self.earlier
-            .iter()
-            .filter(|e| e.thread_id == thread_id)
-            .map(|e| e.message_id.clone())
-            .collect()
     }
 
     /// Threads the worker may read: its own, and each earlier turn's.
     fn may_read(&self, thread_id: &str) -> bool {
         thread_id == self.thread_id || self.earlier.iter().any(|e| e.thread_id == thread_id)
+    }
+
+    fn guard(&self, rule: GuardRule) -> DispatchGuard {
+        DispatchGuard {
+            project_id: self.project_id.clone(),
+            rule,
+        }
     }
 
     /// The guard for one command, or why it is outside the grant.
@@ -149,17 +201,14 @@ impl TaskGrant {
                 if thread_id != self.thread_id || command_id != create.command_id {
                     return Err("not the admitted thread or command".into());
                 }
-                if command.get("initialMessage").is_some_and(|m| !m.is_null()) {
-                    return Err("a task thread is created without a message".into());
+                let mut body = present(command);
+                for key in ["type", "commandId", "threadId"] {
+                    body.remove(key);
                 }
-                if create
-                    .body
-                    .iter()
-                    .any(|(key, value)| command.get(key) != Some(value))
-                {
+                if body != present(&Value::Object(create.body.clone())) {
                     return Err("the create body differs from the frozen one".into());
                 }
-                Ok(DispatchGuard::NewThread)
+                Ok(self.guard(GuardRule::NewThread))
             }
             "message.dispatch" => {
                 let message = &self.message;
@@ -169,48 +218,120 @@ impl TaskGrant {
                 {
                     return Err("not the admitted message".into());
                 }
+                if present(command)
+                    .keys()
+                    .any(|k| !MESSAGE_FIELDS.contains(&k.as_str()))
+                {
+                    return Err("the message carries a field a task message may not".into());
+                }
                 let digest =
                     conn_support::hex::hex(&conn_support::hmac::sha256(text("text").as_bytes()));
                 if digest != message.text_sha256 {
                     return Err("the message body differs from the frozen one".into());
                 }
-                if command
-                    .get("attachments")
-                    .and_then(Value::as_array)
-                    .is_some_and(|a| !a.is_empty())
+                if command["attachments"]
+                    .as_array()
+                    .is_none_or(|a| !a.is_empty())
                 {
                     return Err("a task message carries no attachments".into());
                 }
-                Ok(DispatchGuard::ExclusiveStart)
+                if command["dispatchMode"] != json!({"type": "start_immediately"}) {
+                    return Err("a task message starts its run at once".into());
+                }
+                Ok(self.guard(GuardRule::ExclusiveStart))
             }
             "run.interrupt" => {
-                let mut messages = self.earlier_messages_on(thread_id);
-                if thread_id == self.thread_id {
-                    messages.push(self.message.message_id.clone());
+                // Each admitted stop has its own command ID, naming the one message whose
+                // run it may stop.
+                let own = (thread_id == self.thread_id
+                    && command_id == self.message.interrupt_command_id)
+                    .then(|| OwnedMessage {
+                        message_id: self.message.message_id.clone(),
+                        text_sha256: self.message.text_sha256.clone(),
+                        run_id: None,
+                    });
+                let earlier = || {
+                    self.earlier
+                        .iter()
+                        .find(|e| e.thread_id == thread_id && e.interrupt_command_id == command_id)
+                        .map(|e| OwnedMessage {
+                            message_id: e.message_id.clone(),
+                            text_sha256: e.text_sha256.clone(),
+                            run_id: e.run_id.clone(),
+                        })
+                };
+                match own.or_else(earlier) {
+                    Some(owned) => Ok(self.guard(GuardRule::OwnRun(vec![owned]))),
+                    None => Err("not an admitted stop".into()),
                 }
-                if messages.is_empty() {
-                    return Err("not an admitted thread".into());
-                }
-                Ok(DispatchGuard::RunFromMessages(messages))
             }
             "runtime-request.respond" => {
                 let request_id = text("requestId");
-                let Some(question) = self
-                    .questions
-                    .iter()
-                    .find(|q| q.thread_id == thread_id && q.request_id == request_id)
-                else {
+                let Some(question) = self.questions.iter().find(|q| {
+                    thread_id == self.thread_id
+                        && q.request_id == request_id
+                        && q.cancel_command_id == command_id
+                }) else {
                     return Err("not a stored question".into());
                 };
                 if command["decision"] != "cancel" {
                     return Err("a stored question may only be cancelled".into());
                 }
-                Ok(DispatchGuard::PendingQuestionOf {
+                Ok(self.guard(GuardRule::PendingQuestionOf {
                     owner_run_id: question.owner_run_id.clone(),
-                })
+                }))
             }
             _ => Err("the command is outside the task grant".into()),
         }
+    }
+
+    /// The part of an earlier turn's thread the worker may see: its frozen message, the run
+    /// that message started, that run's nodes and requests. Nothing else of that thread.
+    fn settlement_view(&self, thread_id: &str, mut projection: Value) -> Value {
+        if thread_id == self.thread_id {
+            return projection;
+        }
+        let messages: Vec<String> = self
+            .earlier
+            .iter()
+            .filter(|e| e.thread_id == thread_id)
+            .map(|e| e.message_id.clone())
+            .collect();
+        let ids = |rows: &Value, keep: &dyn Fn(&Value) -> bool| -> Vec<String> {
+            rows.as_array()
+                .into_iter()
+                .flatten()
+                .filter(|row| keep(row))
+                .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let has = |list: &[String], value: &Value| {
+            value.as_str().is_some_and(|v| list.iter().any(|x| x == v))
+        };
+        let runs = ids(&projection["runs"], &|r| {
+            has(&messages, &r["userMessageId"])
+        });
+        let nodes = ids(&projection["nodes"], &|n| has(&runs, &n["runId"]));
+        let Some(object) = projection.as_object_mut() else {
+            return Value::Null;
+        };
+        for (key, value) in object.iter_mut() {
+            if key == "thread" {
+                *value = json!({"id": value["id"], "projectId": value["projectId"]});
+                continue;
+            }
+            let Some(rows) = value.as_array_mut() else {
+                continue;
+            };
+            match key.as_str() {
+                "messages" => rows.retain(|m| has(&messages, &m["id"])),
+                "runs" => rows.retain(|r| has(&runs, &r["id"])),
+                "nodes" => rows.retain(|n| has(&nodes, &n["id"])),
+                "runtimeRequests" => rows.retain(|q| has(&nodes, &q["nodeId"])),
+                _ => rows.clear(),
+            }
+        }
+        projection
     }
 }
 
@@ -242,17 +363,44 @@ struct ThreadIdInput {
     thread_id: ThreadId,
 }
 
-/// The method table of one task worker session: the allowlist, bound to its grant.
-pub fn table(engine: Arc<dyn Engine>, grant: Arc<TaskGrant>) -> MethodTable {
+/// `getThreadProjection` for the worker: an admitted thread of the admitted project, cut to
+/// the settlement evidence when it is an earlier turn's thread.
+async fn read_thread(
+    engine: &Arc<dyn Engine>,
+    grant: &TaskGrant,
+    thread_id: ThreadId,
+) -> Result<Value, Failure> {
+    if !grant.may_read(thread_id.as_str()) {
+        return Err(outside("not an admitted thread"));
+    }
+    let projection = engine
+        .get_thread_projection(thread_id.clone())
+        .await
+        .map_err(failure)?;
+    if projection["thread"]["projectId"] != grant.project_id.as_str() {
+        return Err(outside("the thread belongs to another project"));
+    }
+    Ok(grant.settlement_view(thread_id.as_str(), projection))
+}
+
+/// The method table of one task worker session: the allowlist, bound to its grant. Every
+/// write commits only while `commit_gate` (the session's managed handler) is open.
+pub fn table(
+    engine: Arc<dyn Engine>,
+    grant: Arc<TaskGrant>,
+    commit_gate: Arc<dyn CommitGate>,
+) -> MethodTable {
     let mut table = MethodTable::new();
     let (e, g) = (engine.clone(), grant.clone());
     table.unary(
         "orchestration.dispatchCommand",
         move |_, command: Command| {
-            let (e, g) = (e.clone(), g.clone());
+            let (e, g, c) = (e.clone(), g.clone(), commit_gate.clone());
             async move {
                 let guard = g.guard_for(&to_json(&command)).map_err(|r| outside(&r))?;
-                e.dispatch_guarded(command, guard).await.map_err(failure)
+                e.dispatch_guarded(command, guard, Some(c))
+                    .await
+                    .map_err(failure)
             }
         },
     );
@@ -261,14 +409,7 @@ pub fn table(engine: Arc<dyn Engine>, grant: Arc<TaskGrant>) -> MethodTable {
         "orchestration.getThreadProjection",
         move |_, input: ThreadIdInput| {
             let (e, g) = (e.clone(), g.clone());
-            async move {
-                if !g.may_read(input.thread_id.as_str()) {
-                    return Err(outside("not an admitted thread"));
-                }
-                e.get_thread_projection(input.thread_id)
-                    .await
-                    .map_err(failure)
-            }
+            async move { read_thread(&e, &g, input.thread_id).await }
         },
     );
     let (e, g) = (engine, grant);
@@ -280,6 +421,7 @@ pub fn table(engine: Arc<dyn Engine>, grant: Arc<TaskGrant>) -> MethodTable {
                 if input.thread_id != g.thread_id {
                     return Err(outside("not the admitted thread"));
                 }
+                read_thread(&e, &g, ThreadId::from(input.thread_id.clone())).await?;
                 e.subscribe_thread(input)
                     .await
                     .map(crate::methods::orchestration::forward)

@@ -445,6 +445,26 @@ impl Drop for Handle {
     }
 }
 
+/// A task worker's write commits only while its handler is open, and the access decision
+/// holds the authority lock through the commit: a fence lands either before (the write is
+/// refused) or after (the work was already accepted and stays with the server).
+impl conn_engine::CommitGate for Handle {
+    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> bool {
+        if *self.closed.borrow() {
+            return false;
+        }
+        let now = Instant::now();
+        let authority = crate::lock(&self.shared.authority);
+        if authority.handler_state(self.id, self.expires_ms, now, now_ms())
+            != authority::GateState::Open
+        {
+            return false;
+        }
+        commit();
+        true
+    }
+}
+
 impl crate::session::Gate for Handle {
     fn state(&self) -> crate::session::GateState {
         Handle::state(self)

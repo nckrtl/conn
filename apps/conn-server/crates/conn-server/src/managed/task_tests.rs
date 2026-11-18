@@ -1,9 +1,11 @@
 //! The task worker grant on a real managed ingress (item 6): the allowlist, the atomic owner
-//! check at dispatch, exactly one accept, no replay, exact cancellation and own-run
-//! interrupts. The lab, the fake Gateway and the socket helpers are item 4's (`tests.rs`).
+//! check at dispatch, exactly one accept, no replay, exact cancellation, own-run interrupts,
+//! project binding, settlement-only reads, and commits that survive the caller and respect
+//! the fence. The lab, the fake Gateway and the socket helpers are item 4's (`tests.rs`).
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use conn_engine::{CommitGate, DispatchGuard, Engine, GuardRule};
 use serde_json::{Value, json};
 
 use super::super::tests::{Lab, connect, next, send};
@@ -23,17 +25,19 @@ fn sha(text: &str) -> String {
 fn create_body() -> Value {
     json!({
         "projectId": project_id(), "title": "Implement", "runtimeMode": "full-access",
-        "interactionMode": "default",
+        "interactionMode": "default", "createdBy": "user", "creationSource": "web",
         "modelSelection": {"instanceId": "claudeAgent", "model": "m"},
     })
 }
 
 fn grant(message_id: &str, text: &str, create: bool) -> Value {
     json!({
-        "purpose": "task_worker", "task_id": 5873, "copy_id": 3709, "turn_id": format!("turn-{message_id}"),
+        "purpose": "task_worker", "task_id": 5873, "copy_id": 3709,
+        "turn_id": format!("turn-{message_id}"),
         "project_id": project_id(), "thread_id": THREAD,
         "create": if create { json!({"command_id": "cmd-create", "body": create_body()}) } else { Value::Null },
-        "message": {"command_id": format!("cmd-{message_id}"), "message_id": message_id, "text_sha256": sha(text)},
+        "message": {"command_id": format!("cmd-{message_id}"), "message_id": message_id,
+            "text_sha256": sha(text), "interrupt_command_id": format!("stop-{message_id}")},
         "earlier": [], "questions": [],
     })
 }
@@ -51,7 +55,7 @@ fn worker_token(lab: &Lab, grant: Value) -> String {
 fn create_command() -> Value {
     let mut command = json!({
         "type": "thread.create", "commandId": "cmd-create", "threadId": THREAD,
-        "branch": null, "worktreePath": null, "createdBy": "user", "creationSource": "web",
+        "branch": null, "worktreePath": null,
     });
     for (key, value) in create_body().as_object().unwrap() {
         command[key] = value.clone();
@@ -66,6 +70,10 @@ fn dispatch_command(command_id: &str, message_id: &str, text: &str) -> Value {
         "createdBy": "user", "creationSource": "web",
         "dispatchMode": {"type": "start_immediately"},
     })
+}
+
+fn stop(command_id: &str, run_id: &Value) -> Value {
+    json!({"type": "run.interrupt", "commandId": command_id, "threadId": THREAD, "runId": run_id})
 }
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
@@ -90,15 +98,22 @@ async fn call(socket: &mut Socket, id: u32, tag: &str, payload: Value) -> Result
     }
 }
 
-async fn projection(socket: &mut Socket, id: u32) -> Value {
+async fn dispatch(socket: &mut Socket, id: u32, command: Value) -> Result<Value, Value> {
+    call(socket, id, "orchestration.dispatchCommand", command).await
+}
+
+async fn read(socket: &mut Socket, id: u32, thread: &str) -> Result<Value, Value> {
     call(
         socket,
         id,
         "orchestration.getThreadProjection",
-        json!({"threadId": THREAD}),
+        json!({"threadId": thread}),
     )
     .await
-    .expect("projection")
+}
+
+async fn projection(socket: &mut Socket, id: u32) -> Value {
+    read(socket, id, THREAD).await.expect("projection")
 }
 
 fn runs(projection: &Value) -> Vec<Value> {
@@ -115,20 +130,44 @@ fn user_messages(projection: &Value) -> Vec<Value> {
         .collect()
 }
 
-/// Waits until the thread's run of `message_id` has `status`.
-async fn until_run(socket: &mut Socket, message_id: &str, status: &str) -> Value {
-    for id in 1000.. {
-        let p = projection(socket, id).await;
+/// Waits until the run of `message_id` on the engine has `status`.
+async fn until_run(lab: &Lab, thread: &str, message_id: &str, status: &str) -> Value {
+    let engine = lab.app.engine.clone().unwrap();
+    for n in 0..800 {
+        let p = engine
+            .get_thread_projection(thread.to_owned().into())
+            .await
+            .expect("projection");
         if let Some(run) = runs(&p)
             .into_iter()
             .find(|r| r["userMessageId"] == message_id && r["status"] == status)
         {
             return run;
         }
-        assert!(id < 1400, "run of {message_id} never reached {status}: {p}");
+        assert!(n < 799, "run of {message_id} never reached {status}: {p}");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     unreachable!()
+}
+
+async fn until_request(lab: &Lab, request_id: &str, pending: bool) {
+    let engine = lab.app.engine.clone().unwrap();
+    for n in 0..800 {
+        let p = engine.get_thread_projection(THREAD.into()).await.unwrap();
+        let found = p["runtimeRequests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| r["id"] == request_id && (r["status"] == "pending") == pending);
+        if found {
+            return;
+        }
+        assert!(
+            n < 799,
+            "request {request_id} never became pending={pending}: {p}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn worker(lab: &Lab, grant: Value) -> Socket {
@@ -137,38 +176,76 @@ async fn worker(lab: &Lab, grant: Value) -> Socket {
         .expect("worker admitted")
 }
 
-/// A person's message on the thread, sent past the managed ingress (as Conn would).
-async fn person_sends(lab: &Lab, message_id: &str, text: &str) {
+/// A person's command, sent past the managed ingress (as Conn would).
+async fn person(lab: &Lab, command: Value) {
     let engine = lab.app.engine.clone().unwrap();
-    let command = dispatch_command(&format!("person-{message_id}"), message_id, text);
     engine
         .dispatch(conn_contract::from_json(command).unwrap())
         .await
-        .expect("the person's send");
+        .expect("the person's command");
+}
+
+async fn person_sends(lab: &Lab, message_id: &str, text: &str) {
+    person(
+        lab,
+        dispatch_command(&format!("person-{message_id}"), message_id, text),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_worker_creates_and_dispatches_its_turn_once_and_a_replay_adds_nothing() {
     let lab = Lab::start().await;
     let mut w = worker(&lab, grant("m1", "do it", true)).await;
-    call(&mut w, 1, "orchestration.dispatchCommand", create_command())
-        .await
-        .expect("create");
+    dispatch(&mut w, 1, create_command()).await.expect("create");
     let empty = projection(&mut w, 2).await;
     assert!(runs(&empty).is_empty() && user_messages(&empty).is_empty());
-    let dispatch = dispatch_command("cmd-m1", "m1", "do it");
-    call(&mut w, 3, "orchestration.dispatchCommand", dispatch.clone())
+    let message = dispatch_command("cmd-m1", "m1", "do it");
+    dispatch(&mut w, 3, message.clone())
         .await
         .expect("dispatch");
-    until_run(&mut w, "m1", "completed").await;
+    until_run(&lab, THREAD, "m1", "completed").await;
     // The reply was lost; the worker must never replay, and a replay is refused anyway.
-    let replay = call(&mut w, 4, "orchestration.dispatchCommand", dispatch).await;
-    assert!(replay.is_err(), "a replayed command is not accepted twice");
-    let create_again = call(&mut w, 5, "orchestration.dispatchCommand", create_command()).await;
-    assert!(create_again.is_err());
+    assert!(
+        dispatch(&mut w, 4, message).await.is_err(),
+        "no second accept"
+    );
+    assert!(dispatch(&mut w, 5, create_command()).await.is_err());
     let p = projection(&mut w, 6).await;
-    assert_eq!(user_messages(&p).len(), 1, "{p}");
-    assert_eq!(runs(&p).len(), 1, "{p}");
+    assert_eq!((user_messages(&p).len(), runs(&p).len()), (1, 1), "{p}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_frozen_bodies_are_complete() {
+    let lab = Lab::start().await;
+    let mut w = worker(&lab, grant("m1", "do it", true)).await;
+    // A worktree outside the admitted workspace is a field the frozen body does not hold.
+    let mut moved = create_command();
+    moved["worktreePath"] = json!("/tmp/elsewhere");
+    assert!(dispatch(&mut w, 1, moved).await.is_err());
+    dispatch(&mut w, 2, create_command()).await.expect("create");
+    // Another model, a fresh context or a sender: each is a field a task message may not carry.
+    for (n, (key, value)) in [
+        (
+            "modelSelection",
+            json!({"instanceId": "claudeAgent", "model": "other"}),
+        ),
+        ("freshContext", json!(true)),
+        ("senderThreadId", json!("t-other")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut message = dispatch_command("cmd-m1", "m1", "do it");
+        message[key] = value;
+        let id = u32::try_from(n).unwrap() + 10;
+        assert!(
+            dispatch(&mut w, id, message).await.is_err(),
+            "{key} was allowed"
+        );
+    }
+    let p = projection(&mut w, 20).await;
+    assert!(user_messages(&p).is_empty(), "{p}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -176,30 +253,20 @@ async fn concurrent_sends_to_one_thread_give_exactly_one_accept() {
     let lab = Lab::start().await;
     let mut w1 = worker(&lab, grant("m1", "do it", true)).await;
     let mut w2 = worker(&lab, grant("m1", "do it", true)).await;
-    call(
-        &mut w1,
-        1,
-        "orchestration.dispatchCommand",
-        create_command(),
-    )
-    .await
-    .expect("create");
-    let dispatch = dispatch_command("cmd-m1", "m1", "do it");
+    dispatch(&mut w1, 1, create_command())
+        .await
+        .expect("create");
+    let message = dispatch_command("cmd-m1", "m1", "do it");
     let (a, b) = tokio::join!(
-        call(
-            &mut w1,
-            2,
-            "orchestration.dispatchCommand",
-            dispatch.clone()
-        ),
-        call(&mut w2, 2, "orchestration.dispatchCommand", dispatch),
+        dispatch(&mut w1, 2, message.clone()),
+        dispatch(&mut w2, 2, message),
     );
     assert_eq!(
         [a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(),
         1,
         "exactly one accept: {a:?} {b:?}"
     );
-    until_run(&mut w1, "m1", "completed").await;
+    until_run(&lab, THREAD, "m1", "completed").await;
     let p = projection(&mut w1, 3).await;
     assert_eq!((user_messages(&p).len(), runs(&p).len()), (1, 1), "{p}");
 }
@@ -208,48 +275,30 @@ async fn concurrent_sends_to_one_thread_give_exactly_one_accept() {
 async fn a_persons_active_run_refuses_the_workers_dispatch_and_nothing_is_queued() {
     let lab = Lab::start().await;
     let mut w = worker(&lab, grant("m1", "do it", true)).await;
-    call(&mut w, 1, "orchestration.dispatchCommand", create_command())
-        .await
-        .expect("create");
+    dispatch(&mut w, 1, create_command()).await.expect("create");
     // A person writes between create and the first message; the run is still active.
     person_sends(&lab, "p1", "hang").await;
-    until_run(&mut w, "p1", "running").await;
-    let refused = call(
-        &mut w,
-        2,
-        "orchestration.dispatchCommand",
-        dispatch_command("cmd-m1", "m1", "do it"),
-    )
-    .await;
+    let run = until_run(&lab, THREAD, "p1", "running").await;
+    let refused = dispatch(&mut w, 2, dispatch_command("cmd-m1", "m1", "do it")).await;
     assert!(refused.is_err(), "the owner check refuses: {refused:?}");
     let p = projection(&mut w, 3).await;
     assert_eq!(runs(&p).len(), 1, "nothing queued or steered: {p}");
-    assert!(user_messages(&p).iter().all(|m| m["id"] != "m1"));
-    // The worker cannot stop the person's run either.
-    let run_id = runs(&p)[0]["id"].clone();
-    let stop = call(
-        &mut w,
-        4,
-        "orchestration.dispatchCommand",
-        json!({"type": "run.interrupt", "commandId": "cmd-stop", "threadId": THREAD, "runId": run_id}),
-    )
-    .await;
-    assert!(stop.is_err(), "{stop:?}");
-    until_run(&mut w, "p1", "running").await;
+    // The worker cannot stop the person's run, with any of its stop IDs.
+    assert!(
+        dispatch(&mut w, 4, stop("stop-m1", &run["id"]))
+            .await
+            .is_err()
+    );
+    until_run(&lab, THREAD, "p1", "running").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_wrong_task_grant_is_refused_and_changes_nothing() {
     let lab = Lab::start().await;
     let mut admitted = worker(&lab, grant("m1", "do it", true)).await;
-    call(
-        &mut admitted,
-        1,
-        "orchestration.dispatchCommand",
-        create_command(),
-    )
-    .await
-    .expect("create");
+    dispatch(&mut admitted, 1, create_command())
+        .await
+        .expect("create");
     // A grant for another thread and message.
     let mut other = grant("m9", "other", true);
     other["thread_id"] = json!("another-thread");
@@ -288,21 +337,34 @@ async fn a_wrong_task_grant_is_refused_and_changes_nothing() {
             .contains("ConnServerNotSupported")
     );
     // A changed body or text is refused even with the admitted IDs.
-    let changed = call(
+    let changed = dispatch(
         &mut admitted,
         21,
-        "orchestration.dispatchCommand",
-        dispatch_command("cmd-m1", "m1", "do something else"),
+        dispatch_command("cmd-m1", "m1", "something else"),
     )
     .await;
     assert!(changed.is_err());
     let p = projection(&mut admitted, 22).await;
     assert!(runs(&p).is_empty() && user_messages(&p).is_empty(), "{p}");
-    // A grant with an extra field, or other scopes, is no worker token.
+    // Malformed grants are no worker tokens: an extra field, other scopes, or a stored
+    // question of a thread the turn does not answer.
     let mut loose = grant("m1", "do it", true);
     loose["admin"] = json!(true);
-    let token = worker_token(&lab, loose);
-    assert_eq!(connect(lab.v6, "", Some(&token)).await.err(), Some(403));
+    assert_eq!(
+        connect(lab.v6, "", Some(&worker_token(&lab, loose)))
+            .await
+            .err(),
+        Some(403)
+    );
+    let mut stray = grant("m1", "do it", true);
+    stray["questions"] = json!([{"thread_id": "another-thread", "request_id": "q",
+        "owner_run_id": "r", "cancel_command_id": "c"}]);
+    assert_eq!(
+        connect(lab.v6, "", Some(&worker_token(&lab, stray)))
+            .await
+            .err(),
+        Some(403)
+    );
     let mut extra = serde_json::Map::new();
     extra.insert(GRANT_FIELD.into(), grant("m1", "do it", true));
     let wide = lab.fake.issue_with(
@@ -324,160 +386,241 @@ async fn a_wrong_task_grant_is_refused_and_changes_nothing() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_thread_of_another_project_is_refused_everywhere() {
+    let lab = Lab::start().await;
+    // A thread with the admitted ID exists, but in another project.
+    let mut foreign = create_command();
+    foreign["commandId"] = json!("person-create");
+    foreign["projectId"] = json!(conn_engine::SqliteEngine::project_id_for("/tmp/q"));
+    person(&lab, foreign).await;
+    let mut w = worker(&lab, grant("m1", "do it", false)).await;
+    assert!(read(&mut w, 1, THREAD).await.is_err(), "read refused");
+    assert!(
+        dispatch(&mut w, 2, dispatch_command("cmd-m1", "m1", "do it"))
+            .await
+            .is_err()
+    );
+    let p = lab
+        .app
+        .engine
+        .clone()
+        .unwrap()
+        .get_thread_projection(THREAD.into())
+        .await
+        .unwrap();
+    assert!(user_messages(&p).is_empty(), "nothing written: {p}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_earlier_turns_thread_shows_only_its_settlement_evidence() {
+    let lab = Lab::start().await;
+    // An earlier role's thread, with its frozen message and a person's later message.
+    let earlier_thread = "reviewer-thread";
+    let mut create = create_command();
+    create["commandId"] = json!("person-create-r");
+    create["threadId"] = json!(earlier_thread);
+    person(&lab, create).await;
+    let send = |command_id: &str, message_id: &str, text: &str| {
+        let mut command = dispatch_command(command_id, message_id, text);
+        command["threadId"] = json!(earlier_thread);
+        command
+    };
+    person(&lab, send("pr1", "r1", "hang")).await;
+    let r1 = until_run(&lab, earlier_thread, "r1", "running").await;
+    let mut g = grant("m1", "do it", true);
+    g["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "r1", "text_sha256": sha("hang"),
+        "run_id": r1["id"], "interrupt_command_id": "stop-r1"}]);
+    let mut w = worker(&lab, g).await;
+    let view = read(&mut w, 1, earlier_thread)
+        .await
+        .expect("settlement read");
+    assert_eq!(view["messages"].as_array().unwrap().len(), 1, "{view}");
+    assert_eq!(runs(&view).len(), 1, "{view}");
+    assert!(view["turnItems"].as_array().unwrap().is_empty());
+    assert!(
+        view["thread"]["title"].is_null(),
+        "no thread details: {view}"
+    );
+    // It stops exactly that run, by its admitted stop ID.
+    let mut stop_it = stop("stop-r1", &r1["id"]);
+    stop_it["threadId"] = json!(earlier_thread);
+    dispatch(&mut w, 2, stop_it)
+        .await
+        .expect("stops the earlier run");
+    until_run(&lab, earlier_thread, "r1", "interrupted").await;
+    // A person's later run on that thread is not the earlier turn's.
+    person(&lab, send("pr2", "r2", "hang")).await;
+    let r2 = until_run(&lab, earlier_thread, "r2", "running").await;
+    let mut stop_other = stop("stop-r1", &r2["id"]);
+    stop_other["threadId"] = json!(earlier_thread);
+    assert!(dispatch(&mut w, 3, stop_other).await.is_err());
+    // A digest that does not match the stored text authorizes nothing.
+    let mut wrong = grant("m1", "do it", true);
+    wrong["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "r2", "text_sha256": sha("other"),
+        "interrupt_command_id": "stop-r2"}]);
+    let mut w2 = worker(&lab, wrong).await;
+    let mut stop_r2 = stop("stop-r2", &r2["id"]);
+    stop_r2["threadId"] = json!(earlier_thread);
+    assert!(dispatch(&mut w2, 1, stop_r2).await.is_err());
+    until_run(&lab, earlier_thread, "r2", "running").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn only_the_stored_question_of_its_owner_run_is_cancelled_then_the_answer_runs() {
     let lab = Lab::start().await;
-    // Turn 1 asks a question; Orbit stores it and stops the run (question ends the turn).
+    // Turn 1 asks a question.
     let mut w1 = worker(&lab, grant("m1", "question", true)).await;
-    call(
-        &mut w1,
-        1,
-        "orchestration.dispatchCommand",
-        create_command(),
-    )
-    .await
-    .expect("create");
-    call(
-        &mut w1,
-        2,
-        "orchestration.dispatchCommand",
-        dispatch_command("cmd-m1", "m1", "question"),
-    )
-    .await
-    .expect("dispatch");
-    let run = until_run(&mut w1, "m1", "running").await;
+    dispatch(&mut w1, 1, create_command())
+        .await
+        .expect("create");
+    dispatch(&mut w1, 2, dispatch_command("cmd-m1", "m1", "question"))
+        .await
+        .expect("dispatch");
+    let run = until_run(&lab, THREAD, "m1", "running").await;
     let run_id = run["id"].as_str().unwrap().to_owned();
     let request_id = format!("question:{run_id}");
-    for id in 100.. {
-        let p = projection(&mut w1, id).await;
-        if p["runtimeRequests"].as_array().is_some_and(|r| {
-            r.iter()
-                .any(|r| r["id"] == request_id.as_str() && r["status"] == "pending")
-        }) {
-            break;
-        }
-        assert!(id < 500, "the question never came: {p}");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    until_request(&lab, &request_id, true).await;
 
     // The answer turn's grant names the stored request and its owner run.
     let mut answer = grant("m2", "the answer", false);
-    answer["earlier"] = json!([{"thread_id": THREAD, "message_id": "m1"}]);
-    answer["questions"] =
-        json!([{"thread_id": THREAD, "request_id": request_id, "owner_run_id": run_id}]);
-    let mut w2 = worker(&lab, answer.clone()).await;
-    let cancel = |request: &str, decision: Value| {
-        json!({"type": "runtime-request.respond", "commandId": format!("cancel-{request}-{decision}"),
+    answer["earlier"] = json!([{"thread_id": THREAD, "message_id": "m1", "text_sha256": sha("question"),
+        "interrupt_command_id": "stop-earlier-m1"}]);
+    answer["questions"] = json!([{"thread_id": THREAD, "request_id": request_id, "owner_run_id": run_id,
+        "cancel_command_id": "cancel-q1"}]);
+    let cancel = |request: &str, decision: Value, command_id: &str| {
+        json!({"type": "runtime-request.respond", "commandId": command_id,
                "threadId": THREAD, "requestId": request, "decision": decision})
     };
-    // Not a stored request, or not a cancel: refused.
+    let mut w2 = worker(&lab, answer.clone()).await;
+    // Not a stored request, not a cancel, or not its admitted command ID: refused.
     assert!(
-        call(
+        dispatch(
             &mut w2,
             1,
-            "orchestration.dispatchCommand",
-            cancel("question:other", json!("cancel"))
+            cancel("question:other", json!("cancel"), "cancel-q1")
         )
         .await
         .is_err()
     );
     assert!(
-        call(
+        dispatch(
             &mut w2,
             2,
-            "orchestration.dispatchCommand",
-            cancel(&request_id, json!("accept"))
+            cancel(&request_id, json!("accept"), "cancel-q1")
         )
         .await
         .is_err()
+    );
+    assert!(
+        dispatch(&mut w2, 3, cancel(&request_id, json!("cancel"), "cmd-m2"))
+            .await
+            .is_err()
     );
     // A grant whose stored owner is another run: refused by the target's owner check.
     let mut wrong_owner = answer.clone();
     wrong_owner["questions"][0]["owner_run_id"] = json!("run:other:1");
     let mut w3 = worker(&lab, wrong_owner).await;
     assert!(
-        call(
+        dispatch(
             &mut w3,
             1,
-            "orchestration.dispatchCommand",
-            cancel(&request_id, json!("cancel"))
+            cancel(&request_id, json!("cancel"), "cancel-q1")
         )
         .await
         .is_err()
     );
+    until_request(&lab, &request_id, true).await;
     // The answer cannot start while the earlier run is still active.
     assert!(
-        call(
-            &mut w2,
-            3,
-            "orchestration.dispatchCommand",
-            dispatch_command("cmd-m2", "m2", "the answer")
-        )
-        .await
-        .is_err()
+        dispatch(&mut w2, 4, dispatch_command("cmd-m2", "m2", "the answer"))
+            .await
+            .is_err()
     );
     // The exact cancel succeeds, once.
-    call(
+    dispatch(
         &mut w2,
-        4,
-        "orchestration.dispatchCommand",
-        cancel(&request_id, json!("cancel")),
+        5,
+        cancel(&request_id, json!("cancel"), "cancel-q1"),
     )
     .await
     .expect("cancel");
-    let p = projection(&mut w2, 5).await;
-    let request = p["runtimeRequests"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["id"] == request_id.as_str())
-        .unwrap()
-        .clone();
-    assert_ne!(request["status"], "pending", "{request}");
-    until_run(&mut w2, "m1", "completed").await;
+    until_request(&lab, &request_id, false).await;
+    until_run(&lab, THREAD, "m1", "completed").await;
     // Then the answer goes out as a fresh run of its own.
-    call(
-        &mut w2,
-        6,
-        "orchestration.dispatchCommand",
-        dispatch_command("cmd-m2", "m2", "the answer"),
-    )
-    .await
-    .expect("answer");
-    until_run(&mut w2, "m2", "completed").await;
+    dispatch(&mut w2, 6, dispatch_command("cmd-m2", "m2", "the answer"))
+        .await
+        .expect("answer");
+    until_run(&lab, THREAD, "m2", "completed").await;
     let p = projection(&mut w2, 7).await;
     assert_eq!(runs(&p).len(), 2, "{p}");
 }
 
+/// Question ends the turn: the first worker stops the asking run itself. A stored request
+/// that the stop already settled needs no cancel, and a cancel of it changes nothing.
 #[tokio::test(flavor = "current_thread")]
-async fn a_worker_stops_only_the_run_of_its_own_message() {
+async fn a_question_whose_run_was_stopped_needs_no_cancel() {
     let lab = Lab::start().await;
-    let mut w = worker(&lab, grant("m1", "hang", true)).await;
-    call(&mut w, 1, "orchestration.dispatchCommand", create_command())
+    let mut w1 = worker(&lab, grant("m1", "question", true)).await;
+    dispatch(&mut w1, 1, create_command())
         .await
         .expect("create");
-    call(
-        &mut w,
-        2,
-        "orchestration.dispatchCommand",
-        dispatch_command("cmd-m1", "m1", "hang"),
-    )
-    .await
-    .expect("dispatch");
-    let own = until_run(&mut w, "m1", "running").await;
-    let stop = json!({"type": "run.interrupt", "commandId": "cmd-stop", "threadId": THREAD, "runId": own["id"]});
-    let mut held = stop.clone();
-    held["commandId"] = json!("cmd-stop-held");
+    dispatch(&mut w1, 2, dispatch_command("cmd-m1", "m1", "question"))
+        .await
+        .expect("dispatch");
+    let run = until_run(&lab, THREAD, "m1", "running").await;
+    let request_id = format!("question:{}", run["id"].as_str().unwrap());
+    until_request(&lab, &request_id, true).await;
+    dispatch(&mut w1, 3, stop("stop-m1", &run["id"]))
+        .await
+        .expect("the turn ends");
+    until_run(&lab, THREAD, "m1", "interrupted").await;
+    until_request(&lab, &request_id, false).await;
+    let mut answer = grant("m2", "the answer", false);
+    answer["questions"] = json!([{"thread_id": THREAD, "request_id": request_id,
+        "owner_run_id": run["id"], "cancel_command_id": "cancel-q1"}]);
+    let mut w2 = worker(&lab, answer).await;
+    let cancel = json!({"type": "runtime-request.respond", "commandId": "cancel-q1",
+        "threadId": THREAD, "requestId": request_id, "decision": "cancel"});
+    assert!(
+        dispatch(&mut w2, 1, cancel).await.is_err(),
+        "no longer pending"
+    );
+    dispatch(&mut w2, 2, dispatch_command("cmd-m2", "m2", "the answer"))
+        .await
+        .expect("answer");
+    until_run(&lab, THREAD, "m2", "completed").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_worker_stops_only_the_run_of_its_own_message_once() {
+    let lab = Lab::start().await;
+    let mut w = worker(&lab, grant("m1", "hang", true)).await;
+    dispatch(&mut w, 1, create_command()).await.expect("create");
+    dispatch(&mut w, 2, dispatch_command("cmd-m1", "m1", "hang"))
+        .await
+        .expect("dispatch");
+    let own = until_run(&lab, THREAD, "m1", "running").await;
+    let mut held = stop("stop-m1", &own["id"]);
     held["holdQueue"] = json!(true);
     assert!(
-        call(&mut w, 3, "orchestration.dispatchCommand", held)
-            .await
-            .is_err(),
+        dispatch(&mut w, 3, held).await.is_err(),
         "never holds the queue"
     );
-    call(&mut w, 4, "orchestration.dispatchCommand", stop)
+    assert!(
+        dispatch(&mut w, 4, stop("cmd-m1", &own["id"]))
+            .await
+            .is_err(),
+        "a stop uses only its own admitted command ID"
+    );
+    dispatch(&mut w, 5, stop("stop-m1", &own["id"]))
         .await
         .expect("own run stops");
-    until_run(&mut w, "m1", "interrupted").await;
+    until_run(&lab, THREAD, "m1", "interrupted").await;
+    assert!(
+        dispatch(&mut w, 6, stop("stop-m1", &own["id"]))
+            .await
+            .is_err()
+    );
 }
 
 /// The worker inherits item 4's fence: removing its Node edge ends its session.
@@ -485,9 +628,7 @@ async fn a_worker_stops_only_the_run_of_its_own_message() {
 async fn removing_the_workers_edge_ends_its_session() {
     let lab = Lab::start().await;
     let mut w = worker(&lab, grant("m1", "do it", true)).await;
-    call(&mut w, 1, "orchestration.dispatchCommand", create_command())
-        .await
-        .expect("create");
+    dispatch(&mut w, 1, create_command()).await.expect("create");
     let notice = lab.fake.remove_edge(12);
     lab.deliver(&notice);
     let ended = tokio::time::timeout(Duration::from_secs(2), async {
@@ -495,4 +636,61 @@ async fn removing_the_workers_edge_ends_its_session() {
     })
     .await;
     assert!(ended.is_ok(), "the worker's socket stayed open");
+}
+
+struct Gate(bool);
+impl CommitGate for Gate {
+    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> bool {
+        if self.0 {
+            commit();
+        }
+        self.0
+    }
+}
+
+fn guard(rule: GuardRule) -> DispatchGuard {
+    DispatchGuard {
+        project_id: project_id(),
+        rule,
+    }
+}
+
+/// A revoked caller's write that reaches the commit is refused there, atomically: nothing is
+/// written. A caller that disappears after its write started does not strand the run.
+#[tokio::test(flavor = "current_thread")]
+async fn commits_follow_the_fence_and_survive_the_caller() {
+    let lab = Lab::start().await;
+    let engine: Arc<dyn Engine> = lab.app.engine.clone().unwrap();
+    let decode = |v: Value| conn_contract::from_json(v).unwrap();
+    engine
+        .dispatch_guarded(decode(create_command()), guard(GuardRule::NewThread), None)
+        .await
+        .expect("create");
+    let closed: Arc<dyn CommitGate> = Arc::new(Gate(false));
+    let refused = engine
+        .dispatch_guarded(
+            decode(dispatch_command("cmd-m1", "m1", "do it")),
+            guard(GuardRule::ExclusiveStart),
+            Some(closed),
+        )
+        .await;
+    assert!(refused.is_err());
+    let p = engine.get_thread_projection(THREAD.into()).await.unwrap();
+    assert!(user_messages(&p).is_empty(), "nothing committed: {p}");
+    // The caller drops its future after the first poll: the dispatch still commits and its
+    // run still starts and completes.
+    let open: Arc<dyn CommitGate> = Arc::new(Gate(true));
+    let mut call = engine.dispatch_guarded(
+        decode(dispatch_command("cmd-m1", "m1", "do it")),
+        guard(GuardRule::ExclusiveStart),
+        Some(open),
+    );
+    // Poll it once, then drop it.
+    tokio::select! {
+        biased;
+        _ = &mut call => panic!("it should still be committing"),
+        () = std::future::ready(()) => {}
+    }
+    drop(call);
+    until_run(&lab, THREAD, "m1", "completed").await;
 }

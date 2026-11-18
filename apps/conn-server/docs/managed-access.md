@@ -125,24 +125,31 @@ reader, exactly the scopes `orchestration:read` and `orchestration:operate`, and
 "task_grant": {
   "purpose": "task_worker", "task_id": 5873, "copy_id": 3709, "turn_id": "…",
   "project_id": "project:…", "thread_id": "<admitted thread UUID>",
-  "create": {"command_id": "…", "body": {"projectId": "…", "title": "…", "modelSelection": {…}}},
-  "message": {"command_id": "…", "message_id": "…", "text_sha256": "<hex>"},
-  "earlier": [{"thread_id": "…", "message_id": "…"}],
-  "questions": [{"thread_id": "…", "request_id": "…", "owner_run_id": "…"}]
+  "create": {"command_id": "…", "body": {<the complete create body but type, commandId, threadId>}},
+  "message": {"command_id": "…", "message_id": "…", "text_sha256": "<hex>",
+              "interrupt_command_id": "…"},
+  "earlier": [{"thread_id": "…", "message_id": "…", "text_sha256": "<hex>",
+               "run_id": "<recorded run, optional>", "interrupt_command_id": "…"}],
+  "questions": [{"thread_id": "<the admitted thread>", "request_id": "…",
+                 "owner_run_id": "…", "cancel_command_id": "…"}]
 }
 ```
 
 The worker may call only `orchestration.dispatchCommand`, `orchestration.getThreadProjection`
-(its thread and earlier turns' threads) and `orchestration.subscribeThread` (its thread). Each
-command must match the grant, and the engine checks ownership in the command's own
-transaction (`conn_engine::DispatchGuard`):
+and `orchestration.subscribeThread`. Reads need a thread of the admitted project; an earlier
+turn's other thread is cut to its frozen message, the run it started, and that run's nodes
+and requests. Each write must match the grant, and the engine checks ownership and the
+project in the command's own transaction (`conn_engine::DispatchGuard`). The commit itself
+runs under the worker's managed handler (`conn_engine::CommitGate`): a fence lands before
+the check (refused) or after the commit (accepted work stays). A guarded dispatch runs on its
+own task, so a caller that disconnects mid-commit does not strand its run.
 
 | Command | Allowed when |
 | --- | --- |
-| `thread.create` | The admitted thread ID and command ID, every frozen body field equal, no initial message, and the thread does not exist |
-| `message.dispatch` | The admitted message ID, command ID and text digest, no attachments, `start_immediately` without steer or restart, no active or queued run, and the message is new. It starts its own run or is refused; it never queues or steers |
-| `run.interrupt` | The run's `userMessageId` is the admitted message or an earlier turn's message on that thread; never `holdQueue` |
-| `runtime-request.respond` | Decision `cancel` only, a stored request of that thread, still pending, `user_input`, and its node belongs to the stored owner run |
+| `thread.create` | The admitted thread and command ID, exactly the frozen body (no other field, `null` counts as absent), and the thread does not exist |
+| `message.dispatch` | The admitted message ID, command ID and text digest; only the fields of a plain message (no model, fresh context, sender or steer); no attachments; `start_immediately`; no active or queued run; the message is new. It starts its own run or is refused |
+| `run.interrupt` | The admitted stop command ID of one message; a live run that message started; the message's stored text has the frozen digest; it started exactly one run; any recorded run ID matches; never `holdQueue` |
+| `runtime-request.respond` | Decision `cancel` only, the stored question's cancel command ID, a request of the admitted thread, still pending, `user_input`, its node owned by the stored run |
 
 A guarded command whose ID already has a receipt is refused: one accept per command, and a
 lost reply is recovered by reading, never by replay. The engine's question flow is unchanged

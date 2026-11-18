@@ -33,6 +33,7 @@ import {
   PullRequestFileRouteScreen,
 } from "./features/pull-requests/PullRequestRouteScreen";
 import { PullRequestFilesSheet } from "./features/pull-requests/PullRequestFiles";
+import { OrbitSubtaskRouteScreen, OrbitTaskRouteScreen } from "./features/tasks/TaskDetailScreens";
 import { PullRequestReviewSheet } from "./features/pull-requests/PullRequestReviewSheet";
 import { PullRequestReviewersScreen } from "./features/pull-requests/PullRequestReviewersScreen";
 import { PullRequestLabelsScreen } from "./features/pull-requests/PullRequestLabelsScreen";
@@ -583,6 +584,19 @@ const RootStackConfig = createWorkspaceStackNavigator({
       linking: {
         path: "pull-requests/:environmentId/:projectId/:repository/:number",
         parse: { number: Number },
+      },
+      options: pageRoute({ duoMinimize: "never" }),
+    }),
+    OrbitTask: createNativeStackScreen({
+      screen: OrbitTaskRouteScreen,
+      linking: { path: "tasks/:taskId", parse: { taskId: Number } },
+      options: pageRoute({ duoMinimize: "never" }),
+    }),
+    OrbitSubtask: createNativeStackScreen({
+      screen: OrbitSubtaskRouteScreen,
+      linking: {
+        path: "tasks/:taskId/subtasks/:subtaskId",
+        parse: { taskId: Number, subtaskId: Number },
       },
       options: pageRoute({ duoMinimize: "never" }),
     }),

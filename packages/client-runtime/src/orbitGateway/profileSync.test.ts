@@ -47,6 +47,35 @@ function storedLikeTheGateway(value: unknown): unknown {
   return value;
 }
 
+/**
+ * What the real Gateway stores for a thread-refs section: null and an empty list both
+ * become an explicit `{schema: 1, threads: []}`; a bare list, blank refs or `threads` as a map are 422.
+ */
+function storedThreadRefs(value: unknown): JsonObject {
+  const refuse = (why: string): never => {
+    throw new OrbitGatewayError({
+      code: "validation.failed",
+      message: why,
+      status: 422,
+      details: {},
+    });
+  };
+  if (value === null) return { schema: 1, threads: [] };
+  if (typeof value !== "object" || Array.isArray(value)) return refuse("not an object");
+  const { schema, threads } = value as { schema?: unknown; threads?: unknown };
+  if (schema !== 1) return refuse("unknown schema");
+  if (!Array.isArray(threads)) return refuse("threads must be a list");
+  return {
+    schema: 1,
+    threads: threads.map((entry: unknown) => {
+      const { environmentId, threadId } = (entry ?? {}) as Record<string, unknown>;
+      if (typeof environmentId !== "string" || environmentId.trim() === "") refuse("blank ref");
+      if (typeof threadId !== "string" || threadId.trim() === "") refuse("blank ref");
+      return { environmentId, threadId } as JsonObject;
+    }),
+  };
+}
+
 /** An in-memory Gateway that checks section versions the way the real one is specified to. */
 function fakeGateway(options: { sections?: boolean; profile?: { id: number; name: string } } = {}) {
   const profile = options.profile ?? { id: 1, name: "Nick" };
@@ -95,7 +124,15 @@ function fakeGateway(options: { sections?: boolean; profile?: { id: number; name
           details: {},
         });
       }
-      for (const section of Object.values(patch)) storedLikeTheGateway(section.value);
+      const stored = new Map<string, JsonObject | null>();
+      for (const [name, section] of Object.entries(patch)) {
+        stored.set(
+          name,
+          name === "sidebarHiddenThreads"
+            ? storedThreadRefs(section.value)
+            : (storedLikeTheGateway(section.value) as JsonObject | null),
+        );
+      }
       const stale = Object.entries(patch).filter(
         ([name, section]) =>
           gateway.alwaysConflict || (gateway.sections.get(name)?.version ?? 0) !== section.version,
@@ -105,16 +142,22 @@ function fakeGateway(options: { sections?: boolean; profile?: { id: number; name
           code: "conn.settings_version_conflict",
           message: "stale",
           status: 409,
-          details: { current_version: gateway.version },
+          details: {
+            current_version: gateway.version,
+            sections: Object.fromEntries(
+              stale.map(([name]) => [name, { version: gateway.sections.get(name)?.version ?? 0 }]),
+            ),
+          },
         });
       }
-      for (const [name, section] of Object.entries(patch)) {
+      for (const name of Object.keys(patch)) {
         const current = gateway.sections.get(name);
-        if (section.value === null) gateway.sections.delete(name);
+        const value = stored.get(name) ?? null;
+        if (value === null) gateway.sections.delete(name);
         else {
           gateway.sections.set(name, {
             version: (current?.version ?? 0) + 1,
-            value: storedLikeTheGateway(section.value) as JsonObject,
+            value,
             updatedBy: gateway.caller,
           });
         }
@@ -890,5 +933,98 @@ describe("sidebar hidden threads sync", () => {
     expect(profileHidden(fake)).toHaveLength(500);
     expect([...mac.memory.ops.keys()]).toEqual(["env-a:t500"]);
     expect(mac.overflow()).toBeInstanceOf(SidebarHiddenThreadsCapacityError);
+  });
+
+  it("writes an absent section at version 0 and reads its version from the section, not the document", async () => {
+    const fake = fakeGateway();
+    // The profile's document version is unrelated to the section's.
+    fake.gateway.version = 7;
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a:t1", "hide");
+    await mac.sync();
+    expect(fake.gateway.patches[0]?.sidebarHiddenThreads?.version).toBe(0);
+    expect(mac.memory.state?.sections.sidebarHiddenThreads?.version).toBe(1);
+  });
+
+  it("confirms a Show that clears the set from the explicit empty value the Gateway returns", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a:t1", "hide");
+    await mac.sync();
+    mac.set("env-a:t1", "show");
+    await mac.sync();
+    expect(fake.gateway.patches[1]?.sidebarHiddenThreads).toEqual({
+      version: 1,
+      value: { schema: 1, threads: [] },
+    });
+    expect(fake.gateway.sections.get("sidebarHiddenThreads")).toMatchObject({
+      version: 2,
+      value: { schema: 1, threads: [] },
+    });
+    expect(mac.memory.ops.size).toBe(0);
+    expect(mac.memory.agreed).toEqual([]);
+
+    // A second client reads the cleared section as an explicit empty set.
+    const laptop = makeHidingDevice(fake, ["env-a:t1"]);
+    await laptop.sync();
+    expect(laptop.memory.agreed).toEqual([]);
+    expect(fake.gateway.patches).toHaveLength(2);
+  });
+
+  it("re-reads, merges and retries after a 409 that names the stale section", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    const laptop = makeHidingDevice(fake);
+    await laptop.sync();
+    mac.set("env-a:t1", "hide");
+    await mac.sync();
+    // The laptop's run reads before the mac's second write lands, so its PATCH is stale.
+    const get = fake.client.settings;
+    let raced = false;
+    fake.client.settings = async () => {
+      const read = await get();
+      if (!raced) {
+        raced = true;
+        mac.set("env-a:t2", "hide");
+        await mac.sync();
+      }
+      return read;
+    };
+    const patch = fake.client.patchSections;
+    const conflicts: unknown[] = [];
+    fake.client.patchSections = async (id, sections) => {
+      try {
+        return await patch(id, sections);
+      } catch (error) {
+        conflicts.push(error);
+        throw error;
+      }
+    };
+    laptop.set("env-b:t3", "hide");
+    await laptop.sync();
+    expect(conflicts).toEqual([
+      expect.objectContaining({
+        code: "conn.settings_version_conflict",
+        details: expect.objectContaining({ sections: { sidebarHiddenThreads: { version: 2 } } }),
+      }),
+    ]);
+    expect(profileHidden(fake)).toEqual(["env-a:t1", "env-a:t2", "env-b:t3"]);
+    expect(laptop.memory.ops.size).toBe(0);
+  });
+
+  it("has a mock Gateway that refuses the shapes the real one refuses", async () => {
+    const fake = fakeGateway();
+    const write = (value: unknown) =>
+      fake.client.patchSections(1, {
+        sidebarHiddenThreads: { version: 0, value: value as JsonObject },
+      });
+    await expect(write([])).rejects.toMatchObject({ status: 422 });
+    await expect(write({ schema: 1, threads: {} })).rejects.toMatchObject({ status: 422 });
+    await expect(
+      write({ schema: 1, threads: [{ environmentId: " ", threadId: "t" }] }),
+    ).rejects.toMatchObject({ status: 422 });
+    const cleared = await write(null);
+    expect(cleared.document.sidebarHiddenThreads).toEqual({ schema: 1, threads: [] });
+    expect(cleared.sections?.sidebarHiddenThreads?.version).toBe(1);
   });
 });

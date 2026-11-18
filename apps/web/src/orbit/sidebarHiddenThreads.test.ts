@@ -159,6 +159,38 @@ function liveShell(environmentId: string) {
   for (const listener of fixture.shellListeners.get(environmentId) ?? []) listener(value);
 }
 
+/**
+ * What the real Gateway stores for the section: null and an empty list both become
+ * an explicit `{schema: 1, threads: []}`; a bare list, blank refs or `threads` as a map are 422.
+ */
+function storedThreadRefs(value: unknown): {
+  schema: number;
+  threads: { environmentId: string; threadId: string }[];
+} {
+  const refuse = (why: string): never => {
+    throw new OrbitGatewayError({
+      code: "validation.failed",
+      message: why,
+      status: 422,
+      details: {},
+    });
+  };
+  if (value === null) return { schema: 1, threads: [] };
+  if (typeof value !== "object" || Array.isArray(value)) return refuse("not an object");
+  const { schema, threads } = value as { schema?: unknown; threads?: unknown };
+  if (schema !== 1) return refuse("unknown schema");
+  if (!Array.isArray(threads)) return refuse("threads must be a list");
+  return {
+    schema: 1,
+    threads: threads.map((entry: unknown) => {
+      const { environmentId, threadId } = (entry ?? {}) as Record<string, unknown>;
+      if (typeof environmentId !== "string" || environmentId.trim() === "") refuse("blank ref");
+      if (typeof threadId !== "string" || threadId.trim() === "") refuse("blank ref");
+      return { environmentId: environmentId as string, threadId: threadId as string };
+    }),
+  };
+}
+
 /** A Gateway profile with only the hidden-threads section, which checks versions. */
 function fakeGateway(initial: string[] = []) {
   const gateway = {
@@ -191,9 +223,11 @@ function fakeGateway(initial: string[] = []) {
     workspaces: [],
     updatedAt: "",
     document: gateway.value ? { sidebarHiddenThreads: gateway.value } : {},
-    sections: {
-      sidebarHiddenThreads: { version: gateway.version, updatedAt: null, updatedBy: "" },
-    },
+    // A section the profile never wrote is absent from the reply: version 0.
+    sections:
+      gateway.version > 0
+        ? { sidebarHiddenThreads: { version: gateway.version, updatedAt: null, updatedBy: "" } }
+        : {},
   });
   const client = {
     settings: async () => {
@@ -214,16 +248,17 @@ function fakeGateway(initial: string[] = []) {
         });
       }
       const section = patch.sidebarHiddenThreads!;
+      const stored = storedThreadRefs(section.value);
       if (section.version !== gateway.version) {
         throw new OrbitGatewayError({
           code: "conn.settings_version_conflict",
           message: "stale",
           status: 409,
-          details: {},
+          details: { sections: { sidebarHiddenThreads: { version: gateway.version } } },
         });
       }
       gateway.version += 1;
-      gateway.value = section.value as typeof gateway.value;
+      gateway.value = stored;
       if (gateway.omitReply) return { ...read(), document: {}, sections: {} };
       if (gateway.replyValue === "absent") return { ...read(), document: {} };
       if (gateway.replyValue === "malformed") {

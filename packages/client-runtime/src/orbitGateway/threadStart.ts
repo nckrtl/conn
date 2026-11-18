@@ -44,12 +44,14 @@ export async function fitOrbitThreadInstanceName(
   projectId: number,
   message: string,
   suffix: string,
+  beforeCheck?: () => Promise<void>,
 ): Promise<string> {
   const names = new Set(
     [NAME_SLUG_LENGTH, 24, 12, 0].map((length) => orbitThreadInstanceName(message, suffix, length)),
   );
   let addressTooLong = false;
   for (const name of names) {
+    if (beforeCheck) await beforeCheck();
     const check = await client.checkInstanceName(projectId, name).catch(() => null);
     if (check === null && addressTooLong) break;
     if (check?.reason !== "domain_invalid") return name;

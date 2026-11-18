@@ -94,65 +94,78 @@ describe("applyOtherWindowComposerDrafts", () => {
     );
   });
 
-  it("keeps a locally edited Orbit prompt connected to its Project when another window clears the sent draft", async () => {
-    const draftId = DraftId.make("orbit-draft");
-    const key = composerTargetKey(draftId);
-    const projectKey = orbitDraftLogicalProjectKey(66);
-    const store = useComposerDraftStore.getState();
-    store.setLogicalProjectDraftThreadId(
-      projectKey,
-      scopeProjectRef(ENVIRONMENT_ID, orbitDraftProjectId(66)),
-      draftId,
-      {
-        orbitTarget: {
-          projectId: 66,
-          projectSlug: "create-bench",
-          projectName: "Create bench",
-          nodeName: "beast",
-          instanceKind: "new",
-          instanceName: "isolated-test",
-          existing: null,
-          domainSuffix: ".create-bench.test",
+  it.each(["prompt", "target"])(
+    "keeps an Orbit %s edit connected to its Project when another window clears the sent draft",
+    async (editedField) => {
+      const draftId = DraftId.make("orbit-draft");
+      const key = composerTargetKey(draftId);
+      const projectKey = orbitDraftLogicalProjectKey(66);
+      const store = useComposerDraftStore.getState();
+      store.setLogicalProjectDraftThreadId(
+        projectKey,
+        scopeProjectRef(ENVIRONMENT_ID, orbitDraftProjectId(66)),
+        draftId,
+        {
+          orbitTarget: {
+            projectId: 66,
+            projectSlug: "create-bench",
+            projectName: "Create bench",
+            nodeName: "beast",
+            instanceKind: "new",
+            instanceName: "isolated-test",
+            existing: null,
+            domainSuffix: ".create-bench.test",
+          },
         },
-      },
-    );
-    store.setPrompt(draftId, "original");
-    await vi.advanceTimersByTimeAsync(300);
-    const storage = useComposerDraftStore.persist.getOptions().storage!;
-    const cleared = structuredClone(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY));
-    if (!cleared || "capturedState" in cleared.state) throw new Error("Expected a stored draft");
-    const external = {
-      ...cleared,
-      state: {
-        ...cleared.state,
-        draftsByThreadKey: {},
-        draftThreadsByThreadKey: {},
-        logicalProjectDraftThreadKeyByLogicalProjectKey: {},
-      },
-    };
+      );
+      store.setPrompt(draftId, "original");
+      await vi.advanceTimersByTimeAsync(300);
+      const storage = useComposerDraftStore.persist.getOptions().storage!;
+      const cleared = structuredClone(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY));
+      if (!cleared || "capturedState" in cleared.state) throw new Error("Expected a stored draft");
+      const external = {
+        ...cleared,
+        state: {
+          ...cleared.state,
+          draftsByThreadKey: {},
+          draftThreadsByThreadKey: {},
+          logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+        },
+      };
 
-    store.setPrompt(draftId, "edited here");
-    await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, external);
-    await vi.advanceTimersByTimeAsync(300);
-    const changes = new RecentKeyChanges(2_000);
-    changes.mark(`d:${key}`);
-    applyOtherWindowComposerDrafts(JSON.stringify(external), changes);
+      if (editedField === "prompt") {
+        store.setPrompt(draftId, "edited here");
+      } else {
+        const target = store.getDraftSession(draftId)?.orbitTarget;
+        if (!target) throw new Error("Expected an Orbit draft");
+        store.setDraftThreadContext(draftId, {
+          orbitTarget: { ...target, instanceName: "changed-target" },
+        });
+      }
+      await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, external);
+      await vi.advanceTimersByTimeAsync(300);
+      const changes = new RecentKeyChanges(2_000);
+      changes.mark(`${editedField === "prompt" ? "d" : "t"}:${key}`);
+      applyOtherWindowComposerDrafts(JSON.stringify(external), changes);
 
-    const after = useComposerDraftStore.getState();
-    expect(after.getComposerDraft(draftId)?.prompt).toBe("edited here");
-    expect(after.getDraftSession(draftId)?.orbitTarget?.projectId).toBe(66);
-    expect(after.logicalProjectDraftThreadKeyByLogicalProjectKey[projectKey]).toBe(draftId);
+      const expectedPrompt = editedField === "prompt" ? "edited here" : "original";
+      const instanceName = editedField === "target" ? "changed-target" : "isolated-test";
+      const after = useComposerDraftStore.getState();
+      expect(after.getComposerDraft(draftId)?.prompt).toBe(expectedPrompt);
+      expect(after.getDraftSession(draftId)?.orbitTarget?.instanceName).toBe(instanceName);
+      expect(after.logicalProjectDraftThreadKeyByLogicalProjectKey[projectKey]).toBe(draftId);
 
-    await vi.advanceTimersByTimeAsync(300);
-    const persisted = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
-    expect(persisted).toMatchObject({
-      state: {
-        draftsByThreadKey: { [key]: { prompt: "edited here" } },
-        draftThreadsByThreadKey: { [key]: { orbitTarget: { projectId: 66 } } },
-        logicalProjectDraftThreadKeyByLogicalProjectKey: { [projectKey]: draftId },
-      },
-    });
-  });
+      await vi.advanceTimersByTimeAsync(300);
+      const persisted = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+      expect(persisted).toMatchObject({
+        state: {
+          draftsByThreadKey: { [key]: { prompt: expectedPrompt } },
+          draftThreadsByThreadKey: { [key]: { orbitTarget: { projectId: 66, instanceName } } },
+          logicalProjectDraftThreadKeyByLogicalProjectKey: { [projectKey]: draftId },
+        },
+      });
+    },
+  );
 
   it("takes in drafts another window added, changed or sent", async () => {
     useComposerDraftStore.getState().setPrompt(first, "draft in this window");

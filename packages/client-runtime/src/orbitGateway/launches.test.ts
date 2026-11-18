@@ -43,7 +43,7 @@ const fixture = (patch: Partial<OrbitLaunch> = {}): OrbitLaunch => ({
   profile_id: 12,
   project_id: 78,
   instance_id: null,
-  workspace_id: null,
+  workspace_id: "workspace",
   target_node_id: 5,
   initiator_node_id: 7,
   source: "mobile",
@@ -543,10 +543,12 @@ it("reconciles a stale desktop Send against its accepted identity without postin
     await expect(second.submit(staleSend)).resolves.toEqual(launch);
     expect(post).toHaveBeenCalledOnce();
 
-    rows = [fixture({ source: "web", project_id: 99 })];
-    await observer.refresh();
-    expect(observer.canAcknowledge(original)).toBe(false);
-    await expect(second.submit(staleSend)).rejects.toThrow("different launch");
+    for (const unexpected of [{ project_id: 99 }, { workspace_id: "other-workspace" }]) {
+      rows = [fixture({ source: "web", ...unexpected })];
+      await observer.refresh();
+      expect(observer.canAcknowledge(original)).toBe(false);
+      await expect(second.submit(staleSend)).rejects.toThrow("different launch");
+    }
     rows = [];
     await observer.refresh();
     await expect(second.submit(staleSend)).rejects.toThrow("already handled");

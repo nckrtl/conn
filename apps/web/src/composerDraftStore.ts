@@ -190,6 +190,11 @@ function mergeComposerDraftStates(
     const value = Equal.equals(local[key], baseline[key]) ? stored[key] : local[key];
     return value === undefined ? {} : { [key]: value };
   };
+  const draftsByThreadKey = mergeDraftRecord(
+    stored.draftsByThreadKey,
+    local.draftsByThreadKey,
+    baseline.draftsByThreadKey,
+  );
   const draftThreadsByThreadKey = mergeDraftRecord(
     stored.draftThreadsByThreadKey,
     local.draftThreadsByThreadKey,
@@ -205,13 +210,14 @@ function mergeComposerDraftStates(
   for (const [key, session] of Object.entries(local.draftThreadsByThreadKey)) {
     const draft = local.draftsByThreadKey[key];
     if (
-      draftThreadsByThreadKey[key] === undefined &&
+      stored.draftThreadsByThreadKey[key] === undefined &&
       session.orbitTarget != null &&
-      draft !== undefined &&
-      !Equal.equals(draft, baseline.draftsByThreadKey[key])
+      (!Equal.equals(draft, baseline.draftsByThreadKey[key]) ||
+        !Equal.equals(session, baseline.draftThreadsByThreadKey[key]))
     ) {
       retainedOrbitDrafts.add(key);
-      draftThreadsByThreadKey[key] = session;
+      if (draft !== undefined) draftsByThreadKey[key] ??= draft;
+      draftThreadsByThreadKey[key] ??= session;
     }
   }
   for (const [projectKey, draftKey] of Object.entries(
@@ -221,11 +227,7 @@ function mergeComposerDraftStates(
       logicalProjectDraftThreadKeyByLogicalProjectKey[projectKey] ??= draftKey;
   }
   return {
-    draftsByThreadKey: mergeDraftRecord(
-      stored.draftsByThreadKey,
-      local.draftsByThreadKey,
-      baseline.draftsByThreadKey,
-    ),
+    draftsByThreadKey,
     draftThreadsByThreadKey,
     logicalProjectDraftThreadKeyByLogicalProjectKey,
     ...pick("stickyModelSelectionByProvider"),
@@ -4629,16 +4631,15 @@ export function applyOtherWindowComposerDrafts(
   const local = partializeComposerDraftStoreState(useComposerDraftStore.getState());
   const changedHere = (prefix: string) => (key: string) => changes.has(prefix + key);
 
+  const retainsEditedOrbitDraft = (key: string) =>
+    incoming.draftThreadsByThreadKey[key] === undefined &&
+    local.draftThreadsByThreadKey[key]?.orbitTarget != null &&
+    (changedHere("d:")(key) || changedHere("t:")(key));
   const drafts = diffIncomingRecord(
     local.draftsByThreadKey,
     incoming.draftsByThreadKey,
-    changedHere("d:"),
+    (key) => changedHere("d:")(key) || retainsEditedOrbitDraft(key),
   );
-  const retainsEditedOrbitDraft = (key: string) =>
-    incoming.draftThreadsByThreadKey[key] === undefined &&
-    local.draftsByThreadKey[key] !== undefined &&
-    local.draftThreadsByThreadKey[key]?.orbitTarget != null &&
-    changedHere("d:")(key);
   const draftThreads = diffIncomingRecord(
     local.draftThreadsByThreadKey,
     incoming.draftThreadsByThreadKey,

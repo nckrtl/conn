@@ -188,11 +188,7 @@ export function createOrbitLaunchObserver(
     );
   }
 
-  async function submit(
-    admission: OrbitLaunchAdmission,
-    expected: OrbitLaunchScope,
-    reconcile: boolean | "accepted",
-  ) {
+  function requireGateway(expected: OrbitLaunchScope) {
     const gateway = client();
     if (
       gateway === null ||
@@ -203,6 +199,34 @@ export function createOrbitLaunchObserver(
         msg("Connect to the original Orbit profile and device before sending."),
       );
     }
+    return gateway;
+  }
+
+  async function confirmBinding(
+    gateway: OrbitGatewayClient,
+    expected: OrbitLaunchScope,
+    version: number,
+  ) {
+    const me = await gateway.me();
+    const rebound = me.id !== expected.nodeId || me.profile?.id !== expected.profileId;
+    if (rebound && scopeVersion === version) setScope(null);
+    if (rebound || scopeVersion !== version) {
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("This device's Orbit profile changed before sending."),
+      );
+    }
+  }
+
+  async function verifyScope(expected: OrbitLaunchScope) {
+    await confirmBinding(requireGateway(expected), expected, scopeVersion);
+  }
+
+  async function submit(
+    admission: OrbitLaunchAdmission,
+    expected: OrbitLaunchScope,
+    reconcile: boolean | "accepted",
+  ) {
+    const gateway = requireGateway(expected);
     if (
       admission.request.expected_profile_id !== expected.profileId ||
       admission.request.expected_node_id !== expected.nodeId
@@ -220,14 +244,7 @@ export function createOrbitLaunchObserver(
         );
       }
     };
-    const me = await gateway.me();
-    const rebound = me.id !== expected.nodeId || me.profile?.id !== expected.profileId;
-    if (rebound && scopeVersion === version) setScope(null);
-    if (rebound || scopeVersion !== version) {
-      throw OrbitLaunchCopyError.fromCopy(
-        msg("This device's Orbit profile changed before sending."),
-      );
-    }
+    await confirmBinding(gateway, expected, version);
     ensureAccess();
     const api = gateway.launches;
     const readAdmissions = () => readLaunches(api, expected.profileId, version, "reconcile");
@@ -354,6 +371,7 @@ export function createOrbitLaunchObserver(
     },
     setScope,
     canAcknowledge,
+    verifyScope,
     refresh,
     submit,
     act,
@@ -366,6 +384,9 @@ function matchesLaunchIdentity(launch: OrbitLaunch, admission: OrbitLaunchAdmiss
     launch.profile_id === admission.request.expected_profile_id &&
     launch.initiator_node_id === admission.request.expected_node_id &&
     launch.project_id === admission.request.project_id &&
+    launch.workspace_id === (admission.request.workspace_id ?? null) &&
+    (admission.request.target.kind !== "existing" ||
+      launch.instance_id === admission.request.target.instance_id) &&
     launch.source === admission.request.source &&
     (launch.thread === null ||
       (launch.thread.thread_id === admission.request.thread_id &&

@@ -7,6 +7,7 @@ const navigation = vi.hoisted(() => ({
 }));
 const gateway = vi.hoisted(() => ({
   pair: vi.fn(),
+  me: vi.fn(),
   environments: vi.fn(),
   state: vi.fn(),
   checkInstanceName: vi.fn(),
@@ -54,6 +55,8 @@ vi.mock("../layout/workspace/useSelectWorkspaceDetail", () => ({
 vi.mock("./orbitGatewayClient", () => ({
   orbitGatewayClient: {
     environments: gateway.environments,
+    me: gateway.me,
+    launches: { list: async () => [] },
     checkInstanceName: gateway.checkInstanceName,
   },
 }));
@@ -125,6 +128,35 @@ it("does not send a corrected prompt-derived name after the observer lost its sc
     "original Orbit profile and device",
   );
   expect(gateway.checkInstanceName).not.toHaveBeenCalled();
+});
+
+it("rechecks scope before each name probe even after stale mobile state reinstates the old scope", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  gateway.loadJournal.mockResolvedValue("[]");
+  gateway.state.mockReturnValue({ provider: "orbit", node: { id: 7, profile: { id: 12 } } });
+  gateway.me.mockResolvedValue({ id: 7, profile: { id: 12 } });
+  gateway.checkInstanceName.mockClear();
+  gateway.checkInstanceName.mockImplementationOnce(async () => {
+    gateway.me.mockResolvedValue({ id: 7, profile: { id: 13 } });
+    mobileOrbitLaunches.setScope(null);
+    mobileOrbitLaunches.setScope(scope);
+    return { reason: "domain_invalid" };
+  });
+  mobileOrbitLaunches.setScope(scope);
+  try {
+    await expect(
+      startOrbitThread({ id: 78 }, "Long protected prompt for a new instance", "sheet"),
+    ).rejects.toThrow("Orbit profile changed");
+    expect(gateway.checkInstanceName).toHaveBeenCalledOnce();
+    expect(mobileOrbitLaunches.scope()).toBeNull();
+    mobileOrbitLaunches.setScope(scope);
+    await expect(startOrbitThread({ id: 78 }, "Another protected prompt", "sheet")).rejects.toThrow(
+      "Orbit profile changed",
+    );
+    expect(gateway.checkInstanceName).toHaveBeenCalledOnce();
+  } finally {
+    mobileOrbitLaunches.setScope(null);
+  }
 });
 
 it("opens the canonical thread after pairing only if the user has not navigated away", async () => {

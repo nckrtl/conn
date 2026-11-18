@@ -95,7 +95,7 @@ describe("applyOtherWindowComposerDrafts", () => {
     );
   });
 
-  it.each(["prompt", "target", "unchanged"])(
+  it.each(["prompt", "target", "unchanged", "saved-original", "other-window-edit"])(
     "reconciles an Orbit %s draft when another window clears a newer sent version",
     async (editedField) => {
       const draftId = DraftId.make("orbit-draft");
@@ -123,7 +123,8 @@ describe("applyOtherWindowComposerDrafts", () => {
       await vi.advanceTimersByTimeAsync(300);
       const storage = useComposerDraftStore.persist.getOptions().storage!;
       const original = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
-      if (editedField === "unchanged") {
+      const passive = ["unchanged", "saved-original", "other-window-edit"].includes(editedField);
+      if (passive) {
         store.setPrompt(draftId, "later revision sent in the other window");
         await vi.advanceTimersByTimeAsync(300);
       }
@@ -145,15 +146,37 @@ describe("applyOtherWindowComposerDrafts", () => {
           orbitTarget: { ...target, instanceName: "changed-target" },
         });
       }
+      if (editedField === "saved-original") {
+        await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, original!);
+        await vi.advanceTimersByTimeAsync(300);
+        store.setPrompt(draftId, "earlier draft saved by this window");
+        await vi.advanceTimersByTimeAsync(300);
+      }
+      if (editedField === "other-window-edit") {
+        if (!original || "capturedState" in original.state)
+          throw new Error("Expected a stored draft");
+        const draft = original.state.draftsByThreadKey[key]!;
+        await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, {
+          ...original,
+          state: {
+            ...original.state,
+            draftsByThreadKey: { [key]: { ...draft, prompt: "genuine edit in a third window" } },
+            orbitDraftClearRevisions: external.state.orbitDraftClearRevisions ?? {},
+          },
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        expect(isStaleClearedOrbitDraft(draftId)).toBe(true);
+        return;
+      }
       await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, external);
       await vi.advanceTimersByTimeAsync(300);
       let time = 0;
       const changes = new RecentKeyChanges(2_000, () => time);
       changes.mark(`${editedField === "prompt" ? "d" : "t"}:${key}`);
       time = 2_001;
-      expect(isStaleClearedOrbitDraft(draftId)).toBe(editedField === "unchanged");
+      expect(isStaleClearedOrbitDraft(draftId)).toBe(passive);
       applyOtherWindowComposerDrafts(JSON.stringify(external), changes);
-      if (editedField === "unchanged") {
+      if (passive) {
         expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
         await vi.advanceTimersByTimeAsync(300);
         const persisted = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);

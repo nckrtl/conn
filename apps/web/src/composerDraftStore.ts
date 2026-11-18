@@ -154,7 +154,21 @@ interface ComposerDraftWrite {
 let composerDraftLoadedState: PersistedComposerDraftStoreState | null = null;
 let composerDraftLastWrite: ComposerDraftWrite | null = null;
 let composerDraftPendingWrite: ComposerDraftWrite | null = null;
-const locallyEditedOrbitDrafts = new Set<string>();
+const locallyEditedOrbitPrompts = new Set<string>();
+const locallyEditedOrbitTargets = new Set<string>();
+
+function hasUnwrittenOrbitEdit(
+  local: PersistedComposerDraftStoreState,
+  baseline: PersistedComposerDraftStoreState | null,
+  key: string,
+) {
+  return (
+    (locallyEditedOrbitPrompts.has(key) &&
+      !Equal.equals(local.draftsByThreadKey[key], baseline?.draftsByThreadKey[key])) ||
+    (locallyEditedOrbitTargets.has(key) &&
+      !Equal.equals(local.draftThreadsByThreadKey[key], baseline?.draftThreadsByThreadKey[key]))
+  );
+}
 let pendingOrbitDraftClear: {
   readonly key: string;
   readonly revisions: readonly string[];
@@ -226,7 +240,8 @@ function mergeComposerDraftStates(
     const cleared = stored.orbitDraftClearRevisions?.[key];
     if (
       Array.isArray(cleared) &&
-      (!locallyEditedOrbitDrafts.has(key) || cleared.includes(orbitDraftRevision(local, key)))
+      (!hasUnwrittenOrbitEdit(local, baseline, key) ||
+        cleared.includes(orbitDraftRevision(local, key)))
     ) {
       delete draftsByThreadKey[key];
       delete draftThreadsByThreadKey[key];
@@ -274,9 +289,6 @@ function serializeComposerDraftState(value: StorageValue<ComposerPersistState>):
   const stored = baseline ? readStoredComposerDraftState() : null;
   const drafts = stored && baseline ? mergeComposerDraftStates(stored, local, baseline) : local;
   const orbitDraftClearRevisions = { ...stored?.orbitDraftClearRevisions };
-  for (const key of Object.keys(orbitDraftClearRevisions)) {
-    if (drafts.draftThreadsByThreadKey[key] !== undefined) delete orbitDraftClearRevisions[key];
-  }
   const clear = pendingOrbitDraftClear;
   if (clear !== null && drafts.draftThreadsByThreadKey[clear.key] === undefined)
     orbitDraftClearRevisions[clear.key] = clear.revisions;
@@ -4636,17 +4648,20 @@ useComposerDraftStore.subscribe((next, previous) => {
       next.draftThreadsByThreadKey === previous.draftThreadsByThreadKey)
   )
     return;
-  for (const key of locallyEditedOrbitDrafts) {
+  for (const key of locallyEditedOrbitPrompts) {
     if (next.draftThreadsByThreadKey[key]?.orbitTarget == null)
-      locallyEditedOrbitDrafts.delete(key);
+      locallyEditedOrbitPrompts.delete(key);
+  }
+  for (const key of locallyEditedOrbitTargets) {
+    if (next.draftThreadsByThreadKey[key]?.orbitTarget == null)
+      locallyEditedOrbitTargets.delete(key);
   }
   for (const [key, session] of Object.entries(next.draftThreadsByThreadKey)) {
-    if (
-      session.orbitTarget != null &&
-      (!Equal.equals(next.draftsByThreadKey[key], previous.draftsByThreadKey[key]) ||
-        !Equal.equals(session, previous.draftThreadsByThreadKey[key]))
-    )
-      locallyEditedOrbitDrafts.add(key);
+    if (session.orbitTarget == null) continue;
+    if (!Equal.equals(next.draftsByThreadKey[key], previous.draftsByThreadKey[key]))
+      locallyEditedOrbitPrompts.add(key);
+    if (!Equal.equals(session, previous.draftThreadsByThreadKey[key]))
+      locallyEditedOrbitTargets.add(key);
   }
 });
 
@@ -4697,6 +4712,7 @@ export function applyOtherWindowComposerDrafts(
 
   const orbitDraftClearRevisions = (incomingState as PersistedComposerDraftStoreState | undefined)
     ?.orbitDraftClearRevisions;
+  const baseline = composerDraftLastWrite?.local ?? composerDraftLoadedState;
   const retainsEditedOrbitDraft = (key: string) => {
     if (
       incoming.draftThreadsByThreadKey[key] !== undefined ||
@@ -4705,7 +4721,8 @@ export function applyOtherWindowComposerDrafts(
       return false;
     const cleared = orbitDraftClearRevisions?.[key];
     return Array.isArray(cleared)
-      ? locallyEditedOrbitDrafts.has(key) && !cleared.includes(orbitDraftRevision(local, key))
+      ? hasUnwrittenOrbitEdit(local, baseline, key) &&
+          !cleared.includes(orbitDraftRevision(local, key))
       : changedHere("d:")(key) || changedHere("t:")(key);
   };
   const drafts = diffIncomingRecord(
@@ -4760,7 +4777,7 @@ export function applyOtherWindowComposerDrafts(
     useComposerDraftStore.setState((state) => {
       const draftsByThreadKey = { ...state.draftsByThreadKey };
       for (const [threadKey, draft] of drafts.replace) {
-        locallyEditedOrbitDrafts.delete(threadKey);
+        locallyEditedOrbitPrompts.delete(threadKey);
         revokeDraftThreadPreviewUrls(draftsByThreadKey[threadKey]);
         draftsByThreadKey[threadKey] = toHydratedThreadDraft(draft);
       }
@@ -4770,10 +4787,12 @@ export function applyOtherWindowComposerDrafts(
       }
       const draftThreadsByThreadKey = { ...state.draftThreadsByThreadKey };
       for (const [threadKey, draftThread] of draftThreads.replace) {
+        locallyEditedOrbitTargets.delete(threadKey);
         draftThreadsByThreadKey[threadKey] = toHydratedDraftThreadState(draftThread);
       }
       for (const threadKey of draftThreads.remove) {
-        locallyEditedOrbitDrafts.delete(threadKey);
+        locallyEditedOrbitPrompts.delete(threadKey);
+        locallyEditedOrbitTargets.delete(threadKey);
         delete draftThreadsByThreadKey[threadKey];
       }
       const logicalProjectDraftThreadKeyByLogicalProjectKey = {
@@ -4978,11 +4997,19 @@ export function isStaleClearedOrbitDraft(draftId: DraftId) {
   if (key === null) return false;
   const stored = readStoredComposerDraftState();
   const cleared = stored?.orbitDraftClearRevisions?.[key];
-  return (
-    stored?.draftThreadsByThreadKey[key] === undefined &&
-    Array.isArray(cleared) &&
-    (!locallyEditedOrbitDrafts.has(key) ||
-      cleared.includes(orbitDraftRevision(partializeComposerDraftStoreState(state), key)))
+  if (!Array.isArray(cleared)) return false;
+  const local = partializeComposerDraftStoreState(state);
+  const revision = orbitDraftRevision(local, key);
+  if (cleared.includes(revision)) return true;
+  if (
+    stored?.draftThreadsByThreadKey[key] !== undefined &&
+    orbitDraftRevision(stored, key) === revision
+  )
+    return false;
+  return !hasUnwrittenOrbitEdit(
+    local,
+    composerDraftLastWrite?.local ?? composerDraftLoadedState,
+    key,
   );
 }
 

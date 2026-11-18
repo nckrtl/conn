@@ -90,8 +90,10 @@ pub(crate) fn check(
             if text(command, "projectId") != project_id {
                 return reject("The thread names another project.");
             }
-            if tx.thread(thread_id)?.is_some() {
-                return reject(format!("Thread {thread_id} already exists."));
+            // A deleted thread keeps its history under its ID: a guarded create never takes
+            // over an ID that was ever used.
+            if tx.thread_id_used(thread_id)? {
+                return reject(format!("Thread {thread_id} already exists or existed."));
             }
             Ok(())
         }

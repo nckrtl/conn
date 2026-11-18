@@ -964,6 +964,18 @@ impl Tx<'_> {
         thread(&self.tx, thread_id)
     }
 
+    /// Whether `thread_id` was ever used, deleted or not: a row in `threads` or any event.
+    pub(crate) fn thread_id_used(&self, thread_id: &str) -> StoreResult<bool> {
+        self.tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1)
+                     OR EXISTS(SELECT 1 FROM events WHERE thread_id = ?1)",
+                [thread_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(err)
+    }
+
     pub(crate) fn entity(
         &self,
         thread_id: &str,

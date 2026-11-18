@@ -37,7 +37,8 @@ fn grant(message_id: &str, text: &str, create: bool) -> Value {
         "project_id": project_id(), "thread_id": THREAD,
         "create": if create { json!({"command_id": "cmd-create", "body": create_body()}) } else { Value::Null },
         "message": {"command_id": format!("cmd-{message_id}"), "message_id": message_id,
-            "text_sha256": sha(text), "interrupt_command_id": format!("stop-{message_id}")},
+            "text_sha256": sha(text), "interrupt_command_id": format!("stop-{message_id}"),
+            "created_by": "user", "creation_source": "web"},
         "earlier": [], "questions": [],
     })
 }
@@ -437,10 +438,7 @@ async fn an_earlier_turns_thread_shows_only_its_settlement_evidence() {
     assert_eq!(view["messages"].as_array().unwrap().len(), 1, "{view}");
     assert_eq!(runs(&view).len(), 1, "{view}");
     assert!(view["turnItems"].as_array().unwrap().is_empty());
-    assert!(
-        view["thread"]["title"].is_null(),
-        "no thread details: {view}"
-    );
+    assert_eq!(view["thread"]["title"], "", "no thread details: {view}");
     // It stops exactly that run, by its admitted stop ID.
     let mut stop_it = stop("stop-r1", &r1["id"]);
     stop_it["threadId"] = json!(earlier_thread);
@@ -693,4 +691,101 @@ async fn commits_follow_the_fence_and_survive_the_caller() {
     }
     drop(call);
     until_run(&lab, THREAD, "m1", "completed").await;
+}
+
+type ProjectionSuccess = conn_contract::rpc::orchestration::get_thread_projection::Success;
+type ProjectionError = conn_contract::rpc::orchestration::get_thread_projection::Error;
+type DispatchError = conn_contract::rpc::orchestration::dispatch_command::Error;
+
+/// The failure inside an `Exit` the client receives.
+fn typed_error(exit: &Value) -> Value {
+    exit["cause"]
+        .as_array()
+        .and_then(|c| c.first())
+        .map(|c| c["error"].clone())
+        .unwrap_or_else(|| exit["cause"]["error"].clone())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn refusals_and_settlement_reads_decode_as_the_client_expects() {
+    let lab = Lab::start().await;
+    let earlier_thread = "reviewer-thread";
+    let mut create = create_command();
+    create["commandId"] = json!("person-create-r");
+    create["threadId"] = json!(earlier_thread);
+    person(&lab, create).await;
+    let mut message = dispatch_command("pr1", "r1", "done");
+    message["threadId"] = json!(earlier_thread);
+    person(&lab, message).await;
+    until_run(&lab, earlier_thread, "r1", "completed").await;
+    let mut g = grant("m1", "do it", true);
+    g["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "r1", "text_sha256": sha("done"),
+        "interrupt_command_id": "stop-r1"}]);
+    let mut w = worker(&lab, g).await;
+    let view = read(&mut w, 1, earlier_thread)
+        .await
+        .expect("settlement read");
+    let decoded: Result<ProjectionSuccess, _> = conn_contract::from_json(view.clone());
+    assert!(decoded.is_ok(), "{decoded:?}\n{view}");
+    assert_eq!(view["thread"]["title"], "");
+    let refused = read(&mut w, 2, "another-thread").await.unwrap_err();
+    let error: Result<ProjectionError, _> = conn_contract::from_json(typed_error(&refused));
+    assert!(error.is_ok(), "{refused}");
+    let refused = dispatch(&mut w, 3, dispatch_command("cmd-x", "x", "x"))
+        .await
+        .unwrap_err();
+    let error: Result<DispatchError, _> = conn_contract::from_json(typed_error(&refused));
+    assert!(error.is_ok(), "{refused}");
+    // Another body under the frozen message ID: the read refuses instead of showing it.
+    let mut wrong = grant("m1", "do it", true);
+    wrong["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "r1", "text_sha256": sha("other"),
+        "interrupt_command_id": "stop-r1"}]);
+    let mut w2 = worker(&lab, wrong).await;
+    assert!(read(&mut w2, 1, earlier_thread).await.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_captured_attribution_is_frozen() {
+    let lab = Lab::start().await;
+    let mut w = worker(&lab, grant("m1", "do it", true)).await;
+    dispatch(&mut w, 1, create_command()).await.expect("create");
+    let mut message = dispatch_command("cmd-m1", "m1", "do it");
+    message["createdBy"] = json!("system");
+    message["creationSource"] = json!("server");
+    assert!(dispatch(&mut w, 2, message).await.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_deleted_thread_id_is_never_taken_over_or_followed() {
+    let lab = Lab::start().await;
+    let mut w = worker(&lab, grant("m1", "do it", true)).await;
+    dispatch(&mut w, 1, create_command()).await.expect("create");
+    send(
+        &mut w,
+        json!({"_tag": "Request", "id": "9", "tag": "orchestration.subscribeThread",
+               "payload": {"threadId": THREAD}, "headers": []}),
+    )
+    .await;
+    let first = next(&mut w).await.expect("a first item");
+    assert_eq!(first["_tag"], "Chunk", "{first}");
+    person(
+        &lab,
+        json!({"type": "thread.delete", "commandId": "person-delete", "threadId": THREAD}),
+    )
+    .await;
+    // The open subscription ends instead of following the ID.
+    let ended = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame = next(&mut w).await.expect("socket open");
+            if frame["_tag"] == "Exit" && frame["requestId"] == "9" {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("the stream kept going");
+    assert_ne!(ended["exit"]["_tag"], "Success", "{ended}");
+    // A guarded create never takes over a used ID.
+    let mut w2 = worker(&lab, grant("m1", "do it", true)).await;
+    assert!(dispatch(&mut w2, 1, create_command()).await.is_err());
 }

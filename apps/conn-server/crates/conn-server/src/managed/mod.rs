@@ -445,23 +445,26 @@ impl Drop for Handle {
     }
 }
 
-/// A task worker's write commits only while its handler is open, and the access decision
-/// holds the authority lock through the commit: a fence lands either before (the write is
-/// refused) or after (the work was already accepted and stays with the server).
+/// A task worker's write commits only while its handler is open. The access decision is
+/// made under the authority lock with the time read after acquiring it; the commit itself
+/// runs outside it, so a slow commit never holds up a fence or the runtime thread. The order
+/// is defined: a write accepted at the check is work the server accepted (it stays, as the
+/// contract says), and the call task holds this handler until the commit has ended, so the
+/// fence's `handlers_closed_at`, and its ACK, always come after it.
 impl conn_engine::CommitGate for Handle {
     fn commit_if_open(&self, commit: &mut dyn FnMut()) -> bool {
         if *self.closed.borrow() {
             return false;
         }
-        let now = Instant::now();
-        let authority = crate::lock(&self.shared.authority);
-        if authority.handler_state(self.id, self.expires_ms, now, now_ms())
-            != authority::GateState::Open
-        {
-            return false;
+        let open = {
+            let authority = crate::lock(&self.shared.authority);
+            let now = Instant::now();
+            authority.handler_state(self.id, self.expires, now) == authority::GateState::Open
+        };
+        if open {
+            commit();
         }
-        commit();
-        true
+        open
     }
 }
 

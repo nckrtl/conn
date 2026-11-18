@@ -51,6 +51,9 @@ pub struct FrozenMessage {
     pub text_sha256: String,
     /// The command ID of the one `run.interrupt` that may stop this message's run.
     pub interrupt_command_id: String,
+    /// The captured attribution: the message carries exactly these.
+    pub created_by: String,
+    pub creation_source: String,
 }
 
 /// An earlier, unsettled turn this one may settle: read the evidence of its frozen message,
@@ -235,6 +238,11 @@ impl TaskGrant {
                 {
                     return Err("a task message carries no attachments".into());
                 }
+                if text("createdBy") != message.created_by
+                    || text("creationSource") != message.creation_source
+                {
+                    return Err("the message's attribution differs from the captured one".into());
+                }
                 if command["dispatchMode"] != json!({"type": "start_immediately"}) {
                     return Err("a task message starts its run at once".into());
                 }
@@ -286,52 +294,113 @@ impl TaskGrant {
     }
 
     /// The part of an earlier turn's thread the worker may see: its frozen message, the run
-    /// that message started, that run's nodes and requests. Nothing else of that thread.
-    fn settlement_view(&self, thread_id: &str, mut projection: Value) -> Value {
+    /// that message started, that run's nodes and requests, and a schema-valid thread with
+    /// its details blanked. Evidence that fails the ownership checks (another body, several
+    /// runs, another recorded run) is refused, so the earlier turn stays unsettled.
+    fn settlement_view(&self, thread_id: &str, mut projection: Value) -> Result<Value, String> {
         if thread_id == self.thread_id {
-            return projection;
+            return Ok(projection);
         }
-        let messages: Vec<String> = self
-            .earlier
-            .iter()
-            .filter(|e| e.thread_id == thread_id)
-            .map(|e| e.message_id.clone())
-            .collect();
-        let ids = |rows: &Value, keep: &dyn Fn(&Value) -> bool| -> Vec<String> {
-            rows.as_array()
+        let rows = |key: &str| projection[key].as_array().cloned().unwrap_or_default();
+        let mut messages = Vec::new();
+        let mut runs = Vec::new();
+        for earlier in self.earlier.iter().filter(|e| e.thread_id == thread_id) {
+            let found: Vec<Value> = rows("messages")
                 .into_iter()
-                .flatten()
-                .filter(|row| keep(row))
-                .filter_map(|row| row["id"].as_str().map(str::to_owned))
-                .collect()
-        };
+                .filter(|m| m["id"] == earlier.message_id.as_str())
+                .collect();
+            let Some(message) = found.first() else {
+                // Missing: the worker sees no message and leaves the turn unsettled.
+                continue;
+            };
+            let digest = message["text"]
+                .as_str()
+                .map(|t| conn_support::hex::hex(&conn_support::hmac::sha256(t.as_bytes())));
+            if found.len() != 1 || digest.as_deref() != Some(earlier.text_sha256.as_str()) {
+                return Err("the earlier message differs from the frozen one".into());
+            }
+            let started: Vec<Value> = rows("runs")
+                .into_iter()
+                .filter(|r| r["userMessageId"] == earlier.message_id.as_str())
+                .collect();
+            if started.len() > 1 {
+                return Err("the earlier message started several runs".into());
+            }
+            if let (Some(run), Some(recorded)) = (started.first(), &earlier.run_id)
+                && run["id"] != recorded.as_str()
+            {
+                return Err("the earlier run is not the recorded one".into());
+            }
+            messages.push(earlier.message_id.clone());
+            runs.extend(
+                started
+                    .iter()
+                    .filter_map(|r| r["id"].as_str().map(str::to_owned)),
+            );
+        }
         let has = |list: &[String], value: &Value| {
             value.as_str().is_some_and(|v| list.iter().any(|x| x == v))
         };
-        let runs = ids(&projection["runs"], &|r| {
-            has(&messages, &r["userMessageId"])
-        });
-        let nodes = ids(&projection["nodes"], &|n| has(&runs, &n["runId"]));
+        let nodes: Vec<String> = rows("nodes")
+            .iter()
+            .filter(|n| has(&runs, &n["runId"]))
+            .filter_map(|n| n["id"].as_str().map(str::to_owned))
+            .collect();
         let Some(object) = projection.as_object_mut() else {
-            return Value::Null;
+            return Err("the projection cannot be read".into());
         };
+        let mut latest: Option<String> = None;
         for (key, value) in object.iter_mut() {
-            if key == "thread" {
-                *value = json!({"id": value["id"], "projectId": value["projectId"]});
-                continue;
-            }
-            let Some(rows) = value.as_array_mut() else {
+            let Some(list) = value.as_array_mut() else {
                 continue;
             };
             match key.as_str() {
-                "messages" => rows.retain(|m| has(&messages, &m["id"])),
-                "runs" => rows.retain(|r| has(&runs, &r["id"])),
-                "nodes" => rows.retain(|n| has(&nodes, &n["id"])),
-                "runtimeRequests" => rows.retain(|q| has(&nodes, &q["nodeId"])),
-                _ => rows.clear(),
+                "messages" => list.retain(|m| has(&messages, &m["id"])),
+                "runs" => list.retain(|r| has(&runs, &r["id"])),
+                "nodes" => list.retain(|n| has(&nodes, &n["id"])),
+                "runtimeRequests" => list.retain(|q| has(&nodes, &q["nodeId"])),
+                _ => list.clear(),
+            }
+            for row in list.iter() {
+                for field in [
+                    "updatedAt",
+                    "completedAt",
+                    "resolvedAt",
+                    "createdAt",
+                    "requestedAt",
+                ] {
+                    if let Some(time) = row[field].as_str()
+                        && latest.as_deref().is_none_or(|l| time > l)
+                    {
+                        latest = Some(time.to_owned());
+                    }
+                }
             }
         }
-        projection
+        // The thread stays a valid `OrchestrationV2AppThread`; what names or locates the
+        // other role's work is blanked, and its times come from the evidence only.
+        let created = object["thread"]["createdAt"].clone();
+        let latest = latest.map_or(created, Value::from);
+        if let Some(thread) = object.get_mut("thread").and_then(Value::as_object_mut) {
+            thread.insert("title".into(), json!(""));
+            for key in [
+                "branch",
+                "worktreePath",
+                "lastVisitedAt",
+                "snoozedAt",
+                "snoozedUntil",
+            ] {
+                if thread.contains_key(key) {
+                    thread.insert(key.into(), Value::Null);
+                }
+            }
+            if thread.contains_key("pullRequests") {
+                thread.insert("pullRequests".into(), json!([]));
+            }
+            thread.insert("updatedAt".into(), latest.clone());
+        }
+        object.insert("updatedAt".into(), latest);
+        Ok(projection)
     }
 }
 
@@ -340,15 +409,19 @@ pub fn is_task_worker(claims: &Claims) -> bool {
     TaskGrant::from_claims(claims).is_some()
 }
 
-/// The typed refusal a client decodes for any of these methods.
-fn outside(reason: &str) -> Failure {
+/// The typed refusal a client decodes for any of these methods: the scope check's own
+/// `EnvironmentAuthorizationError`, naming the permission the call needed.
+fn outside(reason: &str, permission: &str) -> Failure {
     Failure::Fail(json!({
         "_tag": "EnvironmentAuthorizationError",
         "message": format!("Outside the task grant: {reason}."),
-        "requiredScope": "orchestration",
-        "requiredPermission": "orchestration:operate",
+        "requiredScope": crate::auth::legacy_parent(permission),
+        "requiredPermission": permission,
     }))
 }
+
+const READ: &str = "orchestration:read";
+const OPERATE: &str = "orchestration:operate";
 
 fn failure<E: Serialize>(error: EngineError<E>) -> Failure {
     match error {
@@ -371,16 +444,59 @@ async fn read_thread(
     thread_id: ThreadId,
 ) -> Result<Value, Failure> {
     if !grant.may_read(thread_id.as_str()) {
-        return Err(outside("not an admitted thread"));
+        return Err(outside("not an admitted thread", READ));
     }
     let projection = engine
         .get_thread_projection(thread_id.clone())
         .await
         .map_err(failure)?;
     if projection["thread"]["projectId"] != grant.project_id.as_str() {
-        return Err(outside("the thread belongs to another project"));
+        return Err(outside("the thread belongs to another project", READ));
     }
-    Ok(grant.settlement_view(thread_id.as_str(), projection))
+    grant
+        .settlement_view(thread_id.as_str(), projection)
+        .map_err(|r| outside(&r, READ))
+}
+
+/// Forwards a thread stream while the thread is the admitted project's. A snapshot of
+/// another project, the thread's deletion, or a thread event naming another project ends the
+/// stream with a refusal: a thread ID recreated elsewhere is never followed.
+fn bound_to_project(
+    mut items: crate::table::ItemStream,
+    project_id: String,
+) -> crate::table::ItemStream {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        loop {
+            let item = tokio::select! {
+                () = tx.closed() => return,
+                item = items.recv() => item,
+            };
+            let Some(item) = item else { return };
+            let outside_project = item.as_ref().is_ok_and(|value| {
+                let snapshot = &value["projection"]["thread"]["projectId"];
+                let event = &value["event"];
+                let event_type = event["type"].as_str().unwrap_or_default();
+                let named = &event["payload"]["projectId"];
+                (value["kind"] == "snapshot" && *snapshot != project_id.as_str())
+                    || event_type == "thread.deleted"
+                    || (event_type.starts_with("thread.")
+                        && !named.is_null()
+                        && *named != project_id.as_str())
+            });
+            if outside_project {
+                let _ = tx
+                    .send(Err(outside("the thread left the admitted project", READ)))
+                    .await;
+                return;
+            }
+            let ended = item.is_err();
+            if tx.send(item).await.is_err() || ended {
+                return;
+            }
+        }
+    });
+    rx
 }
 
 /// The method table of one task worker session: the allowlist, bound to its grant. Every
@@ -397,7 +513,9 @@ pub fn table(
         move |_, command: Command| {
             let (e, g, c) = (e.clone(), g.clone(), commit_gate.clone());
             async move {
-                let guard = g.guard_for(&to_json(&command)).map_err(|r| outside(&r))?;
+                let guard = g
+                    .guard_for(&to_json(&command))
+                    .map_err(|r| outside(&r, OPERATE))?;
                 e.dispatch_guarded(command, guard, Some(c))
                     .await
                     .map_err(failure)
@@ -419,12 +537,13 @@ pub fn table(
             let (e, g) = (e.clone(), g.clone());
             async move {
                 if input.thread_id != g.thread_id {
-                    return Err(outside("not the admitted thread"));
+                    return Err(outside("not the admitted thread", READ));
                 }
                 read_thread(&e, &g, ThreadId::from(input.thread_id.clone())).await?;
                 e.subscribe_thread(input)
                     .await
                     .map(crate::methods::orchestration::forward)
+                    .map(|items| bound_to_project(items, g.project_id.clone()))
                     .map_err(failure)
             }
         },

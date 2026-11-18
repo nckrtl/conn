@@ -127,7 +127,7 @@ reader, exactly the scopes `orchestration:read` and `orchestration:operate`, and
   "project_id": "project:…", "thread_id": "<admitted thread UUID>",
   "create": {"command_id": "…", "body": {<the complete create body but type, commandId, threadId>}},
   "message": {"command_id": "…", "message_id": "…", "text_sha256": "<hex>",
-              "interrupt_command_id": "…"},
+              "interrupt_command_id": "…", "created_by": "user", "creation_source": "web"},
   "earlier": [{"thread_id": "…", "message_id": "…", "text_sha256": "<hex>",
                "run_id": "<recorded run, optional>", "interrupt_command_id": "…"}],
   "questions": [{"thread_id": "<the admitted thread>", "request_id": "…",
@@ -136,12 +136,18 @@ reader, exactly the scopes `orchestration:read` and `orchestration:operate`, and
 ```
 
 The worker may call only `orchestration.dispatchCommand`, `orchestration.getThreadProjection`
-and `orchestration.subscribeThread`. Reads need a thread of the admitted project; an earlier
-turn's other thread is cut to its frozen message, the run it started, and that run's nodes
-and requests. Each write must match the grant, and the engine checks ownership and the
+and `orchestration.subscribeThread`. Reads need a thread of the admitted project; a
+subscription ends when its thread is deleted or names another project. An earlier turn's
+other thread is cut to its frozen message, the run it started, and that run's nodes and
+requests, with the thread's title, branch, worktree and times blanked or taken from that
+evidence; a different body, several runs, or another recorded run is refused instead.
+Refusals are the scope check's `EnvironmentAuthorizationError`. A guarded create never
+takes an ID that was ever used, deleted or not. Each write must match the grant, and the engine checks ownership and the
 project in the command's own transaction (`conn_engine::DispatchGuard`). The commit itself
-runs under the worker's managed handler (`conn_engine::CommitGate`): a fence lands before
-the check (refused) or after the commit (accepted work stays). A guarded dispatch runs on its
+passes the worker's managed handler (`conn_engine::CommitGate`) right before it runs: a
+write accepted there is work the server accepted, and the handler stays registered until
+the commit ended, so the fence's ACK always follows it. The check never holds the
+authority lock across the commit. A guarded dispatch runs on its
 own task, so a caller that disconnects mid-commit does not strand its run.
 
 | Command | Allowed when |

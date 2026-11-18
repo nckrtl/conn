@@ -46,7 +46,7 @@ Each is the fail-closed reading.
 - A closed Reverb link is a "closed control connection": managed access fails closed and
   reopens only with the link up and a fresh snapshot.
 - An introspection the Gateway cannot answer (transport, timeout, bad reply) is a failed
-  check: fail closed. A 4xx refusal refuses only that caller.
+  check: fail closed, unless a snapshot barrier already dropped that introspection.
 - Every managed path needs a managed principal, including discovery and health.
 - The "known test tab" is the provisioning's `previewTabs` list; empty refuses every preview.
 - `peer_address` is the TCP peer's IP, IPv4-mapped addresses unwrapped.

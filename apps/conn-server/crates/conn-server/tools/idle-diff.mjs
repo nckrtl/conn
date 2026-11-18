@@ -550,7 +550,7 @@ async function settled(side) {
 }
 
 /** Reads both servers in one state and records the comparison. */
-async function compare(pair, state, notes = []) {
+async function compare(pair, state, notes = [], { transitional = null } = {}) {
   const [ts, conn] = await Promise.all(pair.map(settled));
   const lines = [];
   if (ts.status !== conn.status) lines.push(`FAIL http status: T3 ${ts.status} / Conn ${conn.status}`);
@@ -564,6 +564,20 @@ async function compare(pair, state, notes = []) {
   const info = differences(a, b).filter((d) => !ORBIT_FIELDS.has(d.match(/^\[\d+\]\.(\w+)/)?.[1] ?? ""));
   const verdict = views[0].readable ? (views[0].turnRuns ? "active" : "idle") : `http ${ts.status}`;
   const status = views[0].rows?.find((row) => row.title === "Idle check")?.status;
+  const connStatus = views[1].rows?.find((row) => row.title === "Idle check")?.status;
+  // A transitional state: each side may be on either side of one step it takes on its own
+  // clock (`transitional.statuses`). When they stand on different sides of it, the Orbit
+  // fields differ for that reason only; the next settled state compares them strictly.
+  if (
+    transitional &&
+    lines.length > 0 &&
+    status !== connStatus &&
+    transitional.statuses.includes(status) &&
+    transitional.statuses.includes(connStatus)
+  ) {
+    notes = [...notes, `${transitional.reason} (T3 ${status}, Conn ${connStatus}): not compared`];
+    info.unshift(...lines.splice(0).map((line) => line.replace(/^FAIL /, "")));
+  }
   record(pair, { state, lines, info, notes, summary: `${verdict}${status ? `, status ${status}` : ""}` });
 }
 
@@ -714,7 +728,16 @@ const SCENARIOS = [
       const notes = await threadWhere(pair, "running", (t) => t.status === "running");
       await compare(pair, "a running turn (before stop)", notes);
       await both(pair, (side) => side.tool("t3_thread_interrupt", { threadId: side.threadId }));
-      await compare(pair, "a turn being stopped", await gate(pair, "turn/interrupt"));
+      // The provider's answer to `turn/interrupt` is held here. T3 may mark the run
+      // interrupted before that answer, on its own timing; Conn marks it when the provider
+      // answers. Either side may stand on either side of that step, so only that split is
+      // tolerated here; "a stopped turn" below compares the settled state strictly.
+      await compare(pair, "a turn being stopped", await gate(pair, "turn/interrupt"), {
+        transitional: {
+          statuses: ["running", "interrupted"],
+          reason: "a stop before the provider answers settles on each server's own timing",
+        },
+      });
       await both(pair, (side) => side.release("turn/interrupt"));
       await compare(pair, "a stopped turn", await threadWhere(pair, "interrupted", (t) => terminal(t.status)));
     },

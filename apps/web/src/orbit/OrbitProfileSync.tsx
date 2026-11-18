@@ -80,7 +80,7 @@ const INITIAL_STATUS: OrbitProfileSyncStatus = {
 export const useOrbitProfileSyncStatus = create<OrbitProfileSyncStatus>(() => INITIAL_STATUS);
 
 let requestSync: (() => Promise<void>) | null = null;
-let beforeRebind: (() => void) | null = null;
+let beforeRebind: ((phase: "before" | "after") => void) | null = null;
 
 /**
  * Runs the profile sync now and settles once a run that started after this call has finished, so
@@ -98,13 +98,17 @@ let rebindAnnouncements = 0;
 
 /**
  * Around this device's bind to another profile: drops the old binding's channel and reads. In a
- * window without the sync it tells the main window, which then reads the new binding.
+ * window without the sync it tells the main window, which holds its reads from `before` until
+ * `after` and then reads the new binding.
  */
-export function orbitProfileRebinding(): void {
-  if (beforeRebind) beforeRebind();
+export function orbitProfileRebinding(phase: "before" | "after"): void {
+  if (beforeRebind) beforeRebind(phase);
   else {
     rebindAnnouncements += 1;
-    window.localStorage.setItem(REBIND_STORAGE_KEY, `${Date.now()}:${rebindAnnouncements}`);
+    window.localStorage.setItem(
+      REBIND_STORAGE_KEY,
+      `${phase}:${Date.now()}:${rebindAnnouncements}`,
+    );
   }
 }
 
@@ -179,8 +183,11 @@ interface ProfileSyncController {
   readonly refreshEnvironments: () => Promise<void>;
   /** Follows the bound profile; `reconcile()` runs one authoritative profile read. */
   readonly profile: ReturnType<typeof createOrbitProfileLive>;
-  /** Before a bind: the old binding's channel, reads and environment record become obsolete. */
-  readonly rebinding: () => void;
+  /**
+   * Around a bind: the old binding's channel, reads and environment record become obsolete.
+   * `hold` keeps every profile read obsolete until the `after` call (a bind in another window).
+   */
+  readonly rebinding: (phase: "before" | "after", hold?: boolean) => void;
   readonly beginNonUserChange: (name: ProfileSectionName) => () => void;
 }
 
@@ -241,6 +248,8 @@ function profileSyncController(): ProfileSyncController | null {
     return result;
   };
   const inOrbit = (): boolean => useEnvironmentProvider.getState().provider === "orbit";
+  let rebindHeld = false;
+  let rebindHoldTimer: ReturnType<typeof setTimeout> | undefined;
   /** The last reads each run shares with the other, so neither needs a second Gateway call. */
   let lastMe: OrbitGatewayNode | null = null;
   let lastListed: readonly OrbitGatewayEnvironment[] | null = null;
@@ -370,13 +379,19 @@ function profileSyncController(): ProfileSyncController | null {
     refreshEnvironments: createSerialRunner(() => exclusive(environmentsOnce)),
     profile: createOrbitProfileLive({
       transport,
-      scope: () => (inOrbit() ? "orbit" : null),
+      // Held while another window binds, so no read can apply the binding it leaves.
+      scope: () => (inOrbit() && !rebindHeld ? "orbit" : null),
       refresh: (isCurrent, observe) => exclusive(() => profileOnce(isCurrent, observe)),
     }),
-    rebinding: () => {
+    rebinding: (phase, hold = false) => {
+      clearTimeout(rebindHoldTimer);
+      rebindHeld = hold && phase === "before";
+      // A bind in another window that never reports back releases the hold on its own.
+      if (rebindHeld) rebindHoldTimer = setTimeout(() => controller?.rebinding("after"), 60_000);
       // An environment run waiting on the old profile's settings fails its `lastMe` check.
       lastMe = null;
       controller?.profile.invalidate();
+      if (phase === "after") void controller?.profile.reconcile();
     },
     beginNonUserChange: sections.beginNonUserChange,
   };
@@ -434,9 +449,8 @@ export function OrbitProfileSync() {
     window.addEventListener("focus", refreshAll);
     window.addEventListener("online", refreshAll);
     const onStorage = (event: StorageEvent): void => {
-      if (event.key !== REBIND_STORAGE_KEY) return;
-      sync.rebinding();
-      reconcileProfile();
+      if (event.key !== REBIND_STORAGE_KEY || event.newValue === null) return;
+      sync.rebinding(event.newValue.startsWith("before:") ? "before" : "after", true);
     };
     window.addEventListener("storage", onStorage);
     refreshEnvironments();

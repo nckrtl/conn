@@ -173,12 +173,21 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
   });
 
   /** Drops the subscription and in-flight reads when the scope changed since the last look. */
+  /** A new binding or scope starts its own retry sequence. */
+  const resetRetries = (): void => {
+    clearTimeout(readRetry);
+    clearTimeout(socketRetry);
+    readRetry = socketRetry = undefined;
+    readRetryMs = socketRetryMs = RETRY_MIN_MS;
+  };
+
   const checkScope = (): string | null => {
     const current = scope();
     if (current !== lastScope) {
       lastScope = current;
       reconciler.invalidate();
       unfollow();
+      resetRetries();
     }
     return current;
   };
@@ -200,10 +209,8 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
 
   const halt = (): void => {
     clearTimeout(checkTimer);
-    clearTimeout(readRetry);
-    clearTimeout(socketRetry);
-    checkTimer = readRetry = socketRetry = undefined;
-    readRetryMs = socketRetryMs = RETRY_MIN_MS;
+    checkTimer = undefined;
+    resetRetries();
     checkScope();
   };
 
@@ -229,11 +236,7 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
     invalidate(): void {
       reconciler.invalidate();
       unfollow();
-      // A new binding starts its own retry sequence.
-      clearTimeout(readRetry);
-      clearTimeout(socketRetry);
-      readRetry = socketRetry = undefined;
-      readRetryMs = socketRetryMs = RETRY_MIN_MS;
+      resetRetries();
     },
     /** The channel followed now, for diagnostics and tests. */
     channel(): string | null {

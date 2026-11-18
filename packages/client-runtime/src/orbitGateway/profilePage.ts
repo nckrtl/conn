@@ -14,10 +14,10 @@ export interface OrbitProfileSwitchPorts {
   /** Runs the profile sync and settles once that run has finished. */
   readonly sync: () => Promise<void>;
   /**
-   * Before the bind and again once it answered: the old binding's channel and any read started
-   * in between must not apply to the new one.
+   * `before` the bind and `after` it answered (also when it failed): the old binding's channel
+   * and any read started in between must not apply to the new one.
    */
-  readonly rebinding?: () => void;
+  readonly rebinding?: (phase: "before" | "after") => void;
 }
 
 /**
@@ -31,9 +31,17 @@ export async function switchOrbitProfile(
 ): Promise<OrbitGatewayNode> {
   await ports.sync();
   const id = "id" in choice ? choice.id : (await ports.client.createProfile(choice.name)).id;
-  ports.rebinding?.();
-  const node = await ports.client.bindProfile(id);
-  ports.rebinding?.();
+  ports.rebinding?.("before");
+  let node: OrbitGatewayNode;
+  try {
+    node = await ports.client.bindProfile(id);
+  } catch (error) {
+    // The old binding still holds: follow it again before the caller shows the error.
+    ports.rebinding?.("after");
+    await ports.sync();
+    throw error;
+  }
+  ports.rebinding?.("after");
   await ports.sync();
   return node;
 }

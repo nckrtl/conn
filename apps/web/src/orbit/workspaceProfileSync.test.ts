@@ -190,6 +190,76 @@ describe("syncWorkspaceProfile", () => {
   });
 });
 
+describe("syncWorkspaceProfile with edits during its requests", () => {
+  function editingGateway() {
+    const remote = gateway({ version: 2, workspaces: [ws("a"), ws("b")] });
+    const hooks = { afterRead: (): void => {}, afterWrite: (): void => {} };
+    const client = {
+      ...remote.client,
+      settings: async (profileId: number) => {
+        const answer = await remote.client.settings(profileId);
+        hooks.afterRead();
+        return answer;
+      },
+      replaceWorkspaces: async (
+        profileId: number,
+        version: number,
+        workspaces: readonly OrbitGatewayWorkspace[],
+      ) => {
+        const answer = await remote.client.replaceWorkspaces(profileId, version, workspaces);
+        hooks.afterWrite();
+        return answer;
+      },
+    } as OrbitGatewayClient;
+    const { ports, memory } = device(client, [ws("a"), ws("b")], {
+      profileId: 1,
+      version: 2,
+      base: [ws("a"), ws("b")],
+    });
+    return { remote, hooks, ports, memory };
+  }
+
+  it("keeps a second edit made during the conflict read", async () => {
+    const { remote, hooks, ports, memory } = editingGateway();
+    remote.profile.workspaces = [ws("a"), ws("b"), ws("c", "from phone")];
+    remote.profile.version = 3;
+    memory.local = [ws("a", "first rename"), ws("b")];
+    hooks.afterRead = () => {
+      hooks.afterRead = () => {};
+      memory.local = [ws("a", "second rename"), ws("b")];
+    };
+    await syncWorkspaceProfile(ports);
+    await syncWorkspaceProfile(ports);
+    expect(names(remote.profile.workspaces)).toEqual(["second rename", "b", "from phone"]);
+    expect(names(memory.local)).toEqual(["second rename", "b", "from phone"]);
+  });
+
+  it("keeps an edit made while the write was in flight", async () => {
+    const { remote, hooks, ports, memory } = editingGateway();
+    memory.local = [ws("a", "first rename"), ws("b")];
+    hooks.afterWrite = () => {
+      hooks.afterWrite = () => {};
+      memory.local = [ws("a", "first rename"), ws("b", "edited meanwhile")];
+    };
+    await syncWorkspaceProfile(ports);
+    expect(names(memory.local)).toEqual(["first rename", "edited meanwhile"]);
+    await syncWorkspaceProfile(ports);
+    expect(names(remote.profile.workspaces)).toEqual(["first rename", "edited meanwhile"]);
+  });
+
+  it("adopts an edit that already equals the newer profile without writing", async () => {
+    const { remote, hooks, ports, memory } = editingGateway();
+    remote.profile.workspaces = [ws("a", "same"), ws("b")];
+    remote.profile.version = 3;
+    hooks.afterRead = () => {
+      memory.local = [ws("a", "same"), ws("b")];
+    };
+    await expect(syncWorkspaceProfile(ports)).resolves.toMatchObject({ kind: "pulled" });
+    expect(remote.writes).toEqual([]);
+    expect(memory.state?.version).toBe(3);
+  });
+});
+
 describe("parseWorkspaceProfileSyncState", () => {
   it("accepts a stored snapshot", () => {
     const stored = JSON.parse(JSON.stringify({ profileId: 1, version: 2, base: [ws("a")] }));

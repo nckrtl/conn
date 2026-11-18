@@ -107,7 +107,7 @@ export async function syncWorkspaceProfile(
   if (!dirty) {
     const remote = await ports.client.settings(profileId);
     const edited = ports.readLocal();
-    if (!sameWorkspaces(edited, local)) {
+    if (!sameWorkspaces(edited, local) && !sameWorkspaces(edited, remote.workspaces)) {
       // The user edited during the read: send that edit against the base it started from, so
       // the version conflict merges it with the newer profile instead of overwriting it.
       const saved = await replace(ports, profileId, state.version, state.base, edited);
@@ -130,7 +130,10 @@ function adopt(
   ports.saveState({ profileId, version, base: workspaces });
 }
 
-/** Sends `local`; on a version conflict merges it with the profile's newer list and tries again. */
+/**
+ * Sends `local`; on a version conflict merges it with the profile's newer list and tries again.
+ * An edit the user makes during any request is merged on top, never overwritten by the answer.
+ */
 async function replace(
   ports: WorkspaceProfileSyncPorts,
   profileId: number,
@@ -142,9 +145,24 @@ async function replace(
   let sendBase = base;
   let candidate = local;
   let merged = false;
+  /** The device list `candidate` already contains. */
+  let sent = local;
   for (let attempt = 1; ; attempt += 1) {
+    const now = ports.readLocal();
+    if (!sameWorkspaces(now, sent)) {
+      candidate = mergeWorkspaces(sent, now, candidate);
+      sent = now;
+    }
     try {
       const saved = await ports.client.replaceWorkspaces(profileId, sendVersion, candidate);
+      const after = ports.readLocal();
+      if (!sameWorkspaces(after, sent)) {
+        // Edited while the write was in flight: keep that edit on top of what landed; it stays
+        // dirty against the saved list and goes out on the next run.
+        ports.writeLocal(mergeWorkspaces(sent, after, saved.workspaces));
+        ports.saveState({ profileId, version: saved.version, base: saved.workspaces });
+        return { merged };
+      }
       adopt(ports, profileId, saved.version, saved.workspaces);
       return { merged };
     } catch (error) {

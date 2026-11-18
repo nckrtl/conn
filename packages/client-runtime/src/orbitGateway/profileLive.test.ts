@@ -452,6 +452,25 @@ describe("Orbit profile live subscription", () => {
     live.dispose();
   });
 
+  it("starts a new retry sequence after Orbit is switched off and on", async () => {
+    using _clock = clock();
+    const scope = { value: "orbit" as string | null };
+    const { gateway, live } = harness({ scope });
+    gateway.access = false;
+    gateway.refusal = { status: 500, code: "server.error" };
+    await live.resume();
+    await vi.advanceTimersByTimeAsync(5_000);
+    scope.value = null;
+    await live.reconcile();
+    scope.value = "orbit";
+    const reads = gateway.requests.length;
+    await live.reconcile();
+    expect(gateway.requests.length).toBe(reads + 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(gateway.requests.length).toBe(reads + 2);
+    live.dispose();
+  });
+
   it("keeps the periodic check when the Gateway has no Reverb, and stops everything on pause", async () => {
     using _clock = clock();
     const { gateway, live, write, applied } = harness();

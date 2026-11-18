@@ -10,6 +10,7 @@ import {
   draft,
   finishing,
   hover,
+  hoverLabelHidden,
   shakeToken,
   dictationSettings,
 } from "./state";
@@ -657,6 +658,7 @@ export function setAnnotationMode(active: boolean): void {
     clearPendingPlacement();
     draft.value = null;
     hover.value = null;
+    hoverLabelHidden.value = false;
     releaseMicrophone();
     return;
   }
@@ -707,6 +709,9 @@ export function handleDocumentMouseDown(event: MouseEvent): void {
     return;
   }
 
+  // The click copies the screen at once; hiding the label now gives it frames to disappear.
+  hoverLabelHidden.value = true;
+
   const nextDraft = draftFromPoint(event.clientX, event.clientY);
 
   if (!nextDraft) {
@@ -756,6 +761,10 @@ export function handleDocumentClick(event: MouseEvent): void {
 }
 
 export function handleMouseMove(event: MouseEvent): void {
+  if (event.buttons === 0 && hoverLabelHidden.value) {
+    hoverLabelHidden.value = false;
+  }
+
   if (!annotationMode.value || (draft.value && !annotationCanMove())) {
     hover.value = null;
     return;

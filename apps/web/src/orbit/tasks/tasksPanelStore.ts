@@ -1,3 +1,4 @@
+import type { OrbitTaskLane } from "@t3tools/client-runtime/orbit-gateway";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -16,6 +17,8 @@ export interface TasksNavigation {
   /** Null shows the task's own brief. */
   readonly subtaskId: number | null;
   readonly tab: TasksDetailTab;
+  /** Inside a subtask: the tab the task itself had open, restored when the path leads back. */
+  readonly taskTab?: TasksDetailTab | undefined;
   readonly boardScroll: { readonly top: number; readonly left: number };
   readonly detailScrollTop: number;
   /** When this thread's Tasks navigation last changed, for the cap below. */
@@ -49,6 +52,12 @@ export const DEFAULT_TASKS_NAVIGATION: TasksNavigation = {
 
 interface TasksPanelState {
   readonly byThreadKey: Readonly<Record<string, TasksNavigation>>;
+  /** Board lanes the user turned off; one setting for every thread and window. */
+  readonly hiddenLanes: ReadonlyArray<OrbitTaskLane>;
+  /** The board search. Kept for the session only, so closing and reopening Tasks keeps it. */
+  readonly query: string;
+  readonly toggleLane: (lane: OrbitTaskLane) => void;
+  readonly setQuery: (query: string) => void;
   readonly handoff: (sourceKey: string, targetKey: string) => void;
   readonly openTask: (threadKey: string, taskId: number) => void;
   /** `tab` switches the content tab too; without it the current tab stays. */
@@ -76,6 +85,15 @@ export const useTasksPanelStore = create<TasksPanelState>()(
         });
       return {
         byThreadKey: {},
+        hiddenLanes: [],
+        query: "",
+        toggleLane: (lane) =>
+          set((state) => ({
+            hiddenLanes: state.hiddenLanes.includes(lane)
+              ? state.hiddenLanes.filter((entry) => entry !== lane)
+              : [...state.hiddenLanes, lane],
+          })),
+        setQuery: (query) => set({ query }),
         handoff: (sourceKey, targetKey) =>
           set((state) => {
             const source = state.byThreadKey[sourceKey];
@@ -102,15 +120,34 @@ export const useTasksPanelStore = create<TasksPanelState>()(
                   taskId,
                   subtaskId: null,
                   tab: "brief",
+                  taskTab: undefined,
                   detailScrollTop: 0,
                 },
           ),
         openSubtask: (threadKey, subtaskId, tab) =>
-          update(threadKey, (current) =>
-            current.subtaskId === subtaskId && (tab === undefined || tab === current.tab)
-              ? current
-              : { ...current, subtaskId, tab: tab ?? current.tab, detailScrollTop: 0 },
-          ),
+          update(threadKey, (current) => {
+            if (current.subtaskId === subtaskId && (tab === undefined || tab === current.tab))
+              return current;
+            // The task's own tab is remembered while inside its subtasks; a subtask's tab never
+            // carries back to the task.
+            const taskTab = current.subtaskId === null ? current.tab : current.taskTab;
+            if (subtaskId === null) {
+              return {
+                ...current,
+                subtaskId,
+                tab: tab ?? taskTab ?? current.tab,
+                taskTab: undefined,
+                detailScrollTop: 0,
+              };
+            }
+            return {
+              ...current,
+              subtaskId,
+              tab: tab ?? current.tab,
+              taskTab,
+              detailScrollTop: 0,
+            };
+          }),
         setTab: (threadKey, tab) =>
           update(threadKey, (current) =>
             current.tab === tab ? current : { ...current, tab, detailScrollTop: 0 },
@@ -133,13 +170,19 @@ export const useTasksPanelStore = create<TasksPanelState>()(
     },
     {
       name: "conn:tasks-panel:v1",
-      version: 2,
+      version: 3,
       // Version 1 entries had no `updatedAt`; they count as oldest.
-      migrate: (persisted) => {
-        const byThreadKey =
-          (persisted as { byThreadKey?: Record<string, TasksNavigation> } | null)?.byThreadKey ??
-          {};
+      migrate: (persisted, version) => {
+        const stored = persisted as {
+          byThreadKey?: Record<string, TasksNavigation>;
+          hiddenLanes?: ReadonlyArray<OrbitTaskLane>;
+        } | null;
+        const byThreadKey = stored?.byThreadKey ?? {};
+        if (version >= 2) {
+          return { byThreadKey: capThreads(byThreadKey), hiddenLanes: stored?.hiddenLanes ?? [] };
+        }
         return {
+          hiddenLanes: [],
           byThreadKey: capThreads(
             Object.fromEntries(
               Object.entries(byThreadKey).map(([key, entry]) => [key, { ...entry, updatedAt: 0 }]),
@@ -150,7 +193,7 @@ export const useTasksPanelStore = create<TasksPanelState>()(
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),
-      partialize: (state) => ({ byThreadKey: state.byThreadKey }),
+      partialize: (state) => ({ byThreadKey: state.byThreadKey, hiddenLanes: state.hiddenLanes }),
     },
   ),
 );

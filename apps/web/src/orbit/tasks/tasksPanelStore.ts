@@ -205,6 +205,13 @@ export const useTasksBoardLanes = create<{
   ),
 );
 
+// Another window's toggle lands in storage; read it so this window never writes a stale copy.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key === "conn:tasks-board:v1") void useTasksBoardLanes.persist.rehydrate();
+  });
+}
+
 /**
  * The board search, for this window's session only. Kept apart from the persisted store so typing
  * never writes navigation that another window may have changed since.

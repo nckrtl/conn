@@ -414,7 +414,6 @@ function TaskCard(props: { task: OrbitTaskSummary; onOpen: (laneTop: number) => 
       <button
         type="button"
         onClick={(event) => props.onOpen(event.currentTarget.closest("ul")?.scrollTop ?? 0)}
-        aria-label={`${task.title}. ${orbitTaskLabel(task)?.label ?? ""} Open task`}
         className="flex w-full cursor-pointer flex-col gap-1.5 rounded-lg border border-(--shell-divider)! bg-(--shell-card) px-3 py-2.5 text-left transition-colors hover:bg-(--shell-card)/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none dark:bg-(--shell-highlight)/70 dark:hover:bg-(--shell-highlight)"
       >
         <span className="flex items-center gap-1.5 text-ui leading-4">
@@ -438,16 +437,14 @@ function TaskCard(props: { task: OrbitTaskSummary; onOpen: (laneTop: number) => 
         <span className="flex items-center gap-2 text-ui leading-4 text-muted-foreground tabular-nums">
           <span className="min-w-0 flex-1 truncate">{taskCardDetail(task)}</span>
           {pr ? (
-            <span
-              className={cn("flex shrink-0 items-center gap-1", prState?.toneClassName)}
-              aria-label={`Pull request #${pr.number}${prState ? `, ${prState.label}` : ""}`}
-            >
+            <span className={cn("flex shrink-0 items-center gap-1", prState?.toneClassName)}>
               {prState ? (
                 <prState.Icon aria-hidden className="size-3.5" />
               ) : (
                 <PullRequestGlyph.pullRequest className="size-3.5" />
               )}
-              #{pr.number}
+              <span className="sr-only">Pull request{prState ? ` (${prState.label})` : ""}</span>#
+              {pr.number}
             </span>
           ) : null}
         </span>

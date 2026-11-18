@@ -521,6 +521,13 @@ impl Authority {
             .map_or(admitted, |ms| admitted.min(self.local_deadline(ms, now, 0)))
     }
 
+    /// A handler's deadline now, for its close timer.
+    pub fn handler_deadline_of(&self, handler: u64, admitted: Instant, now: Instant) -> Instant {
+        self.handlers
+            .get(&handler)
+            .map_or(now, |entry| self.handler_deadline(entry, admitted, now))
+    }
+
     /// Closes every handler whose token expired by the Gateway's verified time.
     fn close_expired(&self, now: Instant) {
         for entry in self.handlers.values() {

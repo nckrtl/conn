@@ -110,7 +110,7 @@ fn read_protected(path: &Path, what: &str) -> Result<Vec<u8>, String> {
         if !meta.is_file() {
             return Err(format!("{what} is not a file"));
         }
-        if meta.mode() & 0o077 != 0 {
+        if meta.mode() & 0o777 != 0o600 {
             return Err(format!("{what} must have mode 0600"));
         }
         if meta.uid() != rustix::process::geteuid().as_raw() {

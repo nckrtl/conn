@@ -406,14 +406,24 @@ impl Handle {
         self.state() == crate::session::GateState::Open
     }
 
-    /// Resolves when the fence closes this handler or its token expires.
+    /// Resolves when the fence closes this handler or its token expires. The expiry timer
+    /// re-arms whenever a verified probe moves the deadline.
     pub fn closed(&self) -> BoxFuture<'static, ()> {
         let mut closed = self.closed.clone();
-        let expires = self.expires;
+        let (shared, id, admitted) = (self.shared.clone(), self.id, self.expires);
         Box::pin(async move {
-            tokio::select! {
-                _ = closed.wait_for(|c| *c) => {}
-                () = tokio::time::sleep_until(expires) => {}
+            let mut changes = shared.wait_change();
+            loop {
+                let deadline = shared.read(|a| a.handler_deadline_of(id, admitted, Instant::now()));
+                tokio::select! {
+                    _ = closed.wait_for(|c| *c) => return,
+                    () = tokio::time::sleep_until(deadline) => {
+                        if Instant::now() >= deadline {
+                            return;
+                        }
+                    }
+                    _ = changes.changed() => {}
+                }
             }
         })
     }

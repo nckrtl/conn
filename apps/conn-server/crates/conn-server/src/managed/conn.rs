@@ -367,4 +367,24 @@ mod tests {
             received.len()
         );
     }
+
+    /// A probe that moves a token's end to a time still ahead re-arms the close timer: the
+    /// handler's close resolves at the new end without another probe or any I/O.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_shortened_deadline_rearms_the_close_timer() {
+        let (shared, handle) = open_handle();
+        let closed = handle.closed();
+        // The Gateway time of the opening snapshot was "now": the token now ends 300 ms on.
+        let id = handle.id;
+        let gateway_now = conn_support::time::now_ms();
+        shared.with(|a| {
+            a.set_handler_expiry(id, gateway_now + 300);
+            ((), Default::default())
+        });
+        let started = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), closed)
+            .await
+            .expect("the close timer re-armed to the shortened deadline");
+        assert!(started.elapsed() < Duration::from_millis(1_000));
+    }
 }

@@ -25,3 +25,4 @@ export * from "./threadIndex.ts";
 export * from "./tasks.ts";
 export * from "./tasksClient.ts";
 export * from "./tasksRealtime.ts";
+export * from "./sidebarHiddenThreads.ts";

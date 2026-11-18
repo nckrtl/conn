@@ -830,16 +830,16 @@ describe("sidebar hidden threads sync", () => {
 
     const get = fake.client.settings;
     const patch = fake.client.patchSections;
-    fake.client.patchSections = async (profileId) => ({
-      ...(await get(profileId)),
+    fake.client.patchSections = async () => ({
+      ...(await get()),
       document: {},
       sections: {},
     });
     await expect(laptop.sync()).rejects.toThrow(/did not confirm/);
     expect(laptop.memory.ops.get("env-a:x")?.intent).toBe("show");
 
-    fake.client.settings = async (profileId) => ({
-      ...(await get(profileId)),
+    fake.client.settings = async () => ({
+      ...(await get()),
       document: {},
       sections: {},
     });

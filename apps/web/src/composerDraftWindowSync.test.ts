@@ -10,6 +10,7 @@ import {
   applyOtherWindowComposerDrafts,
   COMPOSER_DRAFT_STORAGE_KEY,
   composerTargetKey,
+  captureOrbitDraftRevision,
   clearAcceptedOrbitDraft,
   DraftId,
   isStaleClearedOrbitDraft,
@@ -85,7 +86,11 @@ describe("applyOtherWindowComposerDrafts", () => {
     await vi.advanceTimersByTimeAsync(300);
     useComposerDraftStore.getState().setPrompt(first, "different draft in this window");
     await vi.advanceTimersByTimeAsync(300);
+    const captured = captureOrbitDraftRevision(draftId);
     clearAcceptedOrbitDraft(draftId);
+    expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
+      state: { orbitDraftClearRevisions: { [composerTargetKey(draftId)]: [captured] } },
+    });
     expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
       "edited in a second window",
     );
@@ -93,12 +98,13 @@ describe("applyOtherWindowComposerDrafts", () => {
     expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
       "edited in a second window",
     );
+    expect(isStaleClearedOrbitDraft(draftId, captured)).toBe(true);
   });
 
   it.each(["prompt", "target", "unchanged", "saved-original", "other-window-edit"])(
     "reconciles an Orbit %s draft when another window clears a newer sent version",
     async (editedField) => {
-      const draftId = DraftId.make("orbit-draft");
+      const draftId = DraftId.make(`orbit-draft-${editedField}`);
       const key = composerTargetKey(draftId);
       const projectKey = orbitDraftLogicalProjectKey(66);
       const store = useComposerDraftStore.getState();
@@ -166,6 +172,11 @@ describe("applyOtherWindowComposerDrafts", () => {
         });
         await vi.advanceTimersByTimeAsync(300);
         expect(isStaleClearedOrbitDraft(draftId)).toBe(true);
+        useComposerDraftStore.setState({});
+        await vi.advanceTimersByTimeAsync(300);
+        expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
+          state: { draftsByThreadKey: { [key]: { prompt: "genuine edit in a third window" } } },
+        });
         return;
       }
       await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, external);

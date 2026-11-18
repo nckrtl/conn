@@ -78,7 +78,6 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
-  clearAcceptedOrbitDraft,
   useComposerDraftStore,
   DraftId,
 } from "../../composerDraftStore";
@@ -887,9 +886,7 @@ export function useComposerSend(input: ComposerSendInput) {
           if (currentRouteThreadKeyRef.current === routeThreadKey) {
             await navigate({ to: "/orbit/$startId", params: { startId: launch.launch_id } });
           }
-          return acknowledgeOrbitDraft(launch.launch_id, () => {
-            if (unchanged()) clearAcceptedOrbitDraft(draftId);
-          });
+          return acknowledgeOrbitDraft(launch.launch_id, unchanged);
         })
         .catch((error: unknown) => {
           toastManager.add(

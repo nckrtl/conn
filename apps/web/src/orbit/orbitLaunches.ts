@@ -18,7 +18,12 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { msg } from "gt-react";
 import { useSyncExternalStore } from "react";
 
-import { DraftId, isStaleClearedOrbitDraft } from "../composerDraftStore";
+import {
+  captureOrbitDraftRevision,
+  clearAcceptedOrbitDraft,
+  DraftId,
+  isStaleClearedOrbitDraft,
+} from "../composerDraftStore";
 import { m } from "../i18n/messages";
 import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -33,7 +38,6 @@ export const orbitLaunches = createOrbitLaunchObserver(desktopOrbitGatewayClient
 export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   {
     fingerprintAcknowledged: (input) => bytesToHex(sha256(new TextEncoder().encode(input))),
-    canStartDraft: (draftId) => !isStaleClearedOrbitDraft(DraftId.make(draftId)),
     lock: (work) => navigator.locks.request(SUBMISSIONS_KEY, work),
     lockDraft: (draftId, work) =>
       navigator.locks.request(
@@ -57,10 +61,10 @@ export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   (record, reconcile) => orbitLaunches.submit(record.admission, record, reconcile),
 );
 
-export function acknowledgeOrbitDraft(launchId: string, updateDraft: () => void) {
+export function acknowledgeOrbitDraft(launchId: string, matchesDraft: () => boolean) {
   return orbitLaunchSubmissions.acknowledge(launchId, (record) => {
     if (!orbitLaunches.canAcknowledge(record)) return false;
-    updateDraft();
+    clearAcceptedOrbitDraft(DraftId.make(record.draftId), matchesDraft());
     return true;
   });
 }
@@ -99,7 +103,7 @@ export async function updateLegacyWebPreview(row: LegacyOrbitLaunch, action: "re
   await changeLegacyWebArchive((raw) => recordLegacyOrbitPreview(raw, row, operation));
 }
 
-export async function submitOrbitDraft(draftId: string, start: OrbitDraftStartInput) {
+export async function submitOrbitDraft(draftId: DraftId, start: OrbitDraftStartInput) {
   const blocked = orbitThreadStartBlockedMessage();
   if (blocked !== null) throw OrbitLaunchCopyError.fromCopy(blocked);
   const scope = orbitLaunches.scope();
@@ -116,7 +120,11 @@ export async function submitOrbitDraft(draftId: string, start: OrbitDraftStartIn
     ...(start.interactionMode == null ? {} : { interaction_mode: start.interactionMode }),
     source: "web",
   });
-  return orbitLaunchSubmissions.submit({ ...scope, draftId, admission });
+  const captured = captureOrbitDraftRevision(draftId);
+  return orbitLaunchSubmissions.submit(
+    { ...scope, draftId, admission },
+    () => !isStaleClearedOrbitDraft(draftId, captured),
+  );
 }
 
 export function orbitLaunchThreadRef(thread: NonNullable<OrbitLaunch["thread"]>) {

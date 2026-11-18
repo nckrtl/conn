@@ -512,7 +512,6 @@ it("reconciles a stale desktop Send against its accepted identity without postin
     save: async (value: readonly OrbitLaunchSubmission[]) => {
       records = value;
     },
-    canStartDraft: () => canStart,
     fingerprintAcknowledged: (input: string) => {
       if (!fingerprints.has(input)) fingerprints.set(input, `copy-${fingerprints.size}`);
       return fingerprints.get(input)!;
@@ -543,15 +542,18 @@ it("reconciles a stale desktop Send against its accepted identity without postin
     };
     canStart = false;
     const second = openJournal();
-    await expect(second.submit(staleSend)).resolves.toEqual(launch);
+    await expect(second.submit(staleSend, () => canStart)).resolves.toEqual(launch);
     await expect(
-      second.submit({
-        ...staleSend,
-        admission: {
-          ...staleSend.admission,
-          request: { ...staleSend.admission.request, prompt: "An older saved draft" },
+      second.submit(
+        {
+          ...staleSend,
+          admission: {
+            ...staleSend.admission,
+            request: { ...staleSend.admission.request, prompt: "An older saved draft" },
+          },
         },
-      }),
+        () => canStart,
+      ),
     ).rejects.toThrow("already handled");
     expect(post).toHaveBeenCalledOnce();
 

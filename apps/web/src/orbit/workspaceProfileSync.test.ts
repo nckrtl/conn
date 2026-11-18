@@ -248,6 +248,29 @@ describe("syncWorkspaceProfile with edits during its requests", () => {
     expect(memory.state?.version).toBe(remote.profile.version);
   });
 
+  it("sends an edit made during the last allowed write after two conflicts", async () => {
+    const { remote, hooks, ports, memory } = editingGateway();
+    memory.local = [ws("a", "first rename"), ws("b")];
+    // Another device writes before the first PUT and again during the first conflict read.
+    let conflictsLeft = 1;
+    const realRead = hooks.afterRead;
+    hooks.afterRead = () => {
+      realRead();
+      if (conflictsLeft > 0) {
+        conflictsLeft -= 1;
+        remote.profile.version += 1;
+      }
+    };
+    remote.profile.version += 1;
+    hooks.afterWrite = () => {
+      hooks.afterWrite = () => {};
+      memory.local = [ws("a", "second rename"), ws("b")];
+    };
+    await syncWorkspaceProfile(ports);
+    expect(names(remote.profile.workspaces)).toEqual(["second rename", "b"]);
+    expect(names(memory.local)).toEqual(["second rename", "b"]);
+  });
+
   it("writes nothing more when the edit equals the profile after a conflict", async () => {
     const { remote, hooks, ports, memory } = editingGateway();
     remote.profile.workspaces = [ws("a", "same"), ws("b")];

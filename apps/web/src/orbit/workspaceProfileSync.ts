@@ -147,14 +147,16 @@ async function replace(
   let merged = false;
   /** The device list `candidate` already contains. */
   let sent = local;
-  for (let attempt = 1; ; attempt += 1) {
+  /** Version conflicts so far; an edit during a write is sent again without counting. */
+  let conflicts = 0;
+  for (;;) {
     const now = ports.readLocal();
     if (!sameWorkspaces(now, sent)) {
       candidate = mergeWorkspaces(sent, now, candidate);
       sent = now;
     }
     // After a conflict read: nothing left to send when the merge equals the profile's list.
-    if (attempt > 1 && sameWorkspaces(candidate, sendBase)) {
+    if (conflicts > 0 && sameWorkspaces(candidate, sendBase)) {
       adopt(ports, profileId, sendVersion, sendBase);
       return { merged };
     }
@@ -163,11 +165,11 @@ async function replace(
       const after = ports.readLocal();
       if (!sameWorkspaces(after, sent)) {
         // Edited while the write was in flight: keep that edit on top of what landed and send
-        // it in this run, so a profile switch waiting on the run does not leave it behind.
+        // it in this run, so a profile switch waiting on the run does not leave it behind. The
+        // run ends once a write lands with no newer edit.
         const edited = mergeWorkspaces(sent, after, saved.workspaces);
         ports.writeLocal(edited);
         ports.saveState({ profileId, version: saved.version, base: saved.workspaces });
-        if (attempt >= MAX_REPLACE_ATTEMPTS) return { merged };
         candidate = edited;
         sent = ports.readLocal();
         sendBase = saved.workspaces;
@@ -180,10 +182,11 @@ async function replace(
       if (
         !isOrbitGatewayError(error) ||
         error.code !== SETTINGS_VERSION_CONFLICT ||
-        attempt >= MAX_REPLACE_ATTEMPTS
+        conflicts + 1 >= MAX_REPLACE_ATTEMPTS
       ) {
         throw error;
       }
+      conflicts += 1;
       const remote = await ports.client.settings(profileId);
       candidate = mergeWorkspaces(sendBase, candidate, remote.workspaces);
       sendBase = remote.workspaces;

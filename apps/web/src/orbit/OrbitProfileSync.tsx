@@ -109,7 +109,8 @@ export function orbitProfileRebinding(phase: "before" | "after"): void {
   }
   if (phase === "before" || announcedRebind === null) {
     rebindAnnouncements += 1;
-    announcedRebind = `${Date.now()}-${rebindAnnouncements}`;
+    // Random, so two windows announcing in the same millisecond never share a hold.
+    announcedRebind = `${Date.now().toString(36)}-${rebindAnnouncements}-${Math.random().toString(36).slice(2)}`;
   }
   window.localStorage.setItem(REBIND_STORAGE_KEY, `${phase}:${announcedRebind}`);
   if (phase === "after") announcedRebind = null;

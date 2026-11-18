@@ -135,6 +135,13 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { useProjectPin } from "../hooks/useProjectGroupUpdate";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
+import { useEnvironmentProvider } from "../orbit/environmentProvider";
+import { hideSidebarThread, useSidebarHiddenThreads } from "../orbit/sidebarHiddenThreads";
+import {
+  isSidebarHiddenThread,
+  withoutSidebarHiddenProjects,
+  type SidebarHiddenMarks,
+} from "../orbit/sidebarHiddenThreads.logic";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { registerSettleAndAdvance } from "../settleAndAdvance";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -371,6 +378,7 @@ interface SidebarThreadPartitionInput {
   // on the clock, so the minute tick, the precise snooze-wake tick and the inbox
   // tracker's expiry version are inputs: a new key repartitions.
   readonly clockKey: string;
+  readonly hiddenMarks: SidebarHiddenMarks;
 }
 
 function scrollSidebarToTop(content: HTMLElement | null) {
@@ -431,6 +439,7 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly hiddenMarks: SidebarHiddenMarks;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
@@ -445,6 +454,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     threads,
     delegatedUnderParent,
+    hiddenMarks,
     routeRowThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
@@ -497,6 +507,7 @@ function useSidebarThreads(input: {
     workingShelfEnabled,
     sortActiveBySend: folderGroups !== null,
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
+    hiddenMarks,
   });
 
   const { pinnedThreads, activeThreads, workingThreads, snoozedThreads, settledThreads } =
@@ -631,9 +642,15 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     optimisticDrop,
     workingShelfEnabled,
     sortActiveBySend,
+    hiddenMarks,
   } = input;
   const preciseNow = new Date().toISOString();
-  const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
+  const visible = filterSidebarV2VisibleThreads(
+    threads,
+    scopedProjectKeys,
+    delegatedUnderParent,
+    hiddenMarks,
+  );
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
@@ -819,7 +836,12 @@ function useSidebarLookups() {
   const environments = useEnvironmentIdentities();
   const serverConfigs = useServerConfigs();
   const providerEntriesByEnvironment = useAtomValue(sidebarProviderEntriesAtom);
-  const projectGroups = useSidebarProjectGroups();
+  // Conn: a project whose threads are all hidden from the sidebar leaves its list and scope menu.
+  const projectGroups = withoutSidebarHiddenProjects(
+    useSidebarProjectGroups(),
+    useQuietThreadShells(),
+    useSidebarHiddenThreads((state) => state.marks),
+  );
   const environmentLabelById = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
   );
@@ -887,6 +909,12 @@ function checkThreadOperations(
     description: m(msg("This connection cannot change one or more selected threads.")),
   });
   return false;
+}
+
+/** Conn: a thread on an Orbit Instance's server, which a row may disconnect from the sidebar. */
+function isOrbitManagedEnvironment(environmentId: EnvironmentId): boolean {
+  const { provider, orbitInstances } = useEnvironmentProvider.getState();
+  return provider === "orbit" && orbitInstances[environmentId] !== undefined;
 }
 
 const SIDEBAR_DRAG_DISTANCE = 6;
@@ -1165,8 +1193,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
+  const hiddenMarks = useSidebarHiddenThreads((state) => state.marks);
+  // A hidden conversation has no row: the route neither reveals one nor widens the scope.
   const routeRowThreadKey =
-    routeThreadRef === null
+    routeThreadRef === null ||
+    isSidebarHiddenThread(hiddenMarks, routeThreadRef.environmentId, routeThreadRef.threadId)
       ? null
       : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
@@ -1185,6 +1216,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     isSearching: isSearchingThreads,
     scopedProjectKeys: chosenScopeProjectKeys,
     delegatedUnderParent,
+    hiddenMarks,
     findThread: (key) => threads.find((candidate) => threadShellKey(candidate) === key),
   });
   const projectScopeKeys = revealWidensScope ? [] : chosenProjectScopeKeys;
@@ -1411,6 +1443,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
+    hiddenMarks,
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
       ? scopedProjectGroups.length === 0
@@ -2731,6 +2764,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+              canDisconnect: isOrbitManagedEnvironment(threadRef.environmentId),
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -2895,6 +2929,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return;
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
+            return;
+          case "disconnect":
+            hideSidebarThread(threadRef);
             return;
           case "archive": {
             if (confirmThreadArchive) {

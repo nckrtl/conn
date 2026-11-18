@@ -2,7 +2,10 @@ import {
   APPEARANCE_SECTION,
   createOrbitGatewayClient,
   createProfileSync,
+  isJsonObject,
+  SIDEBAR_HIDDEN_THREADS_SECTION,
   type OrbitGatewayClient,
+  type ProfileSyncState,
   type OrbitGatewayWorkspace,
   type ProfileSectionName,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -31,6 +34,11 @@ import {
   saveSectionState,
 } from "./profileSyncStorage";
 import { registerOrbitSleepClient } from "./orbitInstanceSleep";
+import {
+  setSidebarHiddenProfile,
+  sidebarHiddenThreadsChannel,
+  watchSidebarHiddenThreads,
+} from "./sidebarHiddenThreads";
 import { createSerialRunner } from "./serialRunner";
 import { trackNonUserThemeChanges } from "./themeOrigin";
 import {
@@ -41,6 +49,7 @@ import {
 } from "./workspaceProfileSync";
 
 const STATE_STORAGE_KEY = "t3code:orbit-profile-sync:v1";
+const HIDDEN_THREADS_STATE_KEY = "t3code:orbit-profile-hidden-threads:v1";
 /** Probe cadence: GET /me about every 15 s while the window has focus, every 30 s otherwise. */
 const FOCUSED_PROBE_MS = 15_000;
 const BACKGROUND_PROBE_MS = 30_000;
@@ -86,6 +95,8 @@ export function syncOrbitProfileNow(): Promise<void> {
 registerOrbitSleepClient(() => desktopOrbitGatewayClient());
 // Conn: every window applies the attached set the main window stores (flag `connAttachedServers`).
 watchAttachedServersRecord();
+// Conn: every window hides the sidebar threads the main window's sync agreed on.
+watchSidebarHiddenThreads();
 
 /** The Gateway client over the desktop main process, or null outside the desktop app. */
 export function desktopOrbitGatewayClient(): OrbitGatewayClient | null {
@@ -134,6 +145,43 @@ function saveState(state: WorkspaceProfileSyncState | null): void {
   else window.localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(state));
 }
 
+function loadHiddenThreadsState(): ProfileSyncState | null {
+  try {
+    const raw: unknown = JSON.parse(
+      window.localStorage.getItem(HIDDEN_THREADS_STATE_KEY) ?? "null",
+    );
+    if (!isJsonObject(raw) || typeof raw.profileId !== "number") return null;
+    const section = isJsonObject(raw.sections)
+      ? raw.sections[SIDEBAR_HIDDEN_THREADS_SECTION]
+      : undefined;
+    return {
+      profileId: raw.profileId,
+      profileVersion: typeof raw.profileVersion === "number" ? raw.profileVersion : -1,
+      sections:
+        isJsonObject(section) && typeof section.version === "number"
+          ? {
+              [SIDEBAR_HIDDEN_THREADS_SECTION]: {
+                version: section.version,
+                base: isJsonObject(section.base) ? section.base : null,
+                remote: isJsonObject(section.remote) ? section.remote : null,
+              },
+            }
+          : {},
+      ignored: {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveHiddenThreadsState(state: ProfileSyncState): void {
+  try {
+    window.localStorage.setItem(HIDDEN_THREADS_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage blocked: the next run reads the profile again.
+  }
+}
+
 function writeLocal(workspaces: readonly OrbitGatewayWorkspace[]): void {
   const next = workspaces.map(toLocal);
   useWorkspaceStore.setState((state) => ({
@@ -175,6 +223,15 @@ function profileSyncController(): ProfileSyncController | null {
     saveState: saveSectionState,
   });
 
+  // Conn: its own engine and PATCH, so a Gateway that refuses this section cannot hold back
+  // appearance or device edits sent in the same request.
+  const hiddenThreads = createProfileSync({
+    client,
+    channels: () => [sidebarHiddenThreadsChannel],
+    loadState: () => loadHiddenThreadsState(),
+    saveState: (state) => saveHiddenThreadsState(state),
+  });
+
   const runOnce = async (): Promise<void> => {
     try {
       const listed = await reconcileEnvironmentProvider(client);
@@ -193,6 +250,7 @@ function profileSyncController(): ProfileSyncController | null {
           console.warn("Conn could not apply the attached set.", error);
         });
       }
+      setSidebarHiddenProfile(me.profile?.id ?? null);
       const result = await syncWorkspaceProfile(ports, me);
       useOrbitProfileSyncStatus.setState(
         result.kind === "unbound"
@@ -218,6 +276,10 @@ function profileSyncController(): ProfileSyncController | null {
           sectionsError: error instanceof Error ? error.message : String(error),
         });
       }
+      // A refused write keeps the marks on this device; the next change sends them again.
+      await hiddenThreads.run(me).catch((error: unknown) => {
+        console.warn("Conn could not sync hidden sidebar threads.", error);
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       useOrbitProfileSyncStatus.setState((status) => ({

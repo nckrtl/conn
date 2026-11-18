@@ -35,6 +35,14 @@ export interface ProfileSyncChannel {
   readonly applyRemote: (value: JsonObject, previous: JsonObject | null) => void;
   /** Three-way merge, see sectionMerge.ts. The result is what gets sent. */
   readonly merge: (base: JsonObject | null, local: JsonObject, remote: JsonObject) => JsonObject;
+  /**
+   * The device keeps intents, not a copy: the first sync with a profile sends
+   * `merge(null, local, remote)` instead of adopting the profile, and every written value is
+   * applied back, so the channel can retire the intents it carried.
+   */
+  readonly rebases?: boolean;
+  /** A local value that means "nothing chosen": it never seeds or overwrites a missing section. */
+  readonly empty?: JsonObject;
 }
 
 export interface ProfileSyncSectionState {
@@ -94,8 +102,8 @@ interface Remote {
 function remoteSection(settings: OrbitGatewaySettings, name: ProfileSectionName): Remote {
   const document = settings.document;
   const raw =
-    name === "appearance"
-      ? document.appearance
+    name === "appearance" || name === "sidebarHiddenThreads"
+      ? document[name]
       : name.startsWith("devices.")
         ? (document.devices as Record<string, unknown> | undefined)?.[name.slice("devices.".length)]
         : undefined;
@@ -191,11 +199,28 @@ export function createProfileSync(ports: ProfileSyncPorts) {
           delete ignored[name];
         };
 
+        const blank = channel.empty !== undefined && jsonEqual(local, channel.empty);
         if (known === undefined) {
           // First sync of this section, also after a switch to another profile: the profile wins.
           if (profileSide.value !== null) {
-            pull(profileSide.value);
-            outcomes[name] = "adopted";
+            const merged =
+              channel.rebases === true
+                ? toGatewayForm(channel.merge(null, toGatewayForm(local), profileSide.value))
+                : null;
+            if (merged === null || jsonEqual(merged, profileSide.value)) {
+              pull(profileSide.value);
+              outcomes[name] = "adopted";
+            } else if (!jsonEqual(rejected.get(name), local)) {
+              pushes.push({
+                channel,
+                version: profileSide.version,
+                value: merged,
+                local,
+                kind: "merge",
+              });
+            }
+          } else if (blank) {
+            sections[name] = { version: profileSide.version, base: null, remote: null };
           } else if (ignored[name] && jsonEqual(local, ignored[name])) {
             // Nothing the user chose: a server default must not seed the profile.
             sections[name] = { version: profileSide.version, base: null, remote: null };
@@ -216,6 +241,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         const base = remoteChanged && profileSide.value === null ? null : known.base;
         const dirty =
           !jsonEqual(local, base ?? undefined) &&
+          !(base === null && blank) &&
           !(ignored[name] !== undefined && jsonEqual(local, ignored[name]));
 
         if (!dirty) {
@@ -243,7 +269,9 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         );
         if (profileSide.value !== null && jsonEqual(value, profileSide.value)) {
           // The profile already holds the result: nothing to send.
-          if (!jsonEqual(sendable, value)) channel.applyRemote(value, known.base);
+          if (channel.rebases === true || !jsonEqual(sendable, value)) {
+            channel.applyRemote(value, known.base);
+          }
           sections[name] = {
             version: profileSide.version,
             base: read(channel) ?? value,
@@ -301,7 +329,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         // The device may have changed while the PATCH was in flight; its newer edit then stays
         // dirty against `base` and goes out on the next run instead of being overwritten.
         const unchanged = jsonEqual(read(channel) ?? undefined, local);
-        if (unchanged && !jsonEqual(toGatewayForm(local), value)) {
+        if (channel.rebases === true || (unchanged && !jsonEqual(toGatewayForm(local), value))) {
           channel.applyRemote(value, sections[name]?.base ?? null);
         }
         sections[name] = {

@@ -11,9 +11,11 @@ import { environmentCatalog } from "~/connection/catalog";
 import { pullRequestLinkPanelTarget } from "~/lib/openPullRequestLink";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useRightPanelStore } from "~/rightPanelStore";
+import { readThreadShell } from "~/state/entities";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "~/threadRoutes";
 import { desktopOrbitGatewayTransport } from "../desktopOrbitGateway";
 import { connectOrbitEnvironment } from "../environmentProvider";
+import { beginSidebarPeek, isSidebarListedNow } from "../sidebarHiddenThreads";
 import { tasksPanelActions, useTasksPanelStore } from "./tasksPanelStore";
 import {
   openOrbitAgentConversation,
@@ -24,6 +26,31 @@ import {
 async function prepareEnvironment(target: OrbitConversationRef) {
   const transport = desktopOrbitGatewayTransport();
   const client = transport ? createOrbitGatewayClient(transport) : null;
+  const entry = appAtomRegistry
+    .get(environmentCatalog.catalogValueAtom)
+    .entries.get(target.environmentId);
+  // Conn: marks go down before the environment connects, so no row flashes in.
+  const cancelPeek = beginSidebarPeek(target, {
+    targetListed:
+      entry?.enabled === true &&
+      isSidebarListedNow(
+        target.environmentId,
+        readThreadShell({ environmentId: target.environmentId, threadId: target.threadId }),
+      ),
+    environmentSurfaced: entry?.enabled !== true,
+  });
+  try {
+    await prepareKnownEnvironment(target, client);
+  } catch (cause) {
+    cancelPeek();
+    throw cause;
+  }
+}
+
+async function prepareKnownEnvironment(
+  target: OrbitConversationRef,
+  client: ReturnType<typeof createOrbitGatewayClient> | null,
+) {
   await prepareOrbitConversationEnvironment(target.environmentId, {
     known: () =>
       appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries.has(target.environmentId),

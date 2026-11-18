@@ -14,6 +14,11 @@ import {
   type ProfileSyncState,
 } from "./profileSync.ts";
 import { jsonEqual, mergeAppearance, mergeDeviceSection, toGatewayForm } from "./sectionMerge.ts";
+import {
+  createSidebarHiddenThreadsChannel,
+  parseSidebarHiddenThreads,
+  type SidebarHiddenIntent,
+} from "./sidebarHiddenThreads.ts";
 
 type Values = Record<string, string | number | boolean>;
 const device = (values: Values, schema = 1): JsonObject => ({ schema, values: { ...values } });
@@ -59,7 +64,7 @@ function fakeGateway(options: { sections?: boolean; profile?: { id: number; name
     const meta: Record<string, { version: number; updatedAt: string | null; updatedBy: string }> =
       {};
     for (const [name, entry] of gateway.sections) {
-      if (name === "appearance") document.appearance = entry.value;
+      if (name === "appearance" || name === "sidebarHiddenThreads") document[name] = entry.value;
       else devices[name.slice("devices.".length)] = entry.value;
       meta[name] = { version: entry.version, updatedAt: "now", updatedBy: entry.updatedBy };
     }
@@ -679,5 +684,100 @@ describe("section merge", () => {
   it("compares JSON by content, not by key order", () => {
     expect(jsonEqual({ a: 1, b: [1, { c: 2 }] }, { b: [1, { c: 2 }], a: 1 })).toBe(true);
     expect(jsonEqual({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+  });
+});
+
+/** One device that hides sidebar threads, with the store the web app keeps per profile. */
+function makeHidingDevice(fake: ReturnType<typeof fakeGateway>, agreed: string[] = []) {
+  const memory = {
+    agreed,
+    intents: new Map<string, SidebarHiddenIntent>(),
+    state: null as ProfileSyncState | null,
+  };
+  const channel = createSidebarHiddenThreadsChannel({
+    read: () => memory,
+    adopt: (next, intents) => {
+      memory.agreed = [...next];
+      memory.intents = new Map(intents);
+    },
+  });
+  const engine = createProfileSync({
+    client: fake.client,
+    channels: () => [channel],
+    loadState: () => memory.state,
+    saveState: (state) => {
+      memory.state = state;
+    },
+  });
+  const set = (key: string, intent: SidebarHiddenIntent) => memory.intents.set(key, intent);
+  return { memory, set, sync: () => engine.run(fake.me()) };
+}
+
+const profileHidden = (fake: ReturnType<typeof fakeGateway>) =>
+  parseSidebarHiddenThreads(fake.gateway.sections.get("sidebarHiddenThreads")?.value) ?? [];
+
+describe("sidebar hidden threads sync", () => {
+  it("writes nothing for a device that hid nothing", async () => {
+    const fake = fakeGateway();
+    await makeHidingDevice(fake).sync();
+    expect(fake.gateway.patches).toHaveLength(0);
+  });
+
+  it("merges a first load into the profile instead of replacing either side", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a:t1", "hide");
+    await mac.sync();
+    expect(profileHidden(fake)).toEqual(["env-a:t1"]);
+
+    // A device with a stale cached copy and its own peek: the cache is not a deletion, the peek joins.
+    const other = makeHidingDevice(fake, ["env-a:t0"]);
+    other.set("env-b:t2", "hide");
+    await other.sync();
+    expect(profileHidden(fake)).toEqual(["env-a:t1", "env-b:t2"]);
+    expect(other.memory.agreed).toEqual(["env-a:t1", "env-b:t2"]);
+    expect(other.memory.intents.size).toBe(0);
+  });
+
+  it("brings one client's marks to a second client of the same profile", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    const laptop = makeHidingDevice(fake);
+    await laptop.sync();
+    mac.set("env-a:t1", "hide");
+    await mac.sync();
+    await laptop.sync();
+    expect(laptop.memory.agreed).toEqual(["env-a:t1"]);
+
+    // The laptop shows it while the mac hides another: both intents survive the version conflict.
+    laptop.set("env-a:t1", "show");
+    mac.set("env-a:t2", "hide");
+    await mac.sync();
+    await laptop.sync();
+    expect(profileHidden(fake)).toEqual(["env-a:t2"]);
+    await mac.sync();
+    expect(mac.memory.agreed).toEqual(["env-a:t2"]);
+  });
+
+  it("lets an explicit show win over a hide still queued for the same thread", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a:t1", "hide");
+    mac.set("env-a:t1", "show");
+    await mac.sync();
+    expect(profileHidden(fake)).toEqual([]);
+  });
+
+  it("keeps marks on the device when the Gateway refuses the write", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a:t1", "hide");
+    fake.gateway.patchStatus = 422;
+    await expect(mac.sync()).rejects.toMatchObject({ status: 422 });
+    expect(mac.memory.intents.get("env-a:t1")).toBe("hide");
+    fake.gateway.patchStatus = null;
+    mac.set("env-a:t2", "hide");
+    await mac.sync();
+    expect(profileHidden(fake)).toEqual(["env-a:t1", "env-a:t2"]);
   });
 });

@@ -433,10 +433,10 @@ function profileSyncController(): ProfileSyncController | null {
     // A refused hide waits out its cooldown; without the old poll, this read wakes for the retry.
     clearTimeout(hiddenRetryTimer);
     if (hiddenThreadsError !== null && hiddenThreads.hasLocalChanges()) {
-      hiddenRetryTimer = setTimeout(
-        () => void controller?.profile.reconcile(),
-        PROFILE_REJECTED_RETRY_MS + 1_000,
-      );
+      hiddenRetryTimer = setTimeout(() => {
+        // Not for a binding or scope this read no longer belongs to.
+        if (isCurrent()) void controller?.profile.reconcile();
+      }, PROFILE_REJECTED_RETRY_MS + 1_000);
     }
     if (!isCurrent()) return null;
     useOrbitProfileSyncStatus.setState({ hiddenThreadsError });
@@ -531,6 +531,7 @@ function profileSyncController(): ProfileSyncController | null {
     rebinding: (phase) => {
       // An environment run waiting on the old profile's settings fails its `lastMe` check.
       lastMe = null;
+      clearTimeout(hiddenRetryTimer);
       controller?.profile.invalidate();
       if (phase === "after" && heldBinds.size === 0) void controller?.profile.reconcile();
     },

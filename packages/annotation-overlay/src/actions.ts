@@ -1,4 +1,4 @@
-import { annotationMetadata } from "./hooks";
+import { annotationMetadata, hostCapture } from "./hooks";
 import { annotationCanMove, finishActiveDraft, requestAnnotationMove } from "./outside-click";
 import { deepElementFromPoint, isAnnotationUi, isElementFixed } from "./dom";
 import { identifyElement } from "./identify";
@@ -109,6 +109,13 @@ function clearPendingPlacement(): void {
 function scheduleDraftScreenshot(target: AnnotationDraft): void {
   cancelScreenshot?.();
   const scroll = { x: window.scrollX, y: window.scrollY };
+  // A host copies composited pixels off the main thread, so take them now, before the
+  // popup paints or the page reacts to the click (closing menus, moving focus).
+  if (hostCapture()) {
+    cancelScreenshot = null;
+    void attachDraftScreenshot(target, scroll);
+    return;
+  }
   let cancelled = false;
   let idle = 0;
   // Two frames: the popup has painted and its effects, including dictation, have started.
@@ -661,7 +668,14 @@ export function setAnnotationMode(active: boolean): void {
   ) {
     void warmMicrophone();
   }
+  warmHostCapture();
   void pullResolvedAnnotations();
+}
+
+/** A page's first composited-pixel copy is slow; pay for it now, not on the first click. */
+function warmHostCapture(): void {
+  const capture = hostCapture();
+  if (capture) void capture({ x: 0, y: 0, width: 1, height: 1 }).catch(() => undefined);
 }
 
 export function toggleAnnotationMode(): void {

@@ -819,6 +819,40 @@ describe("sidebar hidden threads sync", () => {
     expect(Object.keys(fake.gateway.patches.at(-1)!)).toEqual(["sidebarHiddenThreads"]);
   });
 
+  it("remembers a section observed before an unconfirmed Show", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    const laptop = makeHidingDevice(fake);
+    await laptop.sync();
+    mac.set("env-a:x", "hide");
+    await mac.sync();
+    laptop.set("env-a:x", "show");
+
+    const get = fake.client.settings;
+    const patch = fake.client.patchSections;
+    fake.client.patchSections = async (profileId) => ({
+      ...(await get(profileId)),
+      document: {},
+      sections: {},
+    });
+    await expect(laptop.sync()).rejects.toThrow(/did not confirm/);
+    expect(laptop.memory.ops.get("env-a:x")?.intent).toBe("show");
+
+    fake.client.settings = async (profileId) => ({
+      ...(await get(profileId)),
+      document: {},
+      sections: {},
+    });
+    await expect(laptop.sync()).rejects.toThrow(/did not confirm/);
+    expect(laptop.memory.ops.get("env-a:x")?.intent).toBe("show");
+
+    fake.client.settings = get;
+    fake.client.patchSections = patch;
+    await laptop.sync();
+    expect(profileHidden(fake)).toEqual([]);
+    expect(laptop.memory.ops.size).toBe(0);
+  });
+
   it("syncs the marks that fit and keeps the rest local instead of dropping them", async () => {
     const fake = fakeGateway();
     const mac = makeHidingDevice(fake);

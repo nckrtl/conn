@@ -249,13 +249,14 @@ export function createProfileSync(ports: ProfileSyncPorts) {
           }
           const current = profileSide.value ?? channel.empty ?? {};
           const value = toGatewayForm(channel.merge(null, toGatewayForm(local), current));
+          // Keep the observed version even if the following write cannot be confirmed.
+          sections[name] = {
+            version: profileSide.version,
+            base: profileSide.value,
+            remote: profileSide.value,
+          };
           if (jsonEqual(value, current)) {
             channel.applyRemote(current, known?.base ?? null);
-            sections[name] = {
-              version: profileSide.version,
-              base: profileSide.value,
-              remote: profileSide.value,
-            };
             if (known === undefined || known.version !== profileSide.version) {
               outcomes[name] = known === undefined ? "adopted" : "pulled";
             }

@@ -2,6 +2,7 @@ import {
   ORBIT_TASK_LANES,
   orbitTaskLabel,
   orbitTaskLane,
+  type OrbitTaskLane,
   type OrbitTasksPage,
   type OrbitTasksResult,
   type OrbitTaskSummary,
@@ -54,7 +55,12 @@ import {
   orbitTasksAvailability,
 } from "./orbitTasksClient";
 import { taskCardDetail, tasksBoardLanes, tasksErrorNotice } from "./tasksBoard.logic";
-import { tasksPanelActions, useTasksNavigation, useTasksPanelStore } from "./tasksPanelStore";
+import {
+  tasksPanelActions,
+  useTasksBoardQuery,
+  useTasksNavigation,
+  useTasksPanelStore,
+} from "./tasksPanelStore";
 
 type TaskListState = { readonly status: "loading" } | OrbitTasksResult<OrbitTasksPage>;
 
@@ -170,7 +176,14 @@ function TasksPanelContent(props: { threadKey: string; orbitProjectId: number | 
       />
     );
   }
-  return <TasksBoard threadKey={props.threadKey} tasks={tasks} scroll={navigation.boardScroll} />;
+  return (
+    <TasksBoard
+      threadKey={props.threadKey}
+      tasks={tasks}
+      scroll={navigation.boardScroll}
+      laneScroll={navigation.laneScroll ?? {}}
+    />
+  );
 }
 
 function TasksNotice(props: { icon: ReactNode; title: string; text: string; action?: ReactNode }) {
@@ -187,8 +200,8 @@ function TasksNotice(props: { icon: ReactNode; title: string; text: string; acti
 }
 
 /** Puts a remounted scroller back where the store says, once, without moving focus. */
-function useRestoredScroll(top: number, left: number) {
-  const ref = useRef<HTMLDivElement>(null);
+function useRestoredScroll<T extends HTMLElement>(top: number, left: number) {
+  const ref = useRef<T>(null);
   const [initial] = useState({ top, left });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- restores the DOM scroll position saved before the tab unmounted
   useLayoutEffect(() => {
@@ -201,7 +214,7 @@ function useRestoredScroll(top: number, left: number) {
 
 /** Search fills the row; Lanes sits in Conn's toolbar pill, like the terminal controls. */
 function BoardToolbar() {
-  const query = useTasksPanelStore((state) => state.query);
+  const query = useTasksBoardQuery((state) => state.query);
   const hiddenLanes = useTasksPanelStore((state) => state.hiddenLanes);
   const hidden = hiddenLanes.length;
   return (
@@ -217,7 +230,7 @@ function BoardToolbar() {
           placeholder="Search tasks"
           spellCheck={false}
           value={query}
-          onChange={(event) => tasksPanelActions().setQuery(event.currentTarget.value)}
+          onChange={(event) => useTasksBoardQuery.getState().setQuery(event.currentTarget.value)}
         />
       </InputGroup>
       <ToolbarGroup className="shrink-0">
@@ -269,9 +282,10 @@ function TasksBoard(props: {
   threadKey: string;
   tasks: ReadonlyArray<OrbitTaskSummary>;
   scroll: { readonly top: number; readonly left: number };
+  laneScroll: Partial<Record<OrbitTaskLane, number>>;
 }) {
-  const scrollRef = useRestoredScroll(props.scroll.top, props.scroll.left);
-  const query = useTasksPanelStore((state) => state.query);
+  const scrollRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, props.scroll.left);
+  const query = useTasksBoardQuery((state) => state.query);
   const hiddenLanes = useTasksPanelStore((state) => state.hiddenLanes);
   const searching = query.trim().length > 0;
   return (
@@ -300,7 +314,11 @@ function TasksBoard(props: {
                 {searching ? `${lane.tasks.length} of ${lane.total}` : lane.tasks.length}
               </span>
             </div>
-            <ul className="scrollbar-inset m-0 flex min-h-0 flex-1 list-none flex-col gap-1.5 overflow-y-auto p-0">
+            <LaneList
+              threadKey={props.threadKey}
+              lane={lane.id}
+              top={props.laneScroll[lane.id] ?? 0}
+            >
               {lane.tasks.map((task) => (
                 <TaskCard
                   key={task.id}
@@ -313,11 +331,36 @@ function TasksBoard(props: {
                   {searching && lane.total > 0 ? "No matches" : "Nothing here"}
                 </li>
               ) : null}
-            </ul>
+            </LaneList>
           </section>
         ))}
       </div>
     </div>
+  );
+}
+
+/** One lane's cards. It scrolls on its own and comes back where it was after a task. */
+function LaneList(props: {
+  threadKey: string;
+  lane: OrbitTaskLane;
+  top: number;
+  children: ReactNode;
+}) {
+  const ref = useRestoredScroll<HTMLUListElement>(props.top, 0);
+  return (
+    <ul
+      ref={ref}
+      onScrollEnd={(event) =>
+        tasksPanelActions().saveLaneScroll(
+          props.threadKey,
+          props.lane,
+          event.currentTarget.scrollTop,
+        )
+      }
+      className="scrollbar-inset m-0 flex min-h-0 flex-1 list-none flex-col gap-1.5 overflow-y-auto p-0"
+    >
+      {props.children}
+    </ul>
   );
 }
 
@@ -350,6 +393,9 @@ function TaskCardStatus(props: { task: OrbitTaskSummary }) {
         {label.label}
       </span>
     );
+  }
+  if (label?.tone === "muted") {
+    return <span className="text-muted-foreground">{label.label}</span>;
   }
   if (orbitTaskLane(task.status) === "in-progress") {
     return (

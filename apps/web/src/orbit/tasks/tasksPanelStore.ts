@@ -20,6 +20,8 @@ export interface TasksNavigation {
   /** Inside a subtask: the tab the task itself had open, restored when the path leads back. */
   readonly taskTab?: TasksDetailTab | undefined;
   readonly boardScroll: { readonly top: number; readonly left: number };
+  /** Each lane scrolls on its own; its offset, kept like the board's. */
+  readonly laneScroll?: Partial<Record<OrbitTaskLane, number>> | undefined;
   readonly detailScrollTop: number;
   /** When this thread's Tasks navigation last changed, for the cap below. */
   readonly updatedAt: number;
@@ -54,10 +56,7 @@ interface TasksPanelState {
   readonly byThreadKey: Readonly<Record<string, TasksNavigation>>;
   /** Board lanes the user turned off; one setting for every thread and window. */
   readonly hiddenLanes: ReadonlyArray<OrbitTaskLane>;
-  /** The board search. Kept for the session only, so closing and reopening Tasks keeps it. */
-  readonly query: string;
   readonly toggleLane: (lane: OrbitTaskLane) => void;
-  readonly setQuery: (query: string) => void;
   readonly handoff: (sourceKey: string, targetKey: string) => void;
   readonly openTask: (threadKey: string, taskId: number) => void;
   /** `tab` switches the content tab too; without it the current tab stays. */
@@ -65,6 +64,7 @@ interface TasksPanelState {
   readonly setTab: (threadKey: string, tab: TasksDetailTab) => void;
   readonly showBoard: (threadKey: string) => void;
   readonly saveBoardScroll: (threadKey: string, top: number, left: number) => void;
+  readonly saveLaneScroll: (threadKey: string, lane: OrbitTaskLane, top: number) => void;
   readonly saveDetailScroll: (threadKey: string, top: number) => void;
 }
 
@@ -86,14 +86,12 @@ export const useTasksPanelStore = create<TasksPanelState>()(
       return {
         byThreadKey: {},
         hiddenLanes: [],
-        query: "",
         toggleLane: (lane) =>
           set((state) => ({
             hiddenLanes: state.hiddenLanes.includes(lane)
               ? state.hiddenLanes.filter((entry) => entry !== lane)
               : [...state.hiddenLanes, lane],
           })),
-        setQuery: (query) => set({ query }),
         handoff: (sourceKey, targetKey) =>
           set((state) => {
             const source = state.byThreadKey[sourceKey];
@@ -162,6 +160,12 @@ export const useTasksPanelStore = create<TasksPanelState>()(
               ? current
               : { ...current, boardScroll: { top, left } },
           ),
+        saveLaneScroll: (threadKey, lane, top) =>
+          update(threadKey, (current) =>
+            (current.laneScroll?.[lane] ?? 0) === top
+              ? current
+              : { ...current, laneScroll: { ...current.laneScroll, [lane]: top } },
+          ),
         saveDetailScroll: (threadKey, top) =>
           update(threadKey, (current) =>
             current.detailScrollTop === top ? current : { ...current, detailScrollTop: top },
@@ -197,6 +201,15 @@ export const useTasksPanelStore = create<TasksPanelState>()(
     },
   ),
 );
+
+/**
+ * The board search, for this window's session only. Kept apart from the persisted store so typing
+ * never writes navigation that another window may have changed since.
+ */
+export const useTasksBoardQuery = create<{
+  readonly query: string;
+  readonly setQuery: (query: string) => void;
+}>()((set) => ({ query: "", setQuery: (query) => set({ query }) }));
 
 export function useTasksNavigation(threadKey: string): TasksNavigation {
   return useTasksPanelStore((state) => state.byThreadKey[threadKey] ?? DEFAULT_TASKS_NAVIGATION);

@@ -3,7 +3,6 @@ import { useGT } from "gt-react";
 import * as Schema from "effect/Schema";
 import {
   useEffect,
-  useRef,
   useState,
   useSyncExternalStore,
   type CSSProperties,
@@ -417,35 +416,23 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
   );
 }
 
-const TASKS_HID_THREAD_LIST_KEY = "conn:tasks-hid-thread-list";
-
 /**
- * Conn: the Tasks app needs the width, so the thread list folds away while Tasks is the shown
- * panel tab, and comes back when Tasks closes or another tab or thread takes over. The sidebar
- * toggle still reopens it in between.
+ * Conn: the Tasks app needs the width, so the thread list folds away in this window while Tasks
+ * is the shown panel tab, and comes back when Tasks closes or another tab or thread takes over.
+ * The fold is never saved; the sidebar toggle clears it and is saved as usual.
  */
 function TasksModeThreadListFold() {
-  const { open, setOpen, isMobile } = useSidebar();
+  const { setFolded, isMobile } = useSidebar();
   const shownTarget = useShownThreadRouteTarget().shownTarget;
   const threadRef = shownTarget?.kind === "server" ? shownTarget.threadRef : null;
   const tasksActive = useRightPanelStore(
     (state) => selectActiveRightPanel(state.byThreadKey, threadRef) === "tasks",
   );
-  const previous = useRef(false);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- folds the sidebar's persisted open state when the Tasks tab is entered or left
+  const fold = tasksActive && !isMobile;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- folds the sidebar store when the Tasks tab is entered and unfolds it when left
   useEffect(() => {
-    if (previous.current === tasksActive || isMobile) return;
-    previous.current = tasksActive;
-    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
-    if (tasksActive) {
-      if (!open) return;
-      storage?.setItem(TASKS_HID_THREAD_LIST_KEY, "1");
-      setOpen(false);
-    } else if (storage?.getItem(TASKS_HID_THREAD_LIST_KEY) === "1") {
-      storage.removeItem(TASKS_HID_THREAD_LIST_KEY);
-      setOpen(true);
-    }
-  }, [tasksActive, open, setOpen, isMobile]);
+    setFolded(fold);
+  }, [fold, setFolded]);
   return null;
 }
 

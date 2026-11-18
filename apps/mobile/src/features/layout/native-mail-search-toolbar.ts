@@ -3,7 +3,6 @@ import { useWindowDimensions } from "react-native";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import type { HeaderBarButtonMailSearchToolbarItem } from "react-native-screens";
 
-
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 
 export const NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED = NATIVE_LIQUID_GLASS_SUPPORTED;

@@ -1553,7 +1553,10 @@ export default function FilePreviewPanel({
           </ToolbarGroup>
           <ToolbarGroup className="shrink-0">
             {canOpenInBrowser ? (
-              <FileSurfaceAction label={gt("Open file in preview browser")} onPress={handleOpenInBrowser}>
+              <FileSurfaceAction
+                label={gt("Open file in preview browser")}
+                onPress={handleOpenInBrowser}
+              >
                 <Globe2 className="size-3.5" />
               </FileSurfaceAction>
             ) : null}

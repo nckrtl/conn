@@ -425,8 +425,8 @@ function LinkRequestDialog(props: {
                         <span className="block text-ui text-muted-foreground">
                           {unnamed ? (
                             <T>
-                              Create a link on a machine: Settings → Connections → Create link,
-                              then paste its code here.
+                              Create a link on a machine: Settings → Connections → Create link, then
+                              paste its code here.
                             </T>
                           ) : (
                             <T>

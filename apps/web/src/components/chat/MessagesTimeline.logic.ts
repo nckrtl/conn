@@ -1641,7 +1641,7 @@ export function deriveMessagesTimelineRows(
     availableRevertTurnCounts?: ReadonlySet<number> | undefined;
     worktreeSetup?: WorktreeSetupSnapshot | null;
     orbitReady?: OrbitReadyTimelineInput | null;
-  toolCallVisibility?: ToolCallVisibility;
+    toolCallVisibility?: ToolCallVisibility;
     revealedMessageId?: MessageId | null;
   },
   resolve: MessageResolver = m,

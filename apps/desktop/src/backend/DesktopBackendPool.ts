@@ -193,7 +193,7 @@ export const layer = Layer.effect(
           );
           yield* electronDialog.showErrorBox(
             m(msg("WSL backend is still unavailable")),
-            `${reason}\n\n${m(msg("T3 Code will use the Windows backend for this launch and retry WSL the next time the app starts."))}`,
+            `${reason}\n\n${m(msg("{appName} will use the Windows backend for this launch and retry WSL the next time the app starts.", { appName: appBrand.name }))}`,
           );
           yield* appSettings.applyWslWindowsFallbackInMemory;
           return true;
@@ -204,7 +204,7 @@ export const layer = Layer.effect(
         });
         yield* electronDialog.showErrorBox(
           m(msg("WSL backend couldn't start")),
-          `${reason}\n\n${m(msg("Falling back to the Windows backend so T3 Code can open. Re-enable the WSL backend from Settings > Sharing & access once the WSL distro is fixed."))}`,
+          `${reason}\n\n${m(msg("Falling back to the Windows backend so {appName} can open. Re-enable the WSL backend from Settings > Sharing & access once the WSL distro is fixed.", { appName: appBrand.name }))}`,
         );
         // Clear wslOnly too so enabling WSL cannot restore a failed mode.
         // Keep the in-memory fallback if persistence fails.

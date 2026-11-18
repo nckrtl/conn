@@ -3,10 +3,10 @@ import type {
   ServerProviderVersionAdvisory,
   ServerProviderCompatibilityAdvisory,
 } from "@t3tools/contracts";
-import { APP_BASE_NAME } from "../../branding";
 import { msg } from "gt-react";
 
 import { m, type MessageResolver } from "../../i18n/messages";
+import { appName } from "@t3tools/shared/appName";
 
 export const PROVIDER_STATUS_STYLES = {
   disabled: {
@@ -74,7 +74,11 @@ export function getProviderSummary(
       headline: resolve(msg("Disabled", { $context: "provider status" })),
       detail:
         provider.message ??
-        resolve(msg("This provider is installed but disabled for new sessions in T3 Code.")),
+        resolve(
+          msg("This provider is installed but disabled for new sessions in {appName}.", {
+            appName: appName(),
+          }),
+        ),
     };
   }
   if (!provider.installed) {

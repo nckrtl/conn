@@ -328,7 +328,9 @@ export function PreviewChromeRow({
                     size="icon-xs"
                     onClick={onPictureInPicture}
                     aria-label={
-                      pictureInPicture ? gt("Close floating preview") : gt("Float preview over chat")
+                      pictureInPicture
+                        ? gt("Close floating preview")
+                        : gt("Float preview over chat")
                     }
                     aria-pressed={pictureInPicture ? "true" : "false"}
                     type="button"

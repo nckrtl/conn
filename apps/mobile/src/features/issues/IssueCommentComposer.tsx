@@ -66,7 +66,12 @@ export function IssueCommentComposer(props: {
   const chrome = useComposerChrome();
   const [focused, setFocused] = useState(false);
   // Animate only while typing, as the thread composer does; a restored draft lands in place.
-  const compactEditor = useCompactComposerEditor(bodyText, draft, Platform.OS === "ios" && focused, 0);
+  const compactEditor = useCompactComposerEditor(
+    bodyText,
+    draft,
+    Platform.OS === "ios" && focused,
+    0,
+  );
   const voiceInput = useVoiceInputController({
     ownerKey: props.ownerKey,
     label: props.label,

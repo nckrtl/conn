@@ -454,7 +454,13 @@ export function AttachmentFilePreview(props: {
         <ToolbarGroup className="shrink-0">
           {content || streamsText ? (
             <FileSurfaceAction
-              label={isCopied ? gt("Copied") : content?.truncated ? gt("Copy preview") : gt("Copy contents")}
+              label={
+                isCopied
+                  ? gt("Copied")
+                  : content?.truncated
+                    ? gt("Copy preview")
+                    : gt("Copy contents")
+              }
               onPress={() => {
                 if (content) {
                   void copyToClipboard(content.text, undefined);
@@ -498,7 +504,10 @@ export function AttachmentFilePreview(props: {
             </FileSurfaceAction>
           ) : null}
           {props.onClose ? (
-            <FileSurfaceAction label={gt("Close", { $context: "button, closes the file preview" })} onPress={props.onClose}>
+            <FileSurfaceAction
+              label={gt("Close", { $context: "button, closes the file preview" })}
+              onPress={props.onClose}
+            >
               <XIcon className="size-3.5" />
             </FileSurfaceAction>
           ) : null}

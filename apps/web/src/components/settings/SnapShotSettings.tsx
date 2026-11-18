@@ -63,7 +63,7 @@ import {
   captureSetupShouldDisableOnClose,
   type CaptureSetupStep,
 } from "./SnapShotSetupDialog.logic";
-import { APP_BASE_NAME } from "../../branding";
+import { appName } from "@t3tools/shared/appName";
 
 const soundOptionRowClassName = "grid grid-cols-[1fr_auto]";
 
@@ -269,7 +269,8 @@ export function SnapShotSettings() {
   const shortcutStatus = recording
     ? gt("Press your shortcut. Esc cancels.")
     : candidateConflict
-      ? gt('T3 Code already uses this for "{command}".', {
+      ? gt('{appName} already uses this for "{command}".', {
+          appName: appName(),
           command: commandLabel(candidateConflict, messages),
         })
       : shortcutCheck.status === "checking"

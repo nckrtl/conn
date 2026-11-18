@@ -1,3 +1,5 @@
+import { useGT, useLocale, useMessages } from "gt-react-native";
+
 import { Toolbar } from "./Toolbar";
 import { AppActivityIndicator } from "./AppActivityIndicator";
 import type { HeaderBarButtonMailSearchToolbarItem, SearchBarCommands } from "react-native-screens";
@@ -44,6 +46,9 @@ function mailMenuItems(items: ReadonlyArray<AppBarMenuItem>): MailMenu["items"] 
 
 export function AppBar(props: AppBarProps) {
   const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
+  const gt = useGT();
+  const m = useMessages();
+  const locale = useLocale();
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const deviceType = useDeviceType();
   const headerId = useId();
@@ -119,7 +124,7 @@ export function AppBar(props: AppBarProps) {
   return (
     <>
       <NativeStackScreenOptions
-        optionsVersion={[props.optionsVersion, compactSearch ? menu : undefined]}
+        optionsVersion={[props.optionsVersion, compactSearch ? menu : undefined, locale]}
         options={{
           headerShown: true,
           headerBackVisible:
@@ -137,19 +142,22 @@ export function AppBar(props: AppBarProps) {
             ? {
                 unstable_headerToolbarItems: compactSearch
                   ? () => [
-                      createNativeMailSearchToolbarItem({
-                        showsSearchDismissButton: true,
-                        placeholder: search.compactPlaceholder ?? search.placeholder,
-                        onSearchTextChange: search.onChangeText,
-                        searchTextChangeId: `${headerId}-search-text`,
-                        ...(menu
-                          ? {
-                              filterButtonId: `${headerId}-filter`,
-                              filterSystemImageName: iosIcon(menu.icon),
-                              filterMenu: { title: menu.title, items: mailMenuItems(menu.items) },
-                            }
-                          : undefined),
-                      }),
+                      createNativeMailSearchToolbarItem(
+                        {
+                          showsSearchDismissButton: true,
+                          placeholder: search.compactPlaceholder ?? search.placeholder,
+                          onSearchTextChange: search.onChangeText,
+                          searchTextChangeId: `${headerId}-search-text`,
+                          ...(menu
+                            ? {
+                                filterButtonId: `${headerId}-filter`,
+                                filterSystemImageName: iosIcon(menu.icon),
+                                filterMenu: { title: menu.title, items: mailMenuItems(menu.items) },
+                              }
+                            : undefined),
+                        },
+                        m,
+                      ),
                     ]
                   : () => [],
                 headerSearchBarOptions: compactSearch
@@ -179,7 +187,7 @@ export function AppBar(props: AppBarProps) {
         <Toolbar placement="left">
           <Toolbar.Button
             icon="xmark"
-            accessibilityLabel={props.closeAccessibilityLabel ?? "Close"}
+            accessibilityLabel={props.closeAccessibilityLabel ?? gt("Close")}
             onPress={props.onClose}
           />
         </Toolbar>
@@ -187,7 +195,7 @@ export function AppBar(props: AppBarProps) {
         <Toolbar placement="left">
           {rootBack ? (
             <ScreenHeaderButton
-              accessibilityLabel="Back"
+              accessibilityLabel={gt("Back")}
               icon="chevron.left"
               onPress={rootBack}
               separateBackground
@@ -205,8 +213,8 @@ export function AppBar(props: AppBarProps) {
           ) : null}
           {compose ? (
             <ScreenHeaderButton
-              accessibilityLabel="New task"
-              label="New task"
+              accessibilityLabel={gt("New task")}
+              label={gt("New task")}
               icon="square.and.pencil"
               onPress={compose}
               separateBackground
@@ -265,7 +273,7 @@ export function AppBar(props: AppBarProps) {
           ) : null}
           {closeInspector ? (
             <ScreenHeaderButton
-              accessibilityLabel="Close inspector"
+              accessibilityLabel={gt("Close inspector")}
               icon="xmark"
               onPress={closeInspector}
               separateBackground

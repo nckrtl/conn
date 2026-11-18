@@ -5,8 +5,10 @@ import {
 } from "@t3tools/client-runtime/state/projects";
 import type { DesktopAppActivationRequest } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
+import { msg } from "gt-react";
 
 import { handleDesktopAppActivationRequest } from "../desktopAppActivation";
+import { m } from "../i18n/messages";
 import { newProjectId } from "../lib/utils";
 import { readProjects, readThreadShell, waitForProject } from "../state/entities";
 import { usePrimaryEnvironment } from "../state/environments";
@@ -14,10 +16,10 @@ import { projectEnvironment } from "../state/projects";
 import { useEnvironmentShellHasSnapshot } from "../state/shell";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useWorkspaceStore } from "../workspaceStore";
-import { APP_BASE_NAME } from "../branding";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { reportProjectFailure } from "./useProjectGroupUpdate";
 import { useNewThreadHandler } from "./useHandleNewThread";
+import { appName } from "@t3tools/shared/appName";
 
 /**
  * Opens a folder on this computer as a project in the primary environment: an
@@ -76,7 +78,7 @@ export function useOpenLocalWorkspace() {
           const error = squashAtomCommandFailure(result);
           throw error instanceof Error
             ? error
-            : new Error(`${APP_BASE_NAME} could not add the project.`);
+            : new Error(m(msg("{appName} could not add the project.", { appName: appName() })));
         }
         return projectId;
       },
@@ -94,7 +96,7 @@ export function useOpenLocalWorkspace() {
           void updateProject({
             environmentId: projectRef.environmentId,
             input: { projectId: projectRef.projectId, archived: false },
-          }).then((result) => reportProjectFailure("Failed to unarchive project", result));
+          }).then((result) => reportProjectFailure(m(msg("Failed to unarchive project")), result));
         }
         return openThread(projectRef);
       },

@@ -208,7 +208,6 @@ export function TasksScreen() {
           }
           menu={
             <Menu
-              title={gt("Lanes")}
               actions={laneActions}
               onPressAction={({ nativeEvent }) => {
                 const next = MOBILE_TASK_LANES.find((id) => id === nativeEvent.event);

@@ -73,6 +73,7 @@ impl axum::serve::Listener for Listener {
                         inner: stream,
                         slot: slot.clone(),
                         watched: Vec::new(),
+                        fenced: false,
                     };
                     return (io, Peer { addr, slot });
                 }
@@ -102,6 +103,9 @@ pub struct FencedIo {
     inner: tokio::net::TcpStream,
     slot: Arc<Slot>,
     watched: Vec<Watched>,
+    /// Latched at the first fence: every later poll fails at once and no finished future is
+    /// polled again.
+    fenced: bool,
 }
 
 impl std::fmt::Debug for FencedIo {
@@ -120,6 +124,18 @@ impl FencedIo {
     /// `Ready(Ok)`: all attached handlers are open. `Ready(Err)`: one is fenced. `Pending`:
     /// one is paused; the task wakes at its next change or its fence.
     fn check(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.fenced {
+            return Poll::Ready(Err(fenced()));
+        }
+        let state = self.check_handlers(cx);
+        if matches!(state, Poll::Ready(Err(_))) {
+            self.fenced = true;
+            self.watched.clear();
+        }
+        state
+    }
+
+    fn check_handlers(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         {
             let handles = crate::lock(&self.slot.handles);
             for handle in handles.iter().skip(self.watched.len()) {
@@ -208,4 +224,127 @@ pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> i
         router.into_make_service_with_connect_info::<Peer>(),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        time::Instant,
+    };
+
+    use super::*;
+    use crate::managed::{
+        Shared,
+        authority::{AuthorityReply, Notice, SnapshotEdge},
+    };
+
+    const ENV: &str = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
+
+    /// An open authority with edge 1, and one registered handler of it.
+    fn open_handle() -> (Arc<Shared>, Handle) {
+        let shared = Shared::new(ENV.into(), 1);
+        shared.set_notice_link(true);
+        let wall = conn_support::time::now_ms();
+        let probe = shared
+            .with(|a| {
+                (
+                    a.begin_probe("n-1".into(), Instant::now(), wall),
+                    Default::default(),
+                )
+            })
+            .expect("probe");
+        let reply = AuthorityReply {
+            nonce: probe.nonce,
+            environment_id: ENV.into(),
+            generation: 1,
+            head_revision: 0,
+            server_time: Some(conn_support::time::iso_from_ms(wall)),
+            kind: "snapshot".into(),
+            edges: Some(vec![SnapshotEdge {
+                edge_id: 1,
+                consumer_node_id: 101,
+            }]),
+            revisions: None,
+            owed: vec![],
+        };
+        shared.with(|a| ((), a.apply_reply(&reply, Instant::now(), wall)));
+        let far = Instant::now() + Duration::from_secs(3_600);
+        let epoch = shared.read(|a| a.epoch());
+        let (id, closed) = shared
+            .with(|a| {
+                (
+                    a.admit(1, 0, far, epoch, None, Instant::now(), wall),
+                    Default::default(),
+                )
+            })
+            .expect("admitted");
+        let handle = Handle {
+            shared: shared.clone(),
+            id,
+            expires: far,
+            closed,
+        };
+        (shared, handle)
+    }
+
+    /// A peer that stops reading: the target's writes back up until the socket is pending.
+    /// The fence then cuts it: no write, flush or shutdown passes, a second poll does not
+    /// panic, the peer gets no byte beyond what the kernel took before the fence, and the
+    /// handler unregisters with the socket.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_write_is_cut_at_the_fence() {
+        let (shared, handle) = open_handle();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let slot = Arc::new(Slot::default());
+        slot.attach(Arc::new(handle));
+        let mut io = FencedIo {
+            inner: stream,
+            slot,
+            watched: Vec::new(),
+            fenced: false,
+        };
+        let chunk = vec![7u8; 64 * 1024];
+        let mut written = 0usize;
+        loop {
+            match tokio::time::timeout(Duration::from_millis(50), io.write(&chunk)).await {
+                Ok(Ok(n)) => written += n,
+                Ok(Err(error)) => panic!("{error}"),
+                // The peer reads nothing: the write is pending.
+                Err(_) => break,
+            }
+        }
+        assert!(written > 0);
+        shared.notice(&Notice {
+            environment_id: ENV.into(),
+            generation: 1,
+            revision: 1,
+            edge_ids: vec![1],
+        });
+        assert!(io.write(&chunk).await.is_err(), "no write after the fence");
+        assert!(io.flush().await.is_err(), "no flush after the fence");
+        assert!(
+            io.shutdown().await.is_err(),
+            "a second poll answers from the latch"
+        );
+        drop(io);
+        assert_eq!(
+            shared.read(|a| a.open_handlers()),
+            0,
+            "the handler ended with the socket"
+        );
+        let mut received = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut received)).await;
+        assert!(
+            received.len() <= written,
+            "{} bytes reached the peer, {written} were accepted before the fence",
+            received.len()
+        );
+    }
 }

@@ -67,7 +67,7 @@ impl Lab {
             environment_id: ENV.into(),
             generation: 1,
             head_revision: head,
-            server_time: None,
+            server_time: Some(conn_support::time::iso_from_ms(at)),
             kind: kind.into(),
             edges: edges.map(|e| {
                 e.into_iter()
@@ -348,7 +348,7 @@ fn a_wrong_generation_or_a_missing_revision_fails_closed() {
         environment_id: ENV.into(),
         generation: 2,
         head_revision: 2,
-        server_time: None,
+        server_time: Some(conn_support::time::iso_from_ms(110)),
         kind: "current".into(),
         edges: None,
         revisions: None,
@@ -727,8 +727,9 @@ fn a_disproved_gap_notice_ends_the_pause_without_a_probe_storm() {
 fn token_expiry_is_a_local_deadline_on_the_safe_side_of_the_offset() {
     let mut lab = Lab::new();
     lab.open(0, vec![1], 0);
-    // Without bounds: the wall time as it is.
-    assert_eq!(lab.a.local_deadline(10_000, lab.at(0), 0), lab.at(10_000));
+    // The opening snapshot read the Gateway at 10 between sends at 0 and 10: up to 10 ahead.
+    assert_eq!(lab.a.offset_bounds(), Some((0, 10)));
+    assert_eq!(lab.a.local_deadline(10_000, lab.at(0), 0), lab.at(9_990));
     let probe = lab.probe(1_000);
     let reply = AuthorityReply {
         nonce: probe.nonce,
@@ -799,4 +800,95 @@ fn a_settled_revision_whose_ack_answer_was_lost_is_pruned() {
     assert_eq!(lab.a.revision_records(), 0);
     assert_eq!(lab.a.next_ack(), None);
     assert!(lab.a.is_confirmed(1));
+}
+
+#[test]
+fn an_introspected_revision_keeps_its_notice_and_a_lower_head_fails_closed() {
+    let mut lab = Lab::new();
+    lab.open(10, vec![1, 2], 0);
+    lab.notice(11, vec![1], 50);
+    lab.a.note_revision(11, lab.at(60));
+    // A probe sent after both reports head 10: it cannot disprove 11, which HTTPS proved.
+    let probe = lab.probe(100);
+    lab.reply(&probe, "current", 10, 110);
+    assert!(
+        !lab.a.is_open(),
+        "a head below a proven revision is a missing revision"
+    );
+    assert!(lab.a.is_fenced(1), "the notice's fence stays");
+    // Closed, it does not probe again at round-trip speed.
+    let probe = lab.probe(1_000);
+    let effects = lab.reply_with(
+        &probe,
+        "snapshot",
+        10,
+        Some(vec![1, 2]),
+        None,
+        vec![],
+        1_010,
+    );
+    assert!(!effects.probe_now, "recovery waits for the timer");
+    assert!(
+        !lab.a.is_open(),
+        "a snapshot below the proven revision does not reopen"
+    );
+}
+
+#[test]
+fn an_incomplete_reply_renews_nothing() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let probe = lab.probe(1_000);
+    let reply = AuthorityReply {
+        nonce: probe.nonce,
+        environment_id: ENV.into(),
+        generation: 1,
+        head_revision: 0,
+        server_time: None,
+        kind: "current".into(),
+        edges: None,
+        revisions: None,
+        owed: vec![],
+    };
+    lab.a.apply_reply(&reply, lab.at(1_010), 1_010);
+    assert!(!lab.a.is_open(), "no server time, no lease");
+    let without_owed = serde_json::json!({"nonce": "n", "environment_id": ENV, "generation": 1,
+        "head_revision": 0, "server_time": "2026-11-18T00:00:00.000000+00:00", "kind": "current"});
+    assert!(serde_json::from_value::<AuthorityReply>(without_owed).is_err());
+}
+
+#[test]
+fn a_snapshot_below_the_applied_revision_does_not_reopen() {
+    let mut lab = Lab::new();
+    lab.open(12, vec![1], 0);
+    let probe = lab.probe(100);
+    lab.a.probe_failed(&probe.nonce);
+    let probe = lab.probe(200);
+    lab.reply_with(&probe, "snapshot", 10, Some(vec![1]), None, vec![], 210);
+    assert!(!lab.a.is_open());
+    assert_eq!(lab.a.applied(), Some(12));
+}
+
+#[test]
+fn a_gateway_behind_the_target_does_not_expire_tokens_early() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 39_000);
+    let probe = lab.probe(40_000);
+    let reply = AuthorityReply {
+        nonce: probe.nonce,
+        environment_id: ENV.into(),
+        generation: 1,
+        head_revision: 0,
+        // The Gateway is 30 s behind: it reads 10,005 while the target reads 40,000..40,010.
+        server_time: Some(conn_support::time::iso_from_ms(10_005)),
+        kind: "current".into(),
+        edges: None,
+        revisions: None,
+        owed: vec![],
+    };
+    lab.a.apply_reply(&reply, lab.at(40_010), 40_010);
+    assert_eq!(lab.a.offset_bounds(), Some((-30_005, -29_995)));
+    // A token the Gateway says ends at 30,005 (20 s from its now) ends here no sooner than
+    // 30,005 + 29,995: the earliest target time the Gateway can read 30,005.
+    assert_eq!(lab.a.local_wall_ms(30_005), 60_000);
 }

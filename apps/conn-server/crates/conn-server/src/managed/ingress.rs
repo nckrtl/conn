@@ -220,8 +220,19 @@ async fn ticket(
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
+    // The handler rides the connection from here on, whatever this answers.
+    let handle = Arc::new(handle);
+    conn.slot.attach(handle.clone());
     let now = conn_support::time::now_ms();
-    let expires_ms = principal.expires_ms.min(now + TICKET_TTL_MS);
+    // The token's expiry on this target's clock, on the safe side of the offset.
+    let token_local = u64::try_from(
+        state
+            .managed
+            .shared
+            .read(|a| a.local_wall_ms(principal.expires_ms)),
+    )
+    .unwrap_or(0);
+    let expires_ms = token_local.min(now + TICKET_TTL_MS);
     let ticket = format!("{TICKET_PREFIX}{}", crate::auth::random_hex(32));
     let shared = &state.managed.shared;
     let binding = super::authority::TicketBinding {
@@ -254,13 +265,10 @@ async fn ticket(
             },
         );
     }
-    let handle = Arc::new(handle);
-    if !crate::session::pass(Some(&SessionGate(handle.clone()))).await {
+    if !crate::session::pass(Some(&SessionGate(handle))).await {
         crate::lock(&state.managed.tickets).remove(&ticket);
         return admit_failed(&AdmitError::Forbidden);
     }
-    // The handler stays registered until this connection, and its last byte, is gone.
-    conn.slot.attach(handle);
     let mut response = Json(json!({
         "ticket": ticket,
         "expiresAt": conn_support::time::iso_from_ms(expires_ms),
@@ -486,11 +494,12 @@ async fn preview(
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
+    // The handler rides the connection from here on, whatever this answers.
+    let handle = Arc::new(handle);
+    conn.slot.attach(handle.clone());
     let Some(preview) = state.app.deps.preview.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let handle = Arc::new(handle);
-    conn.slot.attach(handle.clone());
     let gate = SessionGate(handle);
     crate::routes::preview::upgrade_viewer(ws, preview, &thread, &tab, false, &query, Some(gate))
         .await

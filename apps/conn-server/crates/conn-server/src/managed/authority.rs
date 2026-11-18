@@ -41,14 +41,14 @@ pub struct AuthorityReply {
     pub environment_id: String,
     pub generation: u64,
     pub head_revision: Revision,
-    #[serde(default)]
+    /// Required: without it the clock offset, and so token expiry, has no bound.
     pub server_time: Option<String>,
     pub kind: String,
     #[serde(default)]
     pub edges: Option<Vec<SnapshotEdge>>,
     #[serde(default)]
     pub revisions: Option<Vec<RevisionEdges>>,
-    #[serde(default)]
+    /// Required: an omitted list must not read as "nothing owed".
     pub owed: Vec<RevisionEdges>,
 }
 
@@ -300,7 +300,9 @@ impl Authority {
     /// probe has applied it yet.
     pub fn blocked(&self) -> bool {
         let unapplied = |r: Revision| self.applied.is_none_or(|applied| applied < r);
-        self.introspected.is_some_and(|(r, _)| unapplied(r))
+        // An introspected revision whose edges no notice names yet.
+        self.introspected
+            .is_some_and(|(r, _)| unapplied(r) && r >= self.next_unknown())
             || self.gap_notices.iter().any(|r| unapplied(*r))
     }
 
@@ -319,7 +321,9 @@ impl Authority {
         if self.applied.is_some_and(|applied| revision <= applied) {
             return Effects::default();
         }
-        if revision >= self.next_unknown() && self.introspected.is_none_or(|(r, _)| revision > r) {
+        // Recorded even when a notice names it: HTTPS proved it exists, so no later probe may
+        // disprove that notice, and a head below it is a missing revision.
+        if self.introspected.is_none_or(|(r, _)| revision > r) {
             self.introspected = Some((revision, now));
         }
         if self.probe.is_some() {
@@ -339,15 +343,22 @@ impl Authority {
         self.offset_bounds
     }
 
+    /// A Gateway wall time on the target's wall clock, on the safe (early) side: the
+    /// Gateway's time minus the signed upper bound of (Gateway − target).
+    pub fn local_wall_ms(&self, gateway_ms: u64) -> i64 {
+        let ahead = self.offset_bounds.map_or(0, |(_, high)| high);
+        i64::try_from(gateway_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(ahead)
+    }
+
     /// The target monotonic deadline of a Gateway wall time, on the safe side: the Gateway
     /// clock may run ahead of the target's by up to the upper offset bound, so the deadline
     /// comes that much earlier. Without bounds the wall time is taken as it is.
     pub fn local_deadline(&self, gateway_ms: u64, now: Instant, wall_ms: u64) -> Instant {
-        let ahead = self.offset_bounds.map_or(0, |(_, high)| high.max(0));
-        let local = i64::try_from(gateway_ms)
-            .unwrap_or(i64::MAX)
-            .saturating_sub(ahead);
-        let left = local.saturating_sub(i64::try_from(wall_ms).unwrap_or(i64::MAX));
+        let left = self
+            .local_wall_ms(gateway_ms)
+            .saturating_sub(i64::try_from(wall_ms).unwrap_or(i64::MAX));
         now + std::time::Duration::from_millis(u64::try_from(left).unwrap_or(0))
     }
 
@@ -688,6 +699,16 @@ impl Authority {
             self.fail_closed(Loss::LeaseExpired);
             return self.after_reply();
         }
+        // A reply without a readable server time or without its owed list is incomplete.
+        if reply
+            .server_time
+            .as_deref()
+            .and_then(conn_support::time::millis_from_iso)
+            .is_none()
+        {
+            self.fail_closed(Loss::UnexpectedKind);
+            return self.after_reply();
+        }
         let first_snapshot = probe.after_revision.is_none() && self.snapshots == 0;
         let result = match (probe.after_revision, reply.kind.as_str()) {
             (None, "snapshot") if !self.open => self.apply_snapshot(reply, wall_ms),
@@ -762,7 +783,10 @@ impl Authority {
             .copied()
             .max(self.introspected.map(|(r, _)| r));
         let behind = known.is_some_and(|k| self.applied.is_none_or(|a| k > a));
-        let probe_now = std::mem::take(&mut self.rerun) || behind;
+        let rerun = std::mem::take(&mut self.rerun);
+        // Closed, recovery waits for the probe timer: a Gateway that keeps answering below a
+        // proven revision is not probed at its round-trip speed.
+        let probe_now = self.open && (rerun || behind);
         Effects {
             probe_now,
             ack: self.next_ack().is_some(),
@@ -774,6 +798,10 @@ impl Authority {
             return Err(Loss::UnexpectedKind);
         };
         let head = reply.head_revision;
+        // The same generation never goes back below a revision this target applied.
+        if self.applied.is_some_and(|applied| head < applied) {
+            return Err(Loss::MissingRevision);
+        }
         let listed: HashSet<EdgeId> = edges.iter().map(|e| e.edge_id).collect();
         // Admitted before the barrier and gone now: confirm the fence.
         let gone: Vec<EdgeId> = self
@@ -888,10 +916,12 @@ impl Authority {
     /// A notice whose revision a later probe's head does not reach was not committed: clear
     /// its provisional fences. Only a probe sent after the notice arrived can disprove it.
     fn disprove_notices(&mut self, probe_sent: Instant, head: Revision, _wall_ms: u64) {
+        let proven = self.introspected.map(|(r, _)| r);
         let disproved: Vec<Revision> = self
             .notices
             .iter()
             .filter(|(r, n)| **r > head && n.received < probe_sent)
+            .filter(|(r, _)| proven.is_none_or(|p| **r > p))
             .map(|(r, _)| *r)
             .collect();
         for revision in disproved {

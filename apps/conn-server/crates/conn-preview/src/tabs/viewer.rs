@@ -98,6 +98,27 @@ impl Preview {
         height: u64,
         quality: u64,
     ) -> Result<Viewer, Error> {
+        self.attach_viewer_checked(thread, id, can_operate, width, height, quality, &|| true)
+            .await
+    }
+
+    /// [`Self::attach_viewer`], with `admit` asked again once the tab's lock is held and
+    /// before any viewer state changes: a caller whose access was paused or revoked while it
+    /// waited attaches nothing.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the viewer's options plus its admission check"
+    )]
+    pub async fn attach_viewer_checked(
+        &self,
+        thread: &str,
+        id: &str,
+        can_operate: bool,
+        width: u64,
+        height: u64,
+        quality: u64,
+        admit: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<Viewer, Error> {
         let gate = lock(&self.0.state)
             .tabs
             .iter()
@@ -105,6 +126,9 @@ impl Preview {
             .map(|t| t.action.clone())
             .ok_or_else(|| Error("The server preview tab does not exist.".into()))?;
         let _gate = gate.lock().await;
+        if !admit() {
+            return Err(Error("The viewer's access is paused or revoked.".into()));
+        }
         let viewer = conn_support::uuid_v4();
         let (browser, session, control, viewport, frames, start) = {
             let mut state = lock(&self.0.state);

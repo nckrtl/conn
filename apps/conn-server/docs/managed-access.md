@@ -72,8 +72,13 @@ Each is the fail-closed reading.
   gone, so `handlers_closed_at` means no handler and no sendable byte remain. RPC call
   tasks hold the session's registration too, and closes are bounded.
 - A token's expiry is enforced as a target monotonic deadline: the Gateway's expiry minus
-  the upper bound of the measured clock offset (the Gateway may run ahead).
-- A pause also holds HTTP reads and preview attachments; only a fence refuses them.
+  the signed upper bound of the measured clock offset. An authority reply without a
+  readable `server_time` or without its `owed` list is incomplete: it fails closed.
+- An introspected revision stays known even when a notice names it: no probe may disprove
+  that notice, and a later head below it fails closed. A snapshot below the applied
+  revision never reopens. Closed, the target retries on the probe timer, never faster.
+- A pause also holds HTTP reads and preview attachments; only a fence refuses them. A
+  preview attachment asks the gate again once it holds the tab's lock.
 - Settled revision records are pruned after their ACK, or when a fresh verified reply no
   longer owes them (a lost ACK answer); confirmed fences stay for the generation. Each applied probe narrows the Gateway-to-target clock offset bounds from
   `server_time` and the probe's send and receive times.

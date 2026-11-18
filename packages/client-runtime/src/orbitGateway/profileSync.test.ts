@@ -466,6 +466,29 @@ describe("overlapping runs", () => {
     expect(overlapped).toBe(false);
     expect(fake.gateway.patches).toHaveLength(1);
   });
+
+  it("applies nothing it read after the caller's profile scope changed", async () => {
+    const fake = fakeGateway();
+    await makeDevice(fake, { settings: { font: "Menlo", size: 12 } }).sync();
+    const mac = makeDevice(fake, { settings: { font: "Inter", size: 15 } });
+    let current = true;
+    const settings = fake.client.settings;
+    fake.client.settings = async () => {
+      const read = await settings();
+      // The user switches provider or profile while this read is in flight.
+      current = false;
+      return read;
+    };
+    fake.gateway.caller = "device";
+    expect(await mac.engine.run(fake.me(), () => current)).toEqual({ kind: "superseded" });
+    expect(mac.memory.settings).toEqual({ font: "Inter", size: 15 });
+    expect(mac.memory.writes).toEqual([]);
+    expect(mac.memory.state).toBeNull();
+    // A run queued behind it for the old scope does not even read.
+    const gets = fake.gateway.gets;
+    expect(await mac.engine.run(fake.me(), () => false)).toEqual({ kind: "superseded" });
+    expect(fake.gateway.gets).toBe(gets);
+  });
 });
 
 describe("what the Gateway does to a section", () => {

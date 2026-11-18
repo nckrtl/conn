@@ -70,6 +70,8 @@ export type ProfileSyncResult =
   | { readonly kind: "idle" }
   /** The Gateway predates profile sections: nothing was read or written. */
   | { readonly kind: "unsupported" }
+  /** The caller's scope changed during the run (see `run`): nothing was applied or saved. */
+  | { readonly kind: "superseded" }
   | {
       readonly kind: "synced";
       readonly outcomes: Readonly<Partial<Record<ProfileSectionName, ProfileSyncOutcome>>>;
@@ -81,6 +83,7 @@ export type ProfileSyncResult =
 const MAX_ATTEMPTS = 3;
 /** How long an old Gateway is left alone before the next probe. */
 const UNSUPPORTED_RETRY_MS = 10 * 60_000;
+const SUPERSEDED: ProfileSyncResult = { kind: "superseded" };
 
 function emptyProfileSyncState(profileId = -1): ProfileSyncState {
   return { profileId, profileVersion: -1, sections: {}, ignored: {} };
@@ -127,7 +130,10 @@ export function createProfileSync(ports: ProfileSyncPorts) {
     return { ...emptyProfileSyncState(profileId), ignored: saved?.ignored ?? {} };
   };
 
-  async function runOnce(me: OrbitGatewayNode): Promise<ProfileSyncResult> {
+  async function runOnce(
+    me: OrbitGatewayNode,
+    isCurrent: () => boolean,
+  ): Promise<ProfileSyncResult> {
     const profile = me.profile;
     if (profile === null) return { kind: "unbound" };
     if (now() < unsupportedUntil) return { kind: "unsupported" };
@@ -159,6 +165,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
       let remote: OrbitGatewaySettings | null = null;
       if (mustFetch) {
         remote = await ports.client.settings(profile.id);
+        if (!isCurrent()) return SUPERSEDED;
         if (remote.sections === null) {
           unsupportedUntil = now() + UNSUPPORTED_RETRY_MS;
           return { kind: "unsupported" };
@@ -290,6 +297,8 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         }
         throw error;
       }
+      // The write landed; the next run in the new scope reads it back if it still applies.
+      if (!isCurrent()) return SUPERSEDED;
 
       meta = saved.sections ?? meta;
       for (const push of pushes) {
@@ -350,8 +359,11 @@ export function createProfileSync(ports: ProfileSyncPorts) {
    * flight waits for it and then reads the state it saved, so it sends only what is still dirty.
    */
   let lastRun: Promise<unknown> = Promise.resolve();
-  function run(me: OrbitGatewayNode): Promise<ProfileSyncResult> {
-    const result = lastRun.then(() => runOnce(me));
+  function run(
+    me: OrbitGatewayNode,
+    isCurrent: () => boolean = () => true,
+  ): Promise<ProfileSyncResult> {
+    const result = lastRun.then(() => (isCurrent() ? runOnce(me, isCurrent) : SUPERSEDED));
     lastRun = result.catch(() => undefined);
     return result;
   }

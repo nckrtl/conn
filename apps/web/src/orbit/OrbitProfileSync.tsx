@@ -4,6 +4,7 @@ import {
   createOrbitProfileLive,
   createProfileSync,
   isJsonObject,
+  PROFILE_REJECTED_RETRY_MS,
   SIDEBAR_HIDDEN_THREADS_SECTION,
   type OrbitGatewayClient,
   type OrbitGatewayEnvironment,
@@ -341,6 +342,7 @@ function profileSyncController(): ProfileSyncController | null {
   let followUpQueued = false;
   /** Profile reads running now; an edit during one always gets a read after it. */
   let profileReads = 0;
+  let hiddenRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
   const recordAttached = async (
     me: OrbitGatewayNode,
@@ -428,6 +430,14 @@ function profileSyncController(): ProfileSyncController | null {
         return error instanceof Error ? error.message : String(error);
       },
     );
+    // A refused hide waits out its cooldown; without the old poll, this read wakes for the retry.
+    clearTimeout(hiddenRetryTimer);
+    if (hiddenThreadsError !== null && hiddenThreads.hasLocalChanges()) {
+      hiddenRetryTimer = setTimeout(
+        () => void controller?.profile.reconcile(),
+        PROFILE_REJECTED_RETRY_MS + 1_000,
+      );
+    }
     if (!isCurrent()) return null;
     useOrbitProfileSyncStatus.setState({ hiddenThreadsError });
     // An obsolete read never reaches the settings read, so it records no attached set.

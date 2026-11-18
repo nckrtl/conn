@@ -103,7 +103,7 @@ const SUPERSEDED: ProfileSyncResult = { kind: "superseded" };
  * How long a value a Gateway refused (422) waits before a rebasing channel sends it again: the
  * background probe's cadence, so an upgraded Gateway takes it without a local edit.
  */
-const REJECTED_RETRY_MS = 30_000;
+export const PROFILE_REJECTED_RETRY_MS = 30_000;
 
 /** A Gateway reply that does not show what a rebasing channel needs to retire its intents. */
 function unconfirmed(name: string, why: string): Error {
@@ -147,7 +147,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
   let unsupportedUntil = 0;
   /**
    * A local value the Gateway refused (validation), so the same value is not sent again. A
-   * rebasing channel sends it again after `REJECTED_RETRY_MS`, and its runs fail until then.
+   * rebasing channel sends it again after `PROFILE_REJECTED_RETRY_MS`, and its runs fail until then.
    */
   const rejected = new Map<
     ProfileSectionName,
@@ -156,7 +156,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
   const isRejected = (channel: ProfileSyncChannel, local: JsonObject): boolean => {
     const entry = rejected.get(channel.name);
     if (entry === undefined || !jsonEqual(entry.local, local)) return false;
-    return channel.rebases !== true || now() - entry.at < REJECTED_RETRY_MS;
+    return channel.rebases !== true || now() - entry.at < PROFILE_REJECTED_RETRY_MS;
   };
 
   const load = (profileId: number): ProfileSyncState => {

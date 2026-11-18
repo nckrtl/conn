@@ -6,42 +6,83 @@ import {
 
 /**
  * Conn: threads hidden from the sidebar, apart from `hiddenThreadKeysAtom` (tag filter, deletion).
- * `held` lists environments a Tasks peek surfaced whose threads have not arrived yet: until they
- * do, each of their threads counts as hidden unless the user showed it.
+ * `environments` lists environments whose threads hide unless shown: `null` hides every thread
+ * (a peek holds the environment, or the profile's marks have not been read yet), a cutoff hides
+ * the inventory a peek found (threads created up to it), also the pages that load later.
  */
 export interface SidebarHiddenMarks {
   readonly keys: ReadonlySet<string>;
-  readonly held: ReadonlySet<string>;
+  readonly environments: ReadonlyMap<string, string | null>;
   readonly shown: ReadonlySet<string>;
 }
 
 export const NO_SIDEBAR_HIDDEN_MARKS: SidebarHiddenMarks = {
   keys: new Set(),
-  held: new Set(),
+  environments: new Map(),
   shown: new Set(),
 };
 
+/** A Tasks peek in flight or awaiting its environment's threads; local to this device. */
+export interface SidebarPeekAttempt {
+  readonly profile: string;
+  readonly environmentId: string;
+  /** The target, hidden until the attempt commits its hide or is cancelled. */
+  readonly target: string | null;
+  readonly hold: boolean;
+  /** Preparation succeeded: the hold now waits for the environment's threads. */
+  readonly committed: boolean;
+  /** Threads shown while the hold lasts; the sweep leaves them out. */
+  readonly shown: readonly string[];
+}
+
+/** An environment a peek surfaced, after its threads arrived. */
+export interface SidebarPeekedEnvironment {
+  readonly cutoff: string;
+  readonly shown: readonly string[];
+}
+
 export function sidebarHiddenMarks(input: {
   readonly agreed: readonly string[];
-  readonly intents: ReadonlyMap<string, SidebarHiddenIntent>;
-  readonly held: ReadonlySet<string>;
+  readonly ops: ReadonlyMap<string, { readonly intent: SidebarHiddenIntent }>;
+  readonly attempts: readonly SidebarPeekAttempt[];
+  readonly peeked: ReadonlyMap<string, SidebarPeekedEnvironment>;
+  /** Environments whose marks are not known yet. */
+  readonly unhydrated: Iterable<string>;
 }): SidebarHiddenMarks {
+  const keys = new Set(applySidebarHiddenIntents(input.agreed, input.ops));
   const shown = new Set<string>();
-  for (const [key, intent] of input.intents) if (intent === "show") shown.add(key);
-  return {
-    keys: new Set(applySidebarHiddenIntents(input.agreed, input.intents)),
-    held: input.held,
-    shown,
-  };
+  const environments = new Map<string, string | null>();
+  for (const [key, op] of input.ops) if (op.intent === "show") shown.add(key);
+  for (const [environmentId, entry] of input.peeked) {
+    environments.set(environmentId, entry.cutoff);
+    for (const key of entry.shown) shown.add(key);
+  }
+  for (const attempt of input.attempts) {
+    if (attempt.target !== null) keys.add(attempt.target);
+    if (attempt.hold) environments.set(attempt.environmentId, null);
+    for (const key of attempt.shown) shown.add(key);
+  }
+  for (const environmentId of input.unhydrated) environments.set(environmentId, null);
+  return { keys, environments, shown };
 }
 
 export function isSidebarHiddenThread(
   marks: SidebarHiddenMarks,
-  environmentId: string,
-  threadId: string,
+  thread: { readonly environmentId: string; readonly id: string; readonly createdAt?: string },
 ): boolean {
-  const key = sidebarHiddenThreadKey(environmentId, threadId);
-  return marks.keys.has(key) || (marks.held.has(environmentId) && !marks.shown.has(key));
+  const key = sidebarHiddenThreadKey(thread.environmentId, thread.id);
+  if (marks.keys.has(key)) return true;
+  const cutoff = marks.environments.get(thread.environmentId);
+  if (cutoff === undefined || marks.shown.has(key)) return false;
+  return cutoff === null || thread.createdAt === undefined || thread.createdAt <= cutoff;
+}
+
+/** Whether the environment's unloaded threads stay out too: the shelf neither pages nor counts them. */
+export function hidesSidebarEnvironmentInventory(
+  marks: SidebarHiddenMarks,
+  environmentId: string,
+): boolean {
+  return marks.environments.has(environmentId);
 }
 
 /**
@@ -62,6 +103,7 @@ interface MarkedThread {
   readonly id: string;
   readonly projectId: string;
   readonly archivedAt: string | null;
+  readonly createdAt?: string;
 }
 
 interface MarkedProjectGroup {
@@ -69,36 +111,24 @@ interface MarkedProjectGroup {
 }
 
 /**
- * Leaves out project groups whose threads are all hidden. An empty group stays, unless every
- * environment it lives on lists only hidden threads (or is held): a peeked environment's empty
- * projects do not appear either.
+ * Leaves out project groups whose threads are all hidden. An empty group stays, unless each of its
+ * environments is one a peek surfaced or whose marks are still unknown.
  */
 export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
   groups: readonly T[],
   threads: readonly MarkedThread[],
   marks: SidebarHiddenMarks,
 ): T[] {
-  if (marks.keys.size === 0 && marks.held.size === 0) return [...groups];
+  if (marks.keys.size === 0 && marks.environments.size === 0) return [...groups];
   const projectThreads = new Map<string, { total: number; hidden: number }>();
-  const environmentThreads = new Map<string, { total: number; hidden: number }>();
-  const count = (
-    map: Map<string, { total: number; hidden: number }>,
-    key: string,
-    hidden: boolean,
-  ) => {
-    const entry = map.get(key) ?? { total: 0, hidden: 0 };
-    entry.total += 1;
-    if (hidden) entry.hidden += 1;
-    map.set(key, entry);
-  };
   for (const thread of threads) {
     if (thread.archivedAt !== null) continue;
-    const hidden = isSidebarHiddenThread(marks, thread.environmentId, thread.id);
-    count(projectThreads, `${thread.environmentId}:${thread.projectId}`, hidden);
-    count(environmentThreads, thread.environmentId, hidden);
+    const key = `${thread.environmentId}:${thread.projectId}`;
+    const entry = projectThreads.get(key) ?? { total: 0, hidden: 0 };
+    entry.total += 1;
+    if (isSidebarHiddenThread(marks, thread)) entry.hidden += 1;
+    projectThreads.set(key, entry);
   }
-  const allHidden = (entry: { total: number; hidden: number } | undefined) =>
-    entry !== undefined && entry.total > 0 && entry.total === entry.hidden;
   return groups.filter((group) => {
     let total = 0;
     let hidden = 0;
@@ -110,11 +140,7 @@ export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
     if (total > 0) return hidden < total;
     return !(
       group.memberProjects.length > 0 &&
-      group.memberProjects.every(
-        (project) =>
-          marks.held.has(project.environmentId) ||
-          allHidden(environmentThreads.get(project.environmentId)),
-      )
+      group.memberProjects.every((project) => marks.environments.has(project.environmentId))
     );
   });
 }

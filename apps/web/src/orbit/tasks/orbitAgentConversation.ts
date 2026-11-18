@@ -11,7 +11,6 @@ import { environmentCatalog } from "~/connection/catalog";
 import { pullRequestLinkPanelTarget } from "~/lib/openPullRequestLink";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useRightPanelStore } from "~/rightPanelStore";
-import { readThreadShell } from "~/state/entities";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "~/threadRoutes";
 import { desktopOrbitGatewayTransport } from "../desktopOrbitGateway";
 import { connectOrbitEnvironment } from "../environmentProvider";
@@ -23,28 +22,26 @@ import {
   copyTasksPanelWidth,
 } from "./taskNavigation.logic";
 
-async function prepareEnvironment(target: OrbitConversationRef) {
+/** Conn: a Tasks agent click peeks; marks go down before the environment connects. */
+async function prepareEnvironment(target: OrbitConversationRef, peek: boolean) {
   const transport = desktopOrbitGatewayTransport();
   const client = transport ? createOrbitGatewayClient(transport) : null;
   const entry = appAtomRegistry
     .get(environmentCatalog.catalogValueAtom)
     .entries.get(target.environmentId);
-  // Conn: marks go down before the environment connects, so no row flashes in.
-  const cancelPeek = beginSidebarPeek(target, {
-    targetListed:
-      entry?.enabled === true &&
-      isSidebarListedNow(
-        target.environmentId,
-        readThreadShell({ environmentId: target.environmentId, threadId: target.threadId }),
-      ),
-    environmentSurfaced: entry?.enabled !== true,
-  });
+  const attempt = peek
+    ? beginSidebarPeek(target, {
+        targetListed: isSidebarListedNow(target.environmentId, target.threadId),
+        environmentSurfaced: entry?.enabled !== true,
+      })
+    : null;
   try {
     await prepareKnownEnvironment(target, client);
   } catch (cause) {
-    cancelPeek();
+    attempt?.cancel();
     throw cause;
   }
+  attempt?.commit();
 }
 
 async function prepareKnownEnvironment(
@@ -87,7 +84,7 @@ export function useOrbitTaskNavigation(threadKey: string) {
       sequence.current.id += 1;
     };
   }, [threadKey]);
-  const navigate = async (ref: OrbitConversationRef) => {
+  const navigate = async (ref: OrbitConversationRef, peek = true) => {
     if (!source) return;
     const request = ++sequence.current.id;
     setError(null);
@@ -105,7 +102,7 @@ export function useOrbitTaskNavigation(threadKey: string) {
       await openOrbitAgentConversation(ref, {
         source,
         isCurrent,
-        prepare: prepareEnvironment,
+        prepare: (target) => prepareEnvironment(target, peek),
         handoff: (from, to) => {
           tasksPanelActions().handoff(scopedThreadKey(from), scopedThreadKey(to));
           copyTasksPanelWidth(scopedThreadKey(from), scopedThreadKey(to), window.localStorage);
@@ -151,7 +148,13 @@ export function useOrbitTaskNavigation(threadKey: string) {
   const returnToOrigin = () => {
     const key = useTasksPanelStore.getState().byThreadKey[threadKey]?.originThreadKey;
     const target = key ? parseScopedThreadKey(key) : null;
-    if (target) void navigate(target);
+    // Back to where the user came from: no peek, so the origin keeps its sidebar state.
+    if (target) void navigate(target, false);
   };
-  return { openAgent: navigate, openPullRequest, returnToOrigin, error };
+  return {
+    openAgent: (ref: OrbitConversationRef) => navigate(ref),
+    openPullRequest,
+    returnToOrigin,
+    error,
+  };
 }

@@ -34,8 +34,10 @@ describe("sidebar hidden marks", () => {
     });
     const marks = sidebarHiddenMarks({
       agreed: [],
-      intents: new Map([["clone:target", "hide"]]),
-      held: new Set(["clone"]),
+      ops: new Map([["clone:target", { intent: "hide" as const }]]),
+      attempts: [],
+      peeked: new Map(),
+      unhydrated: ["clone"],
     });
     const threads = [
       thread("local", "mine"),
@@ -63,12 +65,21 @@ describe("sidebar hidden marks", () => {
   it("shows an explicitly opened thread while its hidden siblings stay hidden", () => {
     const marks = sidebarHiddenMarks({
       agreed: ["clone:target", "clone:sibling"],
-      intents: new Map([["clone:target", "show"]]),
-      held: new Set(["clone"]),
+      ops: new Map([["clone:target", { intent: "show" as const }]]),
+      attempts: [],
+      peeked: new Map([["clone", { cutoff: "2026-11-01T00:00:00.000Z", shown: [] }]]),
+      unhydrated: [],
     });
-    expect(isSidebarHiddenThread(marks, "clone", "target")).toBe(false);
-    expect(isSidebarHiddenThread(marks, "clone", "sibling")).toBe(true);
-    expect(isSidebarHiddenThread(marks, "clone", "arrives-later")).toBe(true);
+    const ref = (id: string, createdAt?: string) => ({
+      environmentId: "clone",
+      id,
+      ...(createdAt ? { createdAt } : {}),
+    });
+    expect(isSidebarHiddenThread(marks, ref("target"))).toBe(false);
+    expect(isSidebarHiddenThread(marks, ref("sibling"))).toBe(true);
+    // The peek's inventory stays hidden when older pages load; a thread created later shows.
+    expect(isSidebarHiddenThread(marks, ref("older-page", "2026-10-01T00:00:00.000Z"))).toBe(true);
+    expect(isSidebarHiddenThread(marks, ref("new", "2026-11-02T00:00:00.000Z"))).toBe(false);
     // The Orbit panel, the palette and rail badges filter without marks: they still find all three.
     expect(visible([thread("clone", "target"), thread("clone", "sibling")])).toEqual([
       "clone:target",
@@ -81,16 +92,30 @@ describe("sidebar hidden marks", () => {
     const groups = [group(["local", "p1"]), group(["clone", "p2"]), group(["local", "empty"])];
     const marks = sidebarHiddenMarks({
       agreed: [],
-      intents: new Map([["clone:b", "hide"]]),
-      held: new Set(),
+      ops: new Map([["clone:b", { intent: "hide" as const }]]),
+      attempts: [],
+      peeked: new Map(),
+      unhydrated: [],
     });
-    expect(withoutSidebarHiddenProjects(groups, threads, marks)).toEqual([groups[0], groups[2]]);
+    // An empty project the user already had stays, also on the environment it disconnected from.
+    const withEmpty = [...groups, group(["clone", "empty"])];
+    expect(withoutSidebarHiddenProjects(withEmpty, threads, marks)).toEqual([
+      groups[0],
+      groups[2],
+      withEmpty[3],
+    ]);
     // Archived threads do not keep a project listed, and do not count as hidden either.
     expect(
       withoutSidebarHiddenProjects(
         [group(["local", "p1"])],
         [thread("local", "a"), { ...thread("local", "old"), archivedAt: "x" as never }],
-        sidebarHiddenMarks({ agreed: ["local:a"], intents: new Map(), held: new Set() }),
+        sidebarHiddenMarks({
+          agreed: ["local:a"],
+          ops: new Map(),
+          attempts: [],
+          peeked: new Map(),
+          unhydrated: [],
+        }),
       ),
     ).toEqual([]);
   });

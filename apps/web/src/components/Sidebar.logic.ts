@@ -606,7 +606,7 @@ export function filterSidebarV2VisibleThreads<
   return threads.filter(
     (thread) =>
       thread.archivedAt === null &&
-      !isSidebarHiddenThread(hiddenMarks, thread.environmentId, thread.id) &&
+      !isSidebarHiddenThread(hiddenMarks, thread) &&
       !isShownUnderParent(
         { environmentId: thread.environmentId, threadId: thread.id },
         thread.lineage,

@@ -136,8 +136,13 @@ import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { useProjectPin } from "../hooks/useProjectGroupUpdate";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useEnvironmentProvider } from "../orbit/environmentProvider";
-import { hideSidebarThread, useSidebarHiddenThreads } from "../orbit/sidebarHiddenThreads";
 import {
+  hideSidebarThread,
+  publishSidebarListedThreads,
+  useSidebarHiddenThreads,
+} from "../orbit/sidebarHiddenThreads";
+import {
+  hidesSidebarEnvironmentInventory,
   isSidebarHiddenThread,
   withoutSidebarHiddenProjects,
   type SidebarHiddenMarks,
@@ -514,7 +519,13 @@ function useSidebarThreads(input: {
     partition;
   // Older settled threads load in pages; the shelf lists them only as far as they are loaded.
   const olderSettledShelf = useOlderSettledShelf({
-    scopes: olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
+    // Conn: a peeked environment's older threads stay out; the shelf neither pages nor counts them.
+    scopes: olderSettledScopes(
+      [...serverConfigs.keys()].filter(
+        (environmentId) => !hidesSidebarEnvironmentInventory(hiddenMarks, environmentId),
+      ),
+      scopedProjectKeys,
+    ),
     expanded: settledShelfExpanded,
     visibleCount: settledVisibleCount,
   });
@@ -837,8 +848,10 @@ function useSidebarLookups() {
   const serverConfigs = useServerConfigs();
   const providerEntriesByEnvironment = useAtomValue(sidebarProviderEntriesAtom);
   // Conn: a project whose threads are all hidden from the sidebar leaves its list and scope menu.
+  // A scope already on it stays narrowed: scope resolution reads every group.
+  const allProjectGroups = useSidebarProjectGroups();
   const projectGroups = withoutSidebarHiddenProjects(
-    useSidebarProjectGroups(),
+    allProjectGroups,
     useQuietThreadShells(),
     useSidebarHiddenThreads((state) => state.marks),
   );
@@ -869,6 +882,7 @@ function useSidebarLookups() {
     projects,
     serverConfigs,
     projectGroups,
+    allProjectGroups,
     environmentLabelById,
     providerEntriesByEnvironment,
     projectByKey,
@@ -944,6 +958,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projects,
     serverConfigs,
     projectGroups,
+    allProjectGroups,
     environmentLabelById,
     providerEntriesByEnvironment,
     projectByKey,
@@ -1165,12 +1180,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroups.filter((project) => project.archived).map((project) => project.projectKey),
   );
   const chosenProjectScopeKeys = resolveSidebarProjectScopeKeys({
-    groups: projectGroups,
+    groups: allProjectGroups,
     keys: persistedProjectScopeKeys,
     settings: projectGroupingSettings,
     canClearMissingScope: allProjectSnapshotsReady && allProjectConfigsReady,
   }).filter((key) => !archivedProjectKeys.has(key));
-  const chosenProjectGroups = scopeGroups.filter((project) =>
+  const chosenProjectGroups = pickableProjectGroups(allProjectGroups).filter((project) =>
     chosenProjectScopeKeys.includes(project.projectKey),
   );
   const chosenScopeProjectKeys =
@@ -1195,9 +1210,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
   const hiddenMarks = useSidebarHiddenThreads((state) => state.marks);
   // A hidden conversation has no row: the route neither reveals one nor widens the scope.
+  const routeThread =
+    routeThreadRef === null
+      ? undefined
+      : threads.find(
+          (candidate) =>
+            candidate.environmentId === routeThreadRef.environmentId &&
+            candidate.id === routeThreadRef.threadId,
+        );
   const routeRowThreadKey =
     routeThreadRef === null ||
-    isSidebarHiddenThread(hiddenMarks, routeThreadRef.environmentId, routeThreadRef.threadId)
+    isSidebarHiddenThread(hiddenMarks, {
+      environmentId: routeThreadRef.environmentId,
+      id: routeThreadRef.threadId,
+      ...(routeThread ? { createdAt: routeThread.createdAt } : {}),
+    })
       ? null
       : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
@@ -1454,6 +1481,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
   });
+  // Conn: a Tasks peek, which runs outside React, asks whether this list has the target's row.
+  const listedThreadKeys = searchableThreads.map(threadShellKey).join("\n");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- publishes this window's listed rows to the Tasks peek outside React
+  useEffect(() => {
+    publishSidebarListedThreads(
+      new Set(listedThreadKeys === "" ? [] : listedThreadKeys.split("\n")),
+    );
+    return () => publishSidebarListedThreads(new Set());
+  }, [listedThreadKeys]);
 
   // Ranked across environments as the palette ranks them, so one
   // environment's list does not sit above another's better matches; rows

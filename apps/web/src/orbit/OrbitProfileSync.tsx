@@ -35,7 +35,7 @@ import {
 } from "./profileSyncStorage";
 import { registerOrbitSleepClient } from "./orbitInstanceSleep";
 import {
-  setSidebarHiddenProfile,
+  bindSidebarHiddenProfile,
   sidebarHiddenThreadsChannel,
   watchSidebarHiddenThreads,
 } from "./sidebarHiddenThreads";
@@ -66,6 +66,8 @@ export interface OrbitProfileSyncStatus {
    */
   readonly sections: "unknown" | "supported" | "unsupported";
   readonly sectionsError: string | null;
+  /** Conn: why the hidden sidebar threads did not sync; they stay hidden on this device. */
+  readonly hiddenThreadsError?: string | null;
 }
 
 const INITIAL_STATUS: OrbitProfileSyncStatus = {
@@ -224,10 +226,11 @@ function profileSyncController(): ProfileSyncController | null {
   });
 
   // Conn: its own engine and PATCH, so a Gateway that refuses this section cannot hold back
-  // appearance or device edits sent in the same request.
+  // appearance or device edits sent in the same request. The channel belongs to one profile.
+  let hiddenThreadsChannel: ReturnType<typeof sidebarHiddenThreadsChannel> | null = null;
   const hiddenThreads = createProfileSync({
     client,
-    channels: () => [sidebarHiddenThreadsChannel],
+    channels: () => (hiddenThreadsChannel ? [hiddenThreadsChannel] : []),
     loadState: () => loadHiddenThreadsState(),
     saveState: (state) => saveHiddenThreadsState(state),
   });
@@ -238,19 +241,27 @@ function profileSyncController(): ProfileSyncController | null {
       const { provider } = useEnvironmentProvider.getState();
       // Everything syncs only while Orbit provides the environments.
       if (provider !== "orbit") {
+        bindSidebarHiddenProfile(null);
         useOrbitProfileSyncStatus.setState(INITIAL_STATUS);
         await clearAttachedServers();
         return;
       }
       pruneWorkspaceCloneRefs(provider, listed);
       const me = await client.me();
+      // Conn: the sidebar's marks first, so rows the profile hides do not wait for other writes.
+      bindSidebarHiddenProfile(me.profile?.id ?? null);
+      hiddenThreadsChannel = me.profile ? sidebarHiddenThreadsChannel(me.profile.id) : null;
+      const hiddenThreadsError = await hiddenThreads.run(me).then(
+        () => null,
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      useOrbitProfileSyncStatus.setState({ hiddenThreadsError });
       // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
       if (listed !== null) {
         await recordAttachedServers(client, me, listed).catch((error: unknown) => {
           console.warn("Conn could not apply the attached set.", error);
         });
       }
-      setSidebarHiddenProfile(me.profile?.id ?? null);
       const result = await syncWorkspaceProfile(ports, me);
       useOrbitProfileSyncStatus.setState(
         result.kind === "unbound"
@@ -276,10 +287,6 @@ function profileSyncController(): ProfileSyncController | null {
           sectionsError: error instanceof Error ? error.message : String(error),
         });
       }
-      // A refused write keeps the marks on this device; the next change sends them again.
-      await hiddenThreads.run(me).catch((error: unknown) => {
-        console.warn("Conn could not sync hidden sidebar threads.", error);
-      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       useOrbitProfileSyncStatus.setState((status) => ({

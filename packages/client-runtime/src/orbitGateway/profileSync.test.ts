@@ -17,7 +17,9 @@ import { jsonEqual, mergeAppearance, mergeDeviceSection, toGatewayForm } from ".
 import {
   createSidebarHiddenThreadsChannel,
   parseSidebarHiddenThreads,
+  SidebarHiddenThreadsCapacityError,
   type SidebarHiddenIntent,
+  type SidebarHiddenOp,
 } from "./sidebarHiddenThreads.ts";
 
 type Values = Record<string, string | number | boolean>;
@@ -691,14 +693,17 @@ describe("section merge", () => {
 function makeHidingDevice(fake: ReturnType<typeof fakeGateway>, agreed: string[] = []) {
   const memory = {
     agreed,
-    intents: new Map<string, SidebarHiddenIntent>(),
+    ops: new Map<string, SidebarHiddenOp>(),
     state: null as ProfileSyncState | null,
   };
+  let ids = 0;
   const channel = createSidebarHiddenThreadsChannel({
     read: () => memory,
-    adopt: (next, intents) => {
+    adopt: (next, done) => {
       memory.agreed = [...next];
-      memory.intents = new Map(intents);
+      const ops = new Map(memory.ops);
+      for (const [key, id] of done) if (ops.get(key)?.id === id) ops.delete(key);
+      memory.ops = ops;
     },
   });
   const engine = createProfileSync({
@@ -709,7 +714,9 @@ function makeHidingDevice(fake: ReturnType<typeof fakeGateway>, agreed: string[]
       memory.state = state;
     },
   });
-  const set = (key: string, intent: SidebarHiddenIntent) => memory.intents.set(key, intent);
+  const set = (key: string, intent: SidebarHiddenIntent) => {
+    memory.ops = new Map(memory.ops).set(key, { intent, id: `op-${++ids}` });
+  };
   return { memory, set, sync: () => engine.run(fake.me()) };
 }
 
@@ -736,7 +743,7 @@ describe("sidebar hidden threads sync", () => {
     await other.sync();
     expect(profileHidden(fake)).toEqual(["env-a:t1", "env-b:t2"]);
     expect(other.memory.agreed).toEqual(["env-a:t1", "env-b:t2"]);
-    expect(other.memory.intents.size).toBe(0);
+    expect(other.memory.ops.size).toBe(0);
   });
 
   it("brings one client's marks to a second client of the same profile", async () => {
@@ -774,10 +781,50 @@ describe("sidebar hidden threads sync", () => {
     mac.set("env-a:t1", "hide");
     fake.gateway.patchStatus = 422;
     await expect(mac.sync()).rejects.toMatchObject({ status: 422 });
-    expect(mac.memory.intents.get("env-a:t1")).toBe("hide");
+    expect(mac.memory.ops.get("env-a:t1")?.intent).toBe("hide");
     fake.gateway.patchStatus = null;
     mac.set("env-a:t2", "hide");
     await mac.sync();
     expect(profileHidden(fake)).toEqual(["env-a:t1", "env-a:t2"]);
+  });
+
+  it("sends a show from a stale empty copy, through a version conflict", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    const laptop = makeHidingDevice(fake);
+    await laptop.sync();
+    mac.set("env-a:x", "hide");
+    await mac.sync();
+    // The laptop still holds the empty set it read; its show equals that copy, yet must go out.
+    laptop.set("env-a:x", "show");
+    const fetch = fake.client.settings;
+    let raced = false;
+    fake.client.settings = async () => {
+      const read = await fetch();
+      if (!raced) {
+        // Another device writes between this read and the laptop's PATCH: a real 409.
+        raced = true;
+        mac.set("env-a:y", "hide");
+        await mac.sync();
+      }
+      return read;
+    };
+    const patchesBefore = fake.gateway.patches.length;
+    await laptop.sync();
+    expect(fake.gateway.patches.length - patchesBefore).toBe(3);
+    expect(profileHidden(fake)).toEqual(["env-a:y"]);
+    expect(laptop.memory.agreed).toEqual(["env-a:y"]);
+    expect(laptop.memory.ops.size).toBe(0);
+    // Only this section is in the write: other settings are never sent with it.
+    expect(Object.keys(fake.gateway.patches.at(-1)!)).toEqual(["sidebarHiddenThreads"]);
+  });
+
+  it("refuses to sync past the section's limits instead of dropping marks", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    for (let index = 0; index < 501; index += 1) mac.set(`env-a:t${index}`, "hide");
+    await expect(mac.sync()).rejects.toBeInstanceOf(SidebarHiddenThreadsCapacityError);
+    expect(fake.gateway.patches).toHaveLength(0);
+    expect(mac.memory.ops.size).toBe(501);
   });
 });

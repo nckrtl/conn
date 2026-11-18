@@ -30,6 +30,10 @@ export class OrbitLaunchAdmissionRefused extends Schema.TaggedError<
   message: Schema.String,
 }) {}
 
+export function isCorrectableLaunchRefusal(error: OrbitGatewayError) {
+  return error.status === 422 || (error.status === 409 && error.code === "instance.name_taken");
+}
+
 const isLaunchCopyError = Schema.is(OrbitLaunchCopyError);
 const isAdmissionRefused = Schema.is(OrbitLaunchAdmissionRefused);
 
@@ -291,7 +295,10 @@ export function createOrbitLaunchObserver(
         setScope(null);
         throw error;
       }
-      if (isGatewayError(error) && [400, 403, 404, 422].includes(error.status)) {
+      if (
+        isGatewayError(error) &&
+        ([400, 403, 404].includes(error.status) || isCorrectableLaunchRefusal(error))
+      ) {
         const current = observed();
         if (current !== undefined) {
           assertLaunchIdentity(current, admission);

@@ -130,7 +130,7 @@ it("does not send a corrected prompt-derived name after the observer lost its sc
   expect(gateway.checkInstanceName).not.toHaveBeenCalled();
 });
 
-it("rechecks scope before each name probe even after stale mobile state reinstates the old scope", async () => {
+it("probes only an opaque name and rejects a rebind even when the mobile cache is stale", async () => {
   const scope = { nodeId: 7, profileId: 12 };
   gateway.loadJournal.mockResolvedValue("[]");
   gateway.state.mockReturnValue({ provider: "orbit", node: { id: 7, profile: { id: 12 } } });
@@ -146,9 +146,8 @@ it("rechecks scope before each name probe even after stale mobile state reinstat
   try {
     await expect(
       startOrbitThread({ id: 78 }, "Long protected prompt for a new instance", "sheet"),
-    ).rejects.toThrow("Orbit profile changed");
-    expect(gateway.checkInstanceName).toHaveBeenCalledOnce();
-    expect(mobileOrbitLaunches.scope()).toBeNull();
+    ).rejects.toThrow("short enough");
+    expect(gateway.checkInstanceName).toHaveBeenCalledExactlyOnceWith(78, "thread-launch");
     mobileOrbitLaunches.setScope(scope);
     await expect(startOrbitThread({ id: 78 }, "Another protected prompt", "sheet")).rejects.toThrow(
       "Orbit profile changed",

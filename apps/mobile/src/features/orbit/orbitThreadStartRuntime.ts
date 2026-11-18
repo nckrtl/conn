@@ -148,15 +148,13 @@ export async function startOrbitThread(
     throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
   }
   const name =
-    saved?.admission.request.target.kind === "new" &&
-    (!saved.validationRefused ||
-      (saved.admission.request.project_id === project.id &&
-        saved.admission.request.prompt === message))
+    saved?.admission.request.target.kind === "new" && !saved.validationRefused
       ? saved.admission.request.target.name
       : await fitOrbitThreadInstanceName(
           orbitGatewayClient,
           project.id,
-          message,
+          // The preflight endpoint has no expected profile field.
+          "",
           uuidv4().slice(0, 6),
           () => mobileOrbitLaunches.verifyScope({ profileId, nodeId }),
         );

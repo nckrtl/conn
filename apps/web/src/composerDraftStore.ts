@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2";
+import { bytesToHex } from "@noble/hashes/utils";
 import {
   composerFileAttachmentMimeType,
   composerImageDedupKey,
@@ -152,6 +154,15 @@ interface ComposerDraftWrite {
 let composerDraftLoadedState: PersistedComposerDraftStoreState | null = null;
 let composerDraftLastWrite: ComposerDraftWrite | null = null;
 let composerDraftPendingWrite: ComposerDraftWrite | null = null;
+let pendingOrbitDraftClear: {
+  readonly key: string;
+  readonly revisions: readonly string[];
+} | null = null;
+
+function orbitDraftRevision(state: PersistedComposerDraftStoreState, key: string) {
+  const draft = [state.draftsByThreadKey[key], state.draftThreadsByThreadKey[key]];
+  return bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(draft))));
+}
 
 function readStoredComposerDraftState(): PersistedComposerDraftStoreState | null {
   const text = composerDraftBaseStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
@@ -209,11 +220,14 @@ function mergeComposerDraftStates(
   const retainedOrbitDrafts = new Set<string>();
   for (const [key, session] of Object.entries(local.draftThreadsByThreadKey)) {
     const draft = local.draftsByThreadKey[key];
+    const cleared = stored.orbitDraftClearRevisions?.[key];
     if (
       stored.draftThreadsByThreadKey[key] === undefined &&
       session.orbitTarget != null &&
-      (!Equal.equals(draft, baseline.draftsByThreadKey[key]) ||
-        !Equal.equals(session, baseline.draftThreadsByThreadKey[key]))
+      (Array.isArray(cleared)
+        ? !cleared.includes(orbitDraftRevision(local, key))
+        : !Equal.equals(draft, baseline.draftsByThreadKey[key]) ||
+          !Equal.equals(session, baseline.draftThreadsByThreadKey[key]))
     ) {
       retainedOrbitDrafts.add(key);
       if (draft !== undefined) draftsByThreadKey[key] ??= draft;
@@ -243,7 +257,18 @@ function serializeComposerDraftState(value: StorageValue<ComposerPersistState>):
   const local = partializeComposerDraftStoreState(value.state.capturedState);
   const baseline = composerDraftLastWrite?.local ?? composerDraftLoadedState;
   const stored = baseline ? readStoredComposerDraftState() : null;
-  const merged = stored && baseline ? mergeComposerDraftStates(stored, local, baseline) : local;
+  const drafts = stored && baseline ? mergeComposerDraftStates(stored, local, baseline) : local;
+  const orbitDraftClearRevisions = { ...stored?.orbitDraftClearRevisions };
+  for (const key of Object.keys(orbitDraftClearRevisions)) {
+    if (drafts.draftThreadsByThreadKey[key] !== undefined) delete orbitDraftClearRevisions[key];
+  }
+  const clear = pendingOrbitDraftClear;
+  if (clear !== null && drafts.draftThreadsByThreadKey[clear.key] === undefined)
+    orbitDraftClearRevisions[clear.key] = clear.revisions;
+  const merged =
+    Object.keys(orbitDraftClearRevisions).length === 0
+      ? drafts
+      : { ...drafts, orbitDraftClearRevisions };
   const text = JSON.stringify({ state: merged, version: value.version });
   composerDraftPendingWrite = { text, local, merged };
   return text;
@@ -473,6 +498,9 @@ const PersistedComposerDraftStoreState = Schema.Struct({
   draftsByThreadKey: Schema.Record(Schema.String, PersistedComposerThreadDraftState),
   draftThreadsByThreadKey: Schema.Record(Schema.String, PersistedDraftThreadState),
   logicalProjectDraftThreadKeyByLogicalProjectKey: Schema.Record(Schema.String, Schema.String),
+  orbitDraftClearRevisions: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.Array(Schema.String)),
+  ),
   stickyModelSelectionByProvider: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ModelSelection),
   ),
@@ -4631,10 +4659,19 @@ export function applyOtherWindowComposerDrafts(
   const local = partializeComposerDraftStoreState(useComposerDraftStore.getState());
   const changedHere = (prefix: string) => (key: string) => changes.has(prefix + key);
 
-  const retainsEditedOrbitDraft = (key: string) =>
-    incoming.draftThreadsByThreadKey[key] === undefined &&
-    local.draftThreadsByThreadKey[key]?.orbitTarget != null &&
-    (changedHere("d:")(key) || changedHere("t:")(key));
+  const orbitDraftClearRevisions = (incomingState as PersistedComposerDraftStoreState | undefined)
+    ?.orbitDraftClearRevisions;
+  const retainsEditedOrbitDraft = (key: string) => {
+    if (
+      incoming.draftThreadsByThreadKey[key] !== undefined ||
+      local.draftThreadsByThreadKey[key]?.orbitTarget == null
+    )
+      return false;
+    const cleared = orbitDraftClearRevisions?.[key];
+    return Array.isArray(cleared)
+      ? !cleared.includes(orbitDraftRevision(local, key))
+      : changedHere("d:")(key) || changedHere("t:")(key);
+  };
   const drafts = diffIncomingRecord(
     local.draftsByThreadKey,
     incoming.draftsByThreadKey,
@@ -4728,9 +4765,10 @@ export function applyOtherWindowComposerDrafts(
 
 if (typeof window !== "undefined" && window.desktopBridge?.windowContext !== undefined) {
   useComposerDraftStore.subscribe(trackLocalComposerDraftChanges(composerDraftLocalChanges));
-  onOtherWindowStorageChange(COMPOSER_DRAFT_STORAGE_KEY, (raw) =>
-    applyOtherWindowComposerDrafts(raw),
-  );
+  onOtherWindowStorageChange(COMPOSER_DRAFT_STORAGE_KEY, (raw) => {
+    if (composerDraftBaseStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY) === raw)
+      applyOtherWindowComposerDrafts(raw);
+  });
 }
 
 /** Test hook: the local change tracker for a store subscription. */
@@ -4912,8 +4950,15 @@ export function clearAcceptedOrbitDraft(draftId: DraftId) {
   )
     return;
 
-  state.clearDraftThread(draftId);
-  composerDebouncedStorage.flush();
+  const revisions = new Set([orbitDraftRevision(local, key)]);
+  if (stored) revisions.add(orbitDraftRevision(stored, key));
+  pendingOrbitDraftClear = { key, revisions: [...revisions] };
+  try {
+    state.clearDraftThread(draftId);
+    composerDebouncedStorage.flush();
+  } finally {
+    pendingOrbitDraftClear = null;
+  }
 }
 
 export function useComposerThreadDraft(threadRef: ComposerThreadTarget): ComposerThreadDraftState {

@@ -3,7 +3,7 @@ import { msg } from "gt-i18n";
 
 import type { OrbitGatewayClient, OrbitGatewayOperation } from "./client.ts";
 import { OrbitLaunchCopyError } from "./launchCopy.ts";
-import { OrbitLaunchAdmissionRefused } from "./launchObserver.ts";
+import { isCorrectableLaunchRefusal, OrbitLaunchAdmissionRefused } from "./launchObserver.ts";
 import type {
   OrbitLaunch,
   OrbitLaunchAdmission,
@@ -121,8 +121,10 @@ export function createOrbitLaunchSubmissions(
     } catch (error) {
       if (isAdmissionRefused(error)) {
         if (
-          error.cause.status === 422 &&
-          (reconcile || record.admission.request.source === "mobile")
+          isCorrectableLaunchRefusal(error.cause) &&
+          (reconcile ||
+            record.admission.request.source === "mobile" ||
+            error.cause.code === "instance.name_taken")
         ) {
           await update((records) => ({
             records: records.map((row) =>

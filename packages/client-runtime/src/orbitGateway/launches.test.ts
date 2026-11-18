@@ -558,6 +558,73 @@ it("reconciles a stale desktop Send against its accepted identity without postin
   }
 });
 
+it.each(["instance.name_taken", "idempotency_conflict"])(
+  "permits a corrected desktop Send after only a definitive name conflict: %s",
+  async (code) => {
+    const scope = { nodeId: 7, profileId: 12 };
+    const original = {
+      ...scope,
+      draftId: "conflicted-draft",
+      admission: { ...request, request: { ...request.request, source: "web" } as const },
+    };
+    const fixed = {
+      ...original,
+      admission: {
+        id: "renamed-launch",
+        request: {
+          ...original.admission.request,
+          target: { kind: "new", name: "different-name" } as const,
+        },
+      },
+    };
+    const post = vi
+      .fn()
+      .mockReturnValueOnce(errorResponse(code, 409))
+      .mockReturnValueOnce(wrap(fixture({ source: "web", launch_id: fixed.admission.id }), 202));
+    const gateway = createOrbitGatewayClient(async ({ path, method }) => {
+      if (path === "/me") {
+        return wrap({
+          id: 7,
+          name: "Device",
+          profile: {
+            id: 12,
+            name: "Work",
+            settings_version: 1,
+            updated_at: "2026-11-17T12:00:00Z",
+          },
+        });
+      }
+      return method === "POST" ? post() : wrap([]);
+    });
+    const observer = createOrbitLaunchObserver(() => gateway);
+    let records: readonly OrbitLaunchSubmission[] = [];
+    const journal = createOrbitLaunchSubmissions(
+      {
+        load: async () => records,
+        save: async (value) => {
+          records = value;
+        },
+      },
+      (row, reconcile) => observer.submit(row.admission, row, reconcile),
+    );
+    observer.setScope(scope);
+    try {
+      await expect(journal.submit(original)).rejects.toThrow(code);
+      if (code === "instance.name_taken") {
+        await expect(journal.submit(fixed)).resolves.toMatchObject({
+          launch_id: fixed.admission.id,
+        });
+        expect(post).toHaveBeenCalledTimes(2);
+      } else {
+        await expect(journal.submit(fixed)).rejects.toThrow("Resolve the previous");
+        expect(post).toHaveBeenCalledOnce();
+      }
+    } finally {
+      observer.setScope(null);
+    }
+  },
+);
+
 it("retains mobile text after a first access refusal without allowing an edited Send", async () => {
   const scope = { nodeId: 7, profileId: 12 };
   const original = { ...scope, draftId: "sheet", admission: request };

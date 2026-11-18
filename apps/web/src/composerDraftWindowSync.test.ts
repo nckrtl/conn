@@ -121,17 +121,15 @@ describe("applyOtherWindowComposerDrafts", () => {
       store.setPrompt(draftId, "original");
       await vi.advanceTimersByTimeAsync(300);
       const storage = useComposerDraftStore.persist.getOptions().storage!;
-      const cleared = structuredClone(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY));
-      if (!cleared || "capturedState" in cleared.state) throw new Error("Expected a stored draft");
-      const external = {
-        ...cleared,
-        state: {
-          ...cleared.state,
-          draftsByThreadKey: {},
-          draftThreadsByThreadKey: {},
-          logicalProjectDraftThreadKeyByLogicalProjectKey: {},
-        },
-      };
+      const originalWindow = useComposerDraftStore.getState();
+      clearAcceptedOrbitDraft(draftId);
+      const external = structuredClone(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY));
+      if (!external || "capturedState" in external.state)
+        throw new Error("Expected a stored draft clear");
+      expect(external.state.orbitDraftClearRevisions?.[key]).toEqual([
+        expect.stringMatching(/^[0-9a-f]{64}$/),
+      ]);
+      useComposerDraftStore.setState(originalWindow);
 
       if (editedField === "prompt") {
         store.setPrompt(draftId, "edited here");
@@ -144,8 +142,10 @@ describe("applyOtherWindowComposerDrafts", () => {
       }
       await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, external);
       await vi.advanceTimersByTimeAsync(300);
-      const changes = new RecentKeyChanges(2_000);
+      let time = 0;
+      const changes = new RecentKeyChanges(2_000, () => time);
       changes.mark(`${editedField === "prompt" ? "d" : "t"}:${key}`);
+      time = 2_001;
       applyOtherWindowComposerDrafts(JSON.stringify(external), changes);
 
       const expectedPrompt = editedField === "prompt" ? "edited here" : "original";

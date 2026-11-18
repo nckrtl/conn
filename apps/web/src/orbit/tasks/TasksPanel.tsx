@@ -58,6 +58,7 @@ import { taskCardDetail, tasksBoardLanes, tasksErrorNotice } from "./tasksBoard.
 import {
   tasksPanelActions,
   useTasksBoardQuery,
+  useTasksLaneScroll,
   useTasksNavigation,
   useTasksPanelStore,
 } from "./tasksPanelStore";
@@ -176,14 +177,7 @@ function TasksPanelContent(props: { threadKey: string; orbitProjectId: number | 
       />
     );
   }
-  return (
-    <TasksBoard
-      threadKey={props.threadKey}
-      tasks={tasks}
-      scroll={navigation.boardScroll}
-      laneScroll={navigation.laneScroll ?? {}}
-    />
-  );
+  return <TasksBoard threadKey={props.threadKey} tasks={tasks} scroll={navigation.boardScroll} />;
 }
 
 function TasksNotice(props: { icon: ReactNode; title: string; text: string; action?: ReactNode }) {
@@ -282,8 +276,8 @@ function TasksBoard(props: {
   threadKey: string;
   tasks: ReadonlyArray<OrbitTaskSummary>;
   scroll: { readonly top: number; readonly left: number };
-  laneScroll: Partial<Record<OrbitTaskLane, number>>;
 }) {
+  const laneScroll = useTasksLaneScroll((state) => state.byThreadKey[props.threadKey]);
   const scrollRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, props.scroll.left);
   const query = useTasksBoardQuery((state) => state.query);
   const hiddenLanes = useTasksPanelStore((state) => state.hiddenLanes);
@@ -314,16 +308,16 @@ function TasksBoard(props: {
                 {searching ? `${lane.tasks.length} of ${lane.total}` : lane.tasks.length}
               </span>
             </div>
-            <LaneList
-              threadKey={props.threadKey}
-              lane={lane.id}
-              top={props.laneScroll[lane.id] ?? 0}
-            >
+            <LaneList threadKey={props.threadKey} lane={lane.id} top={laneScroll?.[lane.id] ?? 0}>
               {lane.tasks.map((task) => (
                 <TaskCard
                   key={task.id}
                   task={task}
-                  onOpen={() => tasksPanelActions().openTask(props.threadKey, task.id)}
+                  onOpen={(laneTop) => {
+                    // The lane unmounts at once, before a running scroll reports its end.
+                    useTasksLaneScroll.getState().save(props.threadKey, lane.id, laneTop);
+                    tasksPanelActions().openTask(props.threadKey, task.id);
+                  }}
                 />
               ))}
               {lane.tasks.length === 0 ? (
@@ -351,11 +345,9 @@ function LaneList(props: {
     <ul
       ref={ref}
       onScrollEnd={(event) =>
-        tasksPanelActions().saveLaneScroll(
-          props.threadKey,
-          props.lane,
-          event.currentTarget.scrollTop,
-        )
+        useTasksLaneScroll
+          .getState()
+          .save(props.threadKey, props.lane, event.currentTarget.scrollTop)
       }
       className="scrollbar-inset m-0 flex min-h-0 flex-1 list-none flex-col gap-1.5 overflow-y-auto p-0"
     >
@@ -412,7 +404,7 @@ function TaskCardStatus(props: { task: OrbitTaskSummary }) {
   );
 }
 
-function TaskCard(props: { task: OrbitTaskSummary; onOpen: () => void }) {
+function TaskCard(props: { task: OrbitTaskSummary; onOpen: (laneTop: number) => void }) {
   const { task } = props;
   const pr = task.pullRequest;
   const prState = pr?.state ? resolvePullRequestState({ state: pr.state, isDraft: false }) : null;
@@ -421,7 +413,7 @@ function TaskCard(props: { task: OrbitTaskSummary; onOpen: () => void }) {
     <li>
       <button
         type="button"
-        onClick={props.onOpen}
+        onClick={(event) => props.onOpen(event.currentTarget.closest("ul")?.scrollTop ?? 0)}
         aria-label={`${task.title}. ${orbitTaskLabel(task)?.label ?? ""} Open task`}
         className="flex w-full cursor-pointer flex-col gap-1.5 rounded-lg border border-(--shell-divider)! bg-(--shell-card) px-3 py-2.5 text-left transition-colors hover:bg-(--shell-card)/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none dark:bg-(--shell-highlight)/70 dark:hover:bg-(--shell-highlight)"
       >

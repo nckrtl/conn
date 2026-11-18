@@ -20,8 +20,6 @@ export interface TasksNavigation {
   /** Inside a subtask: the tab the task itself had open, restored when the path leads back. */
   readonly taskTab?: TasksDetailTab | undefined;
   readonly boardScroll: { readonly top: number; readonly left: number };
-  /** Each lane scrolls on its own; its offset, kept like the board's. */
-  readonly laneScroll?: Partial<Record<OrbitTaskLane, number>> | undefined;
   readonly detailScrollTop: number;
   /** When this thread's Tasks navigation last changed, for the cap below. */
   readonly updatedAt: number;
@@ -64,7 +62,6 @@ interface TasksPanelState {
   readonly setTab: (threadKey: string, tab: TasksDetailTab) => void;
   readonly showBoard: (threadKey: string) => void;
   readonly saveBoardScroll: (threadKey: string, top: number, left: number) => void;
-  readonly saveLaneScroll: (threadKey: string, lane: OrbitTaskLane, top: number) => void;
   readonly saveDetailScroll: (threadKey: string, top: number) => void;
 }
 
@@ -160,12 +157,6 @@ export const useTasksPanelStore = create<TasksPanelState>()(
               ? current
               : { ...current, boardScroll: { top, left } },
           ),
-        saveLaneScroll: (threadKey, lane, top) =>
-          update(threadKey, (current) =>
-            (current.laneScroll?.[lane] ?? 0) === top
-              ? current
-              : { ...current, laneScroll: { ...current.laneScroll, [lane]: top } },
-          ),
         saveDetailScroll: (threadKey, top) =>
           update(threadKey, (current) =>
             current.detailScrollTop === top ? current : { ...current, detailScrollTop: top },
@@ -210,6 +201,28 @@ export const useTasksBoardQuery = create<{
   readonly query: string;
   readonly setQuery: (query: string) => void;
 }>()((set) => ({ query: "", setQuery: (query) => set({ query }) }));
+
+/**
+ * Where each lane is scrolled, per thread, for this window's session only. Lanes scroll often,
+ * so their offsets stay out of the persisted store for the same reason as the search.
+ */
+export const useTasksLaneScroll = create<{
+  readonly byThreadKey: Readonly<Record<string, Partial<Record<OrbitTaskLane, number>>>>;
+  readonly save: (threadKey: string, lane: OrbitTaskLane, top: number) => void;
+}>()((set) => ({
+  byThreadKey: {},
+  save: (threadKey, lane, top) =>
+    set((state) =>
+      state.byThreadKey[threadKey]?.[lane] === top
+        ? state
+        : {
+            byThreadKey: {
+              ...state.byThreadKey,
+              [threadKey]: { ...state.byThreadKey[threadKey], [lane]: top },
+            },
+          },
+    ),
+}));
 
 export function useTasksNavigation(threadKey: string): TasksNavigation {
   return useTasksPanelStore((state) => state.byThreadKey[threadKey] ?? DEFAULT_TASKS_NAVIGATION);

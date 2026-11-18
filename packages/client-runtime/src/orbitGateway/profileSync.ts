@@ -77,6 +77,8 @@ export type ProfileSyncResult =
       readonly outcomes: Readonly<Partial<Record<ProfileSectionName, ProfileSyncOutcome>>>;
       /** Who changed what, from the latest read or write of this run; null when none happened. */
       readonly sections: Readonly<Record<string, OrbitGatewaySectionMeta>> | null;
+      /** The document version this run counts as applied (see `settledVersion`). */
+      readonly version: number;
     };
 
 /** Attempts at a PATCH before giving up on a run, when other devices keep writing in between. */
@@ -290,7 +292,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
 
       if (pushes.length === 0) {
         commit(settledVersion(remote));
-        return { kind: "synced", outcomes, sections: meta };
+        return { kind: "synced", outcomes, sections: meta, version: state.profileVersion };
       }
       commit(settledVersion(remote));
 
@@ -344,7 +346,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
           push.kind === "seed" ? "seeded" : push.kind === "merge" ? "merged" : "pushed";
       }
       commit(settledVersion(saved));
-      return { kind: "synced", outcomes, sections: meta };
+      return { kind: "synced", outcomes, sections: meta, version: state.profileVersion };
     }
     throw conflict;
   }

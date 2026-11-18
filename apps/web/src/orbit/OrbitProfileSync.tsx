@@ -189,9 +189,17 @@ function profileSyncController(): ProfileSyncController | null {
    */
   const scopedClient = (isCurrent: () => boolean): OrbitGatewayClient => ({
     ...client,
-    settings: (profileId) => (isCurrent() ? client.settings(profileId) : obsoleteRead()),
-    replaceWorkspaces: (...args) =>
-      isCurrent() ? client.replaceWorkspaces(...args) : obsoleteRead(),
+    // Checked before the call and again on its answer, so nothing after it applies the answer.
+    settings: async (profileId) => {
+      if (!isCurrent()) return obsoleteRead();
+      const answer = await client.settings(profileId);
+      return isCurrent() ? answer : obsoleteRead();
+    },
+    replaceWorkspaces: async (...args) => {
+      if (!isCurrent()) return obsoleteRead();
+      const answer = await client.replaceWorkspaces(...args);
+      return isCurrent() ? answer : obsoleteRead();
+    },
   });
   const workspacePorts = (isCurrent: () => boolean): WorkspaceProfileSyncPorts => ({
     client: scopedClient(isCurrent),
@@ -308,8 +316,11 @@ function profileSyncController(): ProfileSyncController | null {
       throw error;
     }
     // A failure in the sections must not hide that the workspaces synced.
+    let applied = me.profile.settingsVersion;
     try {
       const synced = await sections.run(me, isCurrent);
+      // A section the engine could not apply yet keeps the version it counts as read.
+      if (synced.kind === "synced") applied = Math.min(applied, synced.version);
       if (synced.kind === "superseded") return null;
       if (synced.kind === "unsupported") {
         useOrbitProfileSyncStatus.setState({ sections: "unsupported", sectionsError: null });
@@ -326,7 +337,7 @@ function profileSyncController(): ProfileSyncController | null {
     }
     return {
       profileId: me.profile.id,
-      version: me.profile.settingsVersion,
+      version: applied,
       channel: me.profileChannel ?? null,
     };
   };

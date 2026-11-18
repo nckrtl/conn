@@ -385,8 +385,29 @@ async function runPairings(
 let refreshing: Promise<void> | null = null;
 /** The profile version whose workspaces this phone shows, so a profile read skips an equal one. */
 let appliedWorkspaces: { readonly profileId: number; readonly version: number } | null = null;
-/** The error a failed profile read showed, cleared by the next read that succeeds. */
+/**
+ * The two sources of the shown error: the lists (and a bind) of a refresh, and the profile read,
+ * which retries on its own. Each clears only its own failure.
+ */
+let listError: string | null = null;
 let profileReadError: string | null = null;
+
+function profileReadFailed(error: unknown): void {
+  profileReadError = message(error);
+  set({
+    error: listError ?? profileReadError,
+    phase: state.phase === "ready" ? "error" : state.phase,
+  });
+}
+
+function profileReadSucceeded(): void {
+  if (profileReadError === null) return;
+  profileReadError = null;
+  set({
+    error: listError,
+    phase: state.phase === "error" && listError === null ? "ready" : state.phase,
+  });
+}
 
 /**
  * Shows a profile's workspaces unless the phone is bound to another profile now or already shows
@@ -397,8 +418,8 @@ function applyWorkspaces(settings: {
   readonly version: number;
   readonly workspaces: readonly OrbitGatewayWorkspace[];
 }): void {
-  const bound = state.node?.profile?.id;
-  if (bound !== undefined && bound !== settings.profileId) return;
+  // Only for the profile the phone is bound to in Orbit mode now.
+  if (state.provider !== "orbit" || state.node?.profile?.id !== settings.profileId) return;
   if (
     appliedWorkspaces?.profileId === settings.profileId &&
     appliedWorkspaces.version > settings.version
@@ -425,6 +446,7 @@ async function refreshOrbitProfile(
   if (profile === null) {
     appliedWorkspaces = null;
     set({ node, workspaces: [] });
+    profileReadSucceeded();
     return null;
   }
   if (
@@ -442,13 +464,7 @@ async function refreshOrbitProfile(
     throw new Error("The phone's preferences are not loaded yet.");
   }
   if (!isCurrent()) return null;
-  if (profileReadError !== null) {
-    // This read recovered from the failure it showed; a list failure keeps its own error.
-    if (state.error === profileReadError) {
-      set({ error: null, phase: state.phase === "error" ? "ready" : state.phase });
-    }
-    profileReadError = null;
-  }
+  profileReadSucceeded();
   return {
     profileId: profile.id,
     version: profile.settingsVersion,
@@ -465,10 +481,7 @@ const profileLive = createOrbitProfileLive({
   scope: () => (state.provider === "orbit" ? "orbit" : null),
   refresh: refreshOrbitProfile,
   // Only a current read reports here; the refresh shows it as the Gateway's error.
-  onError: (error) => {
-    profileReadError = message(error);
-    set({ error: profileReadError });
-  },
+  onError: profileReadFailed,
 });
 
 /**
@@ -482,13 +495,16 @@ export function refreshOrbitGateway(): Promise<void> {
       if (!state.providerLoaded) await loadProvider();
       if (state.provider === "default") {
         appliedWorkspaces = null;
+        listError = null;
+        profileReadError = null;
         set({ phase: "idle", node: null, environments: [], workspaces: [], error: null });
         // Closes the profile subscription at once: its scope is gone.
         void profileLive.reconcile();
         await reconcileEnvironments(null);
         return;
       }
-      set({ phase: "loading", error: null });
+      listError = null;
+      set({ phase: "loading", error: profileReadError });
       // The Node, workspaces and appearance come from the profile read, which runs one at a time
       // with the notices' reads, so an older answer never replaces a newer one.
       const [profiles, environments] = await Promise.all([
@@ -496,10 +512,16 @@ export function refreshOrbitGateway(): Promise<void> {
         client.environments(),
         profileLive.reconcile(),
       ]);
-      set({ phase: state.error === null ? "ready" : "error", profiles, environments });
+      set({
+        phase: profileReadError === null ? "ready" : "error",
+        error: profileReadError,
+        profiles,
+        environments,
+      });
       await reconcileEnvironments(environments);
     } catch (error) {
-      set({ phase: "error", error: message(error) });
+      listError = message(error);
+      set({ phase: "error", error: listError });
     } finally {
       refreshing = null;
     }
@@ -527,7 +549,8 @@ export async function chooseOrbitProfile(
     profileLive.invalidate();
     await client.bindProfile(id);
   } catch (error) {
-    set({ error: message(error) });
+    listError = message(error);
+    set({ error: listError });
     void profileLive.reconcile();
     throw error;
   }

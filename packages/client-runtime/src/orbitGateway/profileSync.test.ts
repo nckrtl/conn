@@ -331,7 +331,10 @@ describe("profile sync engine", () => {
     // The theme is still loading: appearance reads as null while the desktop settings change.
     mac.memory.unreadable = true;
     mac.memory.settings.size = 18;
-    await mac.sync();
+    // The run does not count the new document version as applied, so a caller reads again.
+    const partial = await mac.sync();
+    expect(partial).toMatchObject({ kind: "synced" });
+    expect(partial.kind === "synced" && partial.version).toBeLessThan(fake.gateway.version);
     mac.memory.unreadable = false;
     await mac.sync();
     expect(mac.memory.appearance).toMatchObject({ mode: "dark" });

@@ -8,7 +8,8 @@ import type {
 
 /** The Gateway and the phone's other parts, which each test sets up through `setup()`. */
 const fake = vi.hoisted(() => ({
-  boundProfile: 1 as number,
+  boundProfile: 1 as number | null,
+  profilesFailures: 0,
   versions: new Map<number, number>(),
   meFailures: 0,
   holdProfiles: null as Promise<void> | null,
@@ -70,17 +71,19 @@ vi.mock("./orbitGatewayClient", () => ({
         id: 7,
         name: "phone",
         wireguardIp: "10.44.0.30",
-        profile: {
-          id,
-          name: `P${id}`,
-          settingsVersion: fake.versions.get(id) ?? 1,
-          updatedAt: "",
-        },
+        profile:
+          id === null
+            ? null
+            : { id, name: `P${id}`, settingsVersion: fake.versions.get(id) ?? 1, updatedAt: "" },
         profileChannel: null,
       };
     },
     profiles: async () => {
       if (fake.holdProfiles) await fake.holdProfiles;
+      if (fake.profilesFailures > 0) {
+        fake.profilesFailures -= 1;
+        throw new Error("Gateway unreachable");
+      }
       return [];
     },
     environments: async () => [],
@@ -116,6 +119,7 @@ async function setup() {
       [2, 1],
     ]),
     meFailures: 0,
+    profilesFailures: 0,
     holdProfiles: null,
     holdWrite: null,
   });
@@ -170,6 +174,20 @@ describe("Orbit Gateway store", () => {
     expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
   });
 
+  it("does not let a late workspace write show workspaces in Default mode", async () => {
+    using t = await setup();
+    t.store.startOrbitGateway();
+    await t.settle();
+    const write = Promise.withResolvers<void>();
+    fake.holdWrite = write.promise;
+    const kept = t.store.keepProjectInOrbitWorkspace("ws-1-v1", "env:project");
+    await t.settle();
+    await t.store.setEnvironmentProvider("default");
+    write.resolve();
+    await kept;
+    expect(t.shown()).toEqual({ profile: null, workspaces: [] });
+  });
+
   it("shows the workspaces again after Default and back to Orbit", async () => {
     using t = await setup();
     t.store.startOrbitGateway();
@@ -179,6 +197,30 @@ describe("Orbit Gateway store", () => {
     await t.store.setEnvironmentProvider("orbit");
     await t.settle();
     expect(t.shown()).toEqual({ profile: 1, workspaces: ["ws-1-v1"] });
+  });
+
+  it("clears a profile read error when the retry finds the phone unbound", async () => {
+    using t = await setup();
+    fake.meFailures = 1;
+    t.store.startOrbitGateway();
+    await t.settle();
+    fake.boundProfile = null;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(t.store.orbitGatewayState()).toMatchObject({ error: null, phase: "ready" });
+  });
+
+  it("keeps a list failure shown when only the profile read recovers", async () => {
+    using t = await setup();
+    fake.meFailures = 1;
+    fake.profilesFailures = 1;
+    t.store.startOrbitGateway();
+    await t.settle();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(t.shown()).toEqual({ profile: 1, workspaces: ["ws-1-v1"] });
+    expect(t.store.orbitGatewayState()).toMatchObject({
+      error: "Gateway unreachable",
+      phase: "error",
+    });
   });
 
   it("clears the error a failed profile read showed once a retry succeeds", async () => {

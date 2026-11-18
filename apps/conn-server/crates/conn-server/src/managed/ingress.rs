@@ -3,12 +3,7 @@
 //! refused here, even on a route the reader profile allows, and a failed `conn_mt_` token
 //! never falls through to native auth.
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -41,7 +36,6 @@ pub const READER_METHODS: [&str; 4] = [
 /// never redeems on the native ingress.
 const TICKET_PREFIX: &str = "conn_mtk_";
 const TICKET_TTL_MS: u64 = 30_000;
-const MAX_TICKETS: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Route {
@@ -49,19 +43,19 @@ enum Route {
     Media,
 }
 
-struct Ticket {
-    token: String,
-    route: Route,
-    /// The edge, its fence generation at mint, and the redeem deadline: a fence of the edge
-    /// voids the ticket.
-    binding: super::authority::TicketBinding,
+impl Route {
+    fn name(self) -> &'static str {
+        match self {
+            Route::Rpc => "rpc",
+            Route::Media => "media",
+        }
+    }
 }
 
 /// The managed ingress's state.
 pub struct Managed {
     pub shared: Arc<Shared>,
     pub gateway: Arc<dyn Gateway>,
-    tickets: Mutex<HashMap<String, Ticket>>,
     preview_tabs: Vec<PreviewTab>,
 }
 
@@ -80,7 +74,6 @@ impl Managed {
         Arc::new(Self {
             shared,
             gateway,
-            tickets: Mutex::new(HashMap::new()),
             preview_tabs,
         })
     }
@@ -233,38 +226,33 @@ async fn ticket(
         + u64::try_from(deadline.saturating_duration_since(now).as_millis()).unwrap_or(0);
     let ticket = format!("{TICKET_PREFIX}{}", crate::auth::random_hex(32));
     let shared = &state.managed.shared;
+    let Some(token) = bearer(&headers) else {
+        return error(StatusCode::UNAUTHORIZED, "managed_token_missing");
+    };
     let binding = super::authority::TicketBinding {
         edge: principal.edge_id,
-        fence_generation: shared.read(|a| a.edge_fence_generation(principal.edge_id)),
         redeem_by: deadline,
     };
-    {
-        let mut tickets = crate::lock(&state.managed.tickets);
-        // Expired tickets and tickets of a fenced edge are void: they leave the pool.
-        shared.read(|a| {
-            tickets.retain(|_, t| {
-                t.binding.redeem_by > now
-                    && !a.is_fenced(t.binding.edge)
-                    && a.edge_fence_generation(t.binding.edge) == t.binding.fence_generation
-            });
-        });
-        if tickets.len() >= MAX_TICKETS {
+    let minted = shared.with(|a| {
+        (
+            a.mint_ticket(ticket.clone(), token.to_owned(), route.name(), binding, now),
+            Default::default(),
+        )
+    });
+    match minted {
+        Ok(()) => {}
+        Err(super::authority::MintRefusal::Full) => {
             return error(StatusCode::TOO_MANY_REQUESTS, "managed_ticket_limit");
         }
-        let Some(token) = bearer(&headers) else {
-            return error(StatusCode::UNAUTHORIZED, "managed_token_missing");
-        };
-        tickets.insert(
-            ticket.clone(),
-            Ticket {
-                token: token.to_owned(),
-                route,
-                binding,
-            },
-        );
+        Err(super::authority::MintRefusal::Fenced) => {
+            return admit_failed(&AdmitError::Forbidden);
+        }
     }
     if !crate::session::pass(Some(&SessionGate(handle))).await {
-        crate::lock(&state.managed.tickets).remove(&ticket);
+        shared.with(|a| {
+            a.drop_ticket(&ticket);
+            ((), Default::default())
+        });
         return admit_failed(&AdmitError::Forbidden);
     }
     let mut response = Json(json!({
@@ -301,19 +289,17 @@ async fn admit_upgrade(
             "managed_ticket_invalid",
         )));
     }
-    let spent = crate::lock(&state.managed.tickets).remove(ticket);
-    let Some(spent) = spent else {
+    let now = tokio::time::Instant::now();
+    let spent = state
+        .managed
+        .shared
+        .with(|a| (a.take_ticket(ticket, route.name(), now), Default::default()));
+    let Some((token, binding)) = spent else {
         return Err(Box::new(error(
             StatusCode::UNAUTHORIZED,
             "managed_ticket_invalid",
         )));
     };
-    if spent.route != route || spent.binding.redeem_by <= tokio::time::Instant::now() {
-        return Err(Box::new(error(
-            StatusCode::UNAUTHORIZED,
-            "managed_ticket_invalid",
-        )));
-    }
     // The redemption is checked again where the handler registers: the ticket's own edge,
     // no fence since it was minted, and its deadline. The session then carries the token's
     // principal and expiry, as the contract asks of a managed ticket.
@@ -322,9 +308,9 @@ async fn admit_upgrade(
         .shared
         .admit(
             &state.managed.gateway,
-            &spent.token,
+            &token,
             peer(addr),
-            Some(spent.binding),
+            Some(binding),
             is_reader,
         )
         .await

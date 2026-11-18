@@ -86,10 +86,26 @@ pub enum GateState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TicketBinding {
     pub edge: EdgeId,
-    /// The edge's fence generation when the ticket was minted.
-    pub fence_generation: u64,
     /// The ticket must be redeemed before this monotonic instant.
     pub redeem_by: Instant,
+}
+
+/// The most unspent managed tickets kept.
+pub const MAX_TICKETS: usize = 256;
+
+/// An unspent managed ticket. Kept with the authority, so a fence of its edge deletes it in
+/// the same step as it closes the edge's handlers.
+struct PoolTicket {
+    token: String,
+    route: &'static str,
+    binding: TicketBinding,
+}
+
+/// Why a ticket could not be minted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MintRefusal {
+    Fenced,
+    Full,
 }
 
 /// Why access was refused. The ingress maps each to a response; none of them falls through
@@ -193,7 +209,7 @@ pub struct Authority {
     /// Snapshots applied in this process; the first one recovers a restart.
     snapshots: u64,
     /// Raised each time an edge is fenced; a ticket minted before a fence never redeems.
-    fence_generation: HashMap<EdgeId, u64>,
+    tickets: HashMap<String, PoolTicket>,
     /// Bounds of (Gateway clock − target clock) in ms, from applied probes.
     offset_bounds: Option<(i64, i64)>,
     notices: BTreeMap<Revision, NoticeRecord>,
@@ -276,7 +292,7 @@ impl Authority {
             gap_notices: BTreeSet::new(),
             introspected: None,
             snapshots: 0,
-            fence_generation: HashMap::new(),
+            tickets: HashMap::new(),
             offset_bounds: None,
             notices: BTreeMap::new(),
             admitted: HashSet::new(),
@@ -372,8 +388,53 @@ impl Authority {
         }
     }
 
-    pub fn edge_fence_generation(&self, edge: EdgeId) -> u64 {
-        self.fence_generation.get(&edge).copied().unwrap_or(0)
+    /// Keeps a new ticket for `binding.edge`, unless the edge is fenced or the pool is full.
+    /// Expired tickets leave the pool first.
+    pub fn mint_ticket(
+        &mut self,
+        ticket: String,
+        token: String,
+        route: &'static str,
+        binding: TicketBinding,
+        now: Instant,
+    ) -> Result<(), MintRefusal> {
+        self.tickets.retain(|_, t| t.binding.redeem_by > now);
+        if self.is_fenced(binding.edge) {
+            return Err(MintRefusal::Fenced);
+        }
+        if self.tickets.len() >= MAX_TICKETS {
+            return Err(MintRefusal::Full);
+        }
+        self.tickets.insert(
+            ticket,
+            PoolTicket {
+                token,
+                route,
+                binding,
+            },
+        );
+        Ok(())
+    }
+
+    /// Spends a ticket: its token and binding, if it is still in the pool for `route`.
+    pub fn take_ticket(
+        &mut self,
+        ticket: &str,
+        route: &'static str,
+        now: Instant,
+    ) -> Option<(String, TicketBinding)> {
+        let spent = self.tickets.remove(ticket)?;
+        (spent.route == route && spent.binding.redeem_by > now)
+            .then_some((spent.token, spent.binding))
+    }
+
+    /// Drops one ticket (a mint that could not answer).
+    pub fn drop_ticket(&mut self, ticket: &str) {
+        self.tickets.remove(ticket);
+    }
+
+    pub fn ticket_count(&self) -> usize {
+        self.tickets.len()
     }
 
     pub fn offset_bounds(&self) -> Option<(i64, i64)> {
@@ -488,9 +549,9 @@ impl Authority {
             return Err(Refusal::Stale);
         }
         if let Some(ticket) = ticket {
-            // A ticket redeems only for its own edge, before its deadline, and only if the
-            // edge was not fenced since it was minted.
-            if ticket.edge != edge || ticket.fence_generation != self.edge_fence_generation(edge) {
+            // A ticket redeems only for its own edge and before its deadline. A fence of the
+            // edge already deleted its unspent tickets.
+            if ticket.edge != edge {
                 return Err(Refusal::Fenced);
             }
             if now >= ticket.redeem_by {
@@ -629,7 +690,8 @@ impl Authority {
 
     /// Blocks `edge` and tells each of its handlers to close.
     fn fence_edge(&mut self, edge: EdgeId, wall_ms: u64) {
-        *self.fence_generation.entry(edge).or_insert(0) += 1;
+        // The edge's unspent tickets go in the same step as its handlers.
+        self.tickets.retain(|_, t| t.binding.edge != edge);
         self.fenced_at.entry(edge).or_insert(wall_ms);
         if let Some(now) = self.clock {
             self.fence_mark.entry(edge).or_insert(now);
@@ -676,6 +738,7 @@ impl Authority {
         self.open = false;
         self.lease_until = None;
         self.probe = None;
+        self.tickets.clear();
         self.close_all_handlers();
     }
 
@@ -706,17 +769,6 @@ impl Authority {
             self.fail_closed(Loss::WrongIdentity);
             return Effects::default();
         }
-        // Bounded: a flood fails closed instead of growing the pending state.
-        if notice.edge_ids.len() > MAX_NOTICE_EDGES
-            || (self.notices.len() >= MAX_PENDING_NOTICES
-                && !self.notices.contains_key(&notice.revision))
-        {
-            self.fail_closed(Loss::NoticeOverflow);
-            return Effects {
-                probe_now: true,
-                ..Effects::default()
-            };
-        }
         let applied = self.applied.unwrap_or(0);
         let ahead = notice.revision > self.next_unknown();
         if (self.applied.is_some() && notice.revision <= applied)
@@ -728,6 +780,15 @@ impl Authority {
         {
             // Stale or duplicate.
             return Effects::default();
+        }
+        // Bounded, for new notices only: a flood fails closed instead of growing the
+        // pending state.
+        if notice.edge_ids.len() > MAX_NOTICE_EDGES || self.notices.len() >= MAX_PENDING_NOTICES {
+            self.fail_closed(Loss::NoticeOverflow);
+            return Effects {
+                probe_now: true,
+                ..Effects::default()
+            };
         }
         for edge in &notice.edge_ids {
             self.provisional
@@ -1188,7 +1249,6 @@ impl Authority {
             .collect();
         for edge in done {
             self.confirmed.remove(&edge);
-            self.fence_generation.remove(&edge);
             self.fenced_at.remove(&edge);
             self.fence_mark.remove(&edge);
             self.closed_at.remove(&edge);

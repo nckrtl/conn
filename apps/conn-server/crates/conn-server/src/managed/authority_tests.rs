@@ -581,36 +581,101 @@ fn an_edge_named_by_two_notices_stays_fenced_until_both_are_settled() {
 }
 
 #[test]
-fn a_ticket_minted_before_a_fence_never_redeems() {
+fn a_fence_deletes_its_edges_tickets_for_good() {
     let mut lab = Lab::new();
-    lab.open(0, vec![1], 0);
-    let binding = TicketBinding {
-        edge: 1,
-        fence_generation: lab.a.edge_fence_generation(1),
-        redeem_by: lab.at(10_000),
+    lab.open(0, vec![1, 2], 0);
+    let t0 = lab.t0;
+    let binding = move |edge, until: u64| TicketBinding {
+        edge,
+        redeem_by: t0 + Duration::from_millis(until),
     };
+    let (b1, b2) = (binding(1, 10_000), binding(2, 10_000));
+    lab.a
+        .mint_ticket("t1".into(), "tok1".into(), "rpc", b1, lab.at(10))
+        .unwrap();
+    lab.a
+        .mint_ticket("t2".into(), "tok2".into(), "rpc", b2, lab.at(10))
+        .unwrap();
     lab.notice(1, vec![1], 50);
     let probe = lab.probe(100);
     lab.reply(&probe, "current", 0, 110);
     assert!(!lab.a.is_fenced(1), "the notice was disproved");
+    assert!(
+        lab.a.take_ticket("t1", "rpc", lab.at(120)).is_none(),
+        "the fence deleted it"
+    );
+    assert!(
+        lab.a.take_ticket("t2", "media", lab.at(120)).is_none(),
+        "wrong route: spent, refused"
+    );
+    assert_eq!(lab.a.ticket_count(), 0);
+    // A fenced edge mints nothing; a full pool refuses with its own answer.
+    lab.notice(1, vec![1], 200);
+    assert_eq!(
+        lab.a.mint_ticket(
+            "t3".into(),
+            "tok".into(),
+            "rpc",
+            binding(1, 10_000),
+            lab.at(210)
+        ),
+        Err(MintRefusal::Fenced)
+    );
+    for n in 0..MAX_TICKETS {
+        lab.a
+            .mint_ticket(
+                format!("p{n}"),
+                "tok".into(),
+                "rpc",
+                binding(2, 10_000),
+                lab.at(210),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        lab.a.mint_ticket(
+            "x".into(),
+            "tok".into(),
+            "rpc",
+            binding(2, 10_000),
+            lab.at(210)
+        ),
+        Err(MintRefusal::Full)
+    );
+    // Expired tickets leave the pool at the next mint.
+    assert!(
+        lab.a
+            .mint_ticket(
+                "y".into(),
+                "tok".into(),
+                "rpc",
+                binding(2, 20_000),
+                lab.at(10_001)
+            )
+            .is_ok()
+    );
     let epoch = lab.a.epoch();
     assert_eq!(
         lab.a
-            .admit(1, 0, far(), epoch, Some(binding), lab.at(120), 120)
-            .unwrap_err(),
-        Refusal::Fenced
-    );
-    let late = TicketBinding {
-        fence_generation: lab.a.edge_fence_generation(1),
-        redeem_by: lab.at(100),
-        ..binding
-    };
-    assert_eq!(
-        lab.a
-            .admit(1, 0, far(), epoch, Some(late), lab.at(120), 120)
+            .admit(2, 0, far(), epoch, Some(binding(2, 100)), lab.at(120), 120)
             .unwrap_err(),
         Refusal::Expired,
         "the ticket's own deadline holds at registration"
+    );
+}
+
+#[test]
+fn a_stale_notice_at_the_notice_bound_changes_nothing() {
+    let mut lab = Lab::new();
+    lab.open(5, vec![1], 0);
+    let (_, closed) = lab.admit(1, 5);
+    for revision in 7..7 + MAX_PENDING_NOTICES as u64 {
+        lab.notice(revision, vec![revision + 100], 10);
+    }
+    lab.notice(3, vec![1], 20);
+    assert!(
+        lab.a.is_open() && !*closed.borrow(),
+        "a stale notice is ignored, even at the bound"
     );
 }
 

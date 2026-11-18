@@ -96,8 +96,13 @@ Each is the fail-closed reading.
   end" to keep memory bounded, with the same safety. Pending notices are bounded (1,024,
   and 1,024 edges each); a flood fails closed. Protected files must have exactly mode
   0600 (no special bits).
+- Unspent managed tickets live with the authority (at most 256): a fence of an edge
+  deletes its tickets in the same step as it closes its handlers, for good, and a
+  fail-closed deletes them all. A Gateway answer may be up to 8 MiB: the contract does not
+  page a snapshot's owed rows yet, so a very long offline backlog beyond that keeps the
+  target closed (open point for the contract owner).
 - Settled revision records are pruned after their ACK, or when a fresh verified reply no
-  longer owes them (a lost ACK answer); confirmed fences stay for the generation. Each applied probe narrows the Gateway-to-target clock offset bounds from
+  longer owes them (a lost ACK answer). Each applied probe narrows the Gateway-to-target clock offset bounds from
   `server_time` and the probe's send and receive times.
 
 ## Not proven here

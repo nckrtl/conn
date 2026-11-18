@@ -14,8 +14,10 @@ use super::provision::Provision;
 
 /// One Gateway call may take this long; a probe that takes longer has failed.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(2);
-/// The largest Gateway answer read.
-const MAX_ANSWER_BYTES: usize = 1024 * 1024;
+/// The largest Gateway answer read. A snapshot carries every owed revision, and the
+/// contract has no paging yet: the cap leaves room for a long offline backlog (about
+/// 200,000 owed rows) while still bounding one answer.
+const MAX_ANSWER_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayError {

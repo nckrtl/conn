@@ -14,6 +14,7 @@ import {
   clearAcceptedOrbitDraft,
   DraftId,
   isStaleClearedOrbitDraft,
+  prepareOrbitDraftAdmission,
   useComposerDraftStore,
 } from "./composerDraftStore";
 import { RecentKeyChanges } from "./lib/desktopWindowContext";
@@ -101,6 +102,25 @@ describe("applyOtherWindowComposerDrafts", () => {
     expect(isStaleClearedOrbitDraft(draftId, captured)).toBe(true);
   });
 
+  it("flushes the captured draft before admission and preserves a peer edit back to the prior text", async () => {
+    const draftId = DraftId.make("orbit-restore-prior-text");
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(draftId, "previous text");
+    const earlier = await otherWindowWrite(() => {});
+    store.setPrompt(draftId, "text actually sent");
+    expect(prepareOrbitDraftAdmission(draftId, captureOrbitDraftRevision(draftId))).toBe(true);
+    const storage = useComposerDraftStore.persist.getOptions().storage!;
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
+      "text actually sent",
+    );
+    await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, JSON.parse(earlier));
+    await vi.advanceTimersByTimeAsync(300);
+    clearAcceptedOrbitDraft(draftId);
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
+      "previous text",
+    );
+  });
+
   it.each([
     "prompt",
     "target",
@@ -110,6 +130,7 @@ describe("applyOtherWindowComposerDrafts", () => {
     "passive-clear",
     "discard-received",
     "acknowledge-received",
+    "first-acknowledge-received",
   ])(
     "reconciles an Orbit %s draft when another window clears a newer sent version",
     async (editedField) => {
@@ -168,32 +189,46 @@ describe("applyOtherWindowComposerDrafts", () => {
         await vi.advanceTimersByTimeAsync(300);
       }
       if (
-        ["other-window-edit", "passive-clear", "discard-received", "acknowledge-received"].includes(
-          editedField,
-        )
+        [
+          "other-window-edit",
+          "passive-clear",
+          "discard-received",
+          "acknowledge-received",
+          "first-acknowledge-received",
+        ].includes(editedField)
       ) {
         if (editedField !== "other-window-edit")
           applyOtherWindowComposerDrafts(JSON.stringify(external), new RecentKeyChanges(2_000));
         if (!original || "capturedState" in original.state)
           throw new Error("Expected a stored draft");
         const draft = original.state.draftsByThreadKey[key]!;
+        const session = original.state.draftThreadsByThreadKey[key]!;
+        const changedBranch = {
+          ...Object.fromEntries(Object.entries(session).reverse()),
+          branch: "topic/edited",
+        } as typeof session;
         await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, {
           ...original,
           state: {
             ...original.state,
             draftsByThreadKey: { [key]: { ...draft, prompt: "genuine edit in a third window" } },
-            orbitDraftClearRevisions: external.state.orbitDraftClearRevisions ?? {},
+            draftThreadsByThreadKey: { [key]: changedBranch },
+            orbitDraftClearRevisions:
+              editedField === "first-acknowledge-received"
+                ? {}
+                : (external.state.orbitDraftClearRevisions ?? {}),
           },
         });
         await vi.advanceTimersByTimeAsync(300);
-        expect(isStaleClearedOrbitDraft(draftId)).toBe(true);
+        if (editedField !== "first-acknowledge-received")
+          expect(isStaleClearedOrbitDraft(draftId)).toBe(true);
         useComposerDraftStore.setState({});
         await vi.advanceTimersByTimeAsync(300);
         const latest = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
         expect(latest).toMatchObject({
           state: { draftsByThreadKey: { [key]: { prompt: "genuine edit in a third window" } } },
         });
-        if (editedField === "discard-received" || editedField === "acknowledge-received") {
+        if (editedField.endsWith("received")) {
           applyOtherWindowComposerDrafts(JSON.stringify(latest), new RecentKeyChanges(2_000));
           expect(useComposerDraftStore.getState().getDraftSession(draftId)).not.toBeNull();
           if (editedField === "discard-received") store.clearDraftThread(draftId);

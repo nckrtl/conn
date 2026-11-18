@@ -1,5 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex } from "@noble/hashes/utils";
+import { stableStringify } from "@t3tools/shared/relaySigning";
 import {
   composerFileAttachmentMimeType,
   composerImageDedupKey,
@@ -178,7 +179,7 @@ let pendingOrbitDraftClear: {
 
 function orbitDraftRevision(state: PersistedComposerDraftStoreState, key: string) {
   const draft = [state.draftsByThreadKey[key], state.draftThreadsByThreadKey[key]];
-  return bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(draft))));
+  return bytesToHex(sha256(new TextEncoder().encode(stableStringify(draft))));
 }
 
 function readStoredComposerDraftState(): PersistedComposerDraftStoreState | null {
@@ -240,6 +241,7 @@ function mergeComposerDraftStates(
   const keys = new Set([
     ...Object.keys(local.draftThreadsByThreadKey),
     ...Object.keys(stored.orbitDraftClearRevisions ?? {}),
+    ...(pendingOrbitDraftClear === null ? [] : [pendingOrbitDraftClear.key]),
   ]);
   for (const key of keys) {
     const session = local.draftThreadsByThreadKey[key];
@@ -248,7 +250,11 @@ function mergeComposerDraftStates(
     const sharedDraft = stored.draftsByThreadKey[key];
     const pending = pendingOrbitDraftClear?.key === key ? pendingOrbitDraftClear : null;
     const cleared = pending?.revisions ?? stored.orbitDraftClearRevisions?.[key];
-    if (Array.isArray(cleared) && session === undefined && shared !== undefined) {
+    if (
+      Array.isArray(cleared) &&
+      session === undefined &&
+      (shared !== undefined || sharedDraft !== undefined)
+    ) {
       const sharedRevision = orbitDraftRevision(stored, key);
       if (
         (pending?.remove && cleared.includes(sharedRevision)) ||
@@ -5063,26 +5069,28 @@ export function isStaleClearedOrbitDraft(draftId: DraftId, captured?: string | n
   );
 }
 
+export function prepareOrbitDraftAdmission(draftId: DraftId, revision: string | null) {
+  if (
+    captureOrbitDraftRevision(draftId) !== revision ||
+    isStaleClearedOrbitDraft(draftId, revision)
+  )
+    return false;
+  useComposerDraftStore.setState({});
+  composerDebouncedStorage.flush();
+  return !isStaleClearedOrbitDraft(draftId, revision);
+}
+
 /** Preserve an edit another window saved before this Orbit acknowledgement. */
 export function clearAcceptedOrbitDraft(draftId: DraftId, clear = true) {
   const state = useComposerDraftStore.getState();
   const key = resolveComposerDraftKey(state, draftId);
   if (key === null) return;
   const stored = readStoredComposerDraftState();
-  const lastWrite = composerDraftLastWrite?.local ?? composerDraftLoadedState;
   const local = partializeComposerDraftStoreState(state);
-  const agreesWithLocalOrLastWrite = (field: "draftsByThreadKey" | "draftThreadsByThreadKey") => {
-    const value = stored?.[field][key];
-    return Equal.equals(value, local[field][key]) || Equal.equals(value, lastWrite?.[field][key]);
-  };
-  const canClear =
-    clear &&
-    agreesWithLocalOrLastWrite("draftsByThreadKey") &&
-    agreesWithLocalOrLastWrite("draftThreadsByThreadKey");
-  const revisions = new Set<string>();
-  if (clear) revisions.add(orbitDraftRevision(local, key));
-  if (canClear && stored) revisions.add(orbitDraftRevision(stored, key));
-  pendingOrbitDraftClear = { key, revisions: [...revisions], remove: canClear };
+  const revision = orbitDraftRevision(local, key);
+  const canClear = clear && (stored === null || orbitDraftRevision(stored, key) === revision);
+  const revisions = clear ? [revision] : [];
+  pendingOrbitDraftClear = { key, revisions, remove: canClear };
   try {
     if (canClear) state.clearDraftThread(draftId);
     useComposerDraftStore.setState({});

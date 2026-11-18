@@ -22,7 +22,7 @@ import {
   captureOrbitDraftRevision,
   clearAcceptedOrbitDraft,
   DraftId,
-  isStaleClearedOrbitDraft,
+  prepareOrbitDraftAdmission,
 } from "../composerDraftStore";
 import { m } from "../i18n/messages";
 import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
@@ -121,9 +121,8 @@ export async function submitOrbitDraft(draftId: DraftId, start: OrbitDraftStartI
     source: "web",
   });
   const captured = captureOrbitDraftRevision(draftId);
-  return orbitLaunchSubmissions.submit(
-    { ...scope, draftId, admission },
-    () => !isStaleClearedOrbitDraft(draftId, captured),
+  return orbitLaunchSubmissions.submit({ ...scope, draftId, admission }, () =>
+    prepareOrbitDraftAdmission(draftId, captured),
   );
 }
 

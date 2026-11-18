@@ -471,10 +471,20 @@ impl Inner {
         self: &Arc<Self>,
         command: Value,
     ) -> Result<(u64, bool), DispatchError> {
+        self.dispatch_value_guarded(command, None).await
+    }
+
+    /// [`Self::dispatch_value`] with an ownership check that runs in the command's own
+    /// transaction (`guard.rs`).
+    pub(crate) async fn dispatch_value_guarded(
+        self: &Arc<Self>,
+        command: Value,
+        guard: Option<crate::guard::DispatchGuard>,
+    ) -> Result<(u64, bool), DispatchError> {
         let (command, claimed) = self.claim_attachments(command).await?;
         let command = self.plan_selection(command).await?;
         let command = self.rollback_capabilities(command).await?;
-        let result = self.dispatch_claimed(command).await;
+        let result = self.dispatch_claimed(command, guard).await;
         if let (Err(_), Some(claimed), Some(host)) = (&result, claimed, &self.host) {
             host.release_attachments(claimed).await;
         }
@@ -637,6 +647,7 @@ impl Inner {
     async fn dispatch_claimed(
         self: &Arc<Self>,
         command: Value,
+        guard: Option<crate::guard::DispatchGuard>,
     ) -> Result<(u64, bool), DispatchError> {
         let _gate = self
             .lock_thread(command["threadId"].as_str().unwrap_or_default())
@@ -662,9 +673,21 @@ impl Inner {
         let outcome = self
             .db(move |store| {
                 if let Some(seq) = store.receipt(&command_id).map_err(CommandError::Store)? {
+                    if guard.is_some() {
+                        // A guarded caller never gets a second accept for one command.
+                        return Err(CommandError::Rejected(
+                            "The command was already accepted.".into(),
+                        ));
+                    }
                     return Ok((vec![], seq, true));
                 }
                 let mut tx = store.tx().map_err(CommandError::Store)?;
+                if let Some(guard) = &guard
+                    && let Err(error) = crate::guard::check(&tx, guard, &command)
+                {
+                    tx.rollback();
+                    return Err(error);
+                }
                 if let Some(host) = &host
                     && let Some((project, instance)) =
                         dispatch_target(&tx, &command).map_err(CommandError::Store)?
@@ -1071,6 +1094,33 @@ impl Engine for SqliteEngine {
                 ))
             };
             match self.inner.dispatch_value(command.clone()).await {
+                Ok((sequence, _)) => from_json(json!({"sequence": sequence}))
+                    .map_err(|e| EngineError::Internal(e.to_string())),
+                Err(DispatchError::Rejected(message)) => Err(rejected(refusal(message))),
+                Err(DispatchError::Internal(message)) => Err(EngineError::Internal(message)),
+            }
+        })
+    }
+
+    fn dispatch_guarded(
+        &self,
+        command: Command,
+        guard: crate::guard::DispatchGuard,
+    ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>> {
+        Box::pin(async move {
+            let command = to_json(&command);
+            let refusal = |message: String| -> Result<DispatchCommandError, String> {
+                contract_error(dispatch_error_body(
+                    command["commandId"].as_str().unwrap_or(""),
+                    command["type"].as_str().unwrap_or(""),
+                    &message,
+                ))
+            };
+            match self
+                .inner
+                .dispatch_value_guarded(command.clone(), Some(guard))
+                .await
+            {
                 Ok((sequence, _)) => from_json(json!({"sequence": sequence}))
                     .map_err(|e| EngineError::Internal(e.to_string())),
                 Err(DispatchError::Rejected(message)) => Err(rejected(refusal(message))),

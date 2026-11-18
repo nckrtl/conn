@@ -21,6 +21,7 @@ pub mod gateway;
 pub mod ingress;
 pub mod notices;
 pub mod provision;
+pub mod task;
 
 use std::sync::{Arc, Mutex};
 

@@ -113,3 +113,40 @@ in a lab test (the preview needs a browser; the session gate tests cover its gat
 streams in the lab (the lab has no terminal manager), and the NAT-mode proxy's caller
 address. Legacy peer-link, held and device-paired credentials stay as they are on the native
 ingress.
+
+## Task worker grant (item 6)
+
+Orbit's task-copy worker drives one admitted turn over the orchestration RPC with a managed
+token of its own profile: the same Gateway introspection, peer binding and fence as the
+reader, exactly the scopes `orchestration:read` and `orchestration:operate`, and one
+`task_grant` claim fixed at capture (`managed/task.rs`). There is no second credential.
+
+```json
+"task_grant": {
+  "purpose": "task_worker", "task_id": 5873, "copy_id": 3709, "turn_id": "…",
+  "project_id": "project:…", "thread_id": "<admitted thread UUID>",
+  "create": {"command_id": "…", "body": {"projectId": "…", "title": "…", "modelSelection": {…}}},
+  "message": {"command_id": "…", "message_id": "…", "text_sha256": "<hex>"},
+  "earlier": [{"thread_id": "…", "message_id": "…"}],
+  "questions": [{"thread_id": "…", "request_id": "…", "owner_run_id": "…"}]
+}
+```
+
+The worker may call only `orchestration.dispatchCommand`, `orchestration.getThreadProjection`
+(its thread and earlier turns' threads) and `orchestration.subscribeThread` (its thread). Each
+command must match the grant, and the engine checks ownership in the command's own
+transaction (`conn_engine::DispatchGuard`):
+
+| Command | Allowed when |
+| --- | --- |
+| `thread.create` | The admitted thread ID and command ID, every frozen body field equal, no initial message, and the thread does not exist |
+| `message.dispatch` | The admitted message ID, command ID and text digest, no attachments, `start_immediately` without steer or restart, no active or queued run, and the message is new. It starts its own run or is refused; it never queues or steers |
+| `run.interrupt` | The run's `userMessageId` is the admitted message or an earlier turn's message on that thread; never `holdQueue` |
+| `runtime-request.respond` | Decision `cancel` only, a stored request of that thread, still pending, `user_input`, and its node belongs to the stored owner run |
+
+A guarded command whose ID already has a receipt is refused: one accept per command, and a
+lost reply is recovered by reading, never by replay. The engine's question flow is unchanged
+(a question still ends the turn on Orbit's side). A worker token is refused on the reader's
+HTTP snapshots and preview. The grant's wire shape is this target's fail-closed reading: the
+item 6 contract fixes what the grant names, not its field names; the Gateway (Orbit 5870 or
+its follow-up) must issue it in this shape or the two must be aligned.

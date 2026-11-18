@@ -320,6 +320,10 @@ impl Lab {
             title: "P".into(),
             workspace_root: "/tmp/p".into(),
         }];
+        // A scripted provider, so runs start, wait, ask and end as a real turn would.
+        let fake: Arc<dyn conn_provider::Provider> =
+            Arc::new(conn_engine::fake::FakeProvider::new("claudeAgent"));
+        config.provider_set = Some(conn_provider::ProviderSet::from(vec![fake]));
         let engine: Arc<dyn conn_engine::Engine> =
             Arc::new(conn_engine::SqliteEngine::open(config).unwrap());
         let deps = crate::methods::Deps {

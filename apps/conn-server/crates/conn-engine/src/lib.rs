@@ -25,6 +25,7 @@ mod checkpoint;
 mod clock;
 mod commands;
 mod engine;
+mod guard;
 mod mcp_apps;
 mod thread_locks;
 
@@ -65,6 +66,7 @@ pub use engine::{
     CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, ProjectConfig, RuntimePolicyOverride,
     SqliteEngine,
 };
+pub use guard::DispatchGuard;
 pub use streaming::ResponseStreamingMode;
 
 /// What a [`TitleGenerator`] titles: the first message of a new thread, or a whole thread whose
@@ -304,6 +306,19 @@ pub trait Engine: Send + Sync {
         &self,
         command: Command,
     ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>>;
+
+    /// [`Engine::dispatch`] with an ownership check that runs atomically with the command
+    /// ([`DispatchGuard`]). A replay of an accepted command ID is refused. An engine that
+    /// cannot check refuses every guarded command.
+    fn dispatch_guarded(
+        &self,
+        _command: Command,
+        _guard: DispatchGuard,
+    ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>> {
+        Box::pin(std::future::ready(Err(EngineError::Internal(
+            "this engine cannot check command ownership".into(),
+        ))))
+    }
 
     /// The shell stream: projects and thread summaries. Starts with a `snapshot` item (or
     /// replays from `afterSequence`), then `synchronized`, then live updates.

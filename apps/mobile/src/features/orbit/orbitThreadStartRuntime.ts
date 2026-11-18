@@ -141,8 +141,8 @@ export async function startOrbitThread(
       msg("Connect to the original Orbit profile and device before sending."),
     );
   }
-  // A new sheet or project is a different draft unless the user opened a refused submission.
-  const draftId = recovery?.draftId ?? `${sheetKey}:${project.id}`;
+  // A sheet keeps the same admission even if the user changes Project.
+  const draftId = recovery?.draftId ?? sheetKey;
   const saved = await mobileOrbitSubmissions.draft(draftId, { profileId, nodeId });
   if (recovery && saved === undefined) {
     throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));

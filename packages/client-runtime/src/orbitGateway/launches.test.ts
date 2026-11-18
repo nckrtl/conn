@@ -424,6 +424,7 @@ it("replays the original profile and Node even when the device is rebound after 
       code: "conn.launch_scope_changed",
     });
     expect(admitted).toBe(0);
+    expect(observer.scope()).toBeNull();
     const post = transport.mock.calls.find(([call]) => call.method === "POST");
     expect(post?.[0]).toMatchObject({ idempotencyKey: request.id, body: request.request });
     await observer.refresh();
@@ -471,6 +472,119 @@ it("withdraws the old scope when a second Send detects a rebind during admission
   } finally {
     observer.setScope(null);
   }
+});
+
+it("reconciles a stale desktop Send against its accepted identity without posting again", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const original = {
+    ...scope,
+    draftId: "desktop-draft",
+    admission: { ...request, request: { ...request.request, source: "web" } as const },
+  };
+  const launch = fixture({ source: "web" });
+  let rows: OrbitLaunch[] = [];
+  const post = vi.fn(() => {
+    rows = [launch];
+    return wrap(launch, 202);
+  });
+  const gateway = createOrbitGatewayClient(async ({ path, method }) => {
+    if (path === "/me") {
+      return wrap({
+        id: 7,
+        name: "Device",
+        profile: {
+          id: 12,
+          name: "Work",
+          settings_version: 1,
+          updated_at: "2026-11-17T12:00:00Z",
+        },
+      });
+    }
+    return method === "POST" ? post() : wrap(rows);
+  });
+  const observer = createOrbitLaunchObserver(() => gateway);
+  observer.setScope(scope);
+  let records: readonly OrbitLaunchSubmission[] = [];
+  const fingerprints = new Map<string, string>();
+  const storage = {
+    load: async () => records,
+    save: async (value: readonly OrbitLaunchSubmission[]) => {
+      records = value;
+    },
+    fingerprintAcknowledged: (input: string) => {
+      if (!fingerprints.has(input)) fingerprints.set(input, `copy-${fingerprints.size}`);
+      return fingerprints.get(input)!;
+    },
+  };
+  const openJournal = () =>
+    createOrbitLaunchSubmissions(storage, (row, reconcile) =>
+      observer.submit(row.admission, row, reconcile),
+    );
+  try {
+    const first = openJournal();
+    await expect(first.submit(original)).resolves.toEqual(launch);
+    await expect(first.acknowledge(request.id, observer.canAcknowledge)).resolves.toBe(true);
+    expect(await first.pending(scope)).toEqual([]);
+    expect(records[0]?.admission.request.prompt).toBe("");
+    const staleSend = {
+      ...original,
+      admission: {
+        id: "fresh-key-that-must-not-post",
+        request: {
+          ...original.admission.request,
+          thread_id: "different-thread",
+          command_id: "different-command",
+          message_id: "different-message",
+          workspace_id: "workspace-changed-in-second-window",
+        },
+      },
+    };
+    const second = openJournal();
+    await expect(second.submit(staleSend)).resolves.toEqual(launch);
+    expect(post).toHaveBeenCalledOnce();
+
+    rows = [fixture({ source: "web", project_id: 99 })];
+    await observer.refresh();
+    expect(observer.canAcknowledge(original)).toBe(false);
+    await expect(second.submit(staleSend)).rejects.toThrow("different launch");
+    rows = [];
+    await observer.refresh();
+    await expect(second.submit(staleSend)).rejects.toThrow("already handled");
+    expect(post).toHaveBeenCalledOnce();
+  } finally {
+    observer.setScope(null);
+  }
+});
+
+it("retains mobile text after a first access refusal without allowing an edited Send", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const original = { ...scope, draftId: "sheet", admission: request };
+  const denied = new OrbitLaunchAdmissionRefused({
+    cause: new OrbitGatewayError({
+      code: "forbidden",
+      status: 403,
+      message: "Forbidden",
+      details: {},
+    }),
+    message: "Forbidden",
+  });
+  let records: readonly OrbitLaunchSubmission[] = [];
+  const storage = {
+    load: async () => records,
+    save: async (value: readonly OrbitLaunchSubmission[]) => {
+      records = value;
+    },
+  };
+  const submit = vi.fn().mockRejectedValue(denied);
+  const journal = createOrbitLaunchSubmissions(storage, submit);
+  await expect(journal.submit(original)).rejects.toThrow("Forbidden");
+  expect(await createOrbitLaunchSubmissions(storage, submit).pending(scope)).toEqual([original]);
+  const switchedProject = {
+    ...original,
+    admission: { id: "new-key", request: { ...request.request, project_id: 99 } },
+  };
+  await expect(journal.submit(switchedProject)).rejects.toThrow("Resolve the previous");
+  expect(submit).toHaveBeenCalledOnce();
 });
 
 it("keeps a first mobile refusal recoverable after restart and guards journal acknowledgement", async () => {

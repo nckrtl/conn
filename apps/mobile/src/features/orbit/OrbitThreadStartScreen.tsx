@@ -117,8 +117,9 @@ export function OrbitThreadStartScreen({
     setSending(true);
     setSendError(null);
     const { back } = orbitStartReturn(navigation.getState());
+    const recoveredSubmission = recovery ?? undefined;
     try {
-      const launch = await startOrbitThread(project, text.trim(), sheetKey, recovery ?? undefined);
+      const launch = await startOrbitThread(project, text.trim(), sheetKey, recoveredSubmission);
       if (navigation.isFocused()) {
         navigation.dispatch(StackActions.pop(back));
         await acknowledgeMobileOrbitLaunch(launch.launch_id).catch(() => {});

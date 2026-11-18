@@ -18,10 +18,12 @@ export interface OrbitLaunchSubmission extends OrbitLaunchScope {
   readonly admission: OrbitLaunchAdmission;
   readonly validationRefused?: true;
   readonly superseded?: true;
+  readonly acknowledgedFingerprint?: string;
 }
 
 export interface OrbitLaunchSubmissionStorage {
   readonly lock?: <T>(work: () => Promise<T>) => Promise<T>;
+  readonly fingerprintAcknowledged?: (input: string) => string;
   readonly lockDraft?: <T>(draftId: string, work: () => Promise<T>) => Promise<T>;
   readonly load: () => Promise<readonly OrbitLaunchSubmission[]>;
   readonly save: (records: readonly OrbitLaunchSubmission[]) => Promise<void>;
@@ -30,7 +32,7 @@ export interface OrbitLaunchSubmissionStorage {
 /** A journal for the admission response only. It never follows or runs the accepted operation. */
 export function createOrbitLaunchSubmissions(
   storage: OrbitLaunchSubmissionStorage,
-  submit: (record: OrbitLaunchSubmission, reconcile: boolean) => Promise<OrbitLaunch>,
+  submit: (record: OrbitLaunchSubmission, reconcile: boolean | "accepted") => Promise<OrbitLaunch>,
 ) {
   let tail = Promise.resolve();
   const listeners = new Set<() => void>();
@@ -63,7 +65,19 @@ export function createOrbitLaunchSubmissions(
       if (record === undefined || (ready !== undefined && !ready(record))) {
         return { records, result: false };
       }
-      return { records: records.filter((row) => row !== record), result: true };
+      if (record.acknowledgedFingerprint !== undefined) return { records, result: true };
+      const fingerprint = ready && storage.fingerprintAcknowledged;
+      if (!fingerprint) return { records: records.filter((row) => row !== record), result: true };
+      // Keep the original identity across renderer windows without retaining the sent prompt.
+      const acknowledged = {
+        ...record,
+        acknowledgedFingerprint: fingerprint(acknowledgedInput(record.admission.request)),
+        admission: {
+          ...record.admission,
+          request: { ...record.admission.request, prompt: "" },
+        },
+      };
+      return { records: records.map((row) => (row === record ? acknowledged : row)), result: true };
     });
   }
 
@@ -72,7 +86,9 @@ export function createOrbitLaunchSubmissions(
     draftId: string,
     scope: OrbitLaunchScope,
   ) {
-    const attempts = records.filter((row) => row.draftId === draftId);
+    const attempts = records.filter(
+      (row) => row.draftId === draftId && row.acknowledgedFingerprint === undefined,
+    );
     if (attempts.some((row) => row.profileId !== scope.profileId || row.nodeId !== scope.nodeId)) {
       throw OrbitLaunchCopyError.fromCopy(
         msg("Connect to the original Orbit profile and device to resolve this draft."),
@@ -116,7 +132,7 @@ export function createOrbitLaunchSubmissions(
             ),
             result: undefined,
           }));
-        } else if (!reconcile) {
+        } else if (!reconcile && record.admission.request.source !== "mobile") {
           await remove(record.admission.id);
         }
       }
@@ -127,7 +143,22 @@ export function createOrbitLaunchSubmissions(
   return {
     submit(record: OrbitLaunchSubmission) {
       return withDraft(record.draftId, async () => {
-        const { saved, reconcile } = await update((records) => {
+        const { saved, reconcile } = await update<{
+          saved: OrbitLaunchSubmission;
+          reconcile: boolean | "accepted";
+        }>((records) => {
+          const fingerprint = storage.fingerprintAcknowledged?.(
+            acknowledgedInput(record.admission.request),
+          );
+          const acknowledged =
+            fingerprint === undefined
+              ? undefined
+              : records.find(
+                  (row) =>
+                    row.draftId === record.draftId && row.acknowledgedFingerprint === fingerprint,
+                );
+          if (acknowledged)
+            return { records, result: { saved: acknowledged, reconcile: "accepted" } };
           const latest = latestAttempt(records, record.draftId, record);
           if (latest && sameInput(latest.admission.request, record.admission.request)) {
             return {
@@ -158,7 +189,7 @@ export function createOrbitLaunchSubmissions(
                 );
           return { records: [...archive, record], result: { saved: record, reconcile: false } };
         });
-        return send(saved, reconcile);
+        return reconcile === "accepted" ? submit(saved, reconcile) : send(saved, reconcile);
       });
     },
     draft: (draftId: string, scope: OrbitLaunchScope) =>
@@ -166,7 +197,12 @@ export function createOrbitLaunchSubmissions(
     pending: ({ profileId, nodeId }: OrbitLaunchScope) =>
       update((records) => ({
         records,
-        result: records.filter((r) => r.profileId === profileId && r.nodeId === nodeId),
+        result: records.filter(
+          (r) =>
+            r.profileId === profileId &&
+            r.nodeId === nodeId &&
+            r.acknowledgedFingerprint === undefined,
+        ),
       })),
     subscribe: (listener: () => void) => {
       listeners.add(listener);
@@ -190,14 +226,25 @@ export function createOrbitLaunchSubmissions(
   };
 }
 
-function sameInput(a: OrbitLaunchRequest, b: OrbitLaunchRequest): boolean {
-  const input = (r: OrbitLaunchRequest) => ({
-    ...r,
+function launchInput(request: OrbitLaunchRequest): string {
+  return JSON.stringify({
+    ...request,
+    expected_profile_id: undefined,
+    expected_node_id: undefined,
     command_id: undefined,
     thread_id: undefined,
     message_id: undefined,
   });
-  return JSON.stringify(input(a)) === JSON.stringify(input(b));
+}
+
+function acknowledgedInput(request: OrbitLaunchRequest): string {
+  // Selecting a workspace in another window does not change the draft revision.
+  const { workspace_id: _, ...draft } = request;
+  return launchInput(draft);
+}
+
+function sameInput(a: OrbitLaunchRequest, b: OrbitLaunchRequest): boolean {
+  return launchInput(a) === launchInput(b);
 }
 
 type LegacyOrbitCompletion = {

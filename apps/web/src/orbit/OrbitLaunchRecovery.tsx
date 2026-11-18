@@ -9,7 +9,12 @@ import { T, msg, useGT, useMessages } from "gt-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "../components/ui/button";
-import { composerDraftHasUserContent, DraftId, useComposerDraftStore } from "../composerDraftStore";
+import {
+  clearAcceptedOrbitDraft,
+  composerDraftHasUserContent,
+  DraftId,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import { m } from "../i18n/messages";
 import { orbitDraftMatchesLaunch } from "./orbitDraft";
 import {
@@ -101,9 +106,8 @@ export function OrbitLaunchRecovery() {
           JSON.stringify(currentModel) === JSON.stringify(request.model_selection)) &&
         orbitDraftMatchesLaunch(store.getDraftSession(draftId)?.orbitTarget, draft.prompt, request)
       ) {
-        store.clearDraftThread(draftId);
+        clearAcceptedOrbitDraft(draftId);
       }
-      return true;
     });
   }
 

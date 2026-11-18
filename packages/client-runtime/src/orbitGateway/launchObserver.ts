@@ -184,19 +184,14 @@ export function createOrbitLaunchObserver(
       scope?.profileId === record.profileId &&
       scope.nodeId === record.nodeId &&
       !accessDenied &&
-      view.launches.some(
-        (launch) =>
-          launch.launch_id === record.admission.id &&
-          launch.profile_id === record.profileId &&
-          launch.initiator_node_id === record.nodeId,
-      )
+      view.launches.some((launch) => matchesLaunchIdentity(launch, record.admission))
     );
   }
 
   async function submit(
     admission: OrbitLaunchAdmission,
     expected: OrbitLaunchScope,
-    reconcile: boolean,
+    reconcile: boolean | "accepted",
   ) {
     const gateway = client();
     if (
@@ -265,6 +260,8 @@ export function createOrbitLaunchObserver(
         return current;
       }
     }
+    if (reconcile === "accepted")
+      throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
     const before = observed();
     let accepted: OrbitLaunch;
     try {
@@ -273,6 +270,10 @@ export function createOrbitLaunchObserver(
       // A lost response may have committed the launch. Check before the UI offers an identical replay.
       if (scopeVersion !== version) throw error;
       ensureAccess();
+      if (isGatewayError(error) && error.code === "conn.launch_scope_changed") {
+        setScope(null);
+        throw error;
+      }
       if (isGatewayError(error) && [400, 403, 404, 422].includes(error.status)) {
         const current = observed();
         if (current !== undefined) {
@@ -359,16 +360,20 @@ export function createOrbitLaunchObserver(
   };
 }
 
+function matchesLaunchIdentity(launch: OrbitLaunch, admission: OrbitLaunchAdmission) {
+  return (
+    launch.launch_id === admission.id &&
+    launch.profile_id === admission.request.expected_profile_id &&
+    launch.initiator_node_id === admission.request.expected_node_id &&
+    launch.project_id === admission.request.project_id &&
+    launch.source === admission.request.source &&
+    (launch.thread === null ||
+      (launch.thread.thread_id === admission.request.thread_id &&
+        launch.thread.message_id === admission.request.message_id))
+  );
+}
+
 function assertLaunchIdentity(launch: OrbitLaunch, admission: OrbitLaunchAdmission) {
-  if (
-    launch.launch_id !== admission.id ||
-    launch.profile_id !== admission.request.expected_profile_id ||
-    launch.initiator_node_id !== admission.request.expected_node_id ||
-    launch.project_id !== admission.request.project_id ||
-    launch.source !== admission.request.source ||
-    (launch.thread !== null &&
-      (launch.thread.thread_id !== admission.request.thread_id ||
-        launch.thread.message_id !== admission.request.message_id))
-  )
+  if (!matchesLaunchIdentity(launch, admission))
     throw OrbitLaunchCopyError.fromCopy(msg("Orbit returned a different launch."));
 }

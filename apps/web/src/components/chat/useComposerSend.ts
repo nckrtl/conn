@@ -78,6 +78,7 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
+  clearAcceptedOrbitDraft,
   useComposerDraftStore,
   DraftId,
 } from "../../composerDraftStore";
@@ -887,9 +888,7 @@ export function useComposerSend(input: ComposerSendInput) {
             await navigate({ to: "/orbit/$startId", params: { startId: launch.launch_id } });
           }
           return acknowledgeOrbitDraft(launch.launch_id, () => {
-            if (!unchanged()) return false;
-            useComposerDraftStore.getState().clearDraftThread(draftId);
-            return true;
+            if (unchanged()) clearAcceptedOrbitDraft(draftId);
           });
         })
         .catch((error: unknown) => {

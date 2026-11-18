@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   applyOtherWindowComposerDrafts,
   COMPOSER_DRAFT_STORAGE_KEY,
-  flushComposerDraftPersistence,
+  clearAcceptedOrbitDraft,
+  DraftId,
   useComposerDraftStore,
 } from "./composerDraftStore";
 import { RecentKeyChanges } from "./lib/desktopWindowContext";
@@ -54,17 +55,36 @@ describe("applyOtherWindowComposerDrafts", () => {
     reset();
   });
 
-  it("stores the cleared draft before the debounce so a restart cannot restore it", async () => {
-    useComposerDraftStore.getState().setPrompt(first, "accepted by Orbit");
-    await otherWindowWrite(() => {});
+  it("persists an accepted Orbit draft clear without waiting for the debounce", async () => {
+    const draftId = DraftId.make("orbit-draft");
     const storage = useComposerDraftStore.persist.getOptions().storage!;
-    useComposerDraftStore.getState().clearDraftThread(first);
-    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
-      "accepted by Orbit",
-    );
-    flushComposerDraftPersistence();
+    useComposerDraftStore.getState().setPrompt(draftId, "accepted by Orbit");
+    await otherWindowWrite(() => {});
+    clearAcceptedOrbitDraft(draftId);
     expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).not.toContain(
       "accepted by Orbit",
+    );
+  });
+
+  it("keeps a newer draft written by a second window before Orbit acknowledges the first", async () => {
+    const draftId = DraftId.make("orbit-draft");
+    const storage = useComposerDraftStore.persist.getOptions().storage!;
+    useComposerDraftStore.getState().setPrompt(draftId, "accepted by Orbit");
+    const raw = await otherWindowWrite((drafts) => {
+      Object.values(drafts).find((draft) => draft.prompt === "accepted by Orbit")!.prompt =
+        "edited in a second window";
+    });
+    await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, JSON.parse(raw));
+    await vi.advanceTimersByTimeAsync(300);
+    useComposerDraftStore.getState().setPrompt(first, "different draft in this window");
+    await vi.advanceTimersByTimeAsync(300);
+    clearAcceptedOrbitDraft(draftId);
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
+      "edited in a second window",
+    );
+    applyOtherWindowComposerDrafts(raw, new RecentKeyChanges(2_000));
+    expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+      "edited in a second window",
     );
   });
 

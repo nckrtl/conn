@@ -1,3 +1,5 @@
+import { bytesToHex } from "@noble/hashes/utils";
+import { sha256 } from "@noble/hashes/sha2";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   OrbitLaunchCopyError,
@@ -16,7 +18,6 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { msg } from "gt-react";
 import { useSyncExternalStore } from "react";
 
-import { flushComposerDraftPersistence } from "../composerDraftStore";
 import { m } from "../i18n/messages";
 import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -30,6 +31,7 @@ const LEGACY_KEY = "conn:orbit-thread-starts:v1";
 export const orbitLaunches = createOrbitLaunchObserver(desktopOrbitGatewayClient, m);
 export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   {
+    fingerprintAcknowledged: (input) => bytesToHex(sha256(new TextEncoder().encode(input))),
     lock: (work) => navigator.locks.request(SUBMISSIONS_KEY, work),
     lockDraft: (draftId, work) =>
       navigator.locks.request(
@@ -53,11 +55,10 @@ export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   (record, reconcile) => orbitLaunches.submit(record.admission, record, reconcile),
 );
 
-export function acknowledgeOrbitDraft(launchId: string, updateDraft: () => boolean) {
+export function acknowledgeOrbitDraft(launchId: string, updateDraft: () => void) {
   return orbitLaunchSubmissions.acknowledge(launchId, (record) => {
-    if (!orbitLaunches.canAcknowledge(record) || !updateDraft()) return false;
-    // A restart must see the draft update before it loses the accepted submission key.
-    flushComposerDraftPersistence();
+    if (!orbitLaunches.canAcknowledge(record)) return false;
+    updateDraft();
     return true;
   });
 }

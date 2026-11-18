@@ -76,7 +76,7 @@ it("does not send a name check for an unresolved draft after a profile or Node c
   gateway.checkInstanceName.mockClear();
   gateway.fileDelete.mockClear();
   gateway.fileText.mockClear();
-  const raw = JSON.stringify([{ ...original, draftId: "sheet:78", admission }]);
+  const raw = JSON.stringify([{ ...original, draftId: "sheet", admission }]);
   gateway.fileText.mockResolvedValue(raw);
   gateway.loadJournal.mockResolvedValue(null);
   gateway.saveJournal.mockRejectedValueOnce(new Error("Journal write interrupted"));

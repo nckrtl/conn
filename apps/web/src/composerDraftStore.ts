@@ -4858,7 +4858,25 @@ export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): vo
   composerDebouncedStorage.flush();
 }
 
-export function flushComposerDraftPersistence() {
+/** Preserve an edit another window saved before this Orbit acknowledgement. */
+export function clearAcceptedOrbitDraft(draftId: DraftId) {
+  const state = useComposerDraftStore.getState();
+  const key = resolveComposerDraftKey(state, draftId);
+  if (key === null) return;
+  const stored = readStoredComposerDraftState();
+  const lastWrite = composerDraftLastWrite?.local ?? composerDraftLoadedState;
+  const local = partializeComposerDraftStoreState(state);
+  const agreesWithLocalOrLastWrite = (field: "draftsByThreadKey" | "draftThreadsByThreadKey") => {
+    const value = stored?.[field][key];
+    return Equal.equals(value, local[field][key]) || Equal.equals(value, lastWrite?.[field][key]);
+  };
+  if (
+    !agreesWithLocalOrLastWrite("draftsByThreadKey") ||
+    !agreesWithLocalOrLastWrite("draftThreadsByThreadKey")
+  )
+    return;
+
+  state.clearDraftThread(draftId);
   composerDebouncedStorage.flush();
 }
 

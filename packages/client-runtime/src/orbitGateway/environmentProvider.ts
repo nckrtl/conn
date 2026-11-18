@@ -88,6 +88,7 @@ export type RenewalFailureReason =
 export interface RenewalFailure {
   readonly at: number;
   readonly reason: RenewalFailureReason;
+  readonly retrySafe?: true;
 }
 
 const RENEWAL_FAILURE_REASONS: readonly RenewalFailureReason[] = [
@@ -332,10 +333,10 @@ export function planEnvironmentProvider(input: {
 
   if (input.provider === "default") {
     for (const environment of saved) {
-      if (disabledByOrbit.has(environment.environmentId)) {
-        if (!environment.enabled) enable.push(environment.environmentId);
-      } else if (pairedByOrbit.has(environment.environmentId) && environment.enabled) {
-        disable.push(environment.environmentId);
+      if (pairedByOrbit.has(environment.environmentId)) {
+        if (environment.enabled) disable.push(environment.environmentId);
+      } else if (disabledByOrbit.has(environment.environmentId) && !environment.enabled) {
+        enable.push(environment.environmentId);
       }
     }
     return {
@@ -417,6 +418,8 @@ export function planEnvironmentProvider(input: {
       // An asleep Instance's server cannot mint a pairing link.
       if (environment.powerState === "stopped") return false;
       const id = environment.environmentId;
+      // Conn: a revoked pairing is never renewed; only an explicit Connect pairs it again.
+      if (state.revokedAt?.[id] !== undefined) return false;
       if (!savedIds.has(id)) {
         if (environment.instanceId !== null && !requested.has(id)) return false;
         const refusedAt = state.pairRefusedAt?.[id];
@@ -424,8 +427,6 @@ export function planEnvironmentProvider(input: {
         const lastAttempt = state.pairAttemptedAt?.[id];
         return lastAttempt === undefined || now - lastAttempt >= PAIRING_RETRY_MS;
       }
-      // Conn: a revoked pairing is never renewed; only an explicit Connect pairs it again.
-      if (state.revokedAt?.[id] !== undefined) return false;
       // Conn: a session that ends soon or has ended is renewed, unless T3 refused this
       // registration's pairing for good (it is tried again once the server registers again).
       const reason = renewals.get(id);
@@ -511,7 +512,7 @@ export function recordPairingRevoked(
   return { ...state, revokedAt: { ...state.revokedAt, [environmentId]: now } };
 }
 
-/** Conn: an explicit Connect lifts the revoked state, so the server pairs (and renews) again. */
+/** Conn: lifts the revoked state once an explicit Connect has saved the replacement session. */
 export function forgetPairingRevoked(
   state: OrbitEnvironmentState,
   environmentId: string,
@@ -566,9 +567,14 @@ export function recordPaired(
   state: OrbitEnvironmentState,
   environmentId: string,
 ): OrbitEnvironmentState {
-  return state.pairedByOrbit.includes(environmentId)
+  const owned = state.pairedByOrbit.includes(environmentId);
+  return owned && !state.disabledByOrbit.includes(environmentId)
     ? state
-    : { ...state, pairedByOrbit: [...state.pairedByOrbit, environmentId] };
+    : {
+        ...state,
+        pairedByOrbit: owned ? state.pairedByOrbit : [...state.pairedByOrbit, environmentId],
+        disabledByOrbit: state.disabledByOrbit.filter((id) => id !== environmentId),
+      };
 }
 
 /** Conn: drops every record of a server Orbit removed, so no sync touches it again. */
@@ -635,13 +641,18 @@ export function parseOrbitEnvironmentState(value: unknown): OrbitEnvironmentStat
     if (typeof value === "object" && value !== null) {
       for (const [id, entry] of Object.entries(value)) {
         if (typeof entry !== "object" || entry === null) continue;
-        const { at, reason } = entry as { at?: unknown; reason?: unknown };
+        const { at, reason, retrySafe } = entry as {
+          at?: unknown;
+          reason?: unknown;
+          retrySafe?: unknown;
+        };
         if (typeof at !== "number") continue;
         result[id] = {
           at,
           reason: RENEWAL_FAILURE_REASONS.includes(reason as RenewalFailureReason)
             ? (reason as RenewalFailureReason)
             : "unknown",
+          ...(retrySafe === true ? { retrySafe: true } : {}),
         };
       }
     }

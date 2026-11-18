@@ -305,7 +305,12 @@ describe("planEnvironmentProvider", () => {
 
     ({ list, state } = apply(
       list,
-      planEnvironmentProvider({ provider: "default", saved: list, orbit: servers, state }),
+      planEnvironmentProvider({
+        provider: "default",
+        saved: list,
+        orbit: servers,
+        state: { ...state, disabledByOrbit: [...state.disabledByOrbit, "beast"] },
+      }),
     ));
     expect(list.filter((entry) => entry.enabled).map((entry) => entry.environmentId)).toEqual([
       "laptop",
@@ -521,6 +526,7 @@ describe("session renewal", () => {
     expect(planEnvironmentProvider({ ...later, renew: [], lacksAccess: ["beast"] }).pair).toEqual(
       [],
     );
+    expect(planEnvironmentProvider({ ...later, saved: [], renew: [] }).pair).not.toContain("beast");
     const connected = forgetPairingRevoked(revoked, "beast");
     expect(isPairingRevoked(connected, "beast")).toBe(false);
     expect(planEnvironmentProvider(input(connected)).renew).toEqual(["beast", "mini", "shark"]);

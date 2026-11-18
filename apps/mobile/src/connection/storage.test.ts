@@ -1,4 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
+import {
+  BearerConnectionCredential,
+  BearerConnectionProfile,
+  BearerConnectionRegistration,
+  BearerConnectionTarget,
+} from "@t3tools/client-runtime/connection";
+import { registerConnectionInCatalog } from "@t3tools/client-runtime/platform";
+import { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { vi } from "vite-plus/test";
 
@@ -34,6 +42,40 @@ function makeStorage(initial: Readonly<Record<string, string>>) {
 }
 
 describe("mobile connection catalog storage", () => {
+  it.effect("reloads the Orbit pairing attempt ID with the replacement credential", () =>
+    Effect.gen(function* () {
+      const memory = makeStorage({});
+      const open = make().pipe(
+        Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+      );
+      const catalog = yield* open;
+      const environmentId = EnvironmentId.make("clone");
+      const connectionId = "bearer:clone:https://clone.example.test";
+      const registration = new BearerConnectionRegistration({
+        target: new BearerConnectionTarget({
+          environmentId,
+          connectionId,
+          label: "Clone",
+          orbitPairingAttemptId: "attempt-1",
+        }),
+        profile: new BearerConnectionProfile({
+          environmentId,
+          connectionId,
+          label: "Clone",
+          httpBaseUrl: "https://clone.example.test/",
+          wsBaseUrl: "wss://clone.example.test/",
+        }),
+        credential: new BearerConnectionCredential({ token: "fixture-replacement" }),
+      });
+
+      yield* catalog.update((document) => registerConnectionInCatalog(document, registration));
+      const reloaded = yield* (yield* open).read;
+
+      expect(reloaded.targets).toEqual([registration.target]);
+      expect(reloaded.credentials).toEqual([{ connectionId, credential: registration.credential }]);
+    }),
+  );
+
   it.effect("recovers from a corrupt current catalog", () =>
     Effect.gen(function* () {
       const memory = makeStorage({

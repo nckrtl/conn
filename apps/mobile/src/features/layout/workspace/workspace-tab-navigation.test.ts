@@ -228,6 +228,16 @@ describe("Settings links", () => {
       undefined,
     );
     expect(names(linked!)).toEqual(["Home", "Settings", "SettingsKeyboard"]);
+    const orbitConnection = restoreSettingsLinkState(
+      { routes: [{ name: "Home" }, { name: "SettingsOrbitConnection" }] },
+      undefined,
+    );
+    expect(names(orbitConnection!)).toEqual([
+      "Home",
+      "Settings",
+      "SettingsOrbit",
+      "SettingsOrbitConnection",
+    ]);
     const bare = { routes: [{ name: "Home" }, { name: "Settings" }] };
     expect(names(restoreSettingsLinkState(bare, "SettingsAppearance")!)).toEqual([
       "Home",
@@ -243,6 +253,8 @@ describe("Settings links", () => {
       Settings: "settings",
       SettingsAbout: "settings/about",
       SettingsAppearance: "settings/appearance",
+      SettingsOrbit: "settings/orbit",
+      SettingsOrbitConnection: "settings/orbit/connection",
     };
     const router = StackRouter({});
     const options = { routeNames: Object.keys(screens), routeParamList: {}, routeGetIdList: {} };
@@ -260,6 +272,12 @@ describe("Settings links", () => {
     const appearance = follow("settings/appearance");
     expect(names(appearance)).toEqual(["Home", "Settings", "SettingsAppearance"]);
     expect(appearance.routes[1]!.key).toBe(open.routes[1]!.key);
+    expect(names(follow("settings/orbit/connection"))).toEqual([
+      "Home",
+      "Settings",
+      "SettingsOrbit",
+      "SettingsOrbitConnection",
+    ]);
   });
 
   it("opens the sign-in link as a modal over the workspace", () => {

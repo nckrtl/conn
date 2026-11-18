@@ -1,7 +1,9 @@
 import {
   orbitSignedInText,
+  renewalFailureText,
   type EnvironmentProvider,
   type OrbitGatewayEnvironment,
+  type RenewalFailure,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useState } from "react";
 import { ActivityIndicator, Pressable, TextInput, View } from "react-native";
@@ -17,6 +19,7 @@ import {
   chooseOrbitProfile,
   connectOrbitEnvironment,
   refreshOrbitGateway,
+  retryOrbitEnvironmentRenewal,
   setEnvironmentProvider,
   useOrbitGateway,
 } from "./orbitGatewayStore";
@@ -237,26 +240,15 @@ export function OrbitEnvironmentSections() {
       {gateway.node ? (
         <SettingsSection title="Servers">
           {gateway.environments.map((environment, index) => (
-            <View
+            <OrbitServerRow
               key={environment.environmentId}
-              className={
-                index === 0
-                  ? "flex-row items-center gap-4 p-4"
-                  : "flex-row items-center gap-4 border-t border-border-subtle p-4"
-              }
-            >
-              <View className="min-w-0 flex-1 gap-1">
-                <Text className="text-lg text-foreground">{environment.label}</Text>
-                <Text className="text-sm text-foreground-muted">
-                  {environment.url.replace(/^https?:\/\//, "")}
-                </Text>
-              </View>
-              <OrbitServerStatus
-                environment={environment}
-                connected={connected.has(environment.environmentId)}
-                revoked={gateway.revokedEnvironmentIds.includes(environment.environmentId)}
-              />
-            </View>
+              environment={environment}
+              first={index === 0}
+              connected={connected.has(environment.environmentId)}
+              revoked={gateway.revokedEnvironmentIds.includes(environment.environmentId)}
+              renewalInterrupted={gateway.interruptedRenewalIds.includes(environment.environmentId)}
+              renewalFailure={gateway.renewalFailed[environment.environmentId]}
+            />
           ))}
         </SettingsSection>
       ) : null}
@@ -264,45 +256,86 @@ export function OrbitEnvironmentSections() {
   );
 }
 
-/**
- * Conn: a Gateway server's state on this phone. Host servers pair by themselves; a clone (an
- * Instance's server) pairs only when the user connects it here.
- */
-function OrbitServerStatus(props: {
+/** Host servers pair automatically. Connect pairs an Instance or replaces a revoked pairing. */
+function OrbitServerRow({
+  environment,
+  first,
+  connected,
+  revoked,
+  renewalInterrupted,
+  renewalFailure,
+}: {
   readonly environment: OrbitGatewayEnvironment;
+  readonly first: boolean;
   readonly connected: boolean;
-  /** Conn: Orbit revoked this phone's pairing; only Connect pairs it again. */
   readonly revoked: boolean;
+  readonly renewalInterrupted: boolean;
+  readonly renewalFailure: RenewalFailure | undefined;
 }) {
-  const { environment } = props;
   const [connecting, setConnecting] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const status =
+  const [connectFailed, setConnectFailed] = useState(false);
+  const unavailable =
     environment.status === "session_expired"
       ? "Registration expired"
       : environment.powerState === "stopped"
         ? "Asleep"
-        : props.revoked && !connecting
-          ? null
-          : props.connected
-            ? "Paired"
-            : environment.instanceId === null || connecting
-              ? "Pairing…"
-              : null;
-  if (status !== null) return <Text className="text-sm text-foreground-muted">{status}</Text>;
+        : null;
+  const requiresConnect = revoked || renewalInterrupted;
+  const retryRenewal = !requiresConnect && renewalFailure?.retrySafe === true;
+  const canConnect = requiresConnect || (!connected && environment.instanceId !== null);
+  const canRecover = unavailable === null && !connecting && (canConnect || retryRenewal);
+  const recoveryStatus = revoked
+    ? "Revoked in Orbit"
+    : renewalInterrupted
+      ? "Renewal interrupted"
+      : renewalFailure
+        ? renewalFailureText(renewalFailure.reason)
+        : "Not connected";
+  const status = unavailable ?? (connecting || !connected ? "Pairing…" : "Paired");
 
   const connect = async () => {
     setConnecting(true);
-    setFailed(false);
-    setFailed(!(await connectOrbitEnvironment(environment)));
+    setConnectFailed(false);
+    if (retryRenewal) {
+      await retryOrbitEnvironmentRenewal(environment);
+    } else {
+      setConnectFailed(!(await connectOrbitEnvironment(environment)));
+    }
     setConnecting(false);
   };
+
   return (
-    <View className="flex-row items-center gap-3">
-      <Text className="text-sm text-foreground-muted">
-        {failed ? "Could not pair" : props.revoked ? "Revoked in Orbit" : "Not connected"}
-      </Text>
-      <ConnectionSheetButton compact icon="link" label="Connect" onPress={() => void connect()} />
+    <View
+      className={
+        first
+          ? "flex-row items-center gap-4 p-4"
+          : "flex-row items-center gap-4 border-t border-border-subtle p-4"
+      }
+    >
+      <View className="min-w-0 flex-1 gap-1">
+        <Text className="text-lg text-foreground">{environment.label}</Text>
+        <Text className="text-sm text-foreground-muted">
+          {environment.url.replace(/^https?:\/\//, "")}
+        </Text>
+        {canRecover ? (
+          <Text className="text-sm text-foreground-muted">
+            {connectFailed && !requiresConnect ? "Could not connect. Try again." : recoveryStatus}
+          </Text>
+        ) : null}
+        {canRecover && requiresConnect && connectFailed ? (
+          <Text className="text-sm text-foreground-muted">Could not connect. Try again.</Text>
+        ) : null}
+      </View>
+      {canRecover ? (
+        <ConnectionSheetButton
+          compact
+          icon={retryRenewal ? "arrow.clockwise" : "link"}
+          label={retryRenewal ? "Retry" : "Connect"}
+          onPress={() => void connect()}
+        />
+      ) : (
+        <Text className="text-sm text-foreground-muted">{status}</Text>
+      )}
     </View>
   );
 }

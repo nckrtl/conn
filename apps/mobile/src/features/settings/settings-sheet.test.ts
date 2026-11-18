@@ -69,8 +69,8 @@ describe("iPhone Settings sheet", () => {
   it("stays one sheet into every page depth and back again", () => {
     const list: Route = { key: "settings", name: "Settings" };
     // In the sheet, a row in the list or in a page pushes its page above the list.
-    const page = { routes: [home, list, { key: "voice", name: "SettingsVoice" }] };
-    const deeper = [...page.routes, { key: "edit", name: "SettingsScheduledTaskEdit" }];
+    const page = { routes: [home, list, { key: "orbit", name: "SettingsOrbit" }] };
+    const deeper = [...page.routes, { key: "connection", name: "SettingsOrbitConnection" }];
     const steps = [
       [home, list],
       page.routes,

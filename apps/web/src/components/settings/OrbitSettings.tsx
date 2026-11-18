@@ -111,6 +111,7 @@ const NODE_STATES: Record<OrbitNodeState, { readonly label: string; readonly dot
   pairing: { label: "Pairing…", dot: "bg-muted-foreground/40" },
   expired: { label: "Registration expired", dot: "bg-warning" },
   revoked: { label: "Revoked in Orbit", dot: "bg-destructive" },
+  renewal_interrupted: { label: "Renewal interrupted", dot: "bg-warning" },
   // The row shows the reason's sentence (renewalFailureText) in place of this label.
   renewal_failed: { label: "Could not renew.", dot: "bg-warning" },
 };

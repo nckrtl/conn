@@ -487,6 +487,16 @@ the desktop app with "Environments from" set to Orbit, and the panel closes when
 A profile sync that drops the selected workspace leaves the panel open, as it does Settings
 (`isAppModalPage`). Settings search has no entries for the panel's sections.
 
+On the phone, Settings starts with an Orbit row while the Environments provider is Orbit.
+Settings › Orbit › Connection checks the Gateway, certificate and device identity. React Native
+can report both tunnel and certificate failures as "Network request failed", so the Gateway check
+explains both causes and leaves the certificate check pending a response. Nodes shows revoked
+pairings and failed renewals for this phone. In Settings › Environments, Retry renews a failed
+session immediately and still respects Orbit revocation. For a revoked server, Connect stays
+available until the phone saves a replacement session. If the app restarts before it can confirm
+a renewal, use Connect to recover it. Background refresh skips these pairings.
+Environments also manages profiles, workspaces and manual connections.
+
 Sources:
 
 - `apps/web/src/orbit/*`.
@@ -501,7 +511,8 @@ Sources:
 - `packages/client-runtime/src/orbitGateway/environmentProvider.ts`.
 - `packages/client-runtime/src/orbitGateway/threadStart.ts` and `threadTurn.ts`.
 - Mobile (`apps/mobile/src/features/orbit/`): `orbitThreadStart*.ts`, `orbitThreadStarts.ts`,
-  `orbitWorkspaceRef.ts`, `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`.
+  `orbitWorkspaceRef.ts`, `OrbitThreadStartScreen.tsx`, `OrbitThreadStartRows.tsx`,
+  `SettingsOrbit*RouteScreen.tsx`, `orbitPhoneConnection.ts`.
 
 ### Orbit profile sync
 

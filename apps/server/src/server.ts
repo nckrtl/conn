@@ -885,8 +885,9 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(PeerLinkRequests.layer),
   // Share the service so HTTP/WS clients single-flight reads and invalidate each other's cached patches.
   Layer.provide(layerPullRequestService),
-  Layer.provide(layerThreadIssueService),
-  Layer.provide(layerIssueService),
+  // Conn: one pipe step for both, since this pipe is at its 20-step limit; the issue service
+  // still reaches the thread issue service and the routes, as two steps did upstream.
+  Layer.provide(layerThreadIssueService.pipe(Layer.provideMerge(layerIssueService))),
   // The same activity instance RunExecutionService reports to, by layer memoization.
   Layer.provide(
     ServerBrowser.layer.pipe(

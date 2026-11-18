@@ -1,4 +1,4 @@
-import { useGT, useLocale, useMessages } from "gt-react-native";
+import { useGT, useLocale } from "gt-react-native";
 
 import { Toolbar } from "./Toolbar";
 import { AppActivityIndicator } from "./AppActivityIndicator";
@@ -47,7 +47,6 @@ function mailMenuItems(items: ReadonlyArray<AppBarMenuItem>): MailMenu["items"] 
 export function AppBar(props: AppBarProps) {
   const createNativeMailSearchToolbarItem = useCreateNativeMailSearchToolbarItem();
   const gt = useGT();
-  const m = useMessages();
   const locale = useLocale();
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const deviceType = useDeviceType();
@@ -142,22 +141,19 @@ export function AppBar(props: AppBarProps) {
             ? {
                 unstable_headerToolbarItems: compactSearch
                   ? () => [
-                      createNativeMailSearchToolbarItem(
-                        {
-                          showsSearchDismissButton: true,
-                          placeholder: search.compactPlaceholder ?? search.placeholder,
-                          onSearchTextChange: search.onChangeText,
-                          searchTextChangeId: `${headerId}-search-text`,
-                          ...(menu
-                            ? {
-                                filterButtonId: `${headerId}-filter`,
-                                filterSystemImageName: iosIcon(menu.icon),
-                                filterMenu: { title: menu.title, items: mailMenuItems(menu.items) },
-                              }
-                            : undefined),
-                        },
-                        m,
-                      ),
+                      createNativeMailSearchToolbarItem({
+                        showsSearchDismissButton: true,
+                        placeholder: search.compactPlaceholder ?? search.placeholder,
+                        onSearchTextChange: search.onChangeText,
+                        searchTextChangeId: `${headerId}-search-text`,
+                        ...(menu
+                          ? {
+                              filterButtonId: `${headerId}-filter`,
+                              filterSystemImageName: iosIcon(menu.icon),
+                              filterMenu: { title: menu.title, items: mailMenuItems(menu.items) },
+                            }
+                          : undefined),
+                      }),
                     ]
                   : () => [],
                 headerSearchBarOptions: compactSearch

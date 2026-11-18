@@ -86,6 +86,7 @@ import {
 } from "./threadListV2";
 import { useSelectWorkspaceDetail } from "../layout/workspace/useSelectWorkspaceDetail";
 import { NativeScrollView } from "../../native/NativeScrollViewMarker";
+import { appName } from "@t3tools/shared/appName";
 
 type SidebarListItem =
   | ThreadListV2ListItem
@@ -544,7 +545,7 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
   };
   const header = (
     <WorkspaceListHeader
-      accessibilityLabel={gt("{appName}, Threads", { appName: "T3 Code" })}
+      accessibilityLabel={gt("{appName}, Threads", { appName: appName() })}
       onOpenEnvironments={props.onOpenEnvironmentSettings}
       onOpenSettings={props.onOpenSettings}
       search={{
@@ -558,11 +559,11 @@ function ThreadNavigationSidebarPane(props: ThreadNavigationSidebarProps) {
           options.selectedEnvironmentId !== null ||
           selectedProjectKey !== null ||
           orbitGateway.selectedWorkspaceId !== null,
-        items: buildHomeListFilterMenuItems({
-          workspaces: orbitGateway.workspaces.map(({ id, name }) => ({ id, label: name })),
-          selectedWorkspaceId: orbitGateway.selectedWorkspaceId,
-          onWorkspaceChange: selectOrbitWorkspace,
+        items: buildHomeListFilterMenuItems(
           {
+            workspaces: orbitGateway.workspaces.map(({ id, name }) => ({ id, label: name })),
+            selectedWorkspaceId: orbitGateway.selectedWorkspaceId,
+            onWorkspaceChange: selectOrbitWorkspace,
             environments,
             projects: projectFilterOptions,
             selectedEnvironmentId: options.selectedEnvironmentId,

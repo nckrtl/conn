@@ -123,6 +123,7 @@ import { useSettingsScope } from "./SettingsScopeContext";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
 import type { ImportOutcome } from "./browserImportWizard.logic";
 import { APP_BASE_NAME } from "../../branding";
+import { appName } from "@t3tools/shared/appName";
 
 const FILL_VALUE = "fill";
 const RESPONSIVE_VALUE = "responsive";
@@ -846,12 +847,15 @@ export function PullRequestLinksOpenInAppSetting() {
     <SettingsRow
       {...searchableSetting("pull-request-links-open-in-app")}
       description={gt(
-        "Clicking a pull request link opens it in T3 Code. Turn off to open pull request links like any other link, on your git host.",
+        "Clicking a pull request link opens it in {appName}. Turn off to open pull request links like any other link, on your git host.",
+        { appName: appName() },
       )}
       resetAction={
         openInApp ? null : (
           <SettingResetButton
-            ariaLabel={gt("Reset open pull requests in T3 Code to default")}
+            ariaLabel={gt("Reset open pull requests in {appName} to default", {
+              appName: appName(),
+            })}
             onClick={() => updateSettings({ pullRequestLinksOpenInApp: true })}
           />
         )
@@ -862,7 +866,7 @@ export function PullRequestLinksOpenInAppSetting() {
           onCheckedChange={(checked) =>
             updateSettings({ pullRequestLinksOpenInApp: Boolean(checked) })
           }
-          aria-label={gt("Open pull requests in T3 Code")}
+          aria-label={gt("Open pull requests in {appName}", { appName: appName() })}
         />
       }
     />
@@ -1188,6 +1192,8 @@ function AnnotationDictationSettings({ disabled }: { readonly disabled: boolean 
   const startUrl = useClientSettings((settings) => settings.annotationDictationUrl);
   const stopUrl = useClientSettings((settings) => settings.annotationDictationStopUrl);
   const updateSettings = useUpdatePrimarySettings();
+  const searchableSetting = useSearchableSetting();
+  const gt = useGT();
 
   return (
     <>
@@ -1197,7 +1203,7 @@ function AnnotationDictationSettings({ disabled }: { readonly disabled: boolean 
         resetAction={
           !disabled && startUrl !== DEFAULT_ANNOTATION_DICTATION_URL ? (
             <SettingResetButton
-              label="annotation dictation URL"
+              ariaLabel={gt("Reset annotation dictation URL to default")}
               onClick={() =>
                 updateSettings({ annotationDictationUrl: DEFAULT_ANNOTATION_DICTATION_URL })
               }
@@ -1223,7 +1229,7 @@ function AnnotationDictationSettings({ disabled }: { readonly disabled: boolean 
         resetAction={
           !disabled && stopUrl !== DEFAULT_ANNOTATION_DICTATION_STOP_URL ? (
             <SettingResetButton
-              label="annotation dictation stop URL"
+              ariaLabel={gt("Reset annotation dictation stop URL to default")}
               onClick={() =>
                 updateSettings({
                   annotationDictationStopUrl: DEFAULT_ANNOTATION_DICTATION_STOP_URL,

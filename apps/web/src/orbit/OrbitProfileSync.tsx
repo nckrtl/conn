@@ -38,6 +38,7 @@ import { registerOrbitSleepClient } from "./orbitInstanceSleep";
 import { createSerialRunner } from "./serialRunner";
 import { trackNonUserThemeChanges } from "./themeOrigin";
 import {
+  hasWorkspaceChanges,
   parseWorkspaceProfileSyncState,
   syncWorkspaceProfile,
   type WorkspaceProfileSyncPorts,
@@ -185,6 +186,8 @@ const obsoleteRead = (): Promise<never> =>
 interface ProfileSyncController {
   /** Environment work: servers, credentials, clone references and the attached set. */
   readonly refreshEnvironments: () => Promise<void>;
+  /** Whether a local edit is waiting to go out (workspaces or a section). */
+  readonly hasLocalChanges: () => boolean;
   /** Follows the bound profile; `reconcile()` runs one authoritative profile read. */
   readonly profile: ReturnType<typeof createOrbitProfileLive>;
   /** Around a bind: the old binding's channel, reads and environment record become obsolete. */
@@ -389,6 +392,11 @@ function profileSyncController(): ProfileSyncController | null {
       scope: () => (inOrbit() && heldBinds.size === 0 ? "orbit" : null),
       refresh: (isCurrent, observe) => exclusive(() => profileOnce(isCurrent, observe)),
     }),
+    hasLocalChanges: () =>
+      hasWorkspaceChanges({
+        readLocal: () => useWorkspaceStore.getState().workspaces.map(toGateway),
+        loadState,
+      }) || sections.hasLocalChanges(),
     rebinding: (phase) => {
       // An environment run waiting on the old profile's settings fails its `lastMe` check.
       lastMe = null;
@@ -436,7 +444,10 @@ export function OrbitProfileSync() {
     let editTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleEditSync = (): void => {
       if (editTimer) clearTimeout(editTimer);
-      editTimer = setTimeout(reconcileProfile, LOCAL_EDIT_DEBOUNCE_MS);
+      // Applying the profile's own change also lands here: read only for a real local edit.
+      editTimer = setTimeout(() => {
+        if (sync.hasLocalChanges()) reconcileProfile();
+      }, LOCAL_EDIT_DEBOUNCE_MS);
     };
     const unsubscribe = useWorkspaceStore.subscribe((state, previous) => {
       if (state.workspaces !== previous.workspaces) scheduleEditSync();

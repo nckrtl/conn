@@ -120,6 +120,14 @@ export async function syncWorkspaceProfile(
   return { kind: saved.merged ? "merged" : "pushed", profileName };
 }
 
+/** Whether the device's workspaces differ from what it last synced (or it never synced). */
+export function hasWorkspaceChanges(
+  ports: Pick<WorkspaceProfileSyncPorts, "readLocal" | "loadState">,
+): boolean {
+  const state = ports.loadState();
+  return state === null || !sameWorkspaces(ports.readLocal(), state.base);
+}
+
 function adopt(
   ports: WorkspaceProfileSyncPorts,
   profileId: number,

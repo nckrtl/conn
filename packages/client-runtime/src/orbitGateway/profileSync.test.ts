@@ -297,6 +297,26 @@ describe("profile sync engine", () => {
     expect(fake.gateway.patches).toHaveLength(patches);
   });
 
+  it("reports a local edit as a change, but not a value it just applied from the profile", async () => {
+    const fake = fakeGateway();
+    const mac = makeDevice(fake);
+    expect(mac.engine.hasLocalChanges()).toBe(true);
+    await mac.sync();
+    expect(mac.engine.hasLocalChanges()).toBe(false);
+    const appearance = fake.gateway.sections.get("appearance")!;
+    fake.gateway.sections.set("appearance", {
+      version: appearance.version + 1,
+      value: { schema: 1, mode: "dark", contrast: 100 },
+      updatedBy: "phone",
+    });
+    fake.gateway.version += 1;
+    await mac.sync();
+    expect(mac.memory.appearance).toMatchObject({ mode: "dark" });
+    expect(mac.engine.hasLocalChanges()).toBe(false);
+    mac.memory.settings.size = 18;
+    expect(mac.engine.hasLocalChanges()).toBe(true);
+  });
+
   it("still pulls another section that changed while its own PATCH was in flight", async () => {
     const fake = fakeGateway();
     const mac = makeDevice(fake);

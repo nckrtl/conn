@@ -392,5 +392,21 @@ export function createProfileSync(ports: ProfileSyncPorts) {
     return result;
   }
 
-  return { run, beginNonUserChange };
+  /**
+   * Whether this device holds a section value the profile has not seen, the way a run decides
+   * what to send. A change the engine just applied from the profile is not one.
+   */
+  function hasLocalChanges(): boolean {
+    const saved = ports.loadState();
+    return ports.channels().some((channel) => {
+      const section = saved?.sections[channel.name];
+      const local = channel.readLocal(section?.base ?? null);
+      if (local === null) return false;
+      const mark = saved?.ignored[channel.name];
+      if (mark !== undefined && jsonEqual(local, mark)) return false;
+      return section === undefined || !jsonEqual(local, section.base ?? undefined);
+    });
+  }
+
+  return { run, beginNonUserChange, hasLocalChanges };
 }

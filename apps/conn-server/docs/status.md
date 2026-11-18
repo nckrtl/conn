@@ -13,6 +13,12 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 `conn-support/src/input.rs` and the generator walk `tools/schema-rules.mjs`. Proof:
 `tools/check.sh` 46/46, no skips; touched-crate tests pass; the original cases are unchanged.
 
+**Known difference, stop in progress (2026-11-18):** with the provider's answer to
+`turn/interrupt` held, T3 may already mark the run interrupted; Conn ends it only when the
+provider answers (or its 10 s stop timeout passes). `idle-diff` lists it in `KNOWN` as
+`intermittent` (it shows only on slow runners). Conn's wait is the engine's existing design;
+whether to match T3 is open.
+
 ## Managed access, target side (item 4)
 
 `serve --managed-provision <file>` serves Orbit callers on a separate managed ingress and

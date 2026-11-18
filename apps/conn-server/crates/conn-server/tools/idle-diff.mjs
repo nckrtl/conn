@@ -503,8 +503,25 @@ const showInfo = argv.includes("--info");
  * Differences in a field Orbit reads that are known, with the reason; each is a defect that
  * waits for its fix. The state then shows `KNOWN` and passes while its FAIL lines stay exactly
  * these. Any other line fails, and so does a known state that turns `same`: remove it here.
+ * An `intermittent` difference depends on timing and may not show on a run; then the state
+ * passes as `same` with a note, and it is never reported as fixed.
  */
-const KNOWN = {};
+const KNOWN = {
+  "a turn being stopped": {
+    intermittent: true,
+    reason:
+      "with the provider's answer to turn/interrupt held, T3 may already mark the run " +
+      "interrupted, while Conn ends it only when the provider answers (or its 10 s stop " +
+      "timeout passes); seen on a slow CI runner (run 44382517419)",
+    lines: [
+      'FAIL orbit.rows[0].activityRunStatus: T3 null / Conn "running"',
+      'FAIL orbit.rows[0].latestRunCompletedAt: T3 "<time>" / Conn null',
+      'FAIL orbit.rows[0].status: T3 "interrupted" / Conn "running"',
+      "FAIL orbit.rows[0].works: T3 false / Conn true",
+      "FAIL orbit.turnRuns: T3 false / Conn true",
+    ],
+  },
+};
 
 /** Records one comparison and prints it; `summary` describes the T3 server's answer. */
 function record(pair, { state, lines, info, notes, summary, orbitSends = true }) {
@@ -515,7 +532,10 @@ function record(pair, { state, lines, info, notes, summary, orbitSends = true })
   let verdict;
   if (!orbitSends) verdict = info.length === 0 ? "same" : "info";
   else if (known === undefined) verdict = lines.length === 0 ? "same" : "DIFF";
-  else if (lines.length === 0) {
+  else if (lines.length === 0 && known.intermittent) {
+    verdict = "same";
+    notes = [...notes, `known timing-dependent difference did not show: ${known.reason}`];
+  } else if (lines.length === 0) {
     verdict = "FIXED";
     lines.push("FAIL no longer differs: remove it from KNOWN in idle-diff.mjs");
   } else {
@@ -550,7 +570,7 @@ async function settled(side) {
 }
 
 /** Reads both servers in one state and records the comparison. */
-async function compare(pair, state, notes = [], { transitional = null } = {}) {
+async function compare(pair, state, notes = []) {
   const [ts, conn] = await Promise.all(pair.map(settled));
   const lines = [];
   if (ts.status !== conn.status) lines.push(`FAIL http status: T3 ${ts.status} / Conn ${conn.status}`);
@@ -564,20 +584,6 @@ async function compare(pair, state, notes = [], { transitional = null } = {}) {
   const info = differences(a, b).filter((d) => !ORBIT_FIELDS.has(d.match(/^\[\d+\]\.(\w+)/)?.[1] ?? ""));
   const verdict = views[0].readable ? (views[0].turnRuns ? "active" : "idle") : `http ${ts.status}`;
   const status = views[0].rows?.find((row) => row.title === "Idle check")?.status;
-  const connStatus = views[1].rows?.find((row) => row.title === "Idle check")?.status;
-  // A transitional state: each side may be on either side of one step it takes on its own
-  // clock (`transitional.statuses`). When they stand on different sides of it, the Orbit
-  // fields differ for that reason only; the next settled state compares them strictly.
-  if (
-    transitional &&
-    lines.length > 0 &&
-    status !== connStatus &&
-    transitional.statuses.includes(status) &&
-    transitional.statuses.includes(connStatus)
-  ) {
-    notes = [...notes, `${transitional.reason} (T3 ${status}, Conn ${connStatus}): not compared`];
-    info.unshift(...lines.splice(0).map((line) => line.replace(/^FAIL /, "")));
-  }
   record(pair, { state, lines, info, notes, summary: `${verdict}${status ? `, status ${status}` : ""}` });
 }
 
@@ -728,16 +734,7 @@ const SCENARIOS = [
       const notes = await threadWhere(pair, "running", (t) => t.status === "running");
       await compare(pair, "a running turn (before stop)", notes);
       await both(pair, (side) => side.tool("t3_thread_interrupt", { threadId: side.threadId }));
-      // The provider's answer to `turn/interrupt` is held here. T3 may mark the run
-      // interrupted before that answer, on its own timing; Conn marks it when the provider
-      // answers. Either side may stand on either side of that step, so only that split is
-      // tolerated here; "a stopped turn" below compares the settled state strictly.
-      await compare(pair, "a turn being stopped", await gate(pair, "turn/interrupt"), {
-        transitional: {
-          statuses: ["running", "interrupted"],
-          reason: "a stop before the provider answers settles on each server's own timing",
-        },
-      });
+      await compare(pair, "a turn being stopped", await gate(pair, "turn/interrupt"));
       await both(pair, (side) => side.release("turn/interrupt"));
       await compare(pair, "a stopped turn", await threadWhere(pair, "interrupted", (t) => terminal(t.status)));
     },

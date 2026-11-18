@@ -106,6 +106,13 @@ export async function syncWorkspaceProfile(
   if (!dirty && !remoteChanged) return { kind: "unchanged", profileName };
   if (!dirty) {
     const remote = await ports.client.settings(profileId);
+    const edited = ports.readLocal();
+    if (!sameWorkspaces(edited, local)) {
+      // The user edited during the read: send that edit against the base it started from, so
+      // the version conflict merges it with the newer profile instead of overwriting it.
+      const saved = await replace(ports, profileId, state.version, state.base, edited);
+      return { kind: saved.merged ? "merged" : "pushed", profileName };
+    }
     adopt(ports, profileId, remote.version, remote.workspaces);
     return { kind: "pulled", profileName };
   }

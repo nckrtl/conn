@@ -13,7 +13,10 @@ export interface OrbitProfileSwitchPorts {
   readonly client: Pick<OrbitGatewayClient, "createProfile" | "bindProfile">;
   /** Runs the profile sync and settles once that run has finished. */
   readonly sync: () => Promise<void>;
-  /** Right before the bind: the old binding's channel and reads must not apply to the new one. */
+  /**
+   * Before the bind and again once it answered: the old binding's channel and any read started
+   * in between must not apply to the new one.
+   */
   readonly rebinding?: () => void;
 }
 
@@ -30,6 +33,7 @@ export async function switchOrbitProfile(
   const id = "id" in choice ? choice.id : (await ports.client.createProfile(choice.name)).id;
   ports.rebinding?.();
   const node = await ports.client.bindProfile(id);
+  ports.rebinding?.();
   await ports.sync();
   return node;
 }

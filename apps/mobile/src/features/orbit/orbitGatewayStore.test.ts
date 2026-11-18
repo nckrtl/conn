@@ -16,6 +16,7 @@ const fake = vi.hoisted(() => ({
   holdWrite: null as Promise<void> | null,
   holdSettings: null as Promise<void> | null,
   bindFailure: null as string | null,
+  holdBind: null as Promise<void> | null,
 }));
 
 vi.mock("react-native", () => ({
@@ -36,10 +37,7 @@ vi.mock("../../state/session", () => ({
   environmentSession: {},
   readEnvironmentLacksScope: () => false,
 }));
-vi.mock("./orbitProfileSync", () => ({
-  runOrbitAppearance: async () => true,
-  syncOrbitAppearance: async () => {},
-}));
+vi.mock("./orbitProfileSync", () => ({ runOrbitAppearance: async () => true }));
 vi.mock("./orbitThreadStartStore", () => ({
   heldOrbitInstanceIds: () => [],
   orbitThreadStartStore: { loaded: () => false },
@@ -95,6 +93,7 @@ vi.mock("./orbitGatewayClient", () => ({
       return answer;
     },
     bindProfile: async (profileId: number) => {
+      if (fake.holdBind) await fake.holdBind;
       if (fake.bindFailure) throw new Error(fake.bindFailure);
       fake.boundProfile = profileId;
     },
@@ -131,6 +130,7 @@ async function setup() {
     holdWrite: null,
     holdSettings: null,
     bindFailure: null,
+    holdBind: null,
   });
   const store = await import("./orbitGatewayStore");
   const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -164,6 +164,32 @@ describe("Orbit Gateway store", () => {
     await chosen;
     await t.settle();
     expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
+  });
+
+  it("never shows the old profile from a read that ran while the bind was pending", async () => {
+    using t = await setup();
+    t.store.startOrbitGateway();
+    await t.settle();
+    const seen: string[][] = [];
+    t.store.subscribeOrbitGateway(() => seen.push(t.shown().workspaces));
+    const bind = Promise.withResolvers<void>();
+    fake.holdBind = bind.promise;
+    const chosen = t.store.chooseOrbitProfile({ id: 2 });
+    await t.settle();
+    // Another device moves A to v2; the periodic check reads it while the bind is pending.
+    fake.versions.set(1, 2);
+    const answer = Promise.withResolvers<void>();
+    fake.holdSettings = answer.promise;
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    fake.holdSettings = null;
+    fake.holdBind = null;
+    bind.resolve();
+    await t.settle();
+    answer.resolve();
+    await chosen;
+    await t.settle();
+    expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
+    expect(seen.flat()).not.toContain("ws-1-v2");
   });
 
   it("does not let a late workspace write of the old profile replace the new one", async () => {

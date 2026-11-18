@@ -229,6 +229,11 @@ export function createOrbitProfileLive(ports: OrbitProfileLivePorts) {
     invalidate(): void {
       reconciler.invalidate();
       unfollow();
+      // A new binding starts its own retry sequence.
+      clearTimeout(readRetry);
+      clearTimeout(socketRetry);
+      readRetry = socketRetry = undefined;
+      readRetryMs = socketRetryMs = RETRY_MIN_MS;
     },
     /** The channel followed now, for diagnostics and tests. */
     channel(): string | null {

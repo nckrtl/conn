@@ -37,7 +37,7 @@ import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentSession, readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client, orbitGatewayTransport } from "./orbitGatewayClient";
-import { runOrbitAppearance, syncOrbitAppearance } from "./orbitProfileSync";
+import { runOrbitAppearance } from "./orbitProfileSync";
 import { heldOrbitInstanceIds, orbitThreadStartStore } from "./orbitThreadStartStore";
 import { addProjectRefToProfileWorkspace } from "./orbitWorkspaceRef";
 
@@ -562,6 +562,8 @@ export async function chooseOrbitProfile(
     // The old binding's channel and any read in flight must not apply to the new one.
     profileLive.invalidate();
     await client.bindProfile(id);
+    // A read that started while the bind was pending still saw the old binding.
+    profileLive.invalidate();
   } catch (error) {
     // The caller shows the failed bind; it is not a list failure for later reads to bring back.
     set({ error: message(error) });
@@ -572,14 +574,12 @@ export async function chooseOrbitProfile(
   await Promise.all([profileLive.reconcile(), refreshOrbitGateway()]);
 }
 
-/** Syncs the appearance with the profile now, as after a theme change on this phone. */
-export async function syncOrbitAppearanceNow(): Promise<void> {
-  if (state.provider !== "orbit") return;
-  try {
-    await syncOrbitAppearance(await client.me());
-  } catch {
-    // An unreachable Gateway syncs on a later run.
-  }
+/**
+ * Syncs the appearance with the profile now, as after a theme change on this phone. It runs as a
+ * profile read, so the provider, the binding and the app's lifecycle scope it like a notice.
+ */
+export function syncOrbitAppearanceNow(): Promise<void> {
+  return profileLive.reconcile();
 }
 
 /**

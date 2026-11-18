@@ -97,12 +97,3 @@ export async function runOrbitAppearance(
 ): Promise<boolean> {
   return (await engine.run(node, isCurrent)).kind !== "idle";
 }
-
-/** Syncs the appearance for a node the caller just read. Failures wait for the next run. */
-export async function syncOrbitAppearance(node: OrbitGatewayNode): Promise<void> {
-  try {
-    await engine.run(node);
-  } catch (error) {
-    console.warn("[orbit] appearance sync failed", error);
-  }
-}

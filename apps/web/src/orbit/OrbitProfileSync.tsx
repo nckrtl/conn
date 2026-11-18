@@ -91,9 +91,21 @@ export function syncOrbitProfileNow(): Promise<void> {
   return requestSync?.() ?? Promise.resolve();
 }
 
-/** Before this device binds another profile: drops the old binding's channel and reads. */
+/** Another window of this app bound a profile; only the main window runs the sync. */
+const REBIND_STORAGE_KEY = "t3code:orbit-profile-rebind:v1";
+/** Keeps two announcements in the same millisecond distinct, so each one fires a storage event. */
+let rebindAnnouncements = 0;
+
+/**
+ * Around this device's bind to another profile: drops the old binding's channel and reads. In a
+ * window without the sync it tells the main window, which then reads the new binding.
+ */
 export function orbitProfileRebinding(): void {
-  beforeRebind?.();
+  if (beforeRebind) beforeRebind();
+  else {
+    rebindAnnouncements += 1;
+    window.localStorage.setItem(REBIND_STORAGE_KEY, `${Date.now()}:${rebindAnnouncements}`);
+  }
 }
 
 // Conn: every window's sleep controller reads the Gateway through this window's client.
@@ -421,6 +433,12 @@ export function OrbitProfileSync() {
     // subscription keeps its own low-frequency check against dropped notices.
     window.addEventListener("focus", refreshAll);
     window.addEventListener("online", refreshAll);
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key !== REBIND_STORAGE_KEY) return;
+      sync.rebinding();
+      reconcileProfile();
+    };
+    window.addEventListener("storage", onStorage);
     refreshEnvironments();
     void sync.profile.resume();
 
@@ -437,6 +455,7 @@ export function OrbitProfileSync() {
       if (editTimer) clearTimeout(editTimer);
       window.removeEventListener("focus", refreshAll);
       window.removeEventListener("online", refreshAll);
+      window.removeEventListener("storage", onStorage);
     };
   }, []);
   return available ? <OrbitAppearanceSync /> : null;

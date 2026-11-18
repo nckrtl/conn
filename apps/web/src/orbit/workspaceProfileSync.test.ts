@@ -162,6 +162,32 @@ describe("syncWorkspaceProfile", () => {
     expect(names(memory.local)).toEqual(["A on desktop", "B on phone"]);
     expect(memory.state?.version).toBe(4);
   });
+
+  it("keeps a desktop edit made while another device's change is being read", async () => {
+    const remote = gateway({ version: 2, workspaces: [ws("a"), ws("b")] });
+    let editDuringRead = (): void => {};
+    const client = {
+      ...remote.client,
+      settings: async (profileId: number) => {
+        const answer = await remote.client.settings(profileId);
+        editDuringRead();
+        return answer;
+      },
+    } as OrbitGatewayClient;
+    const { ports, memory } = device(client, [ws("a"), ws("b")], {
+      profileId: 1,
+      version: 2,
+      base: [ws("a"), ws("b")],
+    });
+    remote.profile.workspaces = [ws("a"), ws("b"), ws("c", "from phone")];
+    remote.profile.version = 3;
+    editDuringRead = () => {
+      memory.local = [ws("a", "renamed on desktop"), ws("b")];
+    };
+    await expect(syncWorkspaceProfile(ports)).resolves.toMatchObject({ kind: "merged" });
+    expect(names(remote.profile.workspaces)).toEqual(["renamed on desktop", "b", "from phone"]);
+    expect(names(memory.local)).toEqual(["renamed on desktop", "b", "from phone"]);
+  });
 });
 
 describe("parseWorkspaceProfileSyncState", () => {

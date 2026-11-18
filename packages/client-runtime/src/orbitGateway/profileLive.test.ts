@@ -434,6 +434,24 @@ describe("Orbit profile live subscription", () => {
     live.dispose();
   });
 
+  it("starts a new retry sequence for a new binding", async () => {
+    using _clock = clock();
+    const { gateway, live } = harness();
+    gateway.access = false;
+    gateway.refusal = { status: 500, code: "server.error" };
+    await live.resume();
+    // A fails twice: its next retry waits 10 s.
+    await vi.advanceTimersByTimeAsync(5_000);
+    const reads = gateway.requests.length;
+    live.invalidate();
+    await live.reconcile();
+    expect(gateway.requests.length).toBe(reads + 1);
+    // B's first failure retries after 5 s, not on A's schedule.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(gateway.requests.length).toBe(reads + 2);
+    live.dispose();
+  });
+
   it("keeps the periodic check when the Gateway has no Reverb, and stops everything on pause", async () => {
     using _clock = clock();
     const { gateway, live, write, applied } = harness();

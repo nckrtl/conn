@@ -41,14 +41,14 @@ describe("switchOrbitProfile", () => {
   it("sends unsent edits to the old profile before binding, then syncs the new one", async () => {
     const { log, ports } = fakeSwitch();
     const node = await switchOrbitProfile(ports, { id: 2 });
-    expect(log).toEqual(["sync", "rebinding", "bind 2", "sync"]);
+    expect(log).toEqual(["sync", "rebinding", "bind 2", "rebinding", "sync"]);
     expect(node.profile?.id).toBe(2);
   });
 
   it("creates a new profile by name and binds this device to it", async () => {
     const { log, ports } = fakeSwitch();
     await switchOrbitProfile(ports, { name: "Work" });
-    expect(log).toEqual(["sync", "create Work", "rebinding", "bind 9", "sync"]);
+    expect(log).toEqual(["sync", "create Work", "rebinding", "bind 9", "rebinding", "sync"]);
   });
 
   it("does not bind when the profile cannot be created", async () => {

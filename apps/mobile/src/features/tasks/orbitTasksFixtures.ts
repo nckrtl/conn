@@ -390,6 +390,11 @@ const json = (status: number, body: unknown) => ({ status, body: JSON.stringify(
 export function fixtureOrbitTasksTransport(): OrbitGatewayTransport {
   return async (request) => {
     const now = Date.now();
+    if (request.path === "/tasks" && Number(request.query?.limit ?? 0) > 100)
+      return json(422, {
+        status: 422,
+        error: { code: "validation.failed", message: "limit must be at most 100.", details: {} },
+      });
     if (request.path === "/tasks")
       return json(200, {
         data: TASKS.map((task) => wireTask(task, now)),

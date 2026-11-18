@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { orbitGatewayTransport } from "../orbit/orbitGatewayClient";
 import { fixtureOrbitTasksTransport } from "./orbitTasksFixtures";
+import { listAllTasks } from "./taskList";
 
 // Design and screenshot builds only: `EXPO_PUBLIC_CONN_TASKS_FIXTURE=1` at build time swaps the
 // Gateway for fixture data in the Gateway's wire form, so it still runs through the real decoder.
@@ -51,18 +52,16 @@ export function useOrbitTaskList() {
   const hasList = useRef(false);
   const read = useCallback(async () => {
     const current = ++request.current;
-    const result = await orbitTasksClient.listTasks({ limit: 200 });
+    const result = await listAllTasks(orbitTasksClient);
     if (current !== request.current) return;
     if (result.status !== "ok") {
       if (!hasList.current || result.reason !== "unreachable") setState(result);
       return;
     }
     hasList.current = true;
-    setState({ status: "ok", value: result.value.tasks });
+    setState(result);
     // The list carries no metrics; a running row's timer reads its task, only for running tasks.
-    const running = result.value.tasks.filter(
-      (task) => orbitTaskLane(task.status) === "in-progress",
-    );
+    const running = result.value.filter((task) => orbitTaskLane(task.status) === "in-progress");
     const details = await Promise.all(running.map((task) => orbitTasksClient.getTask(task.id)));
     if (current !== request.current) return;
     setDurations(
@@ -75,13 +74,15 @@ export function useOrbitTaskList() {
       ),
     );
   }, []);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the shared Orbit Tasks client's invalidations for this screen's lifetime
-  useEffect(() => {
-    const unsubscribe = orbitTasksClient.onInvalidate(() => read());
-    // oxlint-disable-next-line react/set-state-in-effect -- the read is asynchronous; its state lands after the Gateway answers
-    void read();
-    return unsubscribe;
-  }, [read]);
+  // Only while the list is on screen: a detail screen on top keeps it mounted, and the list
+  // reads again when it comes back.
+  useFocusEffect(
+    useCallback(() => {
+      const unsubscribe = orbitTasksClient.onInvalidate(() => read());
+      void read();
+      return unsubscribe;
+    }, [read]),
+  );
   useFollowOrbitTasks();
   const refresh = async () => {
     setRefreshing(true);

@@ -1,6 +1,7 @@
 import { createOrbitTasksClient } from "@t3tools/client-runtime/orbit-gateway";
 import { describe, expect, it } from "vite-plus/test";
 
+import { listAllTasks } from "./taskList";
 import { fixtureOrbitTasksTransport } from "./orbitTasksFixtures";
 import {
   agentRowStatus,
@@ -95,5 +96,31 @@ describe("mobile task presentation", () => {
       timerMs: null,
     });
     expect(agentRowStatus({ ...reviewer, state: "done" }, now)).toMatchObject({ timerMs: null });
+  });
+});
+
+describe("listAllTasks", () => {
+  it("asks for at most the Gateway's page size and follows the cursor", async () => {
+    const limits: Array<number | undefined> = [];
+    const result = await listAllTasks({
+      listTasks: async (query = {}) => {
+        limits.push(query.limit);
+        const fixture = await client.listTasks({ limit: query.limit ?? 100 });
+        if (fixture.status !== "ok") return fixture;
+        return {
+          status: "ok",
+          value: {
+            tasks: fixture.value.tasks.slice(query.cursor ? 4 : 0, query.cursor ? 7 : 4),
+            skipped: 0,
+            nextCursor: query.cursor ? null : "page-2",
+          },
+        };
+      },
+    });
+    expect(limits).toEqual([100, 100]);
+    expect(result.status === "ok" ? result.value.map((task) => task.id) : result).toEqual([
+      482, 479, 474, 487, 498, 500, 471,
+    ]);
+    expect((await client.listTasks({ limit: 200 })).status).toBe("error");
   });
 });

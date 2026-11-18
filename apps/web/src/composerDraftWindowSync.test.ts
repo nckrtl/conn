@@ -75,7 +75,7 @@ describe("applyOtherWindowComposerDrafts", () => {
   });
 
   it("keeps a newer draft written by a second window before Orbit acknowledges the first", async () => {
-    const draftId = DraftId.make("orbit-draft");
+    const draftId = DraftId.make("orbit-other-window-draft");
     const storage = useComposerDraftStore.persist.getOptions().storage!;
     useComposerDraftStore.getState().setPrompt(draftId, "accepted by Orbit");
     const raw = await otherWindowWrite((drafts) => {
@@ -101,7 +101,14 @@ describe("applyOtherWindowComposerDrafts", () => {
     expect(isStaleClearedOrbitDraft(draftId, captured)).toBe(true);
   });
 
-  it.each(["prompt", "target", "unchanged", "saved-original", "other-window-edit"])(
+  it.each([
+    "prompt",
+    "target",
+    "unchanged",
+    "saved-original",
+    "other-window-edit",
+    "passive-clear",
+  ])(
     "reconciles an Orbit %s draft when another window clears a newer sent version",
     async (editedField) => {
       const draftId = DraftId.make(`orbit-draft-${editedField}`);
@@ -129,7 +136,7 @@ describe("applyOtherWindowComposerDrafts", () => {
       await vi.advanceTimersByTimeAsync(300);
       const storage = useComposerDraftStore.persist.getOptions().storage!;
       const original = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
-      const passive = ["unchanged", "saved-original", "other-window-edit"].includes(editedField);
+      const passive = !["prompt", "target"].includes(editedField);
       if (passive) {
         store.setPrompt(draftId, "later revision sent in the other window");
         await vi.advanceTimersByTimeAsync(300);
@@ -158,7 +165,9 @@ describe("applyOtherWindowComposerDrafts", () => {
         store.setPrompt(draftId, "earlier draft saved by this window");
         await vi.advanceTimersByTimeAsync(300);
       }
-      if (editedField === "other-window-edit") {
+      if (editedField === "other-window-edit" || editedField === "passive-clear") {
+        if (editedField === "passive-clear")
+          applyOtherWindowComposerDrafts(JSON.stringify(external), new RecentKeyChanges(2_000));
         if (!original || "capturedState" in original.state)
           throw new Error("Expected a stored draft");
         const draft = original.state.draftsByThreadKey[key]!;

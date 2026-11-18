@@ -4,6 +4,7 @@ import {
   createOrbitLaunchThreadRowsAtom,
   ORBIT_LAUNCH_PHASE_LABELS,
 } from "@t3tools/client-runtime/orbit-gateway";
+import { T, useGT, useMessages } from "gt-react";
 import { CircleAlertIcon, CircleCheckIcon } from "lucide-react";
 
 import { Spinner } from "../components/ui/spinner";
@@ -24,6 +25,8 @@ const orbitLaunchRowsAtom = createOrbitLaunchThreadRowsAtom({
 });
 
 export function OrbitPendingThreadList() {
+  const gt = useGT();
+  const messages = useMessages();
   const available = useOrbitThreadsAvailable();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { snapshot, rows } = useAtomValue(orbitLaunchRowsAtom);
@@ -32,10 +35,12 @@ export function OrbitPendingThreadList() {
     <>
       <OrbitLaunchRecovery />
       {snapshot.error ? (
-        <p className="px-2 text-ui text-muted-foreground">Could not refresh Orbit launches.</p>
+        <p className="px-2 text-ui text-muted-foreground">
+          <T>Could not refresh Orbit launches.</T>
+        </p>
       ) : null}
       {rows.length > 0 ? (
-        <ul className="mt-1 grid grid-cols-1 gap-0.5" aria-label="Orbit launches">
+        <ul className="mt-1 grid grid-cols-1 gap-0.5" aria-label={gt("Orbit launches")}>
           {rows.map((start) => {
             const active = pathname === `/orbit/${start.launch_id}`;
             return (
@@ -59,10 +64,12 @@ export function OrbitPendingThreadList() {
                   )}
                   <span className="min-w-0 flex-1 truncate text-sidebar-foreground">
                     {start.instance_id === null
-                      ? `Orbit project #${start.project_id}`
-                      : `Instance #${start.instance_id}`}
+                      ? gt("Orbit project #{id}", { id: start.project_id })
+                      : gt("Instance #{id}", { id: start.instance_id })}
                   </span>
-                  <span className="shrink-0 text-xs">{ORBIT_LAUNCH_PHASE_LABELS[start.phase]}</span>
+                  <span className="shrink-0 text-xs">
+                    {messages(ORBIT_LAUNCH_PHASE_LABELS[start.phase])}
+                  </span>
                 </Link>
               </li>
             );

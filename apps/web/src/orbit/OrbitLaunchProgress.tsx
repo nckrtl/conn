@@ -2,28 +2,25 @@ import {
   ORBIT_LAUNCH_ACTION_LABELS,
   ORBIT_LAUNCH_PHASE_LABELS,
   ORBIT_LAUNCH_STAGES,
+  ORBIT_LAUNCH_STAGE_STATUS,
   orbitLaunchActionLabel,
   type OrbitLaunch,
   type OrbitLaunchAction,
 } from "@t3tools/client-runtime/orbit-gateway";
+import { T, msg, useGT, useMessages } from "gt-react";
 import { useState } from "react";
+
+import { m } from "../i18n/messages";
 
 import { Button } from "../components/ui/button";
 import { orbitLaunches } from "./orbitLaunches";
-
-const STAGE_STATUS = {
-  pending: "Waiting",
-  running: "In progress",
-  succeeded: "Done",
-  failed: "Failed",
-  cancelled: "Cancelled",
-  skipped: "Skipped",
-} as const;
 
 const stageIds = Object.keys(ORBIT_LAUNCH_STAGES) as Array<keyof OrbitLaunch["stages"]>;
 const actionIds = Object.keys(ORBIT_LAUNCH_ACTION_LABELS) as OrbitLaunchAction[];
 
 export function OrbitLaunchProgress({ launch, stale }: { launch: OrbitLaunch; stale?: boolean }) {
+  const gt = useGT();
+  const messages = useMessages();
   const [busy, setBusy] = useState<OrbitLaunchAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   async function act(action: OrbitLaunchAction) {
@@ -32,17 +29,19 @@ export function OrbitLaunchProgress({ launch, stale }: { launch: OrbitLaunch; st
     try {
       await orbitLaunches.act(launch.id, action);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Orbit did not confirm this action.");
+      setError(
+        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm this action.")),
+      );
     }
     setBusy(null);
   }
   return (
     <section
-      aria-label="Orbit launch"
+      aria-label={gt("Orbit launch")}
       className="flex flex-col gap-2 text-ui"
       data-orbit-launch-phase={launch.phase}
     >
-      <p className="font-medium">{ORBIT_LAUNCH_PHASE_LABELS[launch.phase]}</p>
+      <p className="font-medium">{messages(ORBIT_LAUNCH_PHASE_LABELS[launch.phase])}</p>
       <ul className="grid gap-1">
         {stageIds.map((id) => {
           const stage = launch.stages[id];
@@ -52,9 +51,9 @@ export function OrbitLaunchProgress({ launch, stale }: { launch: OrbitLaunch; st
           return (
             <li key={id} className="grid gap-0.5">
               <div className="flex items-baseline justify-between gap-2">
-                <span>{ORBIT_LAUNCH_STAGES[id]}</span>
+                <span>{messages(ORBIT_LAUNCH_STAGES[id])}</span>
                 <span className="text-muted-foreground">
-                  {STAGE_STATUS[stage.status]}
+                  {messages(ORBIT_LAUNCH_STAGE_STATUS[stage.status])}
                   {time ? (
                     <>
                       {" "}
@@ -73,11 +72,13 @@ export function OrbitLaunchProgress({ launch, stale }: { launch: OrbitLaunch; st
         })}
       </ul>
       {launch.thread ? (
-        <p className="text-muted-foreground">Model: {launch.thread.model_selection.model}</p>
+        <p className="text-muted-foreground">
+          {gt("Model: {model}", { model: launch.thread.model_selection.model })}
+        </p>
       ) : null}
       {stale ? (
         <p role="status" className="text-muted-foreground">
-          Can’t refresh Orbit right now. Showing the last update.
+          <T>Can’t refresh Orbit right now. Showing the last update.</T>
         </p>
       ) : null}
       {error ? (
@@ -96,7 +97,7 @@ export function OrbitLaunchProgress({ launch, stale }: { launch: OrbitLaunch; st
               disabled={busy !== null || stale}
               onClick={() => void act(action)}
             >
-              {orbitLaunchActionLabel(action, launch.phase)}
+              {orbitLaunchActionLabel(action, launch.phase, messages)}
             </Button>
           ))}
       </div>
@@ -105,7 +106,7 @@ export function OrbitLaunchProgress({ launch, stale }: { launch: OrbitLaunch; st
         return !action.available && action.requires ? (
           <p key={id} className="text-muted-foreground">
             {action.requires === "project_process_definition"
-              ? "Update the project’s process definition before retrying."
+              ? gt("Update the project’s process definition before retrying.")
               : (action.reason ?? action.requires)}
           </p>
         ) : null;

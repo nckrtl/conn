@@ -1,5 +1,7 @@
 // @effect-diagnostics globalTimers:off -- Client polling follows Orbit's snapshot cadence.
 import * as Schema from "effect/Schema";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
 import { operationPollDelayMs, OrbitGatewayError, type OrbitGatewayClient } from "./client.ts";
 import {
@@ -30,7 +32,10 @@ export interface OrbitLaunchView {
 
 const EMPTY: OrbitLaunchView = { launches: [], loaded: false, error: null };
 
-export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | null) {
+export function createOrbitLaunchObserver(
+  client: () => OrbitGatewayClient | null,
+  resolve: MFunctionType = mFallback,
+) {
   let view = EMPTY;
   let scope: OrbitLaunchScope | null = null;
   let scopeVersion = 0;
@@ -99,7 +104,10 @@ export function createOrbitLaunchObserver(client: () => OrbitGatewayClient | nul
           publish({
             launches: denied ? [] : view.launches,
             loaded: true,
-            error: error instanceof Error ? error.message : "Could not read Orbit launches.",
+            error:
+              error instanceof Error
+                ? error.message
+                : resolve(msg("Could not read Orbit launches.")),
           });
           if (purpose === "reconcile") schedule();
         }

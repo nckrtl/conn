@@ -1,8 +1,10 @@
 import { useNavigate, useRouter } from "@tanstack/react-router";
+import { T, msg, useGT } from "gt-react";
 import { useState, type ReactNode } from "react";
 
 import { Button } from "../components/ui/button";
 import { SidebarInset } from "../components/ui/sidebar";
+import { m } from "../i18n/messages";
 import { isElectron } from "../env";
 import { cn } from "../lib/utils";
 import { buildThreadRouteParams } from "../threadRoutes";
@@ -11,6 +13,7 @@ import { OrbitLaunchProgress } from "./OrbitLaunchProgress";
 import { attachOrbitLaunchThread, orbitLaunches, useOrbitLaunches } from "./orbitLaunches";
 
 export function OrbitPendingThreadView({ startId }: { startId: string }) {
+  const gt = useGT();
   const state = useOrbitLaunches();
   const launch = state.launches.find((row) => row.launch_id === startId);
   const navigate = useNavigate();
@@ -28,14 +31,18 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
         await navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(ref) });
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not open the thread.");
+      setError(cause instanceof Error ? cause.message : m(msg("Could not open the thread.")));
     }
     setOpening(false);
   };
   return (
     <PendingThreadShell
       startId={startId}
-      header={<span className="text-ui font-medium">Orbit launch</span>}
+      header={
+        <span className="text-ui font-medium">
+          <T>Orbit launch</T>
+        </span>
+      }
     >
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both bg-background">
         <div className="mx-auto grid w-full max-w-(--chat-content-max-width) gap-4 px-3 py-6">
@@ -45,7 +52,7 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
               {launch.thread ? (
                 <div>
                   <Button variant="outline" disabled={opening} onClick={() => void openThread()}>
-                    Open thread
+                    <T>Open thread</T>
                   </Button>
                 </div>
               ) : null}
@@ -59,11 +66,11 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
             <>
               <p role="status" className="text-ui text-muted-foreground">
                 {state.error ??
-                  (state.loaded ? "Orbit does not show this launch." : "Loading launch…")}
+                  (state.loaded ? gt("Orbit does not show this launch.") : gt("Loading launch…"))}
               </p>
               <div>
                 <Button variant="outline" onClick={() => void orbitLaunches.refresh()}>
-                  Refresh
+                  <T>Refresh</T>
                 </Button>
               </div>
             </>

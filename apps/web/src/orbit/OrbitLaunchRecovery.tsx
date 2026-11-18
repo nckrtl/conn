@@ -3,10 +3,12 @@ import type {
   OrbitLaunchSubmission,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { Link } from "@tanstack/react-router";
+import { T, msg, useGT } from "gt-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "../components/ui/button";
 import { composerDraftHasUserContent, DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { m } from "../i18n/messages";
 import { orbitDraftMatchesLaunch } from "./orbitDraft";
 import {
   orbitLaunchSubmissions,
@@ -18,6 +20,7 @@ import {
 } from "./orbitLaunches";
 
 export function OrbitLaunchRecovery() {
+  const gt = useGT();
   const scope = useOrbitLaunchScope();
   const profileId = scope?.profileId ?? null;
   const nodeId = scope?.nodeId ?? null;
@@ -39,7 +42,11 @@ export function OrbitLaunchRecovery() {
         () => {
           if (current)
             setError(
-              "Conn could not read the previous Orbit starts. Their saved data is still on this device.",
+              m(
+                msg(
+                  "Conn could not read the previous Orbit starts. Their saved data is still on this device.",
+                ),
+              ),
             );
         },
       );
@@ -57,7 +64,7 @@ export function OrbitLaunchRecovery() {
           if (current) setPending(rows);
         },
         () => {
-          if (current) setError("Conn could not read its Orbit submission journal.");
+          if (current) setError(m(msg("Conn could not read its Orbit submission journal.")));
         },
       );
     };
@@ -103,7 +110,9 @@ export function OrbitLaunchRecovery() {
       await orbitLaunchSubmissions.replay(item);
       setPending(await orbitLaunchSubmissions.pending(item));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Orbit did not confirm the submission.");
+      setError(
+        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm the submission.")),
+      );
     }
     setBusy(null);
   }
@@ -114,7 +123,9 @@ export function OrbitLaunchRecovery() {
       await updateLegacyWebPreview(row, action);
       setLegacy(readLegacyWebLaunches());
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Orbit did not confirm the preview.");
+      setError(
+        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm the preview.")),
+      );
     }
     setBusy(null);
   }
@@ -123,16 +134,22 @@ export function OrbitLaunchRecovery() {
     <>
       {legacy.map((row) => (
         <details key={row.id} className="grid gap-1 px-2 py-1 text-ui">
-          <summary>Previous Orbit start · {row.project}</summary>
+          <summary>{gt("Previous Orbit start · {project}", { project: row.project })}</summary>
           {row.completion ? (
             <p className="text-muted-foreground">
-              Previous application preview ·{" "}
-              {row.completion.operationId === null ? "Retry unconfirmed" : row.completion.status}
+              {gt("Previous application preview · {status}", {
+                status:
+                  row.completion.operationId === null
+                    ? gt("Retry unconfirmed")
+                    : row.completion.status,
+              })}
               {row.completion.error ? ` · ${row.completion.error}` : ""}
             </p>
           ) : (
             <p className="text-muted-foreground">
-              Check the previous thread before starting again. This message may have been sent.
+              <T>
+                Check the previous thread before starting again. This message may have been sent.
+              </T>
             </p>
           )}
           {row.prompt !== null ? (
@@ -143,7 +160,7 @@ export function OrbitLaunchRecovery() {
               to="/$environmentId/$threadId"
               params={{ environmentId: row.environmentId, threadId: row.threadId }}
             >
-              Open previous thread
+              <T>Open previous thread</T>
             </Link>
           ) : null}
           <div className="flex flex-wrap gap-1">
@@ -156,7 +173,7 @@ export function OrbitLaunchRecovery() {
                     disabled={busy !== null}
                     onClick={() => void legacyPreview(row, "refresh")}
                   >
-                    Refresh preview
+                    <T>Refresh preview</T>
                   </Button>
                 ) : null}
                 {row.completion.retryable ? (
@@ -167,8 +184,8 @@ export function OrbitLaunchRecovery() {
                     onClick={() => void legacyPreview(row, "retry")}
                   >
                     {row.completion.operationId === null
-                      ? "Resume preview retry"
-                      : "Retry application"}
+                      ? gt("Resume preview retry")
+                      : gt("Retry application")}
                   </Button>
                 ) : null}
               </>
@@ -182,10 +199,10 @@ export function OrbitLaunchRecovery() {
                   if (prompt !== null)
                     void navigator.clipboard
                       .writeText(prompt)
-                      .catch(() => setError("Could not copy the message."));
+                      .catch(() => setError(m(msg("Could not copy the message."))));
                 }}
               >
-                Copy message
+                <T>Copy message</T>
               </Button>
             ) : null}
             <Button
@@ -195,10 +212,10 @@ export function OrbitLaunchRecovery() {
               onClick={() =>
                 void resolveLegacyWebLaunch(row.id)
                   .then(() => setLegacy(readLegacyWebLaunches()))
-                  .catch(() => setError("Could not dismiss the previous start."))
+                  .catch(() => setError(m(msg("Could not dismiss the previous start."))))
               }
             >
-              Dismiss saved copy
+              <T>Dismiss saved copy</T>
             </Button>
           </div>
         </details>
@@ -209,10 +226,10 @@ export function OrbitLaunchRecovery() {
           <div key={row.admission.id} className="grid gap-1 px-2 py-1 text-ui">
             <p>
               {accepted
-                ? "Orbit accepted this submission"
+                ? gt("Orbit accepted this submission")
                 : row.validationRefused
-                  ? "Orbit refused the retry"
-                  : "Orbit submission unconfirmed"}
+                  ? gt("Orbit refused the retry")
+                  : gt("Orbit submission unconfirmed")}
             </p>
             <p className="truncate text-muted-foreground">
               {row.admission.request.prompt.split("\n")[0]}
@@ -223,11 +240,11 @@ export function OrbitLaunchRecovery() {
                 params={{ startId: accepted.launch_id }}
                 onClick={() =>
                   void acknowledge(row).catch(() =>
-                    setError("Could not clear the recovered draft."),
+                    setError(m(msg("Could not clear the recovered draft."))),
                   )
                 }
               >
-                Open recovered launch
+                <T>Open recovered launch</T>
               </Link>
             ) : row.superseded ? (
               <Button
@@ -237,17 +254,19 @@ export function OrbitLaunchRecovery() {
                 onClick={() =>
                   void orbitLaunchSubmissions
                     .acknowledge(row.admission.id)
-                    .catch(() => setError("Could not dismiss the saved submission."))
+                    .catch(() => setError(m(msg("Could not dismiss the saved submission."))))
                 }
               >
-                Dismiss saved copy
+                <T>Dismiss saved copy</T>
               </Button>
             ) : (
               <div>
                 {row.validationRefused ? (
                   <p className="text-muted-foreground">
-                    You can edit the draft and send a correction. The original submission stays
-                    here.
+                    <T>
+                      You can edit the draft and send a correction. The original submission stays
+                      here.
+                    </T>
                   </p>
                 ) : null}
                 <Button
@@ -256,7 +275,7 @@ export function OrbitLaunchRecovery() {
                   disabled={busy !== null || snapshot.error !== null}
                   onClick={() => void replay(row)}
                 >
-                  Retry same submission
+                  <T>Retry same submission</T>
                 </Button>
               </div>
             )}

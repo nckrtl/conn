@@ -18,6 +18,7 @@ import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtim
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { AppState } from "react-native";
 
+import { m } from "../../i18n/messages";
 import { environmentCatalog } from "../../connection/catalog";
 import { writeFileAtomically } from "../../lib/atomic-file";
 import { rootNavigationRef } from "../../lib/rootNavigation";
@@ -64,7 +65,7 @@ async function loadMobileLaunchAdmissions() {
   return rows;
 }
 
-export const mobileOrbitLaunches = createOrbitLaunchObserver(() => orbitGatewayClient);
+export const mobileOrbitLaunches = createOrbitLaunchObserver(() => orbitGatewayClient, m);
 const orbitLaunchRowsAtom = createOrbitLaunchThreadRowsAtom({
   observer: mobileOrbitLaunches,
   threadRefsAtom: environmentThreadShells.threadRefsAtom,

@@ -168,36 +168,6 @@ export function newOrbitLaunchAdmission(
   };
 }
 
-export const ORBIT_LAUNCH_STAGES = {
-  workspace_server: "Prepare workspace and server",
-  first_message: "Send first message",
-  publication: "Attach thread to profile",
-  application_preview: "Prepare application preview",
-  cleanup: "Clean up launch",
-} satisfies Record<keyof OrbitLaunch["stages"], string>;
-
-export const ORBIT_LAUNCH_PHASE_LABELS = {
-  preparing: "Preparing instance",
-  dispatching: "Sending first message",
-  publishing: "Attaching thread",
-  ready: "Thread ready",
-  needs_retry: "Launch needs attention",
-  cancelling: "Cancelling",
-  cancelled: "Cancelled",
-} satisfies Record<OrbitLaunch["phase"], string>;
-
-export const ORBIT_LAUNCH_ACTION_LABELS = {
-  cancel: "Cancel launch",
-  retry_launch: "Retry launch",
-  retry_application: "Retry application",
-} satisfies Record<OrbitLaunchAction, string>;
-
-export function orbitLaunchActionLabel(action: OrbitLaunchAction, phase: OrbitLaunch["phase"]) {
-  return action === "retry_launch" && phase === "cancelling"
-    ? "Retry cleanup"
-    : ORBIT_LAUNCH_ACTION_LABELS[action];
-}
-
 export function orbitLaunchNeedsAttention(launch: OrbitLaunch): boolean {
   return (
     launch.phase !== "cancelled" &&

@@ -2,6 +2,7 @@ import {
   ORBIT_LAUNCH_ACTION_LABELS,
   ORBIT_LAUNCH_PHASE_LABELS,
   ORBIT_LAUNCH_STAGES,
+  ORBIT_LAUNCH_STAGE_STATUS,
   orbitLaunchActionLabel,
   type LegacyOrbitLaunch,
   type OrbitLaunch,
@@ -9,12 +10,14 @@ import {
   type OrbitLaunchSubmission,
 } from "@t3tools/client-runtime/orbit-gateway";
 import * as Clipboard from "expo-clipboard";
+import { T, msg, useGT, useMessages } from "gt-react-native";
 import { useEffect, useState } from "react";
 import { View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
 import { ErrorBanner } from "../../components/ui/ErrorBanner";
+import { m } from "../../i18n/messages";
 import { useOrbitGateway } from "./orbitGatewayStore";
 import {
   mobileOrbitLaunches,
@@ -28,16 +31,9 @@ import {
 
 const actionIds = Object.keys(ORBIT_LAUNCH_ACTION_LABELS) as OrbitLaunchAction[];
 const stageIds = Object.keys(ORBIT_LAUNCH_STAGES) as Array<keyof OrbitLaunch["stages"]>;
-const stageStatus = {
-  pending: "Waiting",
-  running: "In progress",
-  succeeded: "Done",
-  failed: "Failed",
-  cancelled: "Cancelled",
-  skipped: "Skipped",
-} as const;
-
 export function OrbitThreadStartRows() {
+  const gt = useGT();
+  const messages = useMessages();
   const gateway = useOrbitGateway();
   const { snapshot, rows } = useMobileOrbitLaunches();
   const nodeId = gateway.node?.id ?? null;
@@ -56,7 +52,9 @@ export function OrbitThreadStartRows() {
       },
       () => {
         if (current)
-          setError("Conn could not read the previous Orbit starts. The saved file is unchanged.");
+          setError(
+            m(msg("Conn could not read the previous Orbit starts. The saved file is unchanged.")),
+          );
       },
     );
     return () => {
@@ -73,7 +71,7 @@ export function OrbitThreadStartRows() {
           if (current) setPending(rows);
         },
         () => {
-          if (current) setError("Conn could not read its Orbit submission journal.");
+          if (current) setError(m(msg("Conn could not read its Orbit submission journal.")));
         },
       );
     };
@@ -91,7 +89,9 @@ export function OrbitThreadStartRows() {
     try {
       await action();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Orbit did not confirm the action.");
+      setError(
+        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm the action.")),
+      );
     }
     setBusy(false);
   };
@@ -109,17 +109,17 @@ export function OrbitThreadStartRows() {
     return null;
   return (
     <View
-      accessibilityLabel="Orbit thread starts"
+      accessibilityLabel={gt("Orbit thread starts")}
       className="mx-2 mb-2 overflow-hidden rounded-[20px] bg-grouped-card"
     >
       {rows.map((launch) => (
         <View key={launch.id} className="gap-2 border-b border-border-subtle px-4 py-3">
           <Text className="text-base text-foreground">
             {launch.instance_id === null
-              ? `Orbit project #${launch.project_id}`
-              : `Instance #${launch.instance_id}`}
+              ? gt("Orbit project #{id}", { id: launch.project_id })
+              : gt("Instance #{id}", { id: launch.instance_id })}
             {" · "}
-            {ORBIT_LAUNCH_PHASE_LABELS[launch.phase]}
+            {messages(ORBIT_LAUNCH_PHASE_LABELS[launch.phase])}
           </Text>
           {stageIds.map((id) => {
             const stage = launch.stages[id];
@@ -129,7 +129,8 @@ export function OrbitThreadStartRows() {
             return (
               <View key={id} className="gap-1">
                 <Text className="text-sm text-foreground-muted">
-                  {ORBIT_LAUNCH_STAGES[id]} · {stageStatus[stage.status]}
+                  {messages(ORBIT_LAUNCH_STAGES[id])} ·{" "}
+                  {messages(ORBIT_LAUNCH_STAGE_STATUS[stage.status])}
                   {time ? ` · ${new Date(time).toLocaleTimeString()}` : ""}
                 </Text>
                 {stage.error ? (
@@ -142,12 +143,12 @@ export function OrbitThreadStartRows() {
           })}
           {launch.thread ? (
             <Text className="text-sm text-foreground-muted">
-              Model: {launch.thread.model_selection.model}
+              {gt("Model: {model}", { model: launch.thread.model_selection.model })}
             </Text>
           ) : null}
           {launch.thread ? (
             <Button
-              label="Open thread"
+              label={gt("Open thread")}
               disabled={busy}
               onPress={() => {
                 const thread = launch.thread;
@@ -161,7 +162,7 @@ export function OrbitThreadStartRows() {
               return (
                 <Button
                   key={id}
-                  label={orbitLaunchActionLabel(id, launch.phase)}
+                  label={orbitLaunchActionLabel(id, launch.phase, messages)}
                   disabled={busy || snapshot.error !== null}
                   onPress={() => void run(() => mobileOrbitLaunches.act(launch.id, id))}
                 />
@@ -169,7 +170,7 @@ export function OrbitThreadStartRows() {
             return action.requires ? (
               <Text key={id} className="text-sm text-foreground-muted">
                 {action.requires === "project_process_definition"
-                  ? "Update the project’s process definition before retrying."
+                  ? gt("Update the project’s process definition before retrying.")
                   : (action.reason ?? action.requires)}
               </Text>
             ) : null;
@@ -178,21 +179,29 @@ export function OrbitThreadStartRows() {
       ))}
       {legacy.map((row) => (
         <View key={row.id} className="gap-2 border-b border-border-subtle px-4 py-3">
-          <Text className="text-base text-foreground">Previous Orbit start · {row.project}</Text>
+          <Text className="text-base text-foreground">
+            {gt("Previous Orbit start · {project}", { project: row.project })}
+          </Text>
           {row.completion ? (
             <Text className="text-sm text-foreground-muted">
-              Previous application preview ·{" "}
-              {row.completion.operationId === null ? "Retry unconfirmed" : row.completion.status}
+              {gt("Previous application preview · {status}", {
+                status:
+                  row.completion.operationId === null
+                    ? gt("Retry unconfirmed")
+                    : row.completion.status,
+              })}
               {row.completion.error ? ` · ${row.completion.error}` : ""}
             </Text>
           ) : (
             <Text className="text-sm text-foreground-muted">
-              Check the previous thread before starting again. This message may have been sent.
+              <T>
+                Check the previous thread before starting again. This message may have been sent.
+              </T>
             </Text>
           )}
           {row.environmentId && row.threadId ? (
             <Button
-              label="Open previous thread"
+              label={gt("Open previous thread")}
               disabled={busy}
               onPress={() => {
                 const environment_id = row.environmentId;
@@ -206,7 +215,7 @@ export function OrbitThreadStartRows() {
             <>
               {row.completion.operationId !== null ? (
                 <Button
-                  label="Refresh preview"
+                  label={gt("Refresh preview")}
                   disabled={busy}
                   onPress={() =>
                     void run(async () => {
@@ -220,8 +229,8 @@ export function OrbitThreadStartRows() {
                 <Button
                   label={
                     row.completion.operationId === null
-                      ? "Resume preview retry"
-                      : "Retry application"
+                      ? gt("Resume preview retry")
+                      : gt("Retry application")
                   }
                   disabled={busy}
                   onPress={() =>
@@ -236,7 +245,7 @@ export function OrbitThreadStartRows() {
           ) : null}
           {row.prompt !== null ? (
             <Button
-              label="Copy saved message"
+              label={gt("Copy saved message")}
               disabled={busy}
               onPress={() => {
                 const prompt = row.prompt;
@@ -245,7 +254,7 @@ export function OrbitThreadStartRows() {
             />
           ) : null}
           <Button
-            label="Dismiss saved copy"
+            label={gt("Dismiss saved copy")}
             disabled={busy}
             onPress={() =>
               void run(async () => {
@@ -262,10 +271,10 @@ export function OrbitThreadStartRows() {
           <View key={row.admission.id} className="gap-2 border-b border-border-subtle px-4 py-3">
             <Text className="text-base text-foreground">
               {accepted
-                ? "Orbit accepted this submission"
+                ? gt("Orbit accepted this submission")
                 : row.validationRefused
-                  ? "Orbit refused the retry"
-                  : "Orbit submission unconfirmed"}
+                  ? gt("Orbit refused the retry")
+                  : gt("Orbit submission unconfirmed")}
             </Text>
             <Text numberOfLines={1} className="text-sm text-foreground-muted">
               {row.admission.request.prompt.split("\n")[0]}
@@ -273,10 +282,10 @@ export function OrbitThreadStartRows() {
             <Button
               label={
                 accepted
-                  ? "Acknowledge launch"
+                  ? gt("Acknowledge launch")
                   : row.superseded
-                    ? "Dismiss saved copy"
-                    : "Retry same submission"
+                    ? gt("Dismiss saved copy")
+                    : gt("Retry same submission")
               }
               disabled={busy || (!row.superseded && snapshot.error !== null)}
               onPress={() =>
@@ -291,7 +300,7 @@ export function OrbitThreadStartRows() {
         );
       })}
       {snapshot.error ? (
-        <ErrorBanner message="Could not refresh Orbit launches. Showing the last update." />
+        <ErrorBanner message={gt("Could not refresh Orbit launches. Showing the last update.")} />
       ) : null}
       {error ? <ErrorBanner message={error} /> : null}
     </View>

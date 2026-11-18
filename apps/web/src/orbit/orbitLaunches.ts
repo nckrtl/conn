@@ -14,6 +14,7 @@ import {
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useSyncExternalStore } from "react";
 
+import { m } from "../i18n/messages";
 import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { useWorkspaceStore } from "../workspaceStore";
 import { randomUUID } from "../lib/utils";
@@ -23,7 +24,7 @@ import { orbitDraftLaunchTarget, type OrbitDraftStartInput } from "./orbitDraft"
 const SUBMISSIONS_KEY = "conn:orbit-launch-admissions:v1";
 const LEGACY_KEY = "conn:orbit-thread-starts:v1";
 
-export const orbitLaunches = createOrbitLaunchObserver(desktopOrbitGatewayClient);
+export const orbitLaunches = createOrbitLaunchObserver(desktopOrbitGatewayClient, m);
 export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   {
     lock: (work) => navigator.locks.request(SUBMISSIONS_KEY, work),

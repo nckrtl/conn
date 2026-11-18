@@ -1810,7 +1810,7 @@ export default function ChatView(props: ChatViewProps) {
   // An Orbit draft kept open after leaving Orbit mode (or the desktop app) says how to send it.
   const orbitDraftBlockedReason =
     !isServerThread && draftThread?.orbitTarget && orbitDraftTarget === null
-      ? orbitThreadStartBlockedReason()
+      ? orbitThreadStartBlockedReason(messages)
       : null;
   // A provider-native subagent cannot take messages: a status bar replaces the
   // composer and its strips. Its approvals and questions are asked on the

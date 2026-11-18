@@ -1,11 +1,20 @@
+import { msg } from "gt-react";
+
+import { m, type MessageResolver } from "../i18n/messages";
 import { orbitThreadsAvailableNow } from "./environmentProvider";
 
-export function orbitThreadStartBlockedReason(): string | null {
+export function orbitThreadStartBlockedReason(resolve: MessageResolver = m): string | null {
   if (window.desktopBridge?.orbitGatewaySend === undefined) {
-    return "Threads in an Orbit Project start only in the Conn desktop app. Open this Project there.";
+    return resolve(
+      msg(
+        "Threads in an Orbit Project start only in the Conn desktop app. Open this Project there.",
+      ),
+    );
   }
   if (!orbitThreadsAvailableNow()) {
-    return "Choose Orbit under Settings › Environments › Environments from, then try again.";
+    return resolve(
+      msg("Choose Orbit under Settings › Environments › Environments from, then try again."),
+    );
   }
   return null;
 }

@@ -3,6 +3,7 @@ import {
   type OrbitGatewayProject,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { StackActions, useNavigation, useRoute } from "@react-navigation/native";
+import { T, msg, useGT } from "gt-react-native";
 import { useEffect, useRef, useState } from "react";
 import { Platform, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -16,6 +17,7 @@ import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
 import { ListSection } from "../../components/ui/ListSection";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
+import { m } from "../../i18n/messages";
 import { orbitGatewayClient } from "./orbitGatewayClient";
 import { mobileOrbitSubmissions, startOrbitThread } from "./orbitThreadStartRuntime";
 import { orbitStartReturn } from "./orbitThreadStarts";
@@ -25,6 +27,7 @@ import { orbitStartReturn } from "./orbitThreadStarts";
  * Instance, and the thread starts there with the first message (FORK.md, "Orbit").
  */
 export function OrbitThreadStartScreen() {
+  const gt = useGT();
   const navigation = useNavigation();
   const { key: sheetKey } = useRoute();
   const insets = useSafeAreaInsets();
@@ -68,7 +71,9 @@ export function OrbitThreadStartScreen() {
         await mobileOrbitSubmissions.acknowledge(launch.launch_id).catch(() => {});
       }
     } catch (error) {
-      setSendError(error instanceof Error ? error.message : "Orbit did not confirm the launch.");
+      setSendError(
+        error instanceof Error ? error.message : m(msg("Orbit did not confirm the launch.")),
+      );
     }
     started.current = false;
     setSending(false);
@@ -76,7 +81,7 @@ export function OrbitThreadStartScreen() {
 
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
-      <AppBar title="Orbit project" hideBottomBorder onBack={goBack} />
+      <AppBar title={gt("Orbit project")} hideBottomBorder onBack={goBack} />
       <ScreenContent>
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
@@ -91,12 +96,14 @@ export function OrbitThreadStartScreen() {
           }}
         >
           <Text className="px-2 text-sm leading-normal text-foreground-muted">
-            Orbit creates a clone of the project's default instance, and the thread starts there
-            with this message.
+            <T>
+              Orbit creates a clone of the project's default instance, and the thread starts there
+              with this message.
+            </T>
           </Text>
           {loadError ? <ErrorBanner message={loadError} /> : null}
           {sendError ? <ErrorBanner message={sendError} /> : null}
-          <ListSection title="Project">
+          <ListSection title={gt("Project")}>
             {projects === null ? (
               loadError ? null : (
                 <View className="items-center p-4">
@@ -105,7 +112,9 @@ export function OrbitThreadStartScreen() {
               )
             ) : projects.length === 0 ? (
               <Text className="p-4 text-sm leading-normal text-foreground-muted">
-                No Orbit project has a default instance in a container that this device reaches.
+                <T>
+                  No Orbit project has a default instance in a container that this device reaches.
+                </T>
               </Text>
             ) : (
               projects.map((entry, index) => (
@@ -122,22 +131,22 @@ export function OrbitThreadStartScreen() {
               ))
             )}
           </ListSection>
-          <ListSection title="First message">
+          <ListSection title={gt("First message")}>
             <TextInput
-              accessibilityLabel="First message"
+              accessibilityLabel={gt("First message")}
               value={text}
               onChangeText={setText}
               editable={!sending}
               multiline
               scrollEnabled
               textAlignVertical="top"
-              placeholder="What should the agent do?"
+              placeholder={gt("What should the agent do?")}
               placeholderTextColorClassName="accent-foreground-muted"
               className="max-h-48 min-h-28 p-4 font-sans text-base text-foreground"
             />
           </ListSection>
           <Button
-            label={sending ? "Sending…" : "Start thread"}
+            label={sending ? gt("Sending…") : gt("Start thread")}
             tone="primary"
             fullWidth
             disabled={!canStart || sending}

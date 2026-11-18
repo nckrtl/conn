@@ -64,11 +64,18 @@ Each is the fail-closed reading.
 - A managed ticket redeems only for its own edge, before its deadline (checked where the
   handler registers), and only if the edge was not fenced since it was minted. The session
   then carries the token's principal and expiry.
-- Handlers end only when their last part has ended: RPC call tasks hold the session's
-  registration, and an HTTP body holds it until Hyper wrote or dropped it. Every frame part
-  passes the gate, and a stalled write is abandoned the moment the gate closes.
-- Settled revision records are pruned after their ACK; confirmed fences stay for the
-  generation. Each applied probe narrows the Gateway-to-target clock offset bounds from
+- The fence also holds at the byte level: every managed socket is a `FencedIo`
+  (`managed/conn.rs`) that carries the handlers of its connection. A fenced handler makes
+  the socket refuse every write and read, so nothing Hyper or the WebSocket still buffers
+  reaches the peer; a paused one holds writes. Each managed HTTP response ends its
+  connection (`Connection: close`), and a handler stays registered until its connection is
+  gone, so `handlers_closed_at` means no handler and no sendable byte remain. RPC call
+  tasks hold the session's registration too, and closes are bounded.
+- A token's expiry is enforced as a target monotonic deadline: the Gateway's expiry minus
+  the upper bound of the measured clock offset (the Gateway may run ahead).
+- A pause also holds HTTP reads and preview attachments; only a fence refuses them.
+- Settled revision records are pruned after their ACK, or when a fresh verified reply no
+  longer owes them (a lost ACK answer); confirmed fences stay for the generation. Each applied probe narrows the Gateway-to-target clock offset bounds from
   `server_time` and the probe's send and receive times.
 
 ## Not proven here

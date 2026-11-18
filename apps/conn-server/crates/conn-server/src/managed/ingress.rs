@@ -121,7 +121,19 @@ pub fn router(app: AppState, managed: Arc<Managed>) -> Router {
         )
         .route("/api/preview-stream/ws", get(preview))
         .fallback(refused)
+        .layer(axum::middleware::map_response(close_after))
         .with_state(state)
+}
+
+/// One request per managed HTTP connection: its handler ends with the connection.
+async fn close_after(mut response: Response) -> Response {
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        response.headers_mut().insert(
+            header::CONNECTION,
+            header::HeaderValue::from_static("close"),
+        );
+    }
+    response
 }
 
 fn error(status: StatusCode, code: &str) -> Response {
@@ -195,7 +207,7 @@ fn native_principal(principal: &ManagedPrincipal, handle: &Handle) -> crate::aut
 /// token. Redeeming it introspects the token again.
 async fn ticket(
     State(state): State<IngressState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(conn): ConnectInfo<super::conn::Peer>,
     Path(route): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -204,7 +216,7 @@ async fn ticket(
         "media" => Route::Media,
         _ => return refused().await,
     };
-    let (principal, handle) = match admit_bearer(&state, &headers, addr).await {
+    let (principal, handle) = match admit_bearer(&state, &headers, conn.addr).await {
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
@@ -242,11 +254,13 @@ async fn ticket(
             },
         );
     }
-    if !handle.open() {
+    let handle = Arc::new(handle);
+    if !crate::session::pass(Some(&SessionGate(handle.clone()))).await {
         crate::lock(&state.managed.tickets).remove(&ticket);
         return admit_failed(&AdmitError::Forbidden);
     }
-    drop(handle);
+    // The handler stays registered until this connection, and its last byte, is gone.
+    conn.slot.attach(handle);
     let mut response = Json(json!({
         "ticket": ticket,
         "expiresAt": conn_support::time::iso_from_ms(expires_ms),
@@ -314,7 +328,7 @@ async fn admit_upgrade(
 async fn ws(
     upgrade: WebSocketUpgrade,
     State(state): State<IngressState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(conn): ConnectInfo<super::conn::Peer>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
@@ -324,15 +338,18 @@ async fn ws(
             "orchestration_protocol_incompatible",
         );
     }
-    let (principal, handle) = match admit_upgrade(&state, &query, &headers, addr, Route::Rpc).await
-    {
-        Ok(admitted) => admitted,
-        Err(response) => return *response,
-    };
+    let (principal, handle) =
+        match admit_upgrade(&state, &query, &headers, conn.addr, Route::Rpc).await {
+            Ok(admitted) => admitted,
+            Err(response) => return *response,
+        };
     let context = CallContext {
         principal: Some(Arc::new(native_principal(&principal, &handle))),
         ..CallContext::default()
     };
+    // The socket itself is fenced with the handler: the upgraded connection keeps it.
+    let handle = Arc::new(handle);
+    conn.slot.attach(handle.clone());
     // The handler is registered before the upgrade completes: a fence that lands now closes
     // the socket on its first check.
     let options = SessionOptions {
@@ -340,7 +357,7 @@ async fn ws(
         max_message_bytes: crate::http::MAX_MESSAGE_BYTES,
         idle_timeout: Duration::from_secs(60),
         context,
-        gate: Some(SessionGate(Arc::new(handle))),
+        gate: Some(SessionGate(handle)),
     };
     let table = state.table.clone();
     upgrade
@@ -367,63 +384,48 @@ fn engine(
         .ok_or_else(|| Box::new(StatusCode::NOT_FOUND.into_response()))
 }
 
-/// Runs `read` while the handler is open, and returns its value only if the handler is
-/// still open after it: a fence during the read withholds the data.
-///
-/// The body streams in parts that each pass the handler's gate, and the body holds the
-/// handler: it stays registered until Hyper has written or dropped the last byte, and a
-/// fence ends the body (Hyper then drops the connection).
+/// Runs `read` while the handler is open (waiting out a pause), and returns its value only
+/// if the handler still passes after it. The handler is attached to the connection, which
+/// carries only this request: it stays registered until Hyper wrote or dropped the last byte,
+/// and a fence ends the connection at the socket.
 async fn guarded(
+    conn: &super::conn::Peer,
     handle: Handle,
     read: impl std::future::Future<Output = Result<Response, Response>>,
 ) -> Response {
-    let closed = handle.closed();
+    let handle = Arc::new(handle);
+    conn.slot.attach(handle.clone());
+    let gate = SessionGate(handle);
+    let closed = gate.0.closed();
     let response = tokio::select! {
-        response = read => response,
+        biased;
         () = closed => return admit_failed(&AdmitError::Forbidden),
+        response = read => response,
     };
     let response = match response {
-        Ok(response) => response,
-        Err(response) => return response,
+        Ok(response) | Err(response) => response,
     };
-    if !handle.open() {
-        return admit_failed(&AdmitError::Forbidden);
+    if crate::session::pass(Some(&gate)).await {
+        response
+    } else {
+        admit_failed(&AdmitError::Forbidden)
     }
-    let (parts, body) = response.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
-        return crate::http::internal_reason("managed_body_failed");
-    };
-    let handle = Arc::new(handle);
-    const PART: usize = 16 * 1024;
-    let stream = futures_util::stream::unfold((bytes, handle), |(mut rest, handle)| async move {
-        if rest.is_empty() {
-            return None;
-        }
-        if !crate::session::pass(Some(&SessionGate(handle.clone()))).await {
-            let fenced: Result<axum::body::Bytes, std::io::Error> =
-                Err(std::io::Error::other("access revoked"));
-            return Some((fenced, (axum::body::Bytes::new(), handle)));
-        }
-        let part = rest.split_to(rest.len().min(PART));
-        Some((Ok(part), (rest, handle)))
-    });
-    Response::from_parts(parts, axum::body::Body::from_stream(stream))
 }
 
 async fn shell_snapshot(
     State(state): State<IngressState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(conn): ConnectInfo<super::conn::Peer>,
     headers: HeaderMap,
 ) -> Response {
     let engine = match engine(&state, &headers) {
         Ok(engine) => engine,
         Err(response) => return *response,
     };
-    let (_, handle) = match admit_bearer(&state, &headers, addr).await {
+    let (_, handle) = match admit_bearer(&state, &headers, conn.addr).await {
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
-    guarded(handle, async move {
+    guarded(&conn, handle, async move {
         match engine.shell_snapshot().await {
             Ok(snapshot) => Ok(Json(snapshot).into_response()),
             Err(_) => Err(crate::http::internal_reason(
@@ -436,7 +438,7 @@ async fn shell_snapshot(
 
 async fn thread_snapshot(
     State(state): State<IngressState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(conn): ConnectInfo<super::conn::Peer>,
     Path(thread_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -444,11 +446,11 @@ async fn thread_snapshot(
         Ok(engine) => engine,
         Err(response) => return *response,
     };
-    let (_, handle) = match admit_bearer(&state, &headers, addr).await {
+    let (_, handle) = match admit_bearer(&state, &headers, conn.addr).await {
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
-    guarded(handle, async move {
+    guarded(&conn, handle, async move {
         match engine.thread_snapshot(thread_id.into()).await {
             Ok(Some(snapshot)) => Ok(Json(snapshot).into_response()),
             Ok(None) => Err(StatusCode::NOT_FOUND.into_response()),
@@ -464,7 +466,7 @@ async fn thread_snapshot(
 async fn preview(
     ws: WebSocketUpgrade,
     State(state): State<IngressState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(conn): ConnectInfo<super::conn::Peer>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
@@ -480,14 +482,16 @@ async fn preview(
     if !known {
         return refused().await;
     }
-    let (_, handle) = match admit_upgrade(&state, &query, &headers, addr, Route::Media).await {
+    let (_, handle) = match admit_upgrade(&state, &query, &headers, conn.addr, Route::Media).await {
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
     let Some(preview) = state.app.deps.preview.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let gate = SessionGate(Arc::new(handle));
+    let handle = Arc::new(handle);
+    conn.slot.attach(handle.clone());
+    let gate = SessionGate(handle);
     crate::routes::preview::upgrade_viewer(ws, preview, &thread, &tab, false, &query, Some(gate))
         .await
 }

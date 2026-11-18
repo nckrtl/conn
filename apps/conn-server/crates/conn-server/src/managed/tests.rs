@@ -346,13 +346,7 @@ impl Lab {
             async move {
                 let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
                 let local = listener.local_addr().unwrap();
-                tokio::spawn(async move {
-                    axum::serve(
-                        listener,
-                        router.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .await
-                });
+                tokio::spawn(async move { super::conn::serve(listener, router).await });
                 local
             }
         };
@@ -825,4 +819,24 @@ async fn a_target_refusal_during_introspection_fails_everything_closed() {
     if let Some((low, high)) = lab.shared.read(|a| a.offset_bounds()) {
         eprintln!("LAB clock offset bounds (Gateway − target): [{low}, {high}] ms");
     }
+}
+
+/// A caller that stops reading cannot hold a revoked edge open: its socket is cut at the
+/// fence, its handler ends, and the ACK goes out.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stalled_reader_is_cut_at_the_fence_and_acknowledged() {
+    let lab = Lab::start().await;
+    let token_a = lab.fake.issue(NODE_A);
+    let _a = subscribed(lab.v4, &token_a).await;
+    // A stops reading; its stream keeps producing.
+    let notice = lab.fake.remove_edge(EDGE_A);
+    let committed = Instant::now();
+    lab.deliver(&notice);
+    let (ack, acked) = until_ack(&lab, notice.revision).await;
+    assert_eq!(ack["kind"], "observed");
+    assert_eq!(lab.shared.read(|a| a.open_handlers()), 0);
+    eprintln!(
+        "LAB stalled reader: commit→ACK {} ms",
+        ms(acked - committed)
+    );
 }

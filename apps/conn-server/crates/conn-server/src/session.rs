@@ -103,11 +103,32 @@ async fn write_gated<T: Transport>(
         }
         let closed = gate.0.closed();
         tokio::select! {
-            sent = socket.send(part) => if !sent { return false },
+            biased;
             () = closed => return false,
+            sent = socket.send(part) => if !sent { return false },
         }
     }
     true
+}
+
+/// Closes the socket. With a gate, the close write is bounded and gives way to a fence: a
+/// stalled peer cannot keep a fenced session registered.
+async fn end<T: Transport>(
+    socket: &mut T,
+    code: u16,
+    reason: &'static str,
+    gate: Option<&SessionGate>,
+) {
+    let Some(gate) = gate else {
+        socket.close(code, reason).await;
+        return;
+    };
+    let closed = gate.0.closed();
+    tokio::select! {
+        biased;
+        () = closed => {}
+        _ = tokio::time::timeout(Duration::from_millis(100), socket.close(code, reason)) => {}
+    }
 }
 
 /// Ends a session whose gate closed: a close frame if the socket takes it at once, else the
@@ -281,7 +302,7 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
             return;
         }
         if ended && calls.0.is_empty() {
-            socket.close(CLOSE_NORMAL, "").await;
+            end(&mut socket, CLOSE_NORMAL, "", gate.as_ref()).await;
             return;
         }
         tokio::select! {
@@ -305,7 +326,7 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                 let text = match incoming {
                     Incoming::Text(text) => text,
                     Incoming::TooLarge => {
-                        socket.close(CLOSE_TOO_LARGE, "message too large").await;
+                        end(&mut socket, CLOSE_TOO_LARGE, "message too large", gate.as_ref()).await;
                         return;
                     }
                     Incoming::Closed => return,
@@ -314,7 +335,7 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                     Ok(Some(text)) => text,
                     Ok(None) => continue,
                     Err(frame_parts::TooLarge) => {
-                        socket.close(CLOSE_TOO_LARGE, "message too large").await;
+                        end(&mut socket, CLOSE_TOO_LARGE, "message too large", gate.as_ref()).await;
                         return;
                     }
                 };
@@ -368,7 +389,7 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                 }
             }
             _ = &mut idle => {
-                socket.close(CLOSE_GOING_AWAY, "idle").await;
+                end(&mut socket, CLOSE_GOING_AWAY, "idle", gate.as_ref()).await;
                 return;
             }
             () = &mut gate_closed => {

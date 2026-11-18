@@ -16,6 +16,7 @@
 //! - [`ingress`]: the managed HTTP and WebSocket routes.
 
 pub mod authority;
+pub mod conn;
 pub mod gateway;
 pub mod ingress;
 pub mod notices;
@@ -196,9 +197,17 @@ impl Shared {
                 continue;
             }
             let nonce = random_nonce();
-            let reply =
-                bounded(gateway.introspect(nonce.clone(), token.to_owned(), peer_address.clone()))
-                    .await;
+            // The call is bounded by its own timeout and by the admission deadline.
+            let call_until = deadline.min(Instant::now() + gateway::CALL_TIMEOUT);
+            let reply = tokio::time::timeout_at(
+                call_until,
+                gateway.introspect(nonce.clone(), token.to_owned(), peer_address.clone()),
+            )
+            .await;
+            if Instant::now() >= deadline {
+                return Err(AdmitError::Unavailable);
+            }
+            let reply = reply.unwrap_or_else(|_| Err(GatewayError::Transport("timeout".into())));
             // A barrier dropped this introspection: whatever came back, ask again.
             if self.read(|a| a.epoch()) != epoch {
                 continue;
@@ -229,6 +238,9 @@ impl Shared {
                 self.fail_closed(Loss::WrongIdentity);
                 return Err(AdmitError::Unavailable);
             }
+            // Every verified introspection teaches the target the Gateway's revision, before
+            // any refusal of this caller: one it has not applied pauses everything.
+            self.with(|a| ((), a.note_revision(claims.revision, Instant::now())));
             let Some(expires_ms) = conn_support::time::millis_from_iso(&claims.expires_at)
                 .and_then(|ms| u64::try_from(ms).ok())
             else {
@@ -238,21 +250,27 @@ impl Shared {
                 return Err(AdmitError::Forbidden);
             }
             let admitted = self.with(|a| {
+                let now = Instant::now();
+                if now >= deadline {
+                    return (Err(Refusal::Unavailable), Effects::default());
+                }
+                let expires = a.local_deadline(expires_ms, now, now_ms());
                 (
                     a.admit(
                         claims.edge_id,
                         claims.revision,
-                        expires_ms,
+                        expires,
                         epoch,
                         ticket,
-                        Instant::now(),
+                        now,
                         now_ms(),
-                    ),
+                    )
+                    .map(|(id, closed)| (id, closed, expires)),
                     Effects::default(),
                 )
             });
             match admitted {
-                Ok((id, closed)) => {
+                Ok((id, closed, expires)) => {
                     let principal = ManagedPrincipal {
                         token_id: id_text(&claims.token_id),
                         caller_node_id: claims.caller_node_id,
@@ -264,13 +282,17 @@ impl Shared {
                     let handle = Handle {
                         shared: self.clone(),
                         id,
-                        expires_ms,
+                        expires,
                         closed,
                     };
                     return Ok((principal, handle));
                 }
                 Err(Refusal::Fenced | Refusal::Expired) => return Err(AdmitError::Forbidden),
-                Err(Refusal::Stale | Refusal::Unavailable) => {}
+                Err(Refusal::Stale | Refusal::Unavailable) => {
+                    if Instant::now() >= deadline {
+                        return Err(AdmitError::Unavailable);
+                    }
+                }
                 Err(Refusal::Reconcile) => {
                     // The Gateway is ahead of us: reconcile first, then introspect again.
                     self.wake_probe.notify_one();
@@ -329,7 +351,9 @@ fn id_text(value: &Value) -> String {
 pub struct Handle {
     shared: Arc<Shared>,
     id: u64,
-    expires_ms: u64,
+    /// The token's expiry as a target monotonic deadline, on the safe side of the clock
+    /// offset.
+    expires: Instant,
     closed: watch::Receiver<bool>,
 }
 
@@ -359,7 +383,7 @@ impl Handle {
         }
         match self
             .shared
-            .read(|a| a.handler_state(self.id, self.expires_ms, now, now_ms()))
+            .read(|a| a.handler_state(self.id, self.expires, now))
         {
             authority::GateState::Open => GateState::Open,
             authority::GateState::Paused => GateState::Paused,
@@ -375,11 +399,11 @@ impl Handle {
     /// Resolves when the fence closes this handler or its token expires.
     pub fn closed(&self) -> BoxFuture<'static, ()> {
         let mut closed = self.closed.clone();
-        let left = self.expires_ms.saturating_sub(now_ms());
+        let expires = self.expires;
         Box::pin(async move {
             tokio::select! {
                 _ = closed.wait_for(|c| *c) => {}
-                () = tokio::time::sleep(std::time::Duration::from_millis(left)) => {}
+                () = tokio::time::sleep_until(expires) => {}
             }
         })
     }

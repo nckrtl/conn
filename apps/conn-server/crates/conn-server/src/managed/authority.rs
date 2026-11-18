@@ -176,7 +176,9 @@ pub struct Authority {
     provisional: HashMap<EdgeId, BTreeSet<Revision>>,
     /// A revision known without a contiguous edge list: everything pauses until a probe
     /// applies at least this revision.
-    block_until: Option<Revision>,
+    gap_notices: BTreeSet<Revision>,
+    /// The greatest revision an introspection named that is not applied yet, and when.
+    introspected: Option<(Revision, Instant)>,
     /// Snapshots applied in this process; the first one recovers a restart.
     snapshots: u64,
     /// Raised each time an edge is fenced; a ticket minted before a fence never redeems.
@@ -237,7 +239,8 @@ impl Authority {
             lease_until: None,
             confirmed: HashSet::new(),
             provisional: HashMap::new(),
-            block_until: None,
+            gap_notices: BTreeSet::new(),
+            introspected: None,
             snapshots: 0,
             fence_generation: HashMap::new(),
             offset_bounds: None,
@@ -296,8 +299,9 @@ impl Authority {
     /// A revision ahead of the next one is known without a contiguous edge list, and no
     /// probe has applied it yet.
     pub fn blocked(&self) -> bool {
-        self.block_until
-            .is_some_and(|r| self.applied.is_none_or(|applied| applied < r))
+        let unapplied = |r: Revision| self.applied.is_none_or(|applied| applied < r);
+        self.introspected.is_some_and(|(r, _)| unapplied(r))
+            || self.gap_notices.iter().any(|r| unapplied(*r))
     }
 
     /// The first revision after the applied one whose edges are not known from a notice.
@@ -311,12 +315,12 @@ impl Authority {
 
     /// A revision named by an introspection or a notice. One the target cannot place in a
     /// contiguous list pauses every managed boundary until a probe applies it.
-    pub fn note_revision(&mut self, revision: Revision) -> Effects {
+    pub fn note_revision(&mut self, revision: Revision, now: Instant) -> Effects {
         if self.applied.is_some_and(|applied| revision <= applied) {
             return Effects::default();
         }
-        if revision >= self.next_unknown() {
-            self.block_until = Some(self.block_until.map_or(revision, |b| b.max(revision)));
+        if revision >= self.next_unknown() && self.introspected.is_none_or(|(r, _)| revision > r) {
+            self.introspected = Some((revision, now));
         }
         if self.probe.is_some() {
             self.rerun = true;
@@ -333,6 +337,18 @@ impl Authority {
 
     pub fn offset_bounds(&self) -> Option<(i64, i64)> {
         self.offset_bounds
+    }
+
+    /// The target monotonic deadline of a Gateway wall time, on the safe side: the Gateway
+    /// clock may run ahead of the target's by up to the upper offset bound, so the deadline
+    /// comes that much earlier. Without bounds the wall time is taken as it is.
+    pub fn local_deadline(&self, gateway_ms: u64, now: Instant, wall_ms: u64) -> Instant {
+        let ahead = self.offset_bounds.map_or(0, |(_, high)| high.max(0));
+        let local = i64::try_from(gateway_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(ahead);
+        let left = local.saturating_sub(i64::try_from(wall_ms).unwrap_or(i64::MAX));
+        now + std::time::Duration::from_millis(u64::try_from(left).unwrap_or(0))
     }
 
     /// Removes `revision` from `edge`'s provisional fences. When none is left the edge is
@@ -369,22 +385,16 @@ impl Authority {
     }
 
     /// The check at every admission, dispatch and frame boundary.
-    pub fn allows(&self, edge: EdgeId, expires_ms: u64, now: Instant, wall_ms: u64) -> bool {
-        self.available(now) && !self.is_fenced(edge) && wall_ms < expires_ms
+    pub fn allows(&self, edge: EdgeId, expires: Instant, now: Instant) -> bool {
+        self.available(now) && !self.is_fenced(edge) && now < expires
     }
 
     /// What a registered handler may do now.
-    pub fn handler_state(
-        &self,
-        handler: u64,
-        expires_ms: u64,
-        now: Instant,
-        wall_ms: u64,
-    ) -> GateState {
+    pub fn handler_state(&self, handler: u64, expires: Instant, now: Instant) -> GateState {
         let Some(entry) = self.handlers.get(&handler) else {
             return GateState::Closed;
         };
-        if !self.held(now) || self.is_fenced(entry.edge) || wall_ms >= expires_ms {
+        if !self.held(now) || self.is_fenced(entry.edge) || now >= expires {
             GateState::Closed
         } else if self.blocked() {
             GateState::Paused
@@ -394,19 +404,14 @@ impl Authority {
     }
 
     /// Whether a registered handler may still run now.
-    pub fn handler_allowed(
-        &self,
-        handler: u64,
-        expires_ms: u64,
-        now: Instant,
-        wall_ms: u64,
-    ) -> bool {
-        self.handler_state(handler, expires_ms, now, wall_ms) == GateState::Open
+    pub fn handler_allowed(&self, handler: u64, expires: Instant, now: Instant) -> bool {
+        self.handler_state(handler, expires, now) == GateState::Open
     }
 
     /// Admits a verified introspection and registers its handler in the same step, so a fence
     /// cannot fall between the check and the registration. `claims_revision` is the Gateway's
-    /// committed revision when it read the token.
+    /// committed revision when it read the token; `expires` is the token's expiry as a target
+    /// monotonic deadline (see [`Self::local_deadline`]).
     #[expect(
         clippy::too_many_arguments,
         reason = "one atomic check of every admission input"
@@ -415,7 +420,7 @@ impl Authority {
         &mut self,
         edge: EdgeId,
         claims_revision: Revision,
-        expires_ms: u64,
+        expires: Instant,
         epoch: u64,
         ticket: Option<TicketBinding>,
         now: Instant,
@@ -438,13 +443,13 @@ impl Authority {
             return Err(Refusal::Unavailable);
         }
         if self.applied.is_none_or(|applied| claims_revision > applied) {
-            self.note_revision(claims_revision);
+            self.note_revision(claims_revision, now);
             return Err(Refusal::Reconcile);
         }
         if self.is_fenced(edge) {
             return Err(Refusal::Fenced);
         }
-        if wall_ms >= expires_ms {
+        if now >= expires {
             return Err(Refusal::Expired);
         }
         self.admitted.insert(edge);
@@ -599,11 +604,9 @@ impl Authority {
             self.fence_edge(*edge, wall_ms);
         }
         if ahead {
-            // Revisions before this one are unknown: pause everything until a probe applies it.
-            self.block_until = Some(
-                self.block_until
-                    .map_or(notice.revision, |b| b.max(notice.revision)),
-            );
+            // Revisions before this one are unknown: pause everything until a probe applies it
+            // or disproves this notice.
+            self.gap_notices.insert(notice.revision);
         }
         let record = self.revisions.entry(notice.revision).or_default();
         record.notice_received_ms.get_or_insert(wall_ms);
@@ -707,8 +710,21 @@ impl Authority {
         if probe.after_revision.is_none() {
             self.snapshots += 1;
         }
+        // An introspection that named a revision before this probe left proves the head
+        // reached it: a head below it is a missing revision.
+        if let Some((revision, noted)) = self.introspected {
+            if self.applied.is_some_and(|applied| applied >= revision) {
+                self.introspected = None;
+            } else if noted < probe.sent {
+                self.fail_closed(Loss::MissingRevision);
+                return self.after_reply();
+            }
+        }
         self.apply_owed(&reply.owed, first_snapshot, wall_ms);
+        self.prune_settled(reply.head_revision);
         self.disprove_notices(probe.sent, reply.head_revision, wall_ms);
+        let applied = self.applied;
+        self.gap_notices.retain(|r| applied.is_none_or(|a| a < *r));
         self.record_offset(reply, probe.sent_wall_ms, wall_ms);
         self.open = true;
         self.lease_until = Some(new_lease);
@@ -744,7 +760,7 @@ impl Authority {
             .keys()
             .next_back()
             .copied()
-            .max(self.block_until);
+            .max(self.introspected.map(|(r, _)| r));
         let behind = known.is_some_and(|k| self.applied.is_none_or(|a| k > a));
         let probe_now = std::mem::take(&mut self.rerun) || behind;
         Effects {
@@ -861,18 +877,9 @@ impl Authority {
                 .get(&entry.revision)
                 .is_some_and(|r| r.verified && r.fenced_ms.is_some());
             if !known {
-                // The target did not observe this revision's fence in this process (a
-                // restart, or a revision it applied through a snapshot): the snapshot it just
-                // applied is the upper bound of the close.
-                let observed_here = entry
-                    .edge_ids
-                    .iter()
-                    .all(|e| self.fenced_at.contains_key(e));
+                // Learned later in a running process: this process fences it now and measures
+                // its own close. `recovered` is only for the first snapshot of a process.
                 self.apply_verified_revision(entry, wall_ms);
-                if !observed_here {
-                    let record = self.revisions.entry(entry.revision).or_default();
-                    record.recovered_ms = Some(wall_ms);
-                }
             }
             self.owed.insert(entry.revision);
         }
@@ -888,6 +895,7 @@ impl Authority {
             .map(|(r, _)| *r)
             .collect();
         for revision in disproved {
+            self.gap_notices.remove(&revision);
             if let Some(notice) = self.notices.remove(&revision) {
                 for edge in notice.edges {
                     self.clear_provisional(edge, revision);
@@ -968,6 +976,25 @@ impl Authority {
                 self.fenced_at.remove(&edge);
                 self.closed_at.remove(&edge);
             }
+        }
+    }
+
+    /// A fresh verified reply that no longer owes a verified revision at or below its head
+    /// settled it (its ACK answer may have been lost): drop its record.
+    fn prune_settled(&mut self, head: Revision) {
+        let settled: Vec<Revision> = self
+            .revisions
+            .iter()
+            .filter(|(r, record)| {
+                record.verified
+                    && **r <= head
+                    && !self.owed.contains(r)
+                    && self.ack_in_flight != Some(**r)
+            })
+            .map(|(r, _)| *r)
+            .collect();
+        for revision in settled {
+            self.prune(revision);
         }
     }
 

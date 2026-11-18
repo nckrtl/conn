@@ -73,17 +73,25 @@ pub(crate) async fn upgrade_viewer(
             .unwrap_or(default)
             .min(max)
     };
-    let viewer = preview
-        .attach_viewer(
-            thread,
-            tab,
-            can_operate,
-            number("maxWidth", 1280, 7680),
-            number("maxHeight", 800, 4320),
-            number("quality", 70, 100),
-        )
-        .await;
-    if gate.as_ref().is_some_and(|g| !g.0.open()) {
+    let attach = preview.attach_viewer(
+        thread,
+        tab,
+        can_operate,
+        number("maxWidth", 1280, 7680),
+        number("maxHeight", 800, 4320),
+        number("quality", 70, 100),
+    );
+    let viewer = match &gate {
+        // A fence while the attachment waits releases the handler at once.
+        Some(gate) => tokio::select! {
+            biased;
+            () = gate.0.closed() => return StatusCode::FORBIDDEN.into_response(),
+            viewer = attach => viewer,
+        },
+        None => attach.await,
+    };
+    // A pause waits; only a fence refuses.
+    if !crate::session::pass(gate.as_ref()).await {
         return StatusCode::FORBIDDEN.into_response();
     }
     ws.max_message_size(64 * 1024)
@@ -119,8 +127,9 @@ async fn gated_send(socket: &mut WebSocket, message: Message, gate: &Option<Sess
     }
     let closed = gate.0.closed();
     tokio::select! {
-        sent = send(socket, message) => sent,
+        biased;
         () = closed => false,
+        sent = send(socket, message) => sent,
     }
 }
 

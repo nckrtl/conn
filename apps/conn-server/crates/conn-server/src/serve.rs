@@ -411,10 +411,9 @@ async fn start_managed(
         println!("managed ingress on http://{addr}");
     }
     let ingress = managed::ingress::Managed::new(shared, gateway, provision.preview_tabs);
-    let app = managed::ingress::router(state.clone(), ingress)
-        .into_make_service_with_connect_info::<SocketAddr>();
+    let app = managed::ingress::router(state.clone(), ingress);
     tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, app).await {
+        if let Err(error) = managed::conn::serve(listener, app).await {
             eprintln!("conn-server: managed ingress: {error}");
         }
     })

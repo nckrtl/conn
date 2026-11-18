@@ -1,0 +1,482 @@
+//! The authority rules, one contract row at a time.
+
+use std::time::Duration;
+
+use tokio::time::Instant;
+
+use super::*;
+
+const ENV: &str = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d";
+const FAR: u64 = u64::MAX;
+
+fn ms(n: u64) -> Duration {
+    Duration::from_millis(n)
+}
+
+struct Lab {
+    a: Authority,
+    t0: Instant,
+    n: u64,
+}
+
+impl Lab {
+    fn new() -> Self {
+        let mut a = Authority::new(ENV.into(), 1);
+        a.set_notice_link(true);
+        Self {
+            a,
+            t0: Instant::now(),
+            n: 0,
+        }
+    }
+
+    fn at(&self, offset: u64) -> Instant {
+        self.t0 + ms(offset)
+    }
+
+    fn probe(&mut self, at: u64) -> Probe {
+        self.n += 1;
+        self.a
+            .begin_probe(format!("nonce-{}", self.n), self.at(at))
+            .expect("no probe outstanding")
+    }
+
+    fn reply(&mut self, probe: &Probe, kind: &str, head: u64, at: u64) -> Effects {
+        self.reply_with(probe, kind, head, None, None, vec![], at)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a test helper that spells out a reply"
+    )]
+    fn reply_with(
+        &mut self,
+        probe: &Probe,
+        kind: &str,
+        head: u64,
+        edges: Option<Vec<u64>>,
+        revisions: Option<Vec<(u64, Vec<u64>)>>,
+        owed: Vec<(u64, Vec<u64>)>,
+        at: u64,
+    ) -> Effects {
+        let reply = AuthorityReply {
+            nonce: probe.nonce.clone(),
+            environment_id: ENV.into(),
+            generation: 1,
+            head_revision: head,
+            server_time: None,
+            kind: kind.into(),
+            edges: edges.map(|e| {
+                e.into_iter()
+                    .map(|edge_id| SnapshotEdge {
+                        edge_id,
+                        consumer_node_id: edge_id + 100,
+                    })
+                    .collect()
+            }),
+            revisions: revisions.map(|r| {
+                r.into_iter()
+                    .map(|(revision, edge_ids)| RevisionEdges { revision, edge_ids })
+                    .collect()
+            }),
+            owed: owed
+                .into_iter()
+                .map(|(revision, edge_ids)| RevisionEdges { revision, edge_ids })
+                .collect(),
+        };
+        self.a.apply_reply(&reply, self.at(at), at)
+    }
+
+    /// Snapshot at revision `head` listing `edges`, sent at `at`, applied 10 ms later.
+    fn open(&mut self, head: u64, edges: Vec<u64>, at: u64) {
+        let probe = self.probe(at);
+        self.reply_with(&probe, "snapshot", head, Some(edges), None, vec![], at + 10);
+        assert!(self.a.available(self.at(at + 10)));
+    }
+
+    fn admit(&mut self, edge: u64, at: u64) -> (u64, watch::Receiver<bool>) {
+        let epoch = self.a.epoch();
+        self.a
+            .admit(
+                edge,
+                self.a.applied().unwrap_or(0),
+                FAR,
+                epoch,
+                self.at(at),
+                at,
+            )
+            .expect("admitted")
+    }
+
+    fn notice(&mut self, revision: u64, edges: Vec<u64>, at: u64) -> Effects {
+        self.a.notice(
+            &Notice {
+                environment_id: ENV.into(),
+                generation: 1,
+                revision,
+                edge_ids: edges,
+            },
+            self.at(at),
+            at,
+        )
+    }
+}
+
+#[test]
+fn starts_closed_and_only_a_snapshot_opens_it() {
+    let mut lab = Lab::new();
+    assert!(!lab.a.available(lab.at(0)));
+    let epoch = lab.a.epoch();
+    assert_eq!(
+        lab.a.admit(1, 0, FAR, epoch, lab.at(0), 0).unwrap_err(),
+        Refusal::Unavailable
+    );
+    let probe = lab.probe(0);
+    assert_eq!(
+        probe.after_revision, None,
+        "a closed target asks for a snapshot"
+    );
+    lab.reply_with(&probe, "snapshot", 4, Some(vec![1, 2]), None, vec![], 20);
+    assert!(lab.a.available(lab.at(20)));
+    assert_eq!(lab.a.applied(), Some(4));
+    // The lease runs from the probe's send time, not the reply's arrival.
+    assert_eq!(lab.a.lease_until(), Some(lab.at(0) + LEASE));
+}
+
+#[test]
+fn a_next_revision_notice_fences_only_its_edges_at_once() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1, 2], 0);
+    let (_, closed_1) = lab.admit(1, 20);
+    let (_, closed_2) = lab.admit(2, 20);
+    let effects = lab.notice(1, vec![1], 100);
+    assert!(effects.probe_now, "a notice asks for a probe");
+    assert!(
+        *closed_1.borrow(),
+        "the revoked edge's handler is told to close"
+    );
+    assert!(!*closed_2.borrow(), "the other edge keeps its stream");
+    assert!(lab.a.is_fenced(1));
+    assert!(
+        lab.a.available(lab.at(100)),
+        "other edges keep their live lease"
+    );
+    let epoch = lab.a.epoch();
+    assert_eq!(
+        lab.a.admit(1, 0, FAR, epoch, lab.at(100), 100).unwrap_err(),
+        Refusal::Fenced
+    );
+}
+
+#[test]
+fn stale_and_duplicate_notices_change_nothing() {
+    let mut lab = Lab::new();
+    lab.open(3, vec![1, 2], 0);
+    assert_eq!(lab.notice(3, vec![2], 50), Effects::default(), "stale");
+    assert!(!lab.a.is_fenced(2));
+    lab.notice(4, vec![1], 60);
+    assert_eq!(lab.notice(4, vec![2], 70), Effects::default(), "duplicate");
+    assert!(!lab.a.is_fenced(2));
+}
+
+#[test]
+fn a_revision_ahead_without_its_predecessor_blocks_everything() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1, 2], 0);
+    let (handler, _) = lab.admit(2, 10);
+    lab.notice(2, vec![1], 50);
+    assert!(!lab.a.available(lab.at(50)));
+    assert!(!lab.a.handler_allowed(handler, FAR, lab.at(50), 50));
+    // A probe that applies the head unblocks it.
+    let probe = lab.probe(60);
+    lab.reply_with(
+        &probe,
+        "delta",
+        2,
+        None,
+        Some(vec![(1, vec![]), (2, vec![1])]),
+        vec![],
+        70,
+    );
+    assert!(lab.a.available(lab.at(70)));
+    assert!(lab.a.handler_allowed(handler, FAR, lab.at(70), 70));
+    assert!(lab.a.is_confirmed(1));
+}
+
+#[test]
+fn a_delta_confirms_and_clears_what_it_does_not_name() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1, 2, 3], 0);
+    lab.notice(1, vec![1, 3], 50);
+    let probe = lab.probe(60);
+    lab.reply_with(
+        &probe,
+        "delta",
+        1,
+        None,
+        Some(vec![(1, vec![1])]),
+        vec![(1, vec![1])],
+        70,
+    );
+    assert!(lab.a.is_confirmed(1));
+    assert!(
+        !lab.a.is_fenced(3),
+        "a provisional ID the verified state does not name is cleared"
+    );
+    assert!(lab.a.available(lab.at(70)));
+    // Edge 1 had no handler: its close is the fence itself, and the ACK is observed.
+    let ack = lab.a.next_ack().expect("ack ready");
+    assert_eq!(ack.revision, 1);
+    assert_eq!(ack.kind, AckKind::Observed);
+    assert_eq!(ack.notice_received_ms, Some(50));
+    assert_eq!(ack.fenced_ms, Some(50));
+    assert_eq!(ack.handlers_closed_ms, Some(50));
+}
+
+#[test]
+fn the_ack_waits_for_the_last_handler_and_reports_its_close() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let (handler, _) = lab.admit(1, 5);
+    lab.notice(1, vec![1], 50);
+    let probe = lab.probe(60);
+    lab.reply_with(
+        &probe,
+        "delta",
+        1,
+        None,
+        Some(vec![(1, vec![1])]),
+        vec![(1, vec![1])],
+        70,
+    );
+    assert_eq!(lab.a.next_ack(), None, "a handler is still open");
+    lab.a.unregister(handler, 90);
+    let ack = lab.a.next_ack().expect("ack ready");
+    assert_eq!(
+        (ack.fenced_ms, ack.handlers_closed_ms),
+        (Some(50), Some(90))
+    );
+    // A lost ACK stays owed; a confirmed one is settled.
+    lab.a.ack_started(1);
+    assert_eq!(lab.a.next_ack(), None, "one at a time");
+    lab.a.ack_finished(1, false);
+    assert!(lab.a.next_ack().is_some(), "sent again while owed");
+    lab.a.ack_started(1);
+    lab.a.ack_finished(1, true);
+    assert_eq!(lab.a.next_ack(), None);
+}
+
+#[test]
+fn a_notice_without_a_revision_is_disproved_only_by_a_later_probe() {
+    let mut lab = Lab::new();
+    lab.open(4, vec![1, 2], 0);
+    // A probe sent before the notice arrived cannot clear it.
+    let early = lab.probe(100);
+    lab.notice(5, vec![2], 150);
+    lab.reply(&early, "current", 4, 160);
+    assert!(lab.a.is_fenced(2));
+    // A probe sent after it, whose head is below the notice's revision, disproves it.
+    let late = lab.probe(200);
+    lab.reply(&late, "current", 4, 210);
+    assert!(
+        !lab.a.is_fenced(2),
+        "the notice named a revision that does not exist"
+    );
+    assert!(lab.a.available(lab.at(210)));
+}
+
+#[test]
+fn a_late_reply_cannot_renew_the_lease_or_reopen() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let probe = lab.probe(1_000);
+    // The old lease ended at 3 s; this reply arrives after the new one would have too.
+    lab.a.check_lease(lab.at(3_000));
+    assert!(!lab.a.is_open(), "the lease timer failed closed at 3 s");
+    lab.reply(&probe, "current", 0, 4_100);
+    assert!(!lab.a.available(lab.at(4_100)));
+}
+
+#[test]
+fn replies_with_another_nonce_are_dropped_and_renew_nothing() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let probe = lab.probe(1_000);
+    let forged = Probe {
+        nonce: "never-sent".into(),
+        ..probe.clone()
+    };
+    lab.reply(&forged, "current", 0, 1_010);
+    assert_eq!(lab.a.lease_until(), Some(lab.at(0) + LEASE), "not renewed");
+    lab.reply(&probe, "current", 0, 1_020);
+    assert_eq!(lab.a.lease_until(), Some(lab.at(1_000) + LEASE));
+    // The same reply again: consumed, dropped.
+    lab.reply(&probe, "current", 0, 1_030);
+    assert!(lab.a.available(lab.at(1_030)));
+}
+
+#[test]
+fn a_wrong_generation_or_a_missing_revision_fails_closed() {
+    let mut lab = Lab::new();
+    lab.open(2, vec![1], 0);
+    let probe = lab.probe(100);
+    lab.reply_with(
+        &probe,
+        "delta",
+        4,
+        None,
+        Some(vec![(4, vec![1])]),
+        vec![],
+        110,
+    );
+    assert!(!lab.a.is_open(), "revision 3 is missing");
+    assert_eq!(lab.a.last_loss, Some(Loss::MissingRevision));
+
+    let mut lab = Lab::new();
+    lab.open(2, vec![1], 0);
+    let probe = lab.probe(100);
+    let reply = AuthorityReply {
+        nonce: probe.nonce,
+        environment_id: ENV.into(),
+        generation: 2,
+        head_revision: 2,
+        server_time: None,
+        kind: "current".into(),
+        edges: None,
+        revisions: None,
+        owed: vec![],
+    };
+    lab.a.apply_reply(&reply, lab.at(110), 110);
+    assert!(!lab.a.is_open());
+    assert_eq!(lab.a.last_loss, Some(Loss::WrongIdentity));
+}
+
+#[test]
+fn after_failing_closed_only_a_snapshot_reopens_and_a_revoked_edge_stays_refused() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1, 2], 0);
+    let (_, closed_1) = lab.admit(1, 5);
+    let (_, closed_2) = lab.admit(2, 5);
+    let probe = lab.probe(1_000);
+    lab.a.probe_failed(&probe.nonce);
+    assert!(
+        *closed_1.borrow() && *closed_2.borrow(),
+        "all managed access fails closed"
+    );
+    // While closed the next probe is a snapshot, never a delta.
+    let probe = lab.probe(2_000);
+    assert_eq!(probe.after_revision, None);
+    // Edge 1 was removed during the outage; the snapshot no longer lists it.
+    lab.reply_with(
+        &probe,
+        "snapshot",
+        1,
+        Some(vec![2]),
+        None,
+        vec![(1, vec![1])],
+        2_010,
+    );
+    assert!(lab.a.available(lab.at(2_010)));
+    assert!(
+        lab.a.is_confirmed(1),
+        "the admitted edge the snapshot does not list is fenced"
+    );
+    let epoch = lab.a.epoch();
+    assert_eq!(
+        lab.a
+            .admit(1, 1, FAR, epoch, lab.at(2_020), 2_020)
+            .unwrap_err(),
+        Refusal::Fenced
+    );
+    assert!(
+        lab.a.admit(2, 1, FAR, epoch, lab.at(2_020), 2_020).is_ok(),
+        "the unrelated edge recovers"
+    );
+}
+
+#[test]
+fn a_restarted_target_sends_a_recovered_ack_for_each_owed_revision() {
+    let mut lab = Lab::new();
+    let probe = lab.probe(0);
+    lab.reply_with(
+        &probe,
+        "snapshot",
+        2,
+        Some(vec![3]),
+        None,
+        vec![(1, vec![1]), (2, vec![2])],
+        15,
+    );
+    let ack = lab.a.next_ack().expect("ack");
+    assert_eq!(ack.revision, 1);
+    assert_eq!(ack.kind, AckKind::Recovered);
+    assert_eq!(ack.recovered_ms, Some(15));
+    assert_eq!(
+        (
+            ack.fenced_ms,
+            ack.handlers_closed_ms,
+            ack.notice_received_ms
+        ),
+        (None, None, None)
+    );
+    lab.a.ack_started(1);
+    lab.a.ack_finished(1, true);
+    assert_eq!(lab.a.next_ack().map(|a| a.revision), Some(2));
+    assert!(lab.a.is_confirmed(1) && lab.a.is_confirmed(2));
+}
+
+#[test]
+fn admission_needs_the_claims_revision_and_the_current_barrier() {
+    let mut lab = Lab::new();
+    lab.open(3, vec![1], 0);
+    let epoch = lab.a.epoch();
+    assert_eq!(
+        lab.a.admit(1, 4, FAR, epoch, lab.at(10), 10).unwrap_err(),
+        Refusal::Reconcile,
+        "the Gateway read a revision this target has not applied"
+    );
+    assert_eq!(
+        lab.a.admit(1, 3, 10, epoch, lab.at(10), 10).unwrap_err(),
+        Refusal::Expired
+    );
+    // A snapshot barrier drops introspections that started before it.
+    let probe = lab.probe(20);
+    lab.a.probe_failed(&probe.nonce);
+    lab.open(3, vec![1], 30);
+    assert_eq!(
+        lab.a.admit(1, 3, FAR, epoch, lab.at(50), 50).unwrap_err(),
+        Refusal::Stale
+    );
+}
+
+#[test]
+fn a_closed_notice_link_fails_closed_and_blocks_recovery_until_it_returns() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let (_, closed) = lab.admit(1, 5);
+    lab.a.set_notice_link(false);
+    assert!(*closed.borrow());
+    assert!(
+        lab.a.begin_probe("x".into(), lab.at(100)).is_none(),
+        "no snapshot without the link"
+    );
+    lab.a.set_notice_link(true);
+    lab.open(0, vec![1], 200);
+}
+
+#[test]
+fn a_notice_of_another_generation_fails_closed() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    lab.a.notice(
+        &Notice {
+            environment_id: ENV.into(),
+            generation: 2,
+            revision: 1,
+            edge_ids: vec![1],
+        },
+        lab.at(10),
+        10,
+    );
+    assert!(!lab.a.is_open());
+}

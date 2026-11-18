@@ -1,0 +1,780 @@
+//! The target's view of the Gateway's managed authority, as Orbit's "Managed grant
+//! revocation" contract defines it: the applied revision, the lease, the provisional and
+//! confirmed fenced sets, the admitted edges, the open handlers and the owed
+//! acknowledgements.
+//!
+//! This file holds only state and rules. It does no I/O, takes the time as arguments and
+//! never blocks, so every rule is a plain test. [`super::Shared`] wraps it in one lock: an
+//! admission, a fence and a data-boundary check all see the same state.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use serde::Deserialize;
+use tokio::{sync::watch, time::Instant};
+
+pub type EdgeId = u64;
+pub type Revision = u64;
+
+/// Lab values from the contract ("Lease"): probe every second, lease ends 3 seconds after the
+/// send time of the last applied probe. Measurements set the production values later.
+pub const PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+pub const LEASE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One edge of a `snapshot` reply.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct SnapshotEdge {
+    pub edge_id: EdgeId,
+    pub consumer_node_id: u64,
+}
+
+/// One revision of a `delta` reply or of `owed`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct RevisionEdges {
+    pub revision: Revision,
+    pub edge_ids: Vec<EdgeId>,
+}
+
+/// `POST /authority` reply `data`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuthorityReply {
+    pub nonce: String,
+    pub environment_id: String,
+    pub generation: u64,
+    pub head_revision: Revision,
+    #[serde(default)]
+    pub server_time: Option<String>,
+    pub kind: String,
+    #[serde(default)]
+    pub edges: Option<Vec<SnapshotEdge>>,
+    #[serde(default)]
+    pub revisions: Option<Vec<RevisionEdges>>,
+    #[serde(default)]
+    pub owed: Vec<RevisionEdges>,
+}
+
+/// The data of a `conn.authority.revoked` notice.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Notice {
+    pub environment_id: String,
+    pub generation: u64,
+    pub revision: Revision,
+    pub edge_ids: Vec<EdgeId>,
+}
+
+/// The probe the target has outstanding. One at a time.
+#[derive(Clone, Debug)]
+pub struct Probe {
+    pub nonce: String,
+    pub after_revision: Option<Revision>,
+    pub sent: Instant,
+}
+
+/// Why access was refused. The ingress maps each to a response; none of them falls through
+/// to native auth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Failed closed, recovering, blocked behind an unknown revision, or the lease ended.
+    Unavailable,
+    /// The claims name a revision this target has not applied: reconcile, then introspect
+    /// again.
+    Reconcile,
+    /// The edge is fenced, provisionally or for good.
+    Fenced,
+    /// The token expired.
+    Expired,
+    /// A snapshot barrier dropped this introspection: introspect again.
+    Stale,
+}
+
+/// Why the target failed closed. Kept for the log and the tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Loss {
+    ProbeFailed,
+    LeaseExpired,
+    WrongIdentity,
+    MissingRevision,
+    UnexpectedKind,
+    NoticeLinkClosed,
+}
+
+/// The kind of an acknowledgement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AckKind {
+    Observed,
+    Recovered,
+}
+
+/// One `/ack` the target owes and can send now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ack {
+    pub revision: Revision,
+    pub kind: AckKind,
+    pub notice_received_ms: Option<u64>,
+    pub fenced_ms: Option<u64>,
+    pub handlers_closed_ms: Option<u64>,
+    pub recovered_ms: Option<u64>,
+}
+
+/// What the target knows about one revision.
+#[derive(Clone, Debug, Default)]
+struct RevisionRecord {
+    edges: BTreeSet<EdgeId>,
+    /// Learned from a verified `delta`, `owed` or snapshot; only then can it be acknowledged.
+    verified: bool,
+    notice_received_ms: Option<u64>,
+    fenced_ms: Option<u64>,
+    handlers_closed_ms: Option<u64>,
+    /// Set when the target applied a snapshot without having observed the close itself.
+    recovered_ms: Option<u64>,
+}
+
+struct HandlerEntry {
+    edge: EdgeId,
+    close: watch::Sender<bool>,
+}
+
+struct NoticeRecord {
+    edges: Vec<EdgeId>,
+    received: Instant,
+}
+
+/// The state behind one managed target.
+pub struct Authority {
+    environment_id: String,
+    generation: u64,
+    /// `false` at start and after failing closed: only a snapshot opens it.
+    open: bool,
+    /// Whether the notice subscription is live. Access needs it (see `notices.rs`).
+    notice_link: bool,
+    applied: Option<Revision>,
+    lease_until: Option<Instant>,
+    confirmed: HashSet<EdgeId>,
+    /// Edge to the revision of the notice that fenced it.
+    provisional: HashMap<EdgeId, Revision>,
+    notices: BTreeMap<Revision, NoticeRecord>,
+    admitted: HashSet<EdgeId>,
+    probe: Option<Probe>,
+    /// A greater revision became known while a probe ran: probe again at once.
+    rerun: bool,
+    /// Raised by every snapshot barrier; an introspection started under an older epoch is
+    /// dropped.
+    epoch: u64,
+    handlers: HashMap<u64, HandlerEntry>,
+    next_handler: u64,
+    /// Wall time each currently fenced edge was blocked.
+    fenced_at: HashMap<EdgeId, u64>,
+    /// Wall time a fenced edge was verified to have no handler left.
+    closed_at: HashMap<EdgeId, u64>,
+    revisions: BTreeMap<Revision, RevisionRecord>,
+    /// Revisions the last verified reply listed as owed and not yet acknowledged since.
+    owed: BTreeSet<Revision>,
+    /// The ACK in flight, so one revision is acknowledged at a time.
+    ack_in_flight: Option<Revision>,
+    pub last_loss: Option<Loss>,
+}
+
+impl std::fmt::Debug for Authority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Authority")
+            .field("open", &self.open)
+            .field("applied", &self.applied)
+            .field("confirmed", &self.confirmed)
+            .field("provisional", &self.provisional)
+            .field("handlers", &self.handlers.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a caller must do after a change.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Effects {
+    /// Probe again now.
+    pub probe_now: bool,
+    /// An ACK may be ready.
+    pub ack: bool,
+}
+
+impl Authority {
+    pub fn new(environment_id: String, generation: u64) -> Self {
+        Self {
+            environment_id,
+            generation,
+            open: false,
+            notice_link: false,
+            applied: None,
+            lease_until: None,
+            confirmed: HashSet::new(),
+            provisional: HashMap::new(),
+            notices: BTreeMap::new(),
+            admitted: HashSet::new(),
+            probe: None,
+            rerun: false,
+            epoch: 0,
+            handlers: HashMap::new(),
+            next_handler: 1,
+            fenced_at: HashMap::new(),
+            closed_at: HashMap::new(),
+            revisions: BTreeMap::new(),
+            owed: BTreeSet::new(),
+            ack_in_flight: None,
+            last_loss: None,
+        }
+    }
+
+    pub fn environment_id(&self) -> &str {
+        &self.environment_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn applied(&self) -> Option<Revision> {
+        self.applied
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn lease_until(&self) -> Option<Instant> {
+        self.lease_until
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn open_handlers(&self) -> usize {
+        self.handlers.len()
+    }
+
+    pub fn is_fenced(&self, edge: EdgeId) -> bool {
+        self.confirmed.contains(&edge) || self.provisional.contains_key(&edge)
+    }
+
+    pub fn is_confirmed(&self, edge: EdgeId) -> bool {
+        self.confirmed.contains(&edge)
+    }
+
+    /// A revision ahead of the next one is known without a contiguous edge list.
+    fn blocked(&self) -> bool {
+        let mut next = self.applied.map_or(0, |a| a + 1);
+        while self.notices.contains_key(&next) {
+            next += 1;
+        }
+        self.notices.keys().any(|r| *r > next)
+    }
+
+    fn lease_live(&self, now: Instant) -> bool {
+        self.lease_until.is_some_and(|until| now < until)
+    }
+
+    /// Managed access in general: open, not blocked, lease live, notices subscribed.
+    pub fn available(&self, now: Instant) -> bool {
+        self.open && self.notice_link && !self.blocked() && self.lease_live(now)
+    }
+
+    /// The check at every admission, dispatch and frame boundary.
+    pub fn allows(&self, edge: EdgeId, expires_ms: u64, now: Instant, wall_ms: u64) -> bool {
+        self.available(now) && !self.is_fenced(edge) && wall_ms < expires_ms
+    }
+
+    /// Whether a registered handler may still run.
+    pub fn handler_allowed(
+        &self,
+        handler: u64,
+        expires_ms: u64,
+        now: Instant,
+        wall_ms: u64,
+    ) -> bool {
+        self.handlers
+            .get(&handler)
+            .is_some_and(|h| self.allows(h.edge, expires_ms, now, wall_ms))
+    }
+
+    /// Admits a verified introspection and registers its handler in the same step, so a fence
+    /// cannot fall between the check and the registration. `claims_revision` is the Gateway's
+    /// committed revision when it read the token.
+    pub fn admit(
+        &mut self,
+        edge: EdgeId,
+        claims_revision: Revision,
+        expires_ms: u64,
+        epoch: u64,
+        now: Instant,
+        wall_ms: u64,
+    ) -> Result<(u64, watch::Receiver<bool>), Refusal> {
+        if epoch != self.epoch {
+            return Err(Refusal::Stale);
+        }
+        if !self.available(now) {
+            return Err(Refusal::Unavailable);
+        }
+        if self.applied.is_none_or(|applied| claims_revision > applied) {
+            return Err(Refusal::Reconcile);
+        }
+        if self.is_fenced(edge) {
+            return Err(Refusal::Fenced);
+        }
+        if wall_ms >= expires_ms {
+            return Err(Refusal::Expired);
+        }
+        self.admitted.insert(edge);
+        Ok(self.register(edge))
+    }
+
+    fn register(&mut self, edge: EdgeId) -> (u64, watch::Receiver<bool>) {
+        let id = self.next_handler;
+        self.next_handler += 1;
+        let (close, closed) = watch::channel(false);
+        self.handlers.insert(id, HandlerEntry { edge, close });
+        (id, closed)
+    }
+
+    /// A handler ended. Records the close time of every revision whose edges have no handler
+    /// left.
+    pub fn unregister(&mut self, handler: u64, wall_ms: u64) -> Effects {
+        let Some(entry) = self.handlers.remove(&handler) else {
+            return Effects::default();
+        };
+        if self.fenced_at.contains_key(&entry.edge) && !self.edge_has_handlers(entry.edge) {
+            self.closed_at.entry(entry.edge).or_insert(wall_ms);
+        }
+        Effects {
+            ack: self.settle_closes(wall_ms),
+            ..Effects::default()
+        }
+    }
+
+    fn edge_has_handlers(&self, edge: EdgeId) -> bool {
+        self.handlers.values().any(|h| h.edge == edge)
+    }
+
+    /// Records `handlers_closed_ms` for fenced revisions whose edges all have no handler
+    /// left: the latest of the edges' close times.
+    fn settle_closes(&mut self, _wall_ms: u64) -> bool {
+        let mut changed = false;
+        for record in self.revisions.values_mut() {
+            if record.handlers_closed_ms.is_some() || record.fenced_ms.is_none() {
+                continue;
+            }
+            let times: Option<Vec<u64>> = record
+                .edges
+                .iter()
+                .map(|e| self.closed_at.get(e).copied())
+                .collect();
+            if let Some(times) = times {
+                record.handlers_closed_ms = Some(
+                    times
+                        .into_iter()
+                        .max()
+                        .unwrap_or_else(|| record.fenced_ms.unwrap_or_default()),
+                );
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Blocks `edge` and tells each of its handlers to close.
+    fn fence_edge(&mut self, edge: EdgeId, wall_ms: u64) {
+        self.fenced_at.entry(edge).or_insert(wall_ms);
+        self.admitted.remove(&edge);
+        if !self.edge_has_handlers(edge) {
+            self.closed_at.entry(edge).or_insert(wall_ms);
+        }
+        for handler in self.handlers.values() {
+            if handler.edge == edge {
+                let _ = handler.close.send(true);
+            }
+        }
+    }
+
+    fn close_all_handlers(&self) {
+        for handler in self.handlers.values() {
+            let _ = handler.close.send(true);
+        }
+    }
+
+    /// Notes when a revision's edges were fenced, from the edges' own fence times.
+    fn mark_revision_fenced(&mut self, revision: Revision, wall_ms: u64) {
+        let fenced: Option<u64> = {
+            let record = self.revisions.entry(revision).or_default();
+            record
+                .edges
+                .iter()
+                .map(|e| self.fenced_at.get(e).copied())
+                .collect::<Option<Vec<u64>>>()
+                .map(|times| times.into_iter().max().unwrap_or(wall_ms))
+        };
+        let record = self.revisions.entry(revision).or_default();
+        if record.fenced_ms.is_none() {
+            record.fenced_ms = Some(fenced.unwrap_or(wall_ms));
+        }
+    }
+
+    /// Fails closed for all managed access. Recovery needs a snapshot with a live lease.
+    pub fn fail_closed(&mut self, loss: Loss) {
+        if self.open {
+            self.last_loss = Some(loss);
+        }
+        self.open = false;
+        self.lease_until = None;
+        self.probe = None;
+        self.close_all_handlers();
+    }
+
+    /// The notice subscription came up or went down. Down fails closed.
+    pub fn set_notice_link(&mut self, up: bool) -> Effects {
+        self.notice_link = up;
+        if !up {
+            self.fail_closed(Loss::NoticeLinkClosed);
+            return Effects::default();
+        }
+        Effects {
+            probe_now: true,
+            ..Effects::default()
+        }
+    }
+
+    /// The independent lease timer, and every boundary that finds the lease over.
+    pub fn check_lease(&mut self, now: Instant) {
+        if self.open && !self.lease_live(now) {
+            self.fail_closed(Loss::LeaseExpired);
+        }
+    }
+
+    /// A `conn.authority.revoked` notice. It can only restrict access.
+    pub fn notice(&mut self, notice: &Notice, now: Instant, wall_ms: u64) -> Effects {
+        if notice.environment_id != self.environment_id || notice.generation != self.generation {
+            self.fail_closed(Loss::WrongIdentity);
+            return Effects::default();
+        }
+        let applied = self.applied.unwrap_or(0);
+        if (self.applied.is_some() && notice.revision <= applied)
+            || self.notices.contains_key(&notice.revision)
+            || self
+                .revisions
+                .get(&notice.revision)
+                .is_some_and(|r| r.verified)
+        {
+            // Stale or duplicate.
+            return Effects::default();
+        }
+        for edge in &notice.edge_ids {
+            self.provisional.entry(*edge).or_insert(notice.revision);
+            self.fence_edge(*edge, wall_ms);
+        }
+        let record = self.revisions.entry(notice.revision).or_default();
+        record.notice_received_ms.get_or_insert(wall_ms);
+        self.notices.insert(
+            notice.revision,
+            NoticeRecord {
+                edges: notice.edge_ids.clone(),
+                received: now,
+            },
+        );
+        if self.probe.is_some() {
+            self.rerun = true;
+        }
+        Effects {
+            probe_now: true,
+            ..Effects::default()
+        }
+    }
+
+    /// Starts the next probe, unless one runs. A snapshot probe raises the barrier epoch, so
+    /// every outstanding introspection is dropped.
+    pub fn begin_probe(&mut self, nonce: String, now: Instant) -> Option<Probe> {
+        if self.probe.is_some() {
+            self.rerun = true;
+            return None;
+        }
+        if !self.notice_link {
+            return None;
+        }
+        self.rerun = false;
+        let after_revision = if self.open { self.applied } else { None };
+        if !self.open {
+            self.epoch += 1;
+        }
+        let probe = Probe {
+            nonce,
+            after_revision,
+            sent: now,
+        };
+        self.probe = Some(probe.clone());
+        Some(probe)
+    }
+
+    /// The probe got no usable answer: a transport error, a refusal or a timeout.
+    pub fn probe_failed(&mut self, nonce: &str) {
+        if self.probe.as_ref().is_some_and(|p| p.nonce == nonce) {
+            self.probe = None;
+            self.fail_closed(Loss::ProbeFailed);
+        }
+    }
+
+    /// Applies a reply to the outstanding probe.
+    pub fn apply_reply(&mut self, reply: &AuthorityReply, now: Instant, wall_ms: u64) -> Effects {
+        let Some(probe) = self.probe.clone().filter(|p| p.nonce == reply.nonce) else {
+            // Consumed or never sent: drop it, renew nothing.
+            return Effects::default();
+        };
+        self.probe = None;
+        if reply.environment_id != self.environment_id || reply.generation != self.generation {
+            self.fail_closed(Loss::WrongIdentity);
+            return self.after_reply();
+        }
+        // A reply after its lease ended cannot renew it or reopen access.
+        self.check_lease(now);
+        let new_lease = probe.sent + LEASE;
+        if now >= new_lease {
+            self.fail_closed(Loss::LeaseExpired);
+            return self.after_reply();
+        }
+        let result = match (probe.after_revision, reply.kind.as_str()) {
+            (None, "snapshot") if !self.open => self.apply_snapshot(reply, wall_ms),
+            (Some(after), "delta") if self.open && self.applied == Some(after) => {
+                self.apply_delta(after, reply, wall_ms)
+            }
+            (Some(after), "current") if self.open && self.applied == Some(after) => {
+                if reply.head_revision == after {
+                    Ok(())
+                } else {
+                    Err(Loss::MissingRevision)
+                }
+            }
+            _ => Err(Loss::UnexpectedKind),
+        };
+        if let Err(loss) = result {
+            self.fail_closed(loss);
+            return self.after_reply();
+        }
+        self.apply_owed(&reply.owed, wall_ms);
+        self.disprove_notices(probe.sent, reply.head_revision, wall_ms);
+        self.open = true;
+        self.lease_until = Some(new_lease);
+        self.settle_closes(wall_ms);
+        self.after_reply()
+    }
+
+    fn after_reply(&mut self) -> Effects {
+        let known = self.notices.keys().next_back().copied();
+        let behind = known.is_some_and(|k| self.applied.is_none_or(|a| k > a));
+        let probe_now = std::mem::take(&mut self.rerun) || behind;
+        Effects {
+            probe_now,
+            ack: self.next_ack().is_some(),
+        }
+    }
+
+    fn apply_snapshot(&mut self, reply: &AuthorityReply, wall_ms: u64) -> Result<(), Loss> {
+        let Some(edges) = &reply.edges else {
+            return Err(Loss::UnexpectedKind);
+        };
+        let head = reply.head_revision;
+        let listed: HashSet<EdgeId> = edges.iter().map(|e| e.edge_id).collect();
+        // Admitted before the barrier and gone now: confirm the fence.
+        let gone: Vec<EdgeId> = self
+            .admitted
+            .iter()
+            .copied()
+            .filter(|e| !listed.contains(e))
+            .collect();
+        for edge in gone {
+            self.confirmed.insert(edge);
+            self.fence_edge(edge, wall_ms);
+        }
+        // Provisional fences of revisions the snapshot covers: confirmed when the edge is
+        // gone, cleared when it is still listed.
+        let covered: Vec<(EdgeId, Revision)> = self
+            .provisional
+            .iter()
+            .filter(|(_, r)| **r <= head)
+            .map(|(e, r)| (*e, *r))
+            .collect();
+        for (edge, _) in covered {
+            self.provisional.remove(&edge);
+            if listed.contains(&edge) {
+                self.fenced_at.remove(&edge);
+                self.closed_at.remove(&edge);
+            } else {
+                self.confirmed.insert(edge);
+            }
+        }
+        self.notices.retain(|r, _| *r > head);
+        // Listed edges are not admitted: each needs a fresh introspection.
+        self.admitted.clear();
+        self.applied = Some(head);
+        Ok(())
+    }
+
+    fn apply_delta(
+        &mut self,
+        after: Revision,
+        reply: &AuthorityReply,
+        wall_ms: u64,
+    ) -> Result<(), Loss> {
+        let Some(revisions) = &reply.revisions else {
+            return Err(Loss::UnexpectedKind);
+        };
+        let head = reply.head_revision;
+        let contiguous = head > after
+            && revisions.len() as u64 == head - after
+            && revisions
+                .iter()
+                .enumerate()
+                .all(|(i, r)| r.revision == after + 1 + i as u64);
+        if !contiguous {
+            return Err(Loss::MissingRevision);
+        }
+        for revision in revisions {
+            self.apply_verified_revision(revision, wall_ms);
+        }
+        self.applied = Some(head);
+        Ok(())
+    }
+
+    /// Verified state for one revision: confirm its edges, close what is still open, and
+    /// clear the provisional fences of that revision it does not name.
+    fn apply_verified_revision(&mut self, revision: &RevisionEdges, wall_ms: u64) {
+        for edge in &revision.edge_ids {
+            self.provisional.remove(edge);
+            self.confirmed.insert(*edge);
+            self.fence_edge(*edge, wall_ms);
+        }
+        let named: HashSet<EdgeId> = revision.edge_ids.iter().copied().collect();
+        let unnamed: Vec<EdgeId> = self
+            .provisional
+            .iter()
+            .filter(|(e, r)| **r == revision.revision && !named.contains(e))
+            .map(|(e, _)| *e)
+            .collect();
+        for edge in unnamed {
+            self.provisional.remove(&edge);
+            self.fenced_at.remove(&edge);
+            self.closed_at.remove(&edge);
+        }
+        self.notices.remove(&revision.revision);
+        let record = self.revisions.entry(revision.revision).or_default();
+        record.edges = named.into_iter().collect();
+        record.verified = true;
+        self.mark_revision_fenced(revision.revision, wall_ms);
+    }
+
+    fn apply_owed(&mut self, owed: &[RevisionEdges], wall_ms: u64) {
+        self.owed.clear();
+        for entry in owed {
+            let known = self
+                .revisions
+                .get(&entry.revision)
+                .is_some_and(|r| r.verified && r.fenced_ms.is_some());
+            if !known {
+                // The target did not observe this revision's fence in this process (a
+                // restart, or a revision it applied through a snapshot): the snapshot it just
+                // applied is the upper bound of the close.
+                let observed_here = entry
+                    .edge_ids
+                    .iter()
+                    .all(|e| self.fenced_at.contains_key(e));
+                self.apply_verified_revision(entry, wall_ms);
+                if !observed_here {
+                    let record = self.revisions.entry(entry.revision).or_default();
+                    record.recovered_ms = Some(wall_ms);
+                }
+            }
+            self.owed.insert(entry.revision);
+        }
+    }
+
+    /// A notice whose revision a later probe's head does not reach was not committed: clear
+    /// its provisional fences. Only a probe sent after the notice arrived can disprove it.
+    fn disprove_notices(&mut self, probe_sent: Instant, head: Revision, _wall_ms: u64) {
+        let disproved: Vec<Revision> = self
+            .notices
+            .iter()
+            .filter(|(r, n)| **r > head && n.received < probe_sent)
+            .map(|(r, _)| *r)
+            .collect();
+        for revision in disproved {
+            if let Some(notice) = self.notices.remove(&revision) {
+                for edge in notice.edges {
+                    if self.provisional.get(&edge) == Some(&revision) {
+                        self.provisional.remove(&edge);
+                        self.fenced_at.remove(&edge);
+                        self.closed_at.remove(&edge);
+                    }
+                }
+            }
+            if self.revisions.get(&revision).is_some_and(|r| !r.verified) {
+                self.revisions.remove(&revision);
+            }
+        }
+    }
+
+    /// The lowest owed revision that is ready to acknowledge, unless an ACK is in flight.
+    pub fn next_ack(&self) -> Option<Ack> {
+        if self.ack_in_flight.is_some() {
+            return None;
+        }
+        let revision = *self.owed.iter().next()?;
+        let record = self.revisions.get(&revision)?;
+        if !record.verified {
+            return None;
+        }
+        if let Some(recovered) = record.recovered_ms {
+            if record.edges.iter().any(|e| self.edge_has_handlers(*e)) {
+                return None;
+            }
+            return Some(Ack {
+                revision,
+                kind: AckKind::Recovered,
+                notice_received_ms: None,
+                fenced_ms: None,
+                handlers_closed_ms: None,
+                recovered_ms: Some(recovered),
+            });
+        }
+        let closed = record.handlers_closed_ms?;
+        Some(Ack {
+            revision,
+            kind: AckKind::Observed,
+            notice_received_ms: record.notice_received_ms,
+            fenced_ms: record.fenced_ms,
+            handlers_closed_ms: Some(closed),
+            recovered_ms: None,
+        })
+    }
+
+    pub fn ack_started(&mut self, revision: Revision) {
+        self.ack_in_flight = Some(revision);
+    }
+
+    /// The Gateway answered the ACK (`ok`) or it was lost. A lost ACK stays owed and is sent
+    /// again while `owed` lists it.
+    pub fn ack_finished(&mut self, revision: Revision, ok: bool) -> Effects {
+        if self.ack_in_flight == Some(revision) {
+            self.ack_in_flight = None;
+        }
+        if ok {
+            self.owed.remove(&revision);
+        }
+        Effects {
+            ack: self.next_ack().is_some(),
+            ..Effects::default()
+        }
+    }
+
+    /// The wall time of the fence of `revision`, for the lab measurements.
+    pub fn revision_times(&self, revision: Revision) -> Option<(Option<u64>, Option<u64>)> {
+        self.revisions
+            .get(&revision)
+            .map(|r| (r.fenced_ms, r.handlers_closed_ms))
+    }
+}
+
+#[cfg(test)]
+#[path = "authority_tests.rs"]
+mod tests;

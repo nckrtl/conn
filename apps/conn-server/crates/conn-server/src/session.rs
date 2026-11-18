@@ -35,6 +35,29 @@ const MAX_CHUNK_VALUES: usize = 64;
 pub const CLOSE_NORMAL: u16 = 1000;
 pub const CLOSE_GOING_AWAY: u16 = 1001;
 pub const CLOSE_TOO_LARGE: u16 = 1009;
+/// The managed gate closed: the caller's grant was fenced, its token expired, or managed
+/// authority was lost.
+pub const CLOSE_POLICY: u16 = 1008;
+
+/// A check the session runs at every inbound dispatch and every outbound frame, and a signal
+/// that ends the session at once. Managed access (`managed/`) is the one gate today.
+pub trait Gate: Send + Sync {
+    /// Whether the session may still dispatch a call or send a frame.
+    fn open(&self) -> bool;
+    /// Resolves when the session must end.
+    fn closed(&self) -> futures_core::future::BoxFuture<'static, ()>;
+}
+
+/// The gate of one session. Holding it keeps the managed handler registered; the session
+/// drops it when it ends.
+#[derive(Clone)]
+pub struct SessionGate(pub Arc<dyn Gate>);
+
+impl std::fmt::Debug for SessionGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionGate")
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
@@ -46,6 +69,8 @@ pub struct SessionOptions {
     pub idle_timeout: Duration,
     /// Passed to every handler.
     pub context: CallContext,
+    /// Checked before every dispatch and every frame; its close ends the session.
+    pub gate: Option<SessionGate>,
 }
 
 impl Default for SessionOptions {
@@ -55,6 +80,7 @@ impl Default for SessionOptions {
             max_message_bytes: 16 * 1024 * 1024,
             idle_timeout: Duration::from_secs(60),
             context: CallContext::default(),
+            gate: None,
         }
     }
 }
@@ -169,8 +195,20 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
     let mut ended = false;
     let idle = tokio::time::sleep(options.idle_timeout);
     tokio::pin!(idle);
+    let gate = options.gate.clone();
+    let gate_closed = match &gate {
+        Some(gate) => gate.0.closed(),
+        None => Box::pin(std::future::pending()),
+    };
+    tokio::pin!(gate_closed);
+    let gate_open = || gate.as_ref().is_none_or(|g| g.0.open());
 
     loop {
+        if !gate_open() {
+            // Calls drop with `calls`: their tasks abort and their queued frames go unsent.
+            socket.close(CLOSE_POLICY, "access revoked").await;
+            return;
+        }
         if ended && calls.0.is_empty() {
             socket.close(CLOSE_NORMAL, "").await;
             return;
@@ -187,6 +225,10 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                     }
                     _ => continue,
                 };
+                if !gate_open() {
+                    socket.close(CLOSE_POLICY, "access revoked").await;
+                    return;
+                }
                 if !write(&mut socket, text, options.frame_parts).await {
                     return;
                 }
@@ -243,10 +285,18 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                         },
                         // Effect ignores requests after `Eof` and duplicates of a live id.
                         FromClient::Request(request) if ended || calls.0.contains_key(&request.id) => None,
+                        FromClient::Request(_) if !gate_open() => {
+                            socket.close(CLOSE_POLICY, "access revoked").await;
+                            return;
+                        }
                         FromClient::Request(request) => {
                             start(request, &table, &context, &outbox, &mut calls)
                         }
                     };
+                    if reply.is_some() && !gate_open() {
+                        socket.close(CLOSE_POLICY, "access revoked").await;
+                        return;
+                    }
                     if let Some(reply) = reply
                         && !send_frame(&mut socket, &reply, &options).await
                     {
@@ -256,6 +306,10 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
             }
             _ = &mut idle => {
                 socket.close(CLOSE_GOING_AWAY, "idle").await;
+                return;
+            }
+            () = &mut gate_closed => {
+                socket.close(CLOSE_POLICY, "access revoked").await;
                 return;
             }
         }

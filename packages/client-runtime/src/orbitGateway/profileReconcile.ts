@@ -66,58 +66,63 @@ export function createProfileReconciler(ports: ProfileReconcilePorts) {
   };
 
   async function pump(): Promise<void> {
-    let staleReads = 0;
-    while (requested) {
-      requested = false;
-      if (disposed) return;
-      const key = checkScope();
-      if (key === null) return;
-      const started = generation;
-      const isCurrent = () => !disposed && generation === started && ports.scope() === key;
-      let result: ProfileBinding | null;
-      try {
-        result = await ports.refresh(isCurrent);
-      } catch (error) {
-        ports.onError?.(error);
-        // Announced versions stay; the next notice or trigger reads again.
-        if (isCurrent()) continue;
-        requested = !disposed;
-        continue;
+    try {
+      let staleReads = 0;
+      while (requested) {
+        requested = false;
+        if (disposed) return;
+        const key = checkScope();
+        if (key === null) return;
+        const started = generation;
+        const isCurrent = () => !disposed && generation === started && ports.scope() === key;
+        let result: ProfileBinding | null;
+        try {
+          result = await ports.refresh(isCurrent);
+        } catch (error) {
+          // Announced versions stay; the next notice or trigger reads again.
+          if (isCurrent()) ports.onError?.(error);
+          else requested = !disposed;
+          continue;
+        }
+        if (!isCurrent()) {
+          // Read for the scope that replaced it, so a switch never ends on obsolete data.
+          requested = !disposed;
+          continue;
+        }
+        binding = result;
+        for (const profileId of announced.keys()) {
+          if (result === null || profileId !== result.profileId) announced.delete(profileId);
+        }
+        if (pending()) {
+          staleReads += 1;
+          if (staleReads < MAX_STALE_READS) requested = true;
+        } else {
+          staleReads = 0;
+          if (result) announced.delete(result.profileId);
+        }
       }
-      if (!isCurrent()) {
-        // Read for the scope that replaced it, so a switch never ends on obsolete data.
-        requested = !disposed;
-        continue;
-      }
-      binding = result;
-      for (const profileId of announced.keys()) {
-        if (result === null || profileId !== result.profileId) announced.delete(profileId);
-      }
-      if (pending()) {
-        staleReads += 1;
-        if (staleReads < MAX_STALE_READS) requested = true;
-      } else {
-        staleReads = 0;
-        if (result) announced.delete(result.profileId);
-      }
+    } finally {
+      // A notice after the loop exits must start a fresh drain.
+      running = null;
     }
   }
 
   function request(): Promise<void> {
     requested = true;
-    if (running) return running;
-    const run: Promise<void> = pump().finally(() => {
-      if (running === run) running = null;
-    });
-    running = run;
-    return run;
+    running ??= Promise.resolve().then(pump);
+    return running;
   }
 
   return {
     /** Handles one notice from the subscription. Returns the read it joined, if any. */
     notify(notice: ProfileChangeNotice): Promise<void> | null {
       if (disposed || checkScope() === null) return null;
-      if (!Number.isSafeInteger(notice.profileId) || !Number.isSafeInteger(notice.version)) {
+      if (
+        !Number.isSafeInteger(notice.profileId) ||
+        notice.profileId < 1 ||
+        !Number.isSafeInteger(notice.version) ||
+        notice.version < 0
+      ) {
         return null;
       }
       const relevant =

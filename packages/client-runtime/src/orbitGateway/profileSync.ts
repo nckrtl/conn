@@ -70,7 +70,7 @@ export type ProfileSyncResult =
   | { readonly kind: "idle" }
   /** The Gateway predates profile sections: nothing was read or written. */
   | { readonly kind: "unsupported" }
-  /** The caller's scope changed during the run (see `run`): nothing was applied or saved. */
+  /** The caller's scope changed (see `run`), so processing stopped. */
   | { readonly kind: "superseded" }
   | {
       readonly kind: "synced";
@@ -164,7 +164,12 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         readable.some((channel) => sections[channel.name] === undefined);
       let remote: OrbitGatewaySettings | null = null;
       if (mustFetch) {
-        remote = await ports.client.settings(profile.id);
+        try {
+          remote = await ports.client.settings(profile.id);
+        } catch (error) {
+          if (!isCurrent()) return SUPERSEDED;
+          throw error;
+        }
         if (!isCurrent()) return SUPERSEDED;
         if (remote.sections === null) {
           unsupportedUntil = now() + UNSUPPORTED_RETRY_MS;
@@ -282,6 +287,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
       try {
         saved = await ports.client.patchSections(profile.id, patch);
       } catch (error) {
+        if (!isCurrent()) return SUPERSEDED;
         if (isOrbitGatewayError(error)) {
           if (error.status === 404 || error.status === 405) {
             unsupportedUntil = now() + UNSUPPORTED_RETRY_MS;

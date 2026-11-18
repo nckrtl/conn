@@ -373,6 +373,25 @@ describe("profile sync engine", () => {
     expect(fake.gateway.sections.has("appearance")).toBe(true);
   });
 
+  it("ignores a failed PATCH from a superseded scope", async () => {
+    const fake = fakeGateway();
+    const mac = makeDevice(fake);
+    const patch = fake.client.patchSections;
+    let current = true;
+    fake.client.patchSections = async (id, sections) => {
+      current = false;
+      fake.gateway.patchStatus = 404;
+      return patch(id, sections);
+    };
+
+    expect(await mac.engine.run(fake.me(), () => current)).toEqual({ kind: "superseded" });
+
+    fake.client.patchSections = patch;
+    fake.gateway.patchStatus = null;
+    expect(await mac.sync()).toMatchObject({ kind: "synced" });
+    expect(fake.gateway.sections.has("appearance")).toBe(true);
+  });
+
   it("gives up after three conflicting attempts", async () => {
     const fake = fakeGateway();
     const mac = makeDevice(fake);

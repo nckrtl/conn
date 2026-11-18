@@ -71,11 +71,40 @@ describe("profile reconciler", () => {
     expect(reads).toHaveLength(2);
   });
 
+  it.each(["notice", "reconnect"] as const)(
+    "handles a %s as the prior read finishes",
+    async (kind) => {
+      const first = Promise.withResolvers<ProfileBinding | null>();
+      const started = Promise.withResolvers<void>();
+      let reads = 0;
+      const reconciler = createProfileReconciler({
+        scope: () => "orbit:gateway",
+        refresh: () => {
+          reads += 1;
+          started.resolve();
+          return reads === 1 ? first.promise : Promise.resolve({ profileId: 1, version: 6 });
+        },
+      });
+      const initial = reconciler.reconcile();
+      await started.promise;
+      first.resolve({ profileId: 1, version: 5 });
+      await Promise.resolve().then(() =>
+        kind === "notice"
+          ? reconciler.notify({ profileId: 1, version: 6 })
+          : reconciler.reconcile(),
+      );
+      await initial;
+      expect(reads).toBe(2);
+    },
+  );
+
   it("ignores notices for other profiles, malformed ones and any while unbound", async () => {
     const { reconciler, reads, bound } = harness();
     await bound({ profileId: 1, version: 5 });
     expect(reconciler.notify({ profileId: 2, version: 9 })).toBeNull();
     expect(reconciler.notify({ profileId: 1, version: Number.NaN })).toBeNull();
+    expect(reconciler.notify({ profileId: 0, version: 9 })).toBeNull();
+    expect(reconciler.notify({ profileId: 1, version: -1 })).toBeNull();
     await bound(null);
     expect(reconciler.notify({ profileId: 1, version: 9 })).toBeNull();
     expect(reads).toHaveLength(2);
@@ -151,6 +180,17 @@ describe("profile reconciler", () => {
     await done;
     expect(reads).toHaveLength(2);
     expect(reconciler.notify({ profileId: 1, version: 6 })).toBeNull();
+  });
+
+  it("ignores a refresh error from the previous scope", async () => {
+    const { local, reconciler, read, errors } = harness();
+    const done = reconciler.reconcile();
+    const old = await read(1);
+    local.scope = "orbit:other-gateway";
+    old.reject(new Error("previous Gateway"));
+    (await read(2)).resolve({ profileId: 1, version: 6 });
+    await done;
+    expect(errors).toEqual([]);
   });
 
   it("does nothing while profile sync is off or after dispose", async () => {

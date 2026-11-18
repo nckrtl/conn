@@ -159,18 +159,38 @@ const locallyEditedOrbitPrompts = new Set<string>();
 const locallyEditedOrbitTargets = new Set<string>();
 const locallyRemovedOrbitDrafts = new Map<string, string>();
 
+function hasUnwrittenOrbitPrompt(
+  local: PersistedComposerDraftStoreState,
+  baseline: PersistedComposerDraftStoreState | null,
+  key: string,
+) {
+  return (
+    locallyEditedOrbitPrompts.has(key) &&
+    !Equal.equals(local.draftsByThreadKey[key], baseline?.draftsByThreadKey[key])
+  );
+}
+
+function hasUnwrittenOrbitTarget(
+  local: PersistedComposerDraftStoreState,
+  baseline: PersistedComposerDraftStoreState | null,
+  key: string,
+) {
+  return (
+    locallyEditedOrbitTargets.has(key) &&
+    !Equal.equals(local.draftThreadsByThreadKey[key], baseline?.draftThreadsByThreadKey[key])
+  );
+}
+
 function hasUnwrittenOrbitEdit(
   local: PersistedComposerDraftStoreState,
   baseline: PersistedComposerDraftStoreState | null,
   key: string,
 ) {
   return (
-    (locallyEditedOrbitPrompts.has(key) &&
-      !Equal.equals(local.draftsByThreadKey[key], baseline?.draftsByThreadKey[key])) ||
-    (locallyEditedOrbitTargets.has(key) &&
-      !Equal.equals(local.draftThreadsByThreadKey[key], baseline?.draftThreadsByThreadKey[key]))
+    hasUnwrittenOrbitPrompt(local, baseline, key) || hasUnwrittenOrbitTarget(local, baseline, key)
   );
 }
+
 let pendingOrbitDraftClear: {
   readonly key: string;
   readonly revisions: readonly string[];
@@ -240,6 +260,7 @@ function mergeComposerDraftStates(
   const removedOrbitDrafts = new Set<string>();
   const keys = new Set([
     ...Object.keys(local.draftThreadsByThreadKey),
+    ...Object.keys(baseline.draftThreadsByThreadKey),
     ...Object.keys(stored.orbitDraftClearRevisions ?? {}),
     ...(pendingOrbitDraftClear === null ? [] : [pendingOrbitDraftClear.key]),
   ]);
@@ -248,16 +269,20 @@ function mergeComposerDraftStates(
     const draft = local.draftsByThreadKey[key];
     const shared = stored.draftThreadsByThreadKey[key];
     const sharedDraft = stored.draftsByThreadKey[key];
+    if (session !== undefined && session.orbitTarget == null) continue;
     const pending = pendingOrbitDraftClear?.key === key ? pendingOrbitDraftClear : null;
     const cleared = pending?.revisions ?? stored.orbitDraftClearRevisions?.[key];
     if (
-      Array.isArray(cleared) &&
-      session === undefined &&
-      (shared !== undefined || sharedDraft !== undefined)
-    ) {
+      !Array.isArray(cleared) &&
+      session?.orbitTarget == null &&
+      shared?.orbitTarget == null &&
+      baseline.draftThreadsByThreadKey[key]?.orbitTarget == null
+    )
+      continue;
+    if (session === undefined && (shared !== undefined || sharedDraft !== undefined)) {
       const sharedRevision = orbitDraftRevision(stored, key);
       if (
-        (pending?.remove && cleared.includes(sharedRevision)) ||
+        (pending?.remove && pending.revisions.includes(sharedRevision)) ||
         locallyRemovedOrbitDrafts.get(key) === sharedRevision
       ) {
         delete draftsByThreadKey[key];
@@ -266,18 +291,19 @@ function mergeComposerDraftStates(
         continue;
       }
     }
-    if (
-      Array.isArray(cleared) &&
-      (!hasUnwrittenOrbitEdit(local, baseline, key) ||
-        cleared.includes(orbitDraftRevision(local, key)))
-    ) {
+    const alreadySent = Array.isArray(cleared) && cleared.includes(orbitDraftRevision(local, key));
+    const promptEdited = !alreadySent && hasUnwrittenOrbitPrompt(local, baseline, key);
+    const targetEdited = !alreadySent && hasUnwrittenOrbitTarget(local, baseline, key);
+    if (!promptEdited && (!targetEdited || shared !== undefined)) {
       if (sharedDraft === undefined) delete draftsByThreadKey[key];
       else draftsByThreadKey[key] = sharedDraft;
+    }
+    if (!targetEdited && (!promptEdited || shared !== undefined)) {
       if (shared === undefined) delete draftThreadsByThreadKey[key];
       else draftThreadsByThreadKey[key] = shared;
       authoritativeOrbitDrafts.add(key);
-      continue;
     }
+    if (!promptEdited && !targetEdited) continue;
     if (shared !== undefined || session?.orbitTarget == null) continue;
     if (
       Array.isArray(cleared) ||
@@ -299,7 +325,7 @@ function mergeComposerDraftStates(
     stored.logicalProjectDraftThreadKeyByLogicalProjectKey,
   )) {
     if (authoritativeOrbitDrafts.has(draftKey))
-      logicalProjectDraftThreadKeyByLogicalProjectKey[projectKey] = draftKey;
+      logicalProjectDraftThreadKeyByLogicalProjectKey[projectKey] ??= draftKey;
   }
   for (const [projectKey, draftKey] of Object.entries(
     local.logicalProjectDraftThreadKeyByLogicalProjectKey,

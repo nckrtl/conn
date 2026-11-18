@@ -122,6 +122,55 @@ describe("applyOtherWindowComposerDrafts", () => {
     );
   });
 
+  it("does not write a passively received draft over a newer peer revision during Send", async () => {
+    const draftId = DraftId.make("orbit-peer-revisions");
+    const key = composerTargetKey(draftId);
+    const store = useComposerDraftStore.getState();
+    store.setLogicalProjectDraftThreadId(
+      orbitDraftLogicalProjectKey(66),
+      scopeProjectRef(ENVIRONMENT_ID, orbitDraftProjectId(66)),
+      draftId,
+      {
+        orbitTarget: {
+          projectId: 66,
+          projectSlug: "create-bench",
+          projectName: "Create bench",
+          nodeName: "beast",
+          instanceKind: "new",
+          instanceName: "first-target",
+          existing: null,
+          domainSuffix: ".create-bench.test",
+        },
+      },
+    );
+    store.setPrompt(draftId, "First locally saved revision");
+    await vi.advanceTimersByTimeAsync(300);
+    const storage = useComposerDraftStore.persist.getOptions().storage!;
+    const first = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+    if (!first || "capturedState" in first.state) throw new Error("Expected a stored draft");
+    const draft = first.state.draftsByThreadKey[key]!;
+    const session = first.state.draftThreadsByThreadKey[key]!;
+    const peerEdit = (prompt: string, instanceName: string) => ({
+      ...first,
+      state: {
+        ...first.state,
+        draftsByThreadKey: { [key]: { ...draft, prompt } },
+        draftThreadsByThreadKey: {
+          [key]: { ...session, orbitTarget: { ...session.orbitTarget!, instanceName } },
+        },
+      },
+    });
+    const previous = peerEdit("Passively received revision", "previous-target");
+    applyOtherWindowComposerDrafts(JSON.stringify(previous), new RecentKeyChanges(2_000));
+    const captured = captureOrbitDraftRevision(draftId);
+    const current = peerEdit("Newest peer revision", "current-target");
+    await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, current);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(prepareOrbitDraftAdmission(draftId, captured)).toBe(false);
+    expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject(current);
+  });
+
   it.each([
     "prompt",
     "target",

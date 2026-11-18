@@ -26,6 +26,8 @@ const fixture = vi.hoisted(() => ({
   /** The untrimmed read's answers per environment, in order; null is a failed read. */
   inventory: new Map<string, Array<string[] | null | Promise<string[] | null>>>(),
   inventoryReads: 0,
+  /** The saved connections, as the environment catalog lists them. */
+  catalog: new Map<string, { enabled: boolean; target: { _tag: string } }>(),
 }));
 
 vi.mock("../lib/utils", () => ({ randomUUID: () => `id-${++fixture.ids}` }));
@@ -39,8 +41,11 @@ vi.mock("./sidebarInventory", () => ({
 vi.mock("../state/shell", () => ({
   environmentShell: { stateValueAtom: (environmentId: string) => environmentId },
 }));
+vi.mock("../connection/catalog", () => ({ environmentCatalog: { catalogValueAtom: "catalog" } }));
 vi.mock("../rpc/atomRegistry", () => ({
   appAtomRegistry: {
+    get: (atom: string) =>
+      atom === "catalog" ? { isReady: true, entries: fixture.catalog } : undefined,
     subscribe: (
       atom: string,
       listener: (value: unknown) => void,
@@ -101,6 +106,7 @@ function setup() {
   fixture.shellListeners.clear();
   fixture.inventory.clear();
   fixture.inventoryReads = 0;
+  fixture.catalog.clear();
   useEnvironmentProvider.setState({ provider: "orbit" });
   const windows: Array<Awaited<ReturnType<typeof openWindow>>> = [];
   const storage = createLocalStorageStub();
@@ -336,6 +342,32 @@ describe("sidebar hidden threads store", () => {
     main.module.bindSidebarHiddenProfile("off");
     broadcast(main);
     expect(hidden(extra, "clone", "x")).toBe(false);
+  });
+
+  it("keeps a pairing this client cannot place yet waiting, and frees one Orbit did not claim", async () => {
+    const { open } = setup();
+    const main = await open();
+    // A fresh client: the saved pairing is in the catalog, its Orbit metadata is not.
+    useEnvironmentProvider.setState({ state: { disabledByOrbit: [], pairedByOrbit: [] } });
+    fixture.catalog.set("paired", { enabled: true, target: { _tag: "BearerConnectionTarget" } });
+    fixture.catalog.set("other", { enabled: true, target: { _tag: "BearerConnectionTarget" } });
+    fixture.catalog.set("ssh", { enabled: true, target: { _tag: "SshConnectionTarget" } });
+    fixture.catalog.set("off", { enabled: false, target: { _tag: "BearerConnectionTarget" } });
+    for (const listener of fixture.shellListeners.get("catalog") ?? []) listener(null);
+    expect(hidden(main, "paired", "row")).toBe(true);
+    expect(hidden(main, "other", "row")).toBe(true);
+    expect(hidden(main, "ssh", "row")).toBe(false);
+    expect(hidden(main, "off", "row")).toBe(false);
+    // The Gateway's listing claims "paired" only.
+    main.module.classifySidebarEnvironments(["paired"]);
+    expect(hidden(main, "paired", "row")).toBe(true);
+    expect(hidden(main, "other", "row")).toBe(false);
+    // The profile's marks arrive: only marked rows stay hidden.
+    const fake = fakeGateway(["paired:hidden"]);
+    await mainSync(main, fake)();
+    expect(hidden(main, "paired", "row")).toBe(false);
+    expect(hidden(main, "paired", "hidden")).toBe(true);
+    useEnvironmentProvider.setState({ state: { disabledByOrbit: [], pairedByOrbit: ["clone"] } });
   });
 
   it("carries a peek made before the first bind to that profile", async () => {

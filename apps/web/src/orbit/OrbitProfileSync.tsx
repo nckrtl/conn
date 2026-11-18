@@ -37,6 +37,7 @@ import { registerOrbitSleepClient } from "./orbitInstanceSleep";
 import { createProviderRunGuard } from "./providerRunGuard";
 import {
   bindSidebarHiddenProfile,
+  classifySidebarEnvironments,
   sidebarHiddenThreadsChannel,
   watchSidebarHiddenThreads,
 } from "./sidebarHiddenThreads";
@@ -258,6 +259,7 @@ function profileSyncController(): ProfileSyncController | null {
         return;
       }
       pruneWorkspaceCloneRefs(provider, listed);
+      if (listed !== null) classifySidebarEnvironments(listed.map((entry) => entry.environmentId));
       const me = await client.me();
       if (!current()) return;
       // Conn: the sidebar's marks first, so rows the profile hides do not wait for other writes.

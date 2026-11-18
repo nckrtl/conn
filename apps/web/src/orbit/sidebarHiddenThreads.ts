@@ -7,6 +7,7 @@ import {
 import type { EnvironmentId } from "@t3tools/contracts";
 import { create } from "zustand";
 
+import { environmentCatalog } from "../connection/catalog";
 import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentShell } from "../state/shell";
@@ -30,6 +31,8 @@ import { readSidebarThreadInventory } from "./sidebarInventory";
 const PREFIX = "t3code:sidebar-hidden-threads:v2:";
 const ACTIVE_KEY = `${PREFIX}active`;
 const LAST_KEY = `${PREFIX}last`;
+/** Saved pairings the Gateway's last listing did not claim: proven not Orbit's. */
+const NOT_ORBIT_KEY = `${PREFIX}not-orbit`;
 /** Confirmed unbound: Orbit on and the Gateway names no profile. Its marks are this bucket's. */
 const NO_PROFILE = "none";
 /** Orbit mode off. Turning it on again waits for a fresh bind, unless `last` is cached. */
@@ -55,6 +58,7 @@ interface Stored {
   readonly agreed: Map<string, string[]>;
   readonly ops: Map<string, Map<string, SidebarHiddenOp>>;
   readonly attempts: Map<string, SidebarPeekAttempt>;
+  readonly notOrbit: ReadonlySet<string>;
 }
 
 function strings(value: unknown): string[] {
@@ -88,11 +92,13 @@ function readStored(): Stored {
     agreed: new Map(),
     ops: new Map(),
     attempts: new Map(),
+    notOrbit: new Set(),
   };
   if (typeof window === "undefined") return stored;
   const storage = window.localStorage;
   let active: string | null = null;
   let last: string | null = null;
+  let notOrbit: ReadonlySet<string> = stored.notOrbit;
   for (let index = 0; index < storage.length; index += 1) {
     const name = storage.key(index);
     if (name === null || !name.startsWith(PREFIX)) continue;
@@ -102,6 +108,8 @@ function readStored(): Stored {
       if (typeof value === "string") active = value;
     } else if (name === LAST_KEY) {
       if (typeof value === "string") last = value;
+    } else if (name === NOT_ORBIT_KEY) {
+      notOrbit = new Set(strings(value));
     } else if (rest.startsWith("agreed:")) {
       stored.agreed.set(rest.slice("agreed:".length), strings(value));
     } else if (rest.startsWith("op:")) {
@@ -127,7 +135,7 @@ function readStored(): Stored {
       });
     }
   }
-  return { ...stored, active, last };
+  return { ...stored, active, last, notOrbit };
 }
 
 function write(name: string, value: unknown): void {
@@ -160,15 +168,39 @@ function binding(stored: Stored): { readonly profile: string; readonly hydrated:
   return { profile: NO_PROFILE, hydrated: false };
 }
 
-/** Environments Orbit provides on this device: their rows wait for the profile's marks. */
-function orbitEnvironmentIds(): string[] {
+/** Enabled pairings (the kind Orbit makes); a fresh client may not know yet which are Orbit's. */
+function pairedEnvironmentIds(): string[] {
+  const catalog = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
+  return [...catalog.entries].flatMap(([environmentId, entry]) =>
+    entry.enabled && entry.target._tag === "BearerConnectionTarget" ? [String(environmentId)] : [],
+  );
+}
+
+/**
+ * Environments whose rows wait for the profile's marks: the ones Orbit provides on this device,
+ * and every pairing the Gateway's listing has not proven to be another server's.
+ */
+function orbitEnvironmentIds(notOrbit: ReadonlySet<string>): string[] {
   const { provider, state, orbitInstances } = useEnvironmentProvider.getState();
   if (provider !== "orbit") return [];
-  return [
+  const known = [
     ...state.pairedByOrbit,
     ...Object.keys(state.pairAttemptedAt ?? {}),
     ...Object.keys(orbitInstances),
   ];
+  const unproven = pairedEnvironmentIds().filter((environmentId) => !notOrbit.has(environmentId));
+  return [...new Set([...known, ...unproven])];
+}
+
+/** The main window's sync, after each Gateway listing: pairings it did not claim are not Orbit's. */
+export function classifySidebarEnvironments(orbitEnvironmentIds: readonly string[]): void {
+  const orbit = new Set(orbitEnvironmentIds);
+  const notOrbit = pairedEnvironmentIds()
+    .filter((environmentId) => !orbit.has(environmentId))
+    .sort();
+  if (JSON.stringify(notOrbit) === window.localStorage.getItem(NOT_ORBIT_KEY)) return;
+  write(NOT_ORBIT_KEY, notOrbit);
+  refresh();
 }
 
 interface SidebarHiddenState {
@@ -186,7 +218,7 @@ function compute(): SidebarHiddenState {
     agreed: stored.agreed.get(profile) ?? [],
     ops: stored.ops.get(profile) ?? new Map<string, SidebarHiddenOp>(),
     attempts: [...stored.attempts.values()].filter((attempt) => attempt.profile === profile),
-    unhydrated: hydrated ? [] : orbitEnvironmentIds(),
+    unhydrated: hydrated ? [] : orbitEnvironmentIds(stored.notOrbit),
   };
   lastSignature = JSON.stringify([
     stored.active,
@@ -481,6 +513,7 @@ export function watchSidebarHiddenThreads(): void {
     if (event.key?.startsWith(`${PREFIX}op:`)) notifyLocalProfileChange();
   });
   useEnvironmentProvider.subscribe(refresh);
+  appAtomRegistry.subscribe(environmentCatalog.catalogValueAtom, refresh);
   resumeSweeps();
 }
 

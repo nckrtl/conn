@@ -45,7 +45,11 @@ async function select({ github, context, core, diff }) {
     if (comparison.total_commits > 1000) {
       selection = { checks: true, musl: true };
     } else if (comparison.merge_base_commit.sha === before && Array.isArray(comparison.files)) {
-      selection = selectPaths(comparison.files.map(({ filename }) => filename));
+      selection = selectPaths(
+        comparison.files.flatMap(({ filename, previous_filename }) =>
+          previous_filename ? [previous_filename, filename] : [filename],
+        ),
+      );
     } else {
       // REST compares from the merge base. The original push compares the two tips.
       selection = selectPaths(await diff(before, after));

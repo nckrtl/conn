@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: conn-server-checks-${{ github.event.pull_request.number || inputs.source_sha || github.sha }}
+  group: conn-server-checks-${{ github.event_name == 'workflow_run' && format('after-ci-{0}', github.run_id) || github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

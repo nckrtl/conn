@@ -10,6 +10,7 @@ const workflow = workflowFile("conn-server-after-ci.yml");
 const before = "a".repeat(40);
 const after = "b".repeat(40);
 const latest = "c".repeat(40);
+const companionRun = 200;
 const repo = { owner: "nckrtl", repo: "conn" };
 const original = {
   event: "push",
@@ -56,6 +57,17 @@ test("fan-out waits for selection, pins every checkout and keeps native PR, sync
     assert.match(companion, /pull_request:\n    paths: &paths/);
     assert.match(companion, /push:\n    branches:\n      - "sync\/\*\*"\n    paths: \*paths/);
     assert.match(companion, /workflow_dispatch:/);
+    const group = companion.match(/^  group: (.+)$/m);
+    assert.ok(group);
+    const key = (runId) =>
+      group[1].replace(/\$\{\{ (.+?) \}\}/g, (_, expr) =>
+        runInNewContext(expr, {
+          github: { event_name: "workflow_run", sha: latest, run_id: runId },
+          inputs: { source_sha: after },
+          format: (pattern, value) => pattern.replace("{0}", value),
+        }),
+      );
+    assert.notEqual(key(companionRun), key(companionRun + 1));
     assert.equal(
       companion.match(/- name: Checkout\n/g).length,
       companion.match(/ref: \$\{\{ inputs\.source_sha \}\}/g).length,
@@ -123,7 +135,7 @@ function selectionFixture({
               data: {
                 total_commits: totalCommits,
                 merge_base_commit: { sha: mergeBase },
-                files: files.map((filename) => ({ filename })),
+                files: files.map((file) => (typeof file === "string" ? { filename: file } : file)),
               },
             };
           },
@@ -157,6 +169,33 @@ test("path selection uses the net multi-commit push range and each original work
     await fixture.run();
     assert.deepEqual(fixture.outputs, { source_sha: after, checks, musl });
   }
+});
+
+test("rename selection counts both endpoints of the push diff", async (t) => {
+  const docs = "docs/server.md";
+  for (const [path, musl] of [
+    ["apps/server/src/bin.ts", "false"],
+    ["apps/conn-server/Cargo.lock", "true"],
+    [".github/workflows/conn-server-ci.yml", "true"],
+  ]) {
+    for (const [previous_filename, filename] of [
+      [path, docs],
+      [docs, path],
+    ]) {
+      await t.test(`${previous_filename} → ${filename}`, async () => {
+        const fixture = selectionFixture({
+          files: [{ status: "renamed", previous_filename, filename }],
+        });
+        await fixture.run();
+        assert.deepEqual(fixture.outputs, { source_sha: after, checks: "true", musl });
+      });
+    }
+  }
+  const fixture = selectionFixture({
+    files: [{ status: "renamed", previous_filename: docs, filename: "docs/new.md" }],
+  });
+  await fixture.run();
+  assert.deepEqual(fixture.outputs, { source_sha: after, checks: "false", musl: "false" });
 });
 
 test("two rapid pushes select independently while the default tip is already newer", async () => {
@@ -196,31 +235,174 @@ test("a non-fast-forward comparison falls back to the two exact push endpoints",
   assert.deepEqual(fixture.outputs, { source_sha: after, checks: "false", musl: "false" });
 });
 
+const resultJob = workflow.split("\n  result:\n")[1];
+const reportScript = resultJob.match(/          script: \|\n([\s\S]+)$/)?.[1];
+const checksName = "Conn Server checks";
+const muslName = "Linux musl release build";
+const actionsApp = { slug: "github-actions" };
+
+function reportFixture() {
+  const records = [];
+  let loseResponseFor;
+  const checks = {
+    listForRef: () => assert.fail("expected pagination"),
+    create: async ({ owner, repo: repoName, ...check }) => {
+      assert.deepEqual({ owner, repo: repoName }, repo);
+      const id = records.length + 1;
+      records.push({ ...check, id, app: actionsApp });
+      if (check.name === loseResponseFor) {
+        loseResponseFor = undefined;
+        throw new Error("lost create response");
+      }
+    },
+    update: async ({ owner, repo: repoName, check_run_id, ...check }) => {
+      assert.deepEqual({ owner, repo: repoName }, repo);
+      assert.ok(!("head_sha" in check), "update cannot change the selected SHA");
+      const record = records.find(({ id }) => id === check_run_id);
+      assert.ok(record, "update must target an existing check");
+      Object.assign(record, check);
+    },
+  };
+  const summary = { addRaw: () => summary, write: async () => {} };
+  return {
+    records,
+    loseCreateResponse: (name) => (loseResponseFor = name),
+    report: ({
+      source = original,
+      number = 10,
+      attempt = 1,
+      runId = companionRun,
+      checksResult = "success",
+      musl = "true",
+      muslResult = "success",
+    } = {}) =>
+      runInNewContext(`(async () => { ${reportScript} })()`, {
+        github: {
+          rest: { checks },
+          paginate: async (method, args) => {
+            assert.equal(method, checks.listForRef);
+            assert.deepEqual({ ...args }, { ...repo, ref: after, filter: "all", per_page: 100 });
+            return records.filter((record) => record.head_sha === args.ref);
+          },
+        },
+        core: { info: () => {}, summary },
+        context: {
+          repo,
+          sha: latest,
+          payload: { workflow_run: source },
+          serverUrl: "https://github.com",
+          runId,
+        },
+        process: {
+          env: {
+            SOURCE_SHA: after,
+            CHECKS_RESULT: checksResult,
+            MUSL_SELECTED: musl,
+            MUSL_RESULT: muslResult,
+            GITHUB_RUN_NUMBER: String(number),
+            GITHUB_RUN_ATTEMPT: String(attempt),
+          },
+        },
+        Date: { now: () => Date.parse("2026-11-18T00:25:16Z"), parse: Date.parse },
+      }),
+  };
+}
+
 test("the publisher reports a failed companion on the old SHA and omits an unselected musl check", async () => {
-  const resultJob = workflow.split("\n  result:\n")[1];
   assert.match(resultJob, /needs: \[select, checks, musl\]/);
   assert.match(resultJob, /always\(\) && needs\.select\.result == 'success'/);
   assert.doesNotMatch(resultJob, /actions\/checkout|actions\/download-artifact/);
-  const script = resultJob.match(/          script: \|\n([\s\S]+)$/)?.[1];
-  assert.ok(script);
-  const created = [];
-  const summary = { addRaw: () => summary, write: async () => {} };
-  await runInNewContext(`(async () => { ${script} })()`, {
-    github: { rest: { checks: { create: async (check) => created.push(check) } } },
-    core: { info: () => {}, summary },
-    context: {
-      repo,
-      sha: latest,
-      payload: { workflow_run: original },
-      serverUrl: "https://github.com",
-      runId: 200,
-    },
-    process: { env: { SOURCE_SHA: after, CHECKS_RESULT: "failure", MUSL_SELECTED: "false" } },
-    Date: { now: () => Date.parse("2026-11-18T00:25:16Z"), parse: Date.parse },
-  });
-  assert.equal(created.length, 1);
-  assert.equal(created[0].name, "Conn Server checks");
-  assert.equal(created[0].head_sha, after);
-  assert.equal(created[0].conclusion, "failure");
-  assert.match(created[0].output.summary, /660s elapsed from push/);
+  assert.ok(reportScript);
+  const { records, report } = reportFixture();
+  await report({ checksResult: "failure", musl: "false" });
+  assert.equal(records.length, 1);
+  assert.equal(records[0].name, checksName);
+  assert.equal(records[0].head_sha, after);
+  assert.equal(records[0].conclusion, "failure");
+  assert.match(records[0].output.summary, /660s elapsed from push/);
+});
+
+test("retry adopts checks created before a partial publication failure", async () => {
+  const { records, report, loseCreateResponse } = reportFixture();
+  loseCreateResponse(checksName);
+  await assert.rejects(report({ checksResult: "failure" }), /lost create response/);
+  assert.deepEqual(
+    records.map(({ name, conclusion }) => [name, conclusion]),
+    [[checksName, "failure"]],
+  );
+  await report({ checksResult: "failure", muslResult: "failure" });
+  assert.deepEqual(
+    records.map(({ id, conclusion }) => [id, conclusion]),
+    [
+      [1, "failure"],
+      [2, "failure"],
+    ],
+  );
+  await report({ attempt: 2, muslResult: "failure" });
+  await report({ attempt: 2, muslResult: "failure" });
+  assert.deepEqual(
+    records.map(({ id, name, conclusion }) => [id, name, conclusion]),
+    [
+      [1, checksName, "success"],
+      [2, muslName, "failure"],
+    ],
+  );
+  assert.match(records[0].details_url, /\/runs\/200\/attempts\/2$/);
+  assert.match(records[1].details_url, /\/runs\/200\/attempts\/2$/);
+});
+
+test("an older queued publication cannot replace a later result or fill its missing gate", async () => {
+  const { records, report, loseCreateResponse } = reportFixture();
+  loseCreateResponse(checksName);
+  await assert.rejects(report({ number: 11, runId: 201 }), /lost create response/);
+  await report({ attempt: 3, checksResult: "failure", muslResult: "failure" });
+  assert.deepEqual(
+    records.map(({ name, conclusion }) => [name, conclusion]),
+    [[checksName, "success"]],
+  );
+  await report({ number: 11, runId: 201, attempt: 2 });
+  await report({ number: 11, runId: 201, checksResult: "failure", muslResult: "failure" });
+  assert.deepEqual(
+    records.map(({ id, name, conclusion }) => [id, name, conclusion]),
+    [
+      [1, checksName, "success"],
+      [2, muslName, "success"],
+    ],
+  );
+  assert.match(records[0].details_url, /\/runs\/201\/attempts\/2$/);
+});
+
+test("same-SHA pushes have distinct reports and leave native and foreign checks alone", async () => {
+  const { records, report } = reportFixture();
+  await report({ musl: "false" });
+  const [own] = records;
+  const native = { ...own, id: 2, external_id: "native-job", conclusion: "neutral" };
+  const foreign = { ...own, id: 3, app: { slug: "other-app" }, conclusion: "neutral" };
+  records.push(native, foreign);
+  const snapshots = records.slice(1).map((record) => ({ ...record }));
+  const secondPush = { ...original, id: 124, check_suite_id: 457 };
+  await report({ source: secondPush, number: 11, runId: 201, musl: "false" });
+  await report({ attempt: 2, checksResult: "failure", musl: "false" });
+  assert.deepEqual(records.slice(1, 3), snapshots);
+  assert.deepEqual(
+    records.map(({ id, conclusion }) => [id, conclusion]),
+    [
+      [1, "failure"],
+      [2, "neutral"],
+      [3, "neutral"],
+      [4, "success"],
+    ],
+  );
+  assert.notEqual(records[0].external_id, records[3].external_id);
+});
+
+test("publication queues overlapping retries by source run, including distinct pushes of one SHA", () => {
+  const group = resultJob.match(/    concurrency:\n      group: (.+)\n      queue: max\n/);
+  assert.ok(group);
+  const groupFor = (run) =>
+    group[1].replace(/\$\{\{ (.+?) \}\}/g, (_, expr) =>
+      runInNewContext(expr, { github: { event: { workflow_run: run } } }),
+    );
+  assert.equal(groupFor(original), groupFor({ ...original, run_attempt: 2 }));
+  assert.notEqual(groupFor(original), groupFor({ ...original, id: 124 }));
 });

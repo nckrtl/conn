@@ -82,15 +82,26 @@ function capacityError(rows: number, bytes: number): SidebarHiddenThreadsCapacit
 }
 
 /**
- * The section for a set of keys, oldest first. A key the Gateway would refuse is left out, so one
- * bad local mark cannot fail the whole write; it stays hidden on this device only.
+ * A ref part that reaches the Gateway unchanged. The sync sends values in Gateway form, which
+ * trims strings with JavaScript's `trim()`; that also strips non-ASCII whitespace such as a
+ * no-break space, so a part with it at either end would be sent as another thread's ref.
+ */
+function isSendableRefPart(value: string): boolean {
+  return isRefPart(value) && value.trim() === value;
+}
+
+/**
+ * The section for a set of keys, oldest first. A key the Gateway would refuse, or one the write
+ * would change, is left out, so one bad local mark cannot fail the whole write or hide another
+ * thread; it stays hidden on this device only.
  */
 function sidebarHiddenThreadsSection(keys: readonly string[]): JsonObject {
   const threads = keys.flatMap((key) => {
     const separator = key.indexOf(":");
     const environmentId = key.slice(0, separator);
     const threadId = key.slice(separator + 1);
-    if (separator <= 0 || !isRefPart(environmentId) || !isRefPart(threadId)) return [];
+    if (separator <= 0 || !isSendableRefPart(environmentId) || !isSendableRefPart(threadId))
+      return [];
     return [{ environmentId, threadId }];
   });
   return { schema: PROFILE_SCHEMA_VERSION, threads };

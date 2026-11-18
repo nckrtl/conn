@@ -1059,6 +1059,18 @@ describe("sidebar hidden threads sync", () => {
     expect([...mac.memory.ops.keys()]).toEqual(["env-a: ", "env-a:a b"]);
   });
 
+  it("keeps a mark local when the write's trim would change its ref", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a:\u00a0x", "hide");
+    mac.set("\u00a0env-a:y\u00a0", "hide");
+    mac.set("env-a:ok", "hide");
+    await mac.sync();
+    // Sent trimmed, the first would hide "env-a:x", another thread.
+    expect(profileHidden(fake)).toEqual(["env-a:ok"]);
+    expect([...mac.memory.ops.keys()]).toEqual(["env-a:\u00a0x", "\u00a0env-a:y\u00a0"]);
+  });
+
   it("reads refs the Gateway accepts, also with non-ASCII whitespace, and still sends a Show", async () => {
     const fake = fakeGateway();
     const mac = makeHidingDevice(fake);

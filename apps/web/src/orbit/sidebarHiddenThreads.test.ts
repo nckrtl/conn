@@ -7,20 +7,35 @@ import {
   type OrbitGatewaySettings,
   type ProfileSyncState,
 } from "@t3tools/client-runtime/orbit-gateway";
-import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { create } from "zustand";
 
-import { isSidebarHiddenThread } from "./sidebarHiddenThreads.logic";
+import { filterSidebarV2VisibleThreads } from "../components/Sidebar.logic";
+import { useEnvironmentProvider } from "./environmentProvider";
+import { createProviderRunGuard } from "./providerRunGuard";
+import {
+  hidesSidebarEnvironmentInventory,
+  isSidebarHiddenThread,
+} from "./sidebarHiddenThreads.logic";
 
 const fixture = vi.hoisted(() => ({
   ids: 0,
   shells: new Map<string, unknown>(),
   shellListeners: new Map<string, Set<(value: unknown) => void>>(),
+  /** The untrimmed read's answers per environment, in order; null is a failed read. */
+  inventory: new Map<string, Array<string[] | null | Promise<string[] | null>>>(),
+  inventoryReads: 0,
 }));
 
 vi.mock("../lib/utils", () => ({ randomUUID: () => `id-${++fixture.ids}` }));
+vi.mock("./sidebarInventory", () => ({
+  readSidebarThreadInventory: async (environmentId: string) => {
+    fixture.inventoryReads += 1;
+    const answers = fixture.inventory.get(environmentId) ?? [];
+    return (answers.length > 1 ? answers.shift() : answers[0]) ?? null;
+  },
+}));
 vi.mock("../state/shell", () => ({
   environmentShell: { stateValueAtom: (environmentId: string) => environmentId },
 }));
@@ -71,18 +86,25 @@ async function openWindow() {
   return { module, listeners };
 }
 
-function setup() {
-  fixture.ids = 0;
-  fixture.shells.clear();
-  fixture.shellListeners.clear();
-  const windows: Array<Awaited<ReturnType<typeof openWindow>>> = [];
-  const storage = createLocalStorageStub();
+function stubWindow(storage: Storage, windows: Array<Awaited<ReturnType<typeof openWindow>>>) {
   vi.stubGlobal("window", {
     localStorage: storage,
     addEventListener: (type: string, listener: (event: { key: string | null }) => void) => {
       if (type === "storage") windows.at(-1)?.listeners.push(listener);
     },
   });
+}
+
+function setup() {
+  fixture.ids = 0;
+  fixture.shells.clear();
+  fixture.shellListeners.clear();
+  fixture.inventory.clear();
+  fixture.inventoryReads = 0;
+  useEnvironmentProvider.setState({ provider: "orbit" });
+  const windows: Array<Awaited<ReturnType<typeof openWindow>>> = [];
+  const storage = createLocalStorageStub();
+  stubWindow(storage, windows);
   const open = async () => {
     const opened = await openWindow();
     windows.push(opened);
@@ -101,7 +123,14 @@ function setup() {
       storage.setItem(`t3code:sidebar-hidden-threads:v2:agreed:${profile}`, "[]");
     }
   };
-  return { storage, open, broadcast, hydrate };
+  /** Makes this device's storage the one `window` reads; another device has its own. */
+  const use = () => stubWindow(storage, windows);
+  return { storage, open, broadcast, hydrate, use };
+}
+
+/** Lets the sweep's microtask and its inventory read run. */
+async function settle() {
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
 
 const hidden = (
@@ -116,16 +145,9 @@ const hidden = (
     ...(createdAt ? { createdAt } : {}),
   });
 
-function liveShell(environmentId: string, threads: Array<[string, string]>) {
-  const value = {
-    status: "live",
-    snapshot: Option.some({
-      threads: threads.map(([id, createdAt]) => ({
-        id,
-        createdAt: DateTime.makeUnsafe(createdAt),
-      })),
-    }),
-  };
+/** The environment connects; its trimmed shell rows never feed the sweep. */
+function liveShell(environmentId: string) {
+  const value = { status: "live", snapshot: Option.some({ threads: [] }) };
   fixture.shells.set(environmentId, value);
   for (const listener of fixture.shellListeners.get(environmentId) ?? []) listener(value);
 }
@@ -148,6 +170,10 @@ function fakeGateway(initial: string[] = []) {
     beforeSettings: null as Promise<void> | null,
     beforePatch: null as Promise<void> | null,
     onPatch: null as (() => void) | null,
+    /** An old Gateway that refuses the section (422). */
+    refuse: false,
+    /** A reply that leaves the section out, though the write landed. */
+    omitReply: false,
   };
   const read = (): OrbitGatewaySettings => ({
     profileId: 1,
@@ -168,6 +194,14 @@ function fakeGateway(initial: string[] = []) {
       gateway.patches.push(patch);
       gateway.onPatch?.();
       await gateway.beforePatch;
+      if (gateway.refuse) {
+        throw new OrbitGatewayError({
+          code: "validation_failed",
+          message: "unknown section",
+          status: 422,
+          details: {},
+        });
+      }
       const section = patch.sidebarHiddenThreads!;
       if (section.version !== gateway.version) {
         throw new OrbitGatewayError({
@@ -179,7 +213,7 @@ function fakeGateway(initial: string[] = []) {
       }
       gateway.version += 1;
       gateway.value = section.value as typeof gateway.value;
-      return read();
+      return gateway.omitReply ? { ...read(), document: {}, sections: {} } : read();
     },
   };
   const me = (): OrbitGatewayNode =>
@@ -191,21 +225,35 @@ function fakeGateway(initial: string[] = []) {
 function mainSync(
   window: Awaited<ReturnType<typeof openWindow>>,
   fake: ReturnType<typeof fakeGateway>,
+  clock = { now: 0 },
 ) {
   let state: ProfileSyncState | null = null;
+  const channel = window.module.sidebarHiddenThreadsChannel(1);
   const engine = createProfileSync({
     client: fake.client,
-    channels: () => [window.module.sidebarHiddenThreadsChannel(1)],
+    channels: () => [channel],
     loadState: () => state,
     saveState: (next) => {
       state = next;
     },
+    now: () => clock.now,
   });
-  return () => {
-    window.module.bindSidebarHiddenProfile(1);
-    return engine.run(fake.me());
-  };
+  return Object.assign(
+    () => {
+      window.module.bindSidebarHiddenProfile(1);
+      return engine.run(fake.me());
+    },
+    { channel },
+  );
 }
+
+const ref = (threadId: string) => ({ environmentId: "clone", threadId });
+const threads = (fake: ReturnType<typeof fakeGateway>) =>
+  (fake.gateway.value?.threads ?? []).map((entry) => entry.threadId);
+const opsOf = (storage: Storage) =>
+  Array.from({ length: storage.length }, (_, index) => storage.key(index)!).filter((key) =>
+    key.includes(":op:"),
+  );
 
 describe("sidebar hidden threads store", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -277,7 +325,8 @@ describe("sidebar hidden threads store", () => {
     expect(storage.getItem("t3code:sidebar-hidden-threads:v2:active")).toBe('"2"');
     expect(storage.getItem("t3code:sidebar-hidden-threads:v2:op:2:clone:x")).not.toBeNull();
     // Orbit mode off: every window unbinds and the profile's marks no longer apply.
-    main.module.bindSidebarHiddenProfile(null);
+    useEnvironmentProvider.setState({ provider: "default" });
+    main.module.bindSidebarHiddenProfile("off");
     broadcast(main);
     expect(hidden(extra, "clone", "x")).toBe(false);
   });
@@ -298,35 +347,250 @@ describe("sidebar hidden threads store", () => {
     );
   });
 
-  it("keeps a sibling shown during a hold out of the sweep, also after the show is acknowledged", async () => {
+  it("marks every sibling of a peek per thread, so a second device hides older pages too", async () => {
+    const fake = fakeGateway();
+    const deviceA = setup();
+    const a = await deviceA.open();
+    const syncA = mainSync(a, fake);
+    await syncA();
+    const peek = a.module.beginSidebarPeek(ref("target"), {
+      targetListed: false,
+      environmentSurfaced: true,
+    });
+    peek.commit();
+    a.module.showSidebarThread(ref("shown"));
+    // The untrimmed read has what the first trimmed shell leaves out.
+    fixture.inventory.set("clone", [["target", "shown", "recent", "older-settled", "idle-child"]]);
+    liveShell("clone");
+    await settle();
+    expect(fixture.inventoryReads).toBe(1);
+    // The hold went, so a thread created later shows like any other.
+    expect(a.module.useSidebarHiddenThreads.getState().marks.environments.size).toBe(0);
+    expect(hidden(a, "clone", "created-later")).toBe(false);
+    expect(hidden(a, "clone", "shown")).toBe(false);
+    await syncA();
+    expect(threads(fake)).toEqual(["target", "recent", "older-settled", "idle-child"]);
+
+    // Device B never peeked: it hydrates the per-thread marks only.
+    const deviceB = setup();
+    const b = await deviceB.open();
+    const syncB = mainSync(b, fake);
+    await syncB();
+    const marksB = b.module.useSidebarHiddenThreads.getState().marks;
+    // B's shelf pages the environment, and an older page's row stays hidden.
+    expect(hidesSidebarEnvironmentInventory(marksB, "clone")).toBe(false);
+    const page = ["older-settled", "idle-child", "shown"].map((id) => ({
+      environmentId: "clone",
+      id,
+      archivedAt: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+    }));
+    const listed = (marks: typeof marksB) =>
+      filterSidebarV2VisibleThreads(
+        page as unknown as Parameters<typeof filterSidebarV2VisibleThreads>[0],
+        null,
+        new Set(),
+        marks,
+      ).map((row) => row.id);
+    expect(listed(marksB)).toEqual(["shown"]);
+
+    // B's Orbit panel Show lists exactly that row on both devices.
+    b.module.showSidebarThread(ref("older-settled"));
+    expect(listed(b.module.useSidebarHiddenThreads.getState().marks)).toEqual([
+      "older-settled",
+      "shown",
+    ]);
+    await syncB();
+    expect(threads(fake)).toEqual(["target", "recent", "idle-child"]);
+    deviceA.use();
+    await syncA();
+    expect(listed(a.module.useSidebarHiddenThreads.getState().marks)).toEqual([
+      "older-settled",
+      "shown",
+    ]);
+    expect(hidden(a, "clone", "recent")).toBe(true);
+  });
+
+  it("holds through failed and slow inventory reads, and a show during the read wins", async () => {
+    vi.useFakeTimers();
     const { open } = setup();
     const main = await open();
     const fake = fakeGateway();
     const sync = mainSync(main, fake);
     await sync();
-    const peek = main.module.beginSidebarPeek(
-      { environmentId: "clone", threadId: "target" },
-      { targetListed: false, environmentSurfaced: true },
-    );
-    peek.commit();
-    main.module.showSidebarThread({ environmentId: "clone", threadId: "sibling" });
-    await sync();
-    liveShell("clone", [
-      ["target", "2026-11-01T00:00:00.000Z"],
-      ["sibling", "2026-11-02T00:00:00.000Z"],
-      ["other", "2026-11-03T00:00:00.000Z"],
-    ]);
-    expect(hidden(main, "clone", "target")).toBe(true);
+    main.module
+      .beginSidebarPeek(ref("target"), { targetListed: false, environmentSurfaced: true })
+      .commit();
+    let answer!: (ids: string[]) => void;
+    const slow = new Promise<string[]>((resolve) => (answer = resolve));
+    fixture.inventory.set("clone", [null, slow]);
+    liveShell("clone");
+    liveShell("clone");
+    await settle();
+    expect(fixture.inventoryReads).toBe(1);
+    expect(hidden(main, "clone", "anything")).toBe(true);
+    // One retry after the pause, not one per shell update.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fixture.inventoryReads).toBe(2);
+    main.module.showSidebarThread(ref("sibling"));
+    answer(["target", "sibling", "other"]);
+    await settle();
     expect(hidden(main, "clone", "sibling")).toBe(false);
     expect(hidden(main, "clone", "other")).toBe(true);
-    // An older settled thread that pages in later is part of the inventory the peek found.
-    expect(hidden(main, "clone", "older", "2026-10-01T00:00:00.000Z")).toBe(true);
-    expect(hidden(main, "clone", "created-later", "2026-11-04T00:00:00.000Z")).toBe(false);
     await sync();
-    expect(fake.gateway.value?.threads).toEqual([
-      { environmentId: "clone", threadId: "target" },
-      { environmentId: "clone", threadId: "other" },
+    expect(threads(fake)).toEqual(["target", "other"]);
+    vi.useRealTimers();
+  });
+
+  it("lets a show beat a provisional hide before the peek resolves, through commit and rollback", async () => {
+    const { open, hydrate, storage } = setup();
+    hydrate(1);
+    const main = await open();
+    main.module.bindSidebarHiddenProfile(1);
+    const committed = main.module.beginSidebarPeek(ref("a"), {
+      targetListed: false,
+      environmentSurfaced: false,
+    });
+    const cancelled = main.module.beginSidebarPeek(ref("b"), {
+      targetListed: false,
+      environmentSurfaced: false,
+    });
+    expect(hidden(main, "clone", "a")).toBe(true);
+    main.module.showSidebarThread(ref("a"));
+    main.module.showSidebarThread(ref("b"));
+    expect(hidden(main, "clone", "a")).toBe(false);
+    expect(hidden(main, "clone", "b")).toBe(false);
+    committed.commit();
+    cancelled.cancel();
+    expect(hidden(main, "clone", "a")).toBe(false);
+    expect(hidden(main, "clone", "b")).toBe(false);
+    expect(opsOf(storage).map((key) => JSON.parse(storage.getItem(key)!).intent)).toEqual([
+      "show",
+      "show",
     ]);
+  });
+
+  it("recovers a peek its closed window left, never a live window's", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { open, storage } = setup();
+    storage.setItem("t3code:sidebar-hidden-threads:v2:agreed:1", "[]");
+    // A window that crashed while preparing, before this restart.
+    storage.setItem(
+      "t3code:sidebar-hidden-threads:v2:attempt:gone",
+      JSON.stringify({
+        profile: "1",
+        environmentId: "clone",
+        target: "clone:orphan",
+        hold: true,
+        committed: false,
+        shown: [],
+        owner: "window-gone",
+        beat: 0,
+      }),
+    );
+    storage.setItem("t3code:sidebar-hidden-threads:v2:active", '"1"');
+    const restarted = await open();
+    const other = await open();
+    other.module.beginSidebarPeek(ref("live"), {
+      targetListed: false,
+      environmentSurfaced: false,
+    });
+    expect(hidden(restarted, "clone", "orphan")).toBe(true);
+    await vi.advanceTimersByTimeAsync(95_000);
+    expect(storage.getItem("t3code:sidebar-hidden-threads:v2:attempt:gone")).toBeNull();
+    expect(hidden(restarted, "clone", "orphan")).toBe(false);
+    expect(hidden(restarted, "clone", "unrelated")).toBe(false);
+    // The other window still prepares its peek: its provisional hide stays.
+    expect(hidden(other, "clone", "live")).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("keeps only fitting hides in the profile, and lets shows sync past the rest", async () => {
+    const full = Array.from({ length: 500 }, (_, index) => `clone:t${index}`);
+    const { open, storage } = setup();
+    const main = await open();
+    const fake = fakeGateway(full);
+    const sync = mainSync(main, fake);
+    await sync();
+    main.module.hideSidebarThread(ref("x"));
+    main.module.hideSidebarThread(ref("y"));
+    main.module.showSidebarThread(ref("t0"));
+    await sync();
+    expect(threads(fake)).toHaveLength(500);
+    expect(threads(fake)).not.toContain("t0");
+    expect(threads(fake).at(-1)).toBe("x");
+    expect(sync.channel.overflow()?.rows).toBe(501);
+    // y stays hidden here and waits; another run sends nothing new.
+    expect(hidden(main, "clone", "y")).toBe(true);
+    expect(opsOf(storage)).toEqual(["t3code:sidebar-hidden-threads:v2:op:1:clone:y"]);
+    const patches = fake.gateway.patches.length;
+    await sync();
+    expect(fake.gateway.patches).toHaveLength(patches);
+    // A show frees a row: the waiting hide goes out and the error clears.
+    main.module.showSidebarThread(ref("t1"));
+    await sync();
+    expect(threads(fake)).toContain("y");
+    expect(sync.channel.overflow()).toBeNull();
+    expect(opsOf(storage)).toEqual([]);
+  });
+
+  it("retries a refused section at the probe pace, and trusts only a confirmed write", async () => {
+    const { open, storage } = setup();
+    const main = await open();
+    const fake = fakeGateway();
+    const clock = { now: 0 };
+    const sync = mainSync(main, fake, clock);
+    await sync();
+    fake.gateway.refuse = true;
+    main.module.hideSidebarThread(ref("x"));
+    await expect(sync()).rejects.toMatchObject({ status: 422 });
+    // Upgraded meanwhile; the refusal stays visible until the pause ends.
+    fake.gateway.refuse = false;
+    await expect(sync()).rejects.toMatchObject({ status: 422 });
+    expect(fake.gateway.patches).toHaveLength(1);
+    clock.now = 30_000;
+    // The write lands, but the reply leaves the section out: the op stays.
+    fake.gateway.omitReply = true;
+    await expect(sync()).rejects.toThrow(/did not confirm/);
+    expect(opsOf(storage)).toHaveLength(1);
+    // A fresh read that holds the same value retires it, without another write.
+    fake.gateway.omitReply = false;
+    await sync();
+    expect(opsOf(storage)).toEqual([]);
+    expect(fake.gateway.patches).toHaveLength(2);
+    expect(threads(fake)).toEqual(["x"]);
+  });
+
+  it("binds nothing from a /me that answered across Orbit off and on", async () => {
+    const { open, storage } = setup();
+    const main = await open();
+    const guard = createProviderRunGuard();
+    // Confirmed unbound earlier: no profile.
+    main.module.bindSidebarHiddenProfile(null);
+    expect(hidden(main, "clone", "row")).toBe(false);
+    const stale = guard.begin();
+    useEnvironmentProvider.setState({ provider: "default" });
+    main.module.bindSidebarHiddenProfile("off");
+    useEnvironmentProvider.setState({ provider: "orbit" });
+    // On again: a fresh bind is pending, so Orbit rows wait instead of reading "none" as known.
+    expect(hidden(main, "clone", "row")).toBe(true);
+    // The delayed reply of the run from before the switch applies nothing.
+    expect(stale()).toBe(false);
+    expect(storage.getItem("t3code:sidebar-hidden-threads:v2:active")).toBe('"off"');
+    const fresh = guard.begin();
+    expect(fresh()).toBe(true);
+    storage.setItem("t3code:sidebar-hidden-threads:v2:agreed:1", '["clone:hidden"]');
+    main.module.bindSidebarHiddenProfile(1);
+    expect(hidden(main, "clone", "row")).toBe(false);
+    expect(hidden(main, "clone", "hidden")).toBe(true);
+    // Off and on again offline: the bound profile's cached marks apply at once.
+    useEnvironmentProvider.setState({ provider: "default" });
+    main.module.bindSidebarHiddenProfile("off");
+    expect(hidden(main, "clone", "hidden")).toBe(false);
+    useEnvironmentProvider.setState({ provider: "orbit" });
+    expect(hidden(main, "clone", "hidden")).toBe(true);
+    expect(hidden(main, "clone", "row")).toBe(false);
   });
 
   it("cancels only its own peek, and drops a peek whose profile was left", async () => {

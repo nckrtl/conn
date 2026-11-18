@@ -71,13 +71,40 @@ function sidebarHiddenThreadsSection(keys: readonly string[]): JsonObject {
   return { schema: PROFILE_SCHEMA_VERSION, threads };
 }
 
-/** Throws when a section would exceed the Gateway's limits, instead of dropping marks. */
-function assertSidebarHiddenThreadsFit(section: JsonObject): void {
-  const rows = Array.isArray(section.threads) ? section.threads.length : 0;
-  const bytes = new TextEncoder().encode(JSON.stringify(section)).length;
-  if (rows > SIDEBAR_HIDDEN_THREADS_LIMITS.rows || bytes > SIDEBAR_HIDDEN_THREADS_LIMITS.bytes) {
-    throw capacityError(rows, bytes);
+const byteLength = (value: unknown): number =>
+  new TextEncoder().encode(JSON.stringify(value)).length;
+
+/**
+ * The set after this device's intents, cut to the Gateway's limits: shows always leave it, and
+ * new hides join at the end only while they fit. A hide that does not fit stays a local intent.
+ */
+function fitSidebarHiddenIntents(
+  agreed: readonly string[],
+  ops: ReadonlyMap<string, { readonly intent: SidebarHiddenIntent }>,
+): { readonly keys: string[]; readonly overflow: SidebarHiddenThreadsCapacityError | null } {
+  const keys = agreed.filter((key) => ops.get(key)?.intent !== "show");
+  const present = new Set(keys);
+  let rows = keys.length;
+  let bytes = byteLength(sidebarHiddenThreadsSection(keys));
+  let wantedRows = rows;
+  let wantedBytes = bytes;
+  for (const [key, op] of ops) {
+    if (op.intent !== "hide" || present.has(key)) continue;
+    const entry = sidebarHiddenThreadsSection([key]).threads as unknown[];
+    if (entry.length === 0) continue;
+    const size = byteLength(entry[0]) + (rows > 0 ? 1 : 0);
+    wantedRows += 1;
+    wantedBytes += byteLength(entry[0]) + (wantedRows > 1 ? 1 : 0);
+    if (rows + 1 > SIDEBAR_HIDDEN_THREADS_LIMITS.rows) continue;
+    if (bytes + size > SIDEBAR_HIDDEN_THREADS_LIMITS.bytes) continue;
+    keys.push(key);
+    present.add(key);
+    rows += 1;
+    bytes += size;
   }
+  const overflow =
+    wantedRows > rows || wantedBytes > bytes ? capacityError(wantedRows, wantedBytes) : null;
+  return { keys, overflow };
 }
 
 /** The set after this device's intents: shows leave it, new hides join at the end. */
@@ -112,10 +139,15 @@ export interface SidebarHiddenThreadsHost {
  */
 export function createSidebarHiddenThreadsChannel(
   host: SidebarHiddenThreadsHost,
-): ProfileSyncChannel {
+): ProfileSyncChannel & {
+  /** Hides the last rebase could not fit; they stay hidden on this device only. */
+  readonly overflow: () => SidebarHiddenThreadsCapacityError | null;
+} {
   // The ops the last rebase planned from; `applyRemote` follows `merge` within one run.
   let planned: ReadonlyMap<string, SidebarHiddenOp> = new Map();
+  let overflow: SidebarHiddenThreadsCapacityError | null = null;
   return {
+    overflow: () => overflow,
     name: SIDEBAR_HIDDEN_THREADS_SECTION,
     rebases: true,
     empty: sidebarHiddenThreadsSection([]),
@@ -140,12 +172,14 @@ export function createSidebarHiddenThreadsChannel(
       // The latest read is what the device agrees on, also when the write below fails.
       host.adopt(agreed, new Map());
       // A section written by a newer schema is left as it is.
-      if (typeof remote.schema === "number" && remote.schema > PROFILE_SCHEMA_VERSION)
+      if (typeof remote.schema === "number" && remote.schema > PROFILE_SCHEMA_VERSION) {
+        overflow = null;
         return remote;
-      const section = sidebarHiddenThreadsSection(applySidebarHiddenIntents(agreed, planned));
-      const before = Array.isArray(remote.threads) ? remote.threads.length : 0;
-      if ((section.threads as unknown[]).length > before) assertSidebarHiddenThreadsFit(section);
-      return section;
+      }
+      // Shows and the hides that fit go out; the rest wait locally and do not hold them back.
+      const fitted = fitSidebarHiddenIntents(agreed, planned);
+      overflow = fitted.overflow;
+      return sidebarHiddenThreadsSection(fitted.keys);
     },
   };
 }

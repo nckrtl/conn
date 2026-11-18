@@ -34,6 +34,7 @@ import {
   saveSectionState,
 } from "./profileSyncStorage";
 import { registerOrbitSleepClient } from "./orbitInstanceSleep";
+import { createProviderRunGuard } from "./providerRunGuard";
 import {
   bindSidebarHiddenProfile,
   sidebarHiddenThreadsChannel,
@@ -235,26 +236,33 @@ function profileSyncController(): ProfileSyncController | null {
     saveState: (state) => saveHiddenThreadsState(state),
   });
 
+  const providerRuns = createProviderRunGuard();
+
   const runOnce = async (): Promise<void> => {
+    const current = providerRuns.begin();
     try {
       const listed = await reconcileEnvironmentProvider(client);
+      if (!current()) return;
       const { provider } = useEnvironmentProvider.getState();
       // Everything syncs only while Orbit provides the environments.
       if (provider !== "orbit") {
-        bindSidebarHiddenProfile(null);
+        bindSidebarHiddenProfile("off");
         useOrbitProfileSyncStatus.setState(INITIAL_STATUS);
         await clearAttachedServers();
         return;
       }
       pruneWorkspaceCloneRefs(provider, listed);
       const me = await client.me();
+      if (!current()) return;
       // Conn: the sidebar's marks first, so rows the profile hides do not wait for other writes.
       bindSidebarHiddenProfile(me.profile?.id ?? null);
-      hiddenThreadsChannel = me.profile ? sidebarHiddenThreadsChannel(me.profile.id) : null;
+      const channel = me.profile ? sidebarHiddenThreadsChannel(me.profile.id) : null;
+      hiddenThreadsChannel = channel;
       const hiddenThreadsError = await hiddenThreads.run(me).then(
-        () => null,
+        () => channel?.overflow()?.message ?? null,
         (error: unknown) => (error instanceof Error ? error.message : String(error)),
       );
+      if (!current()) return;
       useOrbitProfileSyncStatus.setState({ hiddenThreadsError });
       // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
       if (listed !== null) {
@@ -263,6 +271,7 @@ function profileSyncController(): ProfileSyncController | null {
         });
       }
       const result = await syncWorkspaceProfile(ports, me);
+      if (!current()) return;
       useOrbitProfileSyncStatus.setState(
         result.kind === "unbound"
           ? { phase: "unbound", profileName: null, error: null, syncedAt: Date.now() }

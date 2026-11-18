@@ -6,19 +6,18 @@ import {
 
 /**
  * Conn: threads hidden from the sidebar, apart from `hiddenThreadKeysAtom` (tag filter, deletion).
- * `environments` lists environments whose threads hide unless shown: `null` hides every thread
- * (a peek holds the environment, or the profile's marks have not been read yet), a cutoff hides
- * the inventory a peek found (threads created up to it), also the pages that load later.
+ * `environments` lists environments whose threads all hide unless shown: a peek holds the
+ * environment until its whole inventory is marked, or the profile's marks have not been read yet.
  */
 export interface SidebarHiddenMarks {
   readonly keys: ReadonlySet<string>;
-  readonly environments: ReadonlyMap<string, string | null>;
+  readonly environments: ReadonlySet<string>;
   readonly shown: ReadonlySet<string>;
 }
 
 export const NO_SIDEBAR_HIDDEN_MARKS: SidebarHiddenMarks = {
   keys: new Set(),
-  environments: new Map(),
+  environments: new Set(),
   shown: new Set(),
 };
 
@@ -31,50 +30,40 @@ export interface SidebarPeekAttempt {
   readonly hold: boolean;
   /** Preparation succeeded: the hold now waits for the environment's threads. */
   readonly committed: boolean;
-  /** Threads shown while the hold lasts; the sweep leaves them out. */
+  /** Threads shown while the attempt lasts; neither the target's hide nor the sweep takes them. */
   readonly shown: readonly string[];
-}
-
-/** An environment a peek surfaced, after its threads arrived. */
-export interface SidebarPeekedEnvironment {
-  readonly cutoff: string;
-  readonly shown: readonly string[];
+  /** The window running the preparation, and when it last said so; for orphan recovery. */
+  readonly owner?: string;
+  readonly beat?: number;
 }
 
 export function sidebarHiddenMarks(input: {
   readonly agreed: readonly string[];
   readonly ops: ReadonlyMap<string, { readonly intent: SidebarHiddenIntent }>;
   readonly attempts: readonly SidebarPeekAttempt[];
-  readonly peeked: ReadonlyMap<string, SidebarPeekedEnvironment>;
   /** Environments whose marks are not known yet. */
   readonly unhydrated: Iterable<string>;
 }): SidebarHiddenMarks {
   const keys = new Set(applySidebarHiddenIntents(input.agreed, input.ops));
   const shown = new Set<string>();
-  const environments = new Map<string, string | null>();
+  const environments = new Set<string>(input.unhydrated);
   for (const [key, op] of input.ops) if (op.intent === "show") shown.add(key);
-  for (const [environmentId, entry] of input.peeked) {
-    environments.set(environmentId, entry.cutoff);
-    for (const key of entry.shown) shown.add(key);
-  }
+  for (const attempt of input.attempts) for (const key of attempt.shown) shown.add(key);
   for (const attempt of input.attempts) {
-    if (attempt.target !== null) keys.add(attempt.target);
-    if (attempt.hold) environments.set(attempt.environmentId, null);
-    for (const key of attempt.shown) shown.add(key);
+    // An explicit show wins over a provisional hide at once, before preparation resolves.
+    if (attempt.target !== null && !shown.has(attempt.target)) keys.add(attempt.target);
+    if (attempt.hold) environments.add(attempt.environmentId);
   }
-  for (const environmentId of input.unhydrated) environments.set(environmentId, null);
   return { keys, environments, shown };
 }
 
 export function isSidebarHiddenThread(
   marks: SidebarHiddenMarks,
-  thread: { readonly environmentId: string; readonly id: string; readonly createdAt?: string },
+  thread: { readonly environmentId: string; readonly id: string },
 ): boolean {
   const key = sidebarHiddenThreadKey(thread.environmentId, thread.id);
   if (marks.keys.has(key)) return true;
-  const cutoff = marks.environments.get(thread.environmentId);
-  if (cutoff === undefined || marks.shown.has(key)) return false;
-  return cutoff === null || thread.createdAt === undefined || thread.createdAt <= cutoff;
+  return marks.environments.has(thread.environmentId) && !marks.shown.has(key);
 }
 
 /** Whether the environment's unloaded threads stay out too: the shelf neither pages nor counts them. */
@@ -103,7 +92,6 @@ interface MarkedThread {
   readonly id: string;
   readonly projectId: string;
   readonly archivedAt: string | null;
-  readonly createdAt?: string;
 }
 
 interface MarkedProjectGroup {
@@ -112,7 +100,7 @@ interface MarkedProjectGroup {
 
 /**
  * Leaves out project groups whose threads are all hidden. An empty group stays, unless each of its
- * environments is one a peek surfaced or whose marks are still unknown.
+ * environments is one a peek holds or whose marks are still unknown.
  */
 export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
   groups: readonly T[],

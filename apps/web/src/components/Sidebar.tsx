@@ -1210,20 +1210,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
   const hiddenMarks = useSidebarHiddenThreads((state) => state.marks);
   // A hidden conversation has no row: the route neither reveals one nor widens the scope.
-  const routeThread =
-    routeThreadRef === null
-      ? undefined
-      : threads.find(
-          (candidate) =>
-            candidate.environmentId === routeThreadRef.environmentId &&
-            candidate.id === routeThreadRef.threadId,
-        );
   const routeRowThreadKey =
     routeThreadRef === null ||
     isSidebarHiddenThread(hiddenMarks, {
       environmentId: routeThreadRef.environmentId,
       id: routeThreadRef.threadId,
-      ...(routeThread ? { createdAt: routeThread.createdAt } : {}),
     })
       ? null
       : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));

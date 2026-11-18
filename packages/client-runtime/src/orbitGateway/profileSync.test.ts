@@ -717,7 +717,7 @@ function makeHidingDevice(fake: ReturnType<typeof fakeGateway>, agreed: string[]
   const set = (key: string, intent: SidebarHiddenIntent) => {
     memory.ops = new Map(memory.ops).set(key, { intent, id: `op-${++ids}` });
   };
-  return { memory, set, sync: () => engine.run(fake.me()) };
+  return { memory, set, sync: () => engine.run(fake.me()), overflow: channel.overflow };
 }
 
 const profileHidden = (fake: ReturnType<typeof fakeGateway>) =>
@@ -819,12 +819,13 @@ describe("sidebar hidden threads sync", () => {
     expect(Object.keys(fake.gateway.patches.at(-1)!)).toEqual(["sidebarHiddenThreads"]);
   });
 
-  it("refuses to sync past the section's limits instead of dropping marks", async () => {
+  it("syncs the marks that fit and keeps the rest local instead of dropping them", async () => {
     const fake = fakeGateway();
     const mac = makeHidingDevice(fake);
     for (let index = 0; index < 501; index += 1) mac.set(`env-a:t${index}`, "hide");
-    await expect(mac.sync()).rejects.toBeInstanceOf(SidebarHiddenThreadsCapacityError);
-    expect(fake.gateway.patches).toHaveLength(0);
-    expect(mac.memory.ops.size).toBe(501);
+    await mac.sync();
+    expect(profileHidden(fake)).toHaveLength(500);
+    expect([...mac.memory.ops.keys()]).toEqual(["env-a:t500"]);
+    expect(mac.overflow()).toBeInstanceOf(SidebarHiddenThreadsCapacityError);
   });
 });

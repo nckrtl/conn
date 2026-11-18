@@ -1561,7 +1561,7 @@ describe("resolveSidebarRouteReveal", () => {
         isSearching: false,
         scopedProjectKeys,
         delegatedUnderParent: new Set(),
-        hiddenMarks: { keys: new Set([hiddenKey]), environments: new Map(), shown: new Set() },
+        hiddenMarks: { keys: new Set([hiddenKey]), environments: new Set(), shown: new Set() },
         findThread,
       }),
     ).toEqual({ pendingKey: hiddenKey, widensScope: false });

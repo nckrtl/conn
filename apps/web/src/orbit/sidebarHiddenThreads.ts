@@ -1,13 +1,10 @@
 import {
   createSidebarHiddenThreadsChannel,
   sidebarHiddenThreadKey,
-  type ProfileSyncChannel,
   type SidebarHiddenIntent,
   type SidebarHiddenOp,
 } from "@t3tools/client-runtime/orbit-gateway";
 import type { EnvironmentId } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
-import * as Option from "effect/Option";
 import { create } from "zustand";
 
 import { randomUUID } from "../lib/utils";
@@ -21,33 +18,43 @@ import {
   sidebarHiddenMarks,
   type SidebarHiddenMarks,
   type SidebarPeekAttempt,
-  type SidebarPeekedEnvironment,
 } from "./sidebarHiddenThreads.logic";
+import { readSidebarThreadInventory } from "./sidebarInventory";
 
 /**
- * Conn: this device's sidebar marks, one localStorage entry per thread intent, peek attempt and
- * peeked environment, so two windows that edit different threads never overwrite each other. The
- * main window's profile sync alone writes `active` and each profile's `agreed` set; every window
+ * Conn: this device's sidebar marks, one localStorage entry per thread intent and peek attempt,
+ * so two windows that edit different threads never overwrite each other. The main window's
+ * profile sync alone writes `active`, `last` and each profile's `agreed` set; every window
  * follows them through the storage event.
  */
 const PREFIX = "t3code:sidebar-hidden-threads:v2:";
 const ACTIVE_KEY = `${PREFIX}active`;
-/** Marks made with no profile bound, also before the first bind; the first bind takes them. */
+const LAST_KEY = `${PREFIX}last`;
+/** Confirmed unbound: Orbit on and the Gateway names no profile. Its marks are this bucket's. */
 const NO_PROFILE = "none";
+/** Orbit mode off. Turning it on again waits for a fresh bind, unless `last` is cached. */
+const OFF = "off";
 
 const agreedKey = (profile: string) => `${PREFIX}agreed:${profile}`;
 const opKey = (profile: string, key: string) => `${PREFIX}op:${profile}:${key}`;
 const attemptKey = (id: string) => `${PREFIX}attempt:${id}`;
-const peekedKey = (profile: string, environmentId: string) =>
-  `${PREFIX}env:${profile}:${environmentId}`;
+
+/** This window, as the owner of the peeks it prepares. */
+const WINDOW_ID = randomUUID();
+/** An unresolved peek's owner says it is alive this often; one silent this long is an orphan. */
+const ATTEMPT_BEAT_MS = 10_000;
+const ATTEMPT_ORPHAN_MS = 60_000;
+/** Pauses between failed inventory reads; the hold stays meanwhile. */
+const INVENTORY_RETRY_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 
 interface Stored {
-  /** null until the main window binds a profile for the first time. */
+  /** A profile id, `none`, `off`, or null before the main window's first bind. */
   readonly active: string | null;
+  /** The profile bound last, so turning Orbit on again offline keeps its cached marks. */
+  readonly last: string | null;
   readonly agreed: Map<string, string[]>;
   readonly ops: Map<string, Map<string, SidebarHiddenOp>>;
   readonly attempts: Map<string, SidebarPeekAttempt>;
-  readonly peeked: Map<string, Map<string, SidebarPeekedEnvironment>>;
 }
 
 function strings(value: unknown): string[] {
@@ -77,14 +84,15 @@ function inner<V>(map: Map<string, Map<string, V>>, profile: string): Map<string
 function readStored(): Stored {
   const stored: Stored = {
     active: null,
+    last: null,
     agreed: new Map(),
     ops: new Map(),
     attempts: new Map(),
-    peeked: new Map(),
   };
   if (typeof window === "undefined") return stored;
   const storage = window.localStorage;
   let active: string | null = null;
+  let last: string | null = null;
   for (let index = 0; index < storage.length; index += 1) {
     const name = storage.key(index);
     if (name === null || !name.startsWith(PREFIX)) continue;
@@ -92,6 +100,8 @@ function readStored(): Stored {
     const rest = name.slice(PREFIX.length);
     if (name === ACTIVE_KEY) {
       if (typeof value === "string") active = value;
+    } else if (name === LAST_KEY) {
+      if (typeof value === "string") last = value;
     } else if (rest.startsWith("agreed:")) {
       stored.agreed.set(rest.slice("agreed:".length), strings(value));
     } else if (rest.startsWith("op:")) {
@@ -112,19 +122,12 @@ function readStored(): Stored {
         hold: attempt.hold === true,
         committed: attempt.committed === true,
         shown: strings(attempt.shown),
-      });
-    } else if (rest.startsWith("env:")) {
-      const parts = split(rest.slice("env:".length));
-      const entry = value as Partial<SidebarPeekedEnvironment> | null;
-      if (!parts || typeof entry !== "object" || entry === null) continue;
-      if (typeof entry.cutoff !== "string") continue;
-      inner(stored.peeked, parts[0]).set(parts[1], {
-        cutoff: entry.cutoff,
-        shown: strings(entry.shown),
+        ...(typeof attempt.owner === "string" ? { owner: attempt.owner } : {}),
+        ...(typeof attempt.beat === "number" ? { beat: attempt.beat } : {}),
       });
     }
   }
-  return { ...stored, active };
+  return { ...stored, active, last };
 }
 
 function write(name: string, value: unknown): void {
@@ -136,7 +139,26 @@ function write(name: string, value: unknown): void {
   }
 }
 
-const bucket = (active: string | null) => active ?? NO_PROFILE;
+const isProfile = (active: string | null): active is string =>
+  active !== null && active !== NO_PROFILE && active !== OFF;
+
+/**
+ * The bucket whose marks apply, and whether they are known. Orbit on with no bind for this spell
+ * yet is pending: the last profile's cached marks apply, or Orbit rows wait.
+ */
+function binding(stored: Stored): { readonly profile: string; readonly hydrated: boolean } {
+  if (isProfile(stored.active)) {
+    return { profile: stored.active, hydrated: stored.agreed.has(stored.active) };
+  }
+  if (stored.active === NO_PROFILE) return { profile: NO_PROFILE, hydrated: true };
+  if (useEnvironmentProvider.getState().provider !== "orbit") {
+    return { profile: NO_PROFILE, hydrated: true };
+  }
+  if (stored.last !== null && stored.agreed.has(stored.last)) {
+    return { profile: stored.last, hydrated: true };
+  }
+  return { profile: NO_PROFILE, hydrated: false };
+}
 
 /** Environments Orbit provides on this device: their rows wait for the profile's marks. */
 function orbitEnvironmentIds(): string[] {
@@ -150,7 +172,7 @@ function orbitEnvironmentIds(): string[] {
 }
 
 interface SidebarHiddenState {
-  /** The profile the marks belong to; null before the main window's first bind. */
+  /** A profile id, `none`, `off`, or null before the main window's first bind. */
   readonly active: string | null;
   readonly marks: SidebarHiddenMarks;
 }
@@ -159,23 +181,19 @@ let lastSignature = "";
 
 function compute(): SidebarHiddenState {
   const stored = readStored();
-  const profile = bucket(stored.active);
-  // Not read yet: before the first bind, or a bound profile whose section never loaded.
-  const hydrated =
-    stored.active === NO_PROFILE || (stored.active !== null && stored.agreed.has(stored.active));
+  const { profile, hydrated } = binding(stored);
   const input = {
     agreed: stored.agreed.get(profile) ?? [],
     ops: stored.ops.get(profile) ?? new Map<string, SidebarHiddenOp>(),
     attempts: [...stored.attempts.values()].filter((attempt) => attempt.profile === profile),
-    peeked: stored.peeked.get(profile) ?? new Map<string, SidebarPeekedEnvironment>(),
     unhydrated: hydrated ? [] : orbitEnvironmentIds(),
   };
   lastSignature = JSON.stringify([
     stored.active,
+    profile,
     input.agreed,
     [...input.ops].map(([key, op]) => [key, op.intent]),
-    input.attempts,
-    [...input.peeked],
+    input.attempts.map(({ beat: _beat, ...attempt }) => attempt),
     input.unhydrated,
   ]);
   return { active: stored.active, marks: sidebarHiddenMarks(input) };
@@ -196,31 +214,29 @@ function setOp(profile: string, key: string, intent: SidebarHiddenIntent): void 
 }
 
 /**
- * The main window's profile sync names the profile before each run; `null` unbinds (no profile,
- * or Orbit mode off). Marks made before the first bind, or while unbound, move to the profile.
+ * The main window's profile sync names the binding before each run: a profile id, `null` when the
+ * Gateway names no profile (confirmed unbound), or `off` when Orbit mode is off. Marks made while
+ * no profile was bound move to the first profile bound after.
  */
-export function bindSidebarHiddenProfile(profileId: number | null): void {
+export function bindSidebarHiddenProfile(profileId: number | null | typeof OFF): void {
   const stored = readStored();
-  const next = profileId === null ? NO_PROFILE : String(profileId);
+  const next = profileId === OFF ? OFF : profileId === null ? NO_PROFILE : String(profileId);
   if (stored.active === next) return;
-  if (next !== NO_PROFILE && bucket(stored.active) === NO_PROFILE) {
+  if (isProfile(next) && !isProfile(stored.active)) {
     for (const [key, op] of stored.ops.get(NO_PROFILE) ?? []) {
       write(opKey(next, key), op);
       write(opKey(NO_PROFILE, key), undefined);
     }
-    for (const [environmentId, entry] of stored.peeked.get(NO_PROFILE) ?? []) {
-      write(peekedKey(next, environmentId), entry);
-      write(peekedKey(NO_PROFILE, environmentId), undefined);
-    }
     for (const [id, attempt] of stored.attempts) {
       if (attempt.profile === NO_PROFILE) write(attemptKey(id), { ...attempt, profile: next });
     }
-  } else if (next === NO_PROFILE && stored.active !== null) {
+  } else if (!isProfile(next) && isProfile(stored.active)) {
     // Leaving a profile: what an earlier unbound spell left is not this one's to carry over.
     for (const key of stored.ops.get(NO_PROFILE)?.keys() ?? []) {
       write(opKey(NO_PROFILE, key), undefined);
     }
   }
+  if (isProfile(next)) write(LAST_KEY, next);
   write(ACTIVE_KEY, next);
   refresh();
   resumeSweeps();
@@ -228,7 +244,7 @@ export function bindSidebarHiddenProfile(profileId: number | null): void {
 
 export function hideSidebarThread(ref: { environmentId: string; threadId: string }): void {
   setOp(
-    bucket(readStored().active),
+    binding(readStored()).profile,
     sidebarHiddenThreadKey(ref.environmentId, ref.threadId),
     "hide",
   );
@@ -237,18 +253,14 @@ export function hideSidebarThread(ref: { environmentId: string; threadId: string
 }
 
 /**
- * An explicit open: this thread shows, wins over any hide still queued for it, and stays out of
- * any sweep of its environment's threads, also after the profile acknowledges the show.
+ * An explicit open: this thread shows at once, wins over any hide still queued for it and over a
+ * peek's provisional hide, and stays out of the sweep of its environment's threads.
  */
 export function showSidebarThread(ref: { environmentId: string; threadId: string }): void {
   const stored = readStored();
-  const profile = bucket(stored.active);
+  const profile = binding(stored).profile;
   const key = sidebarHiddenThreadKey(ref.environmentId, ref.threadId);
   setOp(profile, key, "show");
-  const peeked = stored.peeked.get(profile)?.get(ref.environmentId);
-  if (peeked && !peeked.shown.includes(key)) {
-    write(peekedKey(profile, ref.environmentId), { ...peeked, shown: [...peeked.shown, key] });
-  }
   for (const [id, attempt] of stored.attempts) {
     if (attempt.profile !== profile || attempt.environmentId !== ref.environmentId) continue;
     if (!attempt.shown.includes(key)) {
@@ -261,68 +273,79 @@ export function showSidebarThread(ref: { environmentId: string; threadId: string
 
 const sweeping = new Map<string, () => void>();
 
-/** Once a held environment's threads arrive, each one nobody showed is marked hidden. */
-function sweepWhenLive(profile: string, environmentId: string): void {
-  const id = `${profile}|${environmentId}`;
-  if (sweeping.has(id)) return;
-  let unsubscribe: (() => void) | null = null;
-  let done = false;
-  const finish = () => {
-    done = true;
-    sweeping.delete(id);
-    unsubscribe?.();
-  };
-  sweeping.set(id, finish);
-  unsubscribe = appAtomRegistry.subscribe(
-    environmentShell.stateValueAtom(environmentId as EnvironmentId),
-    (shell) => {
-      if (done || shell.status !== "live" || Option.isNone(shell.snapshot)) return;
-      finish();
-      sweep(
-        profile,
-        environmentId,
-        shell.snapshot.value.threads.map((thread) => ({
-          id: String(thread.id),
-          createdAt: DateTime.formatIso(thread.createdAt),
-        })),
-      );
-    },
-    { immediate: true },
-  );
-  if (done) unsubscribe();
-}
-
-function sweep(
-  profile: string,
-  environmentId: string,
-  threads: ReadonlyArray<{ readonly id: string; readonly createdAt: string }>,
-): void {
-  const stored = readStored();
-  const holds = [...stored.attempts].filter(
+const holdsOf = (stored: Stored, profile: string, environmentId: string) =>
+  [...stored.attempts].filter(
     ([, attempt]) =>
       attempt.profile === profile &&
       attempt.environmentId === environmentId &&
       attempt.hold &&
       attempt.committed,
   );
+
+/**
+ * Once a held environment connects, one untrimmed read lists all its threads, older settled ones
+ * and idle subagents included; each one nobody showed is marked, then the hold goes. A failed
+ * read keeps the hold and tries again after a pause, without subscribing again.
+ */
+function sweepWhenLive(profile: string, environmentId: string): void {
+  const id = `${profile}|${environmentId}`;
+  if (sweeping.has(id)) return;
+  let unsubscribe: (() => void) | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let started = false;
+  let done = false;
+  let failures = 0;
+  const finish = () => {
+    done = true;
+    sweeping.delete(id);
+    unsubscribe?.();
+    if (timer !== null) clearTimeout(timer);
+  };
+  sweeping.set(id, finish);
+  const read = async (): Promise<void> => {
+    timer = null;
+    if (done) return;
+    if (holdsOf(readStored(), profile, environmentId).length === 0) return finish();
+    const inventory = await readSidebarThreadInventory(environmentId).catch(() => null);
+    if (done) return;
+    if (inventory === null) {
+      const pause = INVENTORY_RETRY_MS[Math.min(failures, INVENTORY_RETRY_MS.length - 1)];
+      failures += 1;
+      timer = setTimeout(() => void read(), pause);
+      return;
+    }
+    finish();
+    sweep(profile, environmentId, inventory);
+  };
+  unsubscribe = appAtomRegistry.subscribe(
+    environmentShell.stateValueAtom(environmentId as EnvironmentId),
+    (shell) => {
+      if (done || started || shell.status !== "live") return;
+      started = true;
+      queueMicrotask(() => {
+        unsubscribe?.();
+        unsubscribe = null;
+        void read();
+      });
+    },
+    { immediate: true },
+  );
+}
+
+function sweep(profile: string, environmentId: string, threadIds: readonly string[]): void {
+  const stored = readStored();
+  const holds = holdsOf(stored, profile, environmentId);
   if (holds.length === 0) return;
-  const previous = stored.peeked.get(profile)?.get(environmentId);
-  const shown = new Set(previous?.shown ?? []);
+  const shown = new Set<string>();
   for (const [, attempt] of holds) for (const key of attempt.shown) shown.add(key);
   const ops = stored.ops.get(profile);
   const agreed = new Set(stored.agreed.get(profile) ?? []);
-  // The server's own clock: what it created up to the newest thread it sent is the inventory.
-  let cutoff = previous?.cutoff ?? "";
-  for (const thread of threads) {
-    const key = sidebarHiddenThreadKey(environmentId, String(thread.id));
-    if (thread.createdAt > cutoff) cutoff = thread.createdAt;
+  for (const threadId of threadIds) {
+    const key = sidebarHiddenThreadKey(environmentId, threadId);
     if (shown.has(key) || ops?.has(key) || agreed.has(key)) continue;
     setOp(profile, key, "hide");
   }
-  write(peekedKey(profile, environmentId), {
-    cutoff: cutoff === "" ? new Date().toISOString() : cutoff,
-    shown: [...shown],
-  });
+  // The whole set is in the intent store now; the hold goes and only per-thread marks remain.
   for (const [attemptId] of holds) write(attemptKey(attemptId), undefined);
   refresh();
   notifyLocalProfileChange();
@@ -330,12 +353,59 @@ function sweep(
 
 function resumeSweeps(): void {
   const stored = readStored();
-  const profile = bucket(stored.active);
+  const profile = binding(stored).profile;
   for (const attempt of stored.attempts.values()) {
     if (attempt.profile === profile && attempt.hold && attempt.committed) {
       sweepWhenLive(profile, attempt.environmentId);
     }
   }
+}
+
+/** Unresolved peeks this window prepares; their beat keeps other windows from recovering them. */
+const ownPending = new Set<string>();
+let beatTimer: ReturnType<typeof setInterval> | null = null;
+
+function beat(): void {
+  const stored = readStored();
+  for (const id of ownPending) {
+    const attempt = stored.attempts.get(id);
+    if (attempt && !attempt.committed) write(attemptKey(id), { ...attempt, beat: Date.now() });
+    else ownPending.delete(id);
+  }
+  if (ownPending.size === 0 && beatTimer !== null) {
+    clearInterval(beatTimer);
+    beatTimer = null;
+  }
+}
+
+function trackOwnAttempt(id: string): void {
+  ownPending.add(id);
+  beatTimer ??= setInterval(beat, ATTEMPT_BEAT_MS);
+}
+
+function releaseOwnAttempt(id: string): void {
+  ownPending.delete(id);
+  if (ownPending.size === 0 && beatTimer !== null) {
+    clearInterval(beatTimer);
+    beatTimer = null;
+  }
+}
+
+/**
+ * Drops unresolved peeks whose window closed or crashed: no beat for `ATTEMPT_ORPHAN_MS`. A live
+ * window's peek beats, and committed holds belong to every window, so neither is touched.
+ */
+function recoverOrphanAttempts(): void {
+  const stored = readStored();
+  const stale = Date.now() - ATTEMPT_ORPHAN_MS;
+  let changed = false;
+  for (const [id, attempt] of stored.attempts) {
+    if (attempt.committed || ownPending.has(id)) continue;
+    if ((attempt.beat ?? 0) >= stale) continue;
+    write(attemptKey(id), undefined);
+    changed = true;
+  }
+  if (changed) refresh();
 }
 
 /** The thread keys the sidebar of this window lists now, under its scope. */
@@ -351,7 +421,9 @@ export function isSidebarListedNow(environmentId: string, threadId: string): boo
 }
 
 /** The sync channel for one profile; its reads and acknowledgements never touch another one. */
-export function sidebarHiddenThreadsChannel(profileId: number): ProfileSyncChannel {
+export function sidebarHiddenThreadsChannel(
+  profileId: number,
+): ReturnType<typeof createSidebarHiddenThreadsChannel> {
   const profile = String(profileId);
   return createSidebarHiddenThreadsChannel({
     read: () => {
@@ -380,6 +452,16 @@ let watched = false;
 export function watchSidebarHiddenThreads(): void {
   if (watched || typeof window === "undefined") return;
   watched = true;
+  // A closing window gives up the peeks it was still preparing; a crash waits for recovery.
+  window.addEventListener("pagehide", () => {
+    for (const id of ownPending) {
+      const attempt = readStored().attempts.get(id);
+      if (attempt && !attempt.committed) write(attemptKey(id), undefined);
+      releaseOwnAttempt(id);
+    }
+  });
+  recoverOrphanAttempts();
+  setInterval(recoverOrphanAttempts, ATTEMPT_ORPHAN_MS / 2);
   window.addEventListener("storage", (event) => {
     if (event.key !== null && !event.key.startsWith(PREFIX)) return;
     const before = useSidebarHiddenThreads.getState().active;
@@ -416,28 +498,33 @@ export function beginSidebarPeek(
   const id = randomUUID();
   const key = sidebarHiddenThreadKey(target.environmentId, target.threadId);
   const attempt: SidebarPeekAttempt = {
-    profile: bucket(readStored().active),
+    profile: binding(readStored()).profile,
     environmentId: target.environmentId,
     target: plan.hideTarget ? key : null,
     hold: plan.holdEnvironment,
     committed: false,
     shown: [],
+    owner: WINDOW_ID,
+    beat: Date.now(),
   };
   write(attemptKey(id), attempt);
+  trackOwnAttempt(id);
   refresh();
   return {
     commit: () => {
+      releaseOwnAttempt(id);
       const stored = readStored();
       const current = stored.attempts.get(id);
       if (!current) return;
-      if (current.profile !== bucket(stored.active)) {
+      if (current.profile !== binding(stored).profile) {
         write(attemptKey(id), undefined);
       } else {
         if (current.target !== null && !current.shown.includes(current.target)) {
           setOp(current.profile, current.target, "hide");
         }
         if (current.hold) {
-          write(attemptKey(id), { ...current, target: null, committed: true });
+          const { owner: _owner, beat: _beat, ...held } = current;
+          write(attemptKey(id), { ...held, target: null, committed: true });
           sweepWhenLive(current.profile, current.environmentId);
         } else {
           write(attemptKey(id), undefined);
@@ -447,6 +534,7 @@ export function beginSidebarPeek(
       refresh();
     },
     cancel: () => {
+      releaseOwnAttempt(id);
       write(attemptKey(id), undefined);
       refresh();
     },

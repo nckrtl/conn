@@ -36,7 +36,6 @@ describe("sidebar hidden marks", () => {
       agreed: [],
       ops: new Map([["clone:target", { intent: "hide" as const }]]),
       attempts: [],
-      peeked: new Map(),
       unhydrated: ["clone"],
     });
     const threads = [
@@ -67,24 +66,43 @@ describe("sidebar hidden marks", () => {
       agreed: ["clone:target", "clone:sibling"],
       ops: new Map([["clone:target", { intent: "show" as const }]]),
       attempts: [],
-      peeked: new Map([["clone", { cutoff: "2026-11-01T00:00:00.000Z", shown: [] }]]),
       unhydrated: [],
     });
-    const ref = (id: string, createdAt?: string) => ({
-      environmentId: "clone",
-      id,
-      ...(createdAt ? { createdAt } : {}),
-    });
+    const ref = (id: string) => ({ environmentId: "clone", id });
     expect(isSidebarHiddenThread(marks, ref("target"))).toBe(false);
     expect(isSidebarHiddenThread(marks, ref("sibling"))).toBe(true);
-    // The peek's inventory stays hidden when older pages load; a thread created later shows.
-    expect(isSidebarHiddenThread(marks, ref("older-page", "2026-10-01T00:00:00.000Z"))).toBe(true);
-    expect(isSidebarHiddenThread(marks, ref("new", "2026-11-02T00:00:00.000Z"))).toBe(false);
+    // Only per-thread marks hide: no local cutoff, so a thread created later shows.
+    expect(isSidebarHiddenThread(marks, ref("new"))).toBe(false);
     // The Orbit panel, the palette and rail badges filter without marks: they still find all three.
     expect(visible([thread("clone", "target"), thread("clone", "sibling")])).toEqual([
       "clone:target",
       "clone:sibling",
     ]);
+  });
+
+  it("lets a show beat a provisional hide before the peek resolves", () => {
+    const attempt = {
+      profile: "1",
+      environmentId: "clone",
+      target: "clone:target",
+      hold: true,
+      committed: false,
+      shown: [] as string[],
+    };
+    const marks = (shown: string[]) =>
+      sidebarHiddenMarks({
+        agreed: [],
+        ops: new Map(),
+        attempts: [{ ...attempt, shown }],
+        unhydrated: [],
+      });
+    expect(isSidebarHiddenThread(marks([]), { environmentId: "clone", id: "target" })).toBe(true);
+    expect(
+      isSidebarHiddenThread(marks(["clone:target"]), { environmentId: "clone", id: "target" }),
+    ).toBe(false);
+    expect(
+      isSidebarHiddenThread(marks(["clone:target"]), { environmentId: "clone", id: "other" }),
+    ).toBe(true);
   });
 
   it("drops a project once Disconnect hides its last row, and keeps empty projects elsewhere", () => {
@@ -94,7 +112,6 @@ describe("sidebar hidden marks", () => {
       agreed: [],
       ops: new Map([["clone:b", { intent: "hide" as const }]]),
       attempts: [],
-      peeked: new Map(),
       unhydrated: [],
     });
     // An empty project the user already had stays, also on the environment it disconnected from.
@@ -113,7 +130,6 @@ describe("sidebar hidden marks", () => {
           agreed: ["local:a"],
           ops: new Map(),
           attempts: [],
-          peeked: new Map(),
           unhydrated: [],
         }),
       ),

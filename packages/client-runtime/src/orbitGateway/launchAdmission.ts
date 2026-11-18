@@ -24,6 +24,7 @@ export interface OrbitLaunchSubmission extends OrbitLaunchScope {
 export interface OrbitLaunchSubmissionStorage {
   readonly lock?: <T>(work: () => Promise<T>) => Promise<T>;
   readonly fingerprintAcknowledged?: (input: string) => string;
+  readonly canStartDraft?: (draftId: string) => boolean;
   readonly lockDraft?: <T>(draftId: string, work: () => Promise<T>) => Promise<T>;
   readonly load: () => Promise<readonly OrbitLaunchSubmission[]>;
   readonly save: (records: readonly OrbitLaunchSubmission[]) => Promise<void>;
@@ -183,6 +184,8 @@ export function createOrbitLaunchSubmissions(
             throw OrbitLaunchCopyError.fromCopy(
               msg("Orbit already refused this request. Change the draft before sending."),
             );
+          if (storage.canStartDraft?.(record.draftId) === false)
+            throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
           const archive =
             latest === undefined
               ? records

@@ -18,6 +18,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { msg } from "gt-react";
 import { useSyncExternalStore } from "react";
 
+import { DraftId, isStaleClearedOrbitDraft } from "../composerDraftStore";
 import { m } from "../i18n/messages";
 import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { useWorkspaceStore } from "../workspaceStore";
@@ -32,6 +33,7 @@ export const orbitLaunches = createOrbitLaunchObserver(desktopOrbitGatewayClient
 export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
   {
     fingerprintAcknowledged: (input) => bytesToHex(sha256(new TextEncoder().encode(input))),
+    canStartDraft: (draftId) => !isStaleClearedOrbitDraft(DraftId.make(draftId)),
     lock: (work) => navigator.locks.request(SUBMISSIONS_KEY, work),
     lockDraft: (draftId, work) =>
       navigator.locks.request(

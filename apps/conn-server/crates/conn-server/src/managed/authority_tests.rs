@@ -967,3 +967,40 @@ fn a_handler_told_to_close_stays_closed_after_recovery() {
         GateState::Closed
     );
 }
+
+#[test]
+fn a_recovery_snapshot_keeps_a_provisional_fence_above_its_head() {
+    let mut lab = Lab::new();
+    lab.open(10, vec![1, 2], 0);
+    let probe = lab.probe(100);
+    lab.a.probe_failed(&probe.nonce);
+    lab.notice(11, vec![1], 150);
+    let probe = lab.probe(200);
+    let effects = lab.reply_with(&probe, "snapshot", 10, Some(vec![1, 2]), None, vec![], 210);
+    assert!(
+        lab.a.is_fenced(1),
+        "only a current or delta reply disproves a notice"
+    );
+    assert!(
+        effects.probe_now,
+        "the notice above the head asks for the next probe"
+    );
+    let probe = lab.probe(300);
+    lab.reply(&probe, "current", 10, 310);
+    assert!(
+        !lab.a.is_fenced(1),
+        "disproved by a current reply sent after it"
+    );
+}
+
+#[test]
+fn a_gateway_time_with_microseconds_rounds_up() {
+    assert_eq!(
+        ceil_millis_from_iso("2026-11-18T12:00:00.999900+00:00"),
+        conn_support::time::millis_from_iso("2026-11-18T12:00:01.000+00:00")
+    );
+    assert_eq!(
+        ceil_millis_from_iso("2026-11-18T12:00:00.999000+00:00"),
+        conn_support::time::millis_from_iso("2026-11-18T12:00:00.999Z")
+    );
+}

@@ -226,6 +226,22 @@ impl std::fmt::Debug for Authority {
     }
 }
 
+/// Milliseconds of an RFC 3339 time, rounded up when it carries digits below the
+/// millisecond.
+pub fn ceil_millis_from_iso(text: &str) -> Option<i64> {
+    let ms = conn_support::time::millis_from_iso(text)?;
+    let below = text
+        .split_once('.')
+        .map(|(_, rest)| {
+            rest.bytes()
+                .take_while(u8::is_ascii_digit)
+                .skip(3)
+                .any(|d| d != b'0')
+        })
+        .unwrap_or(false);
+    Some(if below { ms + 1 } else { ms })
+}
+
 /// What a caller must do after a change.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Effects {
@@ -772,15 +788,16 @@ impl Authority {
         }
         self.apply_owed(&reply.owed, first_snapshot, wall_ms);
         self.prune_settled(reply.head_revision);
-        self.disprove_notices(probe.sent, reply.head_revision, wall_ms);
+        // Only a `current` or `delta` reply disproves a notice; a snapshot keeps the
+        // provisional fence, and the notice above its head asks for the next probe.
+        if probe.after_revision.is_some() {
+            self.disprove_notices(probe.sent, reply.head_revision, wall_ms);
+        }
         let applied = self.applied;
         self.gap_notices.retain(|r| applied.is_none_or(|a| a < *r));
         self.record_offset(reply, probe.sent_wall_ms, wall_ms);
-        if let Some(server) = reply
-            .server_time
-            .as_deref()
-            .and_then(conn_support::time::millis_from_iso)
-        {
+        // The Gateway sends microseconds: round its sample up, so the deadline errs early.
+        if let Some(server) = reply.server_time.as_deref().and_then(ceil_millis_from_iso) {
             self.anchor = Some((probe.sent, server));
         }
         self.open = true;

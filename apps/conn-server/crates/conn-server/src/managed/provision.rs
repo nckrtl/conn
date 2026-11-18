@@ -90,10 +90,20 @@ pub fn is_canonical_uuid(text: &str) -> bool {
 /// Reads a protected file: mode 0600 (no group or other bits) and owned by this process's
 /// user. Runs `std::fs`: call it before the runtime starts or on a blocking thread.
 fn read_protected(path: &Path, what: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    // One open: the checks and the read see the same file, and a symlink is refused.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    }
+    let mut file = options.open(path).map_err(|e| format!("{what}: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::metadata(path).map_err(|e| format!("{what}: {e}"))?;
+        let meta = file.metadata().map_err(|e| format!("{what}: {e}"))?;
         if !meta.is_file() {
             return Err(format!("{what} is not a file"));
         }
@@ -104,7 +114,10 @@ fn read_protected(path: &Path, what: &str) -> Result<Vec<u8>, String> {
             return Err(format!("{what} must be owned by the server's user"));
         }
     }
-    std::fs::read(path).map_err(|e| format!("{what}: {e}"))
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw)
+        .map_err(|e| format!("{what}: {e}"))?;
+    Ok(raw)
 }
 
 impl Provision {
@@ -201,6 +214,12 @@ mod tests {
             error.contains("provisioning file must have mode 0600"),
             "{error}"
         );
+        // A symlink to a protected file is refused: the file is opened once, never followed.
+        std::fs::set_permissions(&provision, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&provision, &link).unwrap();
+        let error = Provision::load(&link).unwrap_err();
+        assert!(error.contains("provisioning file"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

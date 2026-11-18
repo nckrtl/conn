@@ -197,19 +197,23 @@ impl Shared {
                 continue;
             }
             let nonce = random_nonce();
-            // The call is bounded by its own timeout and by the admission deadline.
-            let call_until = deadline.min(Instant::now() + gateway::CALL_TIMEOUT);
+            // The call always gets its own full timeout, so a timeout is the Gateway's failure,
+            // never one this caller's deadline cut short. The deadline is checked again where
+            // the handler registers.
+            let call_until = Instant::now() + gateway::CALL_TIMEOUT;
             let reply = tokio::time::timeout_at(
                 call_until,
                 gateway.introspect(nonce.clone(), token.to_owned(), peer_address.clone()),
             )
             .await;
-            if Instant::now() >= deadline {
-                return Err(AdmitError::Unavailable);
-            }
             let reply = reply.unwrap_or_else(|_| Err(GatewayError::Transport("timeout".into())));
-            // A barrier dropped this introspection: whatever came back, ask again.
+            // A barrier dropped this introspection: whatever came back, ask again. A
+            // current-epoch failure is processed (it may fail everything closed) before the
+            // caller's own deadline counts; registration checks the deadline again.
             if self.read(|a| a.epoch()) != epoch {
+                if Instant::now() >= deadline {
+                    return Err(AdmitError::Unavailable);
+                }
                 continue;
             }
             let claims = match reply {

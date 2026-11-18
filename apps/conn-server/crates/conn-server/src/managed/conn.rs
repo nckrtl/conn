@@ -310,32 +310,43 @@ mod tests {
             watched: Vec::new(),
             fenced: false,
         };
-        let chunk = vec![7u8; 64 * 1024];
-        let mut written = 0usize;
-        loop {
-            // The same write stays pending across the fence: the fence must wake it.
-            let mut write = Box::pin(io.write(&chunk));
-            tokio::select! {
-                done = &mut write => {
-                    written += done.expect("written before the fence");
-                }
-                () = tokio::time::sleep(Duration::from_millis(50)) => {
-                    shared.notice(&Notice {
-                        environment_id: ENV.into(),
-                        generation: 1,
-                        revision: 1,
-                        edge_ids: vec![1],
-                    });
-                    let outcome = tokio::time::timeout(Duration::from_secs(1), write).await;
-                    assert!(
-                        matches!(outcome, Ok(Err(_))),
-                        "the pending write ends with an error at the fence"
-                    );
-                    break;
+        // The writer runs in its own task and signals once a write returned `Pending`. Only
+        // the fence's wakeup can end that write: nothing else polls it again.
+        let (pending_tx, pending_rx) = tokio::sync::oneshot::channel::<()>();
+        let writer = tokio::spawn(async move {
+            let chunk = vec![7u8; 64 * 1024];
+            let mut written = 0usize;
+            let mut pending_tx = Some(pending_tx);
+            loop {
+                let result = std::future::poll_fn(|cx| {
+                    let poll = Pin::new(&mut io).poll_write(cx, &chunk);
+                    if poll.is_pending()
+                        && let Some(tx) = pending_tx.take()
+                    {
+                        let _ = tx.send(());
+                    }
+                    poll
+                })
+                .await;
+                match result {
+                    Ok(n) => written += n,
+                    Err(_) => return (written, io),
                 }
             }
-        }
+        });
+        pending_rx.await.expect("the write backed up");
+        shared.notice(&Notice {
+            environment_id: ENV.into(),
+            generation: 1,
+            revision: 1,
+            edge_ids: vec![1],
+        });
+        let (written, mut io) = tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("the fence woke the blocked writer")
+            .expect("the writer task");
         assert!(written > 0);
+        let chunk = vec![7u8; 64 * 1024];
         assert!(io.write(&chunk).await.is_err(), "no write after the fence");
         assert!(io.flush().await.is_err(), "no flush after the fence");
         assert!(

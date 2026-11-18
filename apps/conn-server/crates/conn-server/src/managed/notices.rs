@@ -90,17 +90,19 @@ async fn link(
         "wss://{host}:{port}{}/app/{key}?protocol=7&client=conn-server&version=1&flash=false",
         parsed.path().trim_end_matches('/')
     );
-    let stream = connect_tls(&host, port, tls.clone())
-        .await
-        .map_err(|e| e.to_string())?;
     let request = path.into_client_request().map_err(|e| e.to_string())?;
-    let (mut socket, _) = tokio::time::timeout(
-        SUBSCRIBE_TIMEOUT,
-        tokio_tungstenite::client_async(request, stream),
-    )
+    // One deadline for TCP, TLS and the WebSocket handshake: a peer that stalls any of them
+    // cannot hold the reconnect loop.
+    let (mut socket, _) = tokio::time::timeout(SUBSCRIBE_TIMEOUT, async {
+        let stream = connect_tls(&host, port, tls.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio_tungstenite::client_async(request, stream)
+            .await
+            .map_err(|e| e.to_string())
+    })
     .await
-    .map_err(|_| "handshake timeout".to_owned())?
-    .map_err(|e| e.to_string())?;
+    .map_err(|_| "handshake timeout".to_owned())??;
 
     let next_json = |message: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>| -> Result<Option<Value>, String> {
         match message {

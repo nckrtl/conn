@@ -1037,3 +1037,23 @@ fn a_gateway_clock_that_moves_ahead_ends_open_handlers_at_once() {
         GateState::Closed
     );
 }
+
+#[test]
+fn past_the_fence_bound_the_target_stays_closed_and_keeps_its_fences() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let edges: Vec<u64> = (10..10 + MAX_FENCED_EDGES as u64).collect();
+    lab.notice(1, edges, 50);
+    assert!(lab.a.exhausted());
+    assert!(
+        !lab.a.available(lab.at(51)),
+        "at the bound, everything fails closed"
+    );
+    assert!(lab.a.is_fenced(10), "the fences it holds stay");
+    // A recovery snapshot does not reopen it.
+    let probe = lab.probe(100);
+    lab.a.probe_failed(&probe.nonce);
+    let probe = lab.probe(200);
+    lab.reply_with(&probe, "snapshot", 1, Some(vec![1]), None, vec![], 210);
+    assert!(!lab.a.available(lab.at(211)));
+}

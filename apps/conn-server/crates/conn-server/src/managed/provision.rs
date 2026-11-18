@@ -110,7 +110,8 @@ fn read_protected(path: &Path, what: &str) -> Result<Vec<u8>, String> {
         if !meta.is_file() {
             return Err(format!("{what} is not a file"));
         }
-        if meta.mode() & 0o777 != 0o600 {
+        // Exactly 0600: no group or other bit, and no setuid, setgid or sticky bit either.
+        if meta.mode() & 0o7777 != 0o600 {
             return Err(format!("{what} must have mode 0600"));
         }
         if meta.uid() != rustix::process::geteuid().as_raw() {
@@ -217,6 +218,12 @@ mod tests {
             error.contains("provisioning file must have mode 0600"),
             "{error}"
         );
+        // A special permission bit is not 0600 either.
+        std::fs::set_permissions(&provision, std::fs::Permissions::from_mode(0o4600)).unwrap();
+        if std::fs::metadata(&provision).unwrap().permissions().mode() & 0o7777 == 0o4600 {
+            let error = Provision::load(&provision).unwrap_err();
+            assert!(error.contains("must have mode 0600"), "{error}");
+        }
         // A symlink to a protected file is refused: the file is opened once, never followed.
         std::fs::set_permissions(&provision, std::fs::Permissions::from_mode(0o600)).unwrap();
         let link = dir.join("link.json");

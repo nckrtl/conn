@@ -373,7 +373,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_shortened_deadline_rearms_the_close_timer() {
         let (shared, handle) = open_handle();
-        let closed = handle.closed();
+        let mut closed = handle.closed();
+        // Already waiting on the old (one-hour) deadline before it moves.
+        tokio::select! {
+            biased;
+            () = &mut closed => panic!("closed before the deadline moved"),
+            () = std::future::ready(()) => {}
+        }
         // The Gateway time of the opening snapshot was "now": the token now ends 300 ms on.
         let id = handle.id;
         let gateway_now = conn_support::time::now_ms();

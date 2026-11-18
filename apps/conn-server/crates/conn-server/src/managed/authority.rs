@@ -118,7 +118,15 @@ pub enum Loss {
     MissingRevision,
     UnexpectedKind,
     NoticeLinkClosed,
+    /// More removed edges than the target keeps in one generation: it stays closed until a
+    /// new generation (re-enrolment) starts it fresh.
+    FenceCapacity,
 }
+
+/// The most removed edges one generation keeps fenced. The fences must outlive every
+/// handler and ACK for the generation, so the set is bounded by this, not pruned: past it
+/// the target fails closed for good, keeping every fence it holds.
+pub const MAX_FENCED_EDGES: usize = 65_536;
 
 /// The kind of an acknowledgement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,12 +429,17 @@ impl Authority {
     /// Managed authority is held: open, lease live, notices subscribed. A blocked target
     /// still holds it, but pauses.
     fn held(&self, now: Instant) -> bool {
-        self.open && self.notice_link && self.lease_live(now)
+        self.open && self.notice_link && self.lease_live(now) && !self.exhausted()
     }
 
     /// Managed access can be admitted now.
     pub fn available(&self, now: Instant) -> bool {
         self.held(now) && !self.blocked()
+    }
+
+    /// Whether the fenced-edge set reached its bound.
+    pub fn exhausted(&self) -> bool {
+        self.fence_generation.len() >= MAX_FENCED_EDGES
     }
 
     /// The check at every admission, dispatch and frame boundary.
@@ -609,6 +622,12 @@ impl Authority {
 
     /// Blocks `edge` and tells each of its handlers to close.
     fn fence_edge(&mut self, edge: EdgeId, wall_ms: u64) {
+        if !self.fence_generation.contains_key(&edge) && self.exhausted() {
+            // No room to remember another fence: refuse everything instead.
+            self.confirmed.remove(&edge);
+            self.fail_closed(Loss::FenceCapacity);
+            return;
+        }
         *self.fence_generation.entry(edge).or_insert(0) += 1;
         self.fenced_at.entry(edge).or_insert(wall_ms);
         if let Some(now) = self.clock {

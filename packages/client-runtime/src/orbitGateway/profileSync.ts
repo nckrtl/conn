@@ -235,6 +235,12 @@ export function createProfileSync(ports: ProfileSyncPorts) {
           // Rebased every run, also when the device's value equals `base`: an intent the profile
           // already satisfies is the only kind that retires without a write.
           if (remote !== null && channel.accepts !== undefined) {
+            if (profileSide.version < (known?.version ?? 0)) {
+              throw unconfirmed(name, "the read has an older section version");
+            }
+            if (profileSide.value !== null && remote.sections?.[name] === undefined) {
+              throw unconfirmed(name, "the read has no section version");
+            }
             if (profileSide.value === null) {
               if (
                 profileSide.version !== 0 ||
@@ -378,8 +384,9 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         if (saved.profileId !== profile.id) {
           throw unconfirmed(name, "the reply belongs to another profile");
         }
-        if (typeof saved.sections?.[name]?.version !== "number") {
-          throw unconfirmed(name, "the reply has no section version");
+        const version = saved.sections?.[name]?.version;
+        if (typeof version !== "number" || version <= push.version) {
+          throw unconfirmed(name, "the reply has no newer section version");
         }
         // Also an empty set must come back explicitly: an absent value may be a partial reply.
         const written = remoteSection(saved, name).value;

@@ -87,6 +87,11 @@ describe("sidebar hidden marks", () => {
     expect(
       withoutSidebarHiddenProjects(groups, threads, marks, older({ a: 1, b: 1 }, rows)),
     ).toEqual({ groups: [groups[0]], unresolved: [] });
+    // The inventory sees b's older thread archived or removed before the count catches up.
+    // Only a visible inventory row can now qualify b, even while the old count reports two.
+    expect(
+      withoutSidebarHiddenProjects(groups, threads, marks, older({ a: 1, b: 2 }, rows)),
+    ).toEqual({ groups: [groups[0]], unresolved: [] });
     // Once a's older thread loaded and is hidden too, a goes.
     expect(withoutSidebarHiddenProjects(groups, threads, marks, older({}, null))).toEqual({
       groups: [],

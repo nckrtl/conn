@@ -150,7 +150,7 @@ import {
   type SidebarHiddenMarks,
 } from "../orbit/sidebarHiddenThreads.logic";
 import {
-  resolveSidebarOlderMembership,
+  syncSidebarOlderMembership,
   useSidebarOlderMembership,
 } from "../orbit/sidebarOlderMembership";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -901,10 +901,10 @@ function useSidebarLookups() {
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads older settled rows from the server while hidden marks leave a project's visibility undecided
   useEffect(() => {
-    for (const { environmentId, older } of membershipReads) {
-      resolveSidebarOlderMembership(environmentId, older);
-    }
+    syncSidebarOlderMembership(membershipReads);
   }, [membershipReads]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases pending inventory reads when the sidebar unmounts
+  useEffect(() => () => syncSidebarOlderMembership([]), []);
   const environmentLabelById = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
   );

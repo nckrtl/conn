@@ -178,17 +178,23 @@ export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
       if (unloaded === 0) continue;
       listed = true;
       const rows = older.rows(project.environmentId);
-      const covering =
-        rows === null
-          ? unresolvedSidebarHiddenCount(marks, project.environmentId, heldKeys)
-          : rows.filter(
-              (row) =>
-                row.projectId === project.id &&
-                !heldKeys.has(sidebarHiddenThreadKey(project.environmentId, row.id)) &&
-                isSidebarHiddenThread(marks, { environmentId: project.environmentId, id: row.id }),
-            ).length;
-      if (unloaded > covering) return true;
-      if (rows === null) undecided.push(project.environmentId);
+      if (rows !== null) {
+        // Inventory establishes visibility directly. Its row total may differ from a stale count.
+        if (
+          rows.some(
+            (row) =>
+              row.projectId === project.id &&
+              !isSidebarHiddenThread(marks, { environmentId: project.environmentId, id: row.id }),
+          )
+        ) {
+          return true;
+        }
+        continue;
+      }
+      if (unloaded > unresolvedSidebarHiddenCount(marks, project.environmentId, heldKeys)) {
+        return true;
+      }
+      undecided.push(project.environmentId);
     }
     for (const environmentId of undecided) unresolved.add(environmentId);
     if (listed) return false;

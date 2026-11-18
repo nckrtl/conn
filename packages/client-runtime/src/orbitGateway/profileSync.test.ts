@@ -853,6 +853,35 @@ describe("sidebar hidden threads sync", () => {
     expect(laptop.memory.ops.size).toBe(0);
   });
 
+  it("never downgrades a confirmed section when responses omit its version", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    const laptop = makeHidingDevice(fake);
+    mac.set("env-a:x", "hide");
+    await mac.sync();
+    await laptop.sync();
+    laptop.set("env-a:x", "show");
+
+    const get = fake.client.settings;
+    let reads = 0;
+    fake.client.settings = async () => {
+      const settings = await get();
+      reads += 1;
+      return { ...settings, document: reads === 1 ? settings.document : {}, sections: {} };
+    };
+    // Neither an unversioned value nor an entirely omitted section can acknowledge Show.
+    await expect(laptop.sync()).rejects.toThrow(/did not confirm/);
+    await expect(laptop.sync()).rejects.toThrow(/did not confirm/);
+    expect(laptop.memory.ops.get("env-a:x")?.intent).toBe("show");
+    expect(laptop.memory.state?.sections.sidebarHiddenThreads?.version).toBe(1);
+    expect(fake.gateway.patches).toHaveLength(1);
+
+    fake.client.settings = get;
+    await laptop.sync();
+    expect(profileHidden(fake)).toEqual([]);
+    expect(laptop.memory.ops.size).toBe(0);
+  });
+
   it("syncs the marks that fit and keeps the rest local instead of dropping them", async () => {
     const fake = fakeGateway();
     const mac = makeHidingDevice(fake);

@@ -17,22 +17,37 @@ interface OlderMembership {
 export const useSidebarOlderMembership = create<{
   readonly byEnvironment: ReadonlyMap<string, OlderMembership>;
   /** The read in flight per environment, retrying after failures. */
-  readonly reading: ReadonlyMap<string, object>;
+  readonly reading: ReadonlyMap<string, { readonly older: OlderSettled }>;
 }>(() => ({ byEnvironment: new Map(), reading: new Map() }));
 
 const RETRY_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 
-/** Reads the environment's older settled rows for this cut, once; a read in flight is reused. */
-export function resolveSidebarOlderMembership(environmentId: string, older: OlderSettled): void {
+/** Retains inventory reads only while the sidebar still needs them. */
+export function syncSidebarOlderMembership(
+  requests: ReadonlyArray<{ readonly environmentId: string; readonly older: OlderSettled }>,
+): void {
+  const store = useSidebarOlderMembership;
+  const { reading } = store.getState();
+  const wanted = new Map(requests.map(({ environmentId, older }) => [environmentId, older]));
+  const needed = new Map(reading);
+  for (const [environmentId, request] of reading) {
+    if (wanted.get(environmentId) !== request.older) needed.delete(environmentId);
+  }
+  if (needed.size !== reading.size) store.setState({ reading: needed });
+  for (const [environmentId, older] of wanted) readOlderMembership(environmentId, older);
+}
+
+function readOlderMembership(environmentId: string, older: OlderSettled): void {
   const store = useSidebarOlderMembership;
   const state = store.getState();
   if (state.reading.has(environmentId)) return;
   if (state.byEnvironment.get(environmentId)?.older === older) return;
-  const token = {};
+  const token = { older };
   store.setState({ reading: new Map(state.reading).set(environmentId, token) });
   const current = () => store.getState().reading.get(environmentId) === token;
   let failures = 0;
   const read = async (): Promise<void> => {
+    if (!current()) return;
     const threads = await readSidebarThreadInventory(environmentId).catch(() => null);
     if (!current()) return;
     if (threads === null) {

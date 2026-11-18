@@ -12,7 +12,7 @@ import { ShellSnapshotLoader } from "./shellSnapshotHttp.ts";
 const SOCKET_SNAPSHOT_TIMEOUT = "30 seconds";
 
 /**
- * Conn: every active thread id, older settled and idle subagents included; null to retry later.
+ * Conn: every active thread, older settled and idle subagents included; null to retry later.
  * HTTP first, the socket when HTTP refuses (as the shell does), never with omissions or cursor.
  * The socket read ends at its first full snapshot and never touches the live shell.
  */
@@ -23,7 +23,7 @@ export const readShellThreadInventory = Effect.fn("ShellInventory.read")(functio
   if (Option.isSome(prepared)) {
     const answer = yield* loader.load(prepared.value, {});
     if (Option.isSome(answer) && !("resumable" in answer.value)) {
-      return answer.value.threads.map((thread) => String(thread.id));
+      return answer.value.threads;
     }
   }
   const snapshot = yield* subscribe(ORCHESTRATION_V2_WS_METHODS.subscribeShell, {}).pipe(
@@ -33,7 +33,5 @@ export const readShellThreadInventory = Effect.fn("ShellInventory.read")(functio
     Effect.map(Option.flatten),
     Effect.orElseSucceed(() => Option.none()),
   );
-  return Option.isSome(snapshot)
-    ? snapshot.value.snapshot.threads.map((thread) => String(thread.id))
-    : null;
+  return Option.isSome(snapshot) ? snapshot.value.snapshot.threads : null;
 });

@@ -103,12 +103,12 @@ export function useOlderSettledShelfGrowth(
 
 /**
  * Conn: per project, the older settled threads the client does not hold, from each environment's
- * cut; reads no pages. `threads` are every row held, hidden ones included.
+ * cut, and that cut; reads no pages. `threads` are every row held, hidden ones included.
  */
 export function useUnloadedOlderSettled(
   environmentIds: ReadonlyArray<EnvironmentId>,
   threads: ReadonlyArray<EnvironmentThreadShell>,
-): (project: { readonly environmentId: string; readonly id: string }) => number {
+) {
   const shelf = useAtomValue(
     olderSettledThreads.shelfAtom(
       sortOlderSettledScopes(
@@ -116,17 +116,22 @@ export function useUnloadedOlderSettled(
       ).map((scope) => ({ scope, pages: 0 })),
     ),
   );
-  return (project) =>
-    unloadedOlderSettledCount({
-      olderSettled: (environmentId) => shelf.get(environmentId)?.older ?? null,
-      scopes: [
-        {
-          environmentId: project.environmentId as EnvironmentId,
-          projectIds: [project.id as ProjectId],
-        },
-      ],
-      threads,
-    });
+  const olderOf = (environmentId: string) =>
+    shelf.get(environmentId as EnvironmentId)?.older ?? null;
+  return {
+    olderOf,
+    unloaded: (project: { readonly environmentId: string; readonly id: string }) =>
+      unloadedOlderSettledCount({
+        olderSettled: olderOf,
+        scopes: [
+          {
+            environmentId: project.environmentId as EnvironmentId,
+            projectIds: [project.id as ProjectId],
+          },
+        ],
+        threads,
+      }),
+  };
 }
 
 /**

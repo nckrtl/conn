@@ -149,6 +149,10 @@ import {
   withoutSidebarHiddenProjects,
   type SidebarHiddenMarks,
 } from "../orbit/sidebarHiddenThreads.logic";
+import {
+  resolveSidebarOlderMembership,
+  useSidebarOlderMembership,
+} from "../orbit/sidebarOlderMembership";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { registerSettleAndAdvance } from "../settleAndAdvance";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -875,12 +879,32 @@ function useSidebarLookups() {
   // A scope already on it stays narrowed: scope resolution reads every group.
   const allProjectGroups = useSidebarProjectGroups();
   const quietThreads = useQuietThreadShells();
-  const projectGroups = withoutSidebarHiddenProjects(
+  const olderSettled = useUnloadedOlderSettled([...serverConfigs.keys()], quietThreads);
+  const olderMembership = useSidebarOlderMembership((state) => state.byEnvironment);
+  const { groups: projectGroups, unresolved } = withoutSidebarHiddenProjects(
     allProjectGroups,
     quietThreads,
     useSidebarHiddenThreads((state) => state.marks),
-    useUnloadedOlderSettled([...serverConfigs.keys()], quietThreads),
+    {
+      unloaded: olderSettled.unloaded,
+      rows: (environmentId) => {
+        const entry = olderMembership.get(environmentId);
+        return entry !== undefined && entry.older === olderSettled.olderOf(environmentId)
+          ? entry.rows
+          : null;
+      },
+    },
   );
+  const membershipReads = unresolved.flatMap((environmentId) => {
+    const older = olderSettled.olderOf(environmentId);
+    return older === null ? [] : [{ environmentId, older }];
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads older settled rows from the server while hidden marks leave a project's visibility undecided
+  useEffect(() => {
+    for (const { environmentId, older } of membershipReads) {
+      resolveSidebarOlderMembership(environmentId, older);
+    }
+  }, [membershipReads]);
   const environmentLabelById = new Map(
     environments.map((environment) => [environment.environmentId, environment.label] as const),
   );

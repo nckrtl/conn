@@ -83,7 +83,7 @@ describe("readShellThreadInventory", () => {
         retryNow: Effect.void,
       });
       let httpReads = 0;
-      const ids = yield* readShellThreadInventory().pipe(
+      const threads = yield* readShellThreadInventory().pipe(
         Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
         // The HTTP shell route refused: the loader answers none, as for a 401 or 404.
         Effect.provideService(ShellSnapshotLoader.ShellSnapshotLoader, {
@@ -91,7 +91,7 @@ describe("readShellThreadInventory", () => {
         }),
       );
       expect(httpReads).toBe(1);
-      expect(ids).toEqual(["recent", "older-settled", "idle-child"]);
+      expect(threads?.map((row) => row.id)).toEqual(["recent", "older-settled", "idle-child"]);
       expect(inputs).toEqual([{}]);
       expect(closed).toBe(1);
     }),

@@ -131,23 +131,33 @@ export function sidebarSettledCount(input: {
   return { atLeast, upTo };
 }
 
+/** What the client knows of a project's older settled threads it does not hold. */
+export interface SidebarOlderSettledInventory {
+  readonly unloaded: (project: { readonly environmentId: string; readonly id: string }) => number;
+  /** The environment's older settled rows from a full read for its current cut, or null. */
+  readonly rows: (
+    environmentId: string,
+  ) => ReadonlyArray<{ readonly id: string; readonly projectId: string }> | null;
+}
+
 /**
- * Leaves out project groups whose threads are all hidden. A group with older settled threads not
- * loaded yet stays: one of them may show. An empty group stays, unless each of its environments
- * is one a peek holds or whose marks are still unknown.
+ * Keeps a group only once a member provably shows: a visible row, or unloaded older threads that
+ * unplaced marks (or a full read in `rows`) cannot all cover; `unresolved` names the reads that
+ * would decide the rest. An empty group stays unless all its environments are held or unhydrated.
  */
 export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
   groups: readonly T[],
   threads: readonly MarkedThread[],
   marks: SidebarHiddenMarks,
-  unloadedOlder: (project: {
-    readonly environmentId: string;
-    readonly id: string;
-  }) => number = () => 0,
-): T[] {
-  if (marks.keys.size === 0 && marks.environments.size === 0) return [...groups];
+  older: SidebarOlderSettledInventory = { unloaded: () => 0, rows: () => null },
+): { readonly groups: T[]; readonly unresolved: string[] } {
+  if (marks.keys.size === 0 && marks.environments.size === 0) {
+    return { groups: [...groups], unresolved: [] };
+  }
+  const heldKeys = new Set<string>();
   const projectThreads = new Map<string, { total: number; hidden: number }>();
   for (const thread of threads) {
+    heldKeys.add(sidebarHiddenThreadKey(thread.environmentId, thread.id));
     if (thread.archivedAt !== null) continue;
     const key = `${thread.environmentId}:${thread.projectId}`;
     const entry = projectThreads.get(key) ?? { total: 0, hidden: 0 };
@@ -155,20 +165,37 @@ export function withoutSidebarHiddenProjects<T extends MarkedProjectGroup>(
     if (isSidebarHiddenThread(marks, thread)) entry.hidden += 1;
     projectThreads.set(key, entry);
   }
-  return groups.filter((group) => {
-    let total = 0;
-    let hidden = 0;
-    let unloaded = 0;
+  const unresolved = new Set<string>();
+  const kept = groups.filter((group) => {
+    let listed = false;
+    const undecided: string[] = [];
     for (const project of group.memberProjects) {
       const entry = projectThreads.get(`${project.environmentId}:${project.id}`);
-      total += entry?.total ?? 0;
-      hidden += entry?.hidden ?? 0;
-      if (!marks.environments.has(project.environmentId)) unloaded += unloadedOlder(project);
+      if (entry !== undefined) listed = true;
+      if (entry !== undefined && entry.hidden < entry.total) return true;
+      if (marks.environments.has(project.environmentId)) continue;
+      const unloaded = older.unloaded(project);
+      if (unloaded === 0) continue;
+      listed = true;
+      const rows = older.rows(project.environmentId);
+      const covering =
+        rows === null
+          ? unresolvedSidebarHiddenCount(marks, project.environmentId, heldKeys)
+          : rows.filter(
+              (row) =>
+                row.projectId === project.id &&
+                !heldKeys.has(sidebarHiddenThreadKey(project.environmentId, row.id)) &&
+                isSidebarHiddenThread(marks, { environmentId: project.environmentId, id: row.id }),
+            ).length;
+      if (unloaded > covering) return true;
+      if (rows === null) undecided.push(project.environmentId);
     }
-    if (total > 0) return hidden < total || unloaded > 0;
+    for (const environmentId of undecided) unresolved.add(environmentId);
+    if (listed) return false;
     return !(
       group.memberProjects.length > 0 &&
       group.memberProjects.every((project) => marks.environments.has(project.environmentId))
     );
   });
+  return { groups: kept, unresolved: [...unresolved] };
 }

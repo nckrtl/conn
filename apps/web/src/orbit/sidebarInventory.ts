@@ -1,7 +1,7 @@
 import { EnvironmentRegistry } from "@t3tools/client-runtime/connection";
 import { createRuntimeCommand, runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { readShellThreadInventory } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -18,8 +18,10 @@ const inventoryRead = createRuntimeCommand(connectionAtomRuntime, {
   }),
 });
 
-/** Every active thread id of the environment, or null when the read failed (retry later). */
-export async function readSidebarThreadInventory(environmentId: string): Promise<string[] | null> {
+/** Every active thread of the environment, or null when the read failed (retry later). */
+export async function readSidebarThreadInventory(
+  environmentId: string,
+): Promise<ReadonlyArray<OrchestrationV2ThreadShell> | null> {
   const result = await runAtomCommand(
     appAtomRegistry,
     inventoryRead,

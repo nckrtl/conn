@@ -35,7 +35,8 @@ vi.mock("./sidebarInventory", () => ({
   readSidebarThreadInventory: async (environmentId: string) => {
     fixture.inventoryReads += 1;
     const answers = fixture.inventory.get(environmentId) ?? [];
-    return (answers.length > 1 ? answers.shift() : answers[0]) ?? null;
+    const ids = (await (answers.length > 1 ? answers.shift() : answers[0])) ?? null;
+    return ids?.map((id) => ({ id })) ?? null;
   },
 }));
 vi.mock("../state/shell", () => ({

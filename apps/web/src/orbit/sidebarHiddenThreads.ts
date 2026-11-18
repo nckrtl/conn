@@ -349,7 +349,11 @@ function sweepWhenLive(profile: string, environmentId: string): void {
       return;
     }
     finish();
-    sweep(profile, environmentId, inventory);
+    sweep(
+      profile,
+      environmentId,
+      inventory.map((thread) => String(thread.id)),
+    );
   };
   unsubscribe = appAtomRegistry.subscribe(
     environmentShell.stateValueAtom(environmentId as EnvironmentId),

@@ -34,6 +34,8 @@ import { useOrbitThreadsAvailable } from "../orbit/environmentProvider";
 import { OrbitPendingThreadList } from "../orbit/OrbitPendingThreadList";
 import { updateStarts } from "../orbit/orbitThreadStartStore";
 import { bindSidebarHiddenProfile } from "../orbit/sidebarHiddenThreads";
+import { readSidebarThreadInventory } from "../orbit/sidebarInventory";
+import { useSidebarOlderMembership } from "../orbit/sidebarOlderMembership";
 import { unloadedOlderSettledCount } from "@t3tools/client-runtime/state/threads";
 import Sidebar from "./Sidebar";
 import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "./Sidebar.logic";
@@ -49,6 +51,7 @@ vi.mock(import("../state/olderSettledShelf"), async (original) => {
   };
 });
 vi.mock("../state/entities", { spy: true });
+vi.mock("../orbit/sidebarInventory", { spy: true });
 vi.mock("../hooks/useHandleNewThread", { spy: true });
 vi.mock("../orbit/environmentProvider", { spy: true });
 vi.mock("../hooks/useNowMinute", { spy: true });
@@ -493,6 +496,7 @@ describe("sidebar settled shelf with hidden threads", () => {
     readonly threads: EnvironmentThreadShell[];
     readonly older: Record<string, number>;
     readonly hidden: string[];
+    readonly collapsed?: boolean;
   }) {
     const stack = new AsyncDisposableStack();
     const projects = Object.keys(input.older).map(project);
@@ -515,6 +519,27 @@ describe("sidebar settled shelf with hidden threads", () => {
         };
       }),
     );
+    const originalUnloaded = vi.mocked(shelfHooks.useUnloadedOlderSettled).getMockImplementation()!;
+    stack.use(
+      vi.spyOn(shelfHooks, "useUnloadedOlderSettled").mockImplementation((ids, threads) => {
+        originalUnloaded(ids, threads);
+        return {
+          olderOf: () => older,
+          unloaded: (member) =>
+            unloadedOlderSettledCount({
+              olderSettled: () => older,
+              scopes: [
+                {
+                  environmentId: member.environmentId as EnvironmentId,
+                  projectIds: [ProjectId.make(member.id)],
+                },
+              ],
+              threads,
+            }),
+        };
+      }),
+    );
+    useSidebarOlderMembership.setState({ byEnvironment: new Map(), reading: new Map() });
     window.localStorage.setItem(
       "t3code:sidebar-hidden-threads:v2:agreed:1",
       JSON.stringify(input.hidden.map((id) => `local:${id}`)),
@@ -546,6 +571,7 @@ describe("sidebar settled shelf with hidden threads", () => {
           {
             scratchWorkspaceRoot: null,
             shellThreadFamilies: false,
+            environment: { capabilities: {} },
           } as unknown as EnvironmentServerConfig,
         ],
       ]),
@@ -560,9 +586,23 @@ describe("sidebar settled shelf with hidden threads", () => {
     const shelf = screen.container.querySelector<HTMLElement>(
       '[data-sidebar-row="shelf:settled"]',
     )!;
-    if (shelf.getAttribute("aria-expanded") === "false") await act(() => shelf.click());
+    if ((shelf.getAttribute("aria-expanded") === "true") === Boolean(input.collapsed)) {
+      await act(() => shelf.click());
+    }
     const owned = stack.move();
     return {
+      shelfExpanded: () => shelf.getAttribute("aria-expanded"),
+      scopeOptions: async () => {
+        await userEvent.click(
+          screen.container.querySelector<HTMLElement>('[aria-label="Filter threads by project"]')!,
+        );
+        // Each project row starts with its favicon's initials.
+        const options = [...document.querySelectorAll('[role="option"]')].map((option) =>
+          option.textContent?.replace(/^P\d/, ""),
+        );
+        await userEvent.keyboard("{Escape}");
+        return options;
+      },
       count: () => shelf.querySelector(".tabular-nums")?.textContent,
       more: () =>
         screen.container.querySelector('[data-sidebar-row="settled:more"]')?.textContent ?? null,
@@ -617,5 +657,29 @@ describe("sidebar settled shelf with hidden threads", () => {
     });
     await vi.waitFor(() => expect(shelf.more()).toBe("Show 1 more"));
     expect(shelf.count()).toBe("2");
+  });
+
+  it("keeps projects out of the scope menu until a full read shows an older thread", async () => {
+    // p2 and p3 each hold one unloaded older thread; the unplaced mark o2 could be either.
+    const read = Promise.withResolvers<EnvironmentThreadShell["source"][] | null>();
+    using _read = vi.mocked(readSidebarThreadInventory).mockReturnValue(read.promise);
+    await using shelf = await renderShelf({
+      threads: [],
+      older: { p1: 0, p2: 1, p3: 1 },
+      hidden: ["o2"],
+      collapsed: true,
+    });
+    expect(await shelf.scopeOptions()).toEqual(["All projects", "p1"]);
+    await vi.waitFor(() => expect(readSidebarThreadInventory).toHaveBeenCalledTimes(1));
+    read.resolve([
+      settled(ProjectId.make("p2"), "o2", "2026-01-01T00:00:00.000Z").source,
+      settled(ProjectId.make("p3"), "o3", "2026-01-01T00:00:00.000Z").source,
+    ]);
+    // o2 is p2's only older thread: p2 stays out; p3's older thread shows, with Settled shut.
+    await vi.waitFor(async () =>
+      expect(await shelf.scopeOptions()).toEqual(["All projects", "p1", "p3"]),
+    );
+    expect(shelf.shelfExpanded()).toBe("false");
+    expect(readSidebarThreadInventory).toHaveBeenCalledTimes(1);
   });
 });

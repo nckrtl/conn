@@ -50,10 +50,12 @@ describe("sidebar hidden marks", () => {
     const groups = [group(["local", "p1"]), group(["clone", "p1"]), group(["clone", "empty"])];
     const unloaded = (project: { environmentId: string }) =>
       project.environmentId === "clone" ? 1 : 0;
-    expect(withoutSidebarHiddenProjects(groups, threads, marks, unloaded)).toEqual([groups[0]]);
+    expect(
+      withoutSidebarHiddenProjects(groups, threads, marks, { unloaded, rows: () => null }),
+    ).toEqual({ groups: [groups[0]], unresolved: [] });
   });
 
-  it("keeps a project with unloaded older threads, and counts them without overstating", () => {
+  it("keeps a project only once an unloaded older thread provably shows", () => {
     const marks = sidebarHiddenMarks({
       agreed: ["local:a-loaded", "local:b-loaded", "local:b-older"],
       ops: new Map(),
@@ -62,11 +64,66 @@ describe("sidebar hidden marks", () => {
     });
     const threads = [thread("local", "a-loaded", "a"), thread("local", "b-loaded", "b")];
     const groups = [group(["local", "a"]), group(["local", "b"])];
-    // a has one older thread not loaded yet; b has none left.
-    const unloaded = (project: { readonly id: string }) => (project.id === "a" ? 1 : 0);
-    expect(withoutSidebarHiddenProjects(groups, threads, marks, unloaded)).toEqual([groups[0]]);
+    const older = (
+      counts: Record<string, number>,
+      rows: Array<{ id: string; projectId: string }> | null,
+    ) => ({
+      unloaded: (project: { readonly id: string }) => counts[project.id] ?? 0,
+      rows: () => rows,
+    });
+    // One unloaded older thread each, and one hidden mark nobody holds: either may be it.
+    expect(
+      withoutSidebarHiddenProjects(groups, threads, marks, older({ a: 1, b: 1 }, null)),
+    ).toEqual({ groups: [], unresolved: ["local"] });
+    // More unloaded than unresolved marks: a shows without a read.
+    expect(
+      withoutSidebarHiddenProjects(groups, threads, marks, older({ a: 2, b: 1 }, null)),
+    ).toEqual({ groups: [groups[0]], unresolved: ["local"] });
+    // The full read places b-older in b: a's older thread shows, b's is hidden.
+    const rows = [
+      { id: "a-older", projectId: "a" },
+      { id: "b-older", projectId: "b" },
+    ];
+    expect(
+      withoutSidebarHiddenProjects(groups, threads, marks, older({ a: 1, b: 1 }, rows)),
+    ).toEqual({ groups: [groups[0]], unresolved: [] });
     // Once a's older thread loaded and is hidden too, a goes.
-    expect(withoutSidebarHiddenProjects(groups, threads, marks, () => 0)).toEqual([]);
+    expect(withoutSidebarHiddenProjects(groups, threads, marks, older({}, null))).toEqual({
+      groups: [],
+      unresolved: [],
+    });
+    // A project with only an unloaded hidden older thread, in a group spanning two scopes.
+    const spanning = [group(["local", "c"], ["clone", "c"])];
+    const cMarks = sidebarHiddenMarks({
+      agreed: ["local:c-older", "clone:c-older"],
+      ops: new Map(),
+      attempts: [],
+      unhydrated: [],
+    });
+    const cOlder = (rows: Array<{ id: string; projectId: string }> | null) => ({
+      unloaded: () => 1,
+      rows: () => rows,
+    });
+    expect(withoutSidebarHiddenProjects(spanning, [], cMarks, cOlder(null))).toEqual({
+      groups: [],
+      unresolved: ["local", "clone"],
+    });
+    expect(
+      withoutSidebarHiddenProjects(
+        spanning,
+        [],
+        cMarks,
+        cOlder([{ id: "c-older", projectId: "c" }]),
+      ),
+    ).toEqual({ groups: [], unresolved: [] });
+    expect(
+      withoutSidebarHiddenProjects(
+        spanning,
+        [],
+        cMarks,
+        cOlder([{ id: "c-other", projectId: "c" }]),
+      ),
+    ).toEqual({ groups: spanning, unresolved: [] });
 
     // b-older is hidden but not held: it may be the one older thread the server counts.
     const held = new Set(threads.map((row) => `${row.environmentId}:${row.id}`));
@@ -147,7 +204,7 @@ describe("sidebar hidden marks", () => {
     });
     // An empty project the user already had stays, also on the environment it disconnected from.
     const withEmpty = [...groups, group(["clone", "empty"])];
-    expect(withoutSidebarHiddenProjects(withEmpty, threads, marks)).toEqual([
+    expect(withoutSidebarHiddenProjects(withEmpty, threads, marks).groups).toEqual([
       groups[0],
       groups[2],
       withEmpty[3],
@@ -163,7 +220,7 @@ describe("sidebar hidden marks", () => {
           attempts: [],
           unhydrated: [],
         }),
-      ),
+      ).groups,
     ).toEqual([]);
   });
 });

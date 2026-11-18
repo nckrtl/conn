@@ -62,7 +62,11 @@ vi.mock("./orbitGatewayStore", () => ({
   orbitGatewayState: gateway.state,
 }));
 
-import { openMobileOrbitThread, startOrbitThread } from "./orbitThreadStartRuntime";
+import {
+  mobileOrbitLaunches,
+  openMobileOrbitThread,
+  startOrbitThread,
+} from "./orbitThreadStartRuntime";
 
 it("does not send a name check for an unresolved draft after a profile or Node change", async () => {
   const original = { nodeId: 7, profileId: 12 };
@@ -101,6 +105,25 @@ it("does not send a name check for an unresolved draft after a profile or Node c
   }
   expect(gateway.fileText).toHaveBeenCalledTimes(2);
   expect(gateway.fileDelete).toHaveBeenCalledOnce();
+  expect(gateway.checkInstanceName).not.toHaveBeenCalled();
+});
+
+it("does not send a corrected prompt-derived name after the observer lost its scope", async () => {
+  const scope = { nodeId: 7, profileId: 12 };
+  const admission = newOrbitLaunchAdmission(() => "refused", scope, {
+    project_id: 78,
+    target: { kind: "new", name: "original" },
+    source: "mobile",
+    prompt: "Original message",
+  });
+  const refused = { ...scope, draftId: "sheet", admission, validationRefused: true } as const;
+  gateway.checkInstanceName.mockClear();
+  gateway.loadJournal.mockResolvedValue(JSON.stringify([refused]));
+  gateway.state.mockReturnValue({ provider: "orbit", node: { id: 7, profile: { id: 12 } } });
+  mobileOrbitLaunches.setScope(null);
+  await expect(startOrbitThread({ id: 78 }, "Corrected message", "sheet")).rejects.toThrow(
+    "original Orbit profile and device",
+  );
   expect(gateway.checkInstanceName).not.toHaveBeenCalled();
 });
 

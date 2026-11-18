@@ -190,22 +190,44 @@ function mergeComposerDraftStates(
     const value = Equal.equals(local[key], baseline[key]) ? stored[key] : local[key];
     return value === undefined ? {} : { [key]: value };
   };
+  const draftThreadsByThreadKey = mergeDraftRecord(
+    stored.draftThreadsByThreadKey,
+    local.draftThreadsByThreadKey,
+    baseline.draftThreadsByThreadKey,
+  );
+  const logicalProjectDraftThreadKeyByLogicalProjectKey = mergeDraftRecord(
+    stored.logicalProjectDraftThreadKeyByLogicalProjectKey,
+    local.logicalProjectDraftThreadKeyByLogicalProjectKey,
+    baseline.logicalProjectDraftThreadKeyByLogicalProjectKey,
+  );
+  // An Orbit edit that outlives another window's acknowledgement still needs its route.
+  const retainedOrbitDrafts = new Set<string>();
+  for (const [key, session] of Object.entries(local.draftThreadsByThreadKey)) {
+    const draft = local.draftsByThreadKey[key];
+    if (
+      draftThreadsByThreadKey[key] === undefined &&
+      session.orbitTarget != null &&
+      draft !== undefined &&
+      !Equal.equals(draft, baseline.draftsByThreadKey[key])
+    ) {
+      retainedOrbitDrafts.add(key);
+      draftThreadsByThreadKey[key] = session;
+    }
+  }
+  for (const [projectKey, draftKey] of Object.entries(
+    local.logicalProjectDraftThreadKeyByLogicalProjectKey,
+  )) {
+    if (retainedOrbitDrafts.has(draftKey))
+      logicalProjectDraftThreadKeyByLogicalProjectKey[projectKey] ??= draftKey;
+  }
   return {
     draftsByThreadKey: mergeDraftRecord(
       stored.draftsByThreadKey,
       local.draftsByThreadKey,
       baseline.draftsByThreadKey,
     ),
-    draftThreadsByThreadKey: mergeDraftRecord(
-      stored.draftThreadsByThreadKey,
-      local.draftThreadsByThreadKey,
-      baseline.draftThreadsByThreadKey,
-    ),
-    logicalProjectDraftThreadKeyByLogicalProjectKey: mergeDraftRecord(
-      stored.logicalProjectDraftThreadKeyByLogicalProjectKey,
-      local.logicalProjectDraftThreadKeyByLogicalProjectKey,
-      baseline.logicalProjectDraftThreadKeyByLogicalProjectKey,
-    ),
+    draftThreadsByThreadKey,
+    logicalProjectDraftThreadKeyByLogicalProjectKey,
     ...pick("stickyModelSelectionByProvider"),
     ...pick("stickyOptionsByModelByProvider"),
     ...pick("stickyActiveProvider"),
@@ -4612,15 +4634,28 @@ export function applyOtherWindowComposerDrafts(
     incoming.draftsByThreadKey,
     changedHere("d:"),
   );
+  const retainsEditedOrbitDraft = (key: string) =>
+    incoming.draftThreadsByThreadKey[key] === undefined &&
+    local.draftsByThreadKey[key] !== undefined &&
+    local.draftThreadsByThreadKey[key]?.orbitTarget != null &&
+    changedHere("d:")(key);
   const draftThreads = diffIncomingRecord(
     local.draftThreadsByThreadKey,
     incoming.draftThreadsByThreadKey,
-    changedHere("t:"),
+    (key) => changedHere("t:")(key) || retainsEditedOrbitDraft(key),
   );
   const logical = diffIncomingRecord(
     local.logicalProjectDraftThreadKeyByLogicalProjectKey,
     incoming.logicalProjectDraftThreadKeyByLogicalProjectKey,
-    changedHere("l:"),
+    (key) => {
+      const draftKey = local.logicalProjectDraftThreadKeyByLogicalProjectKey[key];
+      return (
+        changedHere("l:")(key) ||
+        (draftKey !== undefined &&
+          incoming.logicalProjectDraftThreadKeyByLogicalProjectKey[key] === undefined &&
+          retainsEditedOrbitDraft(draftKey))
+      );
+    },
   );
   const sticky = diffIncomingRecord(
     {

@@ -147,6 +147,12 @@ export async function startOrbitThread(
   if (recovery && saved === undefined) {
     throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
   }
+  const scope = mobileOrbitLaunches.scope();
+  if (scope?.profileId !== profileId || scope.nodeId !== nodeId) {
+    throw OrbitLaunchCopyError.fromCopy(
+      msg("Connect to the original Orbit profile and device before sending."),
+    );
+  }
   const name =
     saved?.admission.request.target.kind === "new" &&
     (!saved.validationRefused ||

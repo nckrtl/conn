@@ -108,6 +108,8 @@ describe("applyOtherWindowComposerDrafts", () => {
     "saved-original",
     "other-window-edit",
     "passive-clear",
+    "discard-received",
+    "acknowledge-received",
   ])(
     "reconciles an Orbit %s draft when another window clears a newer sent version",
     async (editedField) => {
@@ -165,8 +167,12 @@ describe("applyOtherWindowComposerDrafts", () => {
         store.setPrompt(draftId, "earlier draft saved by this window");
         await vi.advanceTimersByTimeAsync(300);
       }
-      if (editedField === "other-window-edit" || editedField === "passive-clear") {
-        if (editedField === "passive-clear")
+      if (
+        ["other-window-edit", "passive-clear", "discard-received", "acknowledge-received"].includes(
+          editedField,
+        )
+      ) {
+        if (editedField !== "other-window-edit")
           applyOtherWindowComposerDrafts(JSON.stringify(external), new RecentKeyChanges(2_000));
         if (!original || "capturedState" in original.state)
           throw new Error("Expected a stored draft");
@@ -183,9 +189,24 @@ describe("applyOtherWindowComposerDrafts", () => {
         expect(isStaleClearedOrbitDraft(draftId)).toBe(true);
         useComposerDraftStore.setState({});
         await vi.advanceTimersByTimeAsync(300);
-        expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
+        const latest = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+        expect(latest).toMatchObject({
           state: { draftsByThreadKey: { [key]: { prompt: "genuine edit in a third window" } } },
         });
+        if (editedField === "discard-received" || editedField === "acknowledge-received") {
+          applyOtherWindowComposerDrafts(JSON.stringify(latest), new RecentKeyChanges(2_000));
+          expect(useComposerDraftStore.getState().getDraftSession(draftId)).not.toBeNull();
+          if (editedField === "discard-received") store.clearDraftThread(draftId);
+          else clearAcceptedOrbitDraft(draftId);
+          await vi.advanceTimersByTimeAsync(300);
+          expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
+            state: {
+              draftsByThreadKey: {},
+              draftThreadsByThreadKey: {},
+              logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+            },
+          });
+        }
         return;
       }
       await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, external);

@@ -487,6 +487,15 @@ impl Inner {
         let command = self.rollback_capabilities(command).await?;
         // A paused commit committed nothing: wait for access, then check everything again
         // (ownership included) in a fresh transaction.
+        // Only a guarded commit can pause and retry: the ordinary path passes the command by
+        // value, with no copy of its body.
+        if commit_gate.is_none() {
+            let result = self.dispatch_claimed(command, guard, None).await;
+            if let (Err(_), Some(claimed), Some(host)) = (&result, claimed, &self.host) {
+                host.release_attachments(claimed).await;
+            }
+            return result;
+        }
         let result = loop {
             let result = self
                 .dispatch_claimed(command.clone(), guard.clone(), commit_gate.clone())

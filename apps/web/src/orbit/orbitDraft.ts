@@ -3,6 +3,7 @@ import type {
   OrbitGatewayBranchSelection,
   OrbitGatewayProject,
   OrbitInstanceKind,
+  OrbitLaunchRequest,
 } from "@t3tools/client-runtime/orbit-gateway";
 import {
   EnvironmentId,
@@ -14,6 +15,9 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { mFallback, msg } from "gt-react";
+
+import type { MessageResolver } from "../i18n/messages";
 
 /**
  * Conn: where an Orbit draft starts (FORK.md, "Orbit"). An Orbit Project is no T3 project, so the
@@ -155,10 +159,12 @@ export function orbitDraftContextRow(target: OrbitDraftTarget): OrbitDraftContex
   };
 }
 
-export const ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE =
-  "Attachments are not available for a new Instance yet.";
-export const ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE =
-  "Attachments are not available until this Instance is connected.";
+export const ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE = msg(
+  "Attachments are not available for a new Instance yet.",
+);
+export const ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE = msg(
+  "Attachments are not available until this Instance is connected.",
+);
 
 /**
  * Why the composer takes no attachments, or null. The start machine sends the first message as
@@ -166,11 +172,14 @@ export const ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE =
  */
 export function orbitDraftAttachmentsBlockedReason(
   target: OrbitDraftTarget | null | undefined,
+  resolve: MessageResolver = mFallback,
 ): string | null {
   if (!target) return null;
-  return target.instanceKind === "new"
-    ? ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE
-    : ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE;
+  return resolve(
+    target.instanceKind === "new"
+      ? ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE
+      : ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE,
+  );
 }
 
 /** The Gateway project the start record needs, from the target alone. */
@@ -193,6 +202,33 @@ export interface OrbitDraftStartInput {
   readonly instanceDomainSuffix?: string | null;
   readonly branch: OrbitGatewayBranchSelection | null;
   readonly defaultBranch: string | null;
+}
+
+export function orbitDraftLaunchTarget(input: {
+  readonly existing: { readonly instanceId: number } | null;
+  readonly instanceName: string;
+  readonly branch?: OrbitGatewayBranchSelection | null;
+}): OrbitLaunchRequest["target"] {
+  return input.existing
+    ? { kind: "existing", instance_id: input.existing.instanceId }
+    : {
+        kind: "new",
+        name: input.instanceName,
+        ...(input.branch == null ? {} : { branch: input.branch }),
+      };
+}
+
+export function orbitDraftMatchesLaunch(
+  target: OrbitDraftTarget | null | undefined,
+  prompt: string | undefined,
+  request: Pick<OrbitLaunchRequest, "project_id" | "prompt" | "target">,
+): boolean {
+  return (
+    target != null &&
+    target.projectId === request.project_id &&
+    prompt?.trim() === request.prompt &&
+    JSON.stringify(orbitDraftLaunchTarget(target)) === JSON.stringify(request.target)
+  );
 }
 
 /**

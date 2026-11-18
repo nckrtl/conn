@@ -1,9 +1,11 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type {
-  OrbitGatewayEnvironment,
-  OrbitConversationRef,
+import {
+  OrbitLaunchCopyError,
+  type OrbitGatewayEnvironment,
+  type OrbitConversationRef,
 } from "@t3tools/client-runtime/orbit-gateway";
 import type { ScopedThreadRef } from "@t3tools/contracts";
+import { msg } from "gt-react";
 
 export interface OrbitAgentNavigationPorts {
   readonly source: ScopedThreadRef;
@@ -47,12 +49,18 @@ export async function prepareOrbitConversationEnvironment(
     (entry) => entry.environmentId === environmentId,
   );
   if (environment?.powerState === "stopped")
-    throw new Error("This workspace is asleep. Wake it in Connections, then try again.");
+    throw OrbitLaunchCopyError.fromCopy(
+      msg("This workspace is asleep. Wake it in Connections, then try again."),
+    );
   if (!ports.known()) {
     if (!environment)
-      throw new Error("This environment is not paired or is no longer available in Orbit.");
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("This environment is not paired or is no longer available in Orbit."),
+      );
     if (!(await ports.connect(environment)))
-      throw new Error("Could not pair with this environment. Open Connections to reconnect it.");
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("Could not pair with this environment. Open Connections to reconnect it."),
+      );
   }
   await ports.enable();
 }

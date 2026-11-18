@@ -1,155 +1,336 @@
-import type { OrbitSetupCreateRow } from "@t3tools/client-runtime/orbit-gateway";
-import { useSyncExternalStore } from "react";
-import { Pressable, View } from "react-native";
-
-import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
-import { SymbolView } from "../../components/ui/AppSymbol";
-import { AppText as Text } from "../../components/ui/AppText";
-import { useOrbitGateway } from "./orbitGatewayStore";
-import { retryOrbitCompletion } from "./orbitThreadStartRuntime";
 import {
-  dismissOrbitThreadStart,
-  orbitThreadStartRow,
-  orbitThreadStartStore,
-  retryOrbitThreadStart,
-} from "./orbitThreadStartStore";
+  orbitLegacyPreviewStatus,
+  resolveOrbitLaunchError,
+  ORBIT_LAUNCH_ACTION_LABELS,
+  ORBIT_LAUNCH_PHASE_LABELS,
+  ORBIT_LAUNCH_STAGES,
+  ORBIT_LAUNCH_STAGE_STATUS,
+  orbitLaunchActionLabel,
+  type LegacyOrbitLaunch,
+  type OrbitLaunch,
+  type OrbitLaunchAction,
+  type OrbitLaunchSubmission,
+} from "@t3tools/client-runtime/orbit-gateway";
+import { useNavigation } from "@react-navigation/native";
+import * as Clipboard from "expo-clipboard";
+import { T, msg, useGT, useMessages } from "gt-react-native";
+import { useEffect, useState } from "react";
+import { View } from "react-native";
 
-/**
- * Conn: the thread starts in Orbit Projects still on their way, above the thread list. Each shows
- * its stage; a stopped one offers Retry unless a Retry would fail the same way, and every one can
- * be dismissed. After the send a row follows the create's completion with the desktop card's rows
- * and words, and goes once the Instance is ready.
- */
+import { AppText as Text } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
+import { ErrorBanner } from "../../components/ui/ErrorBanner";
+import { m } from "../../i18n/messages";
+import { useOrbitGateway } from "./orbitGatewayStore";
+import {
+  acknowledgeMobileOrbitLaunch,
+  mobileOrbitLaunches,
+  mobileOrbitSubmissions,
+  openMobileOrbitThread,
+  readLegacyMobileLaunches,
+  resolveLegacyMobileLaunch,
+  updateLegacyMobilePreview,
+  useMobileOrbitLaunches,
+} from "./orbitThreadStartRuntime";
+
+const actionIds = Object.keys(ORBIT_LAUNCH_ACTION_LABELS) as OrbitLaunchAction[];
+const stageIds = Object.keys(ORBIT_LAUNCH_STAGES) as Array<keyof OrbitLaunch["stages"]>;
 export function OrbitThreadStartRows() {
+  const gt = useGT();
+  const navigation = useNavigation();
+  const messages = useMessages();
   const gateway = useOrbitGateway();
-  const starts = useSyncExternalStore(
-    orbitThreadStartStore.subscribe,
-    orbitThreadStartStore.starts,
+  const { snapshot, rows } = useMobileOrbitLaunches();
+  const nodeId = gateway.node?.id ?? null;
+  const profileId = gateway.node?.profile?.id ?? null;
+  const [legacy, setLegacy] = useState<readonly LegacyOrbitLaunch[]>([]);
+  const [pending, setPending] = useState<readonly OrbitLaunchSubmission[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- old records are read-only until the user resolves one
+  useEffect(() => {
+    let current = true;
+    void readLegacyMobileLaunches().then(
+      (rows) => {
+        if (current) setLegacy(rows);
+      },
+      () => {
+        if (current)
+          setError(
+            m(msg("Conn could not read the previous Orbit starts. The saved file is unchanged.")),
+          );
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, []);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads this profile's unconfirmed submissions from disk
+  useEffect(() => {
+    if (profileId === null || nodeId === null) return;
+    let current = true;
+    const read = () => {
+      void mobileOrbitSubmissions.pending({ profileId, nodeId }).then(
+        (rows) => {
+          if (current) setPending(rows);
+        },
+        () => {
+          if (current) setError(m(msg("Conn could not read its Orbit submission journal.")));
+        },
+      );
+    };
+    const stop = mobileOrbitSubmissions.subscribe(read);
+    read();
+    return () => {
+      current = false;
+      stop();
+    };
+  }, [profileId, nodeId]);
+
+  const run = async (action: () => Promise<unknown>, fallback: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (cause) {
+      setError(resolveOrbitLaunchError(cause, fallback, m));
+    }
+    setBusy(false);
+  };
+  const submissions = pending.filter(
+    (item) => item.profileId === profileId && item.nodeId === nodeId,
   );
-  if (gateway.provider !== "orbit" || starts.length === 0) return null;
+  if (
+    gateway.provider !== "orbit" ||
+    (rows.length === 0 &&
+      legacy.length === 0 &&
+      submissions.length === 0 &&
+      !error &&
+      !snapshot.error)
+  )
+    return null;
   return (
     <View
-      accessibilityLabel="Orbit thread starts"
+      accessibilityLabel={gt("Orbit thread starts")}
       className="mx-2 mb-2 overflow-hidden rounded-[20px] bg-grouped-card"
     >
-      {starts.map((start, index) => {
-        const row = orbitThreadStartRow(start);
-        return (
-          <View
-            key={start.id}
-            className={
-              index === 0 ? "gap-2 px-4 py-3" : "gap-2 border-t border-border-subtle px-4 py-3"
-            }
-          >
-            <View className="flex-row items-center gap-3">
-              <View className="size-6 items-center justify-center">
-                {row.stage === "stopped" || row.stage === "setupFailed" ? (
-                  <SymbolView
-                    name="exclamationmark.triangle"
-                    size={16}
-                    tintColorClassName="accent-warning-foreground"
-                  />
-                ) : (
-                  <AppActivityIndicator colorClassName="accent-icon-muted" />
-                )}
-              </View>
-              <View className="min-w-0 flex-1 gap-0.5">
-                <Text className="text-base text-foreground" numberOfLines={2}>
-                  {start.projectSlug}
-                  <Text className="text-base text-foreground-muted"> · {row.label}</Text>
+      {rows.map((launch) => (
+        <View key={launch.id} className="gap-2 border-b border-border-subtle px-4 py-3">
+          <Text className="text-base text-foreground">
+            {launch.instance_id === null
+              ? gt("Orbit project #{id}", { id: launch.project_id })
+              : gt("Instance #{id}", { id: launch.instance_id })}
+            {" · "}
+            {messages(ORBIT_LAUNCH_PHASE_LABELS[launch.phase])}
+          </Text>
+          {stageIds.map((id) => {
+            const stage = launch.stages[id];
+            if (id === "cleanup" && stage.status === "pending" && launch.phase !== "cancelling")
+              return null;
+            const time = stage.finished_at ?? stage.started_at;
+            return (
+              <View key={id} className="gap-1">
+                <Text className="text-sm text-foreground-muted">
+                  {messages(ORBIT_LAUNCH_STAGES[id])} ·{" "}
+                  {messages(ORBIT_LAUNCH_STAGE_STATUS[stage.status])}
+                  {time ? ` · ${new Date(time).toLocaleTimeString()}` : ""}
                 </Text>
-                <Text className="text-xs leading-snug text-foreground-muted" numberOfLines={2}>
-                  {row.detail}
-                </Text>
-                {row.notes.map((note) => (
-                  <Text key={note} className="text-xs leading-snug text-foreground-muted">
-                    {note}
+                {stage.error ? (
+                  <Text className="text-sm text-foreground">
+                    {stage.error.detail ?? stage.error.code}
                   </Text>
-                ))}
+                ) : null}
               </View>
-              {row.canRetry ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Retry"
-                  hitSlop={8}
+            );
+          })}
+          {launch.thread ? (
+            <Text className="text-sm text-foreground-muted">
+              {gt("Model: {model}", { model: launch.thread.model_selection.model })}
+            </Text>
+          ) : null}
+          {launch.thread ? (
+            <Button
+              label={gt("Open thread")}
+              disabled={busy}
+              onPress={() => {
+                const thread = launch.thread;
+                if (thread !== null)
+                  void run(() => openMobileOrbitThread(thread), msg("Could not open the thread."));
+              }}
+            />
+          ) : null}
+          {actionIds.map((id) => {
+            const action = launch.actions[id];
+            if (action.available)
+              return (
+                <Button
+                  key={id}
+                  label={orbitLaunchActionLabel(id, launch.phase, messages)}
+                  disabled={busy || snapshot.error !== null}
                   onPress={() =>
-                    row.stage === "setupFailed"
-                      ? retryOrbitCompletion(start.id)
-                      : retryOrbitThreadStart(start.id)
+                    void run(
+                      () => mobileOrbitLaunches.act(launch.id, id),
+                      msg("Orbit did not confirm the action."),
+                    )
                   }
-                >
-                  <SymbolView name="arrow.clockwise" size={17} tintColorClassName="accent-icon" />
-                </Pressable>
+                />
+              );
+            return action.requires ? (
+              <Text key={id} className="text-sm text-foreground-muted">
+                {action.requires === "project_process_definition"
+                  ? gt("Update the project’s process definition before retrying.")
+                  : (action.reason ?? action.requires)}
+              </Text>
+            ) : null;
+          })}
+        </View>
+      ))}
+      {legacy.map((row) => (
+        <View key={row.id} className="gap-2 border-b border-border-subtle px-4 py-3">
+          <Text className="text-base text-foreground">
+            {gt("Previous Orbit start · {project}", { project: row.project })}
+          </Text>
+          {row.completion ? (
+            <Text className="text-sm text-foreground-muted">
+              {gt("Previous application preview · {status}", {
+                status:
+                  row.completion.operationId === null
+                    ? gt("Retry unconfirmed")
+                    : orbitLegacyPreviewStatus(row.completion.status, messages),
+              })}
+              {row.completion.error ? ` · ${row.completion.error}` : ""}
+            </Text>
+          ) : (
+            <Text className="text-sm text-foreground-muted">
+              <T>
+                Check the previous thread before starting again. This message may have been sent.
+              </T>
+            </Text>
+          )}
+          {row.environmentId && row.threadId ? (
+            <Button
+              label={gt("Open previous thread")}
+              disabled={busy}
+              onPress={() => {
+                const environment_id = row.environmentId;
+                const thread_id = row.threadId;
+                if (environment_id !== null && thread_id !== null)
+                  void run(
+                    () => openMobileOrbitThread({ environment_id, thread_id }),
+                    msg("Could not open the thread."),
+                  );
+              }}
+            />
+          ) : null}
+          {row.completion ? (
+            <>
+              {row.completion.operationId !== null ? (
+                <Button
+                  label={gt("Refresh preview")}
+                  disabled={busy}
+                  onPress={() =>
+                    void run(async () => {
+                      await updateLegacyMobilePreview(row, "refresh");
+                      setLegacy(await readLegacyMobileLaunches());
+                    }, msg("Orbit did not confirm the preview."))
+                  }
+                />
               ) : null}
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Dismiss"
-                hitSlop={8}
-                onPress={() => dismissOrbitThreadStart(start.id)}
-              >
-                <SymbolView name="xmark" size={15} tintColorClassName="accent-icon-muted" />
-              </Pressable>
-            </View>
-            {row.rows ? <OrbitCreateRows rows={row.rows} host={orbitStartHost(start)} /> : null}
+              {row.completion.retryable ? (
+                <Button
+                  label={
+                    row.completion.operationId === null
+                      ? gt("Resume preview retry")
+                      : gt("Retry application")
+                  }
+                  disabled={busy}
+                  onPress={() =>
+                    void run(async () => {
+                      await updateLegacyMobilePreview(row, "retry");
+                      setLegacy(await readLegacyMobileLaunches());
+                    }, msg("Orbit did not confirm the preview."))
+                  }
+                />
+              ) : null}
+            </>
+          ) : null}
+          {row.prompt !== null ? (
+            <Button
+              label={gt("Copy saved message")}
+              disabled={busy}
+              onPress={() => {
+                const prompt = row.prompt;
+                if (prompt !== null)
+                  void run(
+                    () => Clipboard.setStringAsync(prompt),
+                    msg("Could not copy the message."),
+                  );
+              }}
+            />
+          ) : null}
+          <Button
+            label={gt("Dismiss saved copy")}
+            disabled={busy}
+            onPress={() =>
+              void run(async () => {
+                await resolveLegacyMobileLaunch(row.id);
+                setLegacy(await readLegacyMobileLaunches());
+              }, msg("Could not dismiss the previous start."))
+            }
+          />
+        </View>
+      ))}
+      {submissions.map((row) => {
+        const accepted = snapshot.launches.find((launch) => launch.launch_id === row.admission.id);
+        return (
+          <View key={row.admission.id} className="gap-2 border-b border-border-subtle px-4 py-3">
+            <Text className="text-base text-foreground">
+              {accepted
+                ? gt("Orbit accepted this submission")
+                : row.validationRefused
+                  ? gt("Orbit refused the submission")
+                  : gt("Orbit submission unconfirmed")}
+            </Text>
+            <Text numberOfLines={1} className="text-sm text-foreground-muted">
+              {row.admission.request.prompt.split("\n")[0]}
+            </Text>
+            <Button
+              label={
+                accepted
+                  ? gt("Acknowledge launch")
+                  : row.superseded
+                    ? gt("Dismiss saved copy")
+                    : row.validationRefused
+                      ? gt("Edit")
+                      : gt("Retry same submission")
+              }
+              disabled={busy || (!row.superseded && snapshot.error !== null)}
+              onPress={() =>
+                void run(
+                  async () => {
+                    if (accepted) await acknowledgeMobileOrbitLaunch(accepted.launch_id);
+                    else if (row.superseded)
+                      await mobileOrbitSubmissions.acknowledge(row.admission.id);
+                    else if (row.validationRefused)
+                      navigation.navigate("NewOrbitThread", {
+                        refusedAdmissionId: row.admission.id,
+                      });
+                    else await mobileOrbitSubmissions.replay(row);
+                  },
+                  accepted || row.superseded
+                    ? msg("Could not dismiss the saved submission.")
+                    : msg("Orbit did not confirm the submission."),
+                )
+              }
+            />
           </View>
         );
       })}
-    </View>
-  );
-}
-
-/** The address without its scheme, shown dimmed beside "Publish the address" as on the desktop. */
-function orbitStartHost(start: {
-  readonly instanceName: string;
-  readonly instanceDomainSuffix?: string | null;
-}): string | null {
-  const suffix = start.instanceDomainSuffix ?? null;
-  if (!suffix) return null;
-  return `${start.instanceName}${suffix.startsWith(".") ? "" : "."}${suffix}`;
-}
-
-/** The desktop card's rows under "Create Instance": label at the left, status at the right. */
-function OrbitCreateRows({
-  rows,
-  host,
-}: {
-  rows: readonly OrbitSetupCreateRow[];
-  host: string | null;
-}) {
-  return (
-    <View className="ml-9 gap-1.5">
-      {rows.map((row) => (
-        <View
-          key={row.id}
-          accessibilityLabel={row.label}
-          className="flex-row items-center gap-2"
-          testID={`orbit-create-row-${row.id}-${row.status}`}
-        >
-          <Text
-            className={
-              row.status === "pending"
-                ? "shrink-0 text-sm text-foreground-muted"
-                : "shrink-0 text-sm text-foreground"
-            }
-          >
-            {row.label}
-          </Text>
-          <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
-            {row.id === "address" && host ? host : ""}
-          </Text>
-          <View className="size-4 items-center justify-center">
-            {row.status === "running" ? (
-              <AppActivityIndicator size="small" colorClassName="accent-icon-muted" />
-            ) : row.status === "done" ? (
-              <SymbolView name="checkmark" size={12} tintColorClassName="accent-icon-muted" />
-            ) : row.status === "failed" ? (
-              <SymbolView name="xmark" size={12} tintColorClassName="accent-warning-foreground" />
-            ) : (
-              <SymbolView name="circle" size={10} tintColorClassName="accent-icon-muted" />
-            )}
-          </View>
-        </View>
-      ))}
+      {snapshot.error ? (
+        <ErrorBanner message={gt("Could not refresh Orbit launches. Showing the last update.")} />
+      ) : null}
+      {error ? <ErrorBanner message={error} /> : null}
     </View>
   );
 }

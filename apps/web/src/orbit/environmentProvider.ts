@@ -44,7 +44,6 @@ import { useServerConfigs } from "../state/entities";
 import { environmentSession, readEnvironmentLacksScope } from "../state/session";
 import { observeOrbitInstancePower } from "./orbitInstanceSleep";
 import { rememberedCloneEnvironmentIds } from "./cloneWorkspaceRefs";
-import { dropOrbitInstanceStarts, heldOrbitInstanceIds } from "./orbitThreadStartStore";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
@@ -188,8 +187,7 @@ function saveReconciledState(next: OrbitEnvironmentState): void {
  * Orbit panel does when the user removes the Instance: the saved server, its pairing records and
  * Orbit facts, and the thread starts that wait for it.
  */
-async function removeGoneInstanceServer(environmentId: string, instanceId: number | null) {
-  dropOrbitInstanceStarts(instanceId, [environmentId]);
+async function removeGoneInstanceServer(environmentId: string) {
   await runAtomCommand(appAtomRegistry, environmentCatalog.remove, environmentId as EnvironmentId, {
     reportFailure: false,
   });
@@ -418,7 +416,6 @@ export async function reconcileEnvironmentProvider(
     orbit,
     state,
     lacksAccess,
-    heldInstanceIds: heldOrbitInstanceIds(),
     renew: readSessionRenewals({ environmentIds: bearerIds, readConnection, readSession, now }),
     knownInstanceServers: rememberedCloneEnvironmentIds(),
     now,
@@ -437,7 +434,7 @@ export async function reconcileEnvironmentProvider(
 
   saveReconciledState(plan.state);
   for (const gone of plan.remove) {
-    await removeGoneInstanceServer(gone.environmentId, gone.instanceId);
+    await removeGoneInstanceServer(gone.environmentId);
   }
   // Conn: every renewal of this sync, one after another, without holding up the profile sync.
   const renew = new Set(plan.renew);

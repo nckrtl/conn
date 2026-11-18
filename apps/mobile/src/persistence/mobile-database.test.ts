@@ -9,7 +9,7 @@ vi.mock("expo-sqlite", () => ({ openDatabaseAsync }));
 
 import * as MobileDatabase from "./mobile-database";
 
-describe("offline pull request cache", () => {
+describe("mobile SQLite storage", () => {
   const environmentId = "cached-environment" as import("@t3tools/contracts").EnvironmentId;
   const otherEnvironment = "other-environment" as import("@t3tools/contracts").EnvironmentId;
 
@@ -54,6 +54,30 @@ describe("offline pull request cache", () => {
       expect((yield* database.loadCache(otherEnvironment, "pull-request", "v1:list"))._tag).toBe(
         "Some",
       );
+    }),
+  );
+
+  it.effect("keeps unresolved launch keys when rewriting the journal fails", () =>
+    Effect.gen(function* () {
+      const sqlite = yield* Effect.promise(sqliteDatabase);
+      const database = yield* MobileDatabase.make;
+      const pending = '[{"id":"other-unresolved-key"},{"id":"retry-key","validationRefused":true}]';
+      const retrying = '[{"id":"other-unresolved-key"},{"id":"retry-key"}]';
+      expect(yield* database.loadLaunchAdmissionsJson).toBeNull();
+      yield* database.saveLaunchAdmissionsJson(pending);
+      sqlite.exec(`CREATE TRIGGER interrupt_journal BEFORE UPDATE ON orbit_launch_admissions
+                   BEGIN SELECT RAISE(ABORT, 'interrupted'); END;`);
+      const interrupted = yield* Effect.result(database.saveLaunchAdmissionsJson(retrying));
+      expect(interrupted).toMatchObject({
+        _tag: "Failure",
+        failure: { operation: "save-launch-admissions" },
+      });
+      expect(yield* database.loadLaunchAdmissionsJson).toBe(pending);
+      sqlite.exec("DROP TRIGGER interrupt_journal");
+      yield* database.clearAllCaches;
+      expect(yield* database.loadLaunchAdmissionsJson).toBe(pending);
+      yield* database.saveLaunchAdmissionsJson("[]");
+      expect(yield* database.loadLaunchAdmissionsJson).toBe("[]");
     }),
   );
 });

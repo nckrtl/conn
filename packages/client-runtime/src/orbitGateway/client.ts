@@ -1,6 +1,8 @@
 // @effect-diagnostics globalTimers:off - The Gateway client runs in the app, outside an Effect runtime.
 import * as Schema from "effect/Schema";
 
+import { createOrbitLaunchClient, type OrbitLaunchClient } from "./launches.ts";
+
 /**
  * The Conn layer of the Orbit Gateway (`/api/v1/conn`, see Orbit's docs/reference/conn.md).
  *
@@ -235,27 +237,7 @@ export type OrbitGatewayBranchSelection =
   | { readonly mode: "new"; readonly from: string }
   | { readonly mode: "existing"; readonly name: string };
 
-/** Create refusals for a branch, all at admission (nothing created). */
-export const ORBIT_BRANCH_IN_USE = "branch.in_use";
-export const ORBIT_BRANCH_NOT_FOUND = "branch.not_found";
-/** A new branch named after the Instance already exists on the remote. */
-export const ORBIT_BRANCH_EXISTS = "branch.exists";
 export const ORBIT_SOURCE_HEAD_UNAVAILABLE = "source.head_unavailable";
-/** The same name was created before with another branch selection. */
-export const ORBIT_PLACEMENT_CONFLICT = "instance.placement_conflict";
-/** The Instance's address `<name>.<project domain>` breaks Orbit's limits; nothing created. */
-export const ORBIT_ROUTE_DOMAIN_INVALID = "route.domain_invalid";
-/** Failed create steps, after the Instance exists. */
-export const ORBIT_CREATE_CLONE_FAILED = "instance.create_clone_failed";
-export const ORBIT_CREATE_WORKSPACE_FAILED = "instance.create_workspace_failed";
-/**
- * A Project process of the new Instance did not stay up. Older Gateways keep the broken process
- * on the kept Instance, so a Retry fails the same way; newer ones retry with the Project's current
- * process definitions and say so with `ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION`.
- */
-export const ORBIT_CONTAINER_PROCESS_INACTIVE = "instance.container_process_inactive";
-/** `result.recovery.requires` of a failed create that a Retry fixes after the Project's process changes. */
-export const ORBIT_RECOVERY_REQUIRES_PROCESS_DEFINITION = "project_process_definition";
 
 export interface OrbitGatewayProjectsOptions {
   /**
@@ -344,6 +326,7 @@ export interface OrbitGatewayPairing {
 }
 
 export interface OrbitGatewayClient {
+  readonly launches: OrbitLaunchClient;
   readonly me: () => Promise<OrbitGatewayNode>;
   readonly profiles: () => Promise<readonly OrbitGatewayProfile[]>;
   readonly createProfile: (name: string) => Promise<OrbitGatewayProfile>;
@@ -480,7 +463,7 @@ export interface OrbitGatewayPairOptions {
 const PAIRING_REVOKED = "conn.pairing_revoked";
 
 /** How long `pair` follows the Gateway's Operation, and the bounds of its poll interval. */
-export const OPERATION_TIMEOUT_MS = 60_000;
+const OPERATION_TIMEOUT_MS = 60_000;
 /** The Gateway copies secrets to Swamp before it admits a create or a pairing: 19-27 s today. */
 const ADMISSION_TIMEOUT_MS = 60_000;
 /** A name check is answered at once; a slow one gives way to the create's own check. */
@@ -593,6 +576,7 @@ export function createOrbitGatewayClient(
   };
 
   return {
+    launches: createOrbitLaunchClient(call, invalid),
     me: async () => node(await call({ method: "GET", path: "/me" }), "/me"),
     profiles: async () =>
       list(await call({ method: "GET", path: "/profiles" }), "/profiles", profile),

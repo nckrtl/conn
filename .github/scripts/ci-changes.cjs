@@ -27,7 +27,7 @@ const RUNS_EVERYTHING = [
 const FORK_FILE_DEPS = {
   t3: {
     "@t3tools/client-runtime":
-      /^packages\/client-runtime\/src\/(orbitGateway\/client|state\/orchestrationV2Projection|threadPullRequests|sourceControlClients)\.ts$/,
+      /^packages\/client-runtime\/src\/(orbitGateway\/(client|launches)|state\/orchestrationV2Projection|threadPullRequests|sourceControlClients)\.ts$/,
   },
 };
 

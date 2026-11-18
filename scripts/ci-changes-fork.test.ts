@@ -83,13 +83,15 @@ it("runs the server shards only for the client-runtime files the server imports"
   const packages = readWorkspace();
   const runsServer = (file: string) => decide([file], packages, false).outputs.test_server;
   expect(runsServer("packages/client-runtime/src/orbitGateway/threadStart.ts")).toBe(false);
+  expect(runsServer("packages/client-runtime/src/orbitGateway/launchThreadRows.ts")).toBe(false);
   expect(runsServer("packages/client-runtime/src/orbitGateway/client.ts")).toBe(true);
+  expect(runsServer("packages/client-runtime/src/orbitGateway/launches.ts")).toBe(true);
   expect(runsServer("packages/client-runtime/package.json")).toBe(true);
 });
 
 it("keeps client-runtime's workspace dependencies within the server's", () => {
   // The server-to-client-runtime edge is file-level, so a package only client-runtime
-  // used could change the four files without reaching the server.
+  // used could affect those imports without reaching the server.
   const server = new Set(workspaceDeps("apps/server"));
   expect(workspaceDeps("packages/client-runtime").filter((name) => !server.has(name))).toEqual([]);
 });

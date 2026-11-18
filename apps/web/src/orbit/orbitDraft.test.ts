@@ -4,6 +4,7 @@ import {
   chooseOrbitDraftAnchor,
   ORBIT_DRAFT_NO_ENVIRONMENT_ID,
   orbitDraftAttachmentsBlockedReason,
+  orbitDraftMatchesLaunch,
   type OrbitDraftTarget,
 } from "./orbitDraft";
 
@@ -17,6 +18,30 @@ const target: OrbitDraftTarget = {
   existing: null,
   domainSuffix: ".nckrtl.test",
 };
+
+it("recognizes a recovered launch without treating a draft's edited target as sent", () => {
+  const request = {
+    project_id: target.projectId,
+    prompt: "Do the work",
+    target: { kind: "new", name: target.instanceName } as const,
+  };
+  expect(orbitDraftMatchesLaunch(target, " Do the work ", request)).toBe(true);
+  expect(
+    orbitDraftMatchesLaunch(
+      { ...target, instanceName: "another-instance" },
+      "Do the work",
+      request,
+    ),
+  ).toBe(false);
+  expect(
+    orbitDraftMatchesLaunch(
+      { ...target, branch: { mode: "existing", name: "other" } },
+      "Do the work",
+      request,
+    ),
+  ).toBe(false);
+  expect(orbitDraftMatchesLaunch(target, "Do different work", request)).toBe(false);
+});
 
 describe("chooseOrbitDraftAnchor", () => {
   const orbitInstances = {

@@ -52,7 +52,7 @@ vi.mock("../rpc/atomRegistry", () => ({
           : mocks.primary,
   },
 }));
-vi.mock("./orbitThreadStarts", () => ({
+vi.mock("./orbitLaunchAvailability", () => ({
   // The desktop app in Orbit mode; there is no other switch.
   orbitThreadStartBlockedReason: () => (mocks.enabled ? null : "Turn on Orbit."),
 }));

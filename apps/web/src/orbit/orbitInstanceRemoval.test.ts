@@ -30,7 +30,6 @@ vi.mock("./orbitInstanceList", () => ({
   useOrbitInstanceListStore: { getState: vi.fn() },
 }));
 vi.mock("./OrbitProfileSync", () => ({ desktopOrbitGatewayClient: () => null }));
-vi.mock("./orbitThreadStartStore", () => ({ dropOrbitInstanceStarts: vi.fn() }));
 
 /** A device's saved servers: env-a and env-b of Instance 41, env-c of Instance 7. */
 function device(options: { failRemoving?: string } = {}) {
@@ -48,9 +47,6 @@ function device(options: { failRemoving?: string } = {}) {
       log.push(`forget ${environmentId}`);
       paired.delete(environmentId);
     },
-    dropThreadStarts: (instanceId, environmentIds) => {
-      log.push(`starts ${instanceId} ${environmentIds.join(",")}`);
-    },
   };
   return { ports, saved, paired, log };
 }
@@ -62,7 +58,6 @@ describe("cleanUpRemovedOrbitInstance", () => {
     expect([...state.saved]).toEqual(["env-c"]);
     expect([...state.paired]).toEqual(["env-c"]);
     // The starts go first, so a sync running meanwhile no longer holds the Instance.
-    expect(state.log[0]).toBe("starts 41 env-a,env-b");
   });
 
   it("finishes every step when one server cannot be removed, then reports it", async () => {

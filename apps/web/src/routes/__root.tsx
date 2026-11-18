@@ -33,7 +33,7 @@ import { DesktopWebLinkCoordinator } from "../components/desktop/DesktopWebLinkC
 import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
 import { AnnotationWatchCoordinator } from "../annotations/AnnotationWatchCoordinator";
 import { OrbitProfileSync } from "../orbit/OrbitProfileSync";
-import { OrbitThreadStartRunner } from "../orbit/OrbitThreadStartRunner";
+import { OrbitLaunchObserver } from "../orbit/OrbitLaunchObserver";
 import { isAdditionalDesktopWindow } from "../lib/desktopWindowContext";
 import { ReopenClosedViewShortcut } from "../components/ReopenClosedViewShortcut";
 import { ProjectCloneToastCoordinator } from "../components/ProjectCloneToastCoordinator";
@@ -206,7 +206,7 @@ function RootRouteBranch() {
       {isMainWindow ? <SnapShotCoordinator /> : null}
       {isMainWindow ? <AnnotationWatchCoordinator /> : null}
       {isMainWindow ? <OrbitProfileSync /> : null}
-      {isMainWindow ? <OrbitThreadStartRunner /> : null}
+      <OrbitLaunchObserver mainWindow={isMainWindow} />
       <ReopenClosedViewShortcut />
       <ConfirmDialogHost />
       <CustomSnoozeDialogHost />

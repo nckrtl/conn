@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 import type { SQLiteDatabase } from "expo-sqlite";
 
 const DATABASE_NAME = "t3code-client.db";
-const DATABASE_SCHEMA_VERSION = 1;
+const DATABASE_SCHEMA_VERSION = 2;
 
 export const ClientCacheKind = Schema.Literals([
   "shell",
@@ -54,6 +54,8 @@ const MobileDatabaseOperation = Schema.Literals([
   "inspect-caches",
   "load-preferences",
   "save-preferences",
+  "load-launch-admissions",
+  "save-launch-admissions",
 ]);
 
 export class MobileDatabaseError extends Schema.TaggedError<MobileDatabaseError>()(
@@ -115,6 +117,10 @@ export class MobileDatabase extends Context.Service<
       payload: string,
       updatedAt: number,
     ) => Effect.Effect<void, MobileDatabaseError>;
+    readonly loadLaunchAdmissionsJson: Effect.Effect<string | null, MobileDatabaseError>;
+    readonly saveLaunchAdmissionsJson: (
+      payload: string,
+    ) => Effect.Effect<void, MobileDatabaseError>;
   }
 >()("@t3tools/mobile/persistence/mobile-database/MobileDatabase") {}
 
@@ -155,6 +161,11 @@ const makeAvailable = Effect.gen(function* () {
                 singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
                 payload TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
+              );
+
+              CREATE TABLE IF NOT EXISTS orbit_launch_admissions (
+                singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+                payload TEXT NOT NULL
               );
             `);
       });
@@ -328,6 +339,24 @@ const makeAvailable = Effect.gen(function* () {
         catch: databaseError("save-preferences"),
       }).pipe(Effect.asVoid),
     ),
+    loadLaunchAdmissionsJson: Effect.tryPromise({
+      try: () =>
+        database.getFirstAsync<{ readonly payload: string }>(
+          "SELECT payload FROM orbit_launch_admissions WHERE singleton = 1",
+        ),
+      catch: databaseError("load-launch-admissions"),
+    }).pipe(Effect.map((row) => row?.payload ?? null)),
+    saveLaunchAdmissionsJson: Effect.fn("MobileDatabase.saveLaunchAdmissionsJson")((payload) =>
+      Effect.tryPromise({
+        try: () =>
+          database.runAsync(
+            `INSERT INTO orbit_launch_admissions (singleton, payload) VALUES (1, ?)
+           ON CONFLICT (singleton) DO UPDATE SET payload = excluded.payload`,
+            payload,
+          ),
+        catch: databaseError("save-launch-admissions"),
+      }).pipe(Effect.asVoid),
+    ),
   });
 });
 
@@ -344,6 +373,8 @@ function makeUnavailable(error: MobileDatabaseError): MobileDatabase["Service"] 
     inspectCaches: fail,
     loadPreferencesJson: fail,
     savePreferencesJson: Effect.fn("MobileDatabase.savePreferencesJson")(() => fail),
+    loadLaunchAdmissionsJson: fail,
+    saveLaunchAdmissionsJson: Effect.fn("MobileDatabase.saveLaunchAdmissionsJson")(() => fail),
   });
 }
 

@@ -285,6 +285,8 @@ function makeDatabase() {
     clearAllCaches: Effect.sync(() => values.clear()),
     inspectCaches: Effect.succeed([]),
     loadPreferencesJson: Effect.succeedNone,
+    loadLaunchAdmissionsJson: Effect.succeed(null),
+    saveLaunchAdmissionsJson: () => Effect.void,
     savePreferencesJson: () => Effect.void,
   });
   return { database, removed, schemaVersions, values };

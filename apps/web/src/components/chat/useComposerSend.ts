@@ -1,5 +1,6 @@
-import { msg } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { resolveOrbitLaunchError } from "@t3tools/client-runtime/orbit-gateway";
+import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
@@ -157,9 +158,11 @@ import {
   buildOrbitDraftStart,
   isOrbitDraftWithoutEnvironment,
   orbitDraftAttachmentsBlockedReason,
+  orbitDraftTargetsEqual,
   type OrbitDraftTarget,
 } from "../../orbit/orbitDraft";
-import { orbitThreadStartBlockedReason, sendOrbitDraft } from "../../orbit/orbitThreadStarts";
+import { orbitThreadStartBlockedReason } from "../../orbit/orbitLaunchAvailability";
+import { acknowledgeOrbitDraft, submitOrbitDraft } from "../../orbit/orbitLaunches";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -823,10 +826,10 @@ export function useComposerSend(input: ComposerSendInput) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "Only text can start this thread",
+            title: m(msg("Only text can start this thread")),
             description:
-              orbitDraftAttachmentsBlockedReason(orbitDraftTarget) ??
-              "Remove the attached context, then send.",
+              orbitDraftAttachmentsBlockedReason(orbitDraftTarget, m) ??
+              m(msg("Remove the attached context, then send.")),
           }),
         );
         return;
@@ -835,8 +838,8 @@ export function useComposerSend(input: ComposerSendInput) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "Pick one model",
-            description: "A thread in an Orbit Instance starts with one model.",
+            title: m(msg("Pick one model")),
+            description: m(msg("A thread in an Orbit Instance starts with one model.")),
           }),
         );
         return;
@@ -846,29 +849,61 @@ export function useComposerSend(input: ComposerSendInput) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "This thread cannot start here",
+            title: m(msg("This thread cannot start here")),
             description: blocked,
           }),
         );
         return;
       }
       const composerDraft = useComposerDraftStore.getState().getComposerDraft(draftId);
-      sendOrbitDraft({
-        start: buildOrbitDraftStart({
-          target: orbitDraftTarget,
-          message: trimmed,
-          modelSelection: isOrbitDraftWithoutEnvironment(environmentId)
-            ? null
-            : ctxSelectedModelSelection,
-          runtimeMode,
-          interactionMode:
-            composerDraft?.interactionMode ??
-            draftThread?.interactionMode ??
-            DEFAULT_INTERACTION_MODE,
-        }),
-        openPending: (to) => navigate({ to }),
-        clearDraft: () => useComposerDraftStore.getState().clearDraftThread(draftId),
-      });
+      sendInFlightRef.current = true;
+      const accepted = await Promise.resolve()
+        .then(async () => {
+          const launch = await submitOrbitDraft(
+            draftId,
+            buildOrbitDraftStart({
+              target: orbitDraftTarget,
+              message: trimmed,
+              modelSelection: isOrbitDraftWithoutEnvironment(environmentId)
+                ? null
+                : ctxSelectedModelSelection,
+              runtimeMode,
+              interactionMode:
+                composerDraft?.interactionMode ??
+                draftThread?.interactionMode ??
+                DEFAULT_INTERACTION_MODE,
+            }),
+          );
+          const unchanged = () => {
+            const store = useComposerDraftStore.getState();
+            const savedDraft = store.getComposerDraft(draftId);
+            return (
+              savedDraft === composerDraft &&
+              orbitDraftTargetsEqual(store.getDraftSession(draftId)?.orbitTarget, orbitDraftTarget)
+            );
+          };
+          if (!unchanged()) return false;
+          if (currentRouteThreadKeyRef.current === routeThreadKey) {
+            await navigate({ to: "/orbit/$startId", params: { startId: launch.launch_id } });
+          }
+          return acknowledgeOrbitDraft(launch.launch_id, unchanged);
+        })
+        .catch((error: unknown) => {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: m(msg("Could not confirm the Orbit launch")),
+              description: resolveOrbitLaunchError(
+                error,
+                msg("Orbit did not confirm the submission."),
+                m,
+              ),
+            }),
+          );
+          return false;
+        });
+      sendInFlightRef.current = false;
+      if (!accepted) return;
       promptRef.current = "";
       composerRef.current?.resetCursorState();
       return;

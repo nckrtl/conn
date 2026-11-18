@@ -1,13 +1,24 @@
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   applyOtherWindowComposerDrafts,
   COMPOSER_DRAFT_STORAGE_KEY,
+  composerTargetKey,
+  captureOrbitDraftRevision,
+  clearAcceptedOrbitDraft,
+  DraftId,
+  isStaleClearedOrbitDraft,
+  prepareOrbitDraftAdmission,
   useComposerDraftStore,
 } from "./composerDraftStore";
 import { RecentKeyChanges } from "./lib/desktopWindowContext";
+import { orbitDraftLogicalProjectKey, orbitDraftProjectId } from "./orbit/orbitDraft";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const first = scopeThreadRef(ENVIRONMENT_ID, ThreadId.make("thread-first"));
@@ -52,6 +63,325 @@ describe("applyOtherWindowComposerDrafts", () => {
     vi.useRealTimers();
     reset();
   });
+
+  it("persists an accepted Orbit draft clear without waiting for the debounce", async () => {
+    const draftId = DraftId.make("orbit-draft");
+    const storage = useComposerDraftStore.persist.getOptions().storage!;
+    useComposerDraftStore.getState().setPrompt(draftId, "accepted by Orbit");
+    await otherWindowWrite(() => {});
+    clearAcceptedOrbitDraft(draftId);
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).not.toContain(
+      "accepted by Orbit",
+    );
+  });
+
+  it("keeps a newer draft written by a second window before Orbit acknowledges the first", async () => {
+    const draftId = DraftId.make("orbit-other-window-draft");
+    const storage = useComposerDraftStore.persist.getOptions().storage!;
+    useComposerDraftStore.getState().setPrompt(draftId, "accepted by Orbit");
+    const raw = await otherWindowWrite((drafts) => {
+      Object.values(drafts).find((draft) => draft.prompt === "accepted by Orbit")!.prompt =
+        "edited in a second window";
+    });
+    await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, JSON.parse(raw));
+    await vi.advanceTimersByTimeAsync(300);
+    useComposerDraftStore.getState().setPrompt(first, "different draft in this window");
+    await vi.advanceTimersByTimeAsync(300);
+    const captured = captureOrbitDraftRevision(draftId);
+    clearAcceptedOrbitDraft(draftId);
+    expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
+      state: { orbitDraftClearRevisions: { [composerTargetKey(draftId)]: [captured] } },
+    });
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
+      "edited in a second window",
+    );
+    applyOtherWindowComposerDrafts(raw, new RecentKeyChanges(2_000));
+    expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+      "edited in a second window",
+    );
+    expect(isStaleClearedOrbitDraft(draftId, captured)).toBe(true);
+  });
+
+  it("flushes the captured draft before admission and preserves a peer edit back to the prior text", async () => {
+    const draftId = DraftId.make("orbit-restore-prior-text");
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(draftId, "previous text");
+    const earlier = await otherWindowWrite(() => {});
+    store.setPrompt(draftId, "text actually sent");
+    expect(prepareOrbitDraftAdmission(draftId, captureOrbitDraftRevision(draftId))).toBe(true);
+    const storage = useComposerDraftStore.persist.getOptions().storage!;
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
+      "text actually sent",
+    );
+    await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, JSON.parse(earlier));
+    await vi.advanceTimersByTimeAsync(300);
+    clearAcceptedOrbitDraft(draftId);
+    expect(JSON.stringify(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY))).toContain(
+      "previous text",
+    );
+  });
+
+  it.each(["passive", "restored", "prompt-only"])(
+    "persists peer draft authority on Send for a %s revision",
+    async (kind) => {
+      const draftId = DraftId.make(`orbit-peer-revisions-${kind}`);
+      const key = composerTargetKey(draftId);
+      const store = useComposerDraftStore.getState();
+      store.setLogicalProjectDraftThreadId(
+        orbitDraftLogicalProjectKey(66),
+        scopeProjectRef(ENVIRONMENT_ID, orbitDraftProjectId(66)),
+        draftId,
+        {
+          orbitTarget: {
+            projectId: 66,
+            projectSlug: "create-bench",
+            projectName: "Create bench",
+            nodeName: "beast",
+            instanceKind: "new",
+            instanceName: "first-target",
+            existing: null,
+            domainSuffix: ".create-bench.test",
+          },
+        },
+      );
+      store.setPrompt(draftId, "First locally saved revision");
+      await vi.advanceTimersByTimeAsync(300);
+      const storage = useComposerDraftStore.persist.getOptions().storage!;
+      const first = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+      if (!first || "capturedState" in first.state) throw new Error("Expected a stored draft");
+      const draft = first.state.draftsByThreadKey[key]!;
+      const session = first.state.draftThreadsByThreadKey[key]!;
+      const peerEdit = (prompt: string, instanceName: string) => ({
+        ...first,
+        state: {
+          ...first.state,
+          draftsByThreadKey: { [key]: { ...draft, prompt } },
+          draftThreadsByThreadKey: {
+            [key]: { ...session, orbitTarget: { ...session.orbitTarget!, instanceName } },
+          },
+        },
+      });
+      const previous = peerEdit("Passively received revision", "previous-target");
+      applyOtherWindowComposerDrafts(JSON.stringify(previous), new RecentKeyChanges(2_000));
+      const current = peerEdit("Newest peer revision", "current-target");
+      await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, current);
+      await vi.advanceTimersByTimeAsync(300);
+      if (kind === "restored") {
+        store.setPrompt(draftId, draft.prompt);
+        store.setDraftThreadContext(draftId, { orbitTarget: session.orbitTarget! });
+      } else if (kind === "prompt-only") {
+        store.setPrompt(draftId, "Local prompt with peer target");
+      }
+      const captured = captureOrbitDraftRevision(draftId);
+      expect(prepareOrbitDraftAdmission(draftId, captured)).toBe(kind === "restored");
+      expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
+        state: {
+          draftsByThreadKey: {
+            [key]: {
+              prompt:
+                kind === "restored"
+                  ? draft.prompt
+                  : kind === "prompt-only"
+                    ? "Local prompt with peer target"
+                    : "Newest peer revision",
+            },
+          },
+          draftThreadsByThreadKey: {
+            [key]: {
+              orbitTarget: {
+                instanceName: kind === "restored" ? "first-target" : "current-target",
+              },
+            },
+          },
+        },
+      });
+      if (kind === "prompt-only") {
+        expect(
+          useComposerDraftStore.getState().getDraftSession(draftId)?.orbitTarget?.instanceName,
+        ).toBe("current-target");
+        expect(prepareOrbitDraftAdmission(draftId, captureOrbitDraftRevision(draftId))).toBe(true);
+      }
+    },
+  );
+
+  it.each([
+    "prompt",
+    "target",
+    "unchanged",
+    "saved-original",
+    "other-window-edit",
+    "passive-clear",
+    "discard-received",
+    "acknowledge-received",
+    "first-acknowledge-received",
+    "first-discard-received",
+    "first-unsaved-discard-received",
+  ])(
+    "reconciles an Orbit %s draft when another window clears a newer sent version",
+    async (editedField) => {
+      const draftId = DraftId.make(`orbit-draft-${editedField}`);
+      const key = composerTargetKey(draftId);
+      const projectKey = orbitDraftLogicalProjectKey(66);
+      const store = useComposerDraftStore.getState();
+      store.setLogicalProjectDraftThreadId(
+        projectKey,
+        scopeProjectRef(ENVIRONMENT_ID, orbitDraftProjectId(66)),
+        draftId,
+        {
+          orbitTarget: {
+            projectId: 66,
+            projectSlug: "create-bench",
+            projectName: "Create bench",
+            nodeName: "beast",
+            instanceKind: "new",
+            instanceName: "isolated-test",
+            existing: null,
+            domainSuffix: ".create-bench.test",
+          },
+        },
+      );
+      store.setPrompt(draftId, "original");
+      await vi.advanceTimersByTimeAsync(300);
+      const storage = useComposerDraftStore.persist.getOptions().storage!;
+      const original = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+      const passive = !["prompt", "target"].includes(editedField);
+      if (passive) {
+        store.setPrompt(draftId, "later revision sent in the other window");
+        await vi.advanceTimersByTimeAsync(300);
+      }
+      clearAcceptedOrbitDraft(draftId);
+      const external = structuredClone(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY));
+      if (!external || "capturedState" in external.state)
+        throw new Error("Expected a stored draft clear");
+      expect(external.state.orbitDraftClearRevisions?.[key]).toEqual([
+        expect.stringMatching(/^[0-9a-f]{64}$/),
+      ]);
+      applyOtherWindowComposerDrafts(JSON.stringify(original), new RecentKeyChanges(2_000));
+
+      if (editedField === "prompt") {
+        store.setPrompt(draftId, "edited here");
+      } else if (editedField === "target") {
+        const target = store.getDraftSession(draftId)?.orbitTarget;
+        if (!target) throw new Error("Expected an Orbit draft");
+        store.setDraftThreadContext(draftId, {
+          orbitTarget: { ...target, instanceName: "changed-target" },
+        });
+      }
+      if (editedField === "saved-original") {
+        await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, original!);
+        await vi.advanceTimersByTimeAsync(300);
+        store.setPrompt(draftId, "earlier draft saved by this window");
+        await vi.advanceTimersByTimeAsync(300);
+      }
+      if (
+        [
+          "other-window-edit",
+          "passive-clear",
+          "discard-received",
+          "acknowledge-received",
+          "first-acknowledge-received",
+          "first-discard-received",
+          "first-unsaved-discard-received",
+        ].includes(editedField)
+      ) {
+        if (editedField !== "other-window-edit")
+          applyOtherWindowComposerDrafts(JSON.stringify(external), new RecentKeyChanges(2_000));
+        if (!original || "capturedState" in original.state)
+          throw new Error("Expected a stored draft");
+        const draft = original.state.draftsByThreadKey[key]!;
+        const session = original.state.draftThreadsByThreadKey[key]!;
+        const changedBranch = {
+          ...Object.fromEntries(Object.entries(session).reverse()),
+          branch: "topic/edited",
+        } as typeof session;
+        await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, {
+          ...original,
+          state: {
+            ...original.state,
+            draftsByThreadKey: { [key]: { ...draft, prompt: "genuine edit in a third window" } },
+            draftThreadsByThreadKey: { [key]: changedBranch },
+            orbitDraftClearRevisions: editedField.startsWith("first-")
+              ? {}
+              : (external.state.orbitDraftClearRevisions ?? {}),
+          },
+        });
+        await vi.advanceTimersByTimeAsync(300);
+        if (!editedField.startsWith("first-")) expect(isStaleClearedOrbitDraft(draftId)).toBe(true);
+        useComposerDraftStore.setState({});
+        await vi.advanceTimersByTimeAsync(300);
+        const latest = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+        expect(latest).toMatchObject({
+          state: { draftsByThreadKey: { [key]: { prompt: "genuine edit in a third window" } } },
+        });
+        if (editedField === "other-window-edit") {
+          expect(prepareOrbitDraftAdmission(draftId, captureOrbitDraftRevision(draftId))).toBe(
+            false,
+          );
+          expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+            "genuine edit in a third window",
+          );
+          expect(prepareOrbitDraftAdmission(draftId, captureOrbitDraftRevision(draftId))).toBe(
+            true,
+          );
+        }
+        if (editedField.endsWith("received")) {
+          applyOtherWindowComposerDrafts(JSON.stringify(latest), new RecentKeyChanges(2_000));
+          expect(useComposerDraftStore.getState().getDraftSession(draftId)).not.toBeNull();
+          if (editedField === "first-unsaved-discard-received")
+            store.setPrompt(draftId, "Discard this unsaved correction");
+          if (editedField.endsWith("discard-received")) store.clearDraftThread(draftId);
+          else clearAcceptedOrbitDraft(draftId);
+          await vi.advanceTimersByTimeAsync(300);
+          expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
+            state: {
+              draftsByThreadKey: {},
+              draftThreadsByThreadKey: {},
+              logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+            },
+          });
+        }
+        return;
+      }
+      await storage.setItem(COMPOSER_DRAFT_STORAGE_KEY, external);
+      await vi.advanceTimersByTimeAsync(300);
+      let time = 0;
+      const changes = new RecentKeyChanges(2_000, () => time);
+      changes.mark(`${editedField === "prompt" ? "d" : "t"}:${key}`);
+      time = 2_001;
+      expect(isStaleClearedOrbitDraft(draftId)).toBe(passive);
+      applyOtherWindowComposerDrafts(JSON.stringify(external), changes);
+      if (passive) {
+        expect(useComposerDraftStore.getState().getDraftSession(draftId)).toBeNull();
+        await vi.advanceTimersByTimeAsync(300);
+        const persisted = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+        expect(persisted).toMatchObject({
+          state: {
+            draftsByThreadKey: {},
+            draftThreadsByThreadKey: {},
+            logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+          },
+        });
+        return;
+      }
+
+      const expectedPrompt = editedField === "prompt" ? "edited here" : "original";
+      const instanceName = editedField === "target" ? "changed-target" : "isolated-test";
+      const after = useComposerDraftStore.getState();
+      expect(after.getComposerDraft(draftId)?.prompt).toBe(expectedPrompt);
+      expect(after.getDraftSession(draftId)?.orbitTarget?.instanceName).toBe(instanceName);
+      expect(after.logicalProjectDraftThreadKeyByLogicalProjectKey[projectKey]).toBe(draftId);
+
+      await vi.advanceTimersByTimeAsync(300);
+      const persisted = await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
+      expect(persisted).toMatchObject({
+        state: {
+          draftsByThreadKey: { [key]: { prompt: expectedPrompt } },
+          draftThreadsByThreadKey: { [key]: { orbitTarget: { projectId: 66, instanceName } } },
+          logicalProjectDraftThreadKeyByLogicalProjectKey: { [projectKey]: draftId },
+        },
+      });
+    },
+  );
 
   it("takes in drafts another window added, changed or sent", async () => {
     useComposerDraftStore.getState().setPrompt(first, "draft in this window");

@@ -10,7 +10,7 @@ import { readProjects } from "../state/entities";
 import { carryComposerDraft } from "./carryComposerDraft";
 import { openOrbitDraft } from "./openOrbitDraft";
 import { orbitWakeSupported } from "./orbitInstanceSleep";
-import { orbitThreadStartBlockedReason } from "./orbitThreadStarts";
+import { orbitThreadStartBlockedReason } from "./orbitLaunchAvailability";
 import {
   buildOrbitInstanceRows,
   orbitCloneProject,

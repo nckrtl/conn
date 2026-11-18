@@ -23,7 +23,6 @@ import {
   type OrbitInstanceListState,
 } from "./orbitInstanceList";
 import { desktopOrbitGatewayClient } from "./OrbitProfileSync";
-import { dropOrbitInstanceStarts } from "./orbitThreadStartStore";
 
 /** Conn: removing an Instance from the Orbit panel (DESIGN.md, "Orbit panel and Manage Instances"). */
 
@@ -34,8 +33,6 @@ export interface OrbitInstanceCleanupPorts {
   readonly removeEnvironment: (environmentId: string) => Promise<void>;
   /** Drops the Orbit provider's pairing records and Orbit facts of a server. */
   readonly forgetEnvironment: (environmentId: string) => void;
-  /** Drops the saved thread-start records of the Instance. */
-  readonly dropThreadStarts: (instanceId: number, environmentIds: readonly string[]) => void;
 }
 
 /**
@@ -52,8 +49,6 @@ export async function cleanUpRemovedOrbitInstance(
       ...ports.knownEnvironmentIds(instance.id),
     ]),
   ];
-  // First, so the environment sync no longer holds the Instance for a thread start.
-  ports.dropThreadStarts(instance.id, environmentIds);
   const failures: unknown[] = [];
   for (const environmentId of environmentIds) {
     try {
@@ -78,7 +73,6 @@ export const webOrbitInstanceCleanupPorts: OrbitInstanceCleanupPorts = {
     if (result._tag === "Failure") throw new Error(`Could not remove the server ${environmentId}.`);
   },
   forgetEnvironment: forgetOrbitInstanceEnvironment,
-  dropThreadStarts: dropOrbitInstanceStarts,
 };
 
 /** The row facts a removal keeps, so a row whose Instance left the list can still show its failure. */

@@ -1,4 +1,7 @@
-import type { OrbitGatewayTransport } from "@t3tools/client-runtime/orbit-gateway";
+import {
+  createOrbitGatewayClient,
+  type OrbitGatewayTransport,
+} from "@t3tools/client-runtime/orbit-gateway";
 
 /** The Gateway transport over the desktop main process, or null outside the desktop app. */
 export function desktopOrbitGatewayTransport(): OrbitGatewayTransport | null {
@@ -17,4 +20,9 @@ export function desktopOrbitGatewayTransport(): OrbitGatewayTransport | null {
     if (response.error !== null) throw new Error(response.error);
     return { status: response.status, body: response.body };
   };
+}
+
+export function desktopOrbitGatewayClient() {
+  const transport = desktopOrbitGatewayTransport();
+  return transport ? createOrbitGatewayClient(transport) : null;
 }

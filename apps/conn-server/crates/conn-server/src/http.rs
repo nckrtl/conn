@@ -79,6 +79,10 @@ pub fn router(state: AppState) -> Router {
             "/api/orchestration/threads/{thread_id}",
             get(thread_snapshot),
         )
+        .route(
+            "/api/orchestration/threads/{thread_id}/transcript",
+            get(thread_transcript),
+        )
         .route("/ws", get(ws))
         .merge(crate::routes::router())
         .layer(middleware::from_fn(cors))
@@ -531,6 +535,127 @@ async fn thread_snapshot(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => snapshot_failed("orchestration_thread_snapshot_failed", error),
     }
+}
+
+/// Full-thread exports at once, as T3's `transcriptExportPermits`: each holds a whole
+/// projection in memory.
+static TRANSCRIPT_EXPORTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// `GET /api/orchestration/threads/:threadId/transcript` (`OrchestrationV2ThreadTranscript`):
+/// the thread's visible turn items for the composer's context import. As T3's
+/// `getThreadTranscript`, the items are the stored ones, not cut for transport. A transcript
+/// whose file (header line plus one JSON line per item) would pass
+/// `PROVIDER_SEND_TURN_MAX_FILE_BYTES` is refused with `thread_transcript_too_large`. An
+/// unknown thread is T3's `EnvironmentResourceNotFoundError`: the caller is a command, not the
+/// thread view.
+async fn thread_transcript(
+    State(state): State<AppState>,
+    Path(thread_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let engine = match orchestration_access(&state, &headers) {
+        Ok(engine) => engine,
+        Err(response) => return *response,
+    };
+    let Ok(_permit) = TRANSCRIPT_EXPORTS.acquire().await else {
+        return internal_reason("orchestration_thread_snapshot_failed");
+    };
+    let snapshot = match engine.thread_snapshot(thread_id.into()).await {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                "EnvironmentResourceNotFoundError",
+                "not_found",
+                "thread_not_found",
+            );
+        }
+        Err(error) => return snapshot_failed("orchestration_thread_snapshot_failed", error),
+    };
+    let environment_id = state.descriptor["environmentId"].as_str().unwrap_or("");
+    match thread_transcript_body(
+        snapshot,
+        environment_id,
+        conn_contract::PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+    ) {
+        Some(Ok(body)) => Json(body).into_response(),
+        Some(Err(TooLarge)) => error(
+            StatusCode::BAD_REQUEST,
+            "EnvironmentRequestInvalidError",
+            "invalid_request",
+            "thread_transcript_too_large",
+        ),
+        None => internal_reason("orchestration_thread_snapshot_failed"),
+    }
+}
+
+struct TooLarge;
+
+/// The transcript from a thread snapshot, or `None` when the snapshot lacks a field. `limit`
+/// caps the file the client builds from it.
+fn thread_transcript_body(
+    snapshot: Value,
+    environment_id: &str,
+    limit: u64,
+) -> Option<Result<Value, TooLarge>> {
+    let Value::Object(mut snapshot) = snapshot else {
+        return None;
+    };
+    let Some(Value::Object(mut projection)) = snapshot.remove("projection") else {
+        return None;
+    };
+    let Some(Value::Array(items)) = projection.remove("visibleTurnItems") else {
+        return None;
+    };
+    let thread = projection.get("thread")?;
+    let thread_id = thread.get("id")?.as_str()?;
+    let title = thread.get("title")?.as_str()?;
+    let updated_at = projection.get("updatedAt")?.as_str()?;
+    let mut size = transcript_header_bytes([title, environment_id, thread_id, updated_at]);
+    if size > limit {
+        return Some(Err(TooLarge));
+    }
+    for item in &items {
+        size = size.saturating_add(json_bytes(item)).saturating_add(1);
+        if size > limit {
+            return Some(Err(TooLarge));
+        }
+    }
+    Some(Ok(json!({
+        "threadId": thread_id,
+        "title": title,
+        "updatedAt": updated_at,
+        "items": items,
+    })))
+}
+
+/// The byte length of `threadTranscriptHeader` for these values, newline included.
+fn transcript_header_bytes(values: [&str; 4]) -> u64 {
+    let fixed: usize = conn_contract::THREAD_TRANSCRIPT_HEADER_PARTS
+        .iter()
+        .map(|part| part.len())
+        .sum();
+    values.iter().fold(fixed as u64, |size, value| {
+        size.saturating_add(json_bytes(&Value::from(*value)))
+    })
+}
+
+/// The byte length of a value's compact JSON, counted without building the text.
+fn json_bytes(value: &Value) -> u64 {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    // Writing a `Value` to a sink that never fails cannot fail.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
 }
 
 /// `POST /api/projects/mutate`: `projects.mutate` over HTTP, so `conn-server project add`
@@ -1056,6 +1181,21 @@ mod tests {
         // An unknown thread is a plain 404, never the structured not-found error.
         let (status, body) = get("/api/orchestration/threads/nope", &[header, &bearer]).await;
         assert_eq!((status, body.as_str()), (404, ""));
+        // The transcript route answers T3's structured not-found error, and needs the same
+        // header and bearer.
+        let transcript = "/api/orchestration/threads/nope/transcript";
+        assert_eq!(get(transcript, &[&bearer]).await.0, 400);
+        assert_eq!(get(transcript, &[header]).await.0, 401);
+        let (status, body) = get(transcript, &[header, &bearer]).await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            (status, &body["_tag"], &body["reason"]),
+            (
+                404,
+                &json!("EnvironmentResourceNotFoundError"),
+                &json!("thread_not_found")
+            )
+        );
 
         // `project add` on a running server: an operate-scoped bearer adds the project now.
         let root = dir.to_string_lossy().into_owned();
@@ -1480,5 +1620,62 @@ mod tests {
             error["_tag"], "PullRequestUnavailableError",
             "typed error body"
         );
+    }
+
+    fn transcript_snapshot(items: Value) -> Value {
+        json!({"snapshotSequence": 3, "projection": {
+            "thread": {"id": "t-1", "title": "Say \"hi\" é"},
+            "updatedAt": "2026-11-19T10:00:00.000Z",
+            "turnItems": [{"id": "dropped"}],
+            "visibleTurnItems": items,
+        }})
+    }
+
+    #[test]
+    fn transcript_is_the_snapshot_cut_down() {
+        let items = json!([{"position": 0, "item": {"type": "user_message", "text": "x"}}]);
+        let Some(Ok(body)) =
+            thread_transcript_body(transcript_snapshot(items.clone()), "env", u64::MAX)
+        else {
+            panic!("no transcript");
+        };
+        assert_eq!(
+            body,
+            json!({"threadId": "t-1", "title": "Say \"hi\" é",
+                "updatedAt": "2026-11-19T10:00:00.000Z", "items": items})
+        );
+        assert!(thread_transcript_body(json!({"projection": {}}), "env", u64::MAX).is_none());
+    }
+
+    #[test]
+    fn transcript_size_counts_the_header_and_one_line_per_item() {
+        let header = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            conn_contract::THREAD_TRANSCRIPT_HEADER_PARTS[0],
+            json!("Say \"hi\" é"),
+            conn_contract::THREAD_TRANSCRIPT_HEADER_PARTS[1],
+            json!("env"),
+            conn_contract::THREAD_TRANSCRIPT_HEADER_PARTS[2],
+            json!("t-1"),
+            conn_contract::THREAD_TRANSCRIPT_HEADER_PARTS[3],
+            json!("2026-11-19T10:00:00.000Z"),
+            conn_contract::THREAD_TRANSCRIPT_HEADER_PARTS[4],
+        );
+        assert!(header.starts_with("{\"title\":") && header.ends_with("}\n"));
+        let item = json!({"position": 0, "item": {"text": "ü"}});
+        let file = (header.len() + item.to_string().len() + 1) as u64;
+        let snapshot = || transcript_snapshot(json!([item.clone()]));
+        assert!(matches!(
+            thread_transcript_body(snapshot(), "env", file),
+            Some(Ok(_))
+        ));
+        assert!(matches!(
+            thread_transcript_body(snapshot(), "env", file - 1),
+            Some(Err(TooLarge))
+        ));
+        assert!(matches!(
+            thread_transcript_body(snapshot(), "env", header.len() as u64 - 1),
+            Some(Err(TooLarge))
+        ));
     }
 }

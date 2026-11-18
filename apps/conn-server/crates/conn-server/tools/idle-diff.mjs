@@ -23,6 +23,8 @@
 //   fails the check.
 // - the rest of each thread row after ids and timestamps are replaced: listed as `info`, never
 //   a failure (the client, not Orbit, reads those fields).
+// It also reads `GET /api/orchestration/threads/:threadId/transcript` in some of those states
+// (`compareTranscript`): the composer's context import, on the same seeded threads.
 // Every process gets a sealed environment and a temp HOME; every process is stopped by PID.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -32,7 +34,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import { McpSession, oauthMcpToken, pairBearer } from "../../conn-mcp/tools/mcp-client.mjs";
-import { monorepo } from "../../../tools/monorepo.mjs";
+import { importSource, monorepo, packageImporter } from "../../../tools/monorepo.mjs";
 import { sealedEnv, sealedNodeEnv } from "../../../tools/sealed-env.mjs";
 import { GUARD_ARG } from "../../../tools/no-outside-fetch.mjs";
 
@@ -366,8 +368,17 @@ class Side {
   }
 
   /** The route as Orbit calls it (Laravel's Http client: acceptJson, withToken, the header). */
-  async shell(headers) {
-    const response = await fetch(`${this.origin}/api/orchestration/shell`, {
+  shell(headers) {
+    return this.get("/api/orchestration/shell", headers);
+  }
+
+  /** A thread's transcript, as the composer's context import reads it. */
+  transcript(threadId, headers) {
+    return this.get(`/api/orchestration/threads/${encodeURIComponent(threadId)}/transcript`, headers);
+  }
+
+  async get(path, headers) {
+    const response = await fetch(`${this.origin}${path}`, {
       headers: headers ?? {
         accept: "application/json",
         authorization: `Bearer ${this.bearer}`,
@@ -616,6 +627,104 @@ async function compareRequest(pair, state, headers, { orbitSends = true } = {}) 
   record(pair, { state, lines, info, notes: [], summary: `http ${ts.status}, reason ${reason(ts.body)}`, orbitSends });
 }
 
+/**
+ * `GET /api/orchestration/threads/:threadId/transcript` on both servers: the composer's
+ * context import (`threadTranscriptHttp.ts`). `thread` picks the thread id per side, `headers`
+ * the request headers (default: the paired bearer and the protocol header). Fails on:
+ * - a different HTTP status or content type, or a refusal body that differs (minus `traceId`);
+ * - a 200 body that the contract's `OrchestrationV2ThreadTranscript` does not decode;
+ * - a 200 body that is not the server's own thread snapshot (`GET /api/orchestration/threads/:id`)
+ *   cut down: `projection.thread.id`, `.title`, `projection.updatedAt` and
+ *   `projection.visibleTurnItems`, as T3's `getThreadTranscript` builds it.
+ * The items themselves differ where the two engines record a turn differently; the thread
+ * view shows the same rows, so those differences are `info`. A request the client never sends
+ * (`clientSends: false`) is reported as `info` only.
+ */
+async function compareTranscript(pair, state, { thread = (side) => side.threadId, headers, clientSends = true } = {}) {
+  const auth = (side) => ({
+    accept: "application/json",
+    authorization: `Bearer ${side.bearer}`,
+    "x-t3-orchestration-protocol": "2",
+  });
+  const [ts, conn] = await Promise.all(pair.map((side) => side.transcript(thread(side), headers?.(side) ?? auth(side))));
+  const lines = [];
+  const info = [];
+  if (ts.status !== conn.status) lines.push(`FAIL http status: T3 ${ts.status} / Conn ${conn.status}`);
+  if (ts.contentType !== conn.contentType) {
+    lines.push(`FAIL content-type: T3 ${ts.contentType} / Conn ${conn.contentType}`);
+  }
+  if (ts.status !== 200 || conn.status !== 200) {
+    // `traceId` is per request; the rest of a refusal must match.
+    const body = (value) => (isObject(value) ? normalize({ ...value, traceId: undefined }) : normalize(value));
+    for (const d of differences(body(ts.body), body(conn.body))) lines.push(`FAIL body${d}`);
+  } else {
+    const { decodeTranscript, projectForWire } = await transcriptSchema();
+    for (const [side, read] of [[pair[0], ts], [pair[1], conn]]) {
+      const decoded = decodeTranscript(read.body);
+      if (decoded !== undefined) lines.push(`FAIL ${side.name}: the contract does not decode it: ${decoded}`);
+      const snapshot = await side.get(`/api/orchestration/threads/${encodeURIComponent(thread(side))}`, auth(side));
+      const projection = snapshot.body?.projection;
+      const expected = {
+        threadId: projection?.thread?.id,
+        title: projection?.thread?.title,
+        updatedAt: projection?.updatedAt,
+        items: projection?.visibleTurnItems,
+      };
+      // T3's snapshot route cuts items for transport (`projectThreadProjectionForWire`); its
+      // transcript keeps them whole. This engine stores and sends items whole on both routes.
+      const items = Array.isArray(read.body?.items) ? read.body.items : [];
+      const actual = {
+        ...read.body,
+        // A key the projection sets to `undefined` reaches T3's JSON as `null`.
+        items:
+          side.kind === "ts"
+            ? JSON.parse(JSON.stringify(items.map((row) => ({ ...row, item: projectForWire(row.item) })), (_, v) => v ?? null))
+            : items,
+      };
+      for (const d of differences(expected, actual)) {
+        lines.push(`FAIL ${side.name}: not its own thread snapshot: ${d.replace("T3 ", "snapshot ").replace("Conn ", "transcript ")}`);
+      }
+    }
+    const shape = (body) => Object.keys(body).sort().join(",");
+    if (shape(ts.body) !== shape(conn.body)) lines.push(`FAIL keys: T3 ${shape(ts.body)} / Conn ${shape(conn.body)}`);
+    info.push(...differences(normalize(ts.body), normalize(conn.body)).map((d) => `body${d}`));
+  }
+  if (!clientSends) info.unshift(...lines.splice(0).map((line) => line.replace(/^FAIL /, "")));
+  const items = Array.isArray(ts.body?.items) ? `, ${ts.body.items.length} items` : "";
+  const reason = typeof ts.body?.reason === "string" ? `, reason ${ts.body.reason}` : "";
+  record(pair, {
+    state: `transcript: ${state}`,
+    lines,
+    info,
+    notes: [],
+    summary: `http ${ts.status}${items}${reason}`,
+    orbitSends: clientSends,
+  });
+}
+
+let transcriptSchemaLoad;
+/**
+ * The contract's `OrchestrationV2ThreadTranscript` JSON decoder (`undefined` when it decodes)
+ * and T3's `projectTurnItemForWire`.
+ */
+function transcriptSchema() {
+  transcriptSchemaLoad ??= (async () => {
+    const contracts = await importSource("packages/contracts/src/orchestrationV2.ts");
+    const Schema = await packageImporter("packages/contracts")("effect/Schema");
+    const Exit = await packageImporter("packages/contracts")("effect/Exit");
+    const decode = Schema.decodeUnknownExit(Schema.toCodecJson(contracts.OrchestrationV2ThreadTranscript));
+    const wire = await importSource("apps/server/src/orchestration-v2/WireProjection.ts");
+    return {
+      projectForWire: wire.projectTurnItemForWire,
+      decodeTranscript: (body) => {
+        const exit = decode(body);
+        return Exit.isSuccess(exit) ? undefined : String(exit.cause).slice(0, 400);
+      },
+    };
+  })();
+  return transcriptSchemaLoad;
+}
+
 async function until(pair, label, predicate, timeoutMs = 20_000) {
   const notes = [];
   await Promise.all(
@@ -729,6 +838,25 @@ const SCENARIOS = [
       await both(pair, (side) => side.release("turn/completed"));
       const notes = await threadWhere(pair, "both turns done", (t) => terminal(t.status) && t.activityRunStatus == null);
       await compare(pair, "idle after the queued turn", notes);
+      await compareTranscript(pair, "two completed turns");
+      await compareTranscript(pair, "an unknown thread", { thread: () => "transcript-diff-unknown" });
+      // The client always sends the protocol header (`withOrchestrationProtocolHeader`).
+      await compareTranscript(pair, "no protocol header (the client never sends this)", {
+        headers: (side) => ({ accept: "application/json", authorization: `Bearer ${side.bearer}` }),
+        clientSends: false,
+      });
+      await compareTranscript(pair, "no credential", {
+        headers: () => ({ accept: "application/json", "x-t3-orchestration-protocol": "2" }),
+      });
+      if (!narrow.some((n) => n.error)) {
+        await compareTranscript(pair, "a session with too few scopes", {
+          headers: (side) => ({
+            accept: "application/json",
+            authorization: `Bearer ${narrow[pair.indexOf(side)].bearer}`,
+            "x-t3-orchestration-protocol": "2",
+          }),
+        });
+      }
     },
   },
   {
@@ -744,6 +872,7 @@ const SCENARIOS = [
       await compare(pair, "a turn being stopped", await gate(pair, "turn/interrupt"));
       await both(pair, (side) => side.release("turn/interrupt"));
       await compare(pair, "a stopped turn", await threadWhere(pair, "interrupted", (t) => terminal(t.status)));
+      await compareTranscript(pair, "a stopped turn");
     },
   },
   {
@@ -756,6 +885,7 @@ const SCENARIOS = [
       );
       const notes = await threadWhere(pair, "pending approval", (t) => t.pendingRuntimeRequest != null);
       await compare(pair, "a turn waiting for an approval", notes);
+      await compareTranscript(pair, "a turn waiting for an approval");
     },
   },
   {
@@ -766,6 +896,7 @@ const SCENARIOS = [
       await both(pair, (side) => launch(side, { message: "Plan it; ask me first.", interactionMode: "plan" }));
       const notes = await threadWhere(pair, "pending question", (t) => t.pendingRuntimeRequest != null);
       await compare(pair, "a turn waiting for a user answer", notes);
+      await compareTranscript(pair, "a turn waiting for a user answer");
     },
   },
   {
@@ -775,6 +906,7 @@ const SCENARIOS = [
     async run(pair) {
       await both(pair, (side) => launch(side, { message: "Respond with the following text: fixture simple ok" }));
       await compare(pair, "a failed turn", await threadWhere(pair, "failed", (t) => terminal(t.status)));
+      await compareTranscript(pair, "a failed turn");
     },
   },
   {
@@ -794,6 +926,7 @@ const SCENARIOS = [
       await both(pair, (side) => side.release("wake"));
       const done = await threadWhere(pair, "settled", (t) => terminal(t.status));
       await compare(pair, "after the wake turn", done);
+      await compareTranscript(pair, "a turn with a subagent and a wake turn");
     },
   },
   {

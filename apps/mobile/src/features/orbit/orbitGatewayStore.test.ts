@@ -14,6 +14,8 @@ const fake = vi.hoisted(() => ({
   meFailures: 0,
   holdProfiles: null as Promise<void> | null,
   holdWrite: null as Promise<void> | null,
+  holdSettings: null as Promise<void> | null,
+  bindFailure: null as string | null,
 }));
 
 vi.mock("react-native", () => ({
@@ -87,8 +89,13 @@ vi.mock("./orbitGatewayClient", () => ({
       return [];
     },
     environments: async () => [],
-    settings: async (profileId: number) => settingsOf(profileId, fake.versions.get(profileId) ?? 1),
+    settings: async (profileId: number) => {
+      const answer = settingsOf(profileId, fake.versions.get(profileId) ?? 1);
+      if (fake.holdSettings) await fake.holdSettings;
+      return answer;
+    },
     bindProfile: async (profileId: number) => {
+      if (fake.bindFailure) throw new Error(fake.bindFailure);
       fake.boundProfile = profileId;
     },
   },
@@ -122,6 +129,8 @@ async function setup() {
     profilesFailures: 0,
     holdProfiles: null,
     holdWrite: null,
+    holdSettings: null,
+    bindFailure: null,
   });
   const store = await import("./orbitGatewayStore");
   const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -172,6 +181,40 @@ describe("Orbit Gateway store", () => {
     write.resolve();
     await kept;
     expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
+  });
+
+  it("keeps a workspace write that lands before the first read's older answer", async () => {
+    using t = await setup();
+    const firstRead = Promise.withResolvers<void>();
+    fake.holdSettings = firstRead.promise;
+    t.store.startOrbitGateway();
+    await t.settle();
+    fake.holdSettings = null;
+    // A resumed thread start writes v2 while the first read still holds v1.
+    await t.store.keepProjectInOrbitWorkspace("ws-1-v1", "env:project");
+    firstRead.resolve();
+    await t.settle();
+    expect(t.shown()).toEqual({ profile: 1, workspaces: ["ws-1-v2"] });
+  });
+
+  it("does not bring a failed bind's error back after a later profile read fails", async () => {
+    using t = await setup();
+    t.store.startOrbitGateway();
+    await t.settle();
+    const lists = Promise.withResolvers<void>();
+    fake.holdProfiles = lists.promise;
+    void t.store.refreshOrbitGateway();
+    await t.settle();
+    fake.bindFailure = "bind denied";
+    await expect(t.store.chooseOrbitProfile({ id: 2 })).rejects.toThrow("bind denied");
+    fake.holdProfiles = null;
+    lists.resolve();
+    await t.settle();
+    expect(t.store.orbitGatewayState().error).toBeNull();
+    // The next profile check fails on its own, without a list refresh.
+    fake.meFailures = 1;
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(t.store.orbitGatewayState().error).toBe("Gateway unreachable");
   });
 
   it("does not let a late workspace write show workspaces in Default mode", async () => {

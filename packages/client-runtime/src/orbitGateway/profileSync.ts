@@ -67,7 +67,8 @@ export type ProfileSyncOutcome = "adopted" | "seeded" | "pulled" | "pushed" | "m
 
 export type ProfileSyncResult =
   | { readonly kind: "unbound" }
-  | { readonly kind: "idle" }
+  /** No section is readable on the device yet; `version` is the one it counts as applied. */
+  | { readonly kind: "idle"; readonly version: number }
   /** The Gateway predates profile sections: nothing was read or written. */
   | { readonly kind: "unsupported" }
   /** The caller's scope changed (see `run`), so processing stopped. */
@@ -173,7 +174,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const readable = channels.filter((channel) => read(channel) !== null);
-      if (readable.length === 0) return { kind: "idle" };
+      if (readable.length === 0) return { kind: "idle", version: state.profileVersion };
 
       const mustFetch =
         attempt > 1 ||

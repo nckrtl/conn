@@ -256,7 +256,15 @@ function profileSyncController(): ProfileSyncController | null {
       }
       pruneWorkspaceCloneRefs(provider, listed);
       lastListed = listed;
-      if (listed !== null && lastMe !== null) await recordAttached(lastMe, listed);
+      if (listed !== null && lastMe !== null) {
+        // A later profile read or a switch away from Orbit makes this answer obsolete.
+        const me = lastMe;
+        await recordAttached(
+          me,
+          listed,
+          scopedClient(() => inOrbit() && lastMe === me),
+        );
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       useOrbitProfileSyncStatus.setState((status) => ({
@@ -320,7 +328,9 @@ function profileSyncController(): ProfileSyncController | null {
     try {
       const synced = await sections.run(me, isCurrent);
       // A section the engine could not apply yet keeps the version it counts as read.
-      if (synced.kind === "synced") applied = Math.min(applied, synced.version);
+      if (synced.kind === "synced" || synced.kind === "idle") {
+        applied = Math.min(applied, synced.version);
+      }
       if (synced.kind === "superseded") return null;
       if (synced.kind === "unsupported") {
         useOrbitProfileSyncStatus.setState({ sections: "unsupported", sectionsError: null });

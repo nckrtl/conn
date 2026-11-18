@@ -386,7 +386,7 @@ let refreshing: Promise<void> | null = null;
 /** The profile version whose workspaces this phone shows, so a profile read skips an equal one. */
 let appliedWorkspaces: { readonly profileId: number; readonly version: number } | null = null;
 /**
- * The two sources of the shown error: the lists (and a bind) of a refresh, and the profile read,
+ * The two sources of the shown error: the lists of a refresh, and the profile read,
  * which retries on its own. Each clears only its own failure.
  */
 let listError: string | null = null;
@@ -418,8 +418,10 @@ function applyWorkspaces(settings: {
   readonly version: number;
   readonly workspaces: readonly OrbitGatewayWorkspace[];
 }): void {
-  // Only for the profile the phone is bound to in Orbit mode now.
-  if (state.provider !== "orbit" || state.node?.profile?.id !== settings.profileId) return;
+  // Only in Orbit mode, for the profile the phone is bound to. Before the first read knows the
+  // binding a write may still land; the next read replaces it if the phone is bound elsewhere.
+  if (state.provider !== "orbit") return;
+  if (state.node !== null && state.node.profile?.id !== settings.profileId) return;
   if (
     appliedWorkspaces?.profileId === settings.profileId &&
     appliedWorkspaces.version > settings.version
@@ -549,8 +551,8 @@ export async function chooseOrbitProfile(
     profileLive.invalidate();
     await client.bindProfile(id);
   } catch (error) {
-    listError = message(error);
-    set({ error: listError });
+    // The caller shows the failed bind; it is not a list failure for later reads to bring back.
+    set({ error: message(error) });
     void profileLive.reconcile();
     throw error;
   }

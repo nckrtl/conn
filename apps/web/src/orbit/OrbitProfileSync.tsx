@@ -187,13 +187,14 @@ function profileSyncController(): ProfileSyncController | null {
    * The workspace sync for one read: once that read is obsolete it applies nothing here and sends
    * nothing more to the Gateway, also not a conflict retry.
    */
+  const scopedClient = (isCurrent: () => boolean): OrbitGatewayClient => ({
+    ...client,
+    settings: (profileId) => (isCurrent() ? client.settings(profileId) : obsoleteRead()),
+    replaceWorkspaces: (...args) =>
+      isCurrent() ? client.replaceWorkspaces(...args) : obsoleteRead(),
+  });
   const workspacePorts = (isCurrent: () => boolean): WorkspaceProfileSyncPorts => ({
-    client: {
-      ...client,
-      settings: (profileId) => (isCurrent() ? client.settings(profileId) : obsoleteRead()),
-      replaceWorkspaces: (...args) =>
-        isCurrent() ? client.replaceWorkspaces(...args) : obsoleteRead(),
-    },
+    client: scopedClient(isCurrent),
     readLocal: () => useWorkspaceStore.getState().workspaces.map(toGateway),
     writeLocal: (workspaces) => {
       if (isCurrent()) writeLocal(workspaces);
@@ -225,9 +226,10 @@ function profileSyncController(): ProfileSyncController | null {
   const recordAttached = async (
     me: OrbitGatewayNode,
     listed: readonly OrbitGatewayEnvironment[],
+    gateway: OrbitGatewayClient = client,
   ): Promise<void> => {
     // Conn: flag `connAttachedServers` only; a failure here must not stop the sync.
-    await recordAttachedServers(client, me, listed).catch((error: unknown) => {
+    await recordAttachedServers(gateway, me, listed).catch((error: unknown) => {
       console.warn("Conn could not apply the attached set.", error);
     });
   };
@@ -279,7 +281,8 @@ function profileSyncController(): ProfileSyncController | null {
     if (!isCurrent() || !inOrbit()) return null;
     observe(me.profileChannel ?? null);
     lastMe = me;
-    if (lastListed !== null) await recordAttached(me, lastListed);
+    // An obsolete read never reaches the settings read, so it records no attached set.
+    if (lastListed !== null) await recordAttached(me, lastListed, scopedClient(isCurrent));
     if (!isCurrent()) return null;
     try {
       const result = await syncWorkspaceProfile(workspacePorts(isCurrent), me);

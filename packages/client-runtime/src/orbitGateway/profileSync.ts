@@ -148,6 +148,21 @@ export function createProfileSync(ports: ProfileSyncPorts) {
       state = { profileId: profile.id, profileVersion, sections, ignored };
       ports.saveState(state);
     };
+    /**
+     * The document version covers every section. It counts as read only when each section this
+     * device follows, readable now or not, holds the version `document` names; otherwise the next
+     * run reads the profile again rather than skip a change it never applied.
+     */
+    const settledVersion = (document: OrbitGatewaySettings | null): number =>
+      document === null
+        ? state.profileVersion
+        : document.sections === null ||
+            channels.every(
+              ({ name }) =>
+                remoteSection(document, name).version === (sections[name]?.version ?? 0),
+            )
+          ? document.version
+          : state.profileVersion;
     const read = (channel: ProfileSyncChannel): JsonObject | null =>
       channel.readLocal(sections[channel.name]?.base ?? null);
     const outcomes: Partial<Record<ProfileSectionName, ProfileSyncOutcome>> = {};
@@ -274,10 +289,10 @@ export function createProfileSync(ports: ProfileSyncPorts) {
       }
 
       if (pushes.length === 0) {
-        commit(remote?.version ?? state.profileVersion);
+        commit(settledVersion(remote));
         return { kind: "synced", outcomes, sections: meta };
       }
-      commit(remote?.version ?? state.profileVersion);
+      commit(settledVersion(remote));
 
       const patch: Record<string, OrbitGatewaySectionPatch> = {};
       for (const push of pushes) {
@@ -328,16 +343,7 @@ export function createProfileSync(ports: ProfileSyncPorts) {
         outcomes[name] =
           push.kind === "seed" ? "seeded" : push.kind === "merge" ? "merged" : "pushed";
       }
-      // The document version covers every section. Count it as read only when no other section
-      // this device follows moved while the PATCH was in flight; otherwise the next run reads it.
-      const pushed = new Set(pushes.map((push) => push.channel.name));
-      const othersCurrent =
-        saved.sections === null ||
-        readable.every(
-          ({ name }) =>
-            pushed.has(name) || remoteSection(saved, name).version === sections[name]?.version,
-        );
-      commit(othersCurrent ? saved.version : state.profileVersion);
+      commit(settledVersion(saved));
       return { kind: "synced", outcomes, sections: meta };
     }
     throw conflict;

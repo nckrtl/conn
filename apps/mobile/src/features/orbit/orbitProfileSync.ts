@@ -87,19 +87,22 @@ const engine = createProfileSync({
 });
 
 /**
- * Syncs the appearance for a node the caller just read; nothing applies once `isCurrent()` is
- * false. Resolves false when the run failed or applied nothing, so a profile read does not count
- * its version as applied.
+ * Syncs the appearance for a node a profile read just took; nothing applies once `isCurrent()`
+ * is false. Resolves false when it applied nothing (the preferences are not readable yet) and
+ * throws the Gateway's error, so the read can tell a refusal from a passing failure.
  */
-export async function syncOrbitAppearance(
+export async function runOrbitAppearance(
   node: OrbitGatewayNode,
-  isCurrent: () => boolean = () => true,
+  isCurrent: () => boolean,
 ): Promise<boolean> {
+  return (await engine.run(node, isCurrent)).kind !== "idle";
+}
+
+/** Syncs the appearance for a node the caller just read. Failures wait for the next run. */
+export async function syncOrbitAppearance(node: OrbitGatewayNode): Promise<void> {
   try {
-    // Idle: the preferences are not readable yet, so nothing was applied.
-    return (await engine.run(node, isCurrent)).kind !== "idle";
+    await engine.run(node);
   } catch (error) {
     console.warn("[orbit] appearance sync failed", error);
-    return false;
   }
 }

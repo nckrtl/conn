@@ -37,7 +37,7 @@ import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentSession, readEnvironmentLacksScope } from "../../state/session";
 import { orbitGatewayClient as client, orbitGatewayTransport } from "./orbitGatewayClient";
-import { syncOrbitAppearance } from "./orbitProfileSync";
+import { runOrbitAppearance, syncOrbitAppearance } from "./orbitProfileSync";
 import { heldOrbitInstanceIds, orbitThreadStartStore } from "./orbitThreadStartStore";
 import { addProjectRefToProfileWorkspace } from "./orbitWorkspaceRef";
 
@@ -385,6 +385,29 @@ async function runPairings(
 let refreshing: Promise<void> | null = null;
 /** The profile version whose workspaces this phone shows, so a profile read skips an equal one. */
 let appliedWorkspaces: { readonly profileId: number; readonly version: number } | null = null;
+/** The error a failed profile read showed, cleared by the next read that succeeds. */
+let profileReadError: string | null = null;
+
+/**
+ * Shows a profile's workspaces unless the phone is bound to another profile now or already shows
+ * a newer version of them (a read and a write can answer in either order).
+ */
+function applyWorkspaces(settings: {
+  readonly profileId: number;
+  readonly version: number;
+  readonly workspaces: readonly OrbitGatewayWorkspace[];
+}): void {
+  const bound = state.node?.profile?.id;
+  if (bound !== undefined && bound !== settings.profileId) return;
+  if (
+    appliedWorkspaces?.profileId === settings.profileId &&
+    appliedWorkspaces.version > settings.version
+  ) {
+    return;
+  }
+  appliedWorkspaces = { profileId: settings.profileId, version: settings.version };
+  set({ workspaces: settings.workspaces });
+}
 
 /**
  * One authoritative profile read for the shared subscription: the Node, the workspaces when the
@@ -410,21 +433,21 @@ async function refreshOrbitProfile(
   ) {
     const settings = await client.settings(profile.id);
     if (!isCurrent()) return null;
-    // A workspace write of this phone may have landed a newer version meanwhile: never go back.
-    if (
-      appliedWorkspaces?.profileId !== settings.profileId ||
-      appliedWorkspaces.version <= settings.version
-    ) {
-      appliedWorkspaces = { profileId: settings.profileId, version: settings.version };
-      set({ node, workspaces: settings.workspaces });
-    } else {
-      set({ node });
-    }
+    set({ node });
+    applyWorkspaces(settings);
   } else {
     set({ node });
   }
-  if (!(await syncOrbitAppearance(node, isCurrent))) {
-    throw new Error("The Orbit appearance did not sync.");
+  if (!(await runOrbitAppearance(node, isCurrent))) {
+    throw new Error("The phone's preferences are not loaded yet.");
+  }
+  if (!isCurrent()) return null;
+  if (profileReadError !== null) {
+    // This read recovered from the failure it showed; a list failure keeps its own error.
+    if (state.error === profileReadError) {
+      set({ error: null, phase: state.phase === "error" ? "ready" : state.phase });
+    }
+    profileReadError = null;
   }
   return {
     profileId: profile.id,
@@ -442,7 +465,10 @@ const profileLive = createOrbitProfileLive({
   scope: () => (state.provider === "orbit" ? "orbit" : null),
   refresh: refreshOrbitProfile,
   // Only a current read reports here; the refresh shows it as the Gateway's error.
-  onError: (error) => set({ error: message(error) }),
+  onError: (error) => {
+    profileReadError = message(error);
+    set({ error: profileReadError });
+  },
 });
 
 /**
@@ -455,7 +481,10 @@ export function refreshOrbitGateway(): Promise<void> {
     try {
       if (!state.providerLoaded) await loadProvider();
       if (state.provider === "default") {
+        appliedWorkspaces = null;
         set({ phase: "idle", node: null, environments: [], workspaces: [], error: null });
+        // Closes the profile subscription at once: its scope is gone.
+        void profileLive.reconcile();
         await reconcileEnvironments(null);
         return;
       }
@@ -502,7 +531,8 @@ export async function chooseOrbitProfile(
     void profileLive.reconcile();
     throw error;
   }
-  await refreshOrbitGateway();
+  // A profile read that starts after the bind, not one a running refresh already holds.
+  await Promise.all([profileLive.reconcile(), refreshOrbitGateway()]);
 }
 
 /** Syncs the appearance with the profile now, as after a theme change on this phone. */
@@ -531,10 +561,7 @@ export async function keepProjectInOrbitWorkspace(
     const profileId = node.profile?.id;
     if (profileId === undefined) return;
     const saved = await addProjectRefToProfileWorkspace(client, profileId, workspaceId, projectRef);
-    if (saved) {
-      appliedWorkspaces = { profileId: saved.profileId, version: saved.version };
-      set({ workspaces: saved.workspaces });
-    }
+    if (saved) applyWorkspaces(saved);
   } catch {
     // The thread is sent; a later Start or the desktop can still add the ref.
   }
@@ -575,26 +602,32 @@ export function orbitGatewayState(): OrbitGatewayState {
 let started = false;
 
 /**
+ * Starts the app-wide Gateway state once: the first refresh, the profile subscription while the
+ * app is in front, and the foreground/background lifecycle.
+ */
+export function startOrbitGateway(): void {
+  if (started) return;
+  started = true;
+  // Resumed first, so the refresh's profile read (after the provider loads) subscribes.
+  if (AppState.currentState === "active") void profileLive.resume();
+  void refreshOrbitGateway();
+  AppState.addEventListener("change", (next) => {
+    if (next === "active") {
+      void profileLive.resume();
+      void refreshOrbitGateway();
+    } else if (next === "background") {
+      profileLive.pause();
+    }
+  });
+}
+
+/**
  * The Gateway state. The first use loads it, and it reloads whenever the app comes to the front.
  * Profile changes from other devices arrive through the shared subscription while the app is in
  * front; in the background the socket and its check stop.
  */
 export function useOrbitGateway(): OrbitGatewayState {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts the app-wide AppState listener and the profile subscription once
-  useEffect(() => {
-    if (started) return;
-    started = true;
-    // Resumed first, so the refresh's profile read (after the provider loads) subscribes.
-    if (AppState.currentState === "active") void profileLive.resume();
-    void refreshOrbitGateway();
-    AppState.addEventListener("change", (next) => {
-      if (next === "active") {
-        void profileLive.resume();
-        void refreshOrbitGateway();
-      } else if (next === "background") {
-        profileLive.pause();
-      }
-    });
-  }, []);
+  useEffect(startOrbitGateway, []);
   return useSyncExternalStore(subscribeOrbitGateway, () => state);
 }

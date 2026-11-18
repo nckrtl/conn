@@ -1,0 +1,194 @@
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import type {
+  OrbitGatewayNode,
+  OrbitGatewaySettings,
+  OrbitGatewayWorkspace,
+} from "@t3tools/client-runtime/orbit-gateway";
+
+/** The Gateway and the phone's other parts, which each test sets up through `setup()`. */
+const fake = vi.hoisted(() => ({
+  boundProfile: 1 as number,
+  versions: new Map<number, number>(),
+  meFailures: 0,
+  holdProfiles: null as Promise<void> | null,
+  holdWrite: null as Promise<void> | null,
+}));
+
+vi.mock("react-native", () => ({
+  AppState: { currentState: "active", addEventListener: () => ({ remove: () => {} }) },
+}));
+vi.mock("expo-secure-store", () => ({
+  getItemAsync: async () => JSON.stringify({ provider: "orbit" }),
+  setItemAsync: async () => {},
+}));
+vi.mock("@t3tools/client-runtime/state/runtime", () => ({ runAtomCommand: async () => ({}) }));
+vi.mock("../../connection/catalog", () => ({ environmentCatalog: {} }));
+vi.mock("../../connection/onboarding", () => ({ connectPairingUrl: {} }));
+vi.mock("../../state/atom-registry", () => ({
+  // The catalog is not ready, so a refresh changes no saved environment.
+  appAtomRegistry: { get: () => ({ isReady: false }), subscribe: () => () => {} },
+}));
+vi.mock("../../state/session", () => ({
+  environmentSession: {},
+  readEnvironmentLacksScope: () => false,
+}));
+vi.mock("./orbitProfileSync", () => ({
+  runOrbitAppearance: async () => true,
+  syncOrbitAppearance: async () => {},
+}));
+vi.mock("./orbitThreadStartStore", () => ({
+  heldOrbitInstanceIds: () => [],
+  orbitThreadStartStore: { loaded: () => false },
+}));
+vi.mock("./orbitWorkspaceRef", () => ({
+  addProjectRefToProfileWorkspace: async (
+    _client: unknown,
+    profileId: number,
+  ): Promise<OrbitGatewaySettings> => {
+    const version = (fake.versions.get(profileId) ?? 1) + 1;
+    fake.versions.set(profileId, version);
+    const answer = settingsOf(profileId, version);
+    if (fake.holdWrite) await fake.holdWrite;
+    return answer;
+  },
+}));
+vi.mock("./orbitGatewayClient", () => ({
+  // No Reverb: the store's reads are what the tests observe.
+  orbitGatewayTransport: async () => ({
+    status: 200,
+    body: JSON.stringify({ data: { url: null, key: null } }),
+  }),
+  orbitGatewayClient: {
+    me: async (): Promise<OrbitGatewayNode> => {
+      if (fake.meFailures > 0) {
+        fake.meFailures -= 1;
+        throw new Error("Gateway unreachable");
+      }
+      const id = fake.boundProfile;
+      return {
+        id: 7,
+        name: "phone",
+        wireguardIp: "10.44.0.30",
+        profile: {
+          id,
+          name: `P${id}`,
+          settingsVersion: fake.versions.get(id) ?? 1,
+          updatedAt: "",
+        },
+        profileChannel: null,
+      };
+    },
+    profiles: async () => {
+      if (fake.holdProfiles) await fake.holdProfiles;
+      return [];
+    },
+    environments: async () => [],
+    settings: async (profileId: number) => settingsOf(profileId, fake.versions.get(profileId) ?? 1),
+    bindProfile: async (profileId: number) => {
+      fake.boundProfile = profileId;
+    },
+  },
+}));
+
+function workspace(id: string): OrbitGatewayWorkspace {
+  return { id, name: id, color: "slate", icon: null };
+}
+
+function settingsOf(profileId: number, version: number): OrbitGatewaySettings {
+  return {
+    profileId,
+    version,
+    workspaces: [workspace(`ws-${profileId}-v${version}`)],
+    updatedAt: "",
+    document: {},
+    sections: {},
+  };
+}
+
+async function setup() {
+  vi.useFakeTimers();
+  vi.resetModules();
+  Object.assign(fake, {
+    boundProfile: 1,
+    versions: new Map([
+      [1, 1],
+      [2, 1],
+    ]),
+    meFailures: 0,
+    holdProfiles: null,
+    holdWrite: null,
+  });
+  const store = await import("./orbitGatewayStore");
+  const settle = () => vi.advanceTimersByTimeAsync(0);
+  return {
+    store,
+    settle,
+    shown: () => ({
+      profile: store.orbitGatewayState().node?.profile?.id ?? null,
+      workspaces: store.orbitGatewayState().workspaces.map((entry) => entry.id),
+    }),
+    [Symbol.dispose]() {
+      vi.useRealTimers();
+    },
+  };
+}
+
+describe("Orbit Gateway store", () => {
+  it("reads the new profile after a bind, also while a refresh still runs", async () => {
+    using t = await setup();
+    t.store.startOrbitGateway();
+    await t.settle();
+    expect(t.shown()).toEqual({ profile: 1, workspaces: ["ws-1-v1"] });
+
+    const lists = Promise.withResolvers<void>();
+    fake.holdProfiles = lists.promise;
+    void t.store.refreshOrbitGateway();
+    await t.settle();
+    const chosen = t.store.chooseOrbitProfile({ id: 2 });
+    fake.holdProfiles = null;
+    lists.resolve();
+    await chosen;
+    await t.settle();
+    expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
+  });
+
+  it("does not let a late workspace write of the old profile replace the new one", async () => {
+    using t = await setup();
+    t.store.startOrbitGateway();
+    await t.settle();
+    const write = Promise.withResolvers<void>();
+    fake.holdWrite = write.promise;
+    const kept = t.store.keepProjectInOrbitWorkspace("ws-1-v1", "env:project");
+    await t.settle();
+    fake.holdWrite = null;
+    await t.store.chooseOrbitProfile({ id: 2 });
+    await t.settle();
+    expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
+    write.resolve();
+    await kept;
+    expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
+  });
+
+  it("shows the workspaces again after Default and back to Orbit", async () => {
+    using t = await setup();
+    t.store.startOrbitGateway();
+    await t.settle();
+    await t.store.setEnvironmentProvider("default");
+    expect(t.shown()).toEqual({ profile: null, workspaces: [] });
+    await t.store.setEnvironmentProvider("orbit");
+    await t.settle();
+    expect(t.shown()).toEqual({ profile: 1, workspaces: ["ws-1-v1"] });
+  });
+
+  it("clears the error a failed profile read showed once a retry succeeds", async () => {
+    using t = await setup();
+    fake.meFailures = 1;
+    t.store.startOrbitGateway();
+    await t.settle();
+    expect(t.store.orbitGatewayState().error).toBe("Gateway unreachable");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(t.store.orbitGatewayState()).toMatchObject({ error: null, phase: "ready" });
+    expect(t.shown()).toEqual({ profile: 1, workspaces: ["ws-1-v1"] });
+  });
+});

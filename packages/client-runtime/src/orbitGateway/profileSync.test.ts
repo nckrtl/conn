@@ -136,6 +136,7 @@ function makeDevice(
     appearance: (initial.appearance ?? { schema: 1, mode: "system", contrast: 100 }) as JsonObject,
     state: (initial.state ?? null) as ProfileSyncState | null,
     writes: [] as string[],
+    unreadable: false,
   };
   const channels: ProfileSyncChannel[] = [
     {
@@ -154,7 +155,7 @@ function makeDevice(
     },
     {
       name: "appearance",
-      readLocal: () => ({ ...memory.appearance }),
+      readLocal: () => (memory.unreadable ? null : { ...memory.appearance }),
       applyRemote: (value) => {
         memory.appearance = {
           schema: 1,
@@ -312,6 +313,26 @@ describe("profile sync engine", () => {
     mac.memory.settings.size = 18;
     await mac.engine.run(staleMe);
     expect(fake.gateway.patches.at(-1)).toHaveProperty(["devices.desktop"]);
+    await mac.sync();
+    expect(mac.memory.appearance).toMatchObject({ mode: "dark" });
+  });
+
+  it("pulls a change to a section that was unreadable while the profile was read", async () => {
+    const fake = fakeGateway();
+    const mac = makeDevice(fake);
+    await mac.sync();
+    const appearance = fake.gateway.sections.get("appearance")!;
+    fake.gateway.sections.set("appearance", {
+      version: appearance.version + 1,
+      value: { schema: 1, mode: "dark", contrast: 100 },
+      updatedBy: "phone",
+    });
+    fake.gateway.version += 1;
+    // The theme is still loading: appearance reads as null while the desktop settings change.
+    mac.memory.unreadable = true;
+    mac.memory.settings.size = 18;
+    await mac.sync();
+    mac.memory.unreadable = false;
     await mac.sync();
     expect(mac.memory.appearance).toMatchObject({ mode: "dark" });
   });

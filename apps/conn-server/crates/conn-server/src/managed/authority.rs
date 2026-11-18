@@ -67,6 +67,29 @@ pub struct Probe {
     pub nonce: String,
     pub after_revision: Option<Revision>,
     pub sent: Instant,
+    /// Wall time of the send, for the clock offset bounds.
+    pub sent_wall_ms: u64,
+}
+
+/// What a registered handler may do now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateState {
+    Open,
+    /// A revision is known without its edges: no dispatch and no output until a probe
+    /// applies the head. The handler stays registered.
+    Paused,
+    /// Fenced, expired or authority lost: the handler must end.
+    Closed,
+}
+
+/// A ticket's binding, checked again when it is redeemed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TicketBinding {
+    pub edge: EdgeId,
+    /// The edge's fence generation when the ticket was minted.
+    pub fence_generation: u64,
+    /// The ticket must be redeemed before this wall time.
+    pub redeem_by_ms: u64,
 }
 
 /// Why access was refused. The ingress maps each to a response; none of them falls through
@@ -149,8 +172,17 @@ pub struct Authority {
     applied: Option<Revision>,
     lease_until: Option<Instant>,
     confirmed: HashSet<EdgeId>,
-    /// Edge to the revision of the notice that fenced it.
-    provisional: HashMap<EdgeId, Revision>,
+    /// Edge to the revisions of every outstanding notice that fenced it. Never empty.
+    provisional: HashMap<EdgeId, BTreeSet<Revision>>,
+    /// A revision known without a contiguous edge list: everything pauses until a probe
+    /// applies at least this revision.
+    block_until: Option<Revision>,
+    /// Snapshots applied in this process; the first one recovers a restart.
+    snapshots: u64,
+    /// Raised each time an edge is fenced; a ticket minted before a fence never redeems.
+    fence_generation: HashMap<EdgeId, u64>,
+    /// Bounds of (Gateway clock − target clock) in ms, from applied probes.
+    offset_bounds: Option<(i64, i64)>,
     notices: BTreeMap<Revision, NoticeRecord>,
     admitted: HashSet<EdgeId>,
     probe: Option<Probe>,
@@ -205,6 +237,10 @@ impl Authority {
             lease_until: None,
             confirmed: HashSet::new(),
             provisional: HashMap::new(),
+            block_until: None,
+            snapshots: 0,
+            fence_generation: HashMap::new(),
+            offset_bounds: None,
             notices: BTreeMap::new(),
             admitted: HashSet::new(),
             probe: None,
@@ -257,22 +293,79 @@ impl Authority {
         self.confirmed.contains(&edge)
     }
 
-    /// A revision ahead of the next one is known without a contiguous edge list.
-    fn blocked(&self) -> bool {
+    /// A revision ahead of the next one is known without a contiguous edge list, and no
+    /// probe has applied it yet.
+    pub fn blocked(&self) -> bool {
+        self.block_until
+            .is_some_and(|r| self.applied.is_none_or(|applied| applied < r))
+    }
+
+    /// The first revision after the applied one whose edges are not known from a notice.
+    fn next_unknown(&self) -> Revision {
         let mut next = self.applied.map_or(0, |a| a + 1);
         while self.notices.contains_key(&next) {
             next += 1;
         }
-        self.notices.keys().any(|r| *r > next)
+        next
+    }
+
+    /// A revision named by an introspection or a notice. One the target cannot place in a
+    /// contiguous list pauses every managed boundary until a probe applies it.
+    pub fn note_revision(&mut self, revision: Revision) -> Effects {
+        if self.applied.is_some_and(|applied| revision <= applied) {
+            return Effects::default();
+        }
+        if revision >= self.next_unknown() {
+            self.block_until = Some(self.block_until.map_or(revision, |b| b.max(revision)));
+        }
+        if self.probe.is_some() {
+            self.rerun = true;
+        }
+        Effects {
+            probe_now: true,
+            ..Effects::default()
+        }
+    }
+
+    pub fn edge_fence_generation(&self, edge: EdgeId) -> u64 {
+        self.fence_generation.get(&edge).copied().unwrap_or(0)
+    }
+
+    pub fn offset_bounds(&self) -> Option<(i64, i64)> {
+        self.offset_bounds
+    }
+
+    /// Removes `revision` from `edge`'s provisional fences. When none is left the edge is
+    /// no longer fenced; every introspection started before is dropped, so reopening it needs
+    /// a fresh one. Its closed sockets stay closed.
+    fn clear_provisional(&mut self, edge: EdgeId, revision: Revision) {
+        let Some(revisions) = self.provisional.get_mut(&edge) else {
+            return;
+        };
+        revisions.remove(&revision);
+        if revisions.is_empty() {
+            self.provisional.remove(&edge);
+            if !self.confirmed.contains(&edge) {
+                self.fenced_at.remove(&edge);
+                self.closed_at.remove(&edge);
+            }
+            self.epoch += 1;
+        }
     }
 
     fn lease_live(&self, now: Instant) -> bool {
         self.lease_until.is_some_and(|until| now < until)
     }
 
-    /// Managed access in general: open, not blocked, lease live, notices subscribed.
+    /// Managed authority is held: open, lease live, notices subscribed. A blocked target
+    /// still holds it, but pauses.
+    fn held(&self, now: Instant) -> bool {
+        self.open && self.notice_link && self.lease_live(now)
+    }
+
+    /// Managed access can be admitted now.
     pub fn available(&self, now: Instant) -> bool {
-        self.open && self.notice_link && !self.blocked() && self.lease_live(now)
+        self.held(now) && !self.blocked()
     }
 
     /// The check at every admission, dispatch and frame boundary.
@@ -280,7 +373,27 @@ impl Authority {
         self.available(now) && !self.is_fenced(edge) && wall_ms < expires_ms
     }
 
-    /// Whether a registered handler may still run.
+    /// What a registered handler may do now.
+    pub fn handler_state(
+        &self,
+        handler: u64,
+        expires_ms: u64,
+        now: Instant,
+        wall_ms: u64,
+    ) -> GateState {
+        let Some(entry) = self.handlers.get(&handler) else {
+            return GateState::Closed;
+        };
+        if !self.held(now) || self.is_fenced(entry.edge) || wall_ms >= expires_ms {
+            GateState::Closed
+        } else if self.blocked() {
+            GateState::Paused
+        } else {
+            GateState::Open
+        }
+    }
+
+    /// Whether a registered handler may still run now.
     pub fn handler_allowed(
         &self,
         handler: u64,
@@ -288,30 +401,44 @@ impl Authority {
         now: Instant,
         wall_ms: u64,
     ) -> bool {
-        self.handlers
-            .get(&handler)
-            .is_some_and(|h| self.allows(h.edge, expires_ms, now, wall_ms))
+        self.handler_state(handler, expires_ms, now, wall_ms) == GateState::Open
     }
 
     /// Admits a verified introspection and registers its handler in the same step, so a fence
     /// cannot fall between the check and the registration. `claims_revision` is the Gateway's
     /// committed revision when it read the token.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one atomic check of every admission input"
+    )]
     pub fn admit(
         &mut self,
         edge: EdgeId,
         claims_revision: Revision,
         expires_ms: u64,
         epoch: u64,
+        ticket: Option<TicketBinding>,
         now: Instant,
         wall_ms: u64,
     ) -> Result<(u64, watch::Receiver<bool>), Refusal> {
         if epoch != self.epoch {
             return Err(Refusal::Stale);
         }
+        if let Some(ticket) = ticket {
+            // A ticket redeems only for its own edge, before its deadline, and only if the
+            // edge was not fenced since it was minted.
+            if ticket.edge != edge || ticket.fence_generation != self.edge_fence_generation(edge) {
+                return Err(Refusal::Fenced);
+            }
+            if wall_ms >= ticket.redeem_by_ms {
+                return Err(Refusal::Expired);
+            }
+        }
         if !self.available(now) {
             return Err(Refusal::Unavailable);
         }
         if self.applied.is_none_or(|applied| claims_revision > applied) {
+            self.note_revision(claims_revision);
             return Err(Refusal::Reconcile);
         }
         if self.is_fenced(edge) {
@@ -379,6 +506,7 @@ impl Authority {
 
     /// Blocks `edge` and tells each of its handlers to close.
     fn fence_edge(&mut self, edge: EdgeId, wall_ms: u64) {
+        *self.fence_generation.entry(edge).or_insert(0) += 1;
         self.fenced_at.entry(edge).or_insert(wall_ms);
         self.admitted.remove(&edge);
         if !self.edge_has_handlers(edge) {
@@ -452,6 +580,7 @@ impl Authority {
             return Effects::default();
         }
         let applied = self.applied.unwrap_or(0);
+        let ahead = notice.revision > self.next_unknown();
         if (self.applied.is_some() && notice.revision <= applied)
             || self.notices.contains_key(&notice.revision)
             || self
@@ -463,8 +592,18 @@ impl Authority {
             return Effects::default();
         }
         for edge in &notice.edge_ids {
-            self.provisional.entry(*edge).or_insert(notice.revision);
+            self.provisional
+                .entry(*edge)
+                .or_default()
+                .insert(notice.revision);
             self.fence_edge(*edge, wall_ms);
+        }
+        if ahead {
+            // Revisions before this one are unknown: pause everything until a probe applies it.
+            self.block_until = Some(
+                self.block_until
+                    .map_or(notice.revision, |b| b.max(notice.revision)),
+            );
         }
         let record = self.revisions.entry(notice.revision).or_default();
         record.notice_received_ms.get_or_insert(wall_ms);
@@ -486,7 +625,7 @@ impl Authority {
 
     /// Starts the next probe, unless one runs. A snapshot probe raises the barrier epoch, so
     /// every outstanding introspection is dropped.
-    pub fn begin_probe(&mut self, nonce: String, now: Instant) -> Option<Probe> {
+    pub fn begin_probe(&mut self, nonce: String, now: Instant, wall_ms: u64) -> Option<Probe> {
         if self.probe.is_some() {
             self.rerun = true;
             return None;
@@ -503,6 +642,7 @@ impl Authority {
             nonce,
             after_revision,
             sent: now,
+            sent_wall_ms: wall_ms,
         };
         self.probe = Some(probe.clone());
         Some(probe)
@@ -514,6 +654,17 @@ impl Authority {
             self.probe = None;
             self.fail_closed(Loss::ProbeFailed);
         }
+    }
+
+    /// The call of probe `nonce` ended without a reply that matched it: retire it without
+    /// renewing anything, so the next probe can go out.
+    pub fn retire_probe(&mut self, nonce: &str) -> Effects {
+        if self.probe.as_ref().is_some_and(|p| p.nonce == nonce) {
+            // The next probe goes out on the timer, so a Gateway that keeps answering with
+            // the wrong nonce is not hammered.
+            self.probe = None;
+        }
+        Effects::default()
     }
 
     /// Applies a reply to the outstanding probe.
@@ -534,6 +685,7 @@ impl Authority {
             self.fail_closed(Loss::LeaseExpired);
             return self.after_reply();
         }
+        let first_snapshot = probe.after_revision.is_none() && self.snapshots == 0;
         let result = match (probe.after_revision, reply.kind.as_str()) {
             (None, "snapshot") if !self.open => self.apply_snapshot(reply, wall_ms),
             (Some(after), "delta") if self.open && self.applied == Some(after) => {
@@ -552,16 +704,47 @@ impl Authority {
             self.fail_closed(loss);
             return self.after_reply();
         }
-        self.apply_owed(&reply.owed, wall_ms);
+        if probe.after_revision.is_none() {
+            self.snapshots += 1;
+        }
+        self.apply_owed(&reply.owed, first_snapshot, wall_ms);
         self.disprove_notices(probe.sent, reply.head_revision, wall_ms);
+        self.record_offset(reply, probe.sent_wall_ms, wall_ms);
         self.open = true;
         self.lease_until = Some(new_lease);
         self.settle_closes(wall_ms);
         self.after_reply()
     }
 
+    /// Narrows the Gateway-to-target clock offset bounds: the Gateway read `server_time`
+    /// between the probe's send and the reply's arrival.
+    fn record_offset(&mut self, reply: &AuthorityReply, sent_ms: u64, received_ms: u64) {
+        let Some(server) = reply
+            .server_time
+            .as_deref()
+            .and_then(conn_support::time::millis_from_iso)
+        else {
+            return;
+        };
+        let (Ok(sent), Ok(received)) = (i64::try_from(sent_ms), i64::try_from(received_ms)) else {
+            return;
+        };
+        let bounds = (server - received, server - sent);
+        self.offset_bounds = Some(match self.offset_bounds {
+            Some((low, high)) if bounds.0.max(low) <= bounds.1.min(high) => {
+                (bounds.0.max(low), bounds.1.min(high))
+            }
+            _ => bounds,
+        });
+    }
+
     fn after_reply(&mut self) -> Effects {
-        let known = self.notices.keys().next_back().copied();
+        let known = self
+            .notices
+            .keys()
+            .next_back()
+            .copied()
+            .max(self.block_until);
         let behind = known.is_some_and(|k| self.applied.is_none_or(|a| k > a));
         let probe_now = std::mem::take(&mut self.rerun) || behind;
         Effects {
@@ -592,15 +775,14 @@ impl Authority {
         let covered: Vec<(EdgeId, Revision)> = self
             .provisional
             .iter()
-            .filter(|(_, r)| **r <= head)
-            .map(|(e, r)| (*e, *r))
+            .flat_map(|(e, revisions)| revisions.iter().map(move |r| (*e, *r)))
+            .filter(|(_, r)| *r <= head)
             .collect();
-        for (edge, _) in covered {
-            self.provisional.remove(&edge);
+        for (edge, revision) in covered {
             if listed.contains(&edge) {
-                self.fenced_at.remove(&edge);
-                self.closed_at.remove(&edge);
+                self.clear_provisional(edge, revision);
             } else {
+                self.provisional.remove(&edge);
                 self.confirmed.insert(edge);
             }
         }
@@ -649,13 +831,11 @@ impl Authority {
         let unnamed: Vec<EdgeId> = self
             .provisional
             .iter()
-            .filter(|(e, r)| **r == revision.revision && !named.contains(e))
+            .filter(|(e, revisions)| revisions.contains(&revision.revision) && !named.contains(e))
             .map(|(e, _)| *e)
             .collect();
         for edge in unnamed {
-            self.provisional.remove(&edge);
-            self.fenced_at.remove(&edge);
-            self.closed_at.remove(&edge);
+            self.clear_provisional(edge, revision.revision);
         }
         self.notices.remove(&revision.revision);
         let record = self.revisions.entry(revision.revision).or_default();
@@ -664,9 +844,18 @@ impl Authority {
         self.mark_revision_fenced(revision.revision, wall_ms);
     }
 
-    fn apply_owed(&mut self, owed: &[RevisionEdges], wall_ms: u64) {
+    fn apply_owed(&mut self, owed: &[RevisionEdges], first_snapshot: bool, wall_ms: u64) {
         self.owed.clear();
         for entry in owed {
+            if first_snapshot {
+                // A (re)started process observed no close: its handlers ended with the old
+                // process, and no handler could open here before this snapshot.
+                self.apply_verified_revision(entry, wall_ms);
+                let record = self.revisions.entry(entry.revision).or_default();
+                record.recovered_ms = Some(wall_ms);
+                self.owed.insert(entry.revision);
+                continue;
+            }
             let known = self
                 .revisions
                 .get(&entry.revision)
@@ -701,11 +890,7 @@ impl Authority {
         for revision in disproved {
             if let Some(notice) = self.notices.remove(&revision) {
                 for edge in notice.edges {
-                    if self.provisional.get(&edge) == Some(&revision) {
-                        self.provisional.remove(&edge);
-                        self.fenced_at.remove(&edge);
-                        self.closed_at.remove(&edge);
-                    }
+                    self.clear_provisional(edge, revision);
                 }
             }
             if self.revisions.get(&revision).is_some_and(|r| !r.verified) {
@@ -760,11 +945,35 @@ impl Authority {
         }
         if ok {
             self.owed.remove(&revision);
+            self.prune(revision);
         }
         Effects {
             ack: self.next_ack().is_some(),
             ..Effects::default()
         }
+    }
+
+    /// Drops the measurement record of a settled revision. The confirmed fence of its edges
+    /// stays for the life of the generation.
+    fn prune(&mut self, revision: Revision) {
+        let Some(record) = self.revisions.remove(&revision) else {
+            return;
+        };
+        for edge in record.edges {
+            let referenced = self.revisions.values().any(|r| r.edges.contains(&edge));
+            if !referenced
+                && self.confirmed.contains(&edge)
+                && !self.provisional.contains_key(&edge)
+            {
+                self.fenced_at.remove(&edge);
+                self.closed_at.remove(&edge);
+            }
+        }
+    }
+
+    /// Records kept for unsettled revisions; settled ones are pruned.
+    pub fn revision_records(&self) -> usize {
+        self.revisions.len()
     }
 
     /// The wall time of the fence of `revision`, for the lab measurements.

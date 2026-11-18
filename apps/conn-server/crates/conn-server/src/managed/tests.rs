@@ -62,6 +62,8 @@ pub(crate) struct FakeState {
     pub owed: BTreeMap<u64, Option<Value>>,
     pub ack_calls: u32,
     pub lose_ack_requests: u32,
+    /// A refusal code every introspection answers with.
+    pub introspect_refusal: Option<(u16, String)>,
     /// When each answered probe arrived, as the send time's upper bound.
     pub answered_probes: Vec<Instant>,
 }
@@ -226,6 +228,9 @@ impl Gateway for FakeGateway {
             return gate;
         }
         let state = self.state.lock().unwrap();
+        if let Some((status, code)) = state.introspect_refusal.clone() {
+            return Box::pin(async move { refused(status, &code) });
+        }
         let result = match state.tokens.get(&token) {
             Some(t)
                 if !t.revoked
@@ -796,4 +801,28 @@ async fn a_lost_ack_is_sent_again_and_settles_once() {
         2,
         "sent again after the loss, then quiet once settled"
     );
+}
+
+/// A refusal of the target itself during an introspection (here a generation mismatch)
+/// fails closed for every managed caller at once, not just the one being admitted.
+#[tokio::test(flavor = "current_thread")]
+async fn a_target_refusal_during_introspection_fails_everything_closed() {
+    let lab = Lab::start().await;
+    let token_a = lab.fake.issue(NODE_A);
+    let token_b = lab.fake.issue(NODE_B);
+    let mut b = subscribed(lab.v6, &token_b).await;
+    lab.fake.state.lock().unwrap().introspect_refusal =
+        Some((409, "conn.managed_generation_mismatch".into()));
+    let cut = Instant::now();
+    assert_eq!(connect(lab.v4, "", Some(&token_a)).await.err(), Some(503));
+    let closed = tokio::time::timeout(Duration::from_secs(1), closed_at(&mut b))
+        .await
+        .expect("B stayed open");
+    eprintln!(
+        "LAB target refusal on introspection: fault→fence {} ms",
+        ms(closed - cut)
+    );
+    if let Some((low, high)) = lab.shared.read(|a| a.offset_bounds()) {
+        eprintln!("LAB clock offset bounds (Gateway − target): [{low}, {high}] ms");
+    }
 }

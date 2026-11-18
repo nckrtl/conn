@@ -37,7 +37,7 @@ impl Lab {
     fn probe(&mut self, at: u64) -> Probe {
         self.n += 1;
         self.a
-            .begin_probe(format!("nonce-{}", self.n), self.at(at))
+            .begin_probe(format!("nonce-{}", self.n), self.at(at), at)
             .expect("no probe outstanding")
     }
 
@@ -102,6 +102,7 @@ impl Lab {
                 self.a.applied().unwrap_or(0),
                 FAR,
                 epoch,
+                None,
                 self.at(at),
                 at,
             )
@@ -128,7 +129,9 @@ fn starts_closed_and_only_a_snapshot_opens_it() {
     assert!(!lab.a.available(lab.at(0)));
     let epoch = lab.a.epoch();
     assert_eq!(
-        lab.a.admit(1, 0, FAR, epoch, lab.at(0), 0).unwrap_err(),
+        lab.a
+            .admit(1, 0, FAR, epoch, None, lab.at(0), 0)
+            .unwrap_err(),
         Refusal::Unavailable
     );
     let probe = lab.probe(0);
@@ -163,7 +166,9 @@ fn a_next_revision_notice_fences_only_its_edges_at_once() {
     );
     let epoch = lab.a.epoch();
     assert_eq!(
-        lab.a.admit(1, 0, FAR, epoch, lab.at(100), 100).unwrap_err(),
+        lab.a
+            .admit(1, 0, FAR, epoch, None, lab.at(100), 100)
+            .unwrap_err(),
         Refusal::Fenced
     );
 }
@@ -384,12 +389,14 @@ fn after_failing_closed_only_a_snapshot_reopens_and_a_revoked_edge_stays_refused
     let epoch = lab.a.epoch();
     assert_eq!(
         lab.a
-            .admit(1, 1, FAR, epoch, lab.at(2_020), 2_020)
+            .admit(1, 1, FAR, epoch, None, lab.at(2_020), 2_020)
             .unwrap_err(),
         Refusal::Fenced
     );
     assert!(
-        lab.a.admit(2, 1, FAR, epoch, lab.at(2_020), 2_020).is_ok(),
+        lab.a
+            .admit(2, 1, FAR, epoch, None, lab.at(2_020), 2_020)
+            .is_ok(),
         "the unrelated edge recovers"
     );
 }
@@ -431,20 +438,33 @@ fn admission_needs_the_claims_revision_and_the_current_barrier() {
     lab.open(3, vec![1], 0);
     let epoch = lab.a.epoch();
     assert_eq!(
-        lab.a.admit(1, 4, FAR, epoch, lab.at(10), 10).unwrap_err(),
+        lab.a
+            .admit(1, 3, 10, epoch, None, lab.at(10), 10)
+            .unwrap_err(),
+        Refusal::Expired
+    );
+    let (handler, _) = lab.admit(1, 10);
+    assert_eq!(
+        lab.a
+            .admit(1, 5, FAR, epoch, None, lab.at(10), 10)
+            .unwrap_err(),
         Refusal::Reconcile,
         "the Gateway read a revision this target has not applied"
     );
+    // Revisions 4 and 5 are unknown: every boundary pauses, without closing, until a probe
+    // applies them.
     assert_eq!(
-        lab.a.admit(1, 3, 10, epoch, lab.at(10), 10).unwrap_err(),
-        Refusal::Expired
+        lab.a.handler_state(handler, FAR, lab.at(11), 11),
+        GateState::Paused
     );
     // A snapshot barrier drops introspections that started before it.
     let probe = lab.probe(20);
     lab.a.probe_failed(&probe.nonce);
-    lab.open(3, vec![1], 30);
+    lab.open(5, vec![1], 30);
     assert_eq!(
-        lab.a.admit(1, 3, FAR, epoch, lab.at(50), 50).unwrap_err(),
+        lab.a
+            .admit(1, 3, FAR, epoch, None, lab.at(50), 50)
+            .unwrap_err(),
         Refusal::Stale
     );
 }
@@ -457,7 +477,7 @@ fn a_closed_notice_link_fails_closed_and_blocks_recovery_until_it_returns() {
     lab.a.set_notice_link(false);
     assert!(*closed.borrow());
     assert!(
-        lab.a.begin_probe("x".into(), lab.at(100)).is_none(),
+        lab.a.begin_probe("x".into(), lab.at(100), 100).is_none(),
         "no snapshot without the link"
     );
     lab.a.set_notice_link(true);
@@ -479,4 +499,166 @@ fn a_notice_of_another_generation_fails_closed() {
         10,
     );
     assert!(!lab.a.is_open());
+}
+
+#[test]
+fn a_notice_ahead_pauses_until_a_probe_applies_it_even_after_the_gap_fills() {
+    let mut lab = Lab::new();
+    lab.open(10, vec![1, 2, 3], 0);
+    let (handler, closed) = lab.admit(3, 5);
+    lab.notice(12, vec![1], 50);
+    assert_eq!(
+        lab.a.handler_state(handler, FAR, lab.at(51), 51),
+        GateState::Paused
+    );
+    assert!(
+        !*closed.borrow(),
+        "an unrelated stream pauses, it is not closed"
+    );
+    lab.notice(11, vec![2], 60);
+    assert!(
+        lab.a.blocked(),
+        "notices never unblock; only a verified probe does"
+    );
+    let probe = lab.probe(70);
+    lab.reply_with(
+        &probe,
+        "delta",
+        12,
+        None,
+        Some(vec![(11, vec![2]), (12, vec![1])]),
+        vec![],
+        80,
+    );
+    assert_eq!(
+        lab.a.handler_state(handler, FAR, lab.at(81), 81),
+        GateState::Open
+    );
+}
+
+#[test]
+fn an_edge_named_by_two_notices_stays_fenced_until_both_are_settled() {
+    let mut lab = Lab::new();
+    lab.open(10, vec![1, 2], 0);
+    lab.notice(11, vec![1, 2], 50);
+    // This probe left before notice 12 arrived, so its reply cannot disprove 12.
+    let probe = lab.probe(55);
+    lab.notice(12, vec![1], 60);
+    let epoch = lab.a.epoch();
+    // Revision 11 removed only edge 2; notice 12 still covers edge 1.
+    lab.reply_with(
+        &probe,
+        "delta",
+        11,
+        None,
+        Some(vec![(11, vec![2])]),
+        vec![],
+        80,
+    );
+    assert!(lab.a.is_fenced(1), "notice 12 still fences edge 1");
+    assert!(lab.a.is_confirmed(2));
+    // Clearing a provisional fence later drops introspections that started before it.
+    let probe = lab.probe(1_000);
+    lab.reply(&probe, "current", 11, 1_010);
+    assert!(!lab.a.is_fenced(1), "notice 12 was disproved");
+    assert_ne!(lab.a.epoch(), epoch);
+}
+
+#[test]
+fn a_ticket_minted_before_a_fence_never_redeems() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let binding = TicketBinding {
+        edge: 1,
+        fence_generation: lab.a.edge_fence_generation(1),
+        redeem_by_ms: 10_000,
+    };
+    lab.notice(1, vec![1], 50);
+    let probe = lab.probe(100);
+    lab.reply(&probe, "current", 0, 110);
+    assert!(!lab.a.is_fenced(1), "the notice was disproved");
+    let epoch = lab.a.epoch();
+    assert_eq!(
+        lab.a
+            .admit(1, 0, FAR, epoch, Some(binding), lab.at(120), 120)
+            .unwrap_err(),
+        Refusal::Fenced
+    );
+    let late = TicketBinding {
+        fence_generation: lab.a.edge_fence_generation(1),
+        redeem_by_ms: 100,
+        ..binding
+    };
+    assert_eq!(
+        lab.a
+            .admit(1, 0, FAR, epoch, Some(late), lab.at(120), 120)
+            .unwrap_err(),
+        Refusal::Expired,
+        "the ticket's own deadline holds at registration"
+    );
+}
+
+#[test]
+fn a_reply_with_a_wrong_nonce_retires_the_probe_without_renewing() {
+    let mut lab = Lab::new();
+    let probe = lab.probe(0);
+    let forged = Probe {
+        nonce: "never-sent".into(),
+        ..probe.clone()
+    };
+    lab.reply_with(&forged, "snapshot", 0, Some(vec![1]), None, vec![], 10);
+    lab.a.retire_probe(&probe.nonce);
+    assert!(!lab.a.available(lab.at(10)));
+    lab.open(0, vec![1], 1_000);
+}
+
+#[test]
+fn a_notice_before_the_first_snapshot_still_gives_a_recovered_ack() {
+    let mut lab = Lab::new();
+    lab.notice(1, vec![1], 5);
+    let probe = lab.probe(10);
+    lab.reply_with(
+        &probe,
+        "snapshot",
+        1,
+        Some(vec![2]),
+        None,
+        vec![(1, vec![1])],
+        20,
+    );
+    let ack = lab.a.next_ack().expect("ack");
+    assert_eq!(ack.kind, AckKind::Recovered);
+    assert_eq!(ack.recovered_ms, Some(20));
+}
+
+#[test]
+fn settled_revisions_are_pruned_and_offset_bounds_recorded() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    lab.notice(1, vec![1], 50);
+    let probe = lab.probe(60);
+    let reply = AuthorityReply {
+        nonce: probe.nonce,
+        environment_id: ENV.into(),
+        generation: 1,
+        head_revision: 1,
+        server_time: Some(conn_support::time::iso_from_ms(1_000_065)),
+        kind: "delta".into(),
+        edges: None,
+        revisions: Some(vec![RevisionEdges {
+            revision: 1,
+            edge_ids: vec![1],
+        }]),
+        owed: vec![RevisionEdges {
+            revision: 1,
+            edge_ids: vec![1],
+        }],
+    };
+    lab.a.apply_reply(&reply, lab.at(70), 70);
+    // Gateway clock minus target clock: between 1_000_065 - 70 and 1_000_065 - 60.
+    assert_eq!(lab.a.offset_bounds(), Some((999_995, 1_000_005)));
+    lab.a.ack_started(1);
+    lab.a.ack_finished(1, true);
+    assert_eq!(lab.a.revision_records(), 0);
+    assert!(lab.a.is_confirmed(1), "the confirmed fence stays");
 }

@@ -51,8 +51,25 @@ Each is the fail-closed reading.
 - The "known test tab" is the provisioning's `previewTabs` list; empty refuses every preview.
 - `peer_address` is the TCP peer's IP, IPv4-mapped addresses unwrapped.
 - Realtime `url` must be `wss://` or `https://`; the socket path is `{url}/app/{key}`.
-- An owed revision whose fence this process observed is acknowledged `observed`, also after
-  a fail-closed recovery; `recovered` is only for revisions it did not see (a restart).
+- Owed revisions in the first snapshot of a process are acknowledged `recovered`. Later,
+  a revision whose fence this process observed is `observed`, also after a fail-closed
+  recovery.
+- "Blocks every managed admission, dispatch and output" is a pause: handlers stay
+  registered and send nothing until a probe applies the head, or the lease ends and they
+  close. A revision named by an introspection that the target has not applied pauses the
+  same way. Only a verified probe ends a pause; a later notice never does.
+- An introspection refused for the caller (`conn.managed_token_invalid`,
+  `conn.managed_peer_mismatch`, `conn.managed_direct_edge_required`) refuses that caller.
+  Any other refusal means the target lost its authority: everything fails closed.
+- A managed ticket redeems only for its own edge, before its deadline (checked where the
+  handler registers), and only if the edge was not fenced since it was minted. The session
+  then carries the token's principal and expiry.
+- Handlers end only when their last part has ended: RPC call tasks hold the session's
+  registration, and an HTTP body holds it until Hyper wrote or dropped it. Every frame part
+  passes the gate, and a stalled write is abandoned the moment the gate closes.
+- Settled revision records are pruned after their ACK; confirmed fences stay for the
+  generation. Each applied probe narrows the Gateway-to-target clock offset bounds from
+  `server_time` and the probe's send and receive times.
 
 ## Not proven here
 

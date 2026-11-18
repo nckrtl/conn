@@ -565,8 +565,16 @@ impl TestGate {
 }
 
 impl Gate for TestGate {
-    fn open(&self) -> bool {
-        self.open.load(Ordering::SeqCst)
+    fn state(&self) -> GateState {
+        if self.open.load(Ordering::SeqCst) {
+            GateState::Open
+        } else {
+            GateState::Closed
+        }
+    }
+
+    fn changed(&self) -> futures_core::future::BoxFuture<'static, ()> {
+        Box::pin(std::future::pending())
     }
 
     fn closed(&self) -> futures_core::future::BoxFuture<'static, ()> {

@@ -39,13 +39,85 @@ pub const CLOSE_TOO_LARGE: u16 = 1009;
 /// authority was lost.
 pub const CLOSE_POLICY: u16 = 1008;
 
-/// A check the session runs at every inbound dispatch and every outbound frame, and a signal
-/// that ends the session at once. Managed access (`managed/`) is the one gate today.
+/// What a gate allows now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateState {
+    Open,
+    /// Hold every dispatch and every frame; the session stays.
+    Paused,
+    /// End the session.
+    Closed,
+}
+
+/// A check the session runs at every inbound dispatch and every outbound frame part, and a
+/// signal that ends the session at once. Managed access (`managed/`) is the one gate today.
 pub trait Gate: Send + Sync {
-    /// Whether the session may still dispatch a call or send a frame.
-    fn open(&self) -> bool;
+    fn state(&self) -> GateState;
     /// Resolves when the session must end.
     fn closed(&self) -> futures_core::future::BoxFuture<'static, ()>;
+    /// Resolves when the state may have changed; a paused session looks again then.
+    fn changed(&self) -> futures_core::future::BoxFuture<'static, ()>;
+    fn open(&self) -> bool {
+        self.state() == GateState::Open
+    }
+}
+
+/// Waits while the gate is paused. `false` once it closed: the session must end.
+pub async fn pass(gate: Option<&SessionGate>) -> bool {
+    let Some(gate) = gate else {
+        return true;
+    };
+    loop {
+        match gate.0.state() {
+            GateState::Open => return true,
+            GateState::Closed => return false,
+            GateState::Paused => {
+                tokio::select! {
+                    () = gate.0.changed() => {}
+                    () = gate.0.closed() => return false,
+                }
+            }
+        }
+    }
+}
+
+/// Sends `text` only while the gate passes, checking before each part, and gives up the
+/// moment it closes, even inside a stalled write. `false`: the socket must be dropped.
+async fn write_gated<T: Transport>(
+    socket: &mut T,
+    text: String,
+    frame_parts: bool,
+    gate: Option<&SessionGate>,
+) -> bool {
+    let Some(gate) = gate else {
+        return write(socket, text, frame_parts).await;
+    };
+    let parts: Vec<String> = if !frame_parts || text.len() <= frame_parts::PART_BYTES {
+        vec![text]
+    } else {
+        frame_parts::split(&text, frame_parts::PART_BYTES)
+    };
+    for part in parts {
+        if !pass(Some(gate)).await {
+            return false;
+        }
+        let closed = gate.0.closed();
+        tokio::select! {
+            sent = socket.send(part) => if !sent { return false },
+            () = closed => return false,
+        }
+    }
+    true
+}
+
+/// Ends a session whose gate closed: a close frame if the socket takes it at once, else the
+/// socket is just dropped, so nothing buffered for it can still be sent.
+async fn revoke<T: Transport>(socket: &mut T) {
+    let _ = tokio::time::timeout(
+        Duration::from_millis(100),
+        socket.close(CLOSE_POLICY, "access revoked"),
+    )
+    .await;
 }
 
 /// The gate of one session. Holding it keeps the managed handler registered; the session
@@ -201,12 +273,11 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
         None => Box::pin(std::future::pending()),
     };
     tokio::pin!(gate_closed);
-    let gate_open = || gate.as_ref().is_none_or(|g| g.0.open());
 
     loop {
-        if !gate_open() {
+        if !pass(gate.as_ref()).await {
             // Calls drop with `calls`: their tasks abort and their queued frames go unsent.
-            socket.close(CLOSE_POLICY, "access revoked").await;
+            revoke(&mut socket).await;
             return;
         }
         if ended && calls.0.is_empty() {
@@ -225,11 +296,7 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                     }
                     _ => continue,
                 };
-                if !gate_open() {
-                    socket.close(CLOSE_POLICY, "access revoked").await;
-                    return;
-                }
-                if !write(&mut socket, text, options.frame_parts).await {
+                if !write_gated(&mut socket, text, options.frame_parts, gate.as_ref()).await {
                     return;
                 }
             }
@@ -256,7 +323,7 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                     Err(error) => {
                         // Effect answers an undecodable message with a connection Defect.
                         let defect = error_defect("ConnServerProtocolError", format!("invalid message: {error}"));
-                        if !send_frame(&mut socket, &FromServer::Defect { defect }, &options).await {
+                        if !write_gated(&mut socket, encode_server_frame(&FromServer::Defect { defect }), options.frame_parts, gate.as_ref()).await {
                             return;
                         }
                         continue;
@@ -285,20 +352,16 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                         },
                         // Effect ignores requests after `Eof` and duplicates of a live id.
                         FromClient::Request(request) if ended || calls.0.contains_key(&request.id) => None,
-                        FromClient::Request(_) if !gate_open() => {
-                            socket.close(CLOSE_POLICY, "access revoked").await;
-                            return;
-                        }
                         FromClient::Request(request) => {
-                            start(request, &table, &context, &outbox, &mut calls)
+                            if !pass(gate.as_ref()).await {
+                                revoke(&mut socket).await;
+                                return;
+                            }
+                            start(request, &table, &context, &outbox, &mut calls, gate.as_ref())
                         }
                     };
-                    if reply.is_some() && !gate_open() {
-                        socket.close(CLOSE_POLICY, "access revoked").await;
-                        return;
-                    }
                     if let Some(reply) = reply
-                        && !send_frame(&mut socket, &reply, &options).await
+                        && !write_gated(&mut socket, encode_server_frame(&reply), options.frame_parts, gate.as_ref()).await
                     {
                         return;
                     }
@@ -309,7 +372,7 @@ pub async fn run<T: Transport>(mut socket: T, table: Arc<MethodTable>, options: 
                 return;
             }
             () = &mut gate_closed => {
-                socket.close(CLOSE_POLICY, "access revoked").await;
+                revoke(&mut socket).await;
                 return;
             }
         }
@@ -323,7 +386,11 @@ fn start(
     context: &CallContext,
     outbox: &mpsc::Sender<Out>,
     calls: &mut Calls,
+    gate: Option<&SessionGate>,
 ) -> Option<FromServer> {
+    // Each call task holds the gate: the managed handler stays registered until the task
+    // itself has ended, not just been asked to abort.
+    let gate = gate.cloned();
     let Request {
         id,
         tag,
@@ -347,6 +414,7 @@ fn start(
         Handler::Unary(handler) => {
             let task_id = id.clone();
             let task = tokio::spawn(async move {
+                let _gate = gate;
                 let result = handler(ctx, payload).await;
                 let _ = outbox.send(finish(task_id, silent, result)).await;
             });
@@ -357,6 +425,7 @@ fn start(
             let window = Window::for_tag(&tag);
             let task_id = id.clone();
             let task = tokio::spawn(async move {
+                let _gate = gate;
                 let result = match handler(ctx, payload).await {
                     Ok(items) => {
                         let acks = (!silent).then_some(ack_rx);
@@ -472,14 +541,6 @@ fn exit_frame(id: &RequestId, exit: Exit) -> FromServer {
         request_id: id.clone(),
         exit,
     }
-}
-
-async fn send_frame<T: Transport>(
-    socket: &mut T,
-    frame: &FromServer,
-    options: &SessionOptions,
-) -> bool {
-    write(socket, encode_server_frame(frame), options.frame_parts).await
 }
 
 async fn write<T: Transport>(socket: &mut T, text: String, frame_parts: bool) -> bool {

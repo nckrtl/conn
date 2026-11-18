@@ -164,12 +164,14 @@ impl Shared {
     }
 
     /// Checks a managed bearer with the Gateway and admits it, registering its handler in
-    /// the same step. `allowed` checks the claims' profile for the route.
+    /// the same step. `allowed` checks the claims' profile for the route. A redeemed ticket
+    /// passes its binding, checked in that same step.
     pub async fn admit(
         self: &Arc<Self>,
         gateway: &Arc<dyn Gateway>,
         token: &str,
         peer_address: String,
+        ticket: Option<authority::TicketBinding>,
         allowed: impl Fn(&Claims) -> bool,
     ) -> Result<(ManagedPrincipal, Handle), AdmitError> {
         if !provision::has_secret_shape(token, provision::MANAGED_TOKEN_PREFIX) {
@@ -178,15 +180,17 @@ impl Shared {
         let (environment_id, generation) =
             self.read(|a| (a.environment_id().to_owned(), a.generation()));
         let mut changes = self.wait_change();
-        // A barrier or a reconcile asks for a fresh introspection; a few rounds at most.
-        for _ in 0..4 {
+        // A barrier, a cleared fence or a reconcile asks for a fresh introspection. Callers
+        // that arrive while the target recovers wait for it; the whole admission is bounded.
+        let deadline = Instant::now() + authority::LEASE * 2;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(AdmitError::Unavailable);
+            }
             let (epoch, available) = self.read(|a| (a.epoch(), a.available(Instant::now())));
             if !available {
-                // Callers that arrive while the target recovers wait for it, up to a lease.
-                if tokio::time::timeout(authority::LEASE, changes.changed())
-                    .await
-                    .is_err()
-                {
+                let wait = tokio::time::timeout_at(deadline, changes.changed()).await;
+                if !matches!(wait, Ok(Ok(()))) {
                     return Err(AdmitError::Unavailable);
                 }
                 continue;
@@ -195,6 +199,10 @@ impl Shared {
             let reply =
                 bounded(gateway.introspect(nonce.clone(), token.to_owned(), peer_address.clone()))
                     .await;
+            // A barrier dropped this introspection: whatever came back, ask again.
+            if self.read(|a| a.epoch()) != epoch {
+                continue;
+            }
             let claims = match reply {
                 Ok(value) => match serde_json::from_value::<Claims>(value) {
                     Ok(claims) => claims,
@@ -203,11 +211,12 @@ impl Shared {
                         return Err(AdmitError::Unavailable);
                     }
                 },
-                Err(GatewayError::Refused { status, .. }) if (400..500).contains(&status) => {
+                Err(GatewayError::Refused { code, .. }) if is_caller_refusal(&code) => {
                     return Err(AdmitError::Invalid);
                 }
                 Err(_) => {
-                    // The Gateway cannot answer: a failed check.
+                    // The Gateway refused the target itself, or cannot answer: authority is
+                    // lost for every caller.
                     self.fail_closed(Loss::ProbeFailed);
                     return Err(AdmitError::Unavailable);
                 }
@@ -235,6 +244,7 @@ impl Shared {
                         claims.revision,
                         expires_ms,
                         epoch,
+                        ticket,
                         Instant::now(),
                         now_ms(),
                     ),
@@ -260,12 +270,12 @@ impl Shared {
                     return Ok((principal, handle));
                 }
                 Err(Refusal::Fenced | Refusal::Expired) => return Err(AdmitError::Forbidden),
-                Err(Refusal::Stale) => {}
+                Err(Refusal::Stale | Refusal::Unavailable) => {}
                 Err(Refusal::Reconcile) => {
                     // The Gateway is ahead of us: reconcile first, then introspect again.
                     self.wake_probe.notify_one();
                     let target = claims.revision;
-                    let caught_up = tokio::time::timeout(authority::LEASE, async {
+                    let caught_up = tokio::time::timeout_at(deadline, async {
                         loop {
                             if self.read(|a| a.applied().is_some_and(|r| r >= target)) {
                                 return;
@@ -280,11 +290,21 @@ impl Shared {
                         return Err(AdmitError::Unavailable);
                     }
                 }
-                Err(Refusal::Unavailable) => {}
             }
         }
-        Err(AdmitError::Unavailable)
     }
+}
+
+/// Gateway refusals that concern only the presented token or its caller. Every other
+/// refusal (target identity, generation, the switch, unknown codes) means the target lost
+/// its authority.
+fn is_caller_refusal(code: &str) -> bool {
+    matches!(
+        code,
+        "conn.managed_token_invalid"
+            | "conn.managed_peer_mismatch"
+            | "conn.managed_direct_edge_required"
+    )
 }
 
 /// A Gateway call that answers within [`gateway::CALL_TIMEOUT`], or a transport failure.
@@ -320,10 +340,12 @@ impl std::fmt::Debug for Handle {
 }
 
 impl Handle {
-    /// Whether the handler may still send or dispatch.
-    pub fn open(&self) -> bool {
+    /// What the handler may do now. Finds an expired lease itself, so a boundary never
+    /// waits for the lease timer.
+    pub fn state(&self) -> crate::session::GateState {
+        use crate::session::GateState;
         if *self.closed.borrow() {
-            return false;
+            return GateState::Closed;
         }
         let now = Instant::now();
         let expired_lease = self
@@ -335,8 +357,19 @@ impl Handle {
                 ((), Effects::default())
             });
         }
-        self.shared
-            .read(|a| a.handler_allowed(self.id, self.expires_ms, now, now_ms()))
+        match self
+            .shared
+            .read(|a| a.handler_state(self.id, self.expires_ms, now, now_ms()))
+        {
+            authority::GateState::Open => GateState::Open,
+            authority::GateState::Paused => GateState::Paused,
+            authority::GateState::Closed => GateState::Closed,
+        }
+    }
+
+    /// Whether the handler may send or dispatch now.
+    pub fn open(&self) -> bool {
+        self.state() == crate::session::GateState::Open
     }
 
     /// Resolves when the fence closes this handler or its token expires.
@@ -350,6 +383,14 @@ impl Handle {
             }
         })
     }
+
+    /// Resolves at the next authority change, or within a short bound.
+    pub fn changed(&self) -> BoxFuture<'static, ()> {
+        let mut changes = self.shared.wait_change();
+        Box::pin(async move {
+            let _ = tokio::time::timeout(authority::PROBE_EVERY, changes.changed()).await;
+        })
+    }
 }
 
 impl Drop for Handle {
@@ -360,19 +401,28 @@ impl Drop for Handle {
 }
 
 impl crate::session::Gate for Handle {
-    fn open(&self) -> bool {
-        Handle::open(self)
+    fn state(&self) -> crate::session::GateState {
+        Handle::state(self)
     }
 
     fn closed(&self) -> BoxFuture<'static, ()> {
         Handle::closed(self)
+    }
+
+    fn changed(&self) -> BoxFuture<'static, ()> {
+        Handle::changed(self)
     }
 }
 
 async fn probe_loop(shared: Arc<Shared>, gateway: Arc<dyn Gateway>) {
     loop {
         let now = Instant::now();
-        let probe = shared.with(|a| (a.begin_probe(random_nonce(), now), Effects::default()));
+        let probe = shared.with(|a| {
+            (
+                a.begin_probe(random_nonce(), now, now_ms()),
+                Effects::default(),
+            )
+        });
         let mut next = now + authority::PROBE_EVERY;
         if let Some(probe) = probe {
             next = probe.sent + authority::PROBE_EVERY;
@@ -383,7 +433,11 @@ async fn probe_loop(shared: Arc<Shared>, gateway: Arc<dyn Gateway>) {
                 .and_then(|value| serde_json::from_value::<AuthorityReply>(value).ok());
             let again = shared.with(|a| match &reply {
                 Some(reply) => {
-                    let effects = a.apply_reply(reply, Instant::now(), now_ms());
+                    let mut effects = a.apply_reply(reply, Instant::now(), now_ms());
+                    // A reply that did not match the probe renews nothing; the call is over,
+                    // so the probe is retired and the next one goes out.
+                    let retired = a.retire_probe(&probe.nonce);
+                    effects.probe_now |= retired.probe_now;
                     (effects.probe_now, effects)
                 }
                 None => {

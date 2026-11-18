@@ -52,7 +52,9 @@ enum Route {
 struct Ticket {
     token: String,
     route: Route,
-    expires_ms: u64,
+    /// The edge, its fence generation at mint, and the redeem deadline: a fence of the edge
+    /// voids the ticket.
+    binding: super::authority::TicketBinding,
 }
 
 /// The managed ingress's state.
@@ -175,7 +177,7 @@ async fn admit_bearer(
     state
         .managed
         .shared
-        .admit(&state.managed.gateway, token, peer(addr), is_reader)
+        .admit(&state.managed.gateway, token, peer(addr), None, is_reader)
         .await
         .map_err(|e| Box::new(admit_failed(&e)))
 }
@@ -209,9 +211,22 @@ async fn ticket(
     let now = conn_support::time::now_ms();
     let expires_ms = principal.expires_ms.min(now + TICKET_TTL_MS);
     let ticket = format!("{TICKET_PREFIX}{}", crate::auth::random_hex(32));
+    let shared = &state.managed.shared;
+    let binding = super::authority::TicketBinding {
+        edge: principal.edge_id,
+        fence_generation: shared.read(|a| a.edge_fence_generation(principal.edge_id)),
+        redeem_by_ms: expires_ms,
+    };
     {
         let mut tickets = crate::lock(&state.managed.tickets);
-        tickets.retain(|_, t| t.expires_ms > now);
+        // Expired tickets and tickets of a fenced edge are void: they leave the pool.
+        shared.read(|a| {
+            tickets.retain(|_, t| {
+                t.binding.redeem_by_ms > now
+                    && !a.is_fenced(t.binding.edge)
+                    && a.edge_fence_generation(t.binding.edge) == t.binding.fence_generation
+            });
+        });
         if tickets.len() >= MAX_TICKETS {
             return error(StatusCode::TOO_MANY_REQUESTS, "managed_ticket_limit");
         }
@@ -223,7 +238,7 @@ async fn ticket(
             Ticket {
                 token: token.to_owned(),
                 route,
-                expires_ms,
+                binding,
             },
         );
     }
@@ -273,23 +288,27 @@ async fn admit_upgrade(
             "managed_ticket_invalid",
         )));
     };
-    if spent.route != route || spent.expires_ms <= conn_support::time::now_ms() {
+    if spent.route != route || spent.binding.redeem_by_ms <= conn_support::time::now_ms() {
         return Err(Box::new(error(
             StatusCode::UNAUTHORIZED,
             "managed_ticket_invalid",
         )));
     }
-    let (mut principal, handle) = state
+    // The redemption is checked again where the handler registers: the ticket's own edge,
+    // no fence since it was minted, and its deadline. The session then carries the token's
+    // principal and expiry, as the contract asks of a managed ticket.
+    state
         .managed
         .shared
-        .admit(&state.managed.gateway, &spent.token, peer(addr), is_reader)
+        .admit(
+            &state.managed.gateway,
+            &spent.token,
+            peer(addr),
+            Some(spent.binding),
+            is_reader,
+        )
         .await
-        .map_err(|e| Box::new(admit_failed(&e)))?;
-    // The ticket inherits the token's principal and never outlives its own expiry.
-    principal.expires_ms = principal
-        .expires_ms
-        .min(spent.expires_ms.max(conn_support::time::now_ms()));
-    Ok((principal, handle))
+        .map_err(|e| Box::new(admit_failed(&e)))
 }
 
 async fn ws(
@@ -350,17 +369,45 @@ fn engine(
 
 /// Runs `read` while the handler is open, and returns its value only if the handler is
 /// still open after it: a fence during the read withholds the data.
-async fn guarded(handle: &Handle, read: impl std::future::Future<Output = Response>) -> Response {
+///
+/// The body streams in parts that each pass the handler's gate, and the body holds the
+/// handler: it stays registered until Hyper has written or dropped the last byte, and a
+/// fence ends the body (Hyper then drops the connection).
+async fn guarded(
+    handle: Handle,
+    read: impl std::future::Future<Output = Result<Response, Response>>,
+) -> Response {
     let closed = handle.closed();
     let response = tokio::select! {
         response = read => response,
         () = closed => return admit_failed(&AdmitError::Forbidden),
     };
-    if handle.open() {
-        response
-    } else {
-        admit_failed(&AdmitError::Forbidden)
+    let response = match response {
+        Ok(response) => response,
+        Err(response) => return response,
+    };
+    if !handle.open() {
+        return admit_failed(&AdmitError::Forbidden);
     }
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return crate::http::internal_reason("managed_body_failed");
+    };
+    let handle = Arc::new(handle);
+    const PART: usize = 16 * 1024;
+    let stream = futures_util::stream::unfold((bytes, handle), |(mut rest, handle)| async move {
+        if rest.is_empty() {
+            return None;
+        }
+        if !crate::session::pass(Some(&SessionGate(handle.clone()))).await {
+            let fenced: Result<axum::body::Bytes, std::io::Error> =
+                Err(std::io::Error::other("access revoked"));
+            return Some((fenced, (axum::body::Bytes::new(), handle)));
+        }
+        let part = rest.split_to(rest.len().min(PART));
+        Some((Ok(part), (rest, handle)))
+    });
+    Response::from_parts(parts, axum::body::Body::from_stream(stream))
 }
 
 async fn shell_snapshot(
@@ -376,10 +423,12 @@ async fn shell_snapshot(
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
-    guarded(&handle, async move {
+    guarded(handle, async move {
         match engine.shell_snapshot().await {
-            Ok(snapshot) => Json(snapshot).into_response(),
-            Err(_) => crate::http::internal_reason("orchestration_snapshot_failed"),
+            Ok(snapshot) => Ok(Json(snapshot).into_response()),
+            Err(_) => Err(crate::http::internal_reason(
+                "orchestration_snapshot_failed",
+            )),
         }
     })
     .await
@@ -399,11 +448,13 @@ async fn thread_snapshot(
         Ok(admitted) => admitted,
         Err(response) => return *response,
     };
-    guarded(&handle, async move {
+    guarded(handle, async move {
         match engine.thread_snapshot(thread_id.into()).await {
-            Ok(Some(snapshot)) => Json(snapshot).into_response(),
-            Ok(None) => StatusCode::NOT_FOUND.into_response(),
-            Err(_) => crate::http::internal_reason("orchestration_thread_snapshot_failed"),
+            Ok(Some(snapshot)) => Ok(Json(snapshot).into_response()),
+            Ok(None) => Err(StatusCode::NOT_FOUND.into_response()),
+            Err(_) => Err(crate::http::internal_reason(
+                "orchestration_thread_snapshot_failed",
+            )),
         }
     })
     .await

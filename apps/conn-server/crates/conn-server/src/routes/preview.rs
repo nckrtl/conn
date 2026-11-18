@@ -109,6 +109,21 @@ async fn send(socket: &mut WebSocket, message: Message) -> bool {
         Ok(Ok(()))
     )
 }
+/// `send`, but only while the gate passes, and abandoned the moment it closes.
+async fn gated_send(socket: &mut WebSocket, message: Message, gate: &Option<SessionGate>) -> bool {
+    let Some(gate) = gate else {
+        return send(socket, message).await;
+    };
+    if !crate::session::pass(Some(gate)).await {
+        return false;
+    }
+    let closed = gate.0.closed();
+    tokio::select! {
+        sent = send(socket, message) => sent,
+        () = closed => false,
+    }
+}
+
 async fn drive(mut socket: WebSocket, mut viewer: Viewer, gate: Option<SessionGate>) {
     let open = |gate: &Option<SessionGate>| gate.as_ref().is_none_or(|g| g.0.open());
     let closed = match &gate {
@@ -116,19 +131,19 @@ async fn drive(mut socket: WebSocket, mut viewer: Viewer, gate: Option<SessionGa
         None => Box::pin(std::future::pending()),
     };
     tokio::pin!(closed);
-    if !open(&gate)
-        || !send(
-            &mut socket,
-            Message::Text(viewer.control().to_string().into()),
-        )
-        .await
+    if !gated_send(
+        &mut socket,
+        Message::Text(viewer.control().to_string().into()),
+        &gate,
+    )
+    .await
     {
         return;
     }
     let mut in_flight: Option<conn_preview::tabs::ViewerFrame> = None;
     let mut pending: Option<conn_preview::tabs::ViewerFrame> = None;
     loop {
-        if !open(&gate) {
+        if !crate::session::pass(gate.as_ref()).await {
             break;
         }
         tokio::select! {
@@ -139,12 +154,12 @@ async fn drive(mut socket: WebSocket, mut viewer: Viewer, gate: Option<SessionGa
                let Ok(message)=serde_json::from_slice::<Value>(&text)else{continue;};
                if message.get("type").and_then(Value::as_str)==Some("ack"){
                    if let Some(frame)=in_flight.take(){frame.release();}
-                   if let Some(frame)=pending.take(){if !open(&gate)||!send(&mut socket,Message::Binary(Bytes::from_owner(frame.data.clone()))).await{break;}in_flight=Some(frame);}
+                   if let Some(frame)=pending.take(){if !gated_send(&mut socket,Message::Binary(Bytes::from_owner(frame.data.clone())),&gate).await{break;}in_flight=Some(frame);}
                }else if open(&gate){let _=viewer.input(message).await;}
            },
            output=viewer.next()=>match output{
-               Ok(ViewerOutput::Frame(frame))=>{if in_flight.is_some(){if let Some(old)=pending.replace(frame){old.release();}}else{if !open(&gate)||!send(&mut socket,Message::Binary(Bytes::from_owner(frame.data.clone()))).await{break;}in_flight=Some(frame);}},
-               Ok(ViewerOutput::Message(message))=>if !open(&gate)||!send(&mut socket,Message::Text(message.to_string().into())).await{break;},
+               Ok(ViewerOutput::Frame(frame))=>{if in_flight.is_some(){if let Some(old)=pending.replace(frame){old.release();}}else{if !gated_send(&mut socket,Message::Binary(Bytes::from_owner(frame.data.clone())),&gate).await{break;}in_flight=Some(frame);}},
+               Ok(ViewerOutput::Message(message))=>if !gated_send(&mut socket,Message::Text(message.to_string().into()),&gate).await{break;},
                _=>{let _=send(&mut socket,Message::Close(Some(CloseFrame{code:4404,reason:"tab closed".into()}))).await;break;}
            }
         }

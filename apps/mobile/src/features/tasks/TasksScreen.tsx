@@ -7,7 +7,6 @@ import { ActivityIndicator, ScrollView, View } from "react-native";
 import { RefreshControl } from "../../components/ui/RefreshControl";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { ConnSymbolScope } from "../../components/ConnSymbolScope";
 import { AppText as Text } from "../../components/ui/AppText";
 import { GlassSurface } from "../../components/ui/GlassSurface";
 import { Menu } from "../../components/ui/Menu";
@@ -153,76 +152,72 @@ export function TasksScreen() {
   const bottomClearance = workspace?.bottomClearance ?? insets.bottom + 16;
 
   return (
-    <ConnSymbolScope>
-      <View className="flex-1 bg-screen">
-        {connPhoneBar ? (
-          <WorkspacePhoneBar filterMenu={filterMenu} filterActive={lane !== "in-progress"} />
-        ) : null}
-        <ScrollView
-          contentInsetAdjustmentBehavior="never"
-          contentContainerStyle={{
-            paddingTop: topInset + BAR_HEIGHT + 4,
-            paddingBottom: bottomClearance,
-          }}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => void refresh()}
-              progressViewOffset={topInset + BAR_HEIGHT}
-            />
-          }
-          alwaysBounceVertical
-        >
-          {state.status === "loading" ? (
-            <ActivityIndicator className="mt-10" />
-          ) : state.status === "error" ? (
-            <View className="items-center gap-1 px-8 py-10">
-              <Text className="text-center text-base font-t3-medium text-foreground">
-                {m(tasksErrorText(state.reason).title)}
-              </Text>
-              <Text className="text-center text-[15px] text-foreground-muted">
-                {m(tasksErrorText(state.reason).detail)}
-              </Text>
-            </View>
-          ) : visible.length === 0 ? (
-            <Text className="px-8 py-10 text-center text-[15px] text-foreground-muted">
-              {query ? gt("No matching tasks") : gt("Nothing here")}
+    <View className="flex-1 bg-screen">
+      {connPhoneBar ? (
+        <WorkspacePhoneBar filterMenu={filterMenu} filterActive={lane !== "in-progress"} />
+      ) : null}
+      <ScrollView
+        contentInsetAdjustmentBehavior="never"
+        contentContainerStyle={{
+          paddingTop: topInset + BAR_HEIGHT + 4,
+          paddingBottom: bottomClearance,
+        }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void refresh()}
+            progressViewOffset={topInset + BAR_HEIGHT}
+          />
+        }
+        alwaysBounceVertical
+      >
+        {state.status === "loading" ? (
+          <ActivityIndicator className="mt-10" />
+        ) : state.status === "error" ? (
+          <View className="items-center gap-1 px-8 py-10">
+            <Text className="text-center text-base font-t3-medium text-foreground">
+              {m(tasksErrorText(state.reason).title)}
             </Text>
-          ) : (
-            visible.map((task) => (
-              <TaskRow
-                key={task.id}
-                task={task}
-                durationMs={durations.get(task.id) ?? null}
-                now={now}
-                onPress={() => open(task)}
-              />
-            ))
-          )}
-        </ScrollView>
-        <TasksTopBar
-          top={topInset}
-          title={gt("Tasks")}
-          subtitle={
-            state.status === "ok" ? `${m(TASK_LANE_LABELS[lane])} · ${visible.length}` : null
-          }
-          menu={
-            <Menu
-              actions={laneActions}
-              onPressAction={({ nativeEvent }) => {
-                const next = MOBILE_TASK_LANES.find((id) => id === nativeEvent.event);
-                if (next) setLane(next);
-              }}
-            >
-              <GlassCircle
-                accessibilityLabel={gt("Filter tasks")}
-                icon="line.3.horizontal.decrease"
-              />
-            </Menu>
-          }
-        />
-      </View>
-    </ConnSymbolScope>
+            <Text className="text-center text-[15px] text-foreground-muted">
+              {m(tasksErrorText(state.reason).detail)}
+            </Text>
+          </View>
+        ) : visible.length === 0 ? (
+          <Text className="px-8 py-10 text-center text-[15px] text-foreground-muted">
+            {query ? gt("No matching tasks") : gt("Nothing here")}
+          </Text>
+        ) : (
+          visible.map((task) => (
+            <TaskRow
+              key={task.id}
+              task={task}
+              durationMs={durations.get(task.id) ?? null}
+              now={now}
+              onPress={() => open(task)}
+            />
+          ))
+        )}
+      </ScrollView>
+      <TasksTopBar
+        top={topInset}
+        title={gt("Tasks")}
+        subtitle={state.status === "ok" ? `${m(TASK_LANE_LABELS[lane])} · ${visible.length}` : null}
+        menu={
+          <Menu
+            actions={laneActions}
+            onPressAction={({ nativeEvent }) => {
+              const next = MOBILE_TASK_LANES.find((id) => id === nativeEvent.event);
+              if (next) setLane(next);
+            }}
+          >
+            <GlassCircle
+              accessibilityLabel={gt("Filter tasks")}
+              icon="line.3.horizontal.decrease"
+            />
+          </Menu>
+        }
+      />
+    </View>
   );
 }
 

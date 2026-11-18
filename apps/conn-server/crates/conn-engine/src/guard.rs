@@ -56,6 +56,28 @@ pub trait CommitGate: Send + Sync {
     fn commit_if_open(&self, commit: &mut dyn FnMut()) -> bool;
 }
 
+/// Whether a stored message is exactly a frozen task message: a user message with the
+/// frozen text, no attachments, and none of the fields a task message never carries
+/// (context, notification, scheduled task, sender). The guard and the settlement read use
+/// this one check.
+pub fn is_frozen_message(message: &Value, text_sha256: &str) -> bool {
+    let plain = [
+        "context",
+        "notification",
+        "scheduledTaskId",
+        "senderThreadId",
+    ]
+    .iter()
+    .all(|key| message.get(key).is_none_or(Value::is_null));
+    let no_attachments = message["attachments"].as_array().is_none_or(Vec::is_empty);
+    message["role"] == "user"
+        && plain
+        && no_attachments
+        && message["text"]
+            .as_str()
+            .is_some_and(|t| sha256_hex(t) == text_sha256)
+}
+
 fn text<'a>(command: &'a Value, key: &str) -> &'a str {
     command[key].as_str().unwrap_or_default()
 }
@@ -154,10 +176,7 @@ pub(crate) fn check(
             let Some(message) = tx.entity(thread_id, "messages", from)? else {
                 return reject("The admitted message cannot be read.");
             };
-            if message["text"]
-                .as_str()
-                .is_none_or(|t| sha256_hex(t) != owned.text_sha256)
-            {
+            if !is_frozen_message(&message, &owned.text_sha256) {
                 return reject("The message's body differs from the frozen one.");
             }
             let started = tx

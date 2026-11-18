@@ -141,10 +141,12 @@ subscription ends when its thread is deleted or names another project. An earlie
 other thread is cut to its frozen message, the run it started, and that run's nodes and
 requests, with a thread rebuilt from an allowlist (title "Earlier turn", the run's model,
 no branch, worktree, tags or later provider thread, times from that evidence); a
-different body, no run or several runs, or another recorded run is refused instead. A
+different body (text, attachments, context, sender), no run, a run that never started
+(still queued or cancelled in the queue), several runs, or another recorded run is
+refused instead. Stops use the same frozen-message check. A
 thread ID that was ever deleted is never read or written by a worker: the check runs
-after the read (a deletion is never undone), and a subscription's snapshot passes only
-if no deletion preceded it. Worker views carry only the thread's own rows (T3 also lists
+after the read (a deletion is never undone), and again once a subscription's cursor is
+set; later deletions arrive as events and end the stream. Worker views carry only the thread's own rows (T3 also lists
 its subagents' provider threads, which belong to the child threads). A settlement view
 has fixed runtime and interaction modes, and no evidence at all is a refusal.
 Refusals are the scope check's `EnvironmentAuthorizationError`. A guarded create never

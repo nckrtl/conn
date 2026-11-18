@@ -66,7 +66,7 @@ pub use engine::{
     CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, ProjectConfig, RuntimePolicyOverride,
     SqliteEngine,
 };
-pub use guard::{CommitGate, DispatchGuard, GuardRule, OwnedMessage};
+pub use guard::{CommitGate, DispatchGuard, GuardRule, OwnedMessage, is_frozen_message};
 pub use streaming::ResponseStreamingMode;
 
 /// What a [`TitleGenerator`] titles: the first message of a new thread, or a whole thread whose

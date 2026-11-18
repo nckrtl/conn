@@ -314,10 +314,7 @@ impl TaskGrant {
                 // and the earlier turn stays unsettled.
                 continue;
             };
-            let digest = message["text"]
-                .as_str()
-                .map(|t| conn_support::hex::hex(&conn_support::hmac::sha256(t.as_bytes())));
-            if found.len() != 1 || digest.as_deref() != Some(earlier.text_sha256.as_str()) {
+            if found.len() != 1 || !conn_engine::is_frozen_message(message, &earlier.text_sha256) {
                 return Err("the earlier message differs from the frozen one".into());
             }
             let started: Vec<Value> = rows("runs")
@@ -329,6 +326,11 @@ impl TaskGrant {
             let [run] = started.as_slice() else {
                 return Err("the earlier message did not start exactly one run".into());
             };
+            // A run row exists from the moment a message queues; only one that left the queue
+            // and started is evidence of the turn.
+            if run["startedAt"].is_null() {
+                return Err("the earlier run never started".into());
+            }
             if earlier
                 .run_id
                 .as_ref()
@@ -612,18 +614,19 @@ pub fn table(
                     return Err(outside("not the admitted thread", READ));
                 }
                 read_thread(&e, &g, ThreadId::from(input.thread_id.clone())).await?;
-                e.subscribe_thread(input)
-                    .await
-                    .map(crate::methods::orchestration::forward)
-                    .map(|items| {
-                        bound_to_project(
-                            items,
-                            g.project_id.clone(),
-                            g.thread_id.clone(),
-                            e.clone(),
-                        )
-                    })
-                    .map_err(failure)
+                let items = e.subscribe_thread(input).await.map_err(failure)?;
+                // The stream's cursor is set now: a deletion before this point is in the
+                // history, a later one arrives as an event and ends the stream.
+                if e.thread_ever_deleted(&g.thread_id).await.unwrap_or(true) {
+                    return Err(outside("the thread ID was deleted before", READ));
+                }
+                let items = crate::methods::orchestration::forward(items);
+                Ok(bound_to_project(
+                    items,
+                    g.project_id.clone(),
+                    g.thread_id.clone(),
+                    e.clone(),
+                ))
             }
         },
     );

@@ -909,3 +909,61 @@ async fn a_settlement_read_without_evidence_is_a_typed_refusal_and_modes_are_fix
     );
     assert_eq!(view["thread"]["interactionMode"], "default");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn settlement_evidence_needs_the_plain_frozen_message_and_a_started_run() {
+    let lab = Lab::start().await;
+    let earlier_thread = "reviewer-thread";
+    let mut create = create_command();
+    create["commandId"] = json!("person-create-r");
+    create["threadId"] = json!(earlier_thread);
+    person(&lab, create).await;
+    let on_earlier = |command_id: &str, message_id: &str, text: &str| {
+        let mut command = dispatch_command(command_id, message_id, text);
+        command["threadId"] = json!(earlier_thread);
+        command
+    };
+    // The frozen ID and text, but sent with a sender: not the frozen message.
+    let mut extra = on_earlier("pr1", "r1", "hang");
+    extra["senderThreadId"] = json!("t-other");
+    person(&lab, extra).await;
+    let r1 = until_run(&lab, earlier_thread, "r1", "running").await;
+    // A queued run, then the same cancelled while still queued.
+    person(&lab, on_earlier("pr2", "r2", "later")).await;
+    let r2 = until_run(&lab, earlier_thread, "r2", "queued").await;
+    let mut g = grant("m1", "do it", true);
+    g["earlier"] = json!([
+        {"thread_id": earlier_thread, "message_id": "r1", "text_sha256": sha("hang"),
+         "interrupt_command_id": "stop-r1"},
+    ]);
+    let mut w = worker(&lab, g).await;
+    assert!(
+        read(&mut w, 1, earlier_thread).await.is_err(),
+        "not the frozen message"
+    );
+    let mut stop_r1 = stop("stop-r1", &r1["id"]);
+    stop_r1["threadId"] = json!(earlier_thread);
+    assert!(dispatch(&mut w, 2, stop_r1).await.is_err());
+    until_run(&lab, earlier_thread, "r1", "running").await;
+    let mut queued = grant("m1", "do it", true);
+    queued["earlier"] = json!([
+        {"thread_id": earlier_thread, "message_id": "r2", "text_sha256": sha("later"),
+         "interrupt_command_id": "stop-r2"},
+    ]);
+    let mut w2 = worker(&lab, queued).await;
+    assert!(
+        read(&mut w2, 1, earlier_thread).await.is_err(),
+        "a queued run is no evidence"
+    );
+    person(
+        &lab,
+        json!({"type": "run.interrupt", "commandId": "person-cancel-r2",
+        "threadId": earlier_thread, "runId": r2["id"]}),
+    )
+    .await;
+    until_run(&lab, earlier_thread, "r2", "cancelled").await;
+    assert!(
+        read(&mut w2, 2, earlier_thread).await.is_err(),
+        "cancelled in the queue: no evidence"
+    );
+}

@@ -73,7 +73,10 @@ Each is the fail-closed reading.
   tasks hold the session's registration too, and closes are bounded.
 - A token's expiry is enforced as a target monotonic deadline, without the target's wall
   clock: the last applied probe's monotonic send time plus (expiry − its `server_time`).
-  Ticket lifetimes are monotonic too. Close times are the fence's wall time plus elapsed
+  Each verified probe recomputes every open handler's deadline from its Gateway expiry, so
+  a Gateway clock that moves ahead ends tokens sooner, idle or not. Ticket lifetimes are
+  monotonic too. The reported offset interval is widened by a millisecond each side for
+  truncation. Close times are the fence's wall time plus elapsed
   monotonic time, so a wall clock step never puts a close before its fence.
 - `/broadcasting/auth` answers the bare Pusher object `{"auth": …}`; every other target
   route answers `{"data": …}`. A target refusal on any route (`/ack` included) fails

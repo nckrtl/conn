@@ -269,6 +269,7 @@ impl Shared {
                         now,
                         now_ms(),
                     )
+                    .inspect(|(id, _)| a.set_handler_expiry(*id, expires_ms))
                     .map(|(id, closed)| (id, closed, expires)),
                     Effects::default(),
                 )

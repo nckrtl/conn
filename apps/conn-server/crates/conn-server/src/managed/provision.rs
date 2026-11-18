@@ -97,7 +97,10 @@ fn read_protected(path: &Path, what: &str) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+        // Non-blocking too: a FIFO cannot hang the open before the regular-file check.
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
     }
     let mut file = options.open(path).map_err(|e| format!("{what}: {e}"))?;
     #[cfg(unix)]

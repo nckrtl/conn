@@ -154,6 +154,9 @@ struct RevisionRecord {
 struct HandlerEntry {
     edge: EdgeId,
     close: watch::Sender<bool>,
+    /// The token's expiry on the Gateway's clock. Its local deadline is recomputed from
+    /// every verified probe, so a Gateway clock that moves ahead shortens it.
+    expires_gateway_ms: Option<u64>,
 }
 
 struct NoticeRecord {
@@ -437,7 +440,10 @@ impl Authority {
             return GateState::Closed;
         };
         // A handler told to close stays closed, even after authority recovers.
-        if *entry.close.borrow() || !self.held(now) || self.is_fenced(entry.edge) || now >= expires
+        if *entry.close.borrow()
+            || !self.held(now)
+            || self.is_fenced(entry.edge)
+            || now >= self.handler_deadline(entry, expires, now)
         {
             GateState::Closed
         } else if self.blocked() {
@@ -500,11 +506,45 @@ impl Authority {
         Ok(self.register(edge))
     }
 
+    /// Records the Gateway expiry of a just-admitted handler.
+    pub fn set_handler_expiry(&mut self, handler: u64, gateway_ms: u64) {
+        if let Some(entry) = self.handlers.get_mut(&handler) {
+            entry.expires_gateway_ms = Some(gateway_ms);
+        }
+    }
+
+    /// The deadline a handler has now: its admission deadline, or an earlier one the last
+    /// verified Gateway time sets.
+    fn handler_deadline(&self, entry: &HandlerEntry, admitted: Instant, now: Instant) -> Instant {
+        entry
+            .expires_gateway_ms
+            .map_or(admitted, |ms| admitted.min(self.local_deadline(ms, now, 0)))
+    }
+
+    /// Closes every handler whose token expired by the Gateway's verified time.
+    fn close_expired(&self, now: Instant) {
+        for entry in self.handlers.values() {
+            if entry
+                .expires_gateway_ms
+                .is_some_and(|ms| now >= self.local_deadline(ms, now, 0))
+            {
+                entry.close.send_replace(true);
+            }
+        }
+    }
+
     fn register(&mut self, edge: EdgeId) -> (u64, watch::Receiver<bool>) {
         let id = self.next_handler;
         self.next_handler += 1;
         let (close, closed) = watch::channel(false);
-        self.handlers.insert(id, HandlerEntry { edge, close });
+        self.handlers.insert(
+            id,
+            HandlerEntry {
+                edge,
+                close,
+                expires_gateway_ms: None,
+            },
+        );
         (id, closed)
     }
 
@@ -800,6 +840,9 @@ impl Authority {
         if let Some(server) = reply.server_time.as_deref().and_then(ceil_millis_from_iso) {
             self.anchor = Some((probe.sent, server));
         }
+        // A Gateway clock that moved ahead can end tokens sooner: close them now, idle or
+        // stalled, rather than at their admission deadline.
+        self.close_expired(now);
         self.open = true;
         self.lease_until = Some(new_lease);
         self.settle_closes(wall_ms);
@@ -819,7 +862,9 @@ impl Authority {
         let (Ok(sent), Ok(received)) = (i64::try_from(sent_ms), i64::try_from(received_ms)) else {
             return;
         };
-        let bounds = (server - received, server - sent);
+        // Every time here is truncated to the millisecond: widen by one on each side so the
+        // interval still holds the true offset.
+        let bounds = (server - received - 1, server - sent + 1);
         self.offset_bounds = Some(match self.offset_bounds {
             Some((low, high)) if bounds.0.max(low) <= bounds.1.min(high) => {
                 (bounds.0.max(low), bounds.1.min(high))

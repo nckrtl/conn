@@ -659,7 +659,7 @@ fn settled_revisions_are_pruned_and_offset_bounds_recorded() {
     };
     lab.a.apply_reply(&reply, lab.at(70), 70);
     // Gateway clock minus target clock: between 1_000_065 - 70 and 1_000_065 - 60.
-    assert_eq!(lab.a.offset_bounds(), Some((999_995, 1_000_005)));
+    assert_eq!(lab.a.offset_bounds(), Some((999_994, 1_000_006)));
     lab.a.ack_started(1);
     lab.a.ack_finished(1, true);
     assert_eq!(lab.a.revision_records(), 0);
@@ -728,7 +728,7 @@ fn token_expiry_is_a_local_deadline_on_the_safe_side_of_the_offset() {
     let mut lab = Lab::new();
     lab.open(0, vec![1], 0);
     // The opening snapshot read the Gateway at 10 between sends at 0 and 10: up to 10 ahead.
-    assert_eq!(lab.a.offset_bounds(), Some((0, 10)));
+    assert_eq!(lab.a.offset_bounds(), Some((-1, 11)));
     assert_eq!(lab.a.local_deadline(10_000, lab.at(0), 0), lab.at(9_990));
     let probe = lab.probe(1_000);
     let reply = AuthorityReply {
@@ -744,7 +744,7 @@ fn token_expiry_is_a_local_deadline_on_the_safe_side_of_the_offset() {
     };
     lab.a.apply_reply(&reply, lab.at(1_010), 1_010);
     // The Gateway runs 4,995 to 5,005 ms ahead: its expiry comes up to 5,005 ms sooner here.
-    assert_eq!(lab.a.offset_bounds(), Some((4_995, 5_005)));
+    assert_eq!(lab.a.offset_bounds(), Some((4_994, 5_006)));
     assert_eq!(
         lab.a.local_deadline(20_000, lab.at(1_010), 1_010),
         lab.at(1_010 + 20_000 - 5_005 - 1_010)
@@ -947,10 +947,10 @@ fn a_gateway_behind_the_target_does_not_expire_tokens_early() {
         owed: vec![],
     };
     lab.a.apply_reply(&reply, lab.at(40_010), 40_010);
-    assert_eq!(lab.a.offset_bounds(), Some((-30_005, -29_995)));
+    assert_eq!(lab.a.offset_bounds(), Some((-30_006, -29_994)));
     // A token the Gateway says ends at 30,005 (20 s from its now) ends here no sooner than
     // 30,005 + 29,995: the earliest target time the Gateway can read 30,005.
-    assert_eq!(lab.a.local_wall_ms(30_005), 60_000);
+    assert_eq!(lab.a.local_wall_ms(30_005), 59_999);
 }
 
 #[test]
@@ -1002,5 +1002,38 @@ fn a_gateway_time_with_microseconds_rounds_up() {
     assert_eq!(
         ceil_millis_from_iso("2026-11-18T12:00:00.999000+00:00"),
         conn_support::time::millis_from_iso("2026-11-18T12:00:00.999Z")
+    );
+}
+
+#[test]
+fn a_gateway_clock_that_moves_ahead_ends_open_handlers_at_once() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let (handler, closed) = lab.admit(1, 5);
+    // The token ends at Gateway time 60,000: about a minute from now.
+    lab.a.set_handler_expiry(handler, 60_000);
+    assert_eq!(
+        lab.a.handler_state(handler, far(), lab.at(10)),
+        GateState::Open
+    );
+    // The next probe finds the Gateway two minutes ahead: the token is over there.
+    let probe = lab.probe(1_000);
+    let reply = AuthorityReply {
+        nonce: probe.nonce,
+        environment_id: ENV.into(),
+        generation: 1,
+        head_revision: 0,
+        server_time: Some(conn_support::time::iso_from_ms(121_000)),
+        kind: "current".into(),
+        edges: None,
+        revisions: None,
+        owed: vec![],
+    };
+    lab.a.apply_reply(&reply, lab.at(1_010), 1_010);
+    assert!(lab.a.is_open(), "the lease is live");
+    assert!(*closed.borrow(), "the idle handler is told to close");
+    assert_eq!(
+        lab.a.handler_state(handler, far(), lab.at(1_011)),
+        GateState::Closed
     );
 }

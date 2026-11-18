@@ -74,35 +74,41 @@ pub(crate) async fn upgrade_viewer(
             .min(max)
     };
     // A pause waits before the attachment; under the tab's lock the gate is asked again, so
-    // a pause or fence that lands while it waits attaches nothing.
-    if !crate::session::pass(gate.as_ref()).await {
-        return StatusCode::FORBIDDEN.into_response();
-    }
+    // a pause or fence that lands while it waits attaches nothing. A pause there is not a
+    // closed tab: the attachment waits it out and tries again; only a fence refuses.
     let gate_for_attach = gate.clone();
     let admit = move || {
         gate_for_attach
             .as_ref()
             .is_none_or(|g| g.0.state() == crate::session::GateState::Open)
     };
-    let attach = preview.attach_viewer_checked(
-        thread,
-        tab,
-        can_operate,
-        number("maxWidth", 1280, 7680),
-        number("maxHeight", 800, 4320),
-        number("quality", 70, 100),
-        &admit,
-    );
-    let viewer = match &gate {
-        // A fence while the attachment waits releases the handler at once.
-        Some(gate) => tokio::select! {
-            biased;
-            () = gate.0.closed() => return StatusCode::FORBIDDEN.into_response(),
-            viewer = attach => viewer,
-        },
-        None => attach.await,
+    let viewer = loop {
+        if !crate::session::pass(gate.as_ref()).await {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let attach = preview.attach_viewer_checked(
+            thread,
+            tab,
+            can_operate,
+            number("maxWidth", 1280, 7680),
+            number("maxHeight", 800, 4320),
+            number("quality", 70, 100),
+            &admit,
+        );
+        let viewer = match &gate {
+            // A fence while the attachment waits releases the handler at once.
+            Some(gate) => tokio::select! {
+                biased;
+                () = gate.0.closed() => return StatusCode::FORBIDDEN.into_response(),
+                viewer = attach => viewer,
+            },
+            None => attach.await,
+        };
+        match viewer {
+            Err(error) if error.0 == conn_preview::tabs::ADMISSION_REFUSED => continue,
+            viewer => break viewer,
+        }
     };
-    // A pause waits; only a fence refuses.
     if !crate::session::pass(gate.as_ref()).await {
         return StatusCode::FORBIDDEN.into_response();
     }

@@ -313,20 +313,29 @@ mod tests {
         let chunk = vec![7u8; 64 * 1024];
         let mut written = 0usize;
         loop {
-            match tokio::time::timeout(Duration::from_millis(50), io.write(&chunk)).await {
-                Ok(Ok(n)) => written += n,
-                Ok(Err(error)) => panic!("{error}"),
-                // The peer reads nothing: the write is pending.
-                Err(_) => break,
+            // The same write stays pending across the fence: the fence must wake it.
+            let mut write = Box::pin(io.write(&chunk));
+            tokio::select! {
+                done = &mut write => {
+                    written += done.expect("written before the fence");
+                }
+                () = tokio::time::sleep(Duration::from_millis(50)) => {
+                    shared.notice(&Notice {
+                        environment_id: ENV.into(),
+                        generation: 1,
+                        revision: 1,
+                        edge_ids: vec![1],
+                    });
+                    let outcome = tokio::time::timeout(Duration::from_secs(1), write).await;
+                    assert!(
+                        matches!(outcome, Ok(Err(_))),
+                        "the pending write ends with an error at the fence"
+                    );
+                    break;
+                }
             }
         }
         assert!(written > 0);
-        shared.notice(&Notice {
-            environment_id: ENV.into(),
-            generation: 1,
-            revision: 1,
-            edge_ids: vec![1],
-        });
         assert!(io.write(&chunk).await.is_err(), "no write after the fence");
         assert!(io.flush().await.is_err(), "no flush after the fence");
         assert!(

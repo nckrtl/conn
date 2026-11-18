@@ -258,7 +258,7 @@ fn the_ack_waits_for_the_last_handler_and_reports_its_close() {
         70,
     );
     assert_eq!(lab.a.next_ack(), None, "a handler is still open");
-    lab.a.unregister(handler, 90);
+    lab.a.unregister(handler, lab.at(90));
     let ack = lab.a.next_ack().expect("ack ready");
     assert_eq!(
         (ack.fenced_ms, ack.handlers_closed_ms),
@@ -574,7 +574,7 @@ fn a_ticket_minted_before_a_fence_never_redeems() {
     let binding = TicketBinding {
         edge: 1,
         fence_generation: lab.a.edge_fence_generation(1),
-        redeem_by_ms: 10_000,
+        redeem_by: lab.at(10_000),
     };
     lab.notice(1, vec![1], 50);
     let probe = lab.probe(100);
@@ -589,7 +589,7 @@ fn a_ticket_minted_before_a_fence_never_redeems() {
     );
     let late = TicketBinding {
         fence_generation: lab.a.edge_fence_generation(1),
-        redeem_by_ms: 100,
+        redeem_by: lab.at(100),
         ..binding
     };
     assert_eq!(
@@ -748,6 +748,66 @@ fn token_expiry_is_a_local_deadline_on_the_safe_side_of_the_offset() {
     assert_eq!(
         lab.a.local_deadline(20_000, lab.at(1_010), 1_010),
         lab.at(1_010 + 20_000 - 5_005 - 1_010)
+    );
+    // The deadline comes from the probe's monotonic send and the verified Gateway time: a
+    // step of the target's wall clock does not move it.
+    assert_eq!(
+        lab.a.local_deadline(20_000, lab.at(1_010), 0),
+        lab.a.local_deadline(20_000, lab.at(1_010), 1_000_000)
+    );
+}
+
+#[test]
+fn notices_never_release_a_pause_an_introspection_started() {
+    let mut lab = Lab::new();
+    lab.open(10, vec![1, 2, 3], 0);
+    let (handler, _) = lab.admit(3, 5);
+    lab.a.note_revision(12, lab.at(10));
+    lab.notice(11, vec![1], 20);
+    lab.notice(12, vec![2], 30);
+    assert_eq!(
+        lab.a.handler_state(handler, far(), lab.at(31)),
+        GateState::Paused
+    );
+    let probe = lab.probe(40);
+    lab.reply_with(
+        &probe,
+        "delta",
+        12,
+        None,
+        Some(vec![(11, vec![1]), (12, vec![2])]),
+        vec![],
+        50,
+    );
+    assert_eq!(
+        lab.a.handler_state(handler, far(), lab.at(51)),
+        GateState::Open
+    );
+}
+
+#[test]
+fn a_close_never_precedes_its_fence_when_the_wall_clock_steps_back() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 4_900);
+    let (handler, _) = lab.admit(1, 4_950);
+    // The fence happens at wall 5,000. The close is the fence plus 40 ms of monotonic time,
+    // whatever the wall clock reads when the handler ends.
+    lab.notice(1, vec![1], 5_000);
+    lab.a.unregister(handler, lab.at(5_040));
+    let probe = lab.probe(5_100);
+    lab.reply_with(
+        &probe,
+        "delta",
+        1,
+        None,
+        Some(vec![(1, vec![1])]),
+        vec![(1, vec![1])],
+        5_110,
+    );
+    let ack = lab.a.next_ack().expect("ack");
+    assert_eq!(
+        (ack.fenced_ms, ack.handlers_closed_ms),
+        (Some(5_000), Some(5_040))
     );
 }
 

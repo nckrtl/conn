@@ -106,7 +106,16 @@ impl HttpsGateway {
     fn post(
         &self,
         path: &'static str,
+        body: Value,
+    ) -> BoxFuture<'static, Result<Value, GatewayError>> {
+        self.post_with(path, body, Envelope::Data)
+    }
+
+    fn post_with(
+        &self,
+        path: &'static str,
         mut body: Value,
+        envelope: Envelope,
     ) -> BoxFuture<'static, Result<Value, GatewayError>> {
         if let Some(object) = body.as_object_mut() {
             object.insert("environment_id".into(), json!(&*self.environment_id));
@@ -119,6 +128,7 @@ impl HttpsGateway {
             self.tls.clone(),
             self.credential.clone(),
             body,
+            envelope,
         );
         Box::pin(async move {
             match tokio::time::timeout(CALL_TIMEOUT, call).await {
@@ -166,9 +176,11 @@ impl Gateway for HttpsGateway {
         socket_id: String,
         channel_name: String,
     ) -> BoxFuture<'static, Result<Value, GatewayError>> {
-        self.post(
+        // This route answers the Pusher shape, `{"auth": …}`, without the `data` envelope.
+        self.post_with(
             "/broadcasting/auth",
             json!({ "socket_id": socket_id, "channel_name": channel_name }),
+            Envelope::Bare,
         )
     }
 }
@@ -222,6 +234,7 @@ async fn post_json(
     tls: Arc<rustls::ClientConfig>,
     credential: Arc<str>,
     body: Value,
+    envelope: Envelope,
 ) -> Result<Value, GatewayError> {
     let transport = |what: &str| GatewayError::Transport(what.to_owned());
     let stream = connect_tls(&host, port, tls).await?;
@@ -255,16 +268,33 @@ async fn post_json(
         .to_bytes();
     let answer: Value =
         serde_json::from_slice(&bytes).map_err(|_| transport("answer is not JSON"))?;
-    decode_answer(status, answer)
+    decode_answer(status, answer, envelope)
 }
 
-/// The `data` of a 2xx answer, or the error code of any other.
-pub fn decode_answer(status: u16, answer: Value) -> Result<Value, GatewayError> {
+/// How a route wraps a successful answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Envelope {
+    /// `{"data": …, "meta": …}`: every target route but one.
+    Data,
+    /// The bare object: `/broadcasting/auth` answers `{"auth": …}`, as Pusher expects.
+    Bare,
+}
+
+/// The payload of a 2xx answer, or the error code of any other.
+pub fn decode_answer(
+    status: u16,
+    answer: Value,
+    envelope: Envelope,
+) -> Result<Value, GatewayError> {
     if (200..300).contains(&status) {
-        return answer
-            .get("data")
-            .cloned()
-            .ok_or_else(|| GatewayError::Transport("answer has no data".into()));
+        return match envelope {
+            Envelope::Data => answer
+                .get("data")
+                .cloned()
+                .ok_or_else(|| GatewayError::Transport("answer has no data".into())),
+            Envelope::Bare if answer.is_object() => Ok(answer),
+            Envelope::Bare => Err(GatewayError::Transport("answer is not an object".into())),
+        };
     }
     let code = answer
         .pointer("/error/code")
@@ -272,4 +302,29 @@ pub fn decode_answer(status: u16, answer: Value) -> Result<Value, GatewayError> 
         .unwrap_or("unknown")
         .to_owned();
     Err(GatewayError::Refused { status, code })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The merged Gateway's shapes (Orbit `d023758a54f9`, `ConnManagedTargetsController`).
+    #[test]
+    fn answers_decode_as_the_gateway_sends_them() {
+        let auth = json!({"auth": "key:signature"});
+        assert_eq!(decode_answer(200, auth.clone(), Envelope::Bare), Ok(auth));
+        let authority = json!({"data": {"kind": "current"}, "meta": {"request_id": "r"}});
+        assert_eq!(
+            decode_answer(200, authority, Envelope::Data),
+            Ok(json!({"kind": "current"}))
+        );
+        let refused = json!({"status": 403, "error": {"code": "conn.managed_target_identity", "message": "m"}});
+        assert_eq!(
+            decode_answer(403, refused, Envelope::Bare),
+            Err(GatewayError::Refused {
+                status: 403,
+                code: "conn.managed_target_identity".into()
+            })
+        );
+    }
 }

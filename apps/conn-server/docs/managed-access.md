@@ -71,10 +71,16 @@ Each is the fail-closed reading.
   connection (`Connection: close`), and a handler stays registered until its connection is
   gone, so `handlers_closed_at` means no handler and no sendable byte remain. RPC call
   tasks hold the session's registration too, and closes are bounded.
-- A token's expiry is enforced as a target monotonic deadline: the Gateway's expiry minus
-  the signed upper bound of the measured clock offset. An authority reply without a
+- A token's expiry is enforced as a target monotonic deadline, without the target's wall
+  clock: the last applied probe's monotonic send time plus (expiry − its `server_time`).
+  Ticket lifetimes are monotonic too. Close times are the fence's wall time plus elapsed
+  monotonic time, so a wall clock step never puts a close before its fence.
+- `/broadcasting/auth` answers the bare Pusher object `{"auth": …}`; every other target
+  route answers `{"data": …}`. A target refusal on any route (`/ack` included) fails
+  closed at once. An authority reply without a
   readable `server_time` or without its `owed` list is incomplete: it fails closed.
-- An introspected revision stays known even when a notice names it: no probe may disprove
+- An introspected revision pauses everything until a probe applies it; notices never end
+  that pause. It stays known even when a notice names it: no probe may disprove
   that notice, and a later head below it fails closed. A snapshot below the applied
   revision never reopens. Closed, the target retries on the probe timer, never faster.
 - A pause also holds HTTP reads and preview attachments; only a fence refuses them. A

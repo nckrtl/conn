@@ -223,29 +223,27 @@ async fn ticket(
     // The handler rides the connection from here on, whatever this answers.
     let handle = Arc::new(handle);
     conn.slot.attach(handle.clone());
-    let now = conn_support::time::now_ms();
-    // The token's expiry on this target's clock, on the safe side of the offset.
-    let token_local = u64::try_from(
-        state
-            .managed
-            .shared
-            .read(|a| a.local_wall_ms(principal.expires_ms)),
-    )
-    .unwrap_or(0);
-    let expires_ms = token_local.min(now + TICKET_TTL_MS);
+    // Monotonic throughout: the token's deadline (from the verified Gateway time) and the
+    // ticket's own lifetime. The wall time only labels the answer.
+    let now = tokio::time::Instant::now();
+    let deadline = handle
+        .deadline()
+        .min(now + Duration::from_millis(TICKET_TTL_MS));
+    let expires_ms = conn_support::time::now_ms()
+        + u64::try_from(deadline.saturating_duration_since(now).as_millis()).unwrap_or(0);
     let ticket = format!("{TICKET_PREFIX}{}", crate::auth::random_hex(32));
     let shared = &state.managed.shared;
     let binding = super::authority::TicketBinding {
         edge: principal.edge_id,
         fence_generation: shared.read(|a| a.edge_fence_generation(principal.edge_id)),
-        redeem_by_ms: expires_ms,
+        redeem_by: deadline,
     };
     {
         let mut tickets = crate::lock(&state.managed.tickets);
         // Expired tickets and tickets of a fenced edge are void: they leave the pool.
         shared.read(|a| {
             tickets.retain(|_, t| {
-                t.binding.redeem_by_ms > now
+                t.binding.redeem_by > now
                     && !a.is_fenced(t.binding.edge)
                     && a.edge_fence_generation(t.binding.edge) == t.binding.fence_generation
             });
@@ -310,7 +308,7 @@ async fn admit_upgrade(
             "managed_ticket_invalid",
         )));
     };
-    if spent.route != route || spent.binding.redeem_by_ms <= conn_support::time::now_ms() {
+    if spent.route != route || spent.binding.redeem_by <= tokio::time::Instant::now() {
         return Err(Box::new(error(
             StatusCode::UNAUTHORIZED,
             "managed_ticket_invalid",

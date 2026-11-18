@@ -391,6 +391,11 @@ impl Handle {
         }
     }
 
+    /// The token's expiry as a monotonic deadline.
+    pub fn deadline(&self) -> Instant {
+        self.expires
+    }
+
     /// Whether the handler may send or dispatch now.
     pub fn open(&self) -> bool {
         self.state() == crate::session::GateState::Open
@@ -420,7 +425,7 @@ impl Handle {
 impl Drop for Handle {
     fn drop(&mut self) {
         let id = self.id;
-        self.shared.with(|a| ((), a.unregister(id, now_ms())));
+        self.shared.with(|a| ((), a.unregister(id, Instant::now())));
     }
 }
 
@@ -539,8 +544,17 @@ async fn ack_loop(shared: Arc<Shared>, gateway: Arc<dyn Gateway>) {
         };
         let body = ack_body(&ack);
         let result = bounded(gateway.ack(body)).await;
+        // A refusal of the target itself (rotated credential or generation, unknown target,
+        // switch off) is lost authority, at once, whichever route saw it first.
         if let Err(GatewayError::Refused { code, .. }) = &result
-            && code == "conn.managed_generation_mismatch"
+            && matches!(
+                code.as_str(),
+                "conn.managed_generation_mismatch"
+                    | "conn.managed_target_identity"
+                    | "conn.managed_target_unknown"
+                    | "conn.managed_disabled"
+                    | "peer.identity_unknown"
+            )
         {
             shared.fail_closed(Loss::WrongIdentity);
         }

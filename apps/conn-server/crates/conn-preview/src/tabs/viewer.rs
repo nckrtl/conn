@@ -88,6 +88,9 @@ impl Drop for Viewer {
 pub(super) fn control_message(tab: &Tab) -> Value {
     json!({"type":"control","canOperate":true,"controller":if tab.controller.is_some(){"another-viewer"}else if tab.owner.is_some(){"agent"}else{"unclaimed"},"generation":tab.generation,"dialog":tab.dialog})
 }
+/// The error of an attachment whose admission check said no under the tab's lock.
+pub const ADMISSION_REFUSED: &str = "The viewer's access is paused or revoked.";
+
 impl Preview {
     pub async fn attach_viewer(
         &self,
@@ -127,7 +130,7 @@ impl Preview {
             .ok_or_else(|| Error("The server preview tab does not exist.".into()))?;
         let _gate = gate.lock().await;
         if !admit() {
-            return Err(Error("The viewer's access is paused or revoked.".into()));
+            return Err(Error(ADMISSION_REFUSED.into()));
         }
         let viewer = conn_support::uuid_v4();
         let (browser, session, control, viewport, frames, start) = {

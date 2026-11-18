@@ -88,8 +88,8 @@ pub struct TicketBinding {
     pub edge: EdgeId,
     /// The edge's fence generation when the ticket was minted.
     pub fence_generation: u64,
-    /// The ticket must be redeemed before this wall time.
-    pub redeem_by_ms: u64,
+    /// The ticket must be redeemed before this monotonic instant.
+    pub redeem_by: Instant,
 }
 
 /// Why access was refused. The ingress maps each to a response; none of them falls through
@@ -197,6 +197,13 @@ pub struct Authority {
     next_handler: u64,
     /// Wall time each currently fenced edge was blocked.
     fenced_at: HashMap<EdgeId, u64>,
+    /// The monotonic instant of each fence, so a close time is the fence's wall time plus
+    /// elapsed monotonic time: a wall clock step never makes a close precede its fence.
+    fence_mark: HashMap<EdgeId, Instant>,
+    /// The monotonic time of the change being applied (set by `notice` and `apply_reply`).
+    clock: Option<Instant>,
+    /// The latest verified Gateway time and the monotonic send time of its probe.
+    anchor: Option<(Instant, i64)>,
     /// Wall time a fenced edge was verified to have no handler left.
     closed_at: HashMap<EdgeId, u64>,
     revisions: BTreeMap<Revision, RevisionRecord>,
@@ -252,6 +259,9 @@ impl Authority {
             handlers: HashMap::new(),
             next_handler: 1,
             fenced_at: HashMap::new(),
+            fence_mark: HashMap::new(),
+            clock: None,
+            anchor: None,
             closed_at: HashMap::new(),
             revisions: BTreeMap::new(),
             owed: BTreeSet::new(),
@@ -301,8 +311,8 @@ impl Authority {
     pub fn blocked(&self) -> bool {
         let unapplied = |r: Revision| self.applied.is_none_or(|applied| applied < r);
         // An introspected revision whose edges no notice names yet.
-        self.introspected
-            .is_some_and(|(r, _)| unapplied(r) && r >= self.next_unknown())
+        // Latched: only a verified probe that applies it ends the pause, never notices.
+        self.introspected.is_some_and(|(r, _)| unapplied(r))
             || self.gap_notices.iter().any(|r| unapplied(*r))
     }
 
@@ -352,14 +362,18 @@ impl Authority {
             .saturating_sub(ahead)
     }
 
-    /// The target monotonic deadline of a Gateway wall time, on the safe side: the Gateway
-    /// clock may run ahead of the target's by up to the upper offset bound, so the deadline
-    /// comes that much earlier. Without bounds the wall time is taken as it is.
-    pub fn local_deadline(&self, gateway_ms: u64, now: Instant, wall_ms: u64) -> Instant {
-        let left = self
-            .local_wall_ms(gateway_ms)
-            .saturating_sub(i64::try_from(wall_ms).unwrap_or(i64::MAX));
-        now + std::time::Duration::from_millis(u64::try_from(left).unwrap_or(0))
+    /// The target monotonic deadline of a Gateway wall time, on the safe side and without
+    /// the target's wall clock: the Gateway read `server_time` no earlier than the probe's
+    /// monotonic send, so it reaches `gateway_ms` no earlier than that send plus the
+    /// difference. Without an applied probe the deadline is now (expired).
+    pub fn local_deadline(&self, gateway_ms: u64, now: Instant, _wall_ms: u64) -> Instant {
+        let Some((sent, server)) = self.anchor else {
+            return now;
+        };
+        let left = i64::try_from(gateway_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_sub(server);
+        sent + std::time::Duration::from_millis(u64::try_from(left).unwrap_or(0))
     }
 
     /// Removes `revision` from `edge`'s provisional fences. When none is left the edge is
@@ -374,6 +388,7 @@ impl Authority {
             self.provisional.remove(&edge);
             if !self.confirmed.contains(&edge) {
                 self.fenced_at.remove(&edge);
+                self.fence_mark.remove(&edge);
                 self.closed_at.remove(&edge);
             }
             self.epoch += 1;
@@ -437,7 +452,7 @@ impl Authority {
         epoch: u64,
         ticket: Option<TicketBinding>,
         now: Instant,
-        wall_ms: u64,
+        _wall_ms: u64,
     ) -> Result<(u64, watch::Receiver<bool>), Refusal> {
         if epoch != self.epoch {
             return Err(Refusal::Stale);
@@ -448,7 +463,7 @@ impl Authority {
             if ticket.edge != edge || ticket.fence_generation != self.edge_fence_generation(edge) {
                 return Err(Refusal::Fenced);
             }
-            if wall_ms >= ticket.redeem_by_ms {
+            if now >= ticket.redeem_by {
                 return Err(Refusal::Expired);
             }
         }
@@ -479,15 +494,22 @@ impl Authority {
 
     /// A handler ended. Records the close time of every revision whose edges have no handler
     /// left.
-    pub fn unregister(&mut self, handler: u64, wall_ms: u64) -> Effects {
+    pub fn unregister(&mut self, handler: u64, now: Instant) -> Effects {
         let Some(entry) = self.handlers.remove(&handler) else {
             return Effects::default();
         };
-        if self.fenced_at.contains_key(&entry.edge) && !self.edge_has_handlers(entry.edge) {
-            self.closed_at.entry(entry.edge).or_insert(wall_ms);
+        if let Some(fenced) = self.fenced_at.get(&entry.edge).copied()
+            && !self.edge_has_handlers(entry.edge)
+        {
+            let elapsed = self.fence_mark.get(&entry.edge).map_or(0, |mark| {
+                u64::try_from(now.saturating_duration_since(*mark).as_millis()).unwrap_or(u64::MAX)
+            });
+            self.closed_at
+                .entry(entry.edge)
+                .or_insert(fenced.saturating_add(elapsed));
         }
         Effects {
-            ack: self.settle_closes(wall_ms),
+            ack: self.settle_closes(0),
             ..Effects::default()
         }
     }
@@ -526,6 +548,9 @@ impl Authority {
     fn fence_edge(&mut self, edge: EdgeId, wall_ms: u64) {
         *self.fence_generation.entry(edge).or_insert(0) += 1;
         self.fenced_at.entry(edge).or_insert(wall_ms);
+        if let Some(now) = self.clock {
+            self.fence_mark.entry(edge).or_insert(now);
+        }
         self.admitted.remove(&edge);
         if !self.edge_has_handlers(edge) {
             self.closed_at.entry(edge).or_insert(wall_ms);
@@ -593,6 +618,7 @@ impl Authority {
 
     /// A `conn.authority.revoked` notice. It can only restrict access.
     pub fn notice(&mut self, notice: &Notice, now: Instant, wall_ms: u64) -> Effects {
+        self.clock = Some(now);
         if notice.environment_id != self.environment_id || notice.generation != self.generation {
             self.fail_closed(Loss::WrongIdentity);
             return Effects::default();
@@ -685,6 +711,7 @@ impl Authority {
 
     /// Applies a reply to the outstanding probe.
     pub fn apply_reply(&mut self, reply: &AuthorityReply, now: Instant, wall_ms: u64) -> Effects {
+        self.clock = Some(now);
         let Some(probe) = self.probe.clone().filter(|p| p.nonce == reply.nonce) else {
             // Consumed or never sent: drop it, renew nothing.
             return Effects::default();
@@ -749,6 +776,13 @@ impl Authority {
         let applied = self.applied;
         self.gap_notices.retain(|r| applied.is_none_or(|a| a < *r));
         self.record_offset(reply, probe.sent_wall_ms, wall_ms);
+        if let Some(server) = reply
+            .server_time
+            .as_deref()
+            .and_then(conn_support::time::millis_from_iso)
+        {
+            self.anchor = Some((probe.sent, server));
+        }
         self.open = true;
         self.lease_until = Some(new_lease);
         self.settle_closes(wall_ms);
@@ -1006,6 +1040,7 @@ impl Authority {
                 && !self.provisional.contains_key(&edge)
             {
                 self.fenced_at.remove(&edge);
+                self.fence_mark.remove(&edge);
                 self.closed_at.remove(&edge);
             }
         }

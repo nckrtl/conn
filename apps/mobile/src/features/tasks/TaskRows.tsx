@@ -56,7 +56,10 @@ export function TaskListRow(props: {
           </View>
           {props.detail || props.detailTrailing ? (
             <View className="mt-1 flex-row items-center gap-2 pl-7">
-              <Text className="min-w-0 flex-1 text-xs text-foreground-tertiary" numberOfLines={1}>
+              <Text
+                className="min-w-0 flex-1 text-[13px] leading-5 text-foreground-tertiary"
+                numberOfLines={1}
+              >
                 {props.detail}
               </Text>
               {props.detailTrailing}
@@ -231,8 +234,9 @@ export function InfoRow(props: {
     >
       {({ pressed }) => (
         <View
+          style={{ minHeight: 44 }}
           className={cn(
-            "min-h-11 flex-row items-center gap-2 rounded-xl px-2",
+            "flex-row items-center gap-2 rounded-xl px-2",
             props.multiline && "py-2.5",
             pressed && "bg-row-hover",
           )}

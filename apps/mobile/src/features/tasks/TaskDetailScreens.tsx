@@ -11,11 +11,14 @@ import { useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { ConnSymbolScope } from "../../components/ConnSymbolScope";
 import { AppText as Text } from "../../components/ui/AppText";
 import { RefreshControl } from "../../components/ui/RefreshControl";
 import { GlassSurface } from "../../components/ui/GlassSurface";
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { relativeTime } from "../../lib/time";
+import { withKnownPullRequestSummary } from "../../state/use-thread-pr";
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useMarkdownPreviewStyles } from "../files/FileMarkdownPreview";
 import { SelectableMarkdownText } from "../../native/SelectableMarkdownText";
@@ -141,7 +144,12 @@ function Brief(props: { readonly text: string }) {
     <View className="px-4">
       <SelectableMarkdownText
         markdown={props.text}
-        textStyle={{ ...styles.nativeTextStyle, fontSize: 16, lineHeight: 24 }}
+        textStyle={{
+          ...styles.nativeTextStyle,
+          fontSize: 16,
+          lineHeight: 24,
+          headingFontSizes: [17, 16, 16, 16, 16, 16],
+        }}
       />
     </View>
   );
@@ -238,8 +246,9 @@ function SubtaskList(props: {
             ? `#${subtask.id} · ${gt("Not started")}`
             : `#${subtask.id} · ${tokens === null ? gt("tokens –") : gt("{tokens} tokens", { tokens: formatTokens(tokens) })}`
         }
+        // Orbit reports no lines per subtask today; the row shows them once it does.
         detailTrailing={
-          notStarted ? null : (
+          subtask.metrics.linesAdded === null ? null : (
             <DiffStat
               added={subtask.metrics.linesAdded}
               deleted={subtask.metrics.linesDeleted}
@@ -334,6 +343,11 @@ function LoadState(props: {
   return props.children(props.state.value);
 }
 
+const knownTitle = (params: object) =>
+  "initialSummary" in params
+    ? (params.initialSummary as { readonly title?: string } | undefined)?.title
+    : undefined;
+
 function TaskOverview(props: {
   readonly task: OrbitTaskDetail;
   readonly onOpenSubtasks: () => void;
@@ -346,7 +360,17 @@ function TaskOverview(props: {
   const running = status.tone === "sky";
   const duration = task.metrics.durationMs;
   const pr = task.pullRequest;
-  const repository = pr ? (/github\.com\/([^/]+\/[^/]+)\//.exec(pr.url)?.[1] ?? null) : null;
+  const prLink = pr ? sourceControlClients.parseChangeRequestUrl(pr.url)?.link : undefined;
+  // Orbit sends no PR title; one Conn already read for a thread is shown, else the repository.
+  const prTitle = prLink
+    ? (knownTitle(
+        withKnownPullRequestSummary({
+          host: prLink.authority ?? prLink.host,
+          repository: prLink.repository,
+          number: prLink.number,
+        }),
+      ) ?? prLink.repository)
+    : null;
   const done = task.subtasks.filter((subtask) => subtask.status === "completed").length;
   const now = useNow(running);
   return (
@@ -391,7 +415,7 @@ function TaskOverview(props: {
               <StateGlyph name="arrow.triangle.branch" tintClassName="accent-foreground-muted" />
             }
           >
-            <InfoText className="text-foreground-muted">{task.workspace.branch}</InfoText>
+            <InfoText>{task.workspace.branch}</InfoText>
           </InfoRow>
         ) : null}
         {pr ? (
@@ -418,7 +442,7 @@ function TaskOverview(props: {
             accessibilityLabel={gt("Pull request {number}", { number: pr.number })}
             onPress={() => openPullRequest(pr.url)}
           >
-            {repository ?? gt("Pull request")}
+            {prTitle ?? gt("Pull request")}
           </InfoRow>
         ) : null}
         {task.metrics.tokens !== null || task.metrics.linesAdded !== null ? (
@@ -467,44 +491,46 @@ export function OrbitTaskRouteScreen({ route }: StaticScreenProps<{ taskId: numb
   const openSubtask = (subtask: OrbitSubtask) =>
     navigation.dispatch(StackActions.push("OrbitSubtask", { taskId, subtaskId: subtask.id }));
   return (
-    <View className="flex-1 bg-screen">
-      <NativeStackScreenOptions options={{ title }} />
-      <LoadState state={state}>
-        {(task) => (
-          <>
-            <TabScroll key={tab} refreshing={refreshing} onRefresh={() => void refresh()}>
-              {tab === "overview" ? (
-                <TaskOverview task={task} onOpenSubtasks={() => setTab("subtasks")} />
-              ) : tab === "subtasks" ? (
-                <>
-                  <View className="pt-1" />
-                  <SubtaskList task={task} onOpen={openSubtask} />
-                </>
-              ) : (
-                <AgentsTab task={task} subtaskId={null} />
-              )}
-            </TabScroll>
-            <FloatingTabs
-              value={tab}
-              onChange={setTab}
-              items={[
-                { value: "overview", label: gt("Overview"), icon: OVERVIEW_ICON },
-                {
-                  value: "subtasks",
-                  label: gt("Subtasks, {count}", { count: task.subtasks.length }),
-                  icon: SUBTASKS_ICON,
-                },
-                {
-                  value: "agents",
-                  label: gt("Agents, {count}", { count: agentsFor(task, null).current.length }),
-                  icon: AGENTS_ICON,
-                },
-              ]}
-            />
-          </>
-        )}
-      </LoadState>
-    </View>
+    <ConnSymbolScope>
+      <View className="flex-1 bg-screen">
+        <NativeStackScreenOptions options={{ title }} />
+        <LoadState state={state}>
+          {(task) => (
+            <>
+              <TabScroll key={tab} refreshing={refreshing} onRefresh={() => void refresh()}>
+                {tab === "overview" ? (
+                  <TaskOverview task={task} onOpenSubtasks={() => setTab("subtasks")} />
+                ) : tab === "subtasks" ? (
+                  <>
+                    <View className="pt-1" />
+                    <SubtaskList task={task} onOpen={openSubtask} />
+                  </>
+                ) : (
+                  <AgentsTab task={task} subtaskId={null} />
+                )}
+              </TabScroll>
+              <FloatingTabs
+                value={tab}
+                onChange={setTab}
+                items={[
+                  { value: "overview", label: gt("Overview"), icon: OVERVIEW_ICON },
+                  {
+                    value: "subtasks",
+                    label: gt("Subtasks, {count}", { count: task.subtasks.length }),
+                    icon: SUBTASKS_ICON,
+                  },
+                  {
+                    value: "agents",
+                    label: gt("Agents, {count}", { count: agentsFor(task, null).current.length }),
+                    icon: AGENTS_ICON,
+                  },
+                ]}
+              />
+            </>
+          )}
+        </LoadState>
+      </View>
+    </ConnSymbolScope>
   );
 }
 
@@ -546,7 +572,12 @@ function SubtaskOverview(props: {
           <InfoRow
             icon={<StateGlyph name={USAGE_ICON} tintClassName="accent-foreground-muted" />}
             trailing={
-              <DiffStat added={subtask.metrics.linesAdded} deleted={subtask.metrics.linesDeleted} />
+              subtask.metrics.linesAdded === null ? null : (
+                <DiffStat
+                  added={subtask.metrics.linesAdded}
+                  deleted={subtask.metrics.linesDeleted}
+                />
+              )
             }
           >
             <InfoText className="tabular-nums text-foreground-muted">
@@ -605,40 +636,42 @@ export function OrbitSubtaskRouteScreen({
     else navigation.dispatch(StackActions.push("OrbitTask", { taskId }));
   };
   return (
-    <View className="flex-1 bg-screen">
-      <NativeStackScreenOptions options={{ title }} />
-      <LoadState state={state}>
-        {(task) => {
-          const subtask = task.subtasks.find((item) => item.id === subtaskId);
-          if (!subtask)
-            return <EmptyLine>{gt("This subtask is no longer part of the task.")}</EmptyLine>;
-          return (
-            <>
-              <TabScroll key={tab} refreshing={refreshing} onRefresh={() => void refresh()}>
-                {tab === "overview" ? (
-                  <SubtaskOverview task={task} subtask={subtask} onOpenTask={openTask} />
-                ) : (
-                  <AgentsTab task={task} subtaskId={subtask.id} />
-                )}
-              </TabScroll>
-              <FloatingTabs
-                value={tab}
-                onChange={setTab}
-                items={[
-                  { value: "overview", label: gt("Overview"), icon: OVERVIEW_ICON },
-                  {
-                    value: "agents",
-                    label: gt("Agents, {count}", {
-                      count: agentsFor(task, subtask.id).current.length,
-                    }),
-                    icon: AGENTS_ICON,
-                  },
-                ]}
-              />
-            </>
-          );
-        }}
-      </LoadState>
-    </View>
+    <ConnSymbolScope>
+      <View className="flex-1 bg-screen">
+        <NativeStackScreenOptions options={{ title }} />
+        <LoadState state={state}>
+          {(task) => {
+            const subtask = task.subtasks.find((item) => item.id === subtaskId);
+            if (!subtask)
+              return <EmptyLine>{gt("This subtask is no longer part of the task.")}</EmptyLine>;
+            return (
+              <>
+                <TabScroll key={tab} refreshing={refreshing} onRefresh={() => void refresh()}>
+                  {tab === "overview" ? (
+                    <SubtaskOverview task={task} subtask={subtask} onOpenTask={openTask} />
+                  ) : (
+                    <AgentsTab task={task} subtaskId={subtask.id} />
+                  )}
+                </TabScroll>
+                <FloatingTabs
+                  value={tab}
+                  onChange={setTab}
+                  items={[
+                    { value: "overview", label: gt("Overview"), icon: OVERVIEW_ICON },
+                    {
+                      value: "agents",
+                      label: gt("Agents, {count}", {
+                        count: agentsFor(task, subtask.id).current.length,
+                      }),
+                      icon: AGENTS_ICON,
+                    },
+                  ]}
+                />
+              </>
+            );
+          }}
+        </LoadState>
+      </View>
+    </ConnSymbolScope>
   );
 }

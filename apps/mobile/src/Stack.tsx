@@ -590,7 +590,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
     OrbitTask: createNativeStackScreen({
       screen: OrbitTaskRouteScreen,
       linking: { path: "tasks/:taskId", parse: { taskId: Number } },
-      options: pageRoute({ duoMinimize: "never" }),
+      options: pageRoute({ duoMinimize: "never", itemStyle: "standard" }),
     }),
     OrbitSubtask: createNativeStackScreen({
       screen: OrbitSubtaskRouteScreen,
@@ -598,7 +598,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
         path: "tasks/:taskId/subtasks/:subtaskId",
         parse: { taskId: Number, subtaskId: Number },
       },
-      options: pageRoute({ duoMinimize: "never" }),
+      options: pageRoute({ duoMinimize: "never", itemStyle: "standard" }),
     }),
     PullRequestGuideStop: createNativeStackScreen({
       screen: PullRequestGuideStopScreen,

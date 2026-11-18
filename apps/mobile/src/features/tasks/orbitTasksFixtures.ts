@@ -34,6 +34,7 @@ interface FixtureTask {
   title: string;
   status: string;
   workspace: string | null;
+  branch?: string;
   node: string;
   updatedMinutesAgo: number;
   brief: string;
@@ -98,6 +99,7 @@ const TASKS: ReadonlyArray<FixtureTask> = [
     title: "Image attachments in the composer",
     status: "reviewing",
     workspace: "conn-attachments",
+    branch: "orbit/482-image-attachments",
     node: "beast",
     updatedMinutesAgo: 0,
     brief: TASK_BRIEF,
@@ -153,6 +155,7 @@ const TASKS: ReadonlyArray<FixtureTask> = [
     title: "Paste performance in long threads",
     status: "running",
     workspace: "conn-paste-perf",
+    branch: "orbit/479-paste-performance",
     node: "beast",
     updatedMinutesAgo: 3,
     brief:
@@ -309,7 +312,7 @@ function wireTask(task: FixtureTask, now: number) {
             status: "active",
             power_state: "running",
             node: { id: 9, name: task.node },
-            branch: `orbit/${task.id}-${task.workspace.replace(/^conn-/, "")}`,
+            branch: task.branch ?? `orbit/${task.id}-${task.workspace.replace(/^conn-/, "")}`,
             conn_environment_id: ENV,
           },
     pull_request: task.pr

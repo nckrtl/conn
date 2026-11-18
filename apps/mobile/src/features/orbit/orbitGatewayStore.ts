@@ -409,27 +409,37 @@ function profileReadSucceeded(): void {
   });
 }
 
-/**
- * Shows a profile's workspaces unless the phone is bound to another profile now or already shows
- * a newer version of them (a read and a write can answer in either order).
- */
-function applyWorkspaces(settings: {
+type WorkspaceSettings = {
   readonly profileId: number;
   readonly version: number;
   readonly workspaces: readonly OrbitGatewayWorkspace[];
-}): void {
-  // Only in Orbit mode, for the profile the phone is bound to. Before the first read knows the
-  // binding a write may still land; the next read replaces it if the phone is bound elsewhere.
+};
+/** A write that answered before the first read knew the binding; that read decides on it. */
+let pendingWrite: WorkspaceSettings | null = null;
+
+/**
+ * Shows a profile's workspaces in Orbit mode, for the profile the phone is bound to, and never an
+ * older version of them (a read and a write can answer in either order).
+ */
+function applyWorkspaces(settings: WorkspaceSettings): void {
   if (state.provider !== "orbit") return;
-  if (state.node !== null && state.node.profile?.id !== settings.profileId) return;
-  if (
-    appliedWorkspaces?.profileId === settings.profileId &&
-    appliedWorkspaces.version > settings.version
-  ) {
+  if (state.node === null) {
+    if (pendingWrite === null || pendingWrite.version < settings.version) pendingWrite = settings;
     return;
   }
-  appliedWorkspaces = { profileId: settings.profileId, version: settings.version };
-  set({ workspaces: settings.workspaces });
+  const pending = pendingWrite;
+  pendingWrite = null;
+  const bound = state.node.profile?.id;
+  const best =
+    pending !== null && pending.profileId === bound && pending.version > settings.version
+      ? pending
+      : settings;
+  if (best.profileId !== bound) return;
+  if (appliedWorkspaces?.profileId === best.profileId && appliedWorkspaces.version > best.version) {
+    return;
+  }
+  appliedWorkspaces = { profileId: best.profileId, version: best.version };
+  set({ workspaces: best.workspaces });
 }
 
 /**
@@ -461,6 +471,7 @@ async function refreshOrbitProfile(
     applyWorkspaces(settings);
   } else {
     set({ node });
+    if (pendingWrite !== null) applyWorkspaces(pendingWrite);
   }
   if (!(await runOrbitAppearance(node, isCurrent))) {
     throw new Error("The phone's preferences are not loaded yet.");
@@ -497,6 +508,7 @@ export function refreshOrbitGateway(): Promise<void> {
       if (!state.providerLoaded) await loadProvider();
       if (state.provider === "default") {
         appliedWorkspaces = null;
+        pendingWrite = null;
         listError = null;
         profileReadError = null;
         set({ phase: "idle", node: null, environments: [], workspaces: [], error: null });

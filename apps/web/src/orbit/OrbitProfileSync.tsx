@@ -167,6 +167,8 @@ interface ProfileSyncController {
   readonly refreshEnvironments: () => Promise<void>;
   /** Follows the bound profile; `reconcile()` runs one authoritative profile read. */
   readonly profile: ReturnType<typeof createOrbitProfileLive>;
+  /** Before a bind: the old binding's channel, reads and environment record become obsolete. */
+  readonly rebinding: () => void;
   readonly beginNonUserChange: (name: ProfileSectionName) => () => void;
 }
 
@@ -359,6 +361,11 @@ function profileSyncController(): ProfileSyncController | null {
       scope: () => (inOrbit() ? "orbit" : null),
       refresh: (isCurrent, observe) => exclusive(() => profileOnce(isCurrent, observe)),
     }),
+    rebinding: () => {
+      // An environment run waiting on the old profile's settings fails its `lastMe` check.
+      lastMe = null;
+      controller?.profile.invalidate();
+    },
     beginNonUserChange: sections.beginNonUserChange,
   };
   return controller;
@@ -402,7 +409,7 @@ export function OrbitProfileSync() {
       sync.beginNonUserChange(APPEARANCE_SECTION),
     );
     requestSync = () => sync.profile.reconcile();
-    beforeRebind = () => sync.profile.invalidate();
+    beforeRebind = sync.rebinding;
     let ticks = 0;
     const interval = setInterval(() => {
       ticks += 1;

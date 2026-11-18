@@ -197,6 +197,24 @@ describe("Orbit Gateway store", () => {
     expect(t.shown()).toEqual({ profile: 1, workspaces: ["ws-1-v2"] });
   });
 
+  it("never shows a startup write for a profile the phone turns out not to be bound to", async () => {
+    using t = await setup();
+    fake.boundProfile = 2;
+    const firstRead = Promise.withResolvers<void>();
+    fake.holdSettings = firstRead.promise;
+    t.store.startOrbitGateway();
+    await t.settle();
+    fake.holdSettings = null;
+    // A resumed thread start for profile A, which this phone has left.
+    fake.boundProfile = 1;
+    await t.store.keepProjectInOrbitWorkspace("ws-1-v1", "env:project");
+    fake.boundProfile = 2;
+    expect(t.shown().workspaces).toEqual([]);
+    firstRead.resolve();
+    await t.settle();
+    expect(t.shown()).toEqual({ profile: 2, workspaces: ["ws-2-v1"] });
+  });
+
   it("does not bring a failed bind's error back after a later profile read fails", async () => {
     using t = await setup();
     t.store.startOrbitGateway();

@@ -63,14 +63,25 @@ function storedThreadRefs(value: unknown): JsonObject {
   if (value === null) return { schema: 1, threads: [] };
   if (typeof value !== "object" || Array.isArray(value)) return refuse("not an object");
   const { schema, threads } = value as { schema?: unknown; threads?: unknown };
-  if (schema !== 1) return refuse("unknown schema");
+  if (typeof schema !== "number" || !Number.isInteger(schema) || schema < 1 || schema > 1000) {
+    return refuse("unknown schema");
+  }
   if (!Array.isArray(threads)) return refuse("threads must be a list");
+  if (threads.length === 0) return { schema: 1, threads: [] };
+  // The Gateway's PHP regexes: ASCII whitespace only, lengths in UTF-8 bytes.
+  const ref = (value: unknown, colon: boolean) =>
+    typeof value === "string" &&
+    (colon ? /^[^ \t\n\v\f\r:]+$/ : /^[^ \t\n\v\f\r]+$/).test(value) &&
+    new TextEncoder().encode(value).length <= 255;
+  const seen = new Set<string>();
   return {
-    schema: 1,
+    schema,
     threads: threads.map((entry: unknown) => {
       const { environmentId, threadId } = (entry ?? {}) as Record<string, unknown>;
-      if (typeof environmentId !== "string" || environmentId.trim() === "") refuse("blank ref");
-      if (typeof threadId !== "string" || threadId.trim() === "") refuse("blank ref");
+      if (!ref(environmentId, true) || !ref(threadId, false)) refuse("bad ref");
+      const key = `${environmentId as string}:${threadId as string}`;
+      if (seen.has(key)) refuse("duplicate ref");
+      seen.add(key);
       return { environmentId, threadId } as JsonObject;
     }),
   };
@@ -145,7 +156,7 @@ function fakeGateway(options: { sections?: boolean; profile?: { id: number; name
           details: {
             current_version: gateway.version,
             sections: Object.fromEntries(
-              stale.map(([name]) => [name, { version: gateway.sections.get(name)?.version ?? 0 }]),
+              stale.map(([name]) => [name, gateway.sections.get(name)?.version ?? 0]),
             ),
           },
         });
@@ -1005,7 +1016,7 @@ describe("sidebar hidden threads sync", () => {
     expect(conflicts).toEqual([
       expect.objectContaining({
         code: "conn.settings_version_conflict",
-        details: expect.objectContaining({ sections: { sidebarHiddenThreads: { version: 2 } } }),
+        details: expect.objectContaining({ sections: { sidebarHiddenThreads: 2 } }),
       }),
     ]);
     expect(profileHidden(fake)).toEqual(["env-a:t1", "env-a:t2", "env-b:t3"]);
@@ -1014,6 +1025,7 @@ describe("sidebar hidden threads sync", () => {
 
   it("has a mock Gateway that refuses the shapes the real one refuses", async () => {
     const fake = fakeGateway();
+    const ref = (environmentId: string, threadId: string) => ({ environmentId, threadId });
     const write = (value: unknown) =>
       fake.client.patchSections(1, {
         sidebarHiddenThreads: { version: 0, value: value as JsonObject },
@@ -1023,8 +1035,43 @@ describe("sidebar hidden threads sync", () => {
     await expect(
       write({ schema: 1, threads: [{ environmentId: " ", threadId: "t" }] }),
     ).rejects.toMatchObject({ status: 422 });
+    await expect(
+      write({ schema: 1, threads: [{ environmentId: "e", threadId: "a b" }] }),
+    ).rejects.toMatchObject({ status: 422 });
+    await expect(
+      write({ schema: 1, threads: [ref("e", "t"), ref("e", "t")] }),
+    ).rejects.toMatchObject({ status: 422 });
     const cleared = await write(null);
     expect(cleared.document.sidebarHiddenThreads).toEqual({ schema: 1, threads: [] });
     expect(cleared.sections?.sidebarHiddenThreads?.version).toBe(1);
+  });
+
+  it("leaves a mark the Gateway would refuse out of the write, without blocking the others", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a: ", "hide");
+    mac.set("env-a:a b", "hide");
+    mac.set("env-a:ok", "hide");
+    await mac.sync();
+    expect(profileHidden(fake)).toEqual(["env-a:ok"]);
+    expect(mac.overflow()).toBeNull();
+    // The refused marks stay hidden on this device only.
+    expect([...mac.memory.ops.keys()]).toEqual(["env-a: ", "env-a:a b"]);
+  });
+
+  it("reads refs the Gateway accepts, also with non-ASCII whitespace, and still sends a Show", async () => {
+    const fake = fakeGateway();
+    const mac = makeHidingDevice(fake);
+    mac.set("env-a:x\u00a0y", "hide");
+    mac.set("env-a:t1", "hide");
+    await mac.sync();
+    expect(profileHidden(fake)).toEqual(["env-a:x\u00a0y", "env-a:t1"]);
+
+    const laptop = makeHidingDevice(fake);
+    await laptop.sync();
+    laptop.set("env-a:t1", "show");
+    await laptop.sync();
+    expect(profileHidden(fake)).toEqual(["env-a:x\u00a0y"]);
+    expect(laptop.memory.ops.size).toBe(0);
   });
 });

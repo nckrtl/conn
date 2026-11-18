@@ -178,14 +178,25 @@ function storedThreadRefs(value: unknown): {
   if (value === null) return { schema: 1, threads: [] };
   if (typeof value !== "object" || Array.isArray(value)) return refuse("not an object");
   const { schema, threads } = value as { schema?: unknown; threads?: unknown };
-  if (schema !== 1) return refuse("unknown schema");
+  if (typeof schema !== "number" || !Number.isInteger(schema) || schema < 1 || schema > 1000) {
+    return refuse("unknown schema");
+  }
   if (!Array.isArray(threads)) return refuse("threads must be a list");
+  if (threads.length === 0) return { schema: 1, threads: [] };
+  // The Gateway's PHP regexes: ASCII whitespace only, lengths in UTF-8 bytes.
+  const ref = (value: unknown, colon: boolean) =>
+    typeof value === "string" &&
+    (colon ? /^[^ \t\n\v\f\r:]+$/ : /^[^ \t\n\v\f\r]+$/).test(value) &&
+    new TextEncoder().encode(value).length <= 255;
+  const seen = new Set<string>();
   return {
-    schema: 1,
+    schema,
     threads: threads.map((entry: unknown) => {
       const { environmentId, threadId } = (entry ?? {}) as Record<string, unknown>;
-      if (typeof environmentId !== "string" || environmentId.trim() === "") refuse("blank ref");
-      if (typeof threadId !== "string" || threadId.trim() === "") refuse("blank ref");
+      if (!ref(environmentId, true) || !ref(threadId, false)) refuse("bad ref");
+      const key = `${environmentId as string}:${threadId as string}`;
+      if (seen.has(key)) refuse("duplicate ref");
+      seen.add(key);
       return { environmentId: environmentId as string, threadId: threadId as string };
     }),
   };
@@ -254,7 +265,7 @@ function fakeGateway(initial: string[] = []) {
           code: "conn.settings_version_conflict",
           message: "stale",
           status: 409,
-          details: { sections: { sidebarHiddenThreads: { version: gateway.version } } },
+          details: { sections: { sidebarHiddenThreads: gateway.version } },
         });
       }
       gateway.version += 1;

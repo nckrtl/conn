@@ -25,8 +25,17 @@ export function sidebarHiddenThreadKey(environmentId: string, threadId: string):
   return `${environmentId}:${threadId}`;
 }
 
+/**
+ * A ref part the Gateway accepts: 1 to 255 UTF-8 bytes without ASCII whitespace (its PHP regex has
+ * no `u` flag, so `\s` is ASCII only and the length counts bytes).
+ */
 function isRefPart(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 255 && !/\s/.test(value);
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    !/[ \t\n\v\f\r]/.test(value) &&
+    new TextEncoder().encode(value).length <= 255
+  );
 }
 
 /** The section's thread keys in order, without duplicates; null when the value is not one. */
@@ -72,12 +81,17 @@ function capacityError(rows: number, bytes: number): SidebarHiddenThreadsCapacit
   });
 }
 
-/** The section for a set of keys, oldest first. */
+/**
+ * The section for a set of keys, oldest first. A key the Gateway would refuse is left out, so one
+ * bad local mark cannot fail the whole write; it stays hidden on this device only.
+ */
 function sidebarHiddenThreadsSection(keys: readonly string[]): JsonObject {
   const threads = keys.flatMap((key) => {
     const separator = key.indexOf(":");
-    if (separator <= 0 || separator >= key.length - 1) return [];
-    return [{ environmentId: key.slice(0, separator), threadId: key.slice(separator + 1) }];
+    const environmentId = key.slice(0, separator);
+    const threadId = key.slice(separator + 1);
+    if (separator <= 0 || !isRefPart(environmentId) || !isRefPart(threadId)) return [];
+    return [{ environmentId, threadId }];
   });
   return { schema: PROFILE_SCHEMA_VERSION, threads };
 }

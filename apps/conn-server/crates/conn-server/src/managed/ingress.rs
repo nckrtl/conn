@@ -232,6 +232,7 @@ async fn ticket(
     let binding = super::authority::TicketBinding {
         edge: principal.edge_id,
         redeem_by: deadline,
+        id: 0,
     };
     let minted = shared.with(|a| {
         (

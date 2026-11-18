@@ -98,7 +98,8 @@ Each is the fail-closed reading.
   0600 (no special bits).
 - Unspent managed tickets live with the authority (at most 256): a fence of an edge
   deletes its tickets in the same step as it closes its handlers, for good, and a
-  fail-closed deletes them all. A Gateway answer may be up to 8 MiB: the contract does not
+  fail-closed deletes them all. A redemption keeps its ticket reserved in the pool until
+  the handler registers, so a fence during its introspection still cancels it. A Gateway answer may be up to 8 MiB: the contract does not
   page a snapshot's owed rows yet, so a very long offline backlog beyond that keeps the
   target closed (open point for the contract owner).
 - Settled revision records are pruned after their ACK, or when a fresh verified reply no

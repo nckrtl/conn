@@ -588,6 +588,7 @@ fn a_fence_deletes_its_edges_tickets_for_good() {
     let binding = move |edge, until: u64| TicketBinding {
         edge,
         redeem_by: t0 + Duration::from_millis(until),
+        id: 0,
     };
     let (b1, b2) = (binding(1, 10_000), binding(2, 10_000));
     lab.a
@@ -1200,4 +1201,54 @@ fn a_notice_flood_fails_closed_without_growing() {
     lab.open(0, vec![1], 0);
     lab.notice(1, wide, 30);
     assert!(!lab.a.is_open());
+}
+
+/// A redemption in progress is cancelled by a fail-closed that lands during its
+/// introspection: after recovery, the reserved ticket is gone and admission refuses it.
+#[test]
+fn a_redemption_in_flight_does_not_survive_a_fence() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    let binding = TicketBinding {
+        edge: 1,
+        redeem_by: lab.at(10_000),
+        id: 0,
+    };
+    lab.a
+        .mint_ticket("t1".into(), "tok".into(), "rpc", binding, lab.at(10))
+        .unwrap();
+    let (_, reserved) = lab
+        .a
+        .take_ticket("t1", "rpc", lab.at(20))
+        .expect("reserved");
+    assert!(
+        lab.a.take_ticket("t1", "rpc", lab.at(21)).is_none(),
+        "one redemption at a time"
+    );
+    // The control link drops while the redemption's introspection is out; then it recovers.
+    lab.a.set_notice_link(false);
+    lab.a.set_notice_link(true);
+    lab.open(0, vec![1], 100);
+    let epoch = lab.a.epoch();
+    assert_eq!(
+        lab.a
+            .admit(1, 0, far(), epoch, Some(reserved), lab.at(110), 110)
+            .unwrap_err(),
+        Refusal::Fenced,
+        "the fail-closed cancelled the redemption"
+    );
+    // A clean redemption is consumed when its handler registers.
+    lab.a
+        .mint_ticket("t2".into(), "tok".into(), "rpc", binding, lab.at(120))
+        .unwrap();
+    let (_, reserved) = lab
+        .a
+        .take_ticket("t2", "rpc", lab.at(121))
+        .expect("reserved");
+    assert!(
+        lab.a
+            .admit(1, 0, far(), epoch, Some(reserved), lab.at(122), 122)
+            .is_ok()
+    );
+    assert_eq!(lab.a.ticket_count(), 0);
 }

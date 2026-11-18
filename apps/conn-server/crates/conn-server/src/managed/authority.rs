@@ -88,6 +88,8 @@ pub struct TicketBinding {
     pub edge: EdgeId,
     /// The ticket must be redeemed before this monotonic instant.
     pub redeem_by: Instant,
+    /// The pool's own number for the ticket; set when it is minted.
+    pub id: u64,
 }
 
 /// The most unspent managed tickets kept.
@@ -99,6 +101,9 @@ struct PoolTicket {
     token: String,
     route: &'static str,
     binding: TicketBinding,
+    /// Being redeemed: it stays in the pool until its handler registers, so a fence or a
+    /// fail-closed during the redemption's introspection still cancels it.
+    reserved: bool,
 }
 
 /// Why a ticket could not be minted.
@@ -210,6 +215,7 @@ pub struct Authority {
     snapshots: u64,
     /// Raised each time an edge is fenced; a ticket minted before a fence never redeems.
     tickets: HashMap<String, PoolTicket>,
+    next_ticket: u64,
     /// Bounds of (Gateway clock − target clock) in ms, from applied probes.
     offset_bounds: Option<(i64, i64)>,
     notices: BTreeMap<Revision, NoticeRecord>,
@@ -293,6 +299,7 @@ impl Authority {
             introspected: None,
             snapshots: 0,
             tickets: HashMap::new(),
+            next_ticket: 1,
             offset_bounds: None,
             notices: BTreeMap::new(),
             admitted: HashSet::new(),
@@ -395,7 +402,7 @@ impl Authority {
         ticket: String,
         token: String,
         route: &'static str,
-        binding: TicketBinding,
+        mut binding: TicketBinding,
         now: Instant,
     ) -> Result<(), MintRefusal> {
         self.tickets.retain(|_, t| t.binding.redeem_by > now);
@@ -405,27 +412,48 @@ impl Authority {
         if self.tickets.len() >= MAX_TICKETS {
             return Err(MintRefusal::Full);
         }
+        binding.id = self.next_ticket;
+        self.next_ticket += 1;
         self.tickets.insert(
             ticket,
             PoolTicket {
                 token,
                 route,
                 binding,
+                reserved: false,
             },
         );
         Ok(())
     }
 
-    /// Spends a ticket: its token and binding, if it is still in the pool for `route`.
+    /// Reserves a ticket for redemption: its token and binding, if it is in the pool for
+    /// `route`, unexpired and not already being redeemed. It stays in the pool until the
+    /// handler registers ([`Self::admit`] consumes it). Anything else spends it at once.
     pub fn take_ticket(
         &mut self,
         ticket: &str,
         route: &'static str,
         now: Instant,
     ) -> Option<(String, TicketBinding)> {
-        let spent = self.tickets.remove(ticket)?;
-        (spent.route == route && spent.binding.redeem_by > now)
-            .then_some((spent.token, spent.binding))
+        let usable = self
+            .tickets
+            .get(ticket)
+            .is_some_and(|t| t.route == route && t.binding.redeem_by > now && !t.reserved);
+        if !usable {
+            self.tickets.remove(ticket);
+            return None;
+        }
+        let entry = self.tickets.get_mut(ticket)?;
+        entry.reserved = true;
+        Some((entry.token.clone(), entry.binding))
+    }
+
+    /// The pool key of the reserved ticket with this binding, if it is still there.
+    fn reserved_ticket(&self, binding: &TicketBinding) -> Option<String> {
+        self.tickets
+            .iter()
+            .find(|(_, t)| t.reserved && t.binding.id == binding.id)
+            .map(|(key, _)| key.clone())
     }
 
     /// Drops one ticket (a mint that could not answer).
@@ -557,6 +585,10 @@ impl Authority {
             if now >= ticket.redeem_by {
                 return Err(Refusal::Expired);
             }
+            // Still reserved in the pool: no fence or fail-closed cancelled it meanwhile.
+            if self.reserved_ticket(&ticket).is_none() {
+                return Err(Refusal::Fenced);
+            }
         }
         if !self.available(now) {
             return Err(Refusal::Unavailable);
@@ -580,6 +612,10 @@ impl Authority {
         }
         if now >= expires {
             return Err(Refusal::Expired);
+        }
+        // The redemption is consumed in the same step as the handler registers.
+        if let Some(key) = ticket.and_then(|t| self.reserved_ticket(&t)) {
+            self.tickets.remove(&key);
         }
         self.admitted.insert(edge);
         Ok(self.register(edge))

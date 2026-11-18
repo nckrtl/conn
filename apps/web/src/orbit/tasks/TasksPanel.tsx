@@ -60,7 +60,7 @@ import {
   useTasksBoardQuery,
   useTasksLaneScroll,
   useTasksNavigation,
-  useTasksPanelStore,
+  useTasksBoardLanes,
 } from "./tasksPanelStore";
 
 type TaskListState = { readonly status: "loading" } | OrbitTasksResult<OrbitTasksPage>;
@@ -209,7 +209,7 @@ function useRestoredScroll<T extends HTMLElement>(top: number, left: number) {
 /** Search fills the row; Lanes sits in Conn's toolbar pill, like the terminal controls. */
 function BoardToolbar() {
   const query = useTasksBoardQuery((state) => state.query);
-  const hiddenLanes = useTasksPanelStore((state) => state.hiddenLanes);
+  const hiddenLanes = useTasksBoardLanes((state) => state.hiddenLanes);
   const hidden = hiddenLanes.length;
   return (
     <div className="flex shrink-0 items-center gap-2 px-3 pb-3">
@@ -256,7 +256,7 @@ function BoardToolbar() {
                     checked={shown}
                     // One lane always stays on the board.
                     disabled={shown && hidden === ORBIT_TASK_LANES.length - 1}
-                    onCheckedChange={() => tasksPanelActions().toggleLane(lane.id)}
+                    onCheckedChange={() => useTasksBoardLanes.getState().toggleLane(lane.id)}
                     closeOnClick={false}
                   >
                     {lane.label}
@@ -280,7 +280,7 @@ function TasksBoard(props: {
   const laneScroll = useTasksLaneScroll((state) => state.byThreadKey[props.threadKey]);
   const scrollRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, props.scroll.left);
   const query = useTasksBoardQuery((state) => state.query);
-  const hiddenLanes = useTasksPanelStore((state) => state.hiddenLanes);
+  const hiddenLanes = useTasksBoardLanes((state) => state.hiddenLanes);
   const searching = query.trim().length > 0;
   return (
     <div className="flex min-h-0 flex-1 flex-col">

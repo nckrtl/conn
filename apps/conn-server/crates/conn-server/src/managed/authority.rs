@@ -405,7 +405,9 @@ impl Authority {
         let Some(entry) = self.handlers.get(&handler) else {
             return GateState::Closed;
         };
-        if !self.held(now) || self.is_fenced(entry.edge) || now >= expires {
+        // A handler told to close stays closed, even after authority recovers.
+        if *entry.close.borrow() || !self.held(now) || self.is_fenced(entry.edge) || now >= expires
+        {
             GateState::Closed
         } else if self.blocked() {
             GateState::Paused
@@ -530,14 +532,14 @@ impl Authority {
         }
         for handler in self.handlers.values() {
             if handler.edge == edge {
-                let _ = handler.close.send(true);
+                handler.close.send_replace(true);
             }
         }
     }
 
     fn close_all_handlers(&self) {
         for handler in self.handlers.values() {
-            let _ = handler.close.send(true);
+            handler.close.send_replace(true);
         }
     }
 

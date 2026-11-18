@@ -892,3 +892,18 @@ fn a_gateway_behind_the_target_does_not_expire_tokens_early() {
     // 30,005 + 29,995: the earliest target time the Gateway can read 30,005.
     assert_eq!(lab.a.local_wall_ms(30_005), 60_000);
 }
+
+#[test]
+fn a_handler_told_to_close_stays_closed_after_recovery() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    // Its receiver is gone: the close must still be recorded.
+    let (handler, _) = lab.admit(1, 5);
+    let probe = lab.probe(100);
+    lab.a.probe_failed(&probe.nonce);
+    lab.open(0, vec![1], 200);
+    assert_eq!(
+        lab.a.handler_state(handler, far(), lab.at(211)),
+        GateState::Closed
+    );
+}

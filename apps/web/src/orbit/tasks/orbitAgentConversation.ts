@@ -1,11 +1,13 @@
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
+  OrbitLaunchCopyError,
   createOrbitGatewayClient,
   type OrbitConversationRef,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
+import { msg } from "gt-react";
 import { useEffect, useRef, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
@@ -35,7 +37,8 @@ export async function prepareOrbitThreadEnvironment(environmentId: EnvironmentId
       const entry = appAtomRegistry
         .get(environmentCatalog.catalogValueAtom)
         .entries.get(environmentId);
-      if (!entry) throw new Error("This environment is not paired on this device.");
+      if (!entry)
+        throw OrbitLaunchCopyError.fromCopy(msg("This environment is not paired on this device."));
       if (!entry.enabled) {
         const enabled = await runAtomCommand(
           appAtomRegistry,

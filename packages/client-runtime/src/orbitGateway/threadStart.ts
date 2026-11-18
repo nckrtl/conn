@@ -1,4 +1,7 @@
+import { msg } from "gt-i18n";
+
 import type { OrbitGatewayClient } from "./client.ts";
+import { OrbitLaunchCopyError } from "./launchCopy.ts";
 
 /** A name whose address `<name>.<project domain>` Orbit refuses (check or create). */
 export const ORBIT_NAME_DOMAIN_INVALID_TEXT =
@@ -52,5 +55,7 @@ export async function fitOrbitThreadInstanceName(
     if (check?.reason !== "domain_invalid") return name;
     addressTooLong = true;
   }
-  throw new Error("Orbit could not find an Instance name short enough for this Project's address.");
+  throw OrbitLaunchCopyError.fromCopy(
+    msg("Orbit could not find an Instance name short enough for this Project's address."),
+  );
 }

@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 
@@ -46,4 +47,32 @@ export function orbitLaunchActionLabel(
       ? msg("Retry cleanup")
       : ORBIT_LAUNCH_ACTION_LABELS[action],
   );
+}
+
+export class OrbitLaunchCopyError extends Schema.TaggedError<
+  OrbitLaunchCopyError,
+  { readonly brand: unique symbol }
+>()("OrbitLaunchCopyError", {
+  copy: Schema.String,
+  message: Schema.String,
+}) {
+  static fromCopy(copy: string): OrbitLaunchCopyError {
+    return new OrbitLaunchCopyError({ copy, message: mFallback(copy) });
+  }
+}
+
+const LEGACY_PREVIEW_STATUS = new Map([
+  ["queued", msg("Queued", { $context: "preview status" })],
+  ["waiting", ORBIT_LAUNCH_STAGE_STATUS.pending],
+  ["pending", ORBIT_LAUNCH_STAGE_STATUS.pending],
+  ["running", ORBIT_LAUNCH_STAGE_STATUS.running],
+  ["succeeded", ORBIT_LAUNCH_STAGE_STATUS.succeeded],
+  ["failed", ORBIT_LAUNCH_STAGE_STATUS.failed],
+  ["cancelled", ORBIT_LAUNCH_STAGE_STATUS.cancelled],
+  ["interrupted", msg("Interrupted", { $context: "preview status" })],
+  ["skipped", ORBIT_LAUNCH_STAGE_STATUS.skipped],
+]);
+
+export function orbitLegacyPreviewStatus(status: string, resolve: MFunctionType) {
+  return resolve(LEGACY_PREVIEW_STATUS.get(status) ?? msg("Unknown preview status"));
 }

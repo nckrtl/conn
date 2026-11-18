@@ -1,3 +1,4 @@
+import { resolveOrbitLaunchError } from "@t3tools/client-runtime/orbit-gateway";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { T, msg, useGT } from "gt-react";
 import { useState, type ReactNode } from "react";
@@ -31,7 +32,7 @@ export function OrbitPendingThreadView({ startId }: { startId: string }) {
         await navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(ref) });
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : m(msg("Could not open the thread.")));
+      setError(resolveOrbitLaunchError(cause, msg("Could not open the thread."), m));
     }
     setOpening(false);
   };

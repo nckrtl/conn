@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  OrbitLaunchCopyError,
   createOrbitLaunchObserver,
   createOrbitLaunchSubmissions,
   createOrbitLaunchThreadRowsAtom,
@@ -16,6 +17,7 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { msg } from "gt-react-native";
 import { AppState } from "react-native";
 
 import { m } from "../../i18n/messages";
@@ -46,7 +48,8 @@ const LEGACY = "orbit-thread-starts.json";
 
 function decodeLaunchAdmissions(raw: string): readonly OrbitLaunchSubmission[] {
   const rows: unknown = JSON.parse(raw);
-  if (!Array.isArray(rows)) throw new Error("Could not read the Orbit submission journal.");
+  if (!Array.isArray(rows))
+    throw OrbitLaunchCopyError.fromCopy(msg("Could not read the Orbit submission journal."));
   return rows;
 }
 
@@ -111,7 +114,8 @@ export async function updateLegacyMobilePreview(
   row: LegacyOrbitLaunch,
   action: "refresh" | "retry",
 ) {
-  if (row.completion === null) throw new Error("This preview is unavailable.");
+  if (row.completion === null)
+    throw OrbitLaunchCopyError.fromCopy(msg("This preview is unavailable."));
   const operation = await updateLegacyOrbitPreview(orbitGatewayClient, row.completion, action);
   await changeLegacyMobileArchive((raw) => recordLegacyOrbitPreview(raw, row, operation));
 }
@@ -125,7 +129,7 @@ export async function startOrbitThread(
   const profileId = current.node?.profile?.id;
   const nodeId = current.node?.id;
   if (current.provider !== "orbit" || profileId === undefined || nodeId === undefined) {
-    throw new Error("Connect to an Orbit profile before sending.");
+    throw OrbitLaunchCopyError.fromCopy(msg("Connect to an Orbit profile before sending."));
   }
   // A new sheet or project is a different draft. Unconfirmed sends remain in Home for recovery.
   const draftId = `${sheetKey}:${project.id}`;
@@ -176,7 +180,7 @@ export async function openMobileOrbitThread(
         (row) => row.environmentId === environmentId,
       );
       if (environment === undefined || !(await connectOrbitEnvironment(environment))) {
-        throw new Error("Could not connect to this thread's environment.");
+        throw OrbitLaunchCopyError.fromCopy(msg("Could not connect to this thread's environment."));
       }
     }
     if (entries().get(environmentId)?.enabled === false) {

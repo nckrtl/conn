@@ -1,4 +1,5 @@
 import {
+  resolveOrbitLaunchError,
   ORBIT_LAUNCH_ACTION_LABELS,
   ORBIT_LAUNCH_PHASE_LABELS,
   ORBIT_LAUNCH_STAGES,
@@ -29,9 +30,7 @@ export function OrbitLaunchProgress({ launch, stale }: { launch: OrbitLaunch; st
     try {
       await orbitLaunches.act(launch.id, action);
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm this action.")),
-      );
+      setError(resolveOrbitLaunchError(cause, msg("Orbit did not confirm this action."), m));
     }
     setBusy(null);
   }

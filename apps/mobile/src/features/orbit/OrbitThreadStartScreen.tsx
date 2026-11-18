@@ -1,4 +1,5 @@
 import {
+  resolveOrbitLaunchError,
   startableOrbitProject,
   type OrbitGatewayProject,
 } from "@t3tools/client-runtime/orbit-gateway";
@@ -45,7 +46,8 @@ export function OrbitThreadStartScreen() {
     orbitGatewayClient.projects().then(
       (list) => current && setProjects(list.flatMap((row) => startableOrbitProject(row) ?? [])),
       (error: unknown) =>
-        current && setLoadError(error instanceof Error ? error.message : String(error)),
+        current &&
+        setLoadError(resolveOrbitLaunchError(error, msg("Could not load Orbit projects."), m)),
     );
     return () => {
       current = false;
@@ -71,9 +73,7 @@ export function OrbitThreadStartScreen() {
         await mobileOrbitSubmissions.acknowledge(launch.launch_id).catch(() => {});
       }
     } catch (error) {
-      setSendError(
-        error instanceof Error ? error.message : m(msg("Orbit did not confirm the launch.")),
-      );
+      setSendError(resolveOrbitLaunchError(error, msg("Orbit did not confirm the launch."), m));
     }
     started.current = false;
     setSending(false);

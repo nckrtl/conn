@@ -15,6 +15,9 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { mFallback, msg } from "gt-react";
+
+import type { MessageResolver } from "../i18n/messages";
 
 /**
  * Conn: where an Orbit draft starts (FORK.md, "Orbit"). An Orbit Project is no T3 project, so the
@@ -156,10 +159,12 @@ export function orbitDraftContextRow(target: OrbitDraftTarget): OrbitDraftContex
   };
 }
 
-export const ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE =
-  "Attachments are not available for a new Instance yet.";
-export const ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE =
-  "Attachments are not available until this Instance is connected.";
+export const ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE = msg(
+  "Attachments are not available for a new Instance yet.",
+);
+export const ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE = msg(
+  "Attachments are not available until this Instance is connected.",
+);
 
 /**
  * Why the composer takes no attachments, or null. The start machine sends the first message as
@@ -167,11 +172,14 @@ export const ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE =
  */
 export function orbitDraftAttachmentsBlockedReason(
   target: OrbitDraftTarget | null | undefined,
+  resolve: MessageResolver = mFallback,
 ): string | null {
   if (!target) return null;
-  return target.instanceKind === "new"
-    ? ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE
-    : ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE;
+  return resolve(
+    target.instanceKind === "new"
+      ? ORBIT_NEW_INSTANCE_ATTACHMENTS_NOTICE
+      : ORBIT_UNPAIRED_INSTANCE_ATTACHMENTS_NOTICE,
+  );
 }
 
 /** The Gateway project the start record needs, from the target alone. */

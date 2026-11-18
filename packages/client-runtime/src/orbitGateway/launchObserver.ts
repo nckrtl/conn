@@ -3,7 +3,13 @@ import * as Schema from "effect/Schema";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 
-import { operationPollDelayMs, OrbitGatewayError, type OrbitGatewayClient } from "./client.ts";
+import {
+  gatewayFallbackMessage,
+  operationPollDelayMs,
+  OrbitGatewayError,
+  type OrbitGatewayClient,
+} from "./client.ts";
+import { OrbitLaunchCopyError } from "./launchCopy.ts";
 import {
   type OrbitLaunch,
   type OrbitLaunchAction,
@@ -23,6 +29,31 @@ export class OrbitLaunchAdmissionRefused extends Schema.TaggedError<
   cause: OrbitGatewayError,
   message: Schema.String,
 }) {}
+
+const isLaunchCopyError = Schema.is(OrbitLaunchCopyError);
+const isAdmissionRefused = Schema.is(OrbitLaunchAdmissionRefused);
+
+export function resolveOrbitLaunchError(
+  error: unknown,
+  fallback: string,
+  resolve: MFunctionType,
+): string {
+  if (isLaunchCopyError(error)) return resolve(error.copy);
+  const gateway = isAdmissionRefused(error) ? error.cause : error;
+  if (isGatewayError(gateway)) {
+    if (gateway.code === "gateway.unreachable") {
+      return resolve(msg("The Orbit Gateway did not answer."));
+    }
+    if (gateway.code === "gateway.response_invalid") {
+      return resolve(msg("The Orbit Gateway sent an unexpected response."));
+    }
+    if (gateway.message === gatewayFallbackMessage(gateway.status)) {
+      return resolve(msg("The Orbit Gateway answered {status}."), { status: gateway.status });
+    }
+    return gateway.message;
+  }
+  return resolve(fallback);
+}
 
 export interface OrbitLaunchView {
   readonly launches: readonly OrbitLaunch[];
@@ -104,10 +135,7 @@ export function createOrbitLaunchObserver(
           publish({
             launches: denied ? [] : view.launches,
             loaded: true,
-            error:
-              error instanceof Error
-                ? error.message
-                : resolve(msg("Could not read Orbit launches.")),
+            error: resolveOrbitLaunchError(error, msg("Could not read Orbit launches."), resolve),
           });
           if (purpose === "reconcile") schedule();
         }
@@ -151,19 +179,25 @@ export function createOrbitLaunchObserver(
       scope?.profileId !== expected.profileId ||
       scope.nodeId !== expected.nodeId
     ) {
-      throw new Error("Connect to the original Orbit profile and device before sending.");
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("Connect to the original Orbit profile and device before sending."),
+      );
     }
     if (
       admission.request.expected_profile_id !== expected.profileId ||
       admission.request.expected_node_id !== expected.nodeId
     ) {
-      throw new Error("This submission belongs to a different Orbit profile or device.");
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("This submission belongs to a different Orbit profile or device."),
+      );
     }
     const version = scopeVersion;
     const access = accessVersion;
     const ensureAccess = () => {
       if (access !== accessVersion) {
-        throw new Error("Orbit access changed before Conn could confirm this launch.");
+        throw OrbitLaunchCopyError.fromCopy(
+          msg("Orbit access changed before Conn could confirm this launch."),
+        );
       }
     };
     const me = await gateway.me();
@@ -172,7 +206,9 @@ export function createOrbitLaunchObserver(
       me.profile?.id !== expected.profileId ||
       scopeVersion !== version
     ) {
-      throw new Error("This device's Orbit profile changed before sending.");
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("This device's Orbit profile changed before sending."),
+      );
     }
     ensureAccess();
     const api = gateway.launches;
@@ -195,7 +231,9 @@ export function createOrbitLaunchObserver(
       const before = observed();
       const previous = (await readAdmissions()).find((row) => row.launch_id === admission.id);
       if (scopeVersion !== version)
-        throw new Error("The Orbit profile changed while checking the launch.");
+        throw OrbitLaunchCopyError.fromCopy(
+          msg("The Orbit profile changed while checking the launch."),
+        );
       ensureAccess();
       if (previous) return accept(previous, before);
       const current = observed();
@@ -240,7 +278,9 @@ export function createOrbitLaunchObserver(
       return accept(recovered, beforeRead);
     }
     if (scopeVersion !== version)
-      throw new Error("Orbit may have accepted the launch on your previous profile.");
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("Orbit may have accepted the launch on your previous profile."),
+      );
     return accept(accepted, before);
   }
 
@@ -254,7 +294,7 @@ export function createOrbitLaunchObserver(
       !launch?.actions[action].available
     ) {
       void refresh();
-      throw new Error("Orbit no longer offers this action.");
+      throw OrbitLaunchCopyError.fromCopy(msg("Orbit no longer offers this action."));
     }
     const version = scopeVersion;
     try {
@@ -267,7 +307,7 @@ export function createOrbitLaunchObserver(
         next.launch_id !== launch.launch_id ||
         next.profile_id !== launch.profile_id
       ) {
-        throw new Error("Orbit returned a different launch.");
+        throw OrbitLaunchCopyError.fromCopy(msg("Orbit returned a different launch."));
       }
       if (version === scopeVersion) {
         if (view.launches.find((row) => row.id === id) === launch) apply(next, version);
@@ -315,5 +355,5 @@ function assertLaunchIdentity(launch: OrbitLaunch, admission: OrbitLaunchAdmissi
       (launch.thread.thread_id !== admission.request.thread_id ||
         launch.thread.message_id !== admission.request.message_id))
   )
-    throw new Error("Orbit returned a different launch.");
+    throw OrbitLaunchCopyError.fromCopy(msg("Orbit returned a different launch."));
 }

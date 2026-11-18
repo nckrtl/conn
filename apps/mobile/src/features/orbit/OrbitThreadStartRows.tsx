@@ -1,4 +1,6 @@
 import {
+  orbitLegacyPreviewStatus,
+  resolveOrbitLaunchError,
   ORBIT_LAUNCH_ACTION_LABELS,
   ORBIT_LAUNCH_PHASE_LABELS,
   ORBIT_LAUNCH_STAGES,
@@ -83,15 +85,13 @@ export function OrbitThreadStartRows() {
     };
   }, [profileId, nodeId]);
 
-  const run = async (action: () => Promise<unknown>) => {
+  const run = async (action: () => Promise<unknown>, fallback: string) => {
     setBusy(true);
     setError(null);
     try {
       await action();
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm the action.")),
-      );
+      setError(resolveOrbitLaunchError(cause, fallback, m));
     }
     setBusy(false);
   };
@@ -152,7 +152,8 @@ export function OrbitThreadStartRows() {
               disabled={busy}
               onPress={() => {
                 const thread = launch.thread;
-                if (thread !== null) void run(() => openMobileOrbitThread(thread));
+                if (thread !== null)
+                  void run(() => openMobileOrbitThread(thread), msg("Could not open the thread."));
               }}
             />
           ) : null}
@@ -164,7 +165,12 @@ export function OrbitThreadStartRows() {
                   key={id}
                   label={orbitLaunchActionLabel(id, launch.phase, messages)}
                   disabled={busy || snapshot.error !== null}
-                  onPress={() => void run(() => mobileOrbitLaunches.act(launch.id, id))}
+                  onPress={() =>
+                    void run(
+                      () => mobileOrbitLaunches.act(launch.id, id),
+                      msg("Orbit did not confirm the action."),
+                    )
+                  }
                 />
               );
             return action.requires ? (
@@ -188,7 +194,7 @@ export function OrbitThreadStartRows() {
                 status:
                   row.completion.operationId === null
                     ? gt("Retry unconfirmed")
-                    : row.completion.status,
+                    : orbitLegacyPreviewStatus(row.completion.status, messages),
               })}
               {row.completion.error ? ` · ${row.completion.error}` : ""}
             </Text>
@@ -207,7 +213,10 @@ export function OrbitThreadStartRows() {
                 const environment_id = row.environmentId;
                 const thread_id = row.threadId;
                 if (environment_id !== null && thread_id !== null)
-                  void run(() => openMobileOrbitThread({ environment_id, thread_id }));
+                  void run(
+                    () => openMobileOrbitThread({ environment_id, thread_id }),
+                    msg("Could not open the thread."),
+                  );
               }}
             />
           ) : null}
@@ -221,7 +230,7 @@ export function OrbitThreadStartRows() {
                     void run(async () => {
                       await updateLegacyMobilePreview(row, "refresh");
                       setLegacy(await readLegacyMobileLaunches());
-                    })
+                    }, msg("Orbit did not confirm the preview."))
                   }
                 />
               ) : null}
@@ -237,7 +246,7 @@ export function OrbitThreadStartRows() {
                     void run(async () => {
                       await updateLegacyMobilePreview(row, "retry");
                       setLegacy(await readLegacyMobileLaunches());
-                    })
+                    }, msg("Orbit did not confirm the preview."))
                   }
                 />
               ) : null}
@@ -249,7 +258,11 @@ export function OrbitThreadStartRows() {
               disabled={busy}
               onPress={() => {
                 const prompt = row.prompt;
-                if (prompt !== null) void run(() => Clipboard.setStringAsync(prompt));
+                if (prompt !== null)
+                  void run(
+                    () => Clipboard.setStringAsync(prompt),
+                    msg("Could not copy the message."),
+                  );
               }}
             />
           ) : null}
@@ -260,7 +273,7 @@ export function OrbitThreadStartRows() {
               void run(async () => {
                 await resolveLegacyMobileLaunch(row.id);
                 setLegacy(await readLegacyMobileLaunches());
-              })
+              }, msg("Could not dismiss the previous start."))
             }
           />
         </View>
@@ -289,11 +302,16 @@ export function OrbitThreadStartRows() {
               }
               disabled={busy || (!row.superseded && snapshot.error !== null)}
               onPress={() =>
-                void run(async () => {
-                  if (accepted || row.superseded)
-                    await mobileOrbitSubmissions.acknowledge(row.admission.id);
-                  else await mobileOrbitSubmissions.replay(row);
-                })
+                void run(
+                  async () => {
+                    if (accepted || row.superseded)
+                      await mobileOrbitSubmissions.acknowledge(row.admission.id);
+                    else await mobileOrbitSubmissions.replay(row);
+                  },
+                  accepted || row.superseded
+                    ? msg("Could not dismiss the saved submission.")
+                    : msg("Orbit did not confirm the submission."),
+                )
               }
             />
           </View>

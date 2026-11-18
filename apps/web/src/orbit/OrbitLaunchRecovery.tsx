@@ -1,9 +1,11 @@
-import type {
-  LegacyOrbitLaunch,
-  OrbitLaunchSubmission,
+import {
+  orbitLegacyPreviewStatus,
+  resolveOrbitLaunchError,
+  type LegacyOrbitLaunch,
+  type OrbitLaunchSubmission,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { Link } from "@tanstack/react-router";
-import { T, msg, useGT } from "gt-react";
+import { T, msg, useGT, useMessages } from "gt-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "../components/ui/button";
@@ -21,6 +23,7 @@ import {
 
 export function OrbitLaunchRecovery() {
   const gt = useGT();
+  const messages = useMessages();
   const scope = useOrbitLaunchScope();
   const profileId = scope?.profileId ?? null;
   const nodeId = scope?.nodeId ?? null;
@@ -110,9 +113,7 @@ export function OrbitLaunchRecovery() {
       await orbitLaunchSubmissions.replay(item);
       setPending(await orbitLaunchSubmissions.pending(item));
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm the submission.")),
-      );
+      setError(resolveOrbitLaunchError(cause, msg("Orbit did not confirm the submission."), m));
     }
     setBusy(null);
   }
@@ -123,9 +124,7 @@ export function OrbitLaunchRecovery() {
       await updateLegacyWebPreview(row, action);
       setLegacy(readLegacyWebLaunches());
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : m(msg("Orbit did not confirm the preview.")),
-      );
+      setError(resolveOrbitLaunchError(cause, msg("Orbit did not confirm the preview."), m));
     }
     setBusy(null);
   }
@@ -141,7 +140,7 @@ export function OrbitLaunchRecovery() {
                 status:
                   row.completion.operationId === null
                     ? gt("Retry unconfirmed")
-                    : row.completion.status,
+                    : orbitLegacyPreviewStatus(row.completion.status, messages),
               })}
               {row.completion.error ? ` · ${row.completion.error}` : ""}
             </p>

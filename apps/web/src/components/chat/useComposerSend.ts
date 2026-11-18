@@ -1,5 +1,6 @@
-import { msg } from "gt-react";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { resolveOrbitLaunchError } from "@t3tools/client-runtime/orbit-gateway";
+import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
@@ -825,10 +826,10 @@ export function useComposerSend(input: ComposerSendInput) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "Only text can start this thread",
+            title: m(msg("Only text can start this thread")),
             description:
-              orbitDraftAttachmentsBlockedReason(orbitDraftTarget) ??
-              "Remove the attached context, then send.",
+              orbitDraftAttachmentsBlockedReason(orbitDraftTarget, m) ??
+              m(msg("Remove the attached context, then send.")),
           }),
         );
         return;
@@ -837,8 +838,8 @@ export function useComposerSend(input: ComposerSendInput) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
-            title: "Pick one model",
-            description: "A thread in an Orbit Instance starts with one model.",
+            title: m(msg("Pick one model")),
+            description: m(msg("A thread in an Orbit Instance starts with one model.")),
           }),
         );
         return;
@@ -848,7 +849,7 @@ export function useComposerSend(input: ComposerSendInput) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "This thread cannot start here",
+            title: m(msg("This thread cannot start here")),
             description: blocked,
           }),
         );
@@ -894,8 +895,12 @@ export function useComposerSend(input: ComposerSendInput) {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not confirm the Orbit launch",
-              description: error instanceof Error ? error.message : String(error),
+              title: m(msg("Could not confirm the Orbit launch")),
+              description: resolveOrbitLaunchError(
+                error,
+                msg("Orbit did not confirm the submission."),
+                m,
+              ),
             }),
           );
           return false;

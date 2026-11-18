@@ -3809,6 +3809,7 @@ export default function ChatView(props: ChatViewProps) {
                                 supportsAttachmentUploads={supportsAttachmentUploads}
                                 attachmentsBlockedReason={orbitDraftAttachmentsBlockedReason(
                                   orbitDraftTarget,
+                                  messages,
                                 )}
                                 supportsQuestionAttachments={supportsQuestionAttachments}
                                 maxFileAttachmentBytes={maxFileAttachmentBytes}

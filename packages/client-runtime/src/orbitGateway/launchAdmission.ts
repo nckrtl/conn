@@ -1,6 +1,8 @@
 import * as Schema from "effect/Schema";
+import { msg } from "gt-i18n";
 
 import type { OrbitGatewayClient, OrbitGatewayOperation } from "./client.ts";
+import { OrbitLaunchCopyError } from "./launchCopy.ts";
 import { OrbitLaunchAdmissionRefused } from "./launchObserver.ts";
 import type {
   OrbitLaunch,
@@ -71,14 +73,17 @@ export function createOrbitLaunchSubmissions(
   ) {
     const attempts = records.filter((row) => row.draftId === draftId);
     if (attempts.some((row) => row.profileId !== scope.profileId || row.nodeId !== scope.nodeId)) {
-      throw new Error("Connect to the original Orbit profile and device to resolve this draft.");
+      throw OrbitLaunchCopyError.fromCopy(
+        msg("Connect to the original Orbit profile and device to resolve this draft."),
+      );
     }
     return attempts.findLast((row) => !row.superseded);
   }
 
   const inFlight = new Set<string>();
   async function withDraft<T>(draftId: string, work: () => Promise<T>): Promise<T> {
-    if (inFlight.has(draftId)) throw new Error("Conn is already checking this Orbit submission.");
+    if (inFlight.has(draftId))
+      throw OrbitLaunchCopyError.fromCopy(msg("Conn is already checking this Orbit submission."));
     inFlight.add(draftId);
     try {
       return await (storage.lockDraft ? storage.lockDraft(draftId, work) : work());
@@ -127,8 +132,8 @@ export function createOrbitLaunchSubmissions(
             };
           }
           if (latest && !latest.validationRefused) {
-            throw new Error(
-              "Resolve the previous Orbit submission before sending this edited draft.",
+            throw OrbitLaunchCopyError.fromCopy(
+              msg("Resolve the previous Orbit submission before sending this edited draft."),
             );
           }
           const previous = records.find(
@@ -138,7 +143,9 @@ export function createOrbitLaunchSubmissions(
               sameInput(row.admission.request, record.admission.request),
           );
           if (previous)
-            throw new Error("Orbit already refused this request. Change the draft before sending.");
+            throw OrbitLaunchCopyError.fromCopy(
+              msg("Orbit already refused this request. Change the draft before sending."),
+            );
           const archive =
             latest === undefined
               ? records
@@ -169,7 +176,7 @@ export function createOrbitLaunchSubmissions(
         const saved = await update((records) => {
           const latest = latestAttempt(records, record.draftId, record);
           if (latest?.admission.id !== record.admission.id) {
-            throw new Error("This submission was already handled.");
+            throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
           }
           return { records: clearRefusal(records, latest), result: latest };
         });
@@ -209,7 +216,8 @@ export interface LegacyOrbitLaunch {
 
 function rowsInLegacyArchive(raw: string): unknown[] {
   const data: unknown = JSON.parse(raw);
-  if (!Array.isArray(data)) throw new Error("Could not read the previous Orbit starts.");
+  if (!Array.isArray(data))
+    throw OrbitLaunchCopyError.fromCopy(msg("Could not read the previous Orbit starts."));
   return data;
 }
 
@@ -292,17 +300,18 @@ export async function updateLegacyOrbitPreview(
 ): Promise<OrbitGatewayOperation> {
   const check = (operation: OrbitGatewayOperation) => {
     if (operation.kind !== "instance.complete" || operation.targetId !== completion.instanceId) {
-      throw new Error("Orbit returned a different preview operation.");
+      throw OrbitLaunchCopyError.fromCopy(msg("Orbit returned a different preview operation."));
     }
     return operation;
   };
   if (completion.operationId === null) {
-    if (action === "refresh") throw new Error("Resume the saved preview retry first.");
+    if (action === "refresh")
+      throw OrbitLaunchCopyError.fromCopy(msg("Resume the saved preview retry first."));
     return check(await client.completeInstance(completion.instanceId, completion.retryKey));
   }
   const current = check(await client.operation(completion.operationId));
   if (current.id !== completion.operationId)
-    throw new Error("Orbit returned a different preview operation.");
+    throw OrbitLaunchCopyError.fromCopy(msg("Orbit returned a different preview operation."));
   if (action === "refresh" || !isRetryableLegacyPreview(current)) return current;
   return check(
     await client.completeInstance(completion.instanceId, `conn:legacy-preview:${current.id}`),

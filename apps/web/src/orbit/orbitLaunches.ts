@@ -1,5 +1,6 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
+  OrbitLaunchCopyError,
   createOrbitLaunchObserver,
   createOrbitLaunchSubmissions,
   newOrbitLaunchAdmission,
@@ -12,13 +13,14 @@ import {
   type OrbitLaunchSubmission,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { msg } from "gt-react";
 import { useSyncExternalStore } from "react";
 
 import { m } from "../i18n/messages";
 import { desktopOrbitGatewayClient } from "./desktopOrbitGateway";
 import { useWorkspaceStore } from "../workspaceStore";
 import { randomUUID } from "../lib/utils";
-import { orbitThreadStartBlockedReason } from "./orbitLaunchAvailability";
+import { orbitThreadStartBlockedMessage } from "./orbitLaunchAvailability";
 import { orbitDraftLaunchTarget, type OrbitDraftStartInput } from "./orbitDraft";
 
 const SUBMISSIONS_KEY = "conn:orbit-launch-admissions:v1";
@@ -33,7 +35,10 @@ export const orbitLaunchSubmissions = createOrbitLaunchSubmissions(
         `${SUBMISSIONS_KEY}:draft:${draftId}`,
         { ifAvailable: true },
         (lock) => {
-          if (lock === null) throw new Error("Conn is already checking this Orbit submission.");
+          if (lock === null)
+            throw OrbitLaunchCopyError.fromCopy(
+              msg("Conn is already checking this Orbit submission."),
+            );
           return work();
         },
       ),
@@ -75,16 +80,18 @@ export function resolveLegacyWebLaunch(id: string) {
 
 export async function updateLegacyWebPreview(row: LegacyOrbitLaunch, action: "refresh" | "retry") {
   const client = desktopOrbitGatewayClient();
-  if (client === null || row.completion === null) throw new Error("This preview is unavailable.");
+  if (client === null || row.completion === null)
+    throw OrbitLaunchCopyError.fromCopy(msg("This preview is unavailable."));
   const operation = await updateLegacyOrbitPreview(client, row.completion, action);
   await changeLegacyWebArchive((raw) => recordLegacyOrbitPreview(raw, row, operation));
 }
 
 export async function submitOrbitDraft(draftId: string, start: OrbitDraftStartInput) {
-  const blocked = orbitThreadStartBlockedReason();
-  if (blocked !== null) throw new Error(blocked);
+  const blocked = orbitThreadStartBlockedMessage();
+  if (blocked !== null) throw OrbitLaunchCopyError.fromCopy(blocked);
   const scope = orbitLaunches.scope();
-  if (scope === null) throw new Error("Connect to an Orbit profile before sending.");
+  if (scope === null)
+    throw OrbitLaunchCopyError.fromCopy(msg("Connect to an Orbit profile before sending."));
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
   const admission = newOrbitLaunchAdmission(randomUUID, scope, {
     project_id: start.project.id,

@@ -18,6 +18,7 @@ use conn_contract::{
     ExecutionEnvironmentDescriptor, ExecutionEnvironmentPlatform, ExecutionEnvironmentPlatformArch,
     ExecutionEnvironmentPlatformOs, OrbitInstanceDescriptor, ServerConfig,
 };
+use conn_support::text::js_trim;
 use serde_json::{Value, json};
 
 use crate::{
@@ -179,10 +180,10 @@ fn read_orbit_instance(path: &Path) -> Option<OrbitInstanceDescriptor> {
 fn parse_orbit_instance(text: &str) -> Option<OrbitInstanceDescriptor> {
     let fields: HashMap<_, _> = text
         .lines()
-        .map(str::trim)
+        .map(js_trim)
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.trim(), value.trim()))
+        .map(|(key, value)| (js_trim(key), js_trim(value)))
         .collect();
     let field = |name| fields.get(name).copied().filter(|value| !value.is_empty());
     let id = |name| {
@@ -203,11 +204,33 @@ fn parse_orbit_instance(text: &str) -> Option<OrbitInstanceDescriptor> {
         project_id,
         instance_id,
         project_slug: field("ORBIT_PROJECT").map(str::to_owned),
-        project_name: field("ORBIT_PROJECT_NAME").map(str::to_owned),
+        project_name: field("ORBIT_PROJECT_NAME").and_then(orbit_project_name),
         instance_name: field("ORBIT_INSTANCE").map(str::to_owned),
         node_name: field("ORBIT_NODE").map(str::to_owned),
         url: url.map(str::to_owned),
     })
+}
+
+fn orbit_project_name(value: &str) -> Option<String> {
+    let Some(quoted) = value.strip_prefix('"') else {
+        return Some(value.to_owned());
+    };
+    let mut chars = quoted.strip_suffix('"')?.chars();
+    let mut name = String::with_capacity(quoted.len());
+    // Orbit's InstanceEnvironmentRenderer quotes the name without expanding shell syntax.
+    while let Some(ch) = chars.next() {
+        name.push(match ch {
+            '\\' => match chars.next()? {
+                ch @ ('\\' | '"' | '$') => ch,
+                'n' => '\n',
+                'r' => '\r',
+                _ => return None,
+            },
+            '"' => return None,
+            ch => ch,
+        });
+    }
+    (!js_trim(&name).is_empty()).then_some(name)
 }
 
 /// `ExecutionEnvironmentDescriptor`, built from the contract type, so a new required field
@@ -422,5 +445,29 @@ mod orbit_instance_tests {
             conn_contract::to_json(&facts),
             json!({ "projectId": 7, "instanceId": 41, "projectName": "Hauzer = App" })
         );
+    }
+
+    #[test]
+    fn reads_project_names_quoted_by_the_orbit_renderer() {
+        for (value, expected) in [
+            (
+                r#""Studio \"North\" \$5 \\ = West""#,
+                Some("Studio \"North\" $5 \\ = West"),
+            ),
+            (r#""  Studio  ""#, Some("  Studio  ")),
+            (r#""""#, None),
+            ("\" \u{feff} \"", None),
+            ("\u{feff}", None),
+            (r#""Bad \q""#, None),
+            (r#""Missing end"#, None),
+        ] {
+            let file =
+                format!("ORBIT_PROJECT_ID=7\nORBIT_INSTANCE_ID=41\nORBIT_PROJECT_NAME={value}\n");
+            assert_eq!(
+                parse_orbit_instance(&file).unwrap().project_name.as_deref(),
+                expected,
+                "{value}"
+            );
+        }
     }
 }

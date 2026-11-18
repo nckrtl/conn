@@ -1071,6 +1071,21 @@ describe("sidebar hidden threads sync", () => {
     expect([...mac.memory.ops.keys()]).toEqual(["env-a:\u00a0x", "\u00a0env-a:y\u00a0"]);
   });
 
+  it.each([1, 2])(
+    "writes nothing back from a schema %i read whose ref the write would trim",
+    async (schema) => {
+      const fake = fakeGateway();
+      const value = { schema, threads: [{ environmentId: "env-a", threadId: "\u00a0x" }] };
+      fake.gateway.sections.set("sidebarHiddenThreads", { version: 1, value, updatedBy: "other" });
+      const device = makeHidingDevice(fake);
+      await device.sync().catch(() => undefined);
+      await device.sync().catch(() => undefined);
+      // Neither an unhide (threads: []) nor another thread's ref ("x") goes out.
+      expect(fake.gateway.patches).toHaveLength(0);
+      expect(fake.gateway.sections.get("sidebarHiddenThreads")?.value).toEqual(value);
+    },
+  );
+
   it("reads refs the Gateway accepts, also with non-ASCII whitespace, and still sends a Show", async () => {
     const fake = fakeGateway();
     const mac = makeHidingDevice(fake);

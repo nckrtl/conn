@@ -38,7 +38,21 @@ function isRefPart(value: unknown): value is string {
   );
 }
 
-/** The section's thread keys in order, without duplicates; null when the value is not one. */
+/**
+ * A ref part that reaches the Gateway unchanged. The sync sends values in Gateway form, which
+ * trims strings with JavaScript's `trim()`; that also strips non-ASCII whitespace such as a
+ * no-break space, so a part with it at either end would be sent as another thread's ref. The
+ * Gateway trims the same way, so it never stores such a part.
+ */
+function isSendableRefPart(value: unknown): value is string {
+  return isRefPart(value) && value.trim() === value;
+}
+
+/**
+ * The section's thread keys in order, without duplicates; null when the value is not one. A part
+ * the write would trim makes the value malformed: the Gateway never stores one, and adopting it
+ * would send another thread's ref (or drop the mark) on the next write.
+ */
 export function parseSidebarHiddenThreads(value: unknown): string[] | null {
   if (
     !isJsonObject(value) ||
@@ -54,7 +68,11 @@ export function parseSidebarHiddenThreads(value: unknown): string[] | null {
     if (!isJsonObject(entry)) return null;
     const { environmentId, threadId } = entry;
     // The key's first ":" separates the parts, so an environment id never holds one.
-    if (!isRefPart(environmentId) || !isRefPart(threadId) || environmentId.includes(":")) {
+    if (
+      !isSendableRefPart(environmentId) ||
+      !isSendableRefPart(threadId) ||
+      environmentId.includes(":")
+    ) {
       return null;
     }
     const key = sidebarHiddenThreadKey(environmentId, threadId);
@@ -79,15 +97,6 @@ function capacityError(rows: number, bytes: number): SidebarHiddenThreadsCapacit
       `${bytes} of ${SIDEBAR_HIDDEN_THREADS_LIMITS.bytes} bytes). They stay hidden on this ` +
       "device. Show some of them again from the Orbit panel to sync the rest.",
   });
-}
-
-/**
- * A ref part that reaches the Gateway unchanged. The sync sends values in Gateway form, which
- * trims strings with JavaScript's `trim()`; that also strips non-ASCII whitespace such as a
- * no-break space, so a part with it at either end would be sent as another thread's ref.
- */
-function isSendableRefPart(value: string): boolean {
-  return isRefPart(value) && value.trim() === value;
 }
 
 /**

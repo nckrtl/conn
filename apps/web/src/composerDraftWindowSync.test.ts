@@ -313,6 +313,17 @@ describe("applyOtherWindowComposerDrafts", () => {
         expect(latest).toMatchObject({
           state: { draftsByThreadKey: { [key]: { prompt: "genuine edit in a third window" } } },
         });
+        if (editedField === "other-window-edit") {
+          expect(prepareOrbitDraftAdmission(draftId, captureOrbitDraftRevision(draftId))).toBe(
+            false,
+          );
+          expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(
+            "genuine edit in a third window",
+          );
+          expect(prepareOrbitDraftAdmission(draftId, captureOrbitDraftRevision(draftId))).toBe(
+            true,
+          );
+        }
         if (editedField.endsWith("received")) {
           applyOtherWindowComposerDrafts(JSON.stringify(latest), new RecentKeyChanges(2_000));
           expect(useComposerDraftStore.getState().getDraftSession(draftId)).not.toBeNull();

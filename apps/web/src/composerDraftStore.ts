@@ -5094,16 +5094,16 @@ export function isStaleClearedOrbitDraft(draftId: DraftId, captured?: string | n
 }
 
 export function prepareOrbitDraftAdmission(draftId: DraftId, revision: string | null) {
-  if (
-    captureOrbitDraftRevision(draftId) !== revision ||
-    isStaleClearedOrbitDraft(draftId, revision)
-  )
-    return false;
-  useComposerDraftStore.setState({});
-  composerDebouncedStorage.flush();
-  const stored = readStoredComposerDraftState();
   const key = composerTargetKey(draftId);
-  if (stored !== null && orbitDraftRevision(stored, key) === revision) return true;
+  if (
+    captureOrbitDraftRevision(draftId) === revision &&
+    !isStaleClearedOrbitDraft(draftId, revision)
+  ) {
+    useComposerDraftStore.setState({});
+    composerDebouncedStorage.flush();
+    const stored = readStoredComposerDraftState();
+    if (stored !== null && orbitDraftRevision(stored, key) === revision) return true;
+  }
   const raw = composerDraftBaseStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY);
   if (typeof raw === "string") applyOtherWindowComposerDrafts(raw, composerDraftLocalChanges, key);
   return false;

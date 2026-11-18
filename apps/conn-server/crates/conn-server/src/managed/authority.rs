@@ -118,15 +118,15 @@ pub enum Loss {
     MissingRevision,
     UnexpectedKind,
     NoticeLinkClosed,
-    /// More removed edges than the target keeps in one generation: it stays closed until a
-    /// new generation (re-enrolment) starts it fresh.
-    FenceCapacity,
+    /// More notices than the target keeps pending.
+    NoticeOverflow,
 }
 
-/// The most removed edges one generation keeps fenced. The fences must outlive every
-/// handler and ACK for the generation, so the set is bounded by this, not pruned: past it
-/// the target fails closed for good, keeping every fence it holds.
-pub const MAX_FENCED_EDGES: usize = 65_536;
+/// The most notices kept while their revisions are not applied, and the most edges one
+/// notice may name. A Gateway that floods past either fails the target closed; a snapshot
+/// recovers from the Gateway's own state, so nothing a dropped notice said is needed.
+pub const MAX_PENDING_NOTICES: usize = 1_024;
+pub const MAX_NOTICE_EDGES: usize = 1_024;
 
 /// The kind of an acknowledgement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -429,17 +429,12 @@ impl Authority {
     /// Managed authority is held: open, lease live, notices subscribed. A blocked target
     /// still holds it, but pauses.
     fn held(&self, now: Instant) -> bool {
-        self.open && self.notice_link && self.lease_live(now) && !self.exhausted()
+        self.open && self.notice_link && self.lease_live(now)
     }
 
     /// Managed access can be admitted now.
     pub fn available(&self, now: Instant) -> bool {
         self.held(now) && !self.blocked()
-    }
-
-    /// Whether the fenced-edge set reached its bound.
-    pub fn exhausted(&self) -> bool {
-        self.fence_generation.len() >= MAX_FENCED_EDGES
     }
 
     /// The check at every admission, dispatch and frame boundary.
@@ -508,6 +503,16 @@ impl Authority {
         if self.applied.is_none_or(|applied| claims_revision > applied) {
             self.note_revision(claims_revision, now);
             return Err(Refusal::Reconcile);
+        }
+        // Stricter than "not greater": the Gateway must have read the token at exactly the
+        // applied revision. A reply read before a removal this target already applied can
+        // then never admit the removed edge, so a confirmed fence is needed only until its
+        // handlers drain and its ACK settles, and is pruned then (bounded memory).
+        if self
+            .applied
+            .is_some_and(|applied| claims_revision < applied)
+        {
+            return Err(Refusal::Stale);
         }
         if self.is_fenced(edge) {
             return Err(Refusal::Fenced);
@@ -584,8 +589,10 @@ impl Authority {
                 .entry(entry.edge)
                 .or_insert(fenced.saturating_add(elapsed));
         }
+        let ack = self.settle_closes(0);
+        self.sweep_confirmed();
         Effects {
-            ack: self.settle_closes(0),
+            ack,
             ..Effects::default()
         }
     }
@@ -622,12 +629,6 @@ impl Authority {
 
     /// Blocks `edge` and tells each of its handlers to close.
     fn fence_edge(&mut self, edge: EdgeId, wall_ms: u64) {
-        if !self.fence_generation.contains_key(&edge) && self.exhausted() {
-            // No room to remember another fence: refuse everything instead.
-            self.confirmed.remove(&edge);
-            self.fail_closed(Loss::FenceCapacity);
-            return;
-        }
         *self.fence_generation.entry(edge).or_insert(0) += 1;
         self.fenced_at.entry(edge).or_insert(wall_ms);
         if let Some(now) = self.clock {
@@ -704,6 +705,17 @@ impl Authority {
         if notice.environment_id != self.environment_id || notice.generation != self.generation {
             self.fail_closed(Loss::WrongIdentity);
             return Effects::default();
+        }
+        // Bounded: a flood fails closed instead of growing the pending state.
+        if notice.edge_ids.len() > MAX_NOTICE_EDGES
+            || (self.notices.len() >= MAX_PENDING_NOTICES
+                && !self.notices.contains_key(&notice.revision))
+        {
+            self.fail_closed(Loss::NoticeOverflow);
+            return Effects {
+                probe_now: true,
+                ..Effects::default()
+            };
         }
         let applied = self.applied.unwrap_or(0);
         let ahead = notice.revision > self.next_unknown();
@@ -872,6 +884,7 @@ impl Authority {
         self.open = true;
         self.lease_until = Some(new_lease);
         self.settle_closes(wall_ms);
+        self.sweep_confirmed();
         self.after_reply()
     }
 
@@ -1108,6 +1121,7 @@ impl Authority {
         if ok {
             self.owed.remove(&revision);
             self.prune(revision);
+            self.sweep_confirmed();
         }
         Effects {
             ack: self.next_ack().is_some(),
@@ -1151,6 +1165,39 @@ impl Authority {
         for revision in settled {
             self.prune(revision);
         }
+    }
+
+    /// Forgets confirmed fences that nothing needs any more: no handler of the edge is
+    /// open, no unsettled revision names it, and no notice holds it. The strict admission
+    /// rule (claims at exactly the applied revision) keeps a forgotten edge refused: the
+    /// Gateway no longer has it.
+    fn sweep_confirmed(&mut self) {
+        let referenced: HashSet<EdgeId> = self
+            .revisions
+            .values()
+            .flat_map(|r| r.edges.iter().copied())
+            .collect();
+        let open: HashSet<EdgeId> = self.handlers.values().map(|h| h.edge).collect();
+        let done: Vec<EdgeId> = self
+            .confirmed
+            .iter()
+            .copied()
+            .filter(|e| {
+                !referenced.contains(e) && !open.contains(e) && !self.provisional.contains_key(e)
+            })
+            .collect();
+        for edge in done {
+            self.confirmed.remove(&edge);
+            self.fence_generation.remove(&edge);
+            self.fenced_at.remove(&edge);
+            self.fence_mark.remove(&edge);
+            self.closed_at.remove(&edge);
+        }
+    }
+
+    /// Fences kept for the generation now.
+    pub fn confirmed_fences(&self) -> usize {
+        self.confirmed.len()
     }
 
     /// Records kept for unsettled revisions; settled ones are pruned.

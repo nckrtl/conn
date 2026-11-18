@@ -88,9 +88,14 @@ Each is the fail-closed reading.
   revision never reopens. Closed, the target retries on the probe timer, never faster.
 - A pause also holds HTTP reads and preview attachments; only a fence refuses them. A
   preview attachment asks the gate again once it holds the tab's lock.
-- Fences of removed edges stay for the whole generation, bounded at 65,536 edges: past
-  that the target fails closed for good, keeping every fence, until re-enrolment starts a
-  new generation. Protected files must have exactly mode 0600 (no special bits).
+- Admission is stricter than "revision not greater than applied": the Gateway must have
+  read the token at exactly the applied revision (an older read is introspected again).
+  So a reply read before a removal the target applied can never admit the removed edge,
+  and a confirmed fence is needed only until the edge's handlers drain and its revision
+  settles; it is forgotten then. This departs from the contract's "confirmed fences never
+  end" to keep memory bounded, with the same safety. Pending notices are bounded (1,024,
+  and 1,024 edges each); a flood fails closed. Protected files must have exactly mode
+  0600 (no special bits).
 - Settled revision records are pruned after their ACK, or when a fresh verified reply no
   longer owes them (a lost ACK answer); confirmed fences stay for the generation. Each applied probe narrows the Gateway-to-target clock offset bounds from
   `server_time` and the probe's send and receive times.

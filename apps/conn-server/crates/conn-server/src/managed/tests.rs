@@ -594,7 +594,6 @@ async fn revoking_one_edge_mid_stream_fences_only_that_caller() {
     );
     assert!(ack["notice_received_at"].is_string());
     assert!(ack["recovered_at"].is_null());
-    assert!(lab.shared.read(|a| a.is_confirmed(EDGE_A)));
     eprintln!(
         "LAB revoke mid-stream: commit→client sees close {} ms; commit→ACK {} ms",
         ms(a_closed - committed),

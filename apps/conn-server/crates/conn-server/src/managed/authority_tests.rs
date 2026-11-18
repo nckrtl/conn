@@ -112,6 +112,19 @@ impl Lab {
             .expect("admitted")
     }
 
+    /// A removed edge stays refused once its fence is settled and forgotten: a claim read
+    /// before the applied revision is stale.
+    fn refuses_stale(&mut self, edge: u64) -> bool {
+        let applied = self.a.applied().unwrap_or(0);
+        let epoch = self.a.epoch();
+        applied > 0
+            && matches!(
+                self.a
+                    .admit(edge, applied - 1, far(), epoch, None, self.t0, 0),
+                Err(Refusal::Stale)
+            )
+    }
+
     fn notice(&mut self, revision: u64, edges: Vec<u64>, at: u64) -> Effects {
         self.a.notice(
             &Notice {
@@ -208,7 +221,7 @@ fn a_revision_ahead_without_its_predecessor_blocks_everything() {
     );
     assert!(lab.a.available(lab.at(70)));
     assert!(lab.a.handler_allowed(handler, far(), lab.at(70)));
-    assert!(lab.a.is_confirmed(1));
+    assert!(lab.refuses_stale(1));
 }
 
 #[test]
@@ -432,7 +445,7 @@ fn a_restarted_target_sends_a_recovered_ack_for_each_owed_revision() {
     lab.a.ack_started(1);
     lab.a.ack_finished(1, true);
     assert_eq!(lab.a.next_ack().map(|a| a.revision), Some(2));
-    assert!(lab.a.is_confirmed(1) && lab.a.is_confirmed(2));
+    assert!(lab.refuses_stale(1) && lab.refuses_stale(2));
 }
 
 #[test]
@@ -559,7 +572,7 @@ fn an_edge_named_by_two_notices_stays_fenced_until_both_are_settled() {
         80,
     );
     assert!(lab.a.is_fenced(1), "notice 12 still fences edge 1");
-    assert!(lab.a.is_confirmed(2));
+    assert!(lab.refuses_stale(2));
     // Clearing a provisional fence later drops introspections that started before it.
     let probe = lab.probe(1_000);
     lab.reply(&probe, "current", 11, 1_010);
@@ -663,7 +676,12 @@ fn settled_revisions_are_pruned_and_offset_bounds_recorded() {
     lab.a.ack_started(1);
     lab.a.ack_finished(1, true);
     assert_eq!(lab.a.revision_records(), 0);
-    assert!(lab.a.is_confirmed(1), "the confirmed fence stays");
+    assert_eq!(
+        lab.a.confirmed_fences(),
+        0,
+        "the settled fence is forgotten"
+    );
+    assert!(lab.refuses_stale(1), "and the edge stays refused");
 }
 
 #[test]
@@ -859,7 +877,7 @@ fn a_settled_revision_whose_ack_answer_was_lost_is_pruned() {
     lab.reply(&probe, "current", 1, 1_010);
     assert_eq!(lab.a.revision_records(), 0);
     assert_eq!(lab.a.next_ack(), None);
-    assert!(lab.a.is_confirmed(1));
+    assert!(lab.refuses_stale(1));
 }
 
 #[test]
@@ -1039,21 +1057,82 @@ fn a_gateway_clock_that_moves_ahead_ends_open_handlers_at_once() {
 }
 
 #[test]
-fn past_the_fence_bound_the_target_stays_closed_and_keeps_its_fences() {
+fn a_claim_read_before_an_applied_removal_is_stale_and_settled_fences_are_forgotten() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![1, 2], 0);
+    lab.notice(1, vec![1], 50);
+    let probe = lab.probe(60);
+    lab.reply_with(
+        &probe,
+        "delta",
+        1,
+        None,
+        Some(vec![(1, vec![1])]),
+        vec![(1, vec![1])],
+        70,
+    );
+    lab.a.ack_started(1);
+    lab.a.ack_finished(1, true);
+    // Settled and no handler left: the fence is forgotten, memory stays bounded.
+    assert_eq!(lab.a.confirmed_fences(), 0);
+    let epoch = lab.a.epoch();
+    // A reply the Gateway read at revision 0, before the removal: refused as stale.
+    assert_eq!(
+        lab.a
+            .admit(1, 0, far(), epoch, None, lab.at(80), 80)
+            .unwrap_err(),
+        Refusal::Stale
+    );
+    // The unrelated edge, read at the applied revision, is admitted.
+    assert!(
+        lab.a
+            .admit(2, 1, far(), epoch, None, lab.at(80), 80)
+            .is_ok()
+    );
+}
+
+#[test]
+fn many_removals_keep_no_state_once_settled() {
+    let mut lab = Lab::new();
+    lab.open(0, vec![], 0);
+    let mut at = 10;
+    for revision in 1..=500u64 {
+        lab.notice(revision, vec![1_000 + revision], at);
+        let probe = lab.probe(at + 1);
+        lab.reply_with(
+            &probe,
+            "delta",
+            revision,
+            None,
+            Some(vec![(revision, vec![1_000 + revision])]),
+            vec![(revision, vec![1_000 + revision])],
+            at + 2,
+        );
+        lab.a.ack_started(revision);
+        lab.a.ack_finished(revision, true);
+        at += 5;
+    }
+    assert_eq!(lab.a.confirmed_fences(), 0);
+    assert_eq!(lab.a.revision_records(), 0);
+}
+
+#[test]
+fn a_notice_flood_fails_closed_without_growing() {
     let mut lab = Lab::new();
     lab.open(0, vec![1], 0);
-    let edges: Vec<u64> = (10..10 + MAX_FENCED_EDGES as u64).collect();
-    lab.notice(1, edges, 50);
-    assert!(lab.a.exhausted());
+    for revision in 2..2 + MAX_PENDING_NOTICES as u64 {
+        lab.notice(revision, vec![revision], 10);
+    }
+    assert!(lab.a.is_open(), "within the bound");
+    lab.notice(5_000, vec![5_000], 20);
+    assert!(!lab.a.is_open(), "past it, everything fails closed");
     assert!(
-        !lab.a.available(lab.at(51)),
-        "at the bound, everything fails closed"
+        !lab.a.is_fenced(5_000),
+        "and the overflowing notice is not kept"
     );
-    assert!(lab.a.is_fenced(10), "the fences it holds stay");
-    // A recovery snapshot does not reopen it.
-    let probe = lab.probe(100);
-    lab.a.probe_failed(&probe.nonce);
-    let probe = lab.probe(200);
-    lab.reply_with(&probe, "snapshot", 1, Some(vec![1]), None, vec![], 210);
-    assert!(!lab.a.available(lab.at(211)));
+    let wide: Vec<u64> = (0..=MAX_NOTICE_EDGES as u64).collect();
+    let mut lab = Lab::new();
+    lab.open(0, vec![1], 0);
+    lab.notice(1, wide, 30);
+    assert!(!lab.a.is_open());
 }

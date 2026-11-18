@@ -452,19 +452,49 @@ impl Drop for Handle {
 /// contract says), and the call task holds this handler until the commit has ended, so the
 /// fence's `handlers_closed_at`, and its ACK, always come after it.
 impl conn_engine::CommitGate for Handle {
-    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> bool {
+    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> conn_engine::CommitDecision {
+        use conn_engine::CommitDecision;
         if *self.closed.borrow() {
-            return false;
+            return CommitDecision::Refused;
         }
-        let open = {
+        let state = {
             let authority = crate::lock(&self.shared.authority);
             let now = Instant::now();
-            authority.handler_state(self.id, self.expires, now) == authority::GateState::Open
+            authority.handler_state(self.id, self.expires, now)
         };
-        if open {
-            commit();
+        match state {
+            authority::GateState::Open => {
+                commit();
+                CommitDecision::Committed
+            }
+            // A pause is not a refusal: the engine waits, then checks everything again.
+            authority::GateState::Paused => CommitDecision::Paused,
+            authority::GateState::Closed => CommitDecision::Refused,
         }
-        open
+    }
+
+    fn wait_until_open(&self) -> BoxFuture<'static, bool> {
+        let (shared, id, expires) = (self.shared.clone(), self.id, self.expires);
+        let mut closed = self.closed.clone();
+        Box::pin(async move {
+            let mut changes = shared.wait_change();
+            loop {
+                if *closed.borrow() {
+                    return false;
+                }
+                match shared.read(|a| a.handler_state(id, expires, Instant::now())) {
+                    authority::GateState::Open => return true,
+                    authority::GateState::Closed => return false,
+                    authority::GateState::Paused => {}
+                }
+                // A pause ends with a probe or with the lease: within seconds either way.
+                tokio::select! {
+                    _ = closed.wait_for(|c| *c) => return false,
+                    _ = changes.changed() => {}
+                    () = tokio::time::sleep(authority::PROBE_EVERY) => {}
+                }
+            }
+        })
     }
 }
 

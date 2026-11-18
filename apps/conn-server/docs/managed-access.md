@@ -129,7 +129,8 @@ reader, exactly the scopes `orchestration:read` and `orchestration:operate`, and
   "message": {"command_id": "…", "message_id": "…", "text_sha256": "<hex>",
               "interrupt_command_id": "…", "created_by": "user", "creation_source": "web"},
   "earlier": [{"thread_id": "…", "message_id": "…", "text_sha256": "<hex>",
-               "run_id": "<recorded run, optional>", "interrupt_command_id": "…"}],
+               "run_id": "<recorded run, optional>", "interrupt_command_id": "…",
+               "created_by": "user", "creation_source": "web"}],
   "questions": [{"thread_id": "<the admitted thread>", "request_id": "…",
                  "owner_run_id": "…", "cancel_command_id": "…"}]
 }
@@ -143,7 +144,10 @@ requests, with a thread rebuilt from an allowlist (title "Earlier turn", the run
 no branch, worktree, tags or later provider thread, times from that evidence); a
 different body (text, attachments, context, sender), no run, a run that never started
 (still queued or cancelled in the queue), several runs, or another recorded run is
-refused instead. Stops use the same frozen-message check. A
+refused instead. Stops use the same frozen-message check, including the captured attribution; an
+earlier turn's run is stopped only once it started, so the stop never erases the
+evidence that settles it. A commit that meets a pause waits for it, then checks
+everything again in a fresh transaction; only a fence refuses it. A
 thread ID that was ever deleted is never read or written by a worker: the check runs
 after the read (a deletion is never undone), and again once a subscription's cursor is
 set; later deletions arrive as events and end the stream. Worker views carry only the thread's own rows (T3 also lists

@@ -21,6 +21,12 @@ pub struct OwnedMessage {
     pub message_id: String,
     pub text_sha256: String,
     pub run_id: Option<String>,
+    /// The captured attribution; the stored message must carry exactly it.
+    pub created_by: String,
+    pub creation_source: String,
+    /// Stop only a run that already started (an earlier turn's: stopping it before its
+    /// start would erase the evidence that settles the turn).
+    pub require_started: bool,
 }
 
 /// What must hold for one guarded command.
@@ -51,16 +57,34 @@ pub struct DispatchGuard {
 /// managed fence implements it: a revocation either happens before the check (the command is
 /// refused) or after the commit (the work was already accepted).
 pub trait CommitGate: Send + Sync {
-    /// Runs `commit` only while the caller's access is open, and holds the access decision
-    /// for its duration. `false`: refused, `commit` did not run.
-    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> bool;
+    /// Runs `commit` only while the caller's access is open.
+    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> CommitDecision;
+    /// Waits while access is paused: `true` once it is open again, `false` once it closed.
+    fn wait_until_open(&self) -> conn_provider::BoxFuture<'static, bool>;
 }
+
+/// What a [`CommitGate`] decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitDecision {
+    Committed,
+    /// Access is paused: nothing committed; the engine waits, then checks everything again.
+    Paused,
+    /// Access is gone: nothing committed.
+    Refused,
+}
+
+/// The rejection a paused commit gives inside the engine; never reaches a caller.
+pub(crate) const COMMIT_PAUSED: &str = "\u{0}commit paused";
 
 /// Whether a stored message is exactly a frozen task message: a user message with the
 /// frozen text, no attachments, and none of the fields a task message never carries
 /// (context, notification, scheduled task, sender). The guard and the settlement read use
 /// this one check.
-pub fn is_frozen_message(message: &Value, text_sha256: &str) -> bool {
+pub fn is_frozen_message(
+    message: &Value,
+    text_sha256: &str,
+    attribution: Option<(&str, &str)>,
+) -> bool {
     let plain = [
         "context",
         "notification",
@@ -70,7 +94,11 @@ pub fn is_frozen_message(message: &Value, text_sha256: &str) -> bool {
     .iter()
     .all(|key| message.get(key).is_none_or(Value::is_null));
     let no_attachments = message["attachments"].as_array().is_none_or(Vec::is_empty);
+    let attributed = attribution.is_none_or(|(by, source)| {
+        message["createdBy"] == by && message["creationSource"] == source
+    });
     message["role"] == "user"
+        && attributed
         && plain
         && no_attachments
         && message["text"]
@@ -176,7 +204,11 @@ pub(crate) fn check(
             let Some(message) = tx.entity(thread_id, "messages", from)? else {
                 return reject("The admitted message cannot be read.");
             };
-            if !is_frozen_message(&message, &owned.text_sha256) {
+            if !is_frozen_message(
+                &message,
+                &owned.text_sha256,
+                Some((&owned.created_by, &owned.creation_source)),
+            ) {
                 return reject("The message's body differs from the frozen one.");
             }
             let started = tx

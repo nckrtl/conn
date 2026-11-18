@@ -68,6 +68,9 @@ pub struct EarlierTurn {
     #[serde(default)]
     pub run_id: Option<String>,
     pub interrupt_command_id: String,
+    /// The earlier message's captured attribution.
+    pub created_by: String,
+    pub creation_source: String,
 }
 
 /// A stored question of the admitted thread whose request the answer turn may cancel.
@@ -167,6 +170,8 @@ impl TaskGrant {
                 non_empty(&e.thread_id)
                     && non_empty(&e.message_id)
                     && non_empty(&e.interrupt_command_id)
+                    && non_empty(&e.created_by)
+                    && non_empty(&e.creation_source)
                     && is_digest(&e.text_sha256)
             })
             // A stored question belongs to the thread this turn answers.
@@ -257,6 +262,9 @@ impl TaskGrant {
                         message_id: self.message.message_id.clone(),
                         text_sha256: self.message.text_sha256.clone(),
                         run_id: None,
+                        created_by: self.message.created_by.clone(),
+                        creation_source: self.message.creation_source.clone(),
+                        require_started: false,
                     });
                 let earlier = || {
                     self.earlier
@@ -266,6 +274,9 @@ impl TaskGrant {
                             message_id: e.message_id.clone(),
                             text_sha256: e.text_sha256.clone(),
                             run_id: e.run_id.clone(),
+                            created_by: e.created_by.clone(),
+                            creation_source: e.creation_source.clone(),
+                            require_started: true,
                         })
                 };
                 match own.or_else(earlier) {
@@ -314,7 +325,13 @@ impl TaskGrant {
                 // and the earlier turn stays unsettled.
                 continue;
             };
-            if found.len() != 1 || !conn_engine::is_frozen_message(message, &earlier.text_sha256) {
+            let attribution = Some((
+                earlier.created_by.as_str(),
+                earlier.creation_source.as_str(),
+            ));
+            if found.len() != 1
+                || !conn_engine::is_frozen_message(message, &earlier.text_sha256, attribution)
+            {
                 return Err("the earlier message differs from the frozen one".into());
             }
             let started: Vec<Value> = rows("runs")

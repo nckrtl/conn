@@ -43,7 +43,17 @@ fn grant(message_id: &str, text: &str, create: bool) -> Value {
     })
 }
 
-fn worker_token(lab: &Lab, grant: Value) -> String {
+fn worker_token(lab: &Lab, mut grant: Value) -> String {
+    // Earlier turns name their captured attribution; the tests' people send as user/web.
+    if let Some(earlier) = grant["earlier"].as_array_mut() {
+        for turn in earlier {
+            for (key, value) in [("created_by", "user"), ("creation_source", "web")] {
+                if turn.get(key).is_none() {
+                    turn[key] = json!(value);
+                }
+            }
+        }
+    }
     let mut extra = serde_json::Map::new();
     extra.insert(GRANT_FIELD.into(), grant);
     lab.fake.issue_with(
@@ -639,13 +649,39 @@ async fn removing_the_workers_edge_ends_its_session() {
     assert!(ended.is_ok(), "the worker's socket stayed open");
 }
 
-struct Gate(bool);
-impl CommitGate for Gate {
-    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> bool {
-        if self.0 {
-            commit();
+/// A gate that is open, closed, or paused for its first `pauses` commits.
+struct Gate {
+    open: bool,
+    pauses: std::sync::atomic::AtomicUsize,
+}
+
+impl Gate {
+    fn new(open: bool) -> Self {
+        Self {
+            open,
+            pauses: std::sync::atomic::AtomicUsize::new(0),
         }
-        self.0
+    }
+}
+
+impl CommitGate for Gate {
+    fn commit_if_open(&self, commit: &mut dyn FnMut()) -> conn_engine::CommitDecision {
+        use std::sync::atomic::Ordering;
+        if self.pauses.load(Ordering::SeqCst) > 0 {
+            self.pauses.fetch_sub(1, Ordering::SeqCst);
+            return conn_engine::CommitDecision::Paused;
+        }
+        if self.open {
+            commit();
+            conn_engine::CommitDecision::Committed
+        } else {
+            conn_engine::CommitDecision::Refused
+        }
+    }
+
+    fn wait_until_open(&self) -> conn_provider::BoxFuture<'static, bool> {
+        let open = self.open;
+        Box::pin(async move { open })
     }
 }
 
@@ -667,7 +703,7 @@ async fn commits_follow_the_fence_and_survive_the_caller() {
         .dispatch_guarded(decode(create_command()), guard(GuardRule::NewThread), None)
         .await
         .expect("create");
-    let closed: Arc<dyn CommitGate> = Arc::new(Gate(false));
+    let closed: Arc<dyn CommitGate> = Arc::new(Gate::new(false));
     let refused = engine
         .dispatch_guarded(
             decode(dispatch_command("cmd-m1", "m1", "do it")),
@@ -680,7 +716,7 @@ async fn commits_follow_the_fence_and_survive_the_caller() {
     assert!(user_messages(&p).is_empty(), "nothing committed: {p}");
     // The caller drops its future after the first poll: the dispatch still commits and its
     // run still starts and completes.
-    let open: Arc<dyn CommitGate> = Arc::new(Gate(true));
+    let open: Arc<dyn CommitGate> = Arc::new(Gate::new(true));
     let mut call = engine.dispatch_guarded(
         decode(dispatch_command("cmd-m1", "m1", "do it")),
         guard(GuardRule::ExclusiveStart),
@@ -966,4 +1002,57 @@ async fn settlement_evidence_needs_the_plain_frozen_message_and_a_started_run() 
         read(&mut w2, 2, earlier_thread).await.is_err(),
         "cancelled in the queue: no evidence"
     );
+}
+
+/// A pause at the commit is not a refusal: the engine waits, checks again, then commits.
+#[tokio::test(flavor = "current_thread")]
+async fn a_paused_commit_waits_and_then_commits() {
+    let lab = Lab::start().await;
+    let engine: Arc<dyn Engine> = lab.app.engine.clone().unwrap();
+    let decode = |v: Value| conn_contract::from_json(v).unwrap();
+    engine
+        .dispatch_guarded(decode(create_command()), guard(GuardRule::NewThread), None)
+        .await
+        .expect("create");
+    let gate = Gate::new(true);
+    gate.pauses.store(2, std::sync::atomic::Ordering::SeqCst);
+    let gate: Arc<dyn CommitGate> = Arc::new(gate);
+    engine
+        .dispatch_guarded(
+            decode(dispatch_command("cmd-m1", "m1", "do it")),
+            guard(GuardRule::ExclusiveStart),
+            Some(gate),
+        )
+        .await
+        .expect("committed after the pause");
+    until_run(&lab, THREAD, "m1", "completed").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_stop_needs_the_captured_attribution() {
+    let lab = Lab::start().await;
+    let earlier_thread = "reviewer-thread";
+    let mut create = create_command();
+    create["commandId"] = json!("person-create-r");
+    create["threadId"] = json!(earlier_thread);
+    person(&lab, create).await;
+    // Same ID and text, other attribution.
+    let mut message = dispatch_command("pr1", "r1", "hang");
+    message["threadId"] = json!(earlier_thread);
+    message["createdBy"] = json!("system");
+    message["creationSource"] = json!("server");
+    person(&lab, message).await;
+    let r1 = until_run(&lab, earlier_thread, "r1", "running").await;
+    let mut g = grant("m1", "do it", true);
+    g["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "r1", "text_sha256": sha("hang"),
+        "interrupt_command_id": "stop-r1"}]);
+    let mut w = worker(&lab, g).await;
+    let mut stop_r1 = stop("stop-r1", &r1["id"]);
+    stop_r1["threadId"] = json!(earlier_thread);
+    assert!(
+        dispatch(&mut w, 1, stop_r1).await.is_err(),
+        "another attribution"
+    );
+    assert!(read(&mut w, 2, earlier_thread).await.is_err());
+    until_run(&lab, earlier_thread, "r1", "running").await;
 }

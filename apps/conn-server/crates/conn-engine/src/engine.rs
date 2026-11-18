@@ -485,7 +485,25 @@ impl Inner {
         let (command, claimed) = self.claim_attachments(command).await?;
         let command = self.plan_selection(command).await?;
         let command = self.rollback_capabilities(command).await?;
-        let result = self.dispatch_claimed(command, guard, commit_gate).await;
+        // A paused commit committed nothing: wait for access, then check everything again
+        // (ownership included) in a fresh transaction.
+        let result = loop {
+            let result = self
+                .dispatch_claimed(command.clone(), guard.clone(), commit_gate.clone())
+                .await;
+            match (&result, &commit_gate) {
+                (Err(DispatchError::Rejected(message)), Some(gate))
+                    if message == crate::guard::COMMIT_PAUSED =>
+                {
+                    if !gate.wait_until_open().await {
+                        break Err(DispatchError::Rejected(
+                            "The caller's access was revoked.".into(),
+                        ));
+                    }
+                }
+                _ => break result,
+            }
+        };
         if let (Err(_), Some(claimed), Some(host)) = (&result, claimed, &self.host) {
             host.release_attachments(claimed).await;
         }
@@ -711,7 +729,7 @@ impl Inner {
                                 // The access decision and the commit are one step.
                                 let mut pending = Some(tx);
                                 let mut committed = None;
-                                let open = commit_gate.commit_if_open(&mut || {
+                                let decision = commit_gate.commit_if_open(&mut || {
                                     if let Some(tx) = pending.take() {
                                         committed =
                                             Some(tx.commit(Some((&command_id, &command_type))));
@@ -720,8 +738,15 @@ impl Inner {
                                 if let Some(tx) = pending.take() {
                                     tx.rollback();
                                 }
-                                match committed {
-                                    Some(result) if open => result.map_err(CommandError::Store)?,
+                                match (decision, committed) {
+                                    (crate::guard::CommitDecision::Committed, Some(result)) => {
+                                        result.map_err(CommandError::Store)?
+                                    }
+                                    (crate::guard::CommitDecision::Paused, _) => {
+                                        return Err(CommandError::Rejected(
+                                            crate::guard::COMMIT_PAUSED.into(),
+                                        ));
+                                    }
                                     _ => {
                                         return Err(CommandError::Rejected(
                                             "The caller's access was revoked.".into(),

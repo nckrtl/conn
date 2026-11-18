@@ -168,6 +168,8 @@ export function createOrbitLaunchSubmissions(
               result: { saved: latest, reconcile: true },
             };
           }
+          if (canStartDraft?.() === false)
+            throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
           if (latest && !latest.validationRefused) {
             throw OrbitLaunchCopyError.fromCopy(
               msg("Resolve the previous Orbit submission before sending this edited draft."),
@@ -183,8 +185,6 @@ export function createOrbitLaunchSubmissions(
             throw OrbitLaunchCopyError.fromCopy(
               msg("Orbit already refused this request. Change the draft before sending."),
             );
-          if (canStartDraft?.() === false)
-            throw OrbitLaunchCopyError.fromCopy(msg("This submission was already handled."));
           const archive =
             latest === undefined
               ? records

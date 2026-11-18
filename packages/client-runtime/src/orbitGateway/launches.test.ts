@@ -758,6 +758,9 @@ it("keeps a refused replay recoverable and allows a corrected Send from the same
   await journal.acknowledge(corrected.admission.id);
   await expect(journal.replay(old)).rejects.toThrow("already handled");
   await expect(journal.submit(old)).rejects.toThrow("already refused");
+  const reconcileDraft = vi.fn(() => false);
+  await expect(journal.submit(old, reconcileDraft)).rejects.toThrow("already handled");
+  expect(reconcileDraft).toHaveBeenCalledOnce();
   expect(submit).toHaveBeenCalledTimes(3);
 });
 

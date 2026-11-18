@@ -234,17 +234,32 @@ describe("syncWorkspaceProfile with edits during its requests", () => {
     expect(names(memory.local)).toEqual(["second rename", "b", "from phone"]);
   });
 
-  it("keeps an edit made while the write was in flight", async () => {
+  it("sends an edit made while the write was in flight in the same run", async () => {
     const { remote, hooks, ports, memory } = editingGateway();
     memory.local = [ws("a", "first rename"), ws("b")];
     hooks.afterWrite = () => {
       hooks.afterWrite = () => {};
       memory.local = [ws("a", "first rename"), ws("b", "edited meanwhile")];
     };
-    await syncWorkspaceProfile(ports);
-    expect(names(memory.local)).toEqual(["first rename", "edited meanwhile"]);
+    // A profile switch waits on this run, so the edit must reach this profile now.
     await syncWorkspaceProfile(ports);
     expect(names(remote.profile.workspaces)).toEqual(["first rename", "edited meanwhile"]);
+    expect(names(memory.local)).toEqual(["first rename", "edited meanwhile"]);
+    expect(memory.state?.version).toBe(remote.profile.version);
+  });
+
+  it("writes nothing more when the edit equals the profile after a conflict", async () => {
+    const { remote, hooks, ports, memory } = editingGateway();
+    remote.profile.workspaces = [ws("a", "same"), ws("b")];
+    remote.profile.version = 3;
+    memory.local = [ws("a", "draft"), ws("b")];
+    hooks.afterRead = () => {
+      memory.local = [ws("a", "same"), ws("b")];
+    };
+    await syncWorkspaceProfile(ports);
+    expect(remote.writes).toEqual([]);
+    expect(memory.state?.version).toBe(3);
+    expect(names(memory.local)).toEqual(["same", "b"]);
   });
 
   it("adopts an edit that already equals the newer profile without writing", async () => {

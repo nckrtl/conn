@@ -93,8 +93,9 @@ export function syncOrbitProfileNow(): Promise<void> {
 
 /** Another window of this app bound a profile; only the main window runs the sync. */
 const REBIND_STORAGE_KEY = "t3code:orbit-profile-rebind:v1";
-/** Keeps two announcements in the same millisecond distinct, so each one fires a storage event. */
+/** Keeps announcements distinct, so each fires a storage event and pairs `before` with `after`. */
 let rebindAnnouncements = 0;
+let announcedRebind: string | null = null;
 
 /**
  * Around this device's bind to another profile: drops the old binding's channel and reads. In a
@@ -102,14 +103,16 @@ let rebindAnnouncements = 0;
  * `after` and then reads the new binding.
  */
 export function orbitProfileRebinding(phase: "before" | "after"): void {
-  if (beforeRebind) beforeRebind(phase);
-  else {
-    rebindAnnouncements += 1;
-    window.localStorage.setItem(
-      REBIND_STORAGE_KEY,
-      `${phase}:${Date.now()}:${rebindAnnouncements}`,
-    );
+  if (beforeRebind) {
+    beforeRebind(phase);
+    return;
   }
+  if (phase === "before" || announcedRebind === null) {
+    rebindAnnouncements += 1;
+    announcedRebind = `${Date.now()}-${rebindAnnouncements}`;
+  }
+  window.localStorage.setItem(REBIND_STORAGE_KEY, `${phase}:${announcedRebind}`);
+  if (phase === "after") announcedRebind = null;
 }
 
 // Conn: every window's sleep controller reads the Gateway through this window's client.
@@ -183,11 +186,13 @@ interface ProfileSyncController {
   readonly refreshEnvironments: () => Promise<void>;
   /** Follows the bound profile; `reconcile()` runs one authoritative profile read. */
   readonly profile: ReturnType<typeof createOrbitProfileLive>;
+  /** Around a bind: the old binding's channel, reads and environment record become obsolete. */
+  readonly rebinding: (phase: "before" | "after") => void;
   /**
-   * Around a bind: the old binding's channel, reads and environment record become obsolete.
-   * `hold` keeps every profile read obsolete until the `after` call (a bind in another window).
+   * A bind in another window, by its id: profile reads stay obsolete from its `before` until
+   * every pending bind reported `after` (each released after 60 s if it never does).
    */
-  readonly rebinding: (phase: "before" | "after", hold?: boolean) => void;
+  readonly otherWindowRebinding: (phase: "before" | "after", id: string) => void;
   readonly beginNonUserChange: (name: ProfileSectionName) => () => void;
 }
 
@@ -248,8 +253,8 @@ function profileSyncController(): ProfileSyncController | null {
     return result;
   };
   const inOrbit = (): boolean => useEnvironmentProvider.getState().provider === "orbit";
-  let rebindHeld = false;
-  let rebindHoldTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Binds other windows announced and have not finished, with their safety release. */
+  const heldBinds = new Map<string, ReturnType<typeof setTimeout>>();
   /** The last reads each run shares with the other, so neither needs a second Gateway call. */
   let lastMe: OrbitGatewayNode | null = null;
   let lastListed: readonly OrbitGatewayEnvironment[] | null = null;
@@ -380,18 +385,26 @@ function profileSyncController(): ProfileSyncController | null {
     profile: createOrbitProfileLive({
       transport,
       // Held while another window binds, so no read can apply the binding it leaves.
-      scope: () => (inOrbit() && !rebindHeld ? "orbit" : null),
+      scope: () => (inOrbit() && heldBinds.size === 0 ? "orbit" : null),
       refresh: (isCurrent, observe) => exclusive(() => profileOnce(isCurrent, observe)),
     }),
-    rebinding: (phase, hold = false) => {
-      clearTimeout(rebindHoldTimer);
-      rebindHeld = hold && phase === "before";
-      // A bind in another window that never reports back releases the hold on its own.
-      if (rebindHeld) rebindHoldTimer = setTimeout(() => controller?.rebinding("after"), 60_000);
+    rebinding: (phase) => {
       // An environment run waiting on the old profile's settings fails its `lastMe` check.
       lastMe = null;
       controller?.profile.invalidate();
-      if (phase === "after") void controller?.profile.reconcile();
+      if (phase === "after" && heldBinds.size === 0) void controller?.profile.reconcile();
+    },
+    otherWindowRebinding: (phase, id) => {
+      clearTimeout(heldBinds.get(id));
+      heldBinds.delete(id);
+      if (phase === "before") {
+        // A bind that never reports back releases its hold on its own.
+        heldBinds.set(
+          id,
+          setTimeout(() => controller?.otherWindowRebinding("after", id), 60_000),
+        );
+      }
+      controller?.rebinding(phase);
     },
     beginNonUserChange: sections.beginNonUserChange,
   };
@@ -450,7 +463,8 @@ export function OrbitProfileSync() {
     window.addEventListener("online", refreshAll);
     const onStorage = (event: StorageEvent): void => {
       if (event.key !== REBIND_STORAGE_KEY || event.newValue === null) return;
-      sync.rebinding(event.newValue.startsWith("before:") ? "before" : "after", true);
+      const [phase, id] = event.newValue.split(":");
+      if ((phase === "before" || phase === "after") && id) sync.otherWindowRebinding(phase, id);
     };
     window.addEventListener("storage", onStorage);
     refreshEnvironments();

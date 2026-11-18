@@ -153,15 +153,26 @@ async function replace(
       candidate = mergeWorkspaces(sent, now, candidate);
       sent = now;
     }
+    // After a conflict read: nothing left to send when the merge equals the profile's list.
+    if (attempt > 1 && sameWorkspaces(candidate, sendBase)) {
+      adopt(ports, profileId, sendVersion, sendBase);
+      return { merged };
+    }
     try {
       const saved = await ports.client.replaceWorkspaces(profileId, sendVersion, candidate);
       const after = ports.readLocal();
       if (!sameWorkspaces(after, sent)) {
-        // Edited while the write was in flight: keep that edit on top of what landed; it stays
-        // dirty against the saved list and goes out on the next run.
-        ports.writeLocal(mergeWorkspaces(sent, after, saved.workspaces));
+        // Edited while the write was in flight: keep that edit on top of what landed and send
+        // it in this run, so a profile switch waiting on the run does not leave it behind.
+        const edited = mergeWorkspaces(sent, after, saved.workspaces);
+        ports.writeLocal(edited);
         ports.saveState({ profileId, version: saved.version, base: saved.workspaces });
-        return { merged };
+        if (attempt >= MAX_REPLACE_ATTEMPTS) return { merged };
+        candidate = edited;
+        sent = ports.readLocal();
+        sendBase = saved.workspaces;
+        sendVersion = saved.version;
+        continue;
       }
       adopt(ports, profileId, saved.version, saved.workspaces);
       return { merged };

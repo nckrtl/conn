@@ -5077,7 +5077,8 @@ export function prepareOrbitDraftAdmission(draftId: DraftId, revision: string | 
     return false;
   useComposerDraftStore.setState({});
   composerDebouncedStorage.flush();
-  return !isStaleClearedOrbitDraft(draftId, revision);
+  const stored = readStoredComposerDraftState();
+  return stored !== null && orbitDraftRevision(stored, composerTargetKey(draftId)) === revision;
 }
 
 /** Preserve an edit another window saved before this Orbit acknowledgement. */

@@ -88,6 +88,7 @@ describe("applyOtherWindowComposerDrafts", () => {
     useComposerDraftStore.getState().setPrompt(first, "different draft in this window");
     await vi.advanceTimersByTimeAsync(300);
     const captured = captureOrbitDraftRevision(draftId);
+    expect(prepareOrbitDraftAdmission(draftId, captured)).toBe(false);
     clearAcceptedOrbitDraft(draftId);
     expect(await storage.getItem(COMPOSER_DRAFT_STORAGE_KEY)).toMatchObject({
       state: { orbitDraftClearRevisions: { [composerTargetKey(draftId)]: [captured] } },

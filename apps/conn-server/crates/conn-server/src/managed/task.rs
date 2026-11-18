@@ -310,7 +310,8 @@ impl TaskGrant {
                 .filter(|m| m["id"] == earlier.message_id.as_str())
                 .collect();
             let Some(message) = found.first() else {
-                // Missing: the worker sees no message and leaves the turn unsettled.
+                // Missing: nothing of it is shown; with no evidence left the read is refused,
+                // and the earlier turn stays unsettled.
                 continue;
             };
             let digest = message["text"]
@@ -341,6 +342,9 @@ impl TaskGrant {
                     .iter()
                     .filter_map(|r| r["id"].as_str().map(str::to_owned)),
             );
+        }
+        if runs.is_empty() {
+            return Err("no settlement evidence: the frozen message or its run is missing".into());
         }
         let has = |list: &[String], value: &Value| {
             value.as_str().is_some_and(|v| list.iter().any(|x| x == v))
@@ -402,8 +406,8 @@ impl TaskGrant {
                 "creationSource": source["creationSource"],
                 "providerInstanceId": run["providerInstanceId"],
                 "modelSelection": run["modelSelection"],
-                "runtimeMode": source["runtimeMode"],
-                "interactionMode": source["interactionMode"],
+                "runtimeMode": "full-access",
+                "interactionMode": "default",
                 "branch": null,
                 "worktreePath": null,
                 "activeProviderThreadId": null,
@@ -475,12 +479,39 @@ async fn read_thread(
         .get_thread_projection(thread_id.clone())
         .await
         .map_err(failure)?;
+    // Deletions are never undone: no deletion seen after the read means the projection was
+    // of the one thread this ID ever named.
+    if engine
+        .thread_ever_deleted(thread_id.as_str())
+        .await
+        .unwrap_or(true)
+    {
+        return Err(outside("the thread ID was deleted before", READ));
+    }
     if projection["thread"]["projectId"] != grant.project_id.as_str() {
         return Err(outside("the thread belongs to another project", READ));
     }
+    let projection = own_rows(thread_id.as_str(), projection);
     grant
         .settlement_view(thread_id.as_str(), projection)
         .map_err(|r| outside(&r, READ))
+}
+
+/// The projection without rows of other threads: T3's projection also lists the provider
+/// threads its subagents run on, which belong to the child threads.
+fn own_rows(thread_id: &str, mut projection: Value) -> Value {
+    let foreign = |row: &Value, key: &str| row[key].as_str().is_some_and(|t| t != thread_id);
+    if let Some(object) = projection.as_object_mut() {
+        for (key, value) in object.iter_mut() {
+            if key == "thread" {
+                continue;
+            }
+            if let Some(rows) = value.as_array_mut() {
+                rows.retain(|row| !foreign(row, "threadId") && !foreign(row, "appThreadId"));
+            }
+        }
+    }
+    projection
 }
 
 /// Forwards a thread stream while the thread is the admitted project's. A snapshot of
@@ -489,6 +520,8 @@ async fn read_thread(
 fn bound_to_project(
     mut items: crate::table::ItemStream,
     project_id: String,
+    thread_id: String,
+    engine: Arc<dyn Engine>,
 ) -> crate::table::ItemStream {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
@@ -497,7 +530,21 @@ fn bound_to_project(
                 () = tx.closed() => return,
                 item = items.recv() => item,
             };
-            let Some(item) = item else { return };
+            let Some(mut item) = item else { return };
+            // A snapshot carries only the admitted thread's own rows, and is shown only if
+            // no deletion of this ID happened before it: a later one arrives as an event.
+            if let Ok(value) = &mut item
+                && value["kind"] == "snapshot"
+            {
+                if engine.thread_ever_deleted(&thread_id).await.unwrap_or(true) {
+                    let _ = tx
+                        .send(Err(outside("the thread ID was deleted before", READ)))
+                        .await;
+                    return;
+                }
+                let projection = value["projection"].take();
+                value["projection"] = own_rows(&thread_id, projection);
+            }
             let outside_project = item.as_ref().is_ok_and(|value| {
                 let snapshot = &value["projection"]["thread"]["projectId"];
                 let event = &value["event"];
@@ -568,7 +615,14 @@ pub fn table(
                 e.subscribe_thread(input)
                     .await
                     .map(crate::methods::orchestration::forward)
-                    .map(|items| bound_to_project(items, g.project_id.clone()))
+                    .map(|items| {
+                        bound_to_project(
+                            items,
+                            g.project_id.clone(),
+                            g.thread_id.clone(),
+                            e.clone(),
+                        )
+                    })
                     .map_err(failure)
             }
         },

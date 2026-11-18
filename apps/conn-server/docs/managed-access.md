@@ -142,7 +142,11 @@ other thread is cut to its frozen message, the run it started, and that run's no
 requests, with a thread rebuilt from an allowlist (title "Earlier turn", the run's model,
 no branch, worktree, tags or later provider thread, times from that evidence); a
 different body, no run or several runs, or another recorded run is refused instead. A
-thread ID that was ever deleted is never read or written by a worker.
+thread ID that was ever deleted is never read or written by a worker: the check runs
+after the read (a deletion is never undone), and a subscription's snapshot passes only
+if no deletion preceded it. Worker views carry only the thread's own rows (T3 also lists
+its subagents' provider threads, which belong to the child threads). A settlement view
+has fixed runtime and interaction modes, and no evidence at all is a refusal.
 Refusals are the scope check's `EnvironmentAuthorizationError`. A guarded create never
 takes an ID that was ever used, deleted or not. Each write must match the grant, and the engine checks ownership and the
 project in the command's own transaction (`conn_engine::DispatchGuard`). The commit itself

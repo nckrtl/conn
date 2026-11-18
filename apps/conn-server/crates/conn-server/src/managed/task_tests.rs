@@ -850,3 +850,62 @@ async fn a_thread_id_reused_after_deletion_is_never_read_or_written() {
             .is_err()
     );
 }
+
+/// T3's projection also lists the provider threads of the thread's subagents, which belong
+/// to the child threads; a worker granted the parent never sees them.
+#[test]
+fn the_admitted_thread_shows_only_its_own_rows() {
+    let projection = json!({
+        "thread": {"id": THREAD, "projectId": "p"},
+        "providerThreads": [
+            {"id": "provider-thread:parent", "appThreadId": THREAD},
+            {"id": "provider-thread:child", "appThreadId": "child-thread",
+             "nativeThreadRef": {"nativeId": "secret"}},
+        ],
+        "messages": [{"id": "m1", "threadId": THREAD}],
+        "subagents": [{"id": "s1", "threadId": THREAD, "childThreadId": "child-thread"}],
+    });
+    let view = super::own_rows(THREAD, projection);
+    assert_eq!(
+        view["providerThreads"].as_array().unwrap().len(),
+        1,
+        "{view}"
+    );
+    assert_eq!(view["providerThreads"][0]["appThreadId"], THREAD);
+    assert_eq!(view["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(view["subagents"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_settlement_read_without_evidence_is_a_typed_refusal_and_modes_are_fixed() {
+    let lab = Lab::start().await;
+    let earlier_thread = "reviewer-thread";
+    let mut create = create_command();
+    create["commandId"] = json!("person-create-r");
+    create["threadId"] = json!(earlier_thread);
+    create["runtimeMode"] = json!("approval-required");
+    person(&lab, create).await;
+    let mut missing = grant("m1", "do it", true);
+    missing["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "absent",
+        "text_sha256": sha("x"), "interrupt_command_id": "stop-x"}]);
+    let mut w = worker(&lab, missing).await;
+    let refused = read(&mut w, 1, earlier_thread).await.unwrap_err();
+    let error: Result<ProjectionError, _> = conn_contract::from_json(typed_error(&refused));
+    assert!(error.is_ok(), "{refused}");
+    let mut message = dispatch_command("pr1", "r1", "done");
+    message["threadId"] = json!(earlier_thread);
+    person(&lab, message).await;
+    until_run(&lab, earlier_thread, "r1", "completed").await;
+    let mut g = grant("m1", "do it", true);
+    g["earlier"] = json!([{"thread_id": earlier_thread, "message_id": "r1", "text_sha256": sha("done"),
+        "interrupt_command_id": "stop-r1"}]);
+    let mut w2 = worker(&lab, g).await;
+    let view = read(&mut w2, 1, earlier_thread)
+        .await
+        .expect("settlement read");
+    assert_eq!(
+        view["thread"]["runtimeMode"], "full-access",
+        "not the thread's own setting"
+    );
+    assert_eq!(view["thread"]["interactionMode"], "default");
+}

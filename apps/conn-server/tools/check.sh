@@ -195,6 +195,9 @@ run 4 120 "textgen-diff" node crates/conn-server/tools/textgen-diff.mjs "$releas
 # GitHub and unknown-host fallback against T3's registry, test literals and a fixed grid.
 run 4 120 "registry-diff" \
   node crates/conn-source-control/tools/registry-diff.mjs "$release/examples/registry_cases"
+# Pull request watch evaluation and wake texts against T3's own pullRequestWatch.ts.
+run 4 120 "pr-watch-diff" \
+  node crates/conn-source-control/tools/pr-watch-diff.mjs "$release/examples/pr_watch_cases"
 # Webhook prompt templates, filters and signatures against T3's own functions.
 run 4 120 "webhook-diff" node crates/conn-features/tools/webhook-diff.mjs "$release/examples/webhook_functions"
 run 4 120 "limits-diff" node crates/conn-server/tools/limits-diff.mjs
@@ -205,6 +208,8 @@ run 3 240 "device conformance" \
   node crates/conn-devices/tools/conformance.mjs "$release/examples/replay_server"
 # Orbit's idle check: the shell route in 14 states on both servers, Codex on a stub (no model).
 run 4 180 "idle-diff" node crates/conn-server/tools/idle-diff.mjs "$release/conn-server"
+# Provider sign-in: every provider.auth.* reply and the CLI runs on both servers (stub CLIs).
+run 4 180 "provider-auth-diff" node crates/conn-server/tools/provider-auth-diff.mjs "$release/conn-server"
 run 2 120 "codex instructions --check" \
   node crates/conn-provider-codex/tools/gen-instructions.mjs --check
 run 1 900 "codex conformance" node crates/conn-provider-codex/tools/conformance.mjs

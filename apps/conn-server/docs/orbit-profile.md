@@ -23,11 +23,11 @@ pinned pair.
 | Target | Methods to build | `/mcp` tools to build | HTTP routes to build | Rough size [estimate] |
 | --- | --- | --- | --- | --- |
 | (a) Orbit container only | **0** of 67 needed (all served); 1 useful method remains | **0** needed or useful | **0** needed; 4 useful routes remain | Profile remainder not re-estimated; Orbit additions about 2 to 4 k (section 4) |
-| (b) Container and host, what the client really uses | **11** needed (47 with the useful ones the rip-out list keeps) | **8** needed (16 with the useful ones) | **1** needed (12 with the useful ones) | Remaining work not re-estimated |
-| (c) Full parity with the T3 server | **64**, including 1 unclassified method | **16** | **39** | Remaining work not re-estimated |
+| (b) Container and host, what the client really uses | **5** needed (41 with the useful ones the rip-out list keeps) | **5** needed (13 with the useful ones) | **1** needed (12 with the useful ones) | Remaining work not re-estimated |
+| (c) Full parity with the T3 server | **58**, including 1 unclassified method | **13** | **39** | Remaining work not re-estimated |
 
 The dated size basis is about 140 k lines of Rust [measured on 2026-11-14, `wc -l` over
-`crates/*/src`]. Current coverage is 173 of 237 methods, 71 of 87 tools and 18 of 57 HTTP
+`crates/*/src`]. Current coverage is 179 of 237 methods, 74 of 87 tools and 18 of 57 HTTP
 contract routes, plus eight endpoints outside that HTTP contract. The original size
 estimates are not estimates of the remaining work. Section 2 gives the current gaps;
 section 3 keeps the dated binary measurements.
@@ -55,7 +55,7 @@ Five points carry the rest of the document:
    Gateway signs, which ends pairing, hourly renewal and vault round trips; start-up from
    files Orbit writes, which ends the `t3` CLI calls in `clone-t3`; and Swamp on `/mcp`
    with a service credential, which ends the CLI and WebSocket workaround for task turns.
-4. **Maintenance.** The host target (b) still needs 21 methods, 12 tools and one HTTP
+4. **Maintenance.** The host target (b) still needs 15 methods, 9 tools and one HTTP
    route; their size has not been re-estimated. After that there is one server kind, and
    the contract is ours to change for Orbit. Orbit's workarounds go away. The upkeep becomes merges by
    choice plus a watch on the provider layer: 783 upstream commits and 58 k changed lines in
@@ -223,8 +223,8 @@ active). No known difference is left.
 
 ### 1c. The agent itself, through `/mcp`
 
-Agents in a thread call `/mcp` with a token per provider session. They can use 67 served
-tools: orchestration, scheduled tasks, annotations, PR links, previews, HTML renders,
+Agents in a thread call `/mcp` with a token per provider session. They can use 70 served
+tools: orchestration, scheduled tasks, annotations, PR links, watches and guides, previews, HTML renders,
 attachments, worktree hand-off, secrets, test logins, panels and MCP Apps. Tools that act as
 the calling thread are hidden from outside clients [code,
 `R/crates/conn-mcp/src/outside-hidden.txt`].
@@ -249,7 +249,7 @@ and size measurements retain the dated research framing. The current contract al
 `server.getSettings`, which is unserved and unclassified here; only the full-parity total
 includes it. Section 11 proposes what to hide or remove, independently of what is served.
 
-### Methods (237; 163 served) [measured counts]
+### Methods (237; 169 served) [measured counts]
 
 | Area | Methods | Served | C: N / U / X / O | H: N / U / X / O |
 | --- | --- | --- | --- | --- |
@@ -270,7 +270,7 @@ includes it. Section 11 proposes what to hide or remove, independently of what i
 | preview | 12 | 8 | 0 / 0 / 12 / 0 | 8 / 1 / 3 / 0 |
 | projectClone | 3 | 0 | 0 / 0 / 3 / 0 | 0 / 3 / 0 / 0 |
 | projects | 10 | 10 | 10 / 0 / 0 / 0 | 10 / 0 / 0 / 0 |
-| provider | 16 | 2 | 1 / 2 / 13 / 0 | 7 / 9 / 0 / 0 |
+| provider | 16 | 8 | 1 / 2 / 13 / 0 | 7 / 9 / 0 / 0 |
 | pullRequests | 35 | 35 | 0 / 8 / 2 / 25 | 33 / 2 / 0 / 0 |
 | review | 3 | 3 | 3 / 0 / 0 / 0 | 3 / 0 / 0 / 0 |
 | scheduledTasks | 8 | 8 | 0 / 8 / 0 / 0 | 5 / 3 / 0 / 0 |
@@ -283,30 +283,31 @@ includes it. Section 11 proposes what to hide or remove, independently of what i
 | testLogins | 5 | 5 | 0 / 0 / 5 / 0 | 0 / 5 / 0 / 0 |
 | vcs | 9 | 9 | 9 / 0 / 0 / 0 | 9 / 0 / 0 / 0 |
 | worktreeSetup | 1 | 1 | 1 / 0 / 0 / 0 | 1 / 0 / 0 / 0 |
-| **Total** | **237** | **173** | **67 / 43 / 96 / 30** | **152 / 68 / 16 / 0** |
+| **Total** | **237** | **179** | **67 / 43 / 96 / 30** | **152 / 68 / 16 / 0** |
 
 The C/H columns classify 236 methods; `server.getSettings` adds one unclassified method
 in the `server` area.
 
 - **Container:** all 67 needed methods are served. One useful method is not:
   `provider.consumeResetCredit`.
-- **Host:** 152 are needed, and 11 of them are not served: `peerLinks.*` (4),
-  `provider.auth.*` (6), and `preview.stopLocalServer`. `device.*` is served since 2026-11-19.
+- **Host:** 152 are needed, and 5 of them are not served: `peerLinks.*` (4) and
+  `preview.stopLocalServer`. `device.*` is served since 2026-11-19.
 - **Not needed anywhere: 16 methods.** These are T3 Connect (`cloud.*`, `guestShare`), the
   ACP registry's download and install (9; Nick ruled out installs), the Electron tab relay
   (`preview.desktop*`, 3) and `server.commitDesktopUpdate`.
 
-### `/mcp` tools (87; 71 served) [measured counts]
+### `/mcp` tools (87; 74 served) [measured counts]
 
 | | N | U | X | O |
 | --- | --- | --- | --- | --- |
-| Container | 21 (all served) | 44 (all served) | 14 (2 served) | 8 (none served) |
-| Host | 67 (59 served) | 20 (12 served) | 0 | 0 |
+| Container | 21 (all served) | 44 (all served) | 14 (2 served) | 8 (3 served) |
+| Host | 67 (62 served) | 20 (12 served) | 0 | 0 |
 
 - Every needed or useful container tool is served.
-- On a host, 8 needed tools are missing: linked machines
-  (`t3_environment_link/links/unlink/preferences_update`, 4), and PR watching and guides (4).
-  The `device_*` tools (4) are served since 2026-11-19.
+- On a host, 5 needed tools are missing: linked machines
+  (`t3_environment_link/links/unlink/preferences_update`, 4) and `write_pull_request_guides`
+  (no review guide generator yet). PR watching and guide reads are served since 2026-11-19, and
+  the `device_*` tools (4) too.
 
 ### HTTP routes (57 contract routes; 18 served) [measured counts]
 
@@ -343,16 +344,16 @@ in the `server` area.
 | --- | --- | --- | --- |
 | (a) container: needed, not served | 0 | 0 | 0 |
 | (a) container: needed or useful, not served | 1 | 0 | 4 |
-| (b) container or host: needed, not served | 21 | 12 | 1 |
-| (b) container or host: needed or useful, minus what section 11 hides or removes | 57 | 20 | 12 |
-| (c) full parity: not served | 74 | 20 | 39 |
+| (b) container or host: needed, not served | 15 | 9 | 1 |
+| (b) container or host: needed or useful, minus what section 11 hides or removes | 51 | 17 | 12 |
+| (c) full parity: not served | 68 | 17 | 39 |
 
 Remaining work by area. Estimates for unchanged gaps retain the original research basis;
 implemented areas have no remaining-size estimate.
 
 | Area | Remaining items in (b) | Estimate |
 | --- | --- | --- |
-| Pull request watching and guides | 4 tools | Not re-estimated; PR methods and the diff route are registered |
+| Review guide writing | `write_pull_request_guides` (and `pullRequests.generateReviewGuide` for real) | Not estimated: T3's guide generator, a temporary checkout and the guide normalization |
 | Agent browser and previews | `preview.stopLocalServer` | Not re-estimated; browser tools and eight preview methods are registered |
 | Peer links, linked environments, MCP OAuth | 4 methods, 4 tools, 8 useful routes | 3 to 5 k |
 | Provider sign-in | 6 methods | 1.5 to 2.5 k |
@@ -616,7 +617,7 @@ What moves out:
 
 What is new to maintain:
 
-- The host target (b): 21 needed methods, 12 tools and one HTTP route remain; size not re-estimated.
+- The host target (b): 15 needed methods, 9 tools and one HTTP route remain; size not re-estimated.
 - A pinned client–server pair, and its release.
 - **Version skew:** a new client against an old container image. Orbit upgrades the agent
   bundle fleet-wide with a symlink flip and `try-restart` [code, `DROP-IN.md` §1,
@@ -647,7 +648,7 @@ remain separate from registration):
 | --- | --- | --- |
 | Git actions control (commit, push, PR) | `git.runStackedAction` | Registered; commit is served, push and PR creation return a typed error |
 | Thread PR panel, when a PR is linked | `pullRequests.*` | All 35 methods are registered; disabled guide generation and unavailable actions return typed errors |
-| Provider sign-in and install in Settings | `provider.auth.start` …, `provider.install.*` | Buttons that fail; the UI follows `providers[].auth.status` |
+| Provider sign-in and install in Settings | `provider.auth.*`, `provider.install.*` | Sign-in is served as in T3: Claude, Codex and Grok are CLI-owned (`setup.canAuthenticate: false`), so the UI shows no sign-in and every `provider.auth.*` call answers T3's `ProviderSetupError`. Install actions fail; the UI follows `providers[].auth.status` |
 | Device panel | `device.*` | Served on this machine and on SSH hosts; Expo and Simlock hosts are not offered |
 | Test logins and credentials | `testLogins.*`, `credentials.*` | Test-login methods are served; the two site-credential methods remain unserved |
 | Secret request card | `secrets.answerRequest` | Served |
@@ -1039,12 +1040,12 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `projects.searchContents` | yes | N | N |  | file tree, search, editor |
 | `projects.searchEntries` | yes | N | N |  | file tree, search, editor |
 | `projects.writeFile` | yes | N | N |  | file tree, search, editor |
-| `provider.auth.cancel` | no | X | N | M | provider sign-in; containers use the AI router |
-| `provider.auth.complete` | no | X | N | M | provider sign-in; containers use the AI router |
-| `provider.auth.logout` | no | X | N | M | provider sign-in; containers use the AI router |
-| `provider.auth.removeMethod` | no | X | N | M | provider sign-in; containers use the AI router |
-| `provider.auth.respond` | no | X | N | M | provider sign-in; containers use the AI router |
-| `provider.auth.start` | no | X | N | M | provider sign-in; containers use the AI router |
+| `provider.auth.cancel` | yes | X | N |  | provider sign-in: T3's `ProviderSetupError` for CLI-owned providers |
+| `provider.auth.complete` | yes | X | N |  | provider sign-in: T3's `ProviderSetupError` for CLI-owned providers |
+| `provider.auth.logout` | yes | X | N |  | provider sign-in: T3's `ProviderSetupError` for CLI-owned providers |
+| `provider.auth.removeMethod` | yes | X | N |  | provider sign-in: T3's `ProviderSetupError` for CLI-owned providers |
+| `provider.auth.respond` | yes | X | N |  | provider sign-in: T3's `ProviderSetupError` for CLI-owned providers |
+| `provider.auth.start` | yes | X | N |  | provider sign-in: T3's `ProviderSetupError` for CLI-owned providers |
 | `provider.auth.subscribe` | yes | N | N |  | sign-in state stream |
 | `provider.chatgpt.handoff.subscribe` | no | X | U | M | ChatGPT profile handoff for Codex |
 | `provider.chatgpt.import-profile` | no | X | U | M | ChatGPT profile handoff for Codex |
@@ -1231,7 +1232,7 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `preview_snapshot` | yes | U | N |  | agent browser; needs headless Chromium on the server |
 | `preview_status` | yes | U | N |  | agent browser; needs headless Chromium on the server |
 | `preview_wait_for` | yes | U | N |  | agent browser; needs headless Chromium on the server |
-| `read_pull_request_guide` | no | O | N | M | PR babysitting; Orbit's review-and-merge does it in a container |
+| `read_pull_request_guide` | yes | O | N |  | stored review guides; the panel's guide store |
 | `request_credentials` | yes | X | U |  | test logins |
 | `request_secret` | yes | U | N |  | agent asks for a secret |
 | `run_scheduled_task_now` | yes | U | N |  | scheduled tasks |
@@ -1279,9 +1280,9 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 | `tool_search` | yes | U | U |  |  |
 | `unlink_pull_request` | yes | U | N |  | PR links on a thread; Swamp could link the PR it opens |
 | `unlink_pull_requests` | yes | U | N |  | PR links on a thread; Swamp could link the PR it opens |
-| `unwatch_pull_request` | no | O | N | M | PR babysitting; Orbit's review-and-merge does it in a container |
-| `watch_pull_request` | no | O | N | M | PR babysitting; Orbit's review-and-merge does it in a container |
-| `write_pull_request_guides` | no | O | N | M | PR babysitting; Orbit's review-and-merge does it in a container |
+| `unwatch_pull_request` | yes | O | N |  | PR watching; hidden from delegated children |
+| `watch_pull_request` | yes | O | N |  | PR watching: a 2-minute sweep wakes the thread; hidden from delegated children |
+| `write_pull_request_guides` | no | O | N | M | needs T3's review guide generator (a temporary checkout and a model run); unregistered until then |
 
 
 ## Appendix C. Every HTTP route

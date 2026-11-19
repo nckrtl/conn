@@ -1290,9 +1290,17 @@ impl AuthStore {
         self.refresh(&mut state);
         let mut next = state.clone();
         let changes = change(&mut next);
-        if !changes.is_empty()
-            && let Some(path) = &self.file
-        {
+        // Saved whenever the stored records changed, announced or not: a spent approval or
+        // peer-link code announces nothing but must not come back in another process.
+        let changed = !changes.is_empty()
+            || next.pairing.len() != state.pairing.len()
+            || next.pairing.keys().any(|k| !state.pairing.contains_key(k))
+            || next.sessions.len() != state.sessions.len()
+            || next
+                .sessions
+                .keys()
+                .any(|k| !state.sessions.contains_key(k));
+        if changed && let Some(path) = &self.file {
             let file = AuthFile {
                 version: 1,
                 sessions: next.sessions.values().cloned().collect(),
@@ -1730,6 +1738,14 @@ mod tests {
             Some("auto")
         );
         assert!(events.try_recv().is_err(), "the spent code was announced");
+        // Spent means spent in a process that opens the file afresh too.
+        let reopened = AuthStore::open(dir.join("auth.json")).unwrap();
+        assert!(
+            reopened
+                .consume_mcp_code(&issued.code, "auto", true)
+                .is_err(),
+            "a spent peer-link code came back from the file"
+        );
         assert_eq!(other.pairing_links().len(), 1);
         while let Ok(change) = other_events.try_recv() {
             assert!(

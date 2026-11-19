@@ -140,7 +140,7 @@ const scopeFor = (caller) => ({
   linkedEnvironments: caller !== "links-off",
 });
 
-/** `$ref: "#/$defs/…"` replaced by its definition (a cycle stops at depth 32 with `{}`). */
+/** `$ref: "#/$defs/…"` replaced by its definition; an unknown or too deep reference fails. */
 function inlineRefs(schema) {
   const defs = schema.$defs ?? {};
   const walk = (node, depth) => {
@@ -148,7 +148,8 @@ function inlineRefs(schema) {
     if (!isObject(node)) return node;
     if (typeof node.$ref === "string") {
       const name = node.$ref.replace(/^#\/\$defs\//, "");
-      return depth > 32 || defs[name] === undefined ? {} : walk(defs[name], depth + 1);
+      if (depth > 32 || defs[name] === undefined) throw new Error(`result schema: cannot inline ${node.$ref}`);
+      return walk(defs[name], depth + 1);
     }
     return Object.fromEntries(Object.entries(node).filter(([k]) => k !== "$defs").map(([k, v]) => [k, walk(v, depth)]));
   };

@@ -326,7 +326,15 @@ function TasksBoard(props: {
   scroll: { readonly top: number; readonly left: number };
 }) {
   const laneScroll = useTasksLaneScroll((state) => state.byThreadKey[props.threadKey]);
-  const scrollRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, props.scroll.left);
+  // The board scrolls down past the insights; the lanes scroll sideways.
+  const boardRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, 0);
+  const lanesRef = useRestoredScroll<HTMLDivElement>(0, props.scroll.left);
+  const saveScroll = () =>
+    tasksPanelActions().saveBoardScroll(
+      props.threadKey,
+      boardRef.current?.scrollTop ?? 0,
+      lanesRef.current?.scrollLeft ?? 0,
+    );
   const query = useTasksBoardQuery((state) => state.query);
   const hiddenLanes = useTasksBoardSettings((state) => state.hiddenLanes);
   const searching = query.trim().length > 0;
@@ -334,17 +342,19 @@ function TasksBoard(props: {
     <div className="flex min-h-0 flex-1 flex-col">
       <BoardToolbar />
       {/* A short panel scrolls the insights away, so the lanes keep room for their cards. */}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <div
+        ref={boardRef}
+        onScrollEnd={(event) => {
+          if (event.target === event.currentTarget) saveScroll();
+        }}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+      >
         <TasksInsightsStrip orbitProjectId={props.orbitProjectId} query={query} />
         <div
-          ref={scrollRef}
-          onScrollEnd={(event) =>
-            tasksPanelActions().saveBoardScroll(
-              props.threadKey,
-              event.currentTarget.scrollTop,
-              event.currentTarget.scrollLeft,
-            )
-          }
+          ref={lanesRef}
+          onScrollEnd={(event) => {
+            if (event.target === event.currentTarget) saveScroll();
+          }}
           className="scrollbar-inset flex min-h-64 flex-1 gap-2 overflow-x-auto p-4.5"
         >
           {tasksBoardLanes(props.tasks, { query, hiddenLanes }).map((lane) => (
@@ -367,6 +377,7 @@ function TasksBoard(props: {
                     onOpen={(laneTop) => {
                       // The lane unmounts at once, before a running scroll reports its end.
                       useTasksLaneScroll.getState().save(props.threadKey, lane.id, laneTop);
+                      saveScroll();
                       tasksPanelActions().openTask(props.threadKey, task.id);
                     }}
                   />

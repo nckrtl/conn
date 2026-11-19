@@ -34,42 +34,40 @@ export function KvRow(props: {
   readonly external?: boolean;
   readonly accessibilityLabel?: string;
 }) {
+  const row = (pressed: boolean) => (
+    <View
+      style={{ minHeight: 40 }}
+      className={cn("flex-row items-center gap-2 px-4", pressed && "bg-row-hover")}
+    >
+      <View style={{ width: KEY_WIDTH }} className="flex-row items-center gap-2">
+        <View className="w-4 items-center">{props.icon}</View>
+        <Text className="text-[15px] text-foreground-muted" numberOfLines={1}>
+          {props.label}
+        </Text>
+      </View>
+      <View className="min-w-0 flex-1 flex-row items-center gap-1.5">
+        {typeof props.children === "string" ? <KvText>{props.children}</KvText> : props.children}
+      </View>
+      {props.onPress && !props.external ? (
+        <SymbolView
+          name="chevron.right"
+          size={13}
+          type="monochrome"
+          weight="semibold"
+          tintColorClassName="accent-foreground-tertiary"
+        />
+      ) : null}
+    </View>
+  );
+  // A row that leads nowhere stays a plain view, so controls in its value stay reachable.
+  if (!props.onPress) return row(false);
   return (
     <Pressable
-      accessibilityRole={props.onPress ? (props.external ? "link" : "button") : undefined}
+      accessibilityRole={props.external ? "link" : "button"}
       accessibilityLabel={props.accessibilityLabel}
-      disabled={!props.onPress}
       onPress={props.onPress}
     >
-      {({ pressed }) => (
-        <View
-          style={{ minHeight: 40 }}
-          className={cn("flex-row items-center gap-2 px-4", pressed && "bg-row-hover")}
-        >
-          <View style={{ width: KEY_WIDTH }} className="flex-row items-center gap-2">
-            <View className="w-4 items-center">{props.icon}</View>
-            <Text className="text-[15px] text-foreground-muted" numberOfLines={1}>
-              {props.label}
-            </Text>
-          </View>
-          <View className="min-w-0 flex-1 flex-row items-center gap-1.5">
-            {typeof props.children === "string" ? (
-              <KvText>{props.children}</KvText>
-            ) : (
-              props.children
-            )}
-          </View>
-          {props.onPress && !props.external ? (
-            <SymbolView
-              name="chevron.right"
-              size={13}
-              type="monochrome"
-              weight="semibold"
-              tintColorClassName="accent-foreground-tertiary"
-            />
-          ) : null}
-        </View>
-      )}
+      {({ pressed }) => row(pressed)}
     </Pressable>
   );
 }

@@ -20,6 +20,7 @@ import {
   ExternalLinkIcon,
   FileCode2Icon,
   GitCommitHorizontalIcon,
+  HammerIcon,
   MessageSquareIcon,
   MessageSquarePlusIcon,
 } from "lucide-react";
@@ -45,8 +46,11 @@ import {
   type PullRequestTimelineRow,
   isPullRequestVerdictStale,
   newestPullRequestCommitAt,
+  pullRequestFindingKey,
   pullRequestReviewOutcome,
+  visibleBody,
   type PullRequestChatSubject,
+  type PullRequestFinding,
   type PullRequestReviewOutcome,
   type PullRequestTimelineEvent,
   type PullRequestTimelineThread,
@@ -86,6 +90,40 @@ interface ReactionSurface {
   readonly reference: PullRequestRef;
   readonly completionScope: PullRequestCompletionScope | null;
   readonly onRefresh: () => void;
+  /** Absent where findings cannot be handed to an agent. */
+  readonly fix?:
+    | {
+        readonly findingFor: (event: PullRequestTimelineEvent) => PullRequestFinding | null;
+        readonly onFix: (finding: PullRequestFinding) => void;
+        readonly pending: string | null;
+        readonly label: string;
+      }
+    | undefined;
+}
+
+function FixFindingButton({
+  event,
+  reactions,
+}: {
+  event: PullRequestTimelineEvent;
+  reactions: ReactionSurface;
+}) {
+  const gt = useGT();
+  const fix = reactions.fix;
+  const finding = fix?.findingFor(event) ?? null;
+  if (!fix || finding === null) return null;
+  return (
+    <Button
+      size="xs"
+      variant="ghost"
+      className="-mt-1 shrink-0"
+      disabled={fix.pending !== null}
+      onClick={() => fix.onFix(finding)}
+    >
+      <HammerIcon className="size-3" />
+      {fix.pending === pullRequestFindingKey(finding) ? gt("Preparing...") : fix.label}
+    </Button>
+  );
 }
 
 function TimelineBody({
@@ -334,6 +372,7 @@ function ConversationCard({
               onClick={() => setEditing(true)}
             />
           ) : null}
+          {reply ? null : <FixFindingButton event={event} reactions={reactions} />}
           {resolveButton}
           {event.body && event.comment && !reply ? (
             <AddToChatButton comment={event.comment} reactions={reactions} />
@@ -790,6 +829,7 @@ function ReviewVerdictEvent({
             </PullRequestMetaLine>
           </div>
         </div>
+        <FixFindingButton event={event} reactions={reactions} />
         {event.body && event.comment ? (
           <AddToChatButton comment={event.comment} reactions={reactions} />
         ) : null}
@@ -831,6 +871,9 @@ export function PullRequestTimelineTab({
   onOpenCommit,
   onAddToChat,
   onRefresh,
+  pendingFinding = null,
+  fixFindingLabel,
+  onFixFinding,
 }: {
   /** A clicked link to scroll to and mark, until onRevealSettled reports it shown. */
   revealUrl?: string | undefined;
@@ -844,7 +887,11 @@ export function PullRequestTimelineTab({
   onOpenCommit: (oid: string) => void;
   onAddToChat?: (subject: PullRequestChatSubject) => void;
   onRefresh: () => void;
+  pendingFinding?: string | null;
+  fixFindingLabel?: string;
+  onFixFinding?: (finding: PullRequestFinding) => void;
 }) {
+  const gt = useGT();
   const resolve = useMessages();
   const events = buildPullRequestTimeline(detail, resolve);
   const location = parsePullRequestAnchor(revealUrl);
@@ -878,6 +925,27 @@ export function PullRequestTimelineTab({
     reference,
     completionScope: pullRequestCompletionScope(detail, environmentId, reference),
     onRefresh,
+    fix: onFixFinding && {
+      findingFor: (event) => {
+        const comment = event.comment;
+        if (
+          comment === undefined ||
+          (comment.kind !== "review" && comment.kind !== "review-comment")
+        )
+          return null;
+        if (pullRequestReviewOutcome(comment.reviewState) === "approved") return null;
+        // An overview thread has no line to attach, so it goes as its opening remark.
+        const thread =
+          event.thread?.path == null
+            ? undefined
+            : detail.reviewThreads.find((candidate) => candidate.id === event.thread?.id);
+        if (thread !== undefined) return { kind: "thread", thread };
+        return visibleBody(comment.body) === null ? null : { kind: "comment", comment };
+      },
+      onFix: onFixFinding,
+      pending: pendingFinding,
+      label: fixFindingLabel ?? gt("Fix in a thread"),
+    },
   };
   const editable = new Map(
     events
@@ -971,7 +1039,7 @@ export function PullRequestTimelineTab({
 
   if (events.length === 0) {
     return (
-      <div ref={scrollerRef} className="scrollbar-gutter-both h-full overflow-y-auto px-4 py-5">
+      <div ref={scrollerRef} className="h-full overflow-y-auto px-4.5 py-5">
         <div className="flex flex-col items-center justify-center py-16 text-center text-muted-foreground">
           <PullRequestGlyph.pullRequest className="mb-2 size-5" />
           <p className="text-ui">
@@ -995,8 +1063,8 @@ export function PullRequestTimelineTab({
       keyExtractor={rowKey}
       renderItem={renderRow}
       estimatedItemSize={140}
-      className="scrollbar-gutter-both h-full px-4"
-      contentContainerClassName="relative mx-auto w-full max-w-3xl before:absolute before:bottom-10 before:left-[15px] before:top-6 before:w-px before:bg-border/45"
+      className="h-full px-4.5"
+      contentContainerClassName="relative w-full before:absolute before:bottom-10 before:left-[15px] before:top-6 before:w-px before:bg-(--shell-divider)"
       ListHeaderComponent={
         anchor !== null && targetIndex < 0 && revealUrl === undefined ? (
           <p role="status" className="py-4 text-xs text-muted-foreground">

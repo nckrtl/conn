@@ -645,7 +645,7 @@ export function pullRequestConversationItemComments(
   return item.kind === "comment" ? [item.comment] : [item.root, ...item.replies];
 }
 
-export function isPullRequestCommentFinished(
+function isPullRequestCommentFinished(
   comment: PullRequestComment,
   thread?: PullRequestConversationThread,
 ): boolean {

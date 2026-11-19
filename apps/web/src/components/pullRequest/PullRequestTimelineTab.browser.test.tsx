@@ -174,3 +174,50 @@ it.each(["review", "issue-comment", "resolved-reply"] as const)(
     await expect.element(screen.getByText("Linked reply", { exact: true })).toBeVisible();
   },
 );
+
+it("fixes an overview thread as its opening remark, since it has no line to attach", async () => {
+  const author = { login: "reviewer", name: null, avatarUrl: null };
+  const note = { author, createdAt: "2026-09-01T00:00:00Z", url: null };
+  const remark = {
+    ...note,
+    id: "10",
+    kind: "review-comment" as const,
+    body: "Mention the flag in the README",
+    path: null,
+    reviewState: null,
+  };
+  const value: PullRequestDetailView = {
+    ...detail,
+    commits: [],
+    comments: [remark],
+    overviewThreads: [
+      {
+        id: "overview",
+        path: null,
+        line: null,
+        side: "right",
+        isResolved: false,
+        isOutdated: false,
+        comments: [{ ...note, id: "10", body: remark.body }],
+      },
+    ],
+  };
+  const onFixFinding = vi.fn();
+  await using screen = await render(
+    <div style={{ height: 600 }}>
+      <PullRequestTimelineTab
+        scrollerRef={() => {}}
+        detail={value}
+        environmentId={EnvironmentId.make("environment")}
+        reference={value}
+        order="oldest"
+        onOpenCommit={() => {}}
+        onRefresh={() => {}}
+        onFixFinding={onFixFinding}
+      />
+    </div>,
+  );
+
+  await screen.getByRole("button", { name: "Fix in a thread" }).click();
+  expect(onFixFinding).toHaveBeenCalledWith({ kind: "comment", comment: remark });
+});

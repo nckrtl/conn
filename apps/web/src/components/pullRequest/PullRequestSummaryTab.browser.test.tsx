@@ -54,7 +54,7 @@ function setup() {
 }
 
 import { act, render as renderUi } from "../../../test/render";
-import { PullRequestSummaryTab } from "./PullRequestSummaryTab";
+import { PullRequestDescriptionTab } from "./PullRequestSummaryTab";
 
 const detail: PullRequestDetailView = {
   provider: SourceControlProviderKind.make("github"),
@@ -108,39 +108,20 @@ const detail: PullRequestDetailView = {
   },
 };
 
-// The comment filter persists to localStorage, so tests that touch it start and end empty.
-
 const tab = (value = detail) => (
-  <PullRequestSummaryTab
+  <PullRequestDescriptionTab
     scrollerRef={() => {}}
     environmentId={EnvironmentId.make("environment")}
     threadRef={null}
     reference={value}
     detail={value}
-    activityPending={false}
-    activityError={null}
     onRefresh={() => {}}
   />
 );
 
-async function render(value = detail) {
-  const screen = await renderUi(tab(value));
-  const { container } = screen;
-  const heading = (title: string) => {
-    const section = container.querySelector(`section[aria-label="${title}"]`);
-    expect(section, `section ${title}`).not.toBeNull();
-    return [...section!.querySelectorAll("button")].find(
-      (button) => button.querySelector("span")?.textContent === title,
-    )!;
-  };
-  return Object.assign(screen, {
-    click: (title: string) => act(async () => heading(title).click()),
-    expanded: (title: string) => heading(title).getAttribute("aria-expanded"),
-    visibleText: () => container.innerText,
-  });
-}
+const render = (value = detail) => renderUi(tab(value));
 
-it("keeps an unsaved description when collapsed and reopened, and after a failed save", async () => {
+it("keeps an unsaved description after a failed save", async () => {
   setup();
   state.update.mockResolvedValue({ _tag: "Failure", cause: new Error("offline") });
   await using screen = await render();
@@ -150,10 +131,6 @@ it("keeps an unsaved description when collapsed and reopened, and after a failed
   const textarea = screen.container.querySelector("textarea")!;
   await userEvent.clear(textarea);
   await userEvent.type(textarea, "Unsaved description");
-  await screen.click("Description");
-  expect(screen.expanded("Description")).toBe("false");
-  await screen.click("Description");
-  expect(screen.container.querySelector("textarea")!.value).toBe("Unsaved description");
 
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   expect(state.update).toHaveBeenCalledTimes(1);
@@ -199,74 +176,5 @@ it("leaves description checkboxes read-only without the right to edit it", async
   await using screen = await render({ ...detail, body });
   expect(screen.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(
     true,
-  );
-});
-
-it("fixes an overview thread as its opening remark, since it has no line to attach", async () => {
-  setup();
-  const author = { login: "reviewer", name: null, avatarUrl: null };
-  const note = { author, createdAt: "2026-09-01T00:00:00Z", url: null };
-  const remark = {
-    ...note,
-    id: "10",
-    kind: "review-comment" as const,
-    body: "Mention the flag in the README",
-    path: null,
-    reviewState: null,
-  };
-  const onFixFinding = vi.fn();
-  const value: PullRequestDetailView = {
-    ...detail,
-    comments: [remark],
-    overviewThreads: [
-      {
-        id: "overview",
-        path: null,
-        line: null,
-        side: "right",
-        isResolved: false,
-        isOutdated: false,
-        comments: [{ ...note, id: "10", body: remark.body }],
-      },
-    ],
-  };
-  await using screen = await renderUi(
-    <PullRequestSummaryTab
-      scrollerRef={() => {}}
-      environmentId={EnvironmentId.make("environment")}
-      threadRef={null}
-      reference={value}
-      detail={value}
-      activityPending={false}
-      activityError={null}
-      onRefresh={() => {}}
-      onFixFinding={onFixFinding}
-    />,
-  );
-
-  await userEvent.click(screen.getByRole("button", { name: "Fix in a thread" }));
-  expect(onFixFinding).toHaveBeenCalledWith({ kind: "comment", comment: remark });
-});
-
-it("shows a comment's exact time in the chosen 24-hour clock", async () => {
-  setup();
-  state.timestampFormat = "24-hour";
-  const createdAt = "2026-09-01T17:30:00Z";
-  const comment = {
-    id: "10",
-    kind: "review-comment" as const,
-    body: "A remark",
-    author: { login: "reviewer", name: null, avatarUrl: null },
-    createdAt,
-    url: null,
-    path: null,
-    reviewState: null,
-  };
-  await using screen = await render({ ...detail, comments: [comment], commentCount: 1 });
-
-  await userEvent.hover(screen.container.querySelector(`time[datetime="${createdAt}"]`)!);
-  const expected = new Date(createdAt).toLocaleString(undefined, { hour12: false });
-  await vi.waitFor(() =>
-    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toBe(expected),
   );
 });

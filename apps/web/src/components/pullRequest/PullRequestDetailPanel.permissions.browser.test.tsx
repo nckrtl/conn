@@ -183,7 +183,7 @@ it("reads the first diff page once the pointer rests on the Code tab", async () 
   setup();
   await using screen = await render(panel());
   using _timers = fakeTimers({ now: 0 });
-  const code = screen.getByRole("button", { name: "Code", exact: true });
+  const code = screen.getByRole("tab", { name: "Code", exact: true });
   await expect.element(code).toBeVisible();
 
   await userEvent.hover(code);

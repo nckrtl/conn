@@ -597,7 +597,9 @@ function ReviewThreadEvent({
   const replying = replyDraft !== undefined;
   const setReplyDraft = (body: string) =>
     usePullRequestReviewStore.getState().setThreadReply(replyKey, body);
-  const [sending, setSending] = useState(false);
+  const sending = usePullRequestReviewStore(
+    (store) => store.threadRepliesSending[replyKey] === true,
+  );
   const [loaded, setLoaded] = useState<{
     readonly comments: ReadonlyArray<PullRequestThreadComment>;
     readonly nextCursor: string | null;
@@ -634,13 +636,14 @@ function ReviewThreadEvent({
       : undefined;
   const sendReply = async (text: string) => {
     const body = text.trim();
-    if (body.length === 0 || sending) return;
-    setSending(true);
+    const store = usePullRequestReviewStore.getState();
+    if (body.length === 0 || store.threadRepliesSending[replyKey]) return;
+    store.setThreadReplySending(replyKey, true);
     const result = await replyToThread({
       environmentId: reactions.environmentId,
       input: { ...reactions.reference, threadId: thread.id, body },
     });
-    setSending(false);
+    usePullRequestReviewStore.getState().setThreadReplySending(replyKey, false);
     if (result._tag === "Failure") {
       toastManager.add({ type: "error", title: m(msg("Reply could not be posted")) });
       return;

@@ -34,6 +34,9 @@ interface PullRequestReviewStoreState {
   readonly setThreadReply: (key: string, body: string) => void;
   /** Closes the box; with `submittedBody`, only when nothing was typed since sending it. */
   readonly closeThreadReply: (key: string, submittedBody?: string) => void;
+  /** Replies being posted, by the same key, so a remounted row cannot post one twice. */
+  readonly threadRepliesSending: Readonly<Record<string, true>>;
+  readonly setThreadReplySending: (key: string, sending: boolean) => void;
 }
 
 const EMPTY: ReadonlyArray<PendingReviewComment> = [];
@@ -42,6 +45,12 @@ export const usePullRequestReviewStore = create<PullRequestReviewStoreState>()((
   drafts: {},
   summaries: {},
   threadReplies: {},
+  threadRepliesSending: {},
+  setThreadReplySending: (key, sending) =>
+    set((state) => {
+      const { [key]: _removed, ...rest } = state.threadRepliesSending;
+      return { threadRepliesSending: sending ? { ...rest, [key]: true } : rest };
+    }),
   setThreadReply: (key, body) =>
     set((state) => ({ threadReplies: { ...state.threadReplies, [key]: body } })),
   closeThreadReply: (key, submittedBody) =>

@@ -88,10 +88,10 @@ it("mounts only the timeline rows near the viewport of a huge pull request", asy
   expect(mounted).toBeLessThan(COMMITS / 10);
 });
 
-it.each(["review", "issue-comment", "resolved-reply"] as const)(
+it.each(["review", "issue-comment", "resolved-reply", "bot-comment"] as const)(
   "reveals a linked %s below the virtual viewport",
   async (kind) => {
-    const url = `${detail.url}#${kind === "review" ? "pullrequestreview-123" : kind === "issue-comment" ? "issuecomment-123" : "discussion_r123"}`;
+    const url = `${detail.url}#${kind === "review" ? "pullrequestreview-123" : kind === "resolved-reply" ? "discussion_r123" : "issuecomment-123"}`;
     const linkedDetail: PullRequestDetailView = {
       ...detail,
       comments:
@@ -100,8 +100,13 @@ it.each(["review", "issue-comment", "resolved-reply"] as const)(
           : [
               {
                 id: "linked",
-                kind,
-                author: detail.author,
+                kind: kind === "bot-comment" ? "issue-comment" : kind,
+                author: {
+                  login: "author",
+                  name: null,
+                  avatarUrl: null,
+                  isBot: kind === "bot-comment",
+                },
                 body: "Linked reply",
                 createdAt: "2026-10-01T00:00:00Z",
                 url,
@@ -148,6 +153,8 @@ it.each(["review", "issue-comment", "resolved-reply"] as const)(
           environmentId={EnvironmentId.make("environment")}
           reference={detail}
           order="oldest"
+          // The saved defaults hide resolved threads; a link must land anyway.
+          filter={{ bots: false, resolved: false }}
           onOpenCommit={() => {}}
           onRefresh={() => {}}
           revealUrl={url}
@@ -165,6 +172,7 @@ it.each(["review", "issue-comment", "resolved-reply"] as const)(
           environmentId={EnvironmentId.make("environment")}
           reference={detail}
           order="oldest"
+          filter={{ bots: false, resolved: false }}
           onOpenCommit={() => {}}
           onRefresh={() => {}}
           onRevealSettled={settled}

@@ -910,7 +910,7 @@ export function PullRequestTimelineTab({
 }) {
   const gt = useGT();
   const resolve = useMessages();
-  const events = filterPullRequestTimelineEvents(buildPullRequestTimeline(detail, resolve), filter);
+  const allEvents = buildPullRequestTimeline(detail, resolve);
   const location = parsePullRequestAnchor(revealUrl);
   const revealAnchor = location?.kind === "timeline" ? location.anchor : null;
   // The linked item stays marked and open after it is shown, until another link replaces it.
@@ -929,6 +929,9 @@ export function PullRequestTimelineTab({
   const listRef = useRef<LegendListRef | null>(null);
   const matches = (event: PullRequestTimelineEvent) =>
     anchor !== null && pullRequestTimelineEventMatches(event, anchor);
+  // A linked item shows even when the saved filter hides it, so the link always lands.
+  const shown = new Set(filterPullRequestTimelineEvents(allEvents, filter));
+  const events = allEvents.filter((event) => shown.has(event) || matches(event));
 
   const term = changeRequestTermKind(sourceControlClients.get(detail.provider).changeRequest);
   const newestCommitAt = newestPullRequestCommitAt(detail.commits);

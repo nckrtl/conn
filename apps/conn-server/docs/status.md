@@ -21,6 +21,44 @@ the run stays open. Waiting for terminal confirmation is deliberate. `idle-diff`
 split in `KNOWN` as `intermittent`; a gate either side misses still fails it. Whether to
 match T3 is open.
 
+## PR link sync from GitHub (2026-11-19)
+
+Linked PR rows now get their title, state, checks and review state, and the sidebar chip shows
+the thread branch's PR. Before, the engine refused `thread.pull-request-link.sync` and
+`thread.pull-request.sync`, so rows kept "Waiting for host state".
+
+- **Served:** both commands, with T3's deciders and guards (`conn-engine/src/pull_requests.rs`,
+  `commands.rs`): a link sync replaces the link's snapshot and stack and keeps `updatedAt`; a
+  branch sync is refused with T3's text when the thread, its project or its pull requests
+  changed after the lookup. The shell row carries `branchPullRequest` and `linkedPullRequest`
+  when the thread has them, as T3's does.
+- **The sweeps** (`conn-source-control/src/pull_requests/link_sync.rs` decides,
+  `conn-server/src/methods/pull_requests/links.rs` reads GitHub through the panel's client and
+  `gh`'s login). They run in the watch loop's task from #146, one read at a time, on T3's
+  cadence and triggers: every minute; at once for a new link, a settle (open and closed links),
+  and a thread's own events for its branch (created, run ended, unsettled, branch changed);
+  T3's start-up backfill of settled threads. Every map is pruned to the current links and
+  branches each sweep; pending requests stop at 1,024.
+- **Proof:** `pr-link-sync-diff` (new check, group 4) runs T3's own `PullRequestSyncReactor` and
+  `ThreadPullRequestService` on stub services and Effect's test clock, and ours through
+  `conn-engine/examples/pr_link_sync_cases.rs`, minute by minute on the same host answers.
+  Each side applies its own commands. 19 cases, 150 sweeps: reads, commands and final threads
+  equal (new link, quiet cadence, merged final plus request, not found, backoff, unknown
+  mergeability, settled thread, stack layers, shared read, closed cadence, tombstone; branch
+  found, rechecks after 30 minutes, historical, checked out, replaced, settled thread's event,
+  kept merged PR, subagent). Changing one cadence constant fails it. Engine test: both syncs,
+  the stale refusal, the shell field. `client-check`: the client's own reducers show the
+  snapshot and the branch PR. Server test: on a stub GitHub with a stub `gh`, one sweep
+  writes the link snapshot and the branch PR; the next one reads both and writes nothing. A
+  listener test covers the triggers.
+- **Known differences:** no sibling stack retries across groups; no per-host pause until a
+  rate limit's reset time (a limited read backs off as T3 does without one); no replacement
+  of an older single `linkedPullRequest`; an agent's `gh pr merge` or a panel action is not
+  re-read at once (the next sweep reads it); no lookup caches or fresh-git-state confirmation;
+  no owner page fallback when 100 PRs share a head name. A link sync writes
+  `thread.pull-request-synced` (whole thread) where T3 writes `thread.pull-request-link-updated`
+  (one link); clients end in the same state. Reads run one at a time (T3 runs up to 100).
+
 ## Thread transcript route (2026-11-19)
 
 - **Served:** `GET /api/orchestration/threads/:threadId/transcript`, the composer's "import a

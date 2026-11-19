@@ -1340,6 +1340,18 @@ impl Tx<'_> {
             .map_err(err)
     }
 
+    /// The sequence of the thread's latest stored event, or 0.
+    pub(crate) fn thread_latest_sequence(&self, thread_id: &str) -> StoreResult<u64> {
+        self.tx
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE thread_id = ?1",
+                [thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|seq| seq.max(0) as u64)
+            .map_err(err)
+    }
+
     /// A project that was not deleted.
     pub(crate) fn project(&self, project_id: &str) -> StoreResult<Option<Value>> {
         Ok(self

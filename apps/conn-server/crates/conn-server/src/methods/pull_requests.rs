@@ -28,6 +28,7 @@ use std::{
 };
 use tokio::sync::{OnceCell, mpsc, watch};
 mod guides;
+mod links;
 mod watches;
 
 #[derive(Clone, Debug)]

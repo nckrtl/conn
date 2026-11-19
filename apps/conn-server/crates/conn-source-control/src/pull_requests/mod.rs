@@ -13,6 +13,7 @@ pub mod actions;
 mod activity;
 mod detail;
 pub mod diff;
+pub mod link_sync;
 pub mod listing;
 pub mod normalize;
 mod stack;

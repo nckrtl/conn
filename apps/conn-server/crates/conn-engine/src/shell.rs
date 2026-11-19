@@ -248,7 +248,7 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         .as_ref()
         .map_or(json!("idle"), |run| run["status"].clone());
 
-    Ok(json!({
+    let mut row = json!({
         "createdBy": field("createdBy"),
         "creationSource": field("creationSource"),
         "id": thread_id,
@@ -314,7 +314,14 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         "lastTitleRegeneration": field("lastTitleRegeneration"),
         "limitRecovery": field("limitRecovery"),
         "deletedAt": field("deletedAt"),
-    }))
+    });
+    // As T3's shell: present only when the thread has them.
+    for key in ["linkedPullRequest", "branchPullRequest"] {
+        if let (Some(value), Some(map)) = (thread.get(key), row.as_object_mut()) {
+            map.insert(key.into(), value.clone());
+        }
+    }
+    Ok(row)
 }
 
 #[cfg(test)]

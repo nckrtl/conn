@@ -30,13 +30,21 @@ struct Shell {
     live: tokio::sync::broadcast::Sender<ShellStreamItem>,
     /// What the watch loop sent as `thread.pull-request-watch.sync`.
     syncs: Mutex<Vec<Value>>,
+    /// What the link sweep dispatched.
+    dispatched: Mutex<Vec<Value>>,
 }
 impl Engine for Shell {
     fn dispatch(
         &self,
-        _: Command,
+        command: Command,
     ) -> BoxFuture<'_, Result<DispatchCommandResult, EngineError<DispatchCommandError>>> {
-        Box::pin(async { Err(EngineError::Internal("not called".into())) })
+        self.dispatched
+            .lock()
+            .expect("dispatched")
+            .push(to_json(&command));
+        Box::pin(async {
+            from_json(json!({"sequence": 1})).map_err(|e| EngineError::Internal(e.to_string()))
+        })
     }
     fn subscribe_thread(
         &self,
@@ -109,6 +117,7 @@ fn shell(root: &std::path::Path) -> Arc<Shell> {
         ),
         live: tokio::sync::broadcast::channel(8).0,
         syncs: Mutex::new(Vec::new()),
+        dispatched: Mutex::new(Vec::new()),
     })
 }
 fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
@@ -1607,4 +1616,141 @@ async fn a_watched_pull_request_wakes_its_thread_when_its_checks_or_comments_cha
     assert_eq!(ended["watch"], Value::Null);
     assert!(ended.get("wake").is_none());
     task.abort();
+}
+
+/// The link sweep reads a linked pull request through `gh`'s login and writes its snapshot
+/// (`thread.pull-request-link.sync`), and looks the thread's branch up and writes its pull
+/// request (`thread.pull-request.sync`), as T3's `PullRequestSyncReactor` and
+/// `ThreadPullRequestService` do. A second sweep a minute later changes nothing.
+#[tokio::test]
+async fn the_link_sweep_writes_link_snapshots_and_the_branch_pull_request() {
+    use axum::{Json, Router, routing::post};
+    let dir = TestDir::new();
+    let shell = shell(&dir.0);
+    let reads = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = reads.clone();
+    let router = Router::new().route(
+        "/graphql",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                let name = text(&body, "operationName").to_owned();
+                seen.lock().expect("reads").push(name.clone());
+                let mut pr: Value = serde_json::from_str(include_str!(
+                    "../../../../conn-source-control/src/pull_requests/sample.json"
+                ))
+                .expect("sample");
+                pr["updatedAt"] = json!("2030-01-01T00:00:00Z");
+                let data = if name == "PullRequestsByHead" {
+                    json!({"repository": {"pullRequests": {"nodes": [pr]}}})
+                } else {
+                    json!({"repository": {"pullRequest": pr}})
+                };
+                Json(json!({"data": data}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("stub API");
+    });
+    let thread = json!({"id": "t1", "projectId": "p1", "title": "T", "branch": "feature",
+        "worktreePath": null, "createdAt": "2026-11-16T00:00:00.000Z",
+        "updatedAt": "2026-11-16T00:00:00.000Z", "archivedAt": null, "settledAt": null,
+        "settledOverride": null, "lineage": {"relationshipToParent": null},
+        "pullRequests": [{"host": "github.com", "repository": "a/b", "number": 7,
+            "url": "https://github.com/a/b/pull/7", "source": "manual",
+            "linkedAt": "2026-11-16T00:00:00.000Z", "snapshot": null, "stack": null}]});
+    shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread]);
+    let panel = panel(shell.clone(), &dir, &base);
+    let mut links = links::Links::new(panel);
+    links.tick().await;
+    let dispatched = std::mem::take(&mut *shell.dispatched.lock().expect("dispatched"));
+    let [link_sync, branch_sync] = dispatched.as_slice() else {
+        panic!("two commands: {dispatched:?}")
+    };
+    assert_eq!(link_sync["type"], "thread.pull-request-link.sync");
+    assert_eq!(link_sync["threadId"], "t1");
+    let snapshot = &link_sync["snapshot"];
+    assert_eq!(snapshot["title"], "A change", "{snapshot}");
+    assert_eq!(snapshot["state"], "open");
+    assert_eq!(snapshot["reviewDecision"], "approved");
+    assert!(snapshot["syncedAt"].is_string());
+    assert_eq!(link_sync["stack"], Value::Null);
+    assert_eq!(branch_sync["type"], "thread.pull-request.sync");
+    assert_eq!(
+        branch_sync["branchPullRequest"],
+        json!({"projectId": "p1", "repository": "a/b", "number": 7,
+            "url": "https://github.com/a/b/pull/7"})
+    );
+    assert_eq!(branch_sync["expected"]["branch"], "feature");
+    assert_eq!(branch_sync["expected"]["branchPullRequest"], Value::Null);
+    assert_eq!(
+        *reads.lock().expect("reads"),
+        ["PullRequestSummary", "PullRequestsByHead"]
+    );
+
+    // With both written, the next sweep reads again (an open, recently updated pull request
+    // stays on the minute cadence) but writes nothing.
+    {
+        let mut state = shell.snapshot.lock().expect("snapshot");
+        state["threads"][0]["pullRequests"][0]["snapshot"] = snapshot.clone();
+        state["threads"][0]["branchPullRequest"] = branch_sync["branchPullRequest"].clone();
+    }
+    reads.lock().expect("reads").clear();
+    links.tick().await;
+    assert!(shell.dispatched.lock().expect("dispatched").is_empty());
+    assert_eq!(
+        *reads.lock().expect("reads"),
+        ["PullRequestSummary", "PullRequestsByHead"]
+    );
+    task.abort();
+}
+
+/// The shell listener asks the link sweep for what T3's reactors react to: a new link without a
+/// snapshot, a new thread on a branch, a run's end, a changed branch, and a settle.
+#[test]
+fn thread_updates_ask_the_link_sweep_for_what_t3_reacts_to() {
+    use links::Request;
+    use watches::{Observed, link_requests};
+    let link = json!({"host": "github.com", "repository": "a/b", "number": 7,
+        "url": "https://github.com/a/b/pull/7", "source": "manual", "snapshot": null,
+        "stack": null});
+    let base = json!({"id": "t1", "projectId": "p1", "branch": "feature", "worktreePath": null,
+        "settledAt": null, "settledOverride": null, "latestRunCompletedAt": null,
+        "pullRequests": []});
+    let ask = |before: Option<&Value>, now: &Value| {
+        let observed = before.map(Observed::new);
+        link_requests(now, observed.as_ref(), &Observed::new(now))
+    };
+    assert_eq!(
+        ask(None, &base),
+        [Request::Branch("t1".into())],
+        "a new thread"
+    );
+    assert!(ask(Some(&base), &base).is_empty(), "nothing changed");
+    let mut linked = base.clone();
+    linked["pullRequests"] = json!([link]);
+    assert_eq!(
+        ask(Some(&base), &linked),
+        [Request::Unsynced {
+            project_id: "p1".into(),
+            link
+        }]
+    );
+    assert!(ask(Some(&linked), &linked).is_empty(), "asked once");
+    let mut ended = linked.clone();
+    ended["latestRunCompletedAt"] = json!("2026-11-19T10:00:00.000Z");
+    assert_eq!(ask(Some(&linked), &ended), [Request::Branch("t1".into())]);
+    let mut synced = ended.clone();
+    synced["pullRequests"][0]["snapshot"] = json!({"state": "open"});
+    let mut settled = synced.clone();
+    settled["settledAt"] = json!("2026-11-19T10:01:00.000Z");
+    assert_eq!(
+        ask(Some(&synced), &settled),
+        [Request::Settled(vec!["github.com/a/b#7".into()])]
+    );
 }

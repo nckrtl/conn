@@ -2127,6 +2127,26 @@ async fn a_branch_tracking_its_base_is_looked_up_by_its_own_name() {
     assert_eq!(query.default_branch.as_deref(), Some("main"));
 }
 
+/// Codex round 2: the fork head is still found after the local branch is deleted, through the
+/// one remote that tracks it (T3's `branchPullRequest.remoteTrackingRefs`).
+#[tokio::test]
+async fn a_deleted_local_branch_is_looked_up_in_the_remote_that_tracks_it() {
+    let repo = HeadRepo::new(&[("origin", "o/r"), ("fork", "contributor/r")]);
+    repo.git(&["push", "-q", "-u", "origin", "main"]);
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "Feature"]);
+    repo.git(&["push", "-q", "fork", "feature"]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["branch", "-q", "-D", "feature"]);
+    let project = repo.project();
+    let query = links::head_of(&project, &repo.work(), "feature")
+        .await
+        .expect("looked up");
+    assert_eq!(query.head.name, "feature");
+    assert_eq!(query.head.repository, "contributor/r");
+    assert!(query.head.cross_repository);
+}
+
 /// Codex finding 2 (T3 GitManager.test.ts "finds a fork PR for a branch pushed without an
 /// upstream"): `git push fork feature` without `-u` publishes the head in the fork.
 #[tokio::test]

@@ -178,7 +178,8 @@ pub async fn remote_tracking_remote(
 
 /// `findPublishedBranchRemote`: the one remote a branch without an upstream was pushed to.
 /// A remote whose `refs/remotes/<remote>/<branch>` is the local commit wins; else the one
-/// whose ref is an ancestor of it. Two candidates, or none, answer `None`.
+/// whose ref is an ancestor of it. Without a local branch, the one remote that tracks
+/// `branch`. Two candidates, or none, answer `None`.
 pub async fn published_branch_remote(cwd: &Path, branch: &str) -> VcsResult<Option<String>> {
     let names = remote_names(cwd).await?;
     if names.is_empty() {
@@ -201,13 +202,20 @@ pub async fn published_branch_remote(cwd: &Path, branch: &str) -> VcsResult<Opti
         .filter_map(|line| line.trim().split_once('\0'))
         .collect();
     let oid_of = |reference: &str| oids.iter().find(|(r, _)| *r == reference).map(|(_, o)| *o);
-    let Some(local) = oid_of(&local_ref) else {
-        return Ok(None);
-    };
     let remote_refs: Vec<(&String, &str)> = names
         .iter()
         .filter_map(|n| oid_of(&format!("refs/remotes/{n}/{branch}")).map(|o| (n, o)))
         .collect();
+    let Some(local) = oid_of(&local_ref) else {
+        // No local branch (deleted after the push): the one remote that tracks it, as T3's
+        // `branchPullRequest.remoteTrackingRefs`. Several are ambiguous.
+        let [(name, _)] = remote_refs.as_slice() else {
+            return Ok(None);
+        };
+        return Ok(config_get(cwd, &format!("remote.{name}.url"))
+            .await?
+            .map(|_| (*name).clone()));
+    };
     let exact: Vec<&String> = remote_refs
         .iter()
         .filter(|(_, o)| *o == local)

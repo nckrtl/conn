@@ -197,8 +197,24 @@ impl LocalServers {
         let (out, rx) = mpsc::channel::<Value>(4);
         let scanner = self.clone();
         tokio::spawn(async move {
-            scanner.retain().await;
-            let initial = parse::project(&scanner.scan_snapshot(&configured).await, &configured);
+            let was_idle = scanner.retain_now();
+            let setup = async {
+                if was_idle {
+                    scanner.poll_tick().await;
+                }
+                parse::project(&scanner.scan_snapshot(&configured).await, &configured)
+            };
+            // T3 runs the first scan in the stream's scope: a client that leaves stops it, and
+            // its slot and retention come back at once.
+            let initial = tokio::select! {
+                () = out.closed() => None,
+                initial = setup => Some(initial),
+            };
+            let Some(initial) = initial else {
+                scanner.0.pending.fetch_sub(1, Ordering::SeqCst);
+                scanner.release().await;
+                return;
+            };
             let (tx, mut changes) = tokio::sync::watch::channel(initial.clone());
             let id = scanner.0.next_id.fetch_add(1, Ordering::Relaxed);
             {
@@ -233,11 +249,10 @@ impl LocalServers {
         Ok(rx)
     }
 
-    async fn retain(&self) {
+    /// Counts one more retainer and starts the poller; `true` when nobody retained before (T3
+    /// then runs one poll at once). Synchronous, so a cancelled caller always knows to release.
+    fn retain_now(&self) -> bool {
         let was_idle = self.0.retained.fetch_add(1, Ordering::SeqCst) == 0;
-        if was_idle {
-            self.poll_tick().await;
-        }
         if !self.0.polling.swap(true, Ordering::SeqCst) {
             let scanner = self.clone();
             tokio::spawn(async move {
@@ -258,6 +273,7 @@ impl LocalServers {
                 }
             });
         }
+        was_idle
     }
 
     async fn release(&self) {
@@ -967,3 +983,40 @@ pub fn terminal_shells(terminals: Option<conn_terminal::TerminalManager>) -> Ter
 
 /// The settings map for the foreground gate.
 pub type Settings = Arc<dyn Fn() -> Map<String, Value> + Send + Sync>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Subscriptions that leave during a slow first scan give their slot and retention back
+    /// at once, so a reconnect is not refused (Codex review, round 2).
+    #[tokio::test]
+    async fn a_subscription_left_during_its_first_scan_frees_its_slot() {
+        let scanner = LocalServers::new(Arc::new(Vec::new), Arc::new(|| false));
+        let held = scanner.0.scan.lock().await;
+        let mut lists = Vec::new();
+        for _ in 0..MAX_SUBSCRIBERS {
+            lists.push(scanner.subscribe(Vec::new()).await.expect("a slot"));
+        }
+        assert!(
+            scanner.subscribe(Vec::new()).await.is_err(),
+            "the cap holds"
+        );
+        drop(lists);
+        for _ in 0..100 {
+            if scanner.0.pending.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(scanner.0.pending.load(Ordering::SeqCst), 0);
+        assert_eq!(scanner.0.retained.load(Ordering::SeqCst), 0);
+        let mut again = scanner.subscribe(Vec::new()).await.expect("a slot again");
+        drop(held);
+        let first = tokio::time::timeout(Duration::from_secs(20), again.recv())
+            .await
+            .expect("a first list")
+            .expect("open");
+        assert!(first["servers"].is_array());
+    }
+}

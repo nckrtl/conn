@@ -264,22 +264,28 @@ function TimelineComment({
   const approved = state === "APPROVED";
   const changes = state === "CHANGES_REQUESTED";
   const login = comment.author?.login ?? gt("Unknown author");
+  const footer = (
+    <PullRequestCommentFooter
+      params={params}
+      comment={comment}
+      permissions={actions.permissions}
+      onChanged={actions.onChanged}
+    />
+  );
   const card = (
     <CommentCard
       author={comment.author}
       createdAt={comment.createdAt}
       body={comment.body}
       linked={linked}
-      footer={
-        <PullRequestCommentFooter
-          params={params}
-          comment={comment}
-          permissions={actions.permissions}
-          onChanged={actions.onChanged}
-        />
-      }
+      footer={footer}
     />
   );
+  // A verdict without text keeps its reactions under its title line.
+  const hasFooter =
+    (comment.reactions?.length ?? 0) > 0 ||
+    actions.permissions.canReactComment(comment) ||
+    (comment.kind !== "review" && actions.permissions.canEditComment(comment));
   if (!approved && !changes)
     return (
       <RailRow position={position} marker={<ActorMarker actor={comment.author} />}>
@@ -310,7 +316,7 @@ function TimelineComment({
       }
       meta={gt("{time} ago", { time: relativeTime(comment.createdAt, undefined, messages) })}
     >
-      {comment.body.trim() ? card : null}
+      {comment.body.trim() ? card : hasFooter ? footer : null}
     </RailRow>
   );
 }

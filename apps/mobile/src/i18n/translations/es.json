@@ -2569,6 +2569,9 @@
   "9f52ea3133da8ea4": "Tarea",
   "c1f4237a1a587e78": "Autor",
   "008ac38b2f39a399": "Actualizado",
+  "06a684782801e8f7": "Copiar la rama head {branch}",
+  "227045bc57827a97": "en",
+  "85ae9979ad3b0c1e": "Copiar la rama base {branch}",
   "d85877d9ef77c50c": "Cambios",
   "9b3ae5edeae058a1": "Revisores",
   "7020f0cde6e67564": "Ninguno",
@@ -2584,25 +2587,6 @@
     {
       "i": 1,
       "k": "_gt_value_1",
-      "v": "v"
-    }
-  ],
-  "f1aa989667d657ce": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    " ",
-    {
-      "t": "Text",
-      "i": 2,
-      "c": "en"
-    },
-    " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
       "v": "v"
     }
   ],
@@ -2828,6 +2812,7 @@
   "8cc970597921c38a": "¿Eliminar {branch} de {repository}? Las ramas locales y los worktrees no cambian.",
   "58bda2aa88d28696": "Acciones de la {term, select, mr {merge request} cr {solicitud de cambios} other {pull request}}",
   "ffd49822d34cbd30": "Permitir ediciones de los mantenedores",
+  "cdfe7771384370e8": "¿Abrir una {term, select, mr {merge request} cr {solicitud de cambios} other {pull request}} nueva que revierta estos cambios?",
   "2a83c8767b3e1918": "Eliminando…",
   "99a3c6e593d6947d": "Vuelve a conectarte para eliminar esta rama.",
   "655ace1b049d1c8e": "Comprobaciones",
@@ -2865,20 +2850,11 @@
     },
     ". Abre una capa para revisarla o fusionar la pila hasta esa capa."
   ],
-  "7d50c5c18ba726fa": "Estado de la {term, select, mr {merge request} cr {solicitud de cambios} other {pull request}}, {status}",
-  "25019c947d3082dc": "Estado de la {term, select, mr {merge request} cr {solicitud de cambios} other {pull request}}",
-  "cdfe7771384370e8": "¿Abrir una {term, select, mr {merge request} cr {solicitud de cambios} other {pull request}} nueva que revierta estos cambios?",
-  "c93589b9022328d4": "Comprobaciones, {summary}",
   "698b57490dcff9b2": "Conflictos con {branch}",
   "78bf470bf7712936": "Sin conflictos con {branch}",
   "04ece553cf53e018": "Rama",
   "750195d317fe7e9e": "Rama, {summary}",
   "0dafdeb64cb13711": "Actualizar con {method, select, merge {merge} rebase {rebase} other {{method}}}",
-  "301edbbd0597cf4d": "Revisor desconocido",
-  "1e74602ca35d4c7e": "Aprobada",
-  "9f3f817e9111e162": "Comentó",
-  "82e3cbf8c92aa519": "{login}, revisión solicitada",
-  "b7b4efdb71c594be": "Ver revisores en el proveedor",
   "eb60367cf891f1fa": "{count, plural, one {{count} respuesta} other {{count} respuestas}}",
   "0b68aba89ab9ddaa": "Ver el commit {sha}, {headline}",
   "f3b559e33853d3e4": "hace {time}",

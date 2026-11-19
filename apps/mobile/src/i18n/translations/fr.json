@@ -2569,6 +2569,9 @@
   "9f52ea3133da8ea4": "Tâche",
   "c1f4237a1a587e78": "Auteur",
   "008ac38b2f39a399": "Mise à jour",
+  "06a684782801e8f7": "Copier la branche de tête {branch}",
+  "227045bc57827a97": "vers",
+  "85ae9979ad3b0c1e": "Copier la branche de base {branch}",
   "d85877d9ef77c50c": "Modifications",
   "9b3ae5edeae058a1": "Relecteurs",
   "7020f0cde6e67564": "Aucun",
@@ -2584,25 +2587,6 @@
     {
       "i": 1,
       "k": "_gt_value_1",
-      "v": "v"
-    }
-  ],
-  "f1aa989667d657ce": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    " ",
-    {
-      "t": "Text",
-      "i": 2,
-      "c": "vers"
-    },
-    " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
       "v": "v"
     }
   ],
@@ -2828,6 +2812,7 @@
   "8cc970597921c38a": "Supprimer {branch} de {repository} ? Les branches locales et les worktrees ne sont pas modifiés.",
   "58bda2aa88d28696": "Actions de la {term, select, mr {merge request} cr {demande de modification} other {pull request}}",
   "ffd49822d34cbd30": "Autoriser les modifications des mainteneurs",
+  "cdfe7771384370e8": "Ouvrir une nouvelle {term, select, mr {merge request} cr {demande de modification} other {pull request}} qui annule ces modifications ?",
   "2a83c8767b3e1918": "Suppression…",
   "99a3c6e593d6947d": "Reconnectez-vous pour supprimer cette branche.",
   "655ace1b049d1c8e": "Vérifications",
@@ -2865,20 +2850,11 @@
     },
     ". Ouvrez une couche pour la relire ou fusionner la pile jusqu’à cette couche."
   ],
-  "7d50c5c18ba726fa": "Statut de la {term, select, mr {merge request} cr {demande de modification} other {pull request}}, {status}",
-  "25019c947d3082dc": "Statut de la {term, select, mr {merge request} cr {demande de modification} other {pull request}}",
-  "cdfe7771384370e8": "Ouvrir une nouvelle {term, select, mr {merge request} cr {demande de modification} other {pull request}} qui annule ces modifications ?",
-  "c93589b9022328d4": "Vérifications, {summary}",
   "698b57490dcff9b2": "En conflit avec {branch}",
   "78bf470bf7712936": "Aucun conflit avec {branch}",
   "04ece553cf53e018": "Branche",
   "750195d317fe7e9e": "Branche, {summary}",
   "0dafdeb64cb13711": "Mettre à jour avec {method, select, merge {merge} rebase {rebase} other {{method}}}",
-  "301edbbd0597cf4d": "Relecteur inconnu",
-  "1e74602ca35d4c7e": "Approuvée",
-  "9f3f817e9111e162": "Commentée",
-  "82e3cbf8c92aa519": "{login}, revue demandée",
-  "b7b4efdb71c594be": "Voir les relecteurs chez le fournisseur",
   "eb60367cf891f1fa": "{count, plural, one {{count} réponse} other {{count} réponses}}",
   "0b68aba89ab9ddaa": "Voir le commit {sha}, {headline}",
   "f3b559e33853d3e4": "il y a {time}",

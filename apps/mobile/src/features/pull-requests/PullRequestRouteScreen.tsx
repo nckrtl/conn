@@ -142,7 +142,7 @@ function usePullRequestActivityRows(params: PullRequestParams, filter: ActivityF
       { permissions, onChanged: result.refresh },
       filter.newestFirst,
       messages,
-      detail.data,
+      filter.kind === "all" ? detail.data : null,
     );
     if (!rows.length)
       rows.push({
@@ -509,6 +509,23 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
             },
           ]
         : []),
+      // Draft, ready and revert: the status menu the old header carried, with its gating.
+      ...(["ready", "draft", "revert"] as const).filter(action.available).map((id) => ({
+        id,
+        title: pullRequestActionLabel(id, terminology, messages),
+        icon: PR_ACTION_ICONS[id],
+        onPress: () =>
+          id === "revert"
+            ? action.confirm(
+                id,
+                pullRequestActionLabel("revert", terminology, messages),
+                gt(
+                  "Open a new {term, select, mr {merge request} cr {change request} other {pull request}} that reverses these changes?",
+                  { term: changeRequestTermKind(terminology) },
+                ),
+              )
+            : void action.perform(id),
+      })),
       ...(stateAction
         ? [
             {

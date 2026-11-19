@@ -119,6 +119,19 @@ function activity(now: number) {
   return decodeActivity({
     comments: [
       {
+        id: "r1",
+        kind: "review",
+        author: actor("nckrtl"),
+        body: "",
+        createdAt: ago(6),
+        url: `${URL}#pullrequestreview-1`,
+        path: null,
+        reviewState: "APPROVED",
+        reactions: [
+          { content: "rocket", count: 1, actors: ["orbit-bot"], viewerHasReacted: false },
+        ],
+      },
+      {
         id: "c1",
         kind: "issue-comment",
         author: actor("nckrtl"),
@@ -139,7 +152,7 @@ function activity(now: number) {
         reviewState: null,
       },
     ],
-    commentCount: 2,
+    commentCount: 3,
     commentsTruncated: false,
     reviewThreads: [
       {

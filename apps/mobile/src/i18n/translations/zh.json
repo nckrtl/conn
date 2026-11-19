@@ -2570,6 +2570,9 @@
   "9f52ea3133da8ea4": "任务",
   "c1f4237a1a587e78": "作者",
   "008ac38b2f39a399": "更新时间",
+  "06a684782801e8f7": "复制头部分支 {branch}",
+  "227045bc57827a97": "→",
+  "85ae9979ad3b0c1e": "复制基础分支 {branch}",
   "d85877d9ef77c50c": "改动",
   "9b3ae5edeae058a1": "审阅者",
   "7020f0cde6e67564": "无",
@@ -2587,25 +2590,6 @@
     },
     "",
     "前"
-  ],
-  "f1aa989667d657ce": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    " ",
-    {
-      "t": "Text",
-      "i": 2,
-      "c": "→"
-    },
-    " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    }
   ],
   "406bfbc6b51dda02": "未报告任何检查。",
   "46fe3e345947866f": "提供方无法完成此操作。",
@@ -2829,6 +2813,7 @@
   "8cc970597921c38a": "从 {repository} 删除 {branch}？本地分支和工作树不会更改。",
   "58bda2aa88d28696": "{term, select, mr {MR} cr {change request} other {PR}} 操作",
   "ffd49822d34cbd30": "允许维护者编辑",
+  "cdfe7771384370e8": "要新建一个撤销这些更改的 {term, select, mr {merge request} cr {change request} other {pull request}} 吗？",
   "2a83c8767b3e1918": "正在删除…",
   "99a3c6e593d6947d": "重新连接以删除此分支。",
   "655ace1b049d1c8e": "检查",
@@ -2866,20 +2851,11 @@
     },
     "。打开某一层以审查，或将堆叠合并到该层为止。"
   ],
-  "7d50c5c18ba726fa": "{term, select, mr {MR} cr {change request} other {PR}} 状态，{status}",
-  "25019c947d3082dc": "{term, select, mr {MR} cr {change request} other {PR}} 状态",
-  "cdfe7771384370e8": "要新建一个撤销这些更改的 {term, select, mr {merge request} cr {change request} other {pull request}} 吗？",
-  "c93589b9022328d4": "检查，{summary}",
   "698b57490dcff9b2": "与 {branch} 冲突",
   "78bf470bf7712936": "与 {branch} 无冲突",
   "04ece553cf53e018": "分支",
   "750195d317fe7e9e": "分支，{summary}",
   "0dafdeb64cb13711": "使用{method, select, merge {合并} rebase {变基} other {{method}}}更新",
-  "301edbbd0597cf4d": "未知审查者",
-  "1e74602ca35d4c7e": "已批准",
-  "9f3f817e9111e162": "已评论",
-  "82e3cbf8c92aa519": "{login}，已请求审查",
-  "b7b4efdb71c594be": "在提供方上查看审查者",
   "eb60367cf891f1fa": "{count} 条回复",
   "0b68aba89ab9ddaa": "查看提交 {sha}，{headline}",
   "f3b559e33853d3e4": "{time}前",

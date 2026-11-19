@@ -2573,6 +2573,9 @@
   "9f52ea3133da8ea4": "Uppgift",
   "c1f4237a1a587e78": "Författare",
   "008ac38b2f39a399": "Uppdaterad",
+  "06a684782801e8f7": "Kopiera huvudgrenen {branch}",
+  "227045bc57827a97": "in i",
+  "85ae9979ad3b0c1e": "Kopiera basgrenen {branch}",
   "d85877d9ef77c50c": "Ändringar",
   "9b3ae5edeae058a1": "Granskare",
   "7020f0cde6e67564": "Inga",
@@ -2590,25 +2593,6 @@
     },
     " ",
     "sedan"
-  ],
-  "f1aa989667d657ce": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    " ",
-    {
-      "t": "Text",
-      "i": 2,
-      "c": "in i"
-    },
-    " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    }
   ],
   "406bfbc6b51dda02": "Inga kontroller rapporterade.",
   "46fe3e345947866f": "Leverantören kunde inte slutföra åtgärden.",
@@ -2832,6 +2816,7 @@
   "8cc970597921c38a": "Ta bort {branch} från {repository}? Lokala grenar och worktrees ändras inte.",
   "58bda2aa88d28696": "Åtgärder för {term, select, mr {merge request} cr {ändringsbegäran} other {pull request}}",
   "ffd49822d34cbd30": "Tillåt ändringar från underhållare",
+  "cdfe7771384370e8": "Öppna en ny {term, select, mr {merge request} cr {ändringsbegäran} other {pull request}} som återställer de här ändringarna?",
   "2a83c8767b3e1918": "Tar bort…",
   "99a3c6e593d6947d": "Återanslut för att ta bort grenen.",
   "655ace1b049d1c8e": "Kontroller",
@@ -2869,20 +2854,11 @@
     },
     ". Öppna ett lager för att granska det eller merga stacken till och med det lagret."
   ],
-  "7d50c5c18ba726fa": "Status för {term, select, mr {merge request} cr {ändringsbegäran} other {pull request}}, {status}",
-  "25019c947d3082dc": "Status för {term, select, mr {merge request} cr {ändringsbegäran} other {pull request}}",
-  "cdfe7771384370e8": "Öppna en ny {term, select, mr {merge request} cr {ändringsbegäran} other {pull request}} som återställer de här ändringarna?",
-  "c93589b9022328d4": "Kontroller, {summary}",
   "698b57490dcff9b2": "Konflikter med {branch}",
   "78bf470bf7712936": "Inga konflikter med {branch}",
   "04ece553cf53e018": "Gren",
   "750195d317fe7e9e": "Gren, {summary}",
   "0dafdeb64cb13711": "Uppdatera med {method, select, merge {merge} rebase {rebase} other {{method}}}",
-  "301edbbd0597cf4d": "Okänd granskare",
-  "1e74602ca35d4c7e": "Godkänd",
-  "9f3f817e9111e162": "Kommenterad",
-  "82e3cbf8c92aa519": "{login}, granskning begärd",
-  "b7b4efdb71c594be": "Visa granskare hos leverantören",
   "eb60367cf891f1fa": "{count, plural, one {{count} svar} other {{count} svar}}",
   "0b68aba89ab9ddaa": "Visa commit {sha}, {headline}",
   "f3b559e33853d3e4": "{time} sedan",

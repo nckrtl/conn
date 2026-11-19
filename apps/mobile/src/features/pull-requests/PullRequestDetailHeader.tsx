@@ -7,6 +7,7 @@ import type {
   PullRequestSummary,
 } from "@t3tools/contracts";
 import { T, useGT, useMessages, Var } from "gt-react-native";
+import * as Clipboard from "expo-clipboard";
 import { Linking, Pressable, View } from "react-native";
 
 import { RelativeTime } from "../../components/RelativeTime";
@@ -166,12 +167,30 @@ export function PullRequestKeyValues(props: {
         </KvText>
       </KvRow>
       <KvRow icon={<KvIcon name="arrow.triangle.branch" />} label={gt("Branch")}>
-        <KvText wrap className="text-foreground-muted">
-          <T>
-            <Var>{pr.headBranch}</Var> <Text className="text-foreground-tertiary">into</Text>{" "}
-            <Var>{pr.baseBranch}</Var>
-          </T>
-        </KvText>
+        {/* Each branch name copies itself, as the old header's branch line did. */}
+        <View className="min-w-0 flex-1 flex-row flex-wrap items-center gap-x-1.5 py-2">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={gt("Copy head branch {branch}", { branch: pr.headBranch })}
+            onPress={() => void Clipboard.setStringAsync(pr.headBranch)}
+            className="min-w-0 shrink active:opacity-70"
+            hitSlop={4}
+          >
+            <Text className="text-[15px] leading-6 text-foreground-muted">{pr.headBranch}</Text>
+          </Pressable>
+          <Text className="text-[15px] leading-6 text-foreground-tertiary">
+            {gt("into", { $context: "head branch into base branch" })}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={gt("Copy base branch {branch}", { branch: pr.baseBranch })}
+            onPress={() => void Clipboard.setStringAsync(pr.baseBranch)}
+            className="min-w-0 shrink active:opacity-70"
+            hitSlop={4}
+          >
+            <Text className="text-[15px] leading-6 text-foreground-muted">{pr.baseBranch}</Text>
+          </Pressable>
+        </View>
       </KvRow>
       <KvRow icon={<KvIcon name="plusminus" />} label={gt("Changes")}>
         {changedFiles !== undefined ? (

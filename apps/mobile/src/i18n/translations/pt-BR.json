@@ -2569,6 +2569,9 @@
   "9f52ea3133da8ea4": "Tarefa",
   "c1f4237a1a587e78": "Autor",
   "008ac38b2f39a399": "Atualizado",
+  "06a684782801e8f7": "Copiar branch head {branch}",
+  "227045bc57827a97": "em",
+  "85ae9979ad3b0c1e": "Copiar branch base {branch}",
   "d85877d9ef77c50c": "Alterações",
   "9b3ae5edeae058a1": "Revisores",
   "7020f0cde6e67564": "Nenhum",
@@ -2584,25 +2587,6 @@
     {
       "i": 1,
       "k": "_gt_value_1",
-      "v": "v"
-    }
-  ],
-  "f1aa989667d657ce": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    " ",
-    {
-      "t": "Text",
-      "i": 2,
-      "c": "em"
-    },
-    " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
       "v": "v"
     }
   ],
@@ -2828,6 +2812,7 @@
   "8cc970597921c38a": "Excluir {branch} de {repository}? Os branches locais e os worktrees não são alterados.",
   "58bda2aa88d28696": "Ações {term, select, mr {do merge request} cr {da solicitação de alteração} other {do pull request}}",
   "ffd49822d34cbd30": "Permitir edições dos mantenedores",
+  "cdfe7771384370e8": "Abrir {term, select, mr {um novo merge request} cr {uma nova solicitação de alteração} other {um novo pull request}} que reverte essas alterações?",
   "2a83c8767b3e1918": "Excluindo…",
   "99a3c6e593d6947d": "Reconecte para excluir este branch.",
   "655ace1b049d1c8e": "Verificações",
@@ -2865,20 +2850,11 @@
     },
     ". Abra uma camada para revisá-la ou mesclar a pilha até essa camada."
   ],
-  "7d50c5c18ba726fa": "Status {term, select, mr {do merge request} cr {da solicitação de alteração} other {do pull request}}, {status}",
-  "25019c947d3082dc": "Status {term, select, mr {do merge request} cr {da solicitação de alteração} other {do pull request}}",
-  "cdfe7771384370e8": "Abrir {term, select, mr {um novo merge request} cr {uma nova solicitação de alteração} other {um novo pull request}} que reverte essas alterações?",
-  "c93589b9022328d4": "Verificações, {summary}",
   "698b57490dcff9b2": "Conflita com {branch}",
   "78bf470bf7712936": "Sem conflitos com {branch}",
   "04ece553cf53e018": "Branch",
   "750195d317fe7e9e": "Branch, {summary}",
   "0dafdeb64cb13711": "Atualizar com {method, select, merge {merge} rebase {rebase} other {{method}}}",
-  "301edbbd0597cf4d": "Revisor desconhecido",
-  "1e74602ca35d4c7e": "Aprovou",
-  "9f3f817e9111e162": "Comentou",
-  "82e3cbf8c92aa519": "{login}, revisão solicitada",
-  "b7b4efdb71c594be": "Ver revisores no provedor",
   "eb60367cf891f1fa": "{count, plural, one {{count} resposta} other {{count} respostas}}",
   "0b68aba89ab9ddaa": "Ver commit {sha}, {headline}",
   "f3b559e33853d3e4": "há {time}",

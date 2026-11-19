@@ -550,9 +550,14 @@ fn guide_selection(
                         .and_then(|i| i.pointer("/config/customModels"))
                         .and_then(Value::as_array)
                         .is_some_and(|models| {
-                            models
-                                .iter()
-                                .any(|m| m == &d["model"] || m.get("slug") == Some(&d["model"]))
+                            // `readCustomModelEntries`: a string or `{slug}`, trimmed.
+                            models.iter().any(|m| {
+                                m.as_str()
+                                    .or_else(|| m.get("slug").and_then(Value::as_str))
+                                    .map(str::trim)
+                                    .filter(|slug| !slug.is_empty())
+                                    .is_some_and(|slug| Some(slug) == d["model"].as_str())
+                            })
                         })
             }) {
                 return default.clone();

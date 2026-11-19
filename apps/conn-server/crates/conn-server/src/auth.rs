@@ -1198,16 +1198,18 @@ impl AuthStore {
     }
 
     /// Reloads the file when another process changed it, and announces what moved.
-    fn refresh(&self, state: &mut State) {
+    /// Reads the file again when another process changed it. `false` when it could not: the
+    /// state in memory may then be stale.
+    fn refresh(&self, state: &mut State) -> bool {
         let Some(path) = &self.file else {
             let changes = state.purge(now_ms());
             self.announce(changes);
-            return;
+            return true;
         };
         if stamp(path) == state.stamp {
             let changes = state.purge(now_ms());
             self.announce(changes);
-            return;
+            return true;
         }
         let before_links: Vec<String> = state.pairing.values().map(|l| l.id.clone()).collect();
         let hidden_before: Vec<String> = state
@@ -1219,7 +1221,7 @@ impl AuthStore {
         let before_sessions: Vec<StoredSession> = state.sessions.values().cloned().collect();
         if let Err(error) = self.reload(state) {
             eprintln!("conn-server: could not read {}: {error}", path.display());
-            return;
+            return false;
         }
         let mut changes = Vec::new();
         for id in &before_links {
@@ -1248,6 +1250,7 @@ impl AuthStore {
             }
         }
         self.announce(changes);
+        true
     }
 
     /// Replaces the persistent part of `state` with the file's content.
@@ -1287,7 +1290,12 @@ impl AuthStore {
             None => None,
         };
         let mut state = self.lock();
-        self.refresh(&mut state);
+        // A write from a stale snapshot could bring back what another process removed.
+        if !self.refresh(&mut state) {
+            return Err(io::Error::other(
+                "could not read the auth file before writing it",
+            ));
+        }
         let mut next = state.clone();
         let changes = change(&mut next);
         // Saved whenever the stored records changed, announced or not: a spent approval or

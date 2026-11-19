@@ -581,7 +581,8 @@ impl State {
         let mut changes = Vec::new();
         self.pairing.retain(|_, grant| {
             let keep = grant.expires_at_ms > now;
-            if !keep {
+            // Approval and peer-link codes are never listed, so their end is not announced.
+            if !keep && !grant.purpose_bound() {
                 changes.push(AccessChange::PairingLinkRemoved(grant.id.clone()));
             }
             keep
@@ -913,7 +914,12 @@ impl AuthStore {
                 .filter(|level| is_mcp_access(level))
                 .unwrap_or(access);
             outcome = Ok(level.to_owned());
-            vec![AccessChange::PairingLinkRemoved(grant.id)]
+            // `consumeAvailable`: a spent approval or peer-link code is not announced.
+            if grant.purpose_bound() {
+                Vec::new()
+            } else {
+                vec![AccessChange::PairingLinkRemoved(grant.id)]
+            }
         });
         if let Err(error) = written {
             eprintln!("conn-server: could not save auth state: {error}");
@@ -1204,6 +1210,12 @@ impl AuthStore {
             return;
         }
         let before_links: Vec<String> = state.pairing.values().map(|l| l.id.clone()).collect();
+        let hidden_before: Vec<String> = state
+            .pairing
+            .values()
+            .filter(|l| l.purpose_bound())
+            .map(|l| l.id.clone())
+            .collect();
         let before_sessions: Vec<StoredSession> = state.sessions.values().cloned().collect();
         if let Err(error) = self.reload(state) {
             eprintln!("conn-server: could not read {}: {error}", path.display());
@@ -1215,6 +1227,11 @@ impl AuthStore {
                 changes.push(AccessChange::PairingLinkRemoved(id.clone()));
             }
         }
+        // Approval and peer-link codes were never announced, so their end is not either.
+        changes.retain(|change| match change {
+            AccessChange::PairingLinkRemoved(id) => !hidden_before.contains(id),
+            _ => true,
+        });
         for link in state.pairing.values() {
             if !before_links.contains(&link.id) && !link.purpose_bound() {
                 changes.push(AccessChange::PairingLinkUpserted(link.id.clone()));
@@ -1702,6 +1719,24 @@ mod tests {
             Ok(AccessChange::PairingLinkUpserted(id)) if id == plain.id
         ));
         assert_eq!(store.pairing_links().len(), 1);
+        // Spending the peer-link code announces nothing either, here or on a reload
+        // (`consumeAvailable` skips approval subjects; Codex finding 4 of #151).
+        let _ = other_events.try_recv();
+        assert_eq!(
+            store
+                .consume_mcp_code(&issued.code, "auto", true)
+                .ok()
+                .as_deref(),
+            Some("auto")
+        );
+        assert!(events.try_recv().is_err(), "the spent code was announced");
+        assert_eq!(other.pairing_links().len(), 1);
+        while let Ok(change) = other_events.try_recv() {
+            assert!(
+                !matches!(&change, AccessChange::PairingLinkRemoved(id) if *id == issued.id),
+                "a reload announced the spent code"
+            );
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 

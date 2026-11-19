@@ -48,9 +48,9 @@ pub(crate) enum Effect {
         thread_id: String,
         request: Value,
     },
-    /// Ends the provider process and revokes its MCP credential. A workspace move does this
-    /// too, as T3 does for a per-thread provider process; the queued continuation gets a new
-    /// credential.
+    /// Ends the provider session; a workspace move does this too. Its MCP credential is
+    /// revoked when the process ends, and kept for the thread's next session while a shared
+    /// process (Codex's `app-server`) still runs, as T3 does.
     CloseSession {
         thread_id: String,
     },

@@ -25,7 +25,7 @@ describe("tasks board", () => {
       subtaskCounts: { ...task.subtaskCounts, total, completed },
       workspace: node === null ? null : { ...workspace, node: { ...machine, name: node } },
     });
-    expect(taskCardDetail(withCounts(3, 1, "beast"))).toBe("1/3 subtasks · beast");
+    expect(taskCardDetail(withCounts(2, 1, "beast"))).toBe("1/2 subtasks · beast");
     expect(taskCardDetail(withCounts(1, 0, "beast"))).toBe("beast");
     expect(taskCardDetail(withCounts(1, 1, null))).toBe("");
     expect(taskCardDetail(withCounts(0, 0, null))).toBe("");

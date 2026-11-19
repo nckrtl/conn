@@ -88,12 +88,9 @@ function blockRadius(
   const half = "calc(var(--radius-lg) / 2)";
   const top = row === 0;
   const bottom = row === grid.rows - 1;
-  return [
-    top && start === 0,
-    top && end === grid.columns,
-    bottom && end === grid.columns,
-    bottom && start === 0,
-  ]
+  // One row of one or two numbers keeps three columns; its last block is still the right edge.
+  const right = end === grid.columns || (grid.rows === 1 && index === count - 1);
+  return [top && start === 0, top && right, bottom && right, bottom && start === 0]
     .map((outer) => (outer ? full : half))
     .join(" ");
 }
@@ -353,7 +350,13 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
       className="@container scrollbar-inset shrink-0 overflow-x-auto overflow-y-hidden border-b border-(--shell-divider)! p-2"
     >
       {/* One lane-style container, a task-card block per number. */}
-      <div className="rounded-xl bg-(--shell-highlight)/60 p-1.5 dark:bg-(--shell-highlight)/30">
+      {/* min-w-min: on a narrow panel the container runs on under the blocks it scrolls to. */}
+      <div
+        className={cn(
+          "rounded-xl bg-(--shell-highlight)/60 p-1.5 dark:bg-(--shell-highlight)/30",
+          !open && "min-w-min",
+        )}
+      >
         {open ? (
           <InsightDetail
             spec={open}

@@ -204,14 +204,14 @@ it("keeps the diff after a refresh that brings back the same page", async () => 
   const container = document.createElement("div");
   container.className = "flex h-[700px] w-[900px]";
   await using screen = await render(tab(0), { container });
-  await expect.element(screen.getByText("1 file", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("a.ts", { exact: true })).toBeVisible();
 
   await screen.rerender(tab(1));
 
   await expect
     .element(screen.getByText("This pull request has no file changes."))
     .not.toBeInTheDocument();
-  await expect.element(screen.getByText("1 file", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("a.ts", { exact: true })).toBeVisible();
 });
 
 it("restores saved Viewed folds, follows cleared marks, and allows explicit expansion", async () => {
@@ -231,7 +231,9 @@ it("restores saved Viewed folds, follows cleared marks, and allows explicit expa
     .element(screen.getByRole("button", { name: "Expand diff", exact: true }))
     .toHaveAttribute("aria-expanded", "false");
 
-  await screen.getByRole("button", { name: "Expand diff", exact: true }).click();
+  // The row click is pointer-only; the hidden fold control serves keyboards.
+  screen.getByRole("button", { name: "Expand diff", exact: true }).element().focus();
+  await userEvent.keyboard("{Enter}");
   await expect.element(screen.getByText("three()", { exact: true })).toBeVisible();
   screen.getByRole("checkbox", { name: "Viewed" }).element().focus();
   await userEvent.keyboard(" ");
@@ -368,7 +370,7 @@ it("never requests the diff of a selected commit the pull request no longer has"
     { container },
   );
 
-  await expect.element(screen.getByText("1 file", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("a.ts", { exact: true })).toBeVisible();
   await expect
     .element(screen.getByRole("button", { name: "Diff scope: All commits" }))
     .toBeVisible();
@@ -400,7 +402,7 @@ it("answers a commit's diff link only once that commit's diff is shown", async (
     />
   );
   await using screen = await render(scoped(null), { container });
-  await expect.element(screen.getByText("1 file", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("a.ts", { exact: true })).toBeVisible();
 
   // The panel selects the link's commit after this tab has already seen the link.
   await screen.rerender(scoped(null, url));
@@ -559,4 +561,60 @@ it("keeps an unsent reply when the appearance switches between light and dark", 
   setAppearanceMode("light");
 
   await expect.element(reply()).toHaveValue("Unsent");
+});
+
+it("keeps replying to a conversation the diff cannot place", async () => {
+  setup({ paged: false });
+  const container = document.createElement("div");
+  container.className = "flex h-[700px] w-[900px]";
+  await using screen = await render(
+    <PullRequestCodeTab
+      scrollerRef={() => {}}
+      environmentId={EnvironmentId.make("environment")}
+      reference={detail}
+      detail={{
+        ...detail,
+        capabilities: {
+          ...detail.capabilities,
+          review: { ...detail.capabilities.review, reply: true },
+        },
+        viewerPermissions: { ...detail.viewerPermissions, comment: true },
+        reviewThreads: [
+          {
+            id: "gone",
+            path: "gone.ts",
+            line: 3,
+            side: "right",
+            isResolved: false,
+            isOutdated: true,
+            comments: [
+              {
+                id: "gone-comment",
+                author: { login: "reviewer", name: null, avatarUrl: null },
+                body: "Rename this.",
+                createdAt: "2026-09-01T00:00:00Z",
+                url: null,
+              },
+            ],
+          },
+        ],
+      }}
+      selectedCommitOid={null}
+      onSelectedCommitChange={() => {}}
+      onRefresh={() => {}}
+    />,
+    { container },
+  );
+
+  await screen.getByRole("button", { name: "Conversations not on the current diff (1)" }).click();
+  await screen.getByRole("button", { name: "Reply", exact: true }).click();
+  const reply = screen.getByRole("textbox", { name: "Reply to this conversation" });
+  await reply.fill("Unsent");
+
+  // Folding the conversation keeps the draft.
+  const row = screen.getByRole("button", { name: /gone\.ts/ });
+  await row.click();
+  await expect.element(row).toHaveAttribute("aria-expanded", "false");
+  await row.click();
+  await expect.element(reply).toHaveValue("Unsent");
 });

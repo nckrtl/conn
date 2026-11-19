@@ -18,6 +18,7 @@ import {
   SlidersHorizontalIcon,
   UnplugIcon,
 } from "lucide-react";
+import { useGT, useMessages } from "gt-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { ProjectMonogram } from "~/components/ProjectMonogram";
@@ -39,6 +40,7 @@ import {
   MenuGroup,
   MenuGroupLabel,
   MenuPopup,
+  MenuSeparator,
   MenuTrigger,
 } from "~/components/ui/menu";
 import { Spinner } from "~/components/ui/spinner";
@@ -47,7 +49,10 @@ import { cn } from "~/lib/utils";
 import { PROJECT_ICON_COLORS } from "~/projectIconColors";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
-import { TaskDetail } from "./TaskDetail";
+import { useOrbitTaskNavigation } from "./orbitAgentConversation";
+import { TaskDetail, type TasksPanelHost } from "./TaskDetail";
+import { TasksInsightsStrip } from "./TasksInsights";
+import { INSIGHT_PERIODS, INSIGHTS } from "@t3tools/client-runtime/orbit-gateway";
 import { INPUT_TONE } from "./taskDetail.logic";
 import {
   followTasksUpdates,
@@ -60,7 +65,7 @@ import {
   useTasksBoardQuery,
   useTasksLaneScroll,
   useTasksNavigation,
-  useTasksBoardLanes,
+  useTasksBoardSettings,
 } from "./tasksPanelStore";
 
 type TaskListState = { readonly status: "loading" } | OrbitTasksResult<OrbitTasksPage>;
@@ -103,7 +108,13 @@ function useOrbitTaskList(orbitProjectId: number | null) {
  * The Orbit Tasks app in the right panel. `orbitProjectId` scopes the list to the thread's Orbit
  * Project; null lists every task this Node may read. Navigation lives in tasksPanelStore.
  */
-export function TasksPanel(props: { threadKey: string; orbitProjectId: number | null }) {
+type TasksPanelProps = {
+  threadKey: string;
+  orbitProjectId: number | null;
+  host: TasksPanelHost;
+};
+
+export function TasksPanel(props: TasksPanelProps) {
   const availability = orbitTasksAvailability();
   // Same surface as the file and editor tabs beside it.
   return (
@@ -121,9 +132,16 @@ export function TasksPanel(props: { threadKey: string; orbitProjectId: number | 
   );
 }
 
-function TasksPanelContent(props: { threadKey: string; orbitProjectId: number | null }) {
+function TasksPanelContent(props: TasksPanelProps) {
   const { state, retry } = useOrbitTaskList(props.orbitProjectId);
   const navigation = useTasksNavigation(props.threadKey);
+  // One instance for the board and the task, so an error from a card's PR badge shows on the task.
+  const orbitNavigation = useOrbitTaskNavigation(
+    props.threadKey,
+    navigation.view === "task" && navigation.taskId !== null
+      ? { taskId: navigation.taskId, subtaskId: navigation.subtaskId }
+      : null,
+  );
   const [liveStatus, setLiveStatus] = useState<OrbitTasksLiveStatus>("connecting");
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds the summary connection only while this Tasks surface is mounted
   useEffect(() => {
@@ -145,6 +163,8 @@ function TasksPanelContent(props: { threadKey: string; orbitProjectId: number | 
         threadKey={props.threadKey}
         liveStatus={liveStatus}
         navigation={{ ...navigation, taskId: navigation.taskId }}
+        orbitNavigation={orbitNavigation}
+        host={props.host}
         listTitle={
           state.status === "ok"
             ? (state.value.tasks.find((task) => task.id === navigation.taskId)?.title ?? null)
@@ -185,7 +205,20 @@ function TasksPanelContent(props: { threadKey: string; orbitProjectId: number | 
       />
     );
   }
-  return <TasksBoard threadKey={props.threadKey} tasks={tasks} scroll={navigation.boardScroll} />;
+  return (
+    <TasksBoard
+      threadKey={props.threadKey}
+      orbitProjectId={props.orbitProjectId}
+      tasks={tasks}
+      scroll={navigation.boardScroll}
+      onOpenPullRequest={(task, url) => {
+        // Without a project for its repository the task opens, and the task shows the error.
+        if (!orbitNavigation.openPullRequest(task.id, url)) {
+          tasksPanelActions().openTask(props.threadKey, task.id);
+        }
+      }}
+    />
+  );
 }
 
 function TasksNotice(props: { icon: ReactNode; title: string; text: string; action?: ReactNode }) {
@@ -214,14 +247,16 @@ function useRestoredScroll<T extends HTMLElement>(top: number, left: number) {
   return ref;
 }
 
-/** Search fills the row; Lanes sits in Conn's toolbar pill, like the terminal controls. */
+/** Search fills the row; board settings sit in Conn's toolbar pill, like the terminal controls. */
 function BoardToolbar() {
+  const gt = useGT();
+  const messages = useMessages();
   const query = useTasksBoardQuery((state) => state.query);
-  const hiddenLanes = useTasksBoardLanes((state) => state.hiddenLanes);
-  const hidden = hiddenLanes.length;
+  const settings = useTasksBoardSettings();
+  const hidden = settings.hiddenLanes.length;
   return (
     // Sits under the tab bar like the file view's breadcrumb row.
-    <div className="flex shrink-0 items-center gap-2 px-3 pt-toolbar pb-3">
+    <div className="flex shrink-0 items-center gap-2 border-b border-(--shell-divider)! px-2 py-toolbar">
       <InputGroup variant="soft" className="h-8 min-w-0 flex-1">
         <InputGroupAddon>
           <SearchIcon aria-hidden className="size-4 opacity-50" />
@@ -242,36 +277,61 @@ function BoardToolbar() {
             render={
               <button
                 type="button"
-                className="flex h-6.5 cursor-pointer items-center gap-1.5 rounded-(--control-radius) px-2 text-ui text-muted-foreground transition-colors hover:bg-(--shell-control) hover:text-foreground"
+                aria-label={gt("Board settings")}
+                className="flex size-6.5 cursor-pointer items-center justify-center rounded-(--control-radius) text-muted-foreground transition-colors hover:bg-(--shell-control) hover:text-foreground data-popup-open:bg-(--shell-control) data-popup-open:text-foreground"
               />
             }
           >
             <SlidersHorizontalIcon aria-hidden className="size-4" />
-            Lanes
-            {hidden > 0 ? (
-              <span className="text-muted-foreground/70 tabular-nums">
-                · {ORBIT_TASK_LANES.length - hidden} of {ORBIT_TASK_LANES.length}
-              </span>
-            ) : null}
           </MenuTrigger>
-          <MenuPopup align="end">
+          <MenuPopup align="end" className="min-w-52">
             <MenuGroup>
-              <MenuGroupLabel>Show lanes</MenuGroupLabel>
+              <MenuGroupLabel>{gt("Lanes")}</MenuGroupLabel>
               {ORBIT_TASK_LANES.map((lane) => {
-                const shown = !hiddenLanes.includes(lane.id);
+                const shown = !settings.hiddenLanes.includes(lane.id);
                 return (
                   <MenuCheckboxItem
                     key={lane.id}
                     checked={shown}
                     // One lane always stays on the board.
                     disabled={shown && hidden === ORBIT_TASK_LANES.length - 1}
-                    onCheckedChange={() => useTasksBoardLanes.getState().toggleLane(lane.id)}
+                    onCheckedChange={() => settings.toggleLane(lane.id)}
                     closeOnClick={false}
                   >
                     {lane.label}
                   </MenuCheckboxItem>
                 );
               })}
+            </MenuGroup>
+            <MenuSeparator />
+            <MenuGroup>
+              <MenuGroupLabel>{gt("Insights")}</MenuGroupLabel>
+              {INSIGHTS.map((insight) => (
+                <MenuCheckboxItem
+                  key={insight.id}
+                  checked={!settings.hiddenInsights.includes(insight.id)}
+                  onCheckedChange={() => settings.toggleInsight(insight.id)}
+                  closeOnClick={false}
+                >
+                  {messages(insight.label)}
+                </MenuCheckboxItem>
+              ))}
+            </MenuGroup>
+            <MenuSeparator />
+            <MenuGroup>
+              <MenuGroupLabel>{gt("Insights period")}</MenuGroupLabel>
+              {/* One choice, with the same check as the items above so the groups line up. */}
+              {INSIGHT_PERIODS.map((period) => (
+                <MenuCheckboxItem
+                  key={period}
+                  role="menuitemradio"
+                  checked={settings.insightPeriod === period}
+                  onCheckedChange={() => settings.setInsightPeriod(period)}
+                  closeOnClick={false}
+                >
+                  {period === "7d" ? gt("Last 7 days") : gt("Last 30 days")}
+                </MenuCheckboxItem>
+              ))}
             </MenuGroup>
           </MenuPopup>
         </Menu>
@@ -283,60 +343,80 @@ function BoardToolbar() {
 /** The visible lanes side by side, each a subtle container. Read-only: Orbit owns task state. */
 function TasksBoard(props: {
   threadKey: string;
+  orbitProjectId: number | null;
   tasks: ReadonlyArray<OrbitTaskSummary>;
   scroll: { readonly top: number; readonly left: number };
+  onOpenPullRequest: (task: OrbitTaskSummary, url: string) => void;
 }) {
   const laneScroll = useTasksLaneScroll((state) => state.byThreadKey[props.threadKey]);
-  const scrollRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, props.scroll.left);
+  // The board scrolls down past the insights; the lanes scroll sideways.
+  const boardRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, 0);
+  const lanesRef = useRestoredScroll<HTMLDivElement>(0, props.scroll.left);
+  const saveScroll = () =>
+    tasksPanelActions().saveBoardScroll(
+      props.threadKey,
+      boardRef.current?.scrollTop ?? 0,
+      lanesRef.current?.scrollLeft ?? 0,
+    );
   const query = useTasksBoardQuery((state) => state.query);
-  const hiddenLanes = useTasksBoardLanes((state) => state.hiddenLanes);
+  const hiddenLanes = useTasksBoardSettings((state) => state.hiddenLanes);
   const searching = query.trim().length > 0;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <BoardToolbar />
+      {/* A short panel scrolls the insights away, so the lanes keep room for their cards. */}
       <div
-        ref={scrollRef}
-        onScrollEnd={(event) =>
-          tasksPanelActions().saveBoardScroll(
-            props.threadKey,
-            event.currentTarget.scrollTop,
-            event.currentTarget.scrollLeft,
-          )
-        }
-        className="scrollbar-inset flex min-h-0 flex-1 gap-2 overflow-x-auto px-3 pb-3"
+        ref={boardRef}
+        onScrollEnd={(event) => {
+          if (event.target === event.currentTarget) saveScroll();
+        }}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto"
       >
-        {tasksBoardLanes(props.tasks, { query, hiddenLanes }).map((lane) => (
-          <section
-            key={lane.id}
-            aria-label={lane.label}
-            className="flex min-w-48 flex-1 basis-0 flex-col rounded-xl bg-(--shell-highlight)/60 p-1.5 dark:bg-(--shell-highlight)/30"
-          >
-            <div className="flex h-8 shrink-0 items-center justify-between px-2 text-ui text-muted-foreground">
-              <span className="font-medium">{lane.label}</span>
-              <span className="tabular-nums">
-                {searching ? `${lane.tasks.length} of ${lane.total}` : lane.tasks.length}
-              </span>
-            </div>
-            <LaneList threadKey={props.threadKey} lane={lane.id} top={laneScroll?.[lane.id] ?? 0}>
-              {lane.tasks.map((task) => (
-                <TaskCard
-                  key={task.id}
-                  task={task}
-                  onOpen={(laneTop) => {
-                    // The lane unmounts at once, before a running scroll reports its end.
-                    useTasksLaneScroll.getState().save(props.threadKey, lane.id, laneTop);
-                    tasksPanelActions().openTask(props.threadKey, task.id);
-                  }}
-                />
-              ))}
-              {lane.tasks.length === 0 ? (
-                <li className="px-3 py-4 text-center text-ui text-muted-foreground/70">
-                  {searching && lane.total > 0 ? "No matches" : "Nothing here"}
-                </li>
-              ) : null}
-            </LaneList>
-          </section>
-        ))}
+        <TasksInsightsStrip orbitProjectId={props.orbitProjectId} query={query} />
+        <div
+          ref={lanesRef}
+          onScrollEnd={(event) => {
+            if (event.target === event.currentTarget) saveScroll();
+          }}
+          // The board pads its lanes by the gap between them (8px).
+          className="scrollbar-inset flex min-h-64 flex-1 gap-2 overflow-x-auto p-2"
+        >
+          {tasksBoardLanes(props.tasks, { query, hiddenLanes }).map((lane) => (
+            <section
+              key={lane.id}
+              aria-label={lane.label}
+              className="flex min-w-48 flex-1 basis-0 flex-col rounded-xl bg-(--shell-highlight)/60 p-1.5 pt-0 dark:bg-(--shell-highlight)/30"
+            >
+              {/* 8px from the lane top and 8px above the first card. */}
+              <div className="flex shrink-0 items-center justify-between px-2 py-2 text-ui text-muted-foreground">
+                <span className="font-medium">{lane.label}</span>
+                <span className="tabular-nums">
+                  {searching ? `${lane.tasks.length} of ${lane.total}` : lane.tasks.length}
+                </span>
+              </div>
+              <LaneList threadKey={props.threadKey} lane={lane.id} top={laneScroll?.[lane.id] ?? 0}>
+                {lane.tasks.map((task) => (
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onOpen={(laneTop, pullRequestUrl) => {
+                      // The lane unmounts at once, before a running scroll reports its end.
+                      useTasksLaneScroll.getState().save(props.threadKey, lane.id, laneTop);
+                      saveScroll();
+                      if (pullRequestUrl) props.onOpenPullRequest(task, pullRequestUrl);
+                      else tasksPanelActions().openTask(props.threadKey, task.id);
+                    }}
+                  />
+                ))}
+                {lane.tasks.length === 0 ? (
+                  <li className="px-3 py-4 text-center text-ui text-muted-foreground/70">
+                    {searching && lane.total > 0 ? "No matches" : "Nothing here"}
+                  </li>
+                ) : null}
+              </LaneList>
+            </section>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -358,7 +438,8 @@ function LaneList(props: {
           .getState()
           .save(props.threadKey, props.lane, event.currentTarget.scrollTop)
       }
-      className="scrollbar-inset m-0 flex min-h-0 flex-1 list-none flex-col gap-1.5 overflow-y-auto p-0"
+      // Lanes scroll without a visible scrollbar.
+      className="m-0 flex min-h-0 flex-1 list-none flex-col gap-1.5 overflow-y-auto p-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
       {props.children}
     </ul>
@@ -413,17 +494,34 @@ function TaskCardStatus(props: { task: OrbitTaskSummary }) {
   );
 }
 
-function TaskCard(props: { task: OrbitTaskSummary; onOpen: (laneTop: number) => void }) {
+function TaskCard(props: {
+  task: OrbitTaskSummary;
+  /** With a URL the card's PR badge was clicked: the PR opens below the task. */
+  onOpen: (laneTop: number, pullRequestUrl?: string) => void;
+}) {
+  const gt = useGT();
   const { task } = props;
   const pr = task.pullRequest;
   const prState = pr?.state ? resolvePullRequestState({ state: pr.state, isDraft: false }) : null;
   const working = orbitTaskLane(task.status) === "in-progress" && task.attention === null;
+  const detail = taskCardDetail(task);
+  const laneTop = (element: HTMLElement) => element.closest("ul")?.scrollTop ?? 0;
+  const badge = pr ? (
+    <>
+      {prState ? (
+        <prState.Icon aria-hidden className="size-3.5" />
+      ) : (
+        <PullRequestGlyph.pullRequest className="size-3.5" />
+      )}
+      #{pr.number}
+    </>
+  ) : null;
   return (
-    <li>
+    <li className="relative">
       <button
         type="button"
-        onClick={(event) => props.onOpen(event.currentTarget.closest("ul")?.scrollTop ?? 0)}
-        className="flex w-full cursor-pointer flex-col gap-1.5 rounded-lg border border-(--shell-divider)! bg-(--shell-card) px-3 py-2.5 text-left transition-colors hover:bg-(--shell-card)/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none dark:bg-(--shell-highlight)/70 dark:hover:bg-(--shell-highlight)"
+        onClick={(event) => props.onOpen(laneTop(event.currentTarget))}
+        className="flex w-full cursor-pointer flex-col gap-1.5 rounded-lg border border-(--shell-divider)! border-t-(--shell-card-edge)! bg-(--shell-card) px-3 py-2.5 text-left transition-colors hover:bg-(--shell-card)/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none dark:bg-(--shell-highlight)/70 dark:hover:bg-(--shell-highlight)"
       >
         <span className="flex items-center gap-1.5 text-ui leading-4">
           <TaskProjectIcon project={task.project} />
@@ -443,21 +541,39 @@ function TaskCard(props: { task: OrbitTaskSummary; onOpen: (laneTop: number) => 
         >
           {task.title}
         </span>
-        <span className="flex items-center gap-2 text-ui leading-4 text-muted-foreground tabular-nums">
-          <span className="min-w-0 flex-1 truncate">{taskCardDetail(task)}</span>
-          {pr ? (
-            <span className={cn("flex shrink-0 items-center gap-1", prState?.toneClassName)}>
-              {prState ? (
-                <prState.Icon aria-hidden className="size-3.5" />
-              ) : (
-                <PullRequestGlyph.pullRequest className="size-3.5" />
-              )}
-              <span className="sr-only">Pull request{prState ? ` (${prState.label})` : ""}</span>#
-              {pr.number}
-            </span>
-          ) : null}
-        </span>
+        {/* With no subtask count, machine or PR the line goes. */}
+        {detail || badge ? (
+          <span className="flex items-center gap-2 text-ui leading-4 text-muted-foreground tabular-nums">
+            <span className="min-w-0 flex-1 truncate">{detail}</span>
+            {/* Holds the badge's place; the badge itself is its own button over the card. */}
+            {badge ? (
+              <span aria-hidden className="invisible flex shrink-0 items-center gap-1">
+                {badge}
+              </span>
+            ) : null}
+          </span>
+        ) : null}
       </button>
+      {pr && badge ? (
+        <button
+          type="button"
+          onClick={(event) => props.onOpen(laneTop(event.currentTarget), pr.url)}
+          aria-label={
+            prState
+              ? gt("Pull request #{number} ({state}). Open it in Tasks", {
+                  number: pr.number,
+                  state: prState.label,
+                })
+              : gt("Pull request #{number}. Open it in Tasks", { number: pr.number })
+          }
+          className={cn(
+            "absolute right-3.25 bottom-2.75 flex cursor-pointer items-center gap-1 rounded-sm text-ui leading-4 tabular-nums hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none",
+            prState?.toneClassName ?? "text-muted-foreground",
+          )}
+        >
+          {badge}
+        </button>
+      ) : null}
     </li>
   );
 }

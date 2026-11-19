@@ -188,7 +188,7 @@ pub(crate) async fn call(
         }) if !message.starts_with("The calling")
             && service.links_enabled()
             && !matches!(caller, Caller::Client(ClientCaller { linked: true, .. }))
-            && cx.fencing_link().await.ok().flatten().is_none() =>
+            && matches!(cx.fencing_link().await, Ok(None)) =>
         {
             Err(fail(
                 "thread_not_found",

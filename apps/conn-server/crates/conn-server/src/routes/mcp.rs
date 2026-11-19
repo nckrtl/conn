@@ -156,34 +156,20 @@ async fn mcp(
         return StatusCode::NOT_FOUND.into_response();
     };
     let token = bearer(&headers);
-    let caller = token
-        .and_then(|t| service.resolve_thread_token(t))
-        .map(Caller::Thread)
-        .or_else(|| {
-            let client = state.auth.authenticate_mcp_client(token?)?;
-            Some(Caller::Client(ClientCaller {
-                session_id: client.session_id,
-                max_runtime_mode: crate::auth::MCP_ACCESS_LEVELS
-                    .iter()
-                    .copied()
-                    .find(|level| *level == client.access && *level != "read-only"),
-                label: client.label,
-                linked: client.peer_link,
-                narrowed: None,
-            }))
-        })
-        .or_else(|| {
-            let principal = state.auth.authenticate_bearer(token?)?;
-            principal.has_scope("orchestration:read").then(|| {
-                Caller::Client(ClientCaller {
-                    session_id: principal.session_id.clone(),
-                    max_runtime_mode: principal
-                        .has_scope("orchestration:operate")
-                        .then_some("full-access"),
-                    ..ClientCaller::default()
-                })
-            })
-        });
+    let caller = match token.and_then(|t| service.resolve_thread_token(t)) {
+        Some(thread) => Some(Caller::Thread(thread)),
+        // The auth store may reread `auth.json`: blocking file work, off the runtime thread.
+        None => match token.map(str::to_owned) {
+            Some(token) => {
+                let auth = state.auth.clone();
+                tokio::task::spawn_blocking(move || client_caller(&auth, &token))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
+        },
+    };
     let Some(caller) = caller else {
         // No OAuth here, so no `resource_metadata`: an agent must never start a sign-in.
         let challenge = if token.is_some() {
@@ -241,6 +227,35 @@ async fn mcp(
         }
         response
     }
+}
+
+/// An MCP OAuth client at its approved access, else a native bearer session with its scopes.
+/// Blocking: the auth store may reread its file.
+fn client_caller(auth: &crate::auth::AuthStore, token: &str) -> Option<Caller> {
+    if let Some(client) = auth.authenticate_mcp_client(token) {
+        return Some(Caller::Client(ClientCaller {
+            session_id: client.session_id,
+            max_runtime_mode: crate::auth::MCP_ACCESS_LEVELS
+                .iter()
+                .copied()
+                .find(|level| *level == client.access && *level != "read-only"),
+            label: client.label,
+            linked: client.peer_link,
+            narrowed: None,
+            scopes: None,
+        }));
+    }
+    let principal = auth.authenticate_bearer(token)?;
+    principal.has_scope("orchestration:read").then(|| {
+        Caller::Client(ClientCaller {
+            session_id: principal.session_id.clone(),
+            max_runtime_mode: principal
+                .has_scope("orchestration:operate")
+                .then_some("full-access"),
+            scopes: Some(principal.scopes.clone()),
+            ..ClientCaller::default()
+        })
+    })
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {

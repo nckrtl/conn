@@ -39,6 +39,10 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const SENDER_TITLE_MAX_CHARS: usize = 200;
 /// Links kept at once. Each is a row and a token; a user links a handful of machines.
 pub const MAX_LINKS: usize = 256;
+/// Addresses kept per link, after duplicates are dropped; the first ones win.
+pub const MAX_LINK_URLS: usize = 8;
+/// Descriptor probes in flight at once, across every link and call.
+const MAX_PROBES: usize = 16;
 /// MCP sessions kept open to peers, one per peer and address.
 const MAX_SESSIONS: usize = 64;
 /// How long a listing waits on a link's addresses.
@@ -151,6 +155,7 @@ pub struct PeerLinks {
     disk: tokio::sync::Mutex<()>,
     sessions: Mutex<HashMap<String, String>>,
     answering: Mutex<HashSet<String>>,
+    probes: Arc<tokio::sync::Semaphore>,
 }
 
 impl std::fmt::Debug for PeerLinks {
@@ -283,6 +288,7 @@ impl PeerLinks {
             disk: tokio::sync::Mutex::new(()),
             sessions: Mutex::new(HashMap::new()),
             answering: Mutex::new(HashSet::new()),
+            probes: Arc::new(tokio::sync::Semaphore::new(MAX_PROBES)),
         })
     }
 
@@ -346,6 +352,8 @@ impl PeerLinks {
 
     /// The environment answering at `origin` (`probe`), with one retry after a second.
     async fn probe(&self, origin: &str) -> Result<Value, PeerLinkError> {
+        // Bounded: a link's addresses, and every link a listing probes, share the permits.
+        let _permit = self.probes.clone().acquire_owned().await.map_err(storage)?;
         let timeout = probe_timeout(origin);
         let url = format!("{origin}/.well-known/t3/environment");
         let attempt = async {
@@ -421,7 +429,7 @@ impl PeerLinks {
         limit: Option<Duration>,
     ) -> Option<(String, Value)> {
         let mut set = JoinSet::new();
-        for url in urls {
+        for url in urls.iter().take(MAX_LINK_URLS) {
             let (this, url, id) = (self.clone(), url.clone(), environment_id.to_owned());
             set.spawn(async move { this.answers_as(url, id).await });
         }
@@ -446,9 +454,12 @@ impl PeerLinks {
         &self,
         urls: &[String],
     ) -> Result<(String, Value, Vec<String>), PeerLinkError> {
-        let mut origins = Vec::new();
+        let mut origins: Vec<String> = Vec::new();
         for url in urls {
-            origins.push(peer_origin(url)?);
+            let origin = peer_origin(url)?;
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
         }
         let primary = origins.first().cloned().unwrap_or_default();
         let peer = self.probe(&primary).await?;
@@ -696,8 +707,7 @@ impl PeerLinks {
                 "Unknown access level.",
             ));
         }
-        let mut urls = vec![input.url.clone()];
-        urls.extend(input.alternate_urls.clone().unwrap_or_default());
+        let urls = link_addresses(&input);
         let (primary, peer, origins) = match &input.expected_environment_id {
             None => self.answering_at(&urls).await?,
             Some(expected) => {
@@ -1233,8 +1243,34 @@ impl PeerLinks {
     }
 }
 
+/// The addresses a link tries, in order: duplicates dropped, at most [`MAX_LINK_URLS`].
+fn link_addresses(input: &LinkInput) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    for url in std::iter::once(&input.url).chain(input.alternate_urls.iter().flatten()) {
+        if urls.len() == MAX_LINK_URLS {
+            break;
+        }
+        if !urls.contains(url) {
+            urls.push(url.clone());
+        }
+    }
+    urls
+}
+
 /// One address checked in `answering_as`, by its place in the list.
 type Checked = (usize, Result<(String, Value), PeerLinkError>);
+
+/// A card being answered; dropped, it frees the card for another answer.
+struct Reservation {
+    peers: Arc<PeerLinks>,
+    item: String,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        crate::lock(&self.peers.answering).remove(&self.item);
+    }
+}
 
 /// A forwarded call's end: the peer refused (the link works) or the call failed.
 enum Answered {
@@ -1577,9 +1613,20 @@ impl PeerLinks {
             }
             answering.insert(item.clone());
         }
-        let result = self.answer_card(&thread, &item, &input["answer"]).await;
-        crate::lock(&self.answering).remove(&item);
-        result
+        let reservation = Reservation {
+            peers: self.clone(),
+            item: item.clone(),
+        };
+        // Its own task: once linking may spend the pairing code, the answer finishes and its
+        // outcome is recorded even when the client that sent it goes away.
+        let this = self.clone();
+        let answer = input["answer"].clone();
+        tokio::spawn(async move {
+            let _reservation = reservation;
+            this.answer_card(&thread, &item, &answer).await
+        })
+        .await
+        .unwrap_or_else(|_| Err(request_error("record_failed")))
     }
 
     async fn answer_card(
@@ -1719,6 +1766,161 @@ impl Peers for McpPeers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Peer links on a fresh state folder with links on, and an engine whose thread has an
+    /// active run (the fake provider's `hang`). Returns the links and that thread's id.
+    async fn links_with_a_running_thread(name: &str) -> (Arc<PeerLinks>, String) {
+        let dir =
+            std::env::temp_dir().join(format!("conn-peers-{name}-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"linkedEnvironmentsEnabled":true}"#,
+        )
+        .unwrap();
+        let environment = Arc::new(
+            Environment::load(&dir, Some("Here".into()), dir.clone(), Default::default()).unwrap(),
+        );
+        let mut config = conn_engine::EngineConfig::new(dir.join("engine.sqlite"));
+        config.projects = vec![conn_engine::ProjectConfig {
+            title: "P".into(),
+            workspace_root: "/tmp/conn-peers-p".into(),
+        }];
+        let fake: Arc<dyn conn_provider::Provider> =
+            Arc::new(conn_engine::fake::FakeProvider::new("claudeAgent"));
+        config.provider_set = Some(conn_provider::ProviderSet::from(vec![fake]));
+        let engine: Arc<dyn Engine> = Arc::new(conn_engine::SqliteEngine::open(config).unwrap());
+        let launched = engine
+            .launch_thread(json!({
+                "commandId": "launch", "threadId": "thread:card",
+                "projectId": conn_engine::SqliteEngine::project_id_for("/tmp/conn-peers-p"),
+                "title": "Agent", "runtimeMode": "full-access", "interactionMode": "default",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-5-5"},
+                "workspaceStrategy": {"type": "root"},
+                "initialMessage": {"messageId": "m", "text": "hang", "attachments": []},
+            }))
+            .await
+            .unwrap();
+        let thread = launched["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        (PeerLinks::new(environment, engine), thread)
+    }
+
+    /// A loopback port that accepts connections and never answers; counts those open at once.
+    async fn silent_peer(
+        open: Arc<std::sync::atomic::AtomicUsize>,
+        most: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> String {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let now = open.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                let open = open.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = [0u8; 1024];
+                    while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+                    open.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The answer to a link card finishes, and frees the card, after the client that sent it
+    /// went away mid-link.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_link_answer_outlives_its_client() {
+        let (peers, thread) = links_with_a_running_thread("answer").await;
+        let pending = peers
+            .request_link(LinkAsk {
+                thread_id: thread.clone(),
+                provider_instance_id: "claudeAgent".into(),
+                namespace: "p".into(),
+                arguments: json!({"reason": "test", "clientRequestId": "k"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            })
+            .await
+            .unwrap();
+        let card = pending["turnItemId"].as_str().unwrap().to_owned();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peer = silent_peer(counter.clone(), counter.clone()).await;
+        let answer = json!({"threadId": thread, "turnItemId": card, "answer": {
+            "type": "link", "urls": [peer], "access": "auto", "pairingCode": "ABCDEFGHJKLM",
+        }});
+        // The client goes away while the peer is still being probed.
+        let dropped =
+            tokio::time::timeout(Duration::from_millis(100), peers.answer(answer.clone())).await;
+        assert!(dropped.is_err(), "the answer was still linking");
+        let mut status = String::new();
+        for _ in 0..200 {
+            let found = peers.read_card(&thread, &card).await.unwrap().unwrap();
+            status = found["linkStatus"].as_str().unwrap_or_default().to_owned();
+            if status != "pending" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            status, "failed",
+            "the outcome was recorded after the client left"
+        );
+        assert!(
+            crate::lock(&peers.answering).is_empty(),
+            "the card was freed"
+        );
+    }
+
+    /// A link keeps at most `MAX_LINK_URLS` addresses, once each; probes are bounded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn addresses_are_capped_and_probes_bounded() {
+        let (peers, _) = links_with_a_running_thread("caps").await;
+        let mut alternates: Vec<String> = (0..30)
+            .map(|n| format!("http://127.0.0.1:{}", 20_000 + n))
+            .collect();
+        alternates.extend(alternates.clone());
+        let refused = peers
+            .link(LinkInput {
+                url: "http://127.0.0.1:20000".into(),
+                alternate_urls: Some(alternates),
+                pairing_code: "X".into(),
+                access: "auto".into(),
+                expected_environment_id: Some("environment:peer".into()),
+                expected_label: Some("Peer".into()),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.message.matches("is this machine").count(),
+            MAX_LINK_URLS,
+            "{}",
+            refused.message
+        );
+        let (open, most) = (
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let mut set = JoinSet::new();
+        for _ in 0..40 {
+            let url = silent_peer(open.clone(), most.clone()).await;
+            let peers = peers.clone();
+            set.spawn(async move { peers.probe(&url).await.is_err() });
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            most.load(std::sync::atomic::Ordering::SeqCst) <= MAX_PROBES,
+            "{} probes at once",
+            most.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        set.abort_all();
+    }
 
     #[test]
     fn checks_which_addresses_may_receive_credentials() {

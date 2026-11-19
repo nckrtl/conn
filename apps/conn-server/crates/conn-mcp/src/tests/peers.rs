@@ -63,6 +63,7 @@ fn linked(access: &'static str) -> Caller {
         label: "T3 Code · other".into(),
         linked: true,
         narrowed: None,
+        scopes: None,
     })
 }
 
@@ -256,4 +257,94 @@ async fn a_peer_links_work_stays_within_its_link() {
         json!({"threadId": own, "message": "x", "mode": "queue"}),
     )
     .await;
+}
+
+/// A native bearer session keeps its scopes on `/mcp`: `orchestration:operate` alone is not
+/// enough to change settings or links.
+#[tokio::test(flavor = "current_thread")]
+async fn a_native_session_needs_the_scopes_settings_and_links_need() {
+    let f = fixture_full(
+        "peers-scopes",
+        None,
+        FakeProvider::new("claudeAgent"),
+        Some(Arc::new(StandIn {
+            enabled: true,
+            ..StandIn::default()
+        })),
+    );
+    let operate_only = Caller::Client(ClientCaller {
+        session_id: "device".into(),
+        max_runtime_mode: Some("full-access"),
+        scopes: Some(vec![
+            "orchestration:read".into(),
+            "orchestration:operate".into(),
+        ]),
+        ..ClientCaller::default()
+    });
+    let mut device = Client::open(&f.service, operate_only).await;
+    for (tool, args, scope) in [
+        (
+            "t3_environment_preferences_update",
+            json!({"newWorktreesStartFromOrigin": false}),
+            "settings:write",
+        ),
+        (
+            "t3_environment_unlink",
+            json!({"environmentId": "env-peer"}),
+            "access:write",
+        ),
+        ("t3_environment_links", json!({}), "access:read"),
+    ] {
+        let (code, message) = device.failure(tool, args).await;
+        assert_eq!(code, "capability_denied", "{tool}");
+        assert!(message.contains(scope), "{tool}: {message}");
+    }
+    let granted = Caller::Client(ClientCaller {
+        session_id: "admin".into(),
+        max_runtime_mode: Some("full-access"),
+        scopes: Some(
+            [
+                "orchestration:read",
+                "orchestration:operate",
+                "access:read",
+                "access:write",
+            ]
+            .map(String::from)
+            .to_vec(),
+        ),
+        ..ClientCaller::default()
+    });
+    let mut admin = Client::open(&f.service, granted).await;
+    admin
+        .ok(
+            "t3_environment_unlink",
+            json!({"environmentId": "env-peer"}),
+        )
+        .await;
+    admin.ok("t3_environment_links", json!({})).await;
+}
+
+/// The fence fails closed: when the calling thread cannot be read, the caller is not taken for
+/// one that acts for no link.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_thread_read_does_not_open_the_fence() {
+    let f = fixture("peers-fence-closed");
+    let caller = Caller::Thread(ThreadCaller {
+        thread_id: "thread:missing".into(),
+        provider_session_id: "p".into(),
+        provider_instance_id: "claudeAgent".into(),
+        preview: false,
+        subagent: false,
+    });
+    let cx = crate::tools::Cx {
+        service: &f.service,
+        caller: &caller,
+        origin: None,
+    };
+    assert!(
+        cx.link_origin().await.is_err(),
+        "an unread thread is not \"no link\""
+    );
+    assert!(cx.fencing_link().await.is_err());
+    assert!(cx.assert_not_linked("change this").await.is_err());
 }

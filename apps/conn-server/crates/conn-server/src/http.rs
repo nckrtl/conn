@@ -337,11 +337,23 @@ async fn pairing_token(
     headers: HeaderMap,
     body: Option<Json<PairingTokenRequest>>,
 ) -> Response {
-    let principal = match require_scope(&state, &headers, "access:write") {
+    // The auth store rereads and writes `auth.json` under a file lock: blocking work, off the
+    // runtime thread.
+    let request = body.map(|Json(b)| b).unwrap_or_default();
+    tokio::task::spawn_blocking(move || pairing_token_blocking(&state, &headers, request))
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn pairing_token_blocking(
+    state: &AppState,
+    headers: &HeaderMap,
+    request: PairingTokenRequest,
+) -> Response {
+    let principal = match require_scope(state, headers, "access:write") {
         Ok(principal) => principal,
         Err(response) => return *response,
     };
-    let request = body.map(|Json(b)| b).unwrap_or_default();
     // A peer-link code (`peerLinkPairingCodes`): the scopes its access needs, spent only by a link.
     if let (Some(access), Some("peer-link")) =
         (request.access.as_deref(), request.purpose.as_deref())
@@ -818,6 +830,159 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router(state)).await });
         (addr, auth)
+    }
+
+    /// A server whose auth store keeps `auth.json` in a temp folder, with `/mcp` served.
+    async fn serve_on_disk(dir: &std::path::Path) -> (std::net::SocketAddr, Arc<AuthStore>) {
+        let auth = AuthStore::open(dir.join("auth.json")).unwrap();
+        let environment = Arc::new(
+            crate::environment::Environment::load(dir, None, dir.to_owned(), Default::default())
+                .unwrap(),
+        );
+        let engine: Arc<dyn Engine> = Arc::new(
+            conn_engine::SqliteEngine::open(conn_engine::EngineConfig::new(
+                dir.join("engine.sqlite"),
+            ))
+            .unwrap(),
+        );
+        let mut deps = crate::methods::Deps {
+            environment: Some(environment),
+            engine: Some(engine),
+            ..Default::default()
+        };
+        deps.mcp = crate::routes::mcp::service(&deps);
+        let state = AppState {
+            table: Arc::new(MethodTable::new()),
+            auth: auth.clone(),
+            descriptor: Arc::new(crate::environment::descriptor(
+                "env-test", "Test", false, None,
+            )),
+            engine: None,
+            deps,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(state)).await });
+        (addr, auth)
+    }
+
+    /// How long a 100 ms sleep on this (single) runtime thread takes while `request` runs: a
+    /// handler that blocks the thread delays it by as long as it blocks.
+    async fn sleep_while(
+        addr: std::net::SocketAddr,
+        head: &'static str,
+        body: &'static str,
+    ) -> Duration {
+        let request = tokio::spawn(async move { call(addr, head, body).await });
+        let started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let slept = started.elapsed();
+        request.await.unwrap();
+        slept
+    }
+
+    /// Minting a pairing code writes `auth.json` under its file lock. While another process
+    /// holds the lock, the runtime thread must stay free.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pairing_code_write_waits_off_the_runtime_thread() {
+        let dir = std::env::temp_dir().join(format!("conn-http-lock-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, auth) = serve_on_disk(&dir).await;
+        let token = auth
+            .issue_session(auth::SessionRequest {
+                scopes: auth::STANDARD_SCOPES
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                label: None,
+                subject: None,
+                ttl_ms: auth::SESSION_TTL_MS,
+            })
+            .unwrap()
+            .token;
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let lock = dir.join("auth.lock");
+        let holder = std::thread::spawn(move || {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(lock)
+                .unwrap();
+            file.lock().unwrap();
+            held.0.send(()).unwrap();
+            let _ = release.1.recv_timeout(Duration::from_millis(800));
+        });
+        held.1.recv().unwrap();
+        let head: &'static str = Box::leak(
+            format!("POST /api/auth/pairing-token HTTP/1.1\r\nauthorization: Bearer {token}\r\ncontent-type: application/json").into_boxed_str(),
+        );
+        let request = tokio::spawn(async move {
+            call(addr, head, r#"{"access":"auto","purpose":"peer-link"}"#).await
+        });
+        let started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let slept = started.elapsed();
+        release.0.send(()).unwrap();
+        let (status, _) = request.await.unwrap();
+        holder.join().unwrap();
+        assert_eq!(status, 200);
+        assert!(
+            slept < Duration::from_millis(400),
+            "the runtime thread was blocked for {slept:?}"
+        );
+    }
+
+    /// `/mcp` authenticates through the auth store, which rereads `auth.json` when another
+    /// process changed it. A slow read (here a FIFO with no writer yet) must not block the
+    /// runtime thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_reads_the_auth_store_off_the_runtime_thread() {
+        let dir = std::env::temp_dir().join(format!("conn-http-fifo-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (addr, _auth) = serve_on_disk(&dir).await;
+        let file = dir.join("auth.json");
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success(),
+            "mkfifo"
+        );
+        // After 800 ms, feed every reader the FIFO gets (each reread sees a new stamp).
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = std::thread::spawn({
+            let done = done.clone();
+            move || {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                std::thread::sleep(Duration::from_millis(800));
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok(mut fifo) = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                        .open(&file)
+                    {
+                        let _ = fifo.write_all(br#"{"version":1,"sessions":[],"pairingLinks":[]}"#);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+        let slept = sleep_while(
+            addr,
+            "POST /mcp HTTP/1.1\r\nauthorization: Bearer unknown\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream",
+            "{}",
+        )
+        .await;
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        writer.join().unwrap();
+        assert!(
+            slept < Duration::from_millis(400),
+            "the runtime thread was blocked for {slept:?}"
+        );
     }
 
     /// One HTTP/1.1 request; returns the status and the body.

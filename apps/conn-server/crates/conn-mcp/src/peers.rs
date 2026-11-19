@@ -12,8 +12,8 @@ use conn_support::modes::runtime_rank;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::Caller;
 use crate::tools::{Args, Cx, ToolError, ToolResult, fail};
+use crate::{Caller, ClientCaller};
 
 /// The tools that run in a linked environment when `environmentId` names one.
 const LINKED_TARGETS: &str = include_str!("linked-targets.txt");
@@ -158,10 +158,13 @@ impl Cx<'_> {
                 "access": client.access(),
             }))),
             Caller::Client(_) => Ok(None),
+            // Only a thread read that succeeded says the caller acts for no link: a failed read
+            // must not open the fence.
             Caller::Thread(thread) => {
-                let own = self.projection(&thread.thread_id).await.ok();
-                Ok(own
-                    .and_then(|p| p["thread"].get("linkOrigin").cloned())
+                let own = self.projection(&thread.thread_id).await?;
+                Ok(own["thread"]
+                    .get("linkOrigin")
+                    .cloned()
                     .filter(Value::is_object))
             }
         }
@@ -204,6 +207,23 @@ impl Cx<'_> {
                 origin["label"].as_str().unwrap_or_default()
             ),
         ))
+    }
+
+    /// A native bearer session may do what its scopes allow and no more: changing settings
+    /// needs `settings:write`, links `access:read` or `access:write`, as the RPC methods do.
+    pub(crate) fn require_scope(&self, scope: &str) -> Result<(), ToolError> {
+        match self.caller {
+            Caller::Client(ClientCaller {
+                scopes: Some(scopes),
+                ..
+            }) if !scopes.iter().any(|s| s == scope) => Err(fail(
+                "capability_denied",
+                format!(
+                    "This tool needs the {scope} permission, which this session was not granted."
+                ),
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// `writesEnvironment`'s check: a live writing caller, not fenced, with full access.
@@ -362,6 +382,7 @@ impl Cx<'_> {
 /// `t3_environment_links` (`PeerForwarding.links`).
 pub(crate) async fn links(cx: &Cx<'_>) -> ToolResult {
     cx.forwarding_caller().await?;
+    cx.require_scope("access:read")?;
     let Some(peers) = cx.peers().filter(|p| p.enabled()) else {
         return Err(fail("capability_denied", LINKED_ENVIRONMENTS_OFF));
     };
@@ -392,6 +413,7 @@ pub(crate) async fn links(cx: &Cx<'_>) -> ToolResult {
 /// `t3_environment_unlink`: forgets the link here; the peer lists the session until revoked.
 pub(crate) async fn unlink(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.environment_writer().await?;
+    cx.require_scope("access:write")?;
     let environment = args
         .get("environmentId")
         .and_then(Value::as_str)
@@ -413,6 +435,7 @@ pub(crate) async fn unlink(cx: &Cx<'_>, args: &Args) -> ToolResult {
 /// `t3_environment_link`: a card in the calling thread; returns at once.
 pub(crate) async fn link(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.environment_writer().await?;
+    cx.require_scope("access:write")?;
     let thread = cx.require_thread("t3_environment_link")?.clone();
     let Some(peers) = cx.peers().filter(|p| p.enabled()) else {
         return Err(fail("capability_denied", LINKS_OFF_HERE));
@@ -480,6 +503,7 @@ pub(crate) fn preferences(settings: &Map<String, Value>) -> Value {
 /// `t3_environment_preferences_update`: the omitted fields stay as they are.
 pub(crate) async fn preferences_update(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.environment_writer().await?;
+    cx.require_scope("settings:write")?;
     let Some(settings) = &cx.config().settings else {
         return Err(fail(
             "orchestration_error",

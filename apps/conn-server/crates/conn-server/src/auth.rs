@@ -955,6 +955,8 @@ impl AuthStore {
         })
     }
 
+    /// The session behind a bearer token on the native HTTP and WebSocket paths. An MCP client
+    /// session is refused here: it is only accepted by `/mcp` (`rejectMcpClientAudience`).
     pub fn authenticate_bearer(&self, token: &str) -> Option<Principal> {
         let now = now_ms();
         let mut state = self.lock();
@@ -962,7 +964,7 @@ impl AuthStore {
         state
             .sessions
             .get(&hash(token))
-            .filter(|s| s.expires_at_ms > now)
+            .filter(|s| s.expires_at_ms > now && native_audience(s))
             .map(principal_of)
     }
 
@@ -980,7 +982,7 @@ impl AuthStore {
         state
             .sessions
             .get(&session)
-            .filter(|s| s.expires_at_ms > now)?;
+            .filter(|s| s.expires_at_ms > now && native_audience(s))?;
         let ticket = random_hex(32);
         let expires_at_ms = expires_at(now, TICKET_TTL_MS);
         state.tickets.insert(
@@ -1010,7 +1012,7 @@ impl AuthStore {
         state
             .sessions
             .get(&ticket.session)
-            .filter(|s| s.expires_at_ms > now)
+            .filter(|s| s.expires_at_ms > now && native_audience(s))
             .map(principal_of)
     }
 
@@ -1333,6 +1335,12 @@ fn expires_at(now: u64, ttl_ms: u64) -> u64 {
     now.saturating_add(ttl_ms.min(MAX_TTL_MS))
 }
 
+/// Whether a session may use the native HTTP and WebSocket paths: every session but an MCP
+/// client's (`rejectMcpClientAudience` in `EnvironmentAuth.ts`).
+fn native_audience(session: &StoredSession) -> bool {
+    session.subject != SUBJECT_MCP_CLIENT
+}
+
 fn principal_of(session: &StoredSession) -> Principal {
     Principal {
         session_id: session.id.clone(),
@@ -1519,6 +1527,42 @@ mod tests {
 
     pub(super) fn jump_wall(by_ms: u64) {
         WALL_OFFSET_MS.with(|offset| offset.set(offset.get() + by_ms));
+    }
+
+    /// `rejectMcpClientAudience`: an MCP OAuth token works on `/mcp` only, never as a native
+    /// bearer, for a WebSocket ticket, or behind a ticket minted before.
+    #[test]
+    fn mcp_client_sessions_are_refused_outside_mcp() {
+        let store = AuthStore::in_memory();
+        let issued = store
+            .issue_mcp_client_session("T3 Code · peer", "full-access", true, ClientInfo::default())
+            .unwrap();
+        assert!(
+            store.authenticate_mcp_client(&issued.token).is_some(),
+            "/mcp takes it"
+        );
+        assert!(
+            store.authenticate_bearer(&issued.token).is_none(),
+            "a native bearer path refuses it"
+        );
+        assert!(
+            store.issue_ticket(&issued.token, Some("rpc")).is_none(),
+            "no WebSocket ticket for it"
+        );
+        // A ticket that names the session (as one minted before this check) is refused too.
+        let ticket = "fixture-ticket";
+        {
+            let mut state = store.lock();
+            state.tickets.insert(
+                hash(ticket),
+                Ticket {
+                    session: hash(&issued.token),
+                    audience: None,
+                    expires_at_ms: now_ms() + 60_000,
+                },
+            );
+        }
+        assert!(store.authenticate_ticket(ticket, "rpc").is_none());
     }
 
     /// Orbit freezes a container and its wall clock jumps on wake. Every expiry here reads

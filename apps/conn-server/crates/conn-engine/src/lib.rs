@@ -425,6 +425,14 @@ pub trait Engine: Send + Sync {
         })
     }
 
+    /// `thread.pull-request-watch.sync`: what the server's watch loop read, and its wake. Not a
+    /// client command, so it never goes through [`Engine::dispatch`].
+    fn sync_pull_request_watch(&self, _command: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Err(
+            "Pull request watches are not supported.".into(),
+        )))
+    }
+
     /// Records a secret card without exposing an internal command through client dispatch.
     fn record_secret_request(&self, _input: Value) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(std::future::ready(Err(

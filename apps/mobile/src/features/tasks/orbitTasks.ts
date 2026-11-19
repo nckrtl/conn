@@ -13,23 +13,19 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AppState } from "react-native";
 
 import { orbitGatewayTransport } from "../orbit/orbitGatewayClient";
 import { fixtureOrbitTasksTransport } from "./orbitTasksFixtures";
 import { listAllTasks } from "./taskList";
+import { pollWhileActive } from "./taskInsightsPolling";
+import { TASKS_FIXTURE_INSIGHTS, TASKS_FIXTURES } from "./tasksFixtureMode";
 
-// Design and screenshot builds only: `EXPO_PUBLIC_CONN_TASKS_FIXTURE=1` at build time swaps the
-// Gateway for fixture data in the Gateway's wire form, so it still runs through the real decoder.
-// `EXPO_PUBLIC_CONN_TASKS_FIXTURE_INSIGHTS=unhandled` makes the board's numbers fail as live does.
-const USE_FIXTURES = process.env.EXPO_PUBLIC_CONN_TASKS_FIXTURE === "1";
+// Fixture data stays in the Gateway's wire form, so it still runs through the real decoder.
+const USE_FIXTURES = TASKS_FIXTURES;
 
 const transport: OrbitGatewayTransport = USE_FIXTURES
-  ? fixtureOrbitTasksTransport({
-      insights:
-        process.env.EXPO_PUBLIC_CONN_TASKS_FIXTURE_INSIGHTS === "unhandled"
-          ? "unhandled"
-          : "fixture",
-    })
+  ? fixtureOrbitTasksTransport({ insights: TASKS_FIXTURE_INSIGHTS })
   : orbitGatewayTransport;
 
 /** One client for the app, so a realtime notice reaches every open Tasks screen. */
@@ -150,15 +146,25 @@ export function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod) {
   useFocusEffect(
     useCallback(() => {
       let disposed = false;
-      const read = async () => {
-        const result = await orbitTasksClient.getTaskInsights({ period });
-        if (!disposed) setState(result);
-      };
-      void read();
-      const timer = setInterval(() => void read(), INSIGHTS_POLL_MS);
+      const stop = pollWhileActive({
+        intervalMs: INSIGHTS_POLL_MS,
+        app: {
+          isActive: () => AppState.currentState === "active",
+          onActive: (listener) => {
+            const subscription = AppState.addEventListener("change", (next) => {
+              if (next === "active") listener();
+            });
+            return () => subscription.remove();
+          },
+        },
+        read: () =>
+          void orbitTasksClient.getTaskInsights({ period }).then((result) => {
+            if (!disposed) setState(result);
+          }),
+      });
       return () => {
         disposed = true;
-        clearInterval(timer);
+        stop();
       };
     }, [period]),
   );

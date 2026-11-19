@@ -9,8 +9,9 @@ import {
   type TrendPoint,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { useGT, useMessages } from "gt-react-native";
+import { useId, useState } from "react";
 import { ScrollView, View, useWindowDimensions } from "react-native";
-import Svg, { Polyline } from "react-native-svg";
+import Svg, { Defs, G, LinearGradient, Path, Stop } from "react-native-svg";
 import { useResolveClassNames } from "uniwind";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -19,38 +20,62 @@ import { useOrbitTaskInsights } from "./orbitTasks";
 
 const SPARK_HEIGHT = 28;
 
-/** The insight over the period, where Orbit reports a history; other numbers have none yet. */
+/**
+ * The insight over the period, where Orbit reports a history; other numbers have none yet. Like
+ * the desktop: a muted line over a fading area, broken where a point is missing.
+ */
 function Sparkline(props: { readonly points: ReadonlyArray<TrendPoint> }) {
-  const { color } = useResolveClassNames("text-adaptive-sky-600-400");
+  const { color } = useResolveClassNames("text-foreground-muted");
+  const [width, setWidth] = useState(0);
+  const fade = `spark${useId().replace(/[^a-zA-Z0-9]/g, "")}`;
   const values = props.points.flatMap((point) => (point.value === null ? [] : [point.value]));
-  if (values.length < 2) return null;
-  const min = Math.min(...values);
-  const span = Math.max(...values) - min || 1;
-  const last = props.points.length - 1;
-  const points = props.points
-    .flatMap((point, index) =>
-      point.value === null
-        ? []
-        : [`${(index / last) * 100},${2 + (1 - (point.value - min) / span) * (SPARK_HEIGHT - 4)}`],
-    )
-    .join(" ");
+  const low = Math.min(...values);
+  const span = Math.max(...values) - low || 1;
+  const x = (index: number) => 1 + (index / Math.max(1, props.points.length - 1)) * (width - 2);
+  const y = (value: number) => SPARK_HEIGHT - 3 - ((value - low) / span) * (SPARK_HEIGHT - 6);
+  // Runs of consecutive points; a missing point ends a run.
+  const runs: Array<Array<{ x: number; y: number }>> = [[]];
+  props.points.forEach((point, index) => {
+    if (point.value === null) runs.push([]);
+    else runs.at(-1)!.push({ x: x(index), y: y(point.value) });
+  });
   return (
-    <Svg
-      width="100%"
-      height={SPARK_HEIGHT}
-      viewBox={`0 0 100 ${SPARK_HEIGHT}`}
-      preserveAspectRatio="none"
+    <View
+      accessible={false}
+      style={{ height: SPARK_HEIGHT }}
+      onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
     >
-      <Polyline
-        points={points}
-        fill="none"
-        stroke={color}
-        strokeWidth={1.5}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        vectorEffect="non-scaling-stroke"
-      />
-    </Svg>
+      {width > 0 && values.length > 1 ? (
+        <Svg width={width} height={SPARK_HEIGHT}>
+          <Defs>
+            <LinearGradient id={fade} x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={color} stopOpacity={0.22} />
+              <Stop offset="1" stopColor={color} stopOpacity={0} />
+            </LinearGradient>
+          </Defs>
+          {runs
+            .filter((run) => run.length > 1)
+            .map((run) => {
+              const line = run.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+              const area = `${line} L${run.at(-1)!.x},${SPARK_HEIGHT} L${run[0]!.x},${SPARK_HEIGHT} Z`;
+              return (
+                <G key={`${run[0]!.x}`}>
+                  <Path d={area} fill={`url(#${fade})`} />
+                  <Path
+                    d={line}
+                    fill="none"
+                    stroke={color}
+                    strokeOpacity={0.7}
+                    strokeWidth={1.5}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                </G>
+              );
+            })}
+        </Svg>
+      ) : null}
+    </View>
   );
 }
 

@@ -2,7 +2,7 @@
 import type { OrbitGatewayTransport } from "@t3tools/client-runtime/orbit-gateway";
 
 // Design and screenshot data only, in the Gateway's wire form so it runs through the real decoder.
-// It mirrors the approved mobile mockup. Only builds with EXPO_PUBLIC_CONN_TASKS_FIXTURE=1 use it.
+// It mirrors the approved mobile mockup. Only development builds with EXPO_PUBLIC_CONN_TASKS_FIXTURE=1 use it.
 
 const ENV = "a5bf17aa-d514-4c78-a644-edf55dba343f";
 const MINUTE = 60_000;

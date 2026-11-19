@@ -562,3 +562,53 @@ it("keeps an unsent reply when the appearance switches between light and dark", 
 
   await expect.element(reply()).toHaveValue("Unsent");
 });
+
+it("keeps replying to a conversation the diff cannot place", async () => {
+  setup({ paged: false });
+  const container = document.createElement("div");
+  container.className = "flex h-[700px] w-[900px]";
+  await using screen = await render(
+    <PullRequestCodeTab
+      scrollerRef={() => {}}
+      environmentId={EnvironmentId.make("environment")}
+      reference={detail}
+      detail={{
+        ...detail,
+        capabilities: {
+          ...detail.capabilities,
+          review: { ...detail.capabilities.review, reply: true },
+        },
+        viewerPermissions: { ...detail.viewerPermissions, comment: true },
+        reviewThreads: [
+          {
+            id: "gone",
+            path: "gone.ts",
+            line: 3,
+            side: "right",
+            isResolved: false,
+            isOutdated: true,
+            comments: [
+              {
+                id: "gone-comment",
+                author: { login: "reviewer", name: null, avatarUrl: null },
+                body: "Rename this.",
+                createdAt: "2026-09-01T00:00:00Z",
+                url: null,
+              },
+            ],
+          },
+        ],
+      }}
+      selectedCommitOid={null}
+      onSelectedCommitChange={() => {}}
+      onRefresh={() => {}}
+    />,
+    { container },
+  );
+
+  await screen.getByRole("button", { name: "Conversations not on the current diff (1)" }).click();
+  await screen.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect
+    .element(screen.getByRole("textbox", { name: "Reply to this conversation" }))
+    .toBeVisible();
+});

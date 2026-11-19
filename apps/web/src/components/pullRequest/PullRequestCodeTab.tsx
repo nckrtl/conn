@@ -1197,6 +1197,7 @@ function PullRequestCodeTab({
         <button
           type="button"
           className="sr-only"
+          data-file-item-id={item.id}
           aria-expanded={!collapsed}
           aria-label={collapsed ? gt("Expand diff") : gt("Collapse diff")}
           onClick={(event) => {
@@ -1434,7 +1435,25 @@ function PullRequestCodeTab({
     nextCursor === null
       ? gt("Conversations not on the current diff")
       : gt("Conversations not on the diff loaded so far");
-  const showsOrphans = orphansOpen && orphanThreads.length > 0;
+  const orphansPanel =
+    orphansOpen && orphanThreads.length > 0 ? (
+      <div className="max-h-1/2 shrink-0 overflow-y-auto border-b border-(--shell-divider) px-4.5 pt-3 pb-1">
+        <h2 className="text-sm text-muted-foreground">
+          {orphansLabel} · <span className="tabular-nums">{orphanThreads.length}</span>
+        </h2>
+        <PullRequestThreadList
+          detail={detail}
+          threadIds={new Set(orphanThreads.map((thread) => thread.id))}
+          environmentId={environmentId}
+          reference={reference}
+          onRefresh={onRefresh}
+          renderThread={(threadId) => {
+            const thread = orphanThreads.find((candidate) => candidate.id === threadId);
+            return thread === undefined ? null : renderThreadCard(thread);
+          }}
+        />
+      </div>
+    ) : null;
   // Narrow panels fold the view pill into the Diff options menu; a very narrow toolbar folds the
   // whole-view actions in too and drops the notices.
   const compactToolbar = toolbarWidth !== null && toolbarWidth < COMPACT_TOOLBAR_WIDTH;
@@ -1914,8 +1933,11 @@ function PullRequestCodeTab({
   const withToolbar = (body: ReactNode) =>
     layout(
       toolbar,
-      <div ref={scrollerRef} className="h-full overflow-auto">
-        {body}
+      <div className="flex h-full min-h-0 flex-col">
+        {orphansPanel}
+        <div ref={scrollerRef} className="min-h-0 flex-1 overflow-auto">
+          {body}
+        </div>
       </div>,
     );
 
@@ -1962,24 +1984,7 @@ function PullRequestCodeTab({
   return layout(
     toolbar,
     <div className="flex h-full min-h-0 flex-col">
-      {showsOrphans ? (
-        <div className="max-h-1/2 shrink-0 overflow-y-auto border-b border-(--shell-divider) px-4.5 pt-3 pb-1">
-          <h2 className="text-sm text-muted-foreground">
-            {orphansLabel} · <span className="tabular-nums">{orphanThreads.length}</span>
-          </h2>
-          <PullRequestThreadList
-            detail={detail}
-            threadIds={new Set(orphanThreads.map((thread) => thread.id))}
-            environmentId={environmentId}
-            reference={reference}
-            onAddToChat={onAddToChat}
-            onRefresh={onRefresh}
-            pendingFinding={pendingFinding ?? null}
-            fixFindingLabel={fixFindingLabel}
-            onFixFinding={onFixFinding}
-          />
-        </div>
-      ) : null}
+      {orphansPanel}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div
           className="relative min-h-0 min-w-0 flex-1"
@@ -1997,12 +2002,18 @@ function PullRequestCodeTab({
               }
               if (node.hasAttribute("data-viewed-toggle")) return;
               if (node.hasAttribute("data-diffs-header")) {
-                const filePath = node.querySelector("[data-title]")?.textContent?.trim();
-                if (filePath === undefined || filePath === "") return;
-                const item = items.find(
-                  (candidate) => resolveFileDiffPath(candidate.fileDiff) === filePath,
-                );
-                if (item !== undefined) toggleFile(item.id);
+                // Two rows can share a path, so find the row's own item through its metadata.
+                const itemId = [...node.querySelectorAll("slot")]
+                  .flatMap((slot) => slot.assignedElements())
+                  .map(
+                    (element) =>
+                      (element.matches("[data-file-item-id]")
+                        ? element
+                        : element.querySelector("[data-file-item-id]")
+                      )?.getAttribute("data-file-item-id") ?? null,
+                  )
+                  .find((id) => id !== null);
+                if (itemId) toggleFile(itemId);
                 return;
               }
             }

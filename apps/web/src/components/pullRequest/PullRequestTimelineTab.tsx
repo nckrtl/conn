@@ -115,17 +115,25 @@ function FixFindingButton({
   const fix = reactions.fix;
   const finding = fix?.findingFor(event) ?? null;
   if (!fix || finding === null) return null;
+  const label = fix.pending === pullRequestFindingKey(finding) ? gt("Preparing...") : fix.label;
   return (
-    <Button
-      size="xs"
-      variant="ghost"
-      className="-mt-1 shrink-0"
-      disabled={fix.pending !== null}
-      onClick={() => fix.onFix(finding)}
-    >
-      <HammerIcon className="size-3" />
-      {fix.pending === pullRequestFindingKey(finding) ? gt("Preparing...") : fix.label}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="icon-xs"
+            variant="ghost-muted"
+            className="shrink-0"
+            aria-label={label}
+            disabled={fix.pending !== null}
+            onClick={() => fix.onFix(finding)}
+          />
+        }
+      >
+        <HammerIcon className="size-3.5" />
+      </TooltipTrigger>
+      <TooltipPopup>{label}</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -537,10 +545,13 @@ function ReviewThreadEvent({
   onOpen,
   reactions,
   detail,
+  body,
 }: {
   revealAnchor?: string | null;
   event: PullRequestTimelineEvent;
   thread: PullRequestTimelineThread;
+  /** Draws the open thread in place of its comment and reply cards. */
+  body?: ReactNode;
   detail: PullRequestDetailView;
   editable: ReadonlyMap<string, PullRequestComment>;
   cwd: string;
@@ -627,7 +638,8 @@ function ReviewThreadEvent({
           )}
         />
       </button>
-      {expanded ? (
+      {expanded && body !== undefined ? <div className="mt-4">{body}</div> : null}
+      {expanded && body === undefined ? (
         <div className="mt-4">
           <ConversationCard
             event={event}
@@ -669,7 +681,7 @@ function ReviewThreadEvent({
           ) : null}
         </div>
       ) : null}
-      {thread.hasMoreReplies ? (
+      {thread.hasMoreReplies && body === undefined ? (
         <div className="px-2">
           <PullRequestMoreReplies {...thread} />
         </div>
@@ -914,63 +926,41 @@ function timelineFinding(
   return visibleBody(comment.body) === null ? null : { kind: "comment", comment };
 }
 
-/** Review threads drawn as the Timeline draws them, for threads the Code tab's diff cannot place. */
+/**
+ * Review threads as Timeline rows (path title and meta line) for threads the Code tab's diff
+ * cannot place. `renderThread` draws each open thread, so it keeps the Code tab's reply, load-more,
+ * fix and add-to-chat actions.
+ */
 export function PullRequestThreadList({
   detail,
   threadIds,
   environmentId,
   reference,
-  onAddToChat,
   onRefresh,
-  pendingFinding = null,
-  fixFindingLabel,
-  onFixFinding,
+  renderThread,
 }: {
   detail: PullRequestDetailView;
   threadIds: ReadonlySet<string>;
   environmentId: EnvironmentId;
   reference: PullRequestRef;
-  onAddToChat?: ((subject: PullRequestChatSubject) => void) | undefined;
   onRefresh: () => void;
-  pendingFinding?: string | null;
-  fixFindingLabel?: string;
-  onFixFinding?: ((finding: PullRequestFinding) => void) | undefined;
+  renderThread: (threadId: string) => ReactNode;
 }) {
-  const gt = useGT();
   const resolve = useMessages();
+  const reactions: ReactionSurface = {
+    revealAnchor: null,
+    canReact: () => false,
+    environmentId,
+    threadRef: null,
+    reference,
+    completionScope: null,
+    onRefresh,
+  };
   const threads = buildPullRequestTimeline(detail, resolve).flatMap((event) =>
     event.thread !== undefined && threadIds.has(event.thread.id)
       ? [{ event, thread: event.thread }]
       : [],
   );
-  const events = threads.map(({ event }) => event);
-  const reactions: ReactionSurface = {
-    revealAnchor: null,
-    canReact: (event) =>
-      event.comment !== undefined && canReactPullRequestComment(detail, event.comment),
-    onAddToChat: onAddToChat && ((comment) => onAddToChat({ kind: "comment", comment })),
-    environmentId,
-    threadRef: null,
-    reference,
-    completionScope: pullRequestCompletionScope(detail, environmentId, reference),
-    onRefresh,
-    fix: onFixFinding && {
-      findingFor: (event) => timelineFinding(detail, event),
-      onFix: onFixFinding,
-      pending: pendingFinding,
-      label: fixFindingLabel ?? gt("Fix in a thread"),
-    },
-  };
-  const editable = new Map(
-    events
-      .flatMap((event) => [event, ...(event.thread?.replies ?? [])])
-      .flatMap((event) => (event.comment ? [event.comment] : []))
-      .filter((comment) => canEditPullRequestComment(detail, comment))
-      .map((comment) => [comment.id, comment] as const),
-  );
-  const openOnHost = (url: string) => {
-    void readLocalApi()?.shell.openExternal(url);
-  };
   return (
     <div>
       {threads.map(({ event, thread }) => (
@@ -979,10 +969,11 @@ export function PullRequestThreadList({
           event={event}
           thread={thread}
           detail={detail}
-          editable={editable}
+          editable={new Map()}
           cwd={detail.workspaceRoot}
-          onOpen={openOnHost}
+          onOpen={() => {}}
           reactions={reactions}
+          body={renderThread(thread.id)}
         />
       ))}
     </div>

@@ -75,6 +75,9 @@ pub struct McpConfig {
     pub peers: Option<Arc<dyn Peers>>,
     /// The server settings, for the environment preference tools.
     pub settings: Option<SettingsPort>,
+    /// The server's GitHub pull request panel; without it the watch and guide tools answer
+    /// as T3 does when no host can be read.
+    pub pull_requests: Option<PullRequestHost>,
 }
 
 /// Reads and patches the server settings (`ServerSettingsService`).
@@ -95,6 +98,15 @@ impl std::fmt::Debug for SettingsPort {
         f.debug_struct("SettingsPort").finish_non_exhaustive()
     }
 }
+
+/// One call into the server's pull request panel: `(operation, input)` to the result, or the
+/// contract failure (`PullRequestUnavailableError`, `PullRequestOperationError`, ...). The
+/// operations are `watchSummary`, `locateProject` and `reviewGuide`.
+pub type PullRequestHost = Arc<
+    dyn Fn(&'static str, Value) -> conn_engine::BoxFuture<'static, Result<Value, Value>>
+        + Send
+        + Sync,
+>;
 
 pub type ProviderRefresh = Arc<dyn Fn(String) -> conn_engine::BoxFuture<'static, ()> + Send + Sync>;
 

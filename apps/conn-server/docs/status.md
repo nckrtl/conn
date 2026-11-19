@@ -32,7 +32,7 @@ other in either direction.
   signs in to its `/mcp` with MCP OAuth (register, a `pairing-code` decision, the PKCE code
   exchange). The token goes to the secret store; the rest to `peer-links.json`, at most 256
   links. Plain http only on loopback, Tailscale and Orbit WireGuard; redirects never followed.
-- **Forwarding** (`conn-mcp/src/peers.rs`): the 28 tools whose `environmentId` is
+- **Forwarding** (`conn-mcp/src/peers.rs`): the 31 tools whose `environmentId` is
   `OrchestratorMcpEnvironmentTarget` (generated: `linked-targets.txt`) run in the linked
   environment. Each checks the caller here first, then goes with `T3-Mode-Limit`,
   `T3-Sender-Thread`, a caller-scoped retry key and a 45 s wait cap. One MCP session per peer
@@ -70,7 +70,92 @@ a native bearer session on `/mcp` keeps its scopes (`settings:write` for prefere
 thread cannot be read; `/mcp` authentication and pairing-code writes run off the runtime
 thread; a link card answer runs in its own task, so it finishes and frees the card after the
 client leaves; a link keeps at most 8 addresses, once each, and at most 16 probes run at once.
-Known difference from the last: T3 keeps every address and probes them all.
+Known difference from the last: T3 keeps every address and probes them all. A native session's
+scopes are checked before a call goes local or to a linked environment, so a forwarded
+preference update needs `settings:write` too.
+
+## Thread transcript route (2026-11-19)
+
+- **Served:** `GET /api/orchestration/threads/:threadId/transcript`, the composer's "import a
+  thread's context". As T3: the protocol header (400), a bearer with `orchestration:read`
+  (401, 403), `{threadId, title, updatedAt, items}` with the whole visible turn items (not cut
+  for transport), `thread_transcript_too_large` (400) when the header line plus one JSON line
+  per item passes `PROVIDER_SEND_TURN_MAX_FILE_BYTES`, `thread_not_found` as
+  `EnvironmentResourceNotFoundError` (404), at most two exports at once. The engine reads
+  the visible rows one at a time off the runtime thread, writes the body as it reads, and
+  stops at the first row past the limit; the handler sends the prepared bytes. Peak memory is
+  the body (at most 50 MiB) plus one row, never the whole thread.
+  Two partial indexes serve the reads (`turn_items_in_order` for the timeline,
+  `turn_item_interrupts` for Stop requests); a test checks both query plans (no temporary
+  sort, no scan of item bodies). A run fork that is not a side chat starts with the history it
+  inherits, as T3's `buildVisibleTurnItems`: the source's rows through the fork run (forks of
+  forks recursively), then the synthetic fork marker, all counted against the limit. A deleted
+  source keeps its rows in the fork, as in T3. The
+  thread snapshot does not carry inherited rows yet; that is an engine gap of the thread view. The limit and the
+  header text are generated (`tools/gen-upstream.mjs`). Not on the managed ingress: its
+  reader profile has no composer.
+- **Proof:** `idle-diff` reads the route on both servers in six thread states (two completed
+  turns, an approval, a question, a stop, a failed turn, a subagent with a wake turn) and four
+  refusals. It fails on status, content type, refusal body, top-level keys, a body the
+  contract's JSON codec does not decode, or a body that is not the server's own thread
+  snapshot cut down (T3's snapshot passed through `projectTurnItemForWire`). A `fork`
+  scenario forks a completed run over `/ws` and compares the fork's transcript before its
+  first message and again after its source is deleted: row outline (position, visibility,
+  type, owner) and the fork marker. 36 comparisons, no failure. An engine test proves the early stop: a row past the limit that the reader
+  cannot parse fails a whole read but not a read that stops before it.
+- **Known differences (info):** the items differ where the two engines record a turn
+  differently, as in the thread view: no "Workspace ready" item, no `providerThreadId` on the
+  first user message, ordinals that do not restart per run, no title on a provider error
+  item, "Stopped by an agent." with a full stop. Without the protocol header T3 answers an
+  empty 400; the client always sends it. Size near the limit: T3 counts its in-memory rows,
+  this server the JSON it sends.
+- **`preview.stopLocalServer` stays unregistered.** Its one caller, the thread Servers panel,
+  lists only servers that `subscribeDiscoveredLocalServers` found and offers Stop only when the
+  environment advertises `localServerStop`. Neither is served or advertised, so no client can
+  reach it. Serving it means T3's port scan first (`PortScanner.ts`, about 1,240 lines:
+  socket owners, process groups, terminal and agent attribution); not small.
+
+## PR watching and review guides (2026-11-19)
+
+Served: `watch_pull_request`, `unwatch_pull_request` and `read_pull_request_guide` (70 of 87
+tools), and the engine commands `thread.pull-request.watch` and the server-only
+`thread.pull-request-watch.sync` and `thread.pull-request-watch.checks-reopen`.
+`write_pull_request_guides` stays unregistered: the server has no review guide generator
+(T3 runs a model in a temporary checkout), so the tool could only fail.
+
+- **The watch works.** A loop in the server (`methods/pull_requests/watches.rs`) reads each
+  watched PR from GitHub every 2 minutes, and at once when a new watch appears, through the
+  panel's client (`gh`'s login). It evaluates the read as T3's `pullRequestWatch.ts` does
+  (`conn-source-control/src/pull_requests/watch.rs`) and sends one sync per thread. A change
+  wakes the thread with T3's text as a `monitor` notice: a `message.dispatch` with
+  `queue_after_active`, `createdBy: agent`, `creationSource: server`. Checks, approvals,
+  remarks (review-thread pages included), conflicts, rebases, merge-queue removals, "no checks
+  after 15 minutes", 10 comment-only wakes, closed and merged PRs, and 8 failed reads all
+  follow T3. Watches live on the thread's links, so they survive a restart. Archive, settle
+  and Stop end them. New watches that overflow the loop's queue ask for one more full pass.
+- **Queued wakes are checked when they start** (`startNextQueuedRun`): a wake whose watches
+  all ended or moved is cancelled; a wake for several PRs is narrowed to the current ones.
+- **A push reopens checks.** When an agent's push command finishes (`isPushCommand`, ported
+  in `conn-engine/src/push.rs`), the engine sends `checks-reopen`, which clears each watch's
+  `checksPending`. A read of the old head that lands afterwards cannot restore it.
+- **Guides:** `read_pull_request_guide` reads the panel's stored guide.
+- **Proof.** `pr-watch-diff` (new check): 42 cases, 71 host reads, through T3's own
+  `evaluatePullRequestWatch`, `pullRequestWatchMessage` and `combinePullRequestWatchWakes`
+  and ours, each side feeding its own next watch forward; values equal. `parity.mjs`: 22 new
+  calls of the three tools on both servers with no `gh`, values and texts compared, plus
+  `tools/list`. Engine tests: a sync wakes and runs a turn; a stale sync is refused; Stop ends
+  the watch; a queued wake is cancelled after unwatch and narrowed to one of two PRs (both
+  fail without the fix); a `git push` row clears `checksPending` and an in-flight old read
+  cannot restore it (fails without the fix). Server test: the loop on a stub GitHub sends the
+  baseline, one wake for a failed check and a new comment, nothing on a quiet pass, and an
+  end without a wake on merge. `push.rs` unit test: T3's own test inputs.
+- **Known differences.** No GitHub change feed or watch fingerprints: news waits for the next
+  2-minute sweep, and an unchanged PR is read again after 10 minutes (T3's no-fingerprint
+  path). No cached review-thread tails, no watch-life log lines. The sync writes
+  `thread.pull-request-synced` (whole thread) where T3 writes `thread.pull-request-link-updated`
+  (one link); clients end in the same state. With no `gh` on the server, T3 refuses a watch
+  with its "not signed in" text and we with "no credential" (cli-missing), as the panel
+  already does; `parity.mjs` lists it as KNOWN.
 
 ## Provider sign-in (2026-11-19)
 
@@ -770,7 +855,7 @@ The fixture replay passes 50 of 159 variants: Grok 9 of 15 (was 1), Claude 24 of
   the handoff through Codex `thread/inject_items` and Claude's `inlineContextLength`, both
   provider-crate changes that other workers own); prepared runs and setup scripts; a workspace
   strategy for delegated tasks; the other refused commands; bounded snapshots and the
-  `/history`, `/bounded`, `/transcript` routes; NFC and T3's search ranking (`paletteSearch.ts`,
+  `/history` and `/bounded` routes (`/transcript` is served since 2026-11-19); NFC and T3's search ranking (`paletteSearch.ts`,
   about 1,300 lines). Commands stay 43 of 56.
 
 ## ACP provider, part 3 (2026-11-14)
@@ -1986,8 +2071,8 @@ T3 Code.
    the replay gate in the ACP stub with `finish_held_run` (4 Grok variants, which also need
    Grok background tasks), Grok subagents, Claude's background wakes.
 5. **Engine.** Merge-back and the portable fork path (both need T3's `ContextHandoffService`);
-   prepared runs and setup scripts in a `setup-<id>` terminal; bounded thread snapshots and the `/history`, `/bounded` and
-   `/transcript` routes (a full snapshot of a long thread peaks at about 13 bytes per byte of
+   prepared runs and setup scripts in a `setup-<id>` terminal; bounded thread snapshots and the `/history` and `/bounded`
+   routes (a full snapshot of a long thread peaks at about 13 bytes per byte of
    JSON); a workspace strategy for delegated tasks; search details (no NFC normalization, the
    old snippet rule); titles through a text generator or Codex (Claude as the title model keeps
    the seed title until the Claude provider implements `generate_text`; no fork source or

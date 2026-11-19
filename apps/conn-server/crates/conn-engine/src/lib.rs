@@ -47,6 +47,7 @@ mod link_requests;
 mod output;
 mod projects;
 mod pull_requests;
+mod push;
 mod reads;
 mod restart;
 mod rollback;
@@ -58,6 +59,7 @@ mod streaming;
 mod streams;
 mod time;
 mod titles;
+mod transcript;
 pub use conn_provider::tool_output;
 mod visibility;
 
@@ -434,6 +436,14 @@ pub trait Engine: Send + Sync {
         )))
     }
 
+    /// `thread.pull-request-watch.sync`: what the server's watch loop read, and its wake. Not a
+    /// client command, so it never goes through [`Engine::dispatch`].
+    fn sync_pull_request_watch(&self, _command: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Err(
+            "Pull request watches are not supported.".into(),
+        )))
+    }
+
     /// Records a secret card without exposing an internal command through client dispatch.
     fn record_secret_request(&self, _input: Value) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(std::future::ready(Err(
@@ -462,6 +472,18 @@ pub trait Engine: Send + Sync {
         unsupported("the thread snapshot")
     }
 
+    /// `GET /api/orchestration/threads/:threadId/transcript`: the encoded
+    /// `OrchestrationV2ThreadTranscript`, or why there is none. `limit` caps the file the
+    /// client builds from it; the read stops at the first row past it.
+    fn thread_transcript(
+        &self,
+        _thread_id: ThreadId,
+        _environment_id: String,
+        _limit: u64,
+    ) -> BoxFuture<'_, Result<ThreadTranscript, EngineError<GetThreadProjectionError>>> {
+        unsupported("the thread transcript")
+    }
+
     /// `ThreadManagementService.awaitBackgroundTasks`: the live session of the thread's
     /// active provider thread marks (`awaited`) or clears these background task ids. Answers
     /// the matched and unmatched ids; see [`BackgroundWaitError`] for the refusals.
@@ -473,6 +495,17 @@ pub trait Engine: Send + Sync {
     ) -> BoxFuture<'_, Result<BackgroundWait, BackgroundWaitError>> {
         Box::pin(std::future::ready(Err(BackgroundWaitError::Unavailable)))
     }
+}
+
+/// The outcome of [`Engine::thread_transcript`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ThreadTranscript {
+    /// The JSON body, ready to send.
+    Body(Vec<u8>),
+    /// No such thread, or it was deleted.
+    NotFound,
+    /// The file would pass the limit (`thread_transcript_too_large`).
+    TooLarge,
 }
 
 fn unsupported<T: Send + 'static, E: Send + 'static>(

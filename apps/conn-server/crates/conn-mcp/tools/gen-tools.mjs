@@ -175,21 +175,23 @@ if (missing.length > 0) {
   console.error(`apps/server no longer registers: ${missing.join(", ")}`);
   process.exit(1);
 }
-// conn-mcp knows one filter: tools that act as the calling thread are hidden from outside
-// clients (`hiddenFromOutsideClients`), listed in src/outside-hidden.txt. Any other filter on
-// one of ours would need a Rust check too.
-// The other: tools that only serve links are hidden while Linked environments is off
-// (`hiddenWhileLinksOff`), listed in src/links-hidden.txt.
+// conn-mcp knows three filters: tools that act as the calling thread are hidden from outside
+// clients (`hiddenFromOutsideClients`, src/outside-hidden.txt), tools a delegated child may
+// not call are hidden from it (`hiddenFromSubagents`, src/subagent-hidden.txt), and tools that
+// only serve links are hidden while Linked environments is off (`hiddenWhileLinksOff`,
+// src/links-hidden.txt). Any other filter on one of ours would need a Rust check too.
 const outsideHidden = [];
+const subagentHidden = [];
 const linksHidden = [];
 const catalog = implemented.map((name) => {
   const { "x-conn-hiddenFor": hiddenFor, ...tool } = byName.get(name);
   if (hiddenFor !== undefined) {
-    if (hiddenFor.length !== 1 || !["outside", "links-off"].includes(hiddenFor[0])) {
+    const [only] = hiddenFor;
+    if (hiddenFor.length !== 1 || !["outside", "subagent", "links-off"].includes(only)) {
       console.error(`${name} is hidden for ${hiddenFor.join(", ")}; teach conn-mcp that filter.`);
       process.exit(1);
     }
-    (hiddenFor[0] === "outside" ? outsideHidden : linksHidden).push(`${name}\n`);
+    (only === "outside" ? outsideHidden : only === "subagent" ? subagentHidden : linksHidden).push(`${name}\n`);
   }
   return tool;
 });
@@ -286,6 +288,7 @@ const preferenceDefaultsOut = NodePath.join(here, "..", "src", "preference-defau
 const linksHiddenOut = NodePath.join(here, "..", "src", "links-hidden.txt");
 const nullArgumentsOut = NodePath.join(here, "..", "src", "null-arguments.txt");
 const outsideHiddenOut = NodePath.join(here, "..", "src", "outside-hidden.txt");
+const subagentHiddenOut = NodePath.join(here, "..", "src", "subagent-hidden.txt");
 // Every tool apps/server registers, whoever may see it: the tests check the agent texts by it.
 const allNamesOut = NodePath.join(here, "..", "fixtures", "t3-tool-names.txt");
 const allNames = tools.map((tool) => `${tool.name}\n`).join("");
@@ -395,6 +398,7 @@ const outputs = [
   [linksHiddenOut, linksHidden.join(""), `${linksHidden.length} tools hidden while links are off`],
   [linkedTargetsOut, linkedTargets.join(""), `${linkedTargets.length} tools that run in a linked environment`],
   [preferenceDefaultsOut, preferenceDefaults, "environment preference defaults"],
+  [subagentHiddenOut, subagentHidden.join(""), `${subagentHidden.length} tools hidden from delegated children`],
   [allNamesOut, allNames, `${tools.length} tool names`],
   [runningTaskNextOut, ORCHESTRATOR_MCP_RUNNING_TASK_NEXT, "running task next text"],
   [nullArgumentsOut, nullArguments.join(""), `${nullArguments.length} arguments that keep null`],

@@ -86,6 +86,7 @@ async fn run(state: PathBuf, cases: Vec<Value>) -> Result<Vec<Value>, Error> {
         panels: None,
         peers: None,
         settings: None,
+        pull_requests: None,
         files: Some(files),
     });
     let client = Caller::Client(ClientCaller {

@@ -85,6 +85,7 @@ pub fn service(deps: &Deps) -> Option<Arc<McpService>> {
             .clone()
             .map(|p| Arc::new(crate::peers::McpPeers(p)) as Arc<dyn conn_mcp::Peers>),
         settings: Some(settings_port(environment.clone())),
+        pull_requests: crate::methods::pull_requests::mcp_host(deps),
     }))
 }
 

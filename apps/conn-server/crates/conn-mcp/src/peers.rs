@@ -266,7 +266,8 @@ impl Cx<'_> {
             | "t3_environment_read"
             | "list_scheduled_tasks"
             | "list_thread_pull_requests"
-            | "t3_worktree_list" => true,
+            | "t3_worktree_list"
+            | "read_pull_request_guide" => true,
             _ => false,
         };
         if reads {

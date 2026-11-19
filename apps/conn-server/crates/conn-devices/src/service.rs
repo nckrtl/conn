@@ -91,6 +91,8 @@ pub(crate) struct Inner {
     /// Held while launchers are bound, released or pruned, as T3's `launcherLock`: each reads
     /// the live sessions only after taking it, so a prune never deletes a new launcher.
     launcher_lock: tokio::sync::Mutex<()>,
+    /// The bound on one launcher's `close`; tests shorten it.
+    release_timeout: Mutex<std::time::Duration>,
     /// `environment-id` as the file holds it: T3 hashes the raw text into a host's owner.
     environment_file: std::sync::OnceLock<String>,
 }
@@ -140,6 +142,7 @@ impl Devices {
             discovery_details: Mutex::new(HashMap::new()),
             launchers: Mutex::new(HashMap::new()),
             launcher_lock: tokio::sync::Mutex::new(()),
+            release_timeout: Mutex::new(agent::RELEASE_TIMEOUT),
             environment_file: std::sync::OnceLock::new(),
         }));
         let this = devices.clone();
@@ -1025,18 +1028,43 @@ impl Devices {
         Ok(Some(launcher))
     }
 
+    /// Ends the agent-device sessions behind `launchers` all at once, as T3 does
+    /// (`concurrency: "unbounded"`): a launcher lock held for the releases lasts one close
+    /// timeout, however many hang.
+    async fn release_all(&self, launchers: Vec<String>) {
+        if launchers.is_empty() {
+            return;
+        }
+        let Some(node) = blocking(|| crate::process::find_on_path("node", None)).await else {
+            return;
+        };
+        let node = node.display().to_string();
+        let timeout = *crate::lock(&self.0.release_timeout);
+        let mut releasing = tokio::task::JoinSet::new();
+        for launcher in launchers {
+            let node = node.clone();
+            releasing
+                .spawn(async move { agent::release_launcher(&node, &launcher, timeout).await });
+        }
+        while releasing.join_next().await.is_some() {}
+    }
+
     async fn release_launchers(&self, sessions: &[Session]) {
         let _guard = self.0.launcher_lock.lock().await;
-        for session in sessions {
-            let name =
-                agent::session_name(&session.thread_id, &session.host_id, &session.device_id);
-            let launcher = crate::lock(&self.0.launchers).remove(&name);
-            if let Some(launcher) = launcher
-                && let Some(node) = crate::process::find_on_path("node", None)
-            {
-                agent::release_launcher(&node.display().to_string(), &launcher).await;
-            }
-        }
+        let launchers: Vec<String> = {
+            let mut bound = crate::lock(&self.0.launchers);
+            sessions
+                .iter()
+                .filter_map(|session| {
+                    bound.remove(&agent::session_name(
+                        &session.thread_id,
+                        &session.host_id,
+                        &session.device_id,
+                    ))
+                })
+                .collect()
+        };
+        self.release_all(launchers).await;
     }
 
     /// Ends the agent-device sessions of retired device sessions and removes their launchers.
@@ -1055,11 +1083,7 @@ impl Devices {
                 .filter_map(|session| launchers.remove(session))
                 .collect()
         };
-        if let Some(node) = crate::process::find_on_path("node", None) {
-            for launcher in &retired {
-                agent::release_launcher(&node.display().to_string(), launcher).await;
-            }
-        }
+        self.release_all(retired).await;
         // Sessions opened while the releases ran are live too.
         let live = self.live_session_names();
         let state_dir = self.0.config.state_dir.clone();
@@ -1365,6 +1389,48 @@ mod tests {
             !std::path::Path::new(&launcher).exists(),
             "a retired launcher goes"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Retired launchers whose `close` hangs are released together: a `device_open` waiting for
+    /// the launcher lock waits about one close timeout, not one per launcher.
+    #[tokio::test(flavor = "current_thread")]
+    async fn hanging_closes_hold_the_launcher_lock_for_one_timeout() {
+        if crate::process::find_on_path("node", None).is_none() {
+            eprintln!("no node on PATH: skipped");
+            return;
+        }
+        let (devices, dir) = devices("hang");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let timeout = std::time::Duration::from_millis(600);
+        *crate::lock(&devices.0.release_timeout) = timeout;
+        for n in 0..4 {
+            let name = format!("t3-hanging{n}");
+            let launcher =
+                agent::bind_launcher(devices.state_dir(), "/node", "/entry.mjs", &name, &[])
+                    .unwrap_or_default();
+            // `close` never ends: the release waits out its timeout.
+            let script =
+                std::path::Path::new(&launcher).with_file_name("agent-device-launcher.mjs");
+            std::fs::write(script, "setInterval(() => {}, 1000);\n").unwrap_or_default();
+            crate::lock(&devices.0.launchers).insert(name, launcher);
+        }
+        let pruning = tokio::spawn({
+            let devices = devices.clone();
+            async move { devices.prune_launchers().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let guard = devices.0.launcher_lock.lock().await;
+        let waited = started.elapsed();
+        drop(guard);
+        let _ = pruning.await;
+        assert!(
+            waited < timeout * 2,
+            "waited {waited:?} for the lock; four closes in a row would take {:?}",
+            timeout * 4
+        );
+        assert!(crate::lock(&devices.0.launchers).is_empty(), "all released");
         let _ = std::fs::remove_dir_all(dir);
     }
 

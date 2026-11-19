@@ -138,15 +138,18 @@ pub(crate) fn prune_launchers(state_dir: &Path, live: &[String]) {
     }
 }
 
-/// Ends the agent-device session behind a launcher (`release`); best effort, 15 s.
-pub(crate) async fn release_launcher(node: &str, launcher: &str) {
+/// How long a launcher's `close` may take (`release`, 15 s in T3).
+pub(crate) const RELEASE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Ends the agent-device session behind a launcher (`release`); best effort, within `timeout`.
+pub(crate) async fn release_launcher(node: &str, launcher: &str, timeout: Duration) {
     let script = Path::new(launcher)
         .parent()
         .map(|dir| dir.join("agent-device-launcher.mjs"))
         .unwrap_or_default();
     let _ = Run::new(node, [script.display().to_string(), "close".into()])
         .env("ELECTRON_RUN_AS_NODE", "1")
-        .timeout(Duration::from_secs(15))
+        .timeout(timeout)
         .output()
         .await;
 }

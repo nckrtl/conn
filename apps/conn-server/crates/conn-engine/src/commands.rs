@@ -1211,6 +1211,7 @@ fn thread_stop(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let command_id = command["commandId"].as_str().map(str::to_owned);
     let c: ThreadStop = decode(command)?;
     let mut thread = live_thread(tx, &c.thread_id)?;
+    crate::link_requests::close_pending(tx, &c.thread_id)?;
     // Stop means stop: queued messages wait until the user sends again or resumes the queue.
     hold_queue(tx, &c.thread_id)?;
     // Stop also ends the thread's pull request watches.
@@ -1647,6 +1648,7 @@ fn patch_thread(
 
 fn thread_archive(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let c: ThreadOnly = decode(command)?;
+    crate::link_requests::close_pending(tx, &c.thread_id)?;
     patch_thread(tx, &c.thread_id, "thread.archived", true, |t, now| {
         t["archivedAt"] = json!(now);
         crate::pull_requests::end_watches(t);

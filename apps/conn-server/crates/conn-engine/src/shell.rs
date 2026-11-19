@@ -321,6 +321,10 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
             map.insert(key.into(), value.clone());
         }
     }
+    // The link that started it, when one did (`linkOrigin`): the fence reads it.
+    if let Some(origin) = thread.get("linkOrigin").filter(|o| o.is_object()) {
+        row["linkOrigin"] = origin.clone();
+    }
     Ok(row)
 }
 

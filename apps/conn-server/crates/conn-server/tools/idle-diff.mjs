@@ -1031,6 +1031,14 @@ const SCENARIOS = [
         });
       });
       await compareForkTranscript(pair, "a run fork before its first message");
+      await both(pair, (side) =>
+        side.rpc("orchestration.dispatchCommand", {
+          type: "thread.delete",
+          commandId: `delete-${crypto.randomUUID()}`,
+          threadId: side.threadId,
+        }),
+      );
+      await compareForkTranscript(pair, "the fork after its source was deleted");
     },
   },
   {

@@ -36,7 +36,8 @@ match T3 is open.
   `turn_item_interrupts` for Stop requests); a test checks both query plans (no temporary
   sort, no scan of item bodies). A run fork that is not a side chat starts with the history it
   inherits, as T3's `buildVisibleTurnItems`: the source's rows through the fork run (forks of
-  forks recursively), then the synthetic fork marker, all counted against the limit. The
+  forks recursively), then the synthetic fork marker, all counted against the limit. A deleted
+  source keeps its rows in the fork, as in T3. The
   thread snapshot does not carry inherited rows yet; that is an engine gap of the thread view. The limit and the
   header text are generated (`tools/gen-upstream.mjs`). Not on the managed ingress: its
   reader profile has no composer.
@@ -46,8 +47,8 @@ match T3 is open.
   contract's JSON codec does not decode, or a body that is not the server's own thread
   snapshot cut down (T3's snapshot passed through `projectTurnItemForWire`). A `fork`
   scenario forks a completed run over `/ws` and compares the fork's transcript before its
-  first message: row outline (position, visibility, type, owner) and the fork marker. 35
-  comparisons, no failure. An engine test proves the early stop: a row past the limit that the reader
+  first message and again after its source is deleted: row outline (position, visibility,
+  type, owner) and the fork marker. 36 comparisons, no failure. An engine test proves the early stop: a row past the limit that the reader
   cannot parse fails a whole read but not a read that stops before it.
 - **Known differences (info):** the items differ where the two engines record a turn
   differently, as in the thread view: no "Workspace ready" item, no `providerThreadId` on the

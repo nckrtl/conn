@@ -4842,6 +4842,14 @@ async fn a_fork_transcript_inherits_the_source_history_through_the_fork_run() {
     assert_eq!(body(read("t2").await.unwrap())["items"], json!(expected));
     assert_eq!(body(read("t3").await.unwrap())["items"], json!([]));
 
+    // Deleting the source keeps the fork's inherited history, as in T3.
+    dispatch(
+        &engine,
+        json!({"type": "thread.delete", "commandId": "d1", "threadId": "t1"}),
+    )
+    .await;
+    assert_eq!(body(read("t2").await.unwrap())["items"], json!(expected));
+
     // The inherited rows count against the limit too.
     assert_eq!(
         engine

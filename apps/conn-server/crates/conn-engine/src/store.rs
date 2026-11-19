@@ -658,6 +658,20 @@ impl Store {
         }
     }
 
+    /// The thread record, deleted or not: a fork inherits from a deleted source.
+    fn stored_thread(&self, thread_id: &str) -> StoreResult<Option<Value>> {
+        self.conn
+            .query_row(
+                "SELECT thread FROM threads WHERE id = ?1",
+                [thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(err)?
+            .map(parse)
+            .transpose()
+    }
+
     /// The visibility rule of a thread, with its Stop requests when the rule needs them.
     fn visibility(
         &self,
@@ -725,7 +739,8 @@ impl Store {
         seen: &mut Vec<String>,
         out: &mut crate::transcript::Rows,
     ) -> StoreResult<bool> {
-        let Some((source, _)) = self.live_thread(source_id)? else {
+        // A deleted source keeps its rows, and T3 still shows them in the fork.
+        let Some(source) = self.stored_thread(source_id)? else {
             return Ok(true);
         };
         let runs = entities(&self.conn, source_id, "runs")?;

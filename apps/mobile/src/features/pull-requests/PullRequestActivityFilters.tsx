@@ -1,7 +1,6 @@
-import IconGitCommit from "@tabler/icons-react-native/IconGitCommit";
 import { useGT } from "gt-react-native";
-import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { Pressable, View } from "react-native";
+import { ConnSymbolScope } from "../../components/ConnSymbolScope";
 import { AppText as Text } from "../../components/ui/AppText";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { Menu } from "../../components/ui/Menu";
@@ -23,7 +22,6 @@ export function PullRequestActivityFilters({
   readonly commits: number;
 }) {
   const gt = useGT();
-  const { themeVariables: colors } = useAppearancePreferences();
   const kinds = [
     { id: "all", title: gt("All activity") },
     { id: "comments", title: gt("Comments", { $context: "activity filter" }) },
@@ -66,13 +64,10 @@ export function PullRequestActivityFilters({
         >
           <SymbolView name="text.bubble" size={16} tintColorClassName="accent-foreground-muted" />
           <Text className="text-[15px] tabular-nums text-foreground-muted">{comments} ·</Text>
-          <View style={{ transform: [{ rotate: "90deg" }] }}>
-            <IconGitCommit
-              size={17}
-              color={colors["--color-foreground-muted"] ?? "#838383"}
-              strokeWidth={1.8}
-            />
-          </View>
+          {/* git.commit is Conn's own symbol, not an SF Symbol. */}
+          <ConnSymbolScope>
+            <SymbolView name="git.commit" size={16} tintColorClassName="accent-foreground-muted" />
+          </ConnSymbolScope>
           <Text className="text-[15px] tabular-nums text-foreground-muted">{commits}</Text>
           {hiddenCount > 0 ? (
             <Text className="text-[15px] text-foreground-tertiary">

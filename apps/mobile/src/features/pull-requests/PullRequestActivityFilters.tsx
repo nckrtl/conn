@@ -1,14 +1,21 @@
 import { useGT } from "gt-react-native";
-import { Platform, Pressable, View } from "react-native";
+import { Pressable, View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
-import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { Menu } from "../../components/ui/Menu";
 import { TabActions, TabPill } from "../detail/DetailLayout";
 import type { ActivityFilter } from "./pullRequestActivityFilter";
 
-// git.commit is Conn's own symbol on iOS, missing outside its symbol scope; Android draws Tabler's.
-const COMMIT_ICON: AppSymbolName =
-  Platform.OS === "ios" ? { ios: "circle.and.line.horizontal", android: "remove" } : "git.commit";
+/** A commit: a ring on a line. Neither SF Symbols nor this view's symbol scope has one. */
+function CommitGlyph() {
+  return (
+    <View accessible={false} className="w-4 flex-row items-center">
+      <View className="h-[1.5px] flex-1 bg-foreground-muted" />
+      <View className="size-2 rounded-full border-[1.5px] border-foreground-muted" />
+      <View className="h-[1.5px] flex-1 bg-foreground-muted" />
+    </View>
+  );
+}
 
 /** The Timeline tab's row: comment and commit counts (which filter it), then the order pill. */
 export function PullRequestActivityFilters({
@@ -67,7 +74,7 @@ export function PullRequestActivityFilters({
         >
           <SymbolView name="text.bubble" size={16} tintColorClassName="accent-foreground-muted" />
           <Text className="text-[15px] tabular-nums text-foreground-muted">{comments} ·</Text>
-          <SymbolView name={COMMIT_ICON} size={16} tintColorClassName="accent-foreground-muted" />
+          <CommitGlyph />
           <Text className="text-[15px] tabular-nums text-foreground-muted">{commits}</Text>
           {hiddenCount > 0 ? (
             <Text className="text-[15px] text-foreground-tertiary">

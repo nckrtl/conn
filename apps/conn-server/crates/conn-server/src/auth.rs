@@ -510,6 +510,13 @@ struct StoredPairing {
     expires_at_ms: u64,
 }
 
+impl StoredPairing {
+    /// A code made for one MCP sign-in (`mcp-approval:…`), not a pairing link a client shows.
+    fn purpose_bound(&self) -> bool {
+        self.subject.starts_with(MCP_APPROVAL_SUBJECT_PREFIX)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSession {
@@ -856,9 +863,11 @@ impl AuthStore {
             created_at_ms: now,
             expires_at_ms: link.expires_at_ms,
         };
+        // Purpose-bound codes stay out of the pairing links clients show
+        // (`PairingGrantStore.issue`): no upsert event.
         self.write(|state| {
             state.pairing.insert(hash(&code), link.clone());
-            vec![AccessChange::PairingLinkUpserted(link.id.clone())]
+            Vec::new()
         })?;
         Ok(issued)
     }
@@ -1046,11 +1055,16 @@ impl AuthStore {
             .is_some_and(|(_, s)| s.expires_at_ms > now)
     }
 
-    /// Unspent, unexpired pairing links, oldest first.
+    /// Unspent, unexpired pairing links, oldest first. Purpose-bound codes are not listed
+    /// (`EnvironmentAuth.listPairingLinks`).
     pub fn pairing_links(&self) -> Vec<AuthPairingLink> {
         let mut state = self.lock();
         self.refresh(&mut state);
-        let mut links: Vec<&StoredPairing> = state.pairing.values().collect();
+        let mut links: Vec<&StoredPairing> = state
+            .pairing
+            .values()
+            .filter(|l| !l.purpose_bound())
+            .collect();
         links.sort_by_key(|l| (l.created_at_ms, l.id.clone()));
         links.into_iter().map(pairing_to_contract).collect()
     }
@@ -1061,7 +1075,7 @@ impl AuthStore {
         state
             .pairing
             .values()
-            .find(|l| l.id == id)
+            .find(|l| l.id == id && !l.purpose_bound())
             .map(pairing_to_contract)
     }
 
@@ -1202,7 +1216,7 @@ impl AuthStore {
             }
         }
         for link in state.pairing.values() {
-            if !before_links.contains(&link.id) {
+            if !before_links.contains(&link.id) && !link.purpose_bound() {
                 changes.push(AccessChange::PairingLinkUpserted(link.id.clone()));
             }
         }
@@ -1658,6 +1672,37 @@ mod tests {
         );
         assert!(parse_scopes("review:write").is_err());
         assert!(parse_scopes("").is_err());
+    }
+
+    /// A peer-link code is purpose-bound: it is never announced as a pairing link nor listed,
+    /// here or in another process that reads the file (`PairingGrantStore.issue`,
+    /// `EnvironmentAuth.listPairingLinks`).
+    #[test]
+    fn peer_link_codes_stay_out_of_pairing_links_and_events() {
+        let dir = temp_dir("auth-peer-link-hidden");
+        let file = dir.join("auth.json");
+        let store = AuthStore::open(file.clone()).unwrap();
+        let other = AuthStore::open(file).unwrap();
+        let mut events = store.subscribe();
+        let mut other_events = other.subscribe();
+        let issued = store.issue_peer_link_pairing("auto", None).unwrap();
+        assert!(events.try_recv().is_err(), "an upsert was announced");
+        assert!(store.pairing_links().is_empty());
+        assert!(store.pairing_link(&issued.id).is_none());
+        assert!(other.pairing_links().is_empty());
+        assert!(other.pairing_link(&issued.id).is_none());
+        assert!(
+            other_events.try_recv().is_err(),
+            "a reload announced the code"
+        );
+        // A plain code is still listed and announced.
+        let plain = store.issue_pairing_code(None, PAIRING_CODE_TTL_MS).unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AccessChange::PairingLinkUpserted(id)) if id == plain.id
+        ));
+        assert_eq!(store.pairing_links().len(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

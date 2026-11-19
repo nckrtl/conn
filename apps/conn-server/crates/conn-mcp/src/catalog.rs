@@ -336,6 +336,57 @@ fn range_problem(schema: &Value, n: f64) -> Option<String> {
     })
 }
 
+/// The JSON Schema subset the advertised output schemas use.
+pub(crate) fn conforms(schema: &Value, value: &Value, at: &str) -> Result<(), String> {
+    if let Some(options) = schema["anyOf"].as_array() {
+        return if options.iter().any(|o| conforms(o, value, at).is_ok()) {
+            Ok(())
+        } else {
+            Err(format!("{at}: {value} matches no anyOf branch"))
+        };
+    }
+    if let Some(allowed) = schema["enum"].as_array()
+        && !allowed.contains(value)
+    {
+        return Err(format!("{at}: {value} not in {allowed:?}"));
+    }
+    let ok = match schema["type"].as_str() {
+        Some("string") => value.is_string(),
+        Some("integer") => value.is_i64() || value.is_u64(),
+        Some("number") => value.is_number(),
+        Some("boolean") => value.is_boolean(),
+        Some("null") => value.is_null(),
+        Some("array") => {
+            for (i, item) in value.as_array().into_iter().flatten().enumerate() {
+                conforms(&schema["items"], item, &format!("{at}[{i}]"))?;
+            }
+            value.is_array()
+        }
+        Some("object") => {
+            let Some(object) = value.as_object() else {
+                return Err(format!("{at}: {value} is not an object"));
+            };
+            for key in schema["required"].as_array().into_iter().flatten() {
+                let Some(key) = key.as_str() else {
+                    continue;
+                };
+                if !object.contains_key(key) {
+                    return Err(format!("{at}: missing {key}"));
+                }
+            }
+            for (key, property) in schema["properties"].as_object().into_iter().flatten() {
+                if let Some(field) = object.get(key) {
+                    conforms(property, field, &format!("{at}.{key}"))?;
+                }
+            }
+            true
+        }
+        _ => true,
+    };
+    ok.then_some(())
+        .ok_or_else(|| format!("{at}: {value} is not {}", schema["type"]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -219,6 +219,21 @@ pub fn tool_definition(name: &str) -> Option<&'static str> {
     catalog::line(name)
 }
 
+/// Whether `value` has the shape `tool`'s advertised output schema requires: the types,
+/// required fields and literals it names (excess fields are allowed, as an Effect struct
+/// decode allows them). A tool that advertises no output schema accepts any value. A result
+/// forwarded from a linked environment is checked with this, as `PeerMcpClient` decodes it
+/// with the tool's success schema.
+pub fn tool_result_matches(tool: &str, value: &serde_json::Value) -> bool {
+    let Some((definition, _)) = catalog::tool(tool) else {
+        return false;
+    };
+    match definition.get("outputSchema") {
+        Some(schema) => catalog::conforms(schema, value, tool).is_ok(),
+        None => true,
+    }
+}
+
 impl McpServerEntry {
     /// One `mcpServers` entry for Claude (`--mcp-config '{"mcpServers":{"t3-code": …}}'` or the
     /// SDK's `mcpServers`), as `claudeMcpQueryOverrides` builds it.

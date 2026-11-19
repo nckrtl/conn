@@ -208,7 +208,7 @@ impl<'a> Client<'a> {
         );
         let (definition, _) = catalog::tool(tool).unwrap();
         if let Some(schema) = definition.get("outputSchema") {
-            conforms(schema, &value, tool).unwrap();
+            catalog::conforms(schema, &value, tool).unwrap();
         }
         value
     }
@@ -232,53 +232,19 @@ impl<'a> Client<'a> {
     }
 }
 
-/// The JSON Schema subset the advertised output schemas use.
-fn conforms(schema: &Value, value: &Value, at: &str) -> Result<(), String> {
-    if let Some(options) = schema["anyOf"].as_array() {
-        return if options.iter().any(|o| conforms(o, value, at).is_ok()) {
-            Ok(())
-        } else {
-            Err(format!("{at}: {value} matches no anyOf branch"))
-        };
-    }
-    if let Some(allowed) = schema["enum"].as_array()
-        && !allowed.contains(value)
-    {
-        return Err(format!("{at}: {value} not in {allowed:?}"));
-    }
-    let ok = match schema["type"].as_str() {
-        Some("string") => value.is_string(),
-        Some("integer") => value.is_i64() || value.is_u64(),
-        Some("number") => value.is_number(),
-        Some("boolean") => value.is_boolean(),
-        Some("null") => value.is_null(),
-        Some("array") => {
-            for (i, item) in value.as_array().into_iter().flatten().enumerate() {
-                conforms(&schema["items"], item, &format!("{at}[{i}]"))?;
-            }
-            value.is_array()
-        }
-        Some("object") => {
-            let Some(object) = value.as_object() else {
-                return Err(format!("{at}: {value} is not an object"));
-            };
-            for key in schema["required"].as_array().into_iter().flatten() {
-                let key = key.as_str().unwrap();
-                if !object.contains_key(key) {
-                    return Err(format!("{at}: missing {key}"));
-                }
-            }
-            for (key, property) in schema["properties"].as_object().into_iter().flatten() {
-                if let Some(field) = object.get(key) {
-                    conforms(property, field, &format!("{at}.{key}"))?;
-                }
-            }
-            true
-        }
-        _ => true,
-    };
-    ok.then_some(())
-        .ok_or_else(|| format!("{at}: {value} is not {}", schema["type"]))
+/// A forwarded result is checked against its tool's success shape (`PeerMcpClient`).
+#[test]
+fn forwarded_results_must_match_their_tool() {
+    assert!(!crate::tool_result_matches("t3_thread_launch", &json!({})));
+    assert!(!crate::tool_result_matches(
+        "t3_thread_search",
+        &json!({"matches": "none"})
+    ));
+    assert!(crate::tool_result_matches(
+        "t3_thread_search",
+        &json!({"matches": [], "extra": true})
+    ));
+    assert!(!crate::tool_result_matches("no_such_tool", &json!({})));
 }
 
 #[test]

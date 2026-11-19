@@ -39,6 +39,7 @@ pub const PEER_LINKS_OFF_DESCRIPTION: &str =
     "Linked environments is off on that machine. Turn it on in its Settings → Labs.";
 /// Authorization codes waiting for their exchange. A code lives 60 s, so this bounds a burst.
 const MAX_PENDING_CODES: usize = 256;
+const TOO_MANY_SIGN_INS: &str = "Too many sign-ins are waiting. Try again in a minute.";
 
 /// `issuer` and `resource` as the request reached this server (`McpOAuth.requestUrls`).
 #[derive(Clone, Debug)]
@@ -372,6 +373,14 @@ impl McpOAuth {
         })
     }
 
+    /// Whether [`MAX_PENDING_CODES`] unexpired codes already wait for their exchange.
+    fn codes_full(&self) -> bool {
+        let now = conn_support::time::now_ms();
+        let mut codes = crate::lock(&self.codes);
+        codes.retain(|_, pending| pending.expires_at_ms > now);
+        codes.len() >= MAX_PENDING_CODES
+    }
+
     /// `decision`: `deny`, or a `pairing-code` that this environment issued. Browser-session
     /// approval needs a cookie session, which this server does not have.
     pub fn decide(
@@ -410,6 +419,10 @@ impl McpOAuth {
                         "Linking needs a plain pairing code, not an app approval code.".to_owned(),
                     );
                 }
+                // Capacity first: a sign-in refused for it must not spend the user's code.
+                if self.codes_full() {
+                    return Decision::PageError(TOO_MANY_SIGN_INS.to_owned());
+                }
                 match auth.consume_mcp_code(code, access, authorization.client.peer_link) {
                     Ok(level) => level,
                     Err(McpCodeError::Storage) => {
@@ -428,13 +441,10 @@ impl McpOAuth {
         let code = mint_code();
         let now = conn_support::time::now_ms();
         {
+            // Checked before the pairing code was spent; a sign-in that raced in since may
+            // pass the limit briefly rather than lose its spent code.
             let mut codes = crate::lock(&self.codes);
             codes.retain(|_, pending| pending.expires_at_ms > now);
-            if codes.len() >= MAX_PENDING_CODES {
-                return Decision::PageError(
-                    "Too many sign-ins are waiting. Try again in a minute.".to_owned(),
-                );
-            }
             codes.insert(
                 code.clone(),
                 PendingCode {
@@ -654,6 +664,57 @@ mod tests {
             state: Some("s".into()),
             resource: Some("http://127.0.0.1:3773/mcp".into()),
         }
+    }
+
+    /// A sign-in refused because too many codes wait must leave the user's pairing code
+    /// unspent: capacity is checked before the code is consumed.
+    #[test]
+    fn a_full_code_table_does_not_spend_the_pairing_code() {
+        let oauth = oauth();
+        let auth = AuthStore::in_memory();
+        let client = oauth
+            .register(
+                Registration {
+                    client_name: Some("T3 Code · other".into()),
+                    software_id: Some(MCP_PEER_LINK_SOFTWARE_ID.into()),
+                    redirect_uris: Some(vec!["http://127.0.0.1/t3code-peer-link".into()]),
+                },
+                true,
+            )
+            .unwrap();
+        let challenge = base64::url_encode(&conn_support::hmac::sha256(b"verifier"));
+        let request = authorization(&client, &challenge);
+        let later = conn_support::time::now_ms() + 60_000;
+        {
+            let mut codes = crate::lock(&oauth.codes);
+            for n in 0..MAX_PENDING_CODES {
+                codes.insert(
+                    format!("pending-{n}"),
+                    PendingCode {
+                        client_id: client.client_id.clone(),
+                        client_name: client.name.clone(),
+                        peer_link: true,
+                        redirect_uri: "http://127.0.0.1/t3code-peer-link".into(),
+                        code_challenge: challenge.clone(),
+                        resource: "http://127.0.0.1:3773/mcp".into(),
+                        access: "auto".into(),
+                        expires_at_ms: later,
+                    },
+                );
+            }
+        }
+        let code = auth.issue_peer_link_pairing("auto", None).unwrap().code;
+        let decision = json!({"_tag": "pairing-code", "access": "auto", "code": code});
+        let Decision::PageError(message) = oauth.decide(&auth, &urls(), &request, &decision) else {
+            panic!("a full table refuses the sign-in");
+        };
+        assert_eq!(message, TOO_MANY_SIGN_INS);
+        // Once codes free up, the same pairing code still links.
+        crate::lock(&oauth.codes).clear();
+        assert!(matches!(
+            oauth.decide(&auth, &urls(), &request, &decision),
+            Decision::Redirect(_)
+        ));
     }
 
     #[test]

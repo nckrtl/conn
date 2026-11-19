@@ -39,9 +39,8 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 const SENDER_TITLE_MAX_CHARS: usize = 200;
 /// Links kept at once. Each is a row and a token; a user links a handful of machines.
 pub const MAX_LINKS: usize = 256;
-/// Addresses kept per link, after duplicates are dropped; the first ones win.
-pub const MAX_LINK_URLS: usize = 8;
-/// Descriptor probes in flight at once, across every link and call.
+/// Descriptor probes in flight at once, across every link and call. Every address supplied is
+/// probed (`PeerLinks.link`); this bounds how many at once.
 const MAX_PROBES: usize = 16;
 /// MCP sessions kept open to peers, one per peer and address.
 const MAX_SESSIONS: usize = 64;
@@ -350,69 +349,59 @@ impl PeerLinks {
         .await
     }
 
-    /// The environment answering at `origin` (`probe`), with one retry after a second.
+    /// The environment answering at `origin` (`probe`). Any failure but a rejected
+    /// certificate is tried once more after a second, as T3 retries: a dropped request or a
+    /// brief 503 must not list a live peer as down. The timeout bounds both tries.
     async fn probe(&self, origin: &str) -> Result<Value, PeerLinkError> {
         // Bounded: a link's addresses, and every link a listing probes, share the permits.
         let _permit = self.probes.clone().acquire_owned().await.map_err(storage)?;
         let timeout = probe_timeout(origin);
         let url = format!("{origin}/.well-known/t3/environment");
+        let once = || async {
+            match http::send(HttpRequest::new(Method::Get, url.clone()).timeout(timeout)).await {
+                Ok(response) => descriptor_of(&response).ok_or(Probed::NotT3),
+                Err(error) => Err(Probed::Http(error)),
+            }
+        };
         let attempt = async {
-            let first =
-                http::send(HttpRequest::new(Method::Get, url.clone()).timeout(timeout)).await;
-            match first {
-                Err(HttpError::Transport { message, .. }) if message.contains("certificate") => {
-                    Err(HttpError::Transport {
-                        host: String::new(),
-                        message,
-                    })
-                }
-                Err(_) => {
+            match once().await {
+                Err(error) if !error.rejected_certificate() => {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    http::send(HttpRequest::new(Method::Get, url.clone()).timeout(timeout)).await
+                    once().await
                 }
-                ok => ok,
+                first => first,
             }
         };
         let unreachable = |message: String| PeerLinkError::new("unreachable", message);
-        let response = match tokio::time::timeout(timeout, attempt).await {
-            Err(_) | Ok(Err(HttpError::Timeout { .. })) => {
-                return Err(unreachable(format!(
-                    "{origin} did not answer within {} seconds.",
-                    timeout.as_secs()
-                )));
-            }
-            Ok(Err(HttpError::Transport { message, .. })) if message.contains("certificate") => {
-                return Err(unreachable(format!(
+        match tokio::time::timeout(timeout, attempt).await {
+            Ok(Ok(descriptor)) => Ok(descriptor),
+            Err(_) | Ok(Err(Probed::Http(HttpError::Timeout { .. }))) => Err(unreachable(format!(
+                "{origin} did not answer within {} seconds.",
+                timeout.as_secs()
+            ))),
+            Ok(Err(Probed::Http(HttpError::Transport { message, .. })))
+                if message.contains("certificate") =>
+            {
+                Err(unreachable(format!(
                     "{origin} presented a certificate this machine rejected (UNABLE_TO_VERIFY_LEAF_SIGNATURE)."
-                )));
+                )))
             }
-            Ok(Err(HttpError::Connect { message, .. } | HttpError::Transport { message, .. })) => {
-                return Err(unreachable(match connection_code(&message) {
-                    Some(code) => format!("{origin} did not answer ({code})."),
-                    None => format!("{origin} did not answer."),
-                }));
+            Ok(Err(Probed::Http(
+                HttpError::Connect { message, .. } | HttpError::Transport { message, .. },
+            ))) => Err(unreachable(match connection_code(&message) {
+                Some(code) => format!("{origin} did not answer ({code})."),
+                None => format!("{origin} did not answer."),
+            })),
+            Ok(Err(Probed::Http(HttpError::InvalidUrl))) => {
+                Err(unreachable(format!("{origin} did not answer.")))
             }
-            Ok(Err(HttpError::InvalidUrl)) => {
-                return Err(unreachable(format!("{origin} did not answer.")));
-            }
-            Ok(Ok(response)) => response,
-        };
-        let descriptor: Option<Value> = (response.status == 200)
-            .then(|| serde_json::from_slice::<Value>(&response.body).ok())
-            .flatten()
-            .filter(|d| {
-                d["environmentId"].is_string()
-                    && d["label"].is_string()
-                    && d["capabilities"].is_object()
-            });
-        descriptor.ok_or_else(|| {
-            PeerLinkError::new(
+            Ok(Err(Probed::NotT3)) => Err(PeerLinkError::new(
                 "not_a_t3_environment",
                 format!(
                     "{origin} answered, but not as a T3 Code environment this version understands."
                 ),
-            )
-        })
+            )),
+        }
     }
 
     /// The descriptor `url` answers with, when it answers as `environment_id`.
@@ -429,7 +418,7 @@ impl PeerLinks {
         limit: Option<Duration>,
     ) -> Option<(String, Value)> {
         let mut set = JoinSet::new();
-        for url in urls.iter().take(MAX_LINK_URLS) {
+        for url in urls {
             let (this, url, id) = (self.clone(), url.clone(), environment_id.to_owned());
             set.spawn(async move { this.answers_as(url, id).await });
         }
@@ -1210,12 +1199,17 @@ impl PeerLinks {
                 )
             })));
         }
-        serde_json::from_str(&text).map_err(|_| {
-            Answered::Failed(failure(
-                "orchestration_error",
-                "The linked environment's answer did not match this version. Update both environments.",
-            ))
-        })
+        // Decoded with the tool's success shape, as `PeerMcpClient` does: `{}` for a launch is
+        // not a launch.
+        serde_json::from_str::<Value>(&text)
+            .ok()
+            .filter(|value| conn_mcp::tool_result_matches(&call.tool, value))
+            .ok_or_else(|| {
+                Answered::Failed(failure(
+                    "orchestration_error",
+                    "The linked environment's answer did not match this version. Update both environments.",
+                ))
+            })
     }
 
     fn remember_session(&self, key: &str, session: &str) {
@@ -1243,18 +1237,53 @@ impl PeerLinks {
     }
 }
 
-/// The addresses a link tries, in order: duplicates dropped, at most [`MAX_LINK_URLS`].
+/// The addresses a link tries, every one in the order given (`[url, ...alternateUrls]`);
+/// the origins they reach are kept once each.
 fn link_addresses(input: &LinkInput) -> Vec<String> {
-    let mut urls: Vec<String> = Vec::new();
-    for url in std::iter::once(&input.url).chain(input.alternate_urls.iter().flatten()) {
-        if urls.len() == MAX_LINK_URLS {
-            break;
-        }
-        if !urls.contains(url) {
-            urls.push(url.clone());
-        }
+    std::iter::once(&input.url)
+        .chain(input.alternate_urls.iter().flatten())
+        .cloned()
+        .collect()
+}
+
+/// Why one descriptor request did not answer as a T3 environment.
+enum Probed {
+    Http(HttpError),
+    NotT3,
+}
+
+impl Probed {
+    /// A certificate this machine rejected: trying again would not change it.
+    fn rejected_certificate(&self) -> bool {
+        matches!(self, Probed::Http(HttpError::Transport { message, .. }) if message.contains("certificate"))
     }
-    urls
+}
+
+/// The `ExecutionEnvironmentDescriptor` a 200 answer carries, when it has every field the
+/// contract requires (`packages/contracts/src/environment.ts`).
+fn descriptor_of(response: &HttpResponse) -> Option<Value> {
+    if response.status != 200 {
+        return None;
+    }
+    let descriptor: Value = serde_json::from_slice(&response.body).ok()?;
+    let text = |key: &str| {
+        descriptor[key]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let platform = &descriptor["platform"];
+    let platform_ok = platform["os"]
+        .as_str()
+        .is_some_and(|os| matches!(os, "darwin" | "linux" | "windows" | "unknown"))
+        && platform["arch"]
+            .as_str()
+            .is_some_and(|arch| matches!(arch, "arm64" | "x64" | "other"));
+    (text("environmentId")
+        && text("label")
+        && text("serverVersion")
+        && platform_ok
+        && descriptor["capabilities"].is_object())
+    .then_some(descriptor)
 }
 
 /// One address checked in `answering_as`, by its place in the list.
@@ -1832,6 +1861,173 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// A good `ExecutionEnvironmentDescriptor` for `environmentId` `environment:peer`.
+    fn good_descriptor() -> Value {
+        json!({
+            "environmentId": "environment:peer", "label": "Peer",
+            "platform": {"os": "linux", "arch": "x64"}, "serverVersion": "0.0.46",
+            "capabilities": {"mcpModeLimitHeader": true, "linkFence": true},
+        })
+    }
+
+    /// A loopback peer: `GET /.well-known/t3/environment` answers the next of `descriptors`
+    /// (the last one repeats) and counts the requests; `POST /mcp` opens a session and answers
+    /// `tools/call` with `tool_text` as its one text part.
+    async fn fake_peer(
+        descriptors: Vec<(u16, String)>,
+        tool_text: &'static str,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = probes.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let (counted, descriptors) = (counted.clone(), descriptors.clone());
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let (head, body) = loop {
+                        let n = socket.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        bytes.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&bytes).into_owned();
+                        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                            let length = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            if body.len() >= length {
+                                break (head.to_owned(), body.to_owned());
+                            }
+                        }
+                    };
+                    let (status, content_type, extra, reply) = if head.starts_with("GET ") {
+                        let n = counted.fetch_add(1, Ordering::SeqCst);
+                        let (status, body) = descriptors[n.min(descriptors.len() - 1)].clone();
+                        (status, "application/json", "", body)
+                    } else {
+                        let request: Value = serde_json::from_str(&body).unwrap_or_default();
+                        match request["method"].as_str() {
+                            Some("initialize") => (
+                                200,
+                                "application/json",
+                                "mcp-session-id: s1\r\n",
+                                json!({"jsonrpc": "2.0", "id": 0, "result": {}}).to_string(),
+                            ),
+                            Some("tools/call") => (
+                                200,
+                                "application/json",
+                                "",
+                                json!({"jsonrpc": "2.0", "id": 1, "result": {
+                                    "content": [{"type": "text", "text": tool_text}],
+                                }})
+                                .to_string(),
+                            ),
+                            _ => (202, "application/json", "", String::new()),
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), probes)
+    }
+
+    /// One 503 from a live peer is retried, as T3 retries any failure but a rejected
+    /// certificate (`PeerLinks.test.ts`: "one dropped descriptor request does not list a live
+    /// peer as unreachable").
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_dropped_descriptor_request_is_retried() {
+        let (peers, _) = links_with_a_running_thread("retry").await;
+        let (url, probes) = fake_peer(
+            vec![(503, String::new()), (200, good_descriptor().to_string())],
+            "{}",
+        )
+        .await;
+        let found = peers.probe(&url).await.unwrap();
+        assert_eq!(found["environmentId"], "environment:peer");
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A descriptor without a required field is not a T3 environment, before any sign-in
+    /// (`ExecutionEnvironmentDescriptor`: `platform` and `serverVersion` are required).
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_descriptor_missing_required_fields_is_refused() {
+        let (peers, _) = links_with_a_running_thread("descriptor").await;
+        for missing in ["platform", "serverVersion"] {
+            let mut descriptor = good_descriptor();
+            descriptor.as_object_mut().unwrap().remove(missing);
+            let (url, _) = fake_peer(vec![(200, descriptor.to_string())], "{}").await;
+            let refused = peers.probe(&url).await.unwrap_err();
+            assert_eq!(refused.reason, "not_a_t3_environment", "without {missing}");
+        }
+        let mut descriptor = good_descriptor();
+        descriptor["platform"]["os"] = json!("plan9");
+        let (url, _) = fake_peer(vec![(200, descriptor.to_string())], "{}").await;
+        assert_eq!(
+            peers.probe(&url).await.unwrap_err().reason,
+            "not_a_t3_environment"
+        );
+    }
+
+    /// A forwarded result is decoded with the tool's success shape (`PeerMcpClient`): a peer
+    /// answering `{}` to `t3_thread_launch` did not launch anything.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_forwarded_result_must_match_the_tool() {
+        let (peers, _) = links_with_a_running_thread("shape").await;
+        let (url, _) = fake_peer(vec![(200, good_descriptor().to_string())], "{}").await;
+        let now = now_ms();
+        peers
+            .change(move |rows| {
+                rows.push(Row {
+                    environment_id: "environment:peer".into(),
+                    secret_name: "peer-link-test".into(),
+                    label: "Peer".into(),
+                    urls: vec![url],
+                    access: "auto".into(),
+                    linked_at_ms: now,
+                    expires_at_ms: now + 60_000,
+                    last_reached_at_ms: None,
+                    last_error: None,
+                })
+            })
+            .await
+            .unwrap();
+        conn_support::secret_store::write(&peers.secrets_dir, "peer-link-test", b"token").unwrap();
+        let refused = peers
+            .call(PeerCall {
+                environment_id: "environment:peer".into(),
+                tool: "t3_thread_launch".into(),
+                arguments: Map::new(),
+                limits: conn_mcp::PeerLimits {
+                    runtime_mode: "full-access".into(),
+                    interaction_mode: "default".into(),
+                },
+                sender: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, "orchestration_error");
+        assert_eq!(
+            refused.message,
+            "The linked environment's answer did not match this version. Update both environments."
+        );
+    }
+
     /// The answer to a link card finishes, and frees the card, after the client that sent it
     /// went away mid-link.
     #[tokio::test(flavor = "current_thread")]
@@ -1878,9 +2074,10 @@ mod tests {
         );
     }
 
-    /// A link keeps at most `MAX_LINK_URLS` addresses, once each; probes are bounded.
+    /// Every address supplied is checked (`PeerLinks.link` probes them all); probes in flight
+    /// at once are bounded.
     #[tokio::test(flavor = "current_thread")]
-    async fn addresses_are_capped_and_probes_bounded() {
+    async fn every_address_is_checked_and_probes_bounded() {
         let (peers, _) = links_with_a_running_thread("caps").await;
         let mut alternates: Vec<String> = (0..30)
             .map(|n| format!("http://127.0.0.1:{}", 20_000 + n))
@@ -1899,7 +2096,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             refused.message.matches("is this machine").count(),
-            MAX_LINK_URLS,
+            61,
             "{}",
             refused.message
         );

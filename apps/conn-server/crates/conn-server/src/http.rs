@@ -386,8 +386,10 @@ fn pairing_token_blocking(
         }
         return no_store(Json(body).into_response());
     }
-    // MCP approval codes (`access` alone) are not served: only peer-link codes are.
-    if request.access.is_some() {
+    // MCP approval codes (`access` alone) are not served: only peer-link codes are. A
+    // `purpose` without its `access` matches no branch of `AuthCreatePairingCredentialInput`,
+    // so it is refused too, never issued as an ordinary pairing code.
+    if request.access.is_some() || request.purpose.is_some() {
         return error(
             StatusCode::BAD_REQUEST,
             "EnvironmentRequestInvalidError",
@@ -1478,6 +1480,19 @@ mod tests {
         )
         .await;
         assert_eq!(status, 400);
+        // `purpose: "peer-link"` needs its `access`; alone, or with any other purpose, it is
+        // refused and no code is issued (`AuthCreatePairingCredentialInput`).
+        let links_before = auth.pairing_links().len();
+        for body in [
+            r#"{"purpose":"peer-link"}"#,
+            r#"{"purpose":"peer-link","scopes":["access:read"]}"#,
+            r#"{"purpose":"startup"}"#,
+        ] {
+            let (status, reply) = post("/api/auth/pairing-token", body).await;
+            assert_eq!(status, 400, "{body}: {reply}");
+            assert!(!reply.contains(r#""credential""#), "{body}: {reply}");
+        }
+        assert_eq!(auth.pairing_links().len(), links_before);
 
         let device = auth
             .exchange(

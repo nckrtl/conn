@@ -334,6 +334,7 @@ async fn a_failed_thread_read_does_not_open_the_fence() {
         provider_session_id: "p".into(),
         provider_instance_id: "claudeAgent".into(),
         preview: false,
+        device: false,
         subagent: false,
     });
     let cx = crate::tools::Cx {

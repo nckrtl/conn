@@ -7,6 +7,7 @@ use axum::Router;
 use crate::AppState;
 
 mod assets;
+mod device_hub;
 mod hooks;
 pub mod mcp;
 mod oauth_mcp;
@@ -18,6 +19,7 @@ pub fn router() -> Router<AppState> {
         .merge(mcp::router())
         .merge(oauth_mcp::router())
         .merge(assets::router())
+        .merge(device_hub::router())
         .merge(hooks::router())
         .merge(preview::router())
         .merge(pull_requests::router())

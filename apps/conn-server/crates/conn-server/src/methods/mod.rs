@@ -9,6 +9,7 @@ use conn_engine::Engine;
 use crate::table::MethodTable;
 
 mod annotations;
+pub(crate) mod devices;
 mod files;
 mod git;
 mod git_message;
@@ -61,6 +62,8 @@ pub struct Deps {
     /// Text generators (`crate::text_generation`); without it `listTextGeneratorModels` is not
     /// served.
     pub text_generators: Option<Arc<crate::text_generation::TextGenerators>>,
+    /// Device hosts (`conn_devices`); without it `device.*` is not served.
+    pub devices: Option<conn_devices::Devices>,
     /// Bumped when a provider's `ServerProvider` entry changes (`provider::ProviderStatus`).
     pub provider_status: provider::ProviderStatus,
     /// MCP OAuth for outside agents and peer links (`crate::oauth`).
@@ -94,6 +97,7 @@ pub fn register_all(table: &mut MethodTable, deps: &Deps) {
     test_logins::register(table, deps);
     panels::register(table, deps);
     annotations::register(table, deps);
+    devices::register(table, deps);
     source_control::register(table, deps);
     pull_requests::register(table, deps);
     peer_links::register(table, deps);

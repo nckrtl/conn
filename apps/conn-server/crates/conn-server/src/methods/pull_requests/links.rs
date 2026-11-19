@@ -269,9 +269,7 @@ impl Links {
                     (owner.to_owned(), name.to_owned(), head.to_owned())
                 })
                 .collect();
-            let Ok(answers) = client.pull_requests_by_heads(&heads).await else {
-                continue;
-            };
+            let answers = client.pull_requests_by_heads(&heads).await;
             for (&i, nodes) in members.iter().zip(answers) {
                 if let Some(item) = prepared.get_mut(i) {
                     item.found = nodes.map(|nodes| {

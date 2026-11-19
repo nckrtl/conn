@@ -665,10 +665,10 @@ pub(super) async fn run(panel: Arc<Panel>) {
                             .map(|i| known.remove(i).1)
                             .unwrap_or_default();
                         for life in now.iter().filter(|life| !before.contains(life)) {
-                            if let Some((key, _)) = life.split_once(' ') {
-                                if tx.try_send(key.to_owned()).is_err() {
-                                    overflowed.store(true, std::sync::atomic::Ordering::Relaxed);
-                                }
+                            if let Some((key, _)) = life.split_once(' ')
+                                && tx.try_send(key.to_owned()).is_err()
+                            {
+                                overflowed.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         if known.len() >= MAX_OBSERVED_THREADS {

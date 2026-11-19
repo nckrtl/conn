@@ -37,6 +37,24 @@ fn text(status: StatusCode, body: &'static str) -> Response {
     (status, [(header::CONTENT_TYPE, "text/plain")], body).into_response()
 }
 
+/// The query the hub gets: the ticket and the host stay here. Names are matched decoded, as
+/// auth reads them (`URLSearchParams.delete`), so `ws%54icket` is consumed too.
+fn upstream_search(raw_query: &str) -> String {
+    let kept: Vec<&str> = raw_query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter(|pair| {
+            let name = conn_support::url::form_decode(pair.split('=').next().unwrap_or_default());
+            name != "wsTicket" && name != "hostId"
+        })
+        .collect();
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", kept.join("&"))
+    }
+}
+
 async fn handle(State(state): State<AppState>, request: Request<Body>) -> Response {
     let Some(devices) = state.deps.devices.clone() else {
         return text(StatusCode::NOT_FOUND, "Not Found");
@@ -88,20 +106,7 @@ async fn handle(State(state): State<AppState>, request: Request<Body>) -> Respon
     else {
         return text(StatusCode::SERVICE_UNAVAILABLE, "Device hub is not running");
     };
-    // The ticket and the host stay here.
-    let upstream_query: Vec<&str> = raw_query
-        .split('&')
-        .filter(|pair| !pair.is_empty())
-        .filter(|pair| {
-            let name = pair.split('=').next().unwrap_or_default();
-            name != "wsTicket" && name != "hostId"
-        })
-        .collect();
-    let search = if upstream_query.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", upstream_query.join("&"))
-    };
+    let search = upstream_search(&raw_query);
     if let Some(device) = query.get("device").filter(|_| {
         hub_path == "/vendor/serve-sim/api/screenshot"
             || hub_path == "/vendor/serve-emu/api/screenshot"
@@ -331,4 +336,21 @@ fn to_hub(message: ClientMessage) -> Option<HubMessage> {
             }))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Auth decodes parameter names, so the strip must too: an encoded `wsTicket` name
+    /// authenticates and must not reach the hub.
+    #[test]
+    fn strips_credentials_by_their_decoded_names() {
+        assert_eq!(
+            upstream_search("device=A&ws%54icket=secret&host%49d=mac&wsTicket=s2&a+b=1"),
+            "?device=A&a+b=1",
+            "decoded names"
+        );
+        assert_eq!(upstream_search("wsTicket=secret"), "", "only credentials");
+    }
 }

@@ -1,7 +1,7 @@
 //! Device operations against expo-device-hub (`DeviceHubOperations.ts`): list, boot, attach the
 //! stream, shut down, screenshot.
 
-use std::time::Duration;
+use std::{collections::HashMap, future::Future, time::Duration};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::{
     errors::DeviceError,
     generated::DEFAULT_DISPLAY_SCREENSHOT,
-    host::{Host, Ready, RunOptions},
+    host::{Host, Ready, RunOptions, RunResult},
     http,
 };
 
@@ -17,6 +17,8 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Lets the hub's own 30 s simctl timeout report its cause first.
 const LIST_TIMEOUT_SECONDS: u64 = 40;
+/// expo-device-hub 0.22.1 returns no Android devices when avdmanager fails, before it runs adb.
+const AVDMANAGER_LIST_FAILED: &str = "[android-utils] Failed to run `avdmanager list avd`";
 
 /// A device as the host lists it (`HostDevice`).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -155,6 +157,155 @@ async fn hub_json<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&answer.body).map_err(|e| failed(e.to_string()))
 }
 
+/// Mirrors the hub's own adb discovery for when it skips it; `None` when `adb` failed.
+async fn list_adb_devices<F, Fut>(run: &F) -> Option<Vec<HubDevice>>
+where
+    F: Fn(&'static str, Vec<String>) -> Fut,
+    Fut: Future<Output = RunResult>,
+{
+    let listed = run("adb", vec!["devices".into(), "-l".into()]).await;
+    if listed.code != 0 {
+        return None;
+    }
+    let serials: Vec<String> = listed
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            match (words.next(), words.next()) {
+                (Some(serial), Some("device")) => Some(serial.to_owned()),
+                _ => None,
+            }
+        })
+        .collect();
+    let mut devices = Vec::new();
+    for serial in serials {
+        let getprop = run(
+            "adb",
+            vec![
+                "-s".into(),
+                serial.clone(),
+                "shell".into(),
+                "getprop".into(),
+            ],
+        )
+        .await;
+        let props: HashMap<&str, &str> = getprop
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let inner = line.trim().strip_prefix('[')?;
+                let (key, rest) = inner.split_once("]: [")?;
+                let value = rest.strip_suffix(']')?;
+                (!key.contains(']')).then_some((key, value))
+            })
+            .collect();
+        let emulator =
+            props.get("ro.kernel.qemu") == Some(&"1") || props.get("ro.boot.qemu") == Some(&"1");
+        let avd_name = if emulator {
+            run(
+                "adb",
+                vec![
+                    "-s".into(),
+                    serial.clone(),
+                    "emu".into(),
+                    "avd".into(),
+                    "name".into(),
+                ],
+            )
+            .await
+            .stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && *line != "OK" && !line.starts_with("KO"))
+            .map(str::to_owned)
+        } else {
+            None
+        };
+        let model = props.get("ro.product.model").filter(|m| !m.is_empty());
+        let manufacturer = props
+            .get("ro.product.manufacturer")
+            .filter(|m| !m.is_empty());
+        let release = props
+            .get("ro.build.version.release")
+            .filter(|r| !r.is_empty());
+        let name = if emulator {
+            avd_name.unwrap_or_else(|| serial.clone())
+        } else if let Some(model) = model {
+            manufacturer
+                .map(|m| format!("{m} {model}"))
+                .unwrap_or_else(|| (*model).to_owned())
+        } else {
+            serial.clone()
+        };
+        let version = match release {
+            Some(r) if r.chars().all(|c| c.is_ascii_digit()) => format!("Android {r}.0"),
+            Some(r) => format!("Android {r}"),
+            None => "Android".into(),
+        };
+        devices.push(HubDevice {
+            id: serial,
+            name,
+            platform: "android".into(),
+            version,
+            booted: true,
+            physical: !emulator,
+        });
+    }
+    Some(devices)
+}
+
+/// Adds the Android devices the hub could not list: adb devices when its avdmanager failed,
+/// and AVDs that have not booted. Returns whether Android discovery is incomplete.
+async fn add_android<F, Fut>(
+    run: F,
+    errors: &[HubError],
+    devices: &mut Vec<HubDevice>,
+    details: &mut Vec<String>,
+) -> bool
+where
+    F: Fn(&'static str, Vec<String>) -> Fut,
+    Fut: Future<Output = RunResult>,
+{
+    let mut incomplete = false;
+    if errors
+        .iter()
+        .any(|e| e.message.starts_with(AVDMANAGER_LIST_FAILED))
+    {
+        match list_adb_devices(&run).await {
+            Some(found) => devices.extend(found),
+            None => {
+                incomplete = true;
+                details.push("Could not list Android devices (adb devices -l).".into());
+            }
+        }
+    }
+    let avds = run("emulator", vec!["-list-avds".into()]).await;
+    if avds.code != 0 {
+        details.push(format!(
+            "Could not list Android virtual devices (emulator -list-avds, exit code {}). Discovered devices remain available.",
+            avds.code
+        ));
+        return true;
+    }
+    for name in avds.stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !devices
+            .iter()
+            .any(|d| d.platform == "android" && d.name == name)
+        {
+            devices.push(HubDevice {
+                id: name.into(),
+                name: name.into(),
+                platform: "android".into(),
+                version: "Android".into(),
+                booted: false,
+                physical: false,
+            });
+        }
+    }
+    incomplete
+}
+
 pub(crate) async fn list(ready: &Ready, host: &Host) -> Result<Listing, DeviceError> {
     let url = format!("{}/api/devices", ready.hub_origin);
     let listed = tokio::time::timeout(
@@ -200,35 +351,14 @@ pub(crate) async fn list(ready: &Ready, host: &Host) -> Result<Listing, DeviceEr
             })
         })
         .collect();
-    let mut android_incomplete = false;
-    if android {
-        let avds = ready
-            .run("emulator", &["-list-avds".into()], RunOptions::default())
-            .await;
-        if avds.code != 0 {
-            android_incomplete = true;
-            details.push(format!(
-                "Could not list Android virtual devices (emulator -list-avds, exit code {}). Discovered devices remain available.",
-                avds.code
-            ));
-        } else {
-            for name in avds.stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                if !devices
-                    .iter()
-                    .any(|d| d.platform == "android" && d.name == name)
-                {
-                    devices.push(HubDevice {
-                        id: name.into(),
-                        name: name.into(),
-                        platform: "android".into(),
-                        version: "Android".into(),
-                        booted: false,
-                        physical: false,
-                    });
-                }
-            }
-        }
-    }
+    let android_incomplete = android
+        && add_android(
+            |command, args| async move { ready.run(command, &args, RunOptions::default()).await },
+            &errors,
+            &mut devices,
+            &mut details,
+        )
+        .await;
     let simulators_unlisted =
         hub.simulators.is_empty() && errors.iter().any(|e| simulator_list_failed(&e.message));
     Ok(Listing {
@@ -534,6 +664,51 @@ mod tests {
                 error: Some("Error: ENOENT: no such file".into()),
             }),
             "deleted"
+        );
+    }
+
+    /// expo-device-hub returns no Android devices once `avdmanager list avd` fails; adb still
+    /// sees the phone (DeviceService.test.ts "lists adb-attached physical devices").
+    #[tokio::test]
+    async fn lists_adb_devices_when_the_hub_cannot_run_avdmanager() {
+        let run = |command: &'static str, args: Vec<String>| {
+            let stdout = if command == "adb" && args.iter().any(|a| a == "devices") {
+                "List of devices attached\nR52T10ABCDE            device usb:1-1 product:gts9wifi model:SM_X710 device:gts9wifi transport_id:1\n\n"
+            } else if command == "adb" && args.iter().any(|a| a == "getprop") {
+                "[ro.product.manufacturer]: [samsung]\n[ro.product.model]: [SM-X710]\n[ro.build.version.release]: [15]\n"
+            } else {
+                ""
+            };
+            async move {
+                RunResult {
+                    stdout: stdout.into(),
+                    stderr: String::new(),
+                    code: 0,
+                }
+            }
+        };
+        let errors = vec![HubError {
+            message: "[android-utils] Failed to run `avdmanager list avd`:".into(),
+            error: Some(
+                "Error: Command failed: avdmanager list avd\nUnable to locate a Java Runtime."
+                    .into(),
+            ),
+        }];
+        let mut devices = Vec::new();
+        let mut details = Vec::new();
+        let incomplete = add_android(run, &errors, &mut devices, &mut details).await;
+        assert!(!incomplete, "complete");
+        assert_eq!(
+            devices,
+            vec![HubDevice {
+                id: "R52T10ABCDE".into(),
+                name: "samsung SM-X710".into(),
+                version: "Android 15.0".into(),
+                platform: "android".into(),
+                booted: true,
+                physical: true,
+            }],
+            "adb phone"
         );
     }
 

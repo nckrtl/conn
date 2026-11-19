@@ -95,6 +95,9 @@ pub(crate) struct Inner {
     release_timeout: Mutex<std::time::Duration>,
     /// `environment-id` as the file holds it: T3 hashes the raw text into a host's owner.
     environment_file: std::sync::OnceLock<String>,
+    /// Turns true once the first `reconcile` added the saved hosts. T3 builds its service
+    /// only after that reconcile, so no request sees a saved host missing.
+    hosts_loaded: watch::Sender<bool>,
 }
 
 /// The device service. Cheap to clone.
@@ -144,6 +147,7 @@ impl Devices {
             launcher_lock: tokio::sync::Mutex::new(()),
             release_timeout: Mutex::new(agent::RELEASE_TIMEOUT),
             environment_file: std::sync::OnceLock::new(),
+            hosts_loaded: watch::Sender::new(false),
         }));
         let this = devices.clone();
         tokio::spawn(async move {
@@ -166,12 +170,19 @@ impl Devices {
             let mut changes = this.0.config.settings.changes();
             loop {
                 this.reconcile().await;
+                this.0.hosts_loaded.send_replace(true);
                 if changes.changed().await.is_err() {
                     return;
                 }
             }
         });
         devices
+    }
+
+    /// Waits until the saved hosts are in the host list (`hosts_loaded`).
+    async fn loaded(&self) {
+        let mut loaded = self.0.hosts_loaded.subscribe();
+        let _ = loaded.wait_for(|done| *done).await;
     }
 
     fn settings(&self) -> DeviceSettings {
@@ -291,6 +302,7 @@ impl Devices {
 
     /// `readiness`.
     pub(crate) async fn readiness(&self, host_id: Option<&str>) -> Result<Ready, DeviceError> {
+        self.loaded().await;
         let host = self.resolve_host(host_id)?;
         let _guard = self.0.lifecycle.lock().await;
         if !self.settings().enabled {
@@ -346,6 +358,10 @@ impl Devices {
         &self,
         host_id: Option<&str>,
     ) -> Result<Option<Ready>, DeviceError> {
+        self.loaded().await;
+        // The lock covers the settings check too: a disable that lands while this waits must
+        // stop it, as T3 runs the whole call under `lifecycleLock`.
+        let _guard = self.0.lifecycle.lock().await;
         let settings = self.settings();
         if !settings.enabled || !settings.agent_access {
             return Ok(None);
@@ -356,7 +372,6 @@ impl Devices {
         {
             return Ok(None);
         }
-        let _guard = self.0.lifecycle.lock().await;
         let ready = host
             .ensure_agent_ready(&self.on_phase(host.id()))
             .await
@@ -436,6 +451,7 @@ impl Devices {
 
     /// `list`.
     pub async fn list(&self) -> Value {
+        self.loaded().await;
         if !self.settings().enabled {
             return self.state();
         }
@@ -456,6 +472,7 @@ impl Devices {
 
     /// `inspect`: tool versions, without starting anything.
     pub async fn inspect(&self) -> Value {
+        self.loaded().await;
         for host in self.hosts() {
             let result = host.inspect().await;
             if !self.still_current(&host) {
@@ -478,6 +495,7 @@ impl Devices {
 
     /// `updateTool`: installs the pinned tool on this machine.
     pub async fn update_tool(&self, tool: &str) -> Result<Value, DeviceError> {
+        self.loaded().await;
         let tool = if tool == "hub" {
             Tool::Hub
         } else {
@@ -506,6 +524,7 @@ impl Devices {
 
     /// `retryHost`.
     pub async fn retry_host(&self, host_id: &str) -> Result<Value, DeviceError> {
+        self.loaded().await;
         self.resolve_host(Some(host_id))?;
         if !self.settings().enabled {
             return Ok(self.state());
@@ -529,6 +548,7 @@ impl Devices {
 
     /// `configure`.
     pub async fn configure(&self, input: &Value) -> Result<Value, DeviceError> {
+        self.loaded().await;
         let current = self.settings();
         let enabled = input["enabled"].as_bool();
         let agent_access = input["agentAccessEnabled"].as_bool();
@@ -593,6 +613,7 @@ impl Devices {
 
     /// `open`.
     pub async fn open(&self, input: &Value) -> Result<Session, DeviceError> {
+        self.loaded().await;
         let thread_id = input["threadId"].as_str().unwrap_or_default().to_owned();
         let device_id = input["deviceId"].as_str().unwrap_or_default().to_owned();
         let platform = input["platform"].as_str().unwrap_or_default().to_owned();
@@ -704,6 +725,7 @@ impl Devices {
 
     /// `close`.
     pub async fn close(&self, input: &Value) -> Result<(), DeviceError> {
+        self.loaded().await;
         let thread_id = input["threadId"].as_str().unwrap_or_default();
         let host_id = input["hostId"].as_str();
         let device_id = input["deviceId"].as_str();
@@ -786,6 +808,7 @@ impl Devices {
 
     /// `shutdown`: the sessions retire first, while agent-device can still close the app.
     pub async fn shutdown(&self, input: &Value) -> Result<(), DeviceError> {
+        self.loaded().await;
         let host = self.resolve_host(input["hostId"].as_str())?;
         let device_id = input["deviceId"].as_str().unwrap_or_default().to_owned();
         let platform = input["platform"].as_str().unwrap_or_default().to_owned();
@@ -817,6 +840,7 @@ impl Devices {
 
     /// `detail`.
     pub async fn detail(&self, input: &Value) -> Result<Value, DeviceError> {
+        self.loaded().await;
         let (ready, device) = self
             .resolve_device(
                 input["hostId"].as_str(),
@@ -835,6 +859,7 @@ impl Devices {
 
     /// `action`: runs it, then reads the detail again.
     pub async fn action(&self, input: &Value) -> Result<Value, DeviceError> {
+        self.loaded().await;
         let (ready, device) = self
             .resolve_device(
                 input["hostId"].as_str(),
@@ -852,6 +877,7 @@ impl Devices {
         host_id: Option<&str>,
         device_id: &str,
     ) -> Result<(Device, Vec<u8>), DeviceError> {
+        self.loaded().await;
         let (ready, device) = self.resolve_device(host_id, device_id).await?;
         let bytes = hub::screenshot(&ready, &to_hub(&device)).await?;
         let Some(png) = hub::extract_png(&bytes) else {
@@ -928,6 +954,7 @@ impl Devices {
         host_id: &str,
         device_id: &str,
     ) -> Result<(String, String, Vec<String>), DeviceError> {
+        self.loaded().await;
         let host = self.resolve_host(Some(host_id))?;
         let Some(ready) = self.agent_readiness_if_supported(Some(host_id)).await? else {
             return Err(unavailable(
@@ -1431,6 +1458,87 @@ mod tests {
             timeout * 4
         );
         assert!(crate::lock(&devices.0.launchers).is_empty(), "all released");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Settings a test can change while the service runs.
+    struct MutableSettings(Mutex<Map<String, Value>>, watch::Sender<u64>);
+
+    impl SettingsAccess for MutableSettings {
+        fn read(&self) -> Map<String, Value> {
+            crate::lock(&self.0).clone()
+        }
+        fn update(&self, _patch: Value) -> BoxFuture<'static, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn changes(&self) -> watch::Receiver<u64> {
+            self.1.subscribe()
+        }
+    }
+
+    /// A service with one saved SSH host, `mac`, at an address nothing answers on.
+    fn devices_with_saved_host(
+        name: &str,
+        enabled: bool,
+    ) -> (Devices, Arc<MutableSettings>, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("conn-devices-{name}-{}", conn_support::uuid_v4()));
+        let state_dir = dir.join("userdata");
+        std::fs::create_dir_all(&state_dir).unwrap_or_default();
+        let raw = json!({
+            "enableDeviceSupport": enabled,
+            "enableAgentDeviceAccess": enabled,
+            "deviceHosts": [{ "id": "mac", "label": "Mac", "target": "192.0.2.10" }],
+        });
+        let settings = Arc::new(MutableSettings(
+            Mutex::new(raw.as_object().cloned().unwrap_or_default()),
+            watch::Sender::new(0),
+        ));
+        let devices = Devices::start(Config {
+            base_dir: dir.clone(),
+            cwd: dir.clone(),
+            environment_id: "env-1".into(),
+            settings: settings.clone(),
+            state_dir,
+        });
+        (devices, settings, dir)
+    }
+
+    /// The first request after a start finds a saved host: requests wait for the first host
+    /// list, as T3 builds its service only after it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_first_request_finds_a_saved_host() {
+        let (devices, _settings, dir) = devices_with_saved_host("saved", false);
+        let retried = devices.retry_host("mac").await;
+        assert!(retried.is_ok(), "{:?}", retried.err().map(|e| e.message()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A retry that waits for the lifecycle lock while the user turns device support off must
+    /// not start agent tools after the lock frees.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_waiting_agent_start_honours_a_disable() {
+        let (devices, settings, dir) = devices_with_saved_host("disable", true);
+        devices.loaded().await;
+        let guard = devices.0.lifecycle.lock().await;
+        let starting = tokio::spawn({
+            let devices = devices.clone();
+            async move {
+                devices
+                    .agent_readiness_if_supported(Some("mac"))
+                    .await
+                    .map(|ready| ready.is_some())
+                    .map_err(|e| e.message())
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        crate::lock(&settings.0).insert("enableDeviceSupport".into(), Value::Bool(false));
+        drop(guard);
+        let started = tokio::time::timeout(std::time::Duration::from_secs(5), starting).await;
+        assert!(
+            matches!(started, Ok(Ok(Ok(false)))),
+            "started agent tools after the disable: {started:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -12,6 +12,8 @@ import type {
   PullRequestComment,
   PullRequestDetailView,
   PullRequestRef,
+  PullRequestReviewThread,
+  PullRequestThreadComment,
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import {
@@ -43,6 +45,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   buildPullRequestTimeline,
   filterPullRequestTimelineEvents,
+  mergePullRequestThreadComments,
   groupPullRequestTimelineConversations,
   pullRequestTimelineEventMatches,
   type PullRequestTimelineRow,
@@ -64,6 +67,7 @@ import { PullRequestMarkdownEditor } from "./PullRequestMarkdownEditor";
 import { PullRequestReactionBar } from "./PullRequestReactions";
 import { canReactPullRequestComment } from "@t3tools/client-runtime/pull-request-reactions";
 import { PullRequestResolveThreadButton } from "./PullRequestResolveThreadButton";
+import { PullRequestThreadReplyBox } from "./PullRequestReviewAnnotation";
 import {
   PullRequestActorAvatar,
   PullRequestDiffStat,
@@ -88,6 +92,8 @@ interface ReactionSurface {
   readonly canReact: (event: PullRequestTimelineEvent) => boolean;
   /** Absent where there is no composer beside the panel to add a remark to. */
   readonly onAddToChat?: ((comment: PullRequestComment) => void) | undefined;
+  /** Adds a review thread with every comment loaded so far. */
+  readonly onAddThreadToChat?: ((thread: PullRequestReviewThread) => void) | undefined;
   readonly environmentId: EnvironmentId;
   readonly threadRef: ScopedThreadRef | null;
   readonly reference: PullRequestRef;
@@ -240,12 +246,15 @@ function ReviewStateBadge({ state }: { state: string }) {
 function AddToChatButton({
   comment,
   reactions,
+  onAdd,
 }: {
   comment: PullRequestComment;
   reactions: ReactionSurface;
+  /** Adds something larger than the comment, such as its whole conversation. */
+  onAdd?: (() => void) | undefined;
 }) {
   const gt = useGT();
-  const onAddToChat = reactions.onAddToChat;
+  const onAddToChat = onAdd ?? (reactions.onAddToChat && (() => reactions.onAddToChat?.(comment)));
   return onAddToChat === undefined ? null : (
     <Tooltip>
       <TooltipTrigger
@@ -255,7 +264,7 @@ function AddToChatButton({
             variant="ghost-muted"
             className="shrink-0"
             aria-label={gt("Add to chat")}
-            onClick={() => onAddToChat(comment)}
+            onClick={onAddToChat}
           />
         }
       >
@@ -292,6 +301,7 @@ function ConversationCard({
   showPath = true,
   reply = false,
   resolveButton = null,
+  addToChat,
 }: {
   event: PullRequestTimelineEvent;
   editable: PullRequestComment | null;
@@ -302,6 +312,8 @@ function ConversationCard({
   /** A reply goes with its conversation, from the card that heads it. */
   reply?: boolean;
   resolveButton?: ReactNode;
+  /** Replaces adding the comment alone, for a card that heads a whole conversation. */
+  addToChat?: (() => void) | undefined;
 }) {
   const gt = useGT();
   const canReact = reactions.canReact(event);
@@ -394,8 +406,8 @@ function ConversationCard({
           ) : null}
           {reply ? null : <FixFindingButton event={event} reactions={reactions} />}
           {resolveButton}
-          {event.body && event.comment && !reply ? (
-            <AddToChatButton comment={event.comment} reactions={reactions} />
+          {event.comment && !reply && (addToChat || event.body) ? (
+            <AddToChatButton comment={event.comment} reactions={reactions} onAdd={addToChat} />
           ) : null}
           {canReact || event.reactions.length > 0 ? (
             <PullRequestReactionBar
@@ -545,13 +557,10 @@ function ReviewThreadEvent({
   onOpen,
   reactions,
   detail,
-  body,
 }: {
   revealAnchor?: string | null;
   event: PullRequestTimelineEvent;
   thread: PullRequestTimelineThread;
-  /** Draws the open thread in place of its comment and reply cards. */
-  body?: ReactNode;
   detail: PullRequestDetailView;
   editable: ReadonlyMap<string, PullRequestComment>;
   cwd: string;
@@ -569,6 +578,84 @@ function ReviewThreadEvent({
       (!thread.isResolved && !dismissed),
   );
   const replyCount = thread.replies.length + thread.moreReplies;
+  const reviewThread = detail.reviewThreads.find((candidate) => candidate.id === thread.id);
+  const overviewThread = detail.overviewThreads?.find((candidate) => candidate.id === thread.id);
+  const hostThread = reviewThread ?? overviewThread;
+  const canReply =
+    hostThread !== undefined &&
+    detail.capabilities.review.reply &&
+    detail.viewerPermissions.comment;
+  const replyToThread = useAtomCommand(pullRequestEnvironment.replyToThread, {
+    reportFailure: false,
+  });
+  const loadThreadComments = useAtomCommand(pullRequestEnvironment.threadComments, {
+    reportFailure: false,
+  });
+  // The draft lives outside the folded part, so folding the thread keeps an unsent reply.
+  const [replying, setReplying] = useState(false);
+  const [replyDraft, setReplyDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [loaded, setLoaded] = useState<{
+    readonly comments: ReadonlyArray<PullRequestThreadComment>;
+    readonly nextCursor: string | null;
+  } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const comments = mergePullRequestThreadComments(
+    hostThread?.comments ?? [],
+    loaded?.comments ?? [],
+  );
+  const nextCommentsCursor =
+    loaded === null ? (hostThread?.nextCommentsCursor ?? null) : loaded.nextCursor;
+  // Comments loaded past the first page join the replies the way the Timeline builds them.
+  const replies =
+    loaded === null || hostThread === undefined
+      ? thread.replies
+      : (buildPullRequestTimeline({
+          ...detail,
+          commits: [],
+          reviewThreads: reviewThread ? [{ ...reviewThread, comments: [...comments] }] : [],
+          overviewThreads: overviewThread ? [{ ...overviewThread, comments: [...comments] }] : [],
+        }).find((candidate) => candidate.thread?.id === thread.id)?.thread?.replies ??
+        thread.replies);
+  const onAddThreadToChat = reactions.onAddThreadToChat;
+  const addThreadToChat =
+    onAddThreadToChat && reviewThread && comments.some((comment) => visibleBody(comment.body))
+      ? () => onAddThreadToChat({ ...reviewThread, comments })
+      : undefined;
+  const sendReply = async (text: string) => {
+    const body = text.trim();
+    if (body.length === 0 || sending) return;
+    setSending(true);
+    const result = await replyToThread({
+      environmentId: reactions.environmentId,
+      input: { ...reactions.reference, threadId: thread.id, body },
+    });
+    setSending(false);
+    if (result._tag === "Failure") {
+      toastManager.add({ type: "error", title: m(msg("Reply could not be posted")) });
+      return;
+    }
+    setReplyDraft("");
+    setReplying(false);
+    reactions.onRefresh();
+  };
+  const loadMore = async (cursor: string) => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    const result = await loadThreadComments({
+      environmentId: reactions.environmentId,
+      input: { ...reactions.reference, threadId: thread.id, cursor },
+    });
+    setLoadingMore(false);
+    if (result._tag === "Failure") {
+      toastManager.add({ type: "error", title: m(msg("More comments could not be loaded")) });
+      return;
+    }
+    setLoaded((previous) => ({
+      comments: mergePullRequestThreadComments(previous?.comments ?? [], result.value.comments),
+      nextCursor: result.value.nextCursor,
+    }));
+  };
 
   return (
     <div className="group relative py-3 pl-9 [contain-intrinsic-block-size:60px] [content-visibility:auto]">
@@ -638,9 +725,7 @@ function ReviewThreadEvent({
           )}
         />
       </button>
-      {/* Folded, the body stays mounted, so an unsent reply survives. */}
-      {body === undefined ? null : <div className={cn("mt-4", !expanded && "hidden")}>{body}</div>}
-      {expanded && body === undefined ? (
+      {expanded ? (
         <div className="mt-4">
           <ConversationCard
             event={event}
@@ -649,6 +734,7 @@ function ReviewThreadEvent({
             onOpen={onOpen}
             reactions={reactions}
             showPath={false}
+            {...(addThreadToChat ? { addToChat: addThreadToChat } : {})}
             resolveButton={
               <PullRequestResolveThreadButton
                 environmentId={reactions.environmentId}
@@ -659,10 +745,10 @@ function ReviewThreadEvent({
               />
             }
           />
-          {thread.replies.length > 0 ? (
+          {replies.length > 0 ? (
             // Each reply card hangs off a line that runs down from the comment it answers.
             <div className="mt-2 space-y-2 ps-6">
-              {thread.replies.map((reply) => (
+              {replies.map((reply) => (
                 <div
                   key={reply.id}
                   className="relative before:absolute before:top-5 before:-left-3 before:h-px before:w-3 before:bg-(--shell-divider) after:absolute after:-top-2 after:bottom-0 after:-left-3 after:w-px after:bg-(--shell-divider) last:after:bottom-auto last:after:h-7"
@@ -680,11 +766,44 @@ function ReviewThreadEvent({
               ))}
             </div>
           ) : null}
-        </div>
-      ) : null}
-      {thread.hasMoreReplies && body === undefined ? (
-        <div className="px-2">
-          <PullRequestMoreReplies {...thread} />
+          {nextCommentsCursor !== null ? (
+            <div className="mt-2 ps-6">
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={loadingMore}
+                onClick={() => void loadMore(nextCommentsCursor)}
+              >
+                {loadingMore ? gt("Loading...") : gt("Load more comments")}
+              </Button>
+            </div>
+          ) : thread.hasMoreReplies ? (
+            <div className="mt-2 ps-6">
+              <PullRequestMoreReplies {...thread} />
+            </div>
+          ) : null}
+          {canReply ? (
+            <div className="mt-2 ps-6">
+              {replying ? (
+                <PullRequestThreadReplyBox
+                  className="rounded-lg border border-(--shell-divider) p-3"
+                  environmentId={reactions.environmentId}
+                  reference={reactions.reference}
+                  threadId={thread.id}
+                  completionScope={reactions.completionScope}
+                  pending={sending}
+                  value={replyDraft}
+                  onValueChange={setReplyDraft}
+                  onSend={(text) => void sendReply(text)}
+                  onCancel={() => setReplying(false)}
+                />
+              ) : (
+                <Button size="xs" variant="ghost" onClick={() => setReplying(true)}>
+                  <T context="verb, button">Reply</T>
+                </Button>
+              )}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -927,41 +1046,63 @@ function timelineFinding(
   return visibleBody(comment.body) === null ? null : { kind: "comment", comment };
 }
 
-/**
- * Review threads as Timeline rows (path title and meta line) for threads the Code tab's diff
- * cannot place. `renderThread` draws each open thread, so it keeps the Code tab's reply, load-more,
- * fix and add-to-chat actions.
- */
+/** Review threads drawn as the Timeline draws them, for threads the Code tab's diff cannot place. */
 export function PullRequestThreadList({
   detail,
   threadIds,
   environmentId,
   reference,
+  onAddToChat,
   onRefresh,
-  renderThread,
+  pendingFinding = null,
+  fixFindingLabel,
+  onFixFinding,
 }: {
   detail: PullRequestDetailView;
   threadIds: ReadonlySet<string>;
   environmentId: EnvironmentId;
   reference: PullRequestRef;
+  onAddToChat?: ((subject: PullRequestChatSubject) => void) | undefined;
   onRefresh: () => void;
-  renderThread: (threadId: string) => ReactNode;
+  pendingFinding?: string | null;
+  fixFindingLabel?: string | undefined;
+  onFixFinding?: ((finding: PullRequestFinding) => void) | undefined;
 }) {
+  const gt = useGT();
   const resolve = useMessages();
-  const reactions: ReactionSurface = {
-    revealAnchor: null,
-    canReact: () => false,
-    environmentId,
-    threadRef: null,
-    reference,
-    completionScope: null,
-    onRefresh,
-  };
   const threads = buildPullRequestTimeline(detail, resolve).flatMap((event) =>
     event.thread !== undefined && threadIds.has(event.thread.id)
       ? [{ event, thread: event.thread }]
       : [],
   );
+  const reactions: ReactionSurface = {
+    revealAnchor: null,
+    canReact: (event) =>
+      event.comment !== undefined && canReactPullRequestComment(detail, event.comment),
+    onAddToChat: onAddToChat && ((comment) => onAddToChat({ kind: "comment", comment })),
+    onAddThreadToChat: onAddToChat && ((thread) => onAddToChat({ kind: "thread", thread })),
+    environmentId,
+    threadRef: null,
+    reference,
+    completionScope: pullRequestCompletionScope(detail, environmentId, reference),
+    onRefresh,
+    fix: onFixFinding && {
+      findingFor: (event) => timelineFinding(detail, event),
+      onFix: onFixFinding,
+      pending: pendingFinding,
+      label: fixFindingLabel ?? gt("Fix in a thread"),
+    },
+  };
+  const editable = new Map(
+    threads
+      .flatMap(({ event }) => [event, ...(event.thread?.replies ?? [])])
+      .flatMap((event) => (event.comment ? [event.comment] : []))
+      .filter((comment) => canEditPullRequestComment(detail, comment))
+      .map((comment) => [comment.id, comment] as const),
+  );
+  const openOnHost = (url: string) => {
+    void readLocalApi()?.shell.openExternal(url);
+  };
   return (
     <div>
       {threads.map(({ event, thread }) => (
@@ -970,11 +1111,10 @@ export function PullRequestThreadList({
           event={event}
           thread={thread}
           detail={detail}
-          editable={new Map()}
+          editable={editable}
           cwd={detail.workspaceRoot}
-          onOpen={() => {}}
+          onOpen={openOnHost}
           reactions={reactions}
-          body={renderThread(thread.id)}
         />
       ))}
     </div>
@@ -1060,6 +1200,7 @@ export function PullRequestTimelineTab({
     canReact: (event) =>
       event.comment !== undefined && canReactPullRequestComment(detail, event.comment),
     onAddToChat: onAddToChat && ((comment) => onAddToChat({ kind: "comment", comment })),
+    onAddThreadToChat: onAddToChat && ((thread) => onAddToChat({ kind: "thread", thread })),
     environmentId,
     threadRef,
     reference,

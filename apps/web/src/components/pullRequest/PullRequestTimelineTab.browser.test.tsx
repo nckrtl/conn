@@ -268,3 +268,44 @@ it("hides bot comments under the saved filter and shows them when the filter all
   await screen.rerender(timeline({ bots: true, resolved: false }));
   await expect.element(screen.getByText("1 comment")).toBeVisible();
 });
+
+it("adds a review thread to the chat as its whole conversation", async () => {
+  const note = { author: detail.author, createdAt: "2026-09-01T00:00:00Z", url: null };
+  const thread = {
+    id: "thread",
+    path: "src/a.ts",
+    line: 3,
+    side: "right" as const,
+    isResolved: false,
+    isOutdated: false,
+    comments: [
+      { ...note, id: "root", body: "Rename this." },
+      { ...note, id: "reply", body: "Done.", createdAt: "2026-09-02T00:00:00Z" },
+    ],
+  };
+  const value: PullRequestDetailView = { ...detail, commits: [], reviewThreads: [thread] };
+  const onAddToChat = vi.fn();
+  await using screen = await render(
+    <div style={{ height: 600 }}>
+      <PullRequestTimelineTab
+        scrollerRef={() => {}}
+        detail={value}
+        environmentId={EnvironmentId.make("environment")}
+        reference={value}
+        order="oldest"
+        onOpenCommit={() => {}}
+        onRefresh={() => {}}
+        onAddToChat={onAddToChat}
+      />
+    </div>,
+  );
+
+  await screen.getByRole("button", { name: "Add to chat" }).click();
+  expect(onAddToChat).toHaveBeenCalledWith({
+    kind: "thread",
+    thread: expect.objectContaining({
+      id: "thread",
+      comments: [expect.objectContaining({ id: "root" }), expect.objectContaining({ id: "reply" })],
+    }),
+  });
+});

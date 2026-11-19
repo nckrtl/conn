@@ -20,6 +20,8 @@ pub struct ThreadCredentialRequest {
     pub thread_id: String,
     pub provider_instance_id: String,
     pub preview: bool,
+    /// Device tools, captured when the provider session starts (`agentAccessSettings`).
+    pub device: bool,
     /// A delegated child task.
     pub subagent: bool,
 }
@@ -60,6 +62,7 @@ impl Credentials {
             provider_instance_id: request.provider_instance_id,
             subagent: request.subagent,
             preview: request.preview,
+            device: request.device,
         };
         self.records.insert(
             hash(&token),
@@ -87,6 +90,26 @@ impl Credentials {
         }
         record.last_alive = now;
         Some(record.caller.clone())
+    }
+
+    /// Whether `provider_session_id`'s token still resolves and was issued for `request`.
+    pub(crate) fn fits(
+        &self,
+        provider_session_id: &str,
+        request: &ThreadCredentialRequest,
+    ) -> bool {
+        let now = Mark::now();
+        self.records.values().any(|record| {
+            let caller = &record.caller;
+            caller.provider_session_id == provider_session_id
+                && !record.expired
+                && record.last_alive.elapsed_to(&now) <= LIVENESS
+                && caller.thread_id == request.thread_id
+                && caller.provider_instance_id == request.provider_instance_id
+                && caller.subagent == request.subagent
+                && caller.preview == request.preview
+                && caller.device == request.device
+        })
     }
 
     pub(crate) fn touch(&mut self, thread_id: &str) {

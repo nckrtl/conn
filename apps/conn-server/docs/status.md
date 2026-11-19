@@ -83,6 +83,33 @@ the thread branch's PR. Before, the engine refused `thread.pull-request-link.syn
   `thread.pull-request-link-updated` (one link); clients end in the same state. Link reads
   run one at a time (T3 runs up to 100).
 
+## A handoff releases the caller's credential with its process (2026-11-19)
+
+A worktree handoff detaches the calling thread's provider session. T3 revokes that session's
+MCP credential when its process ends (`releaseEntry` in `ProviderSessionManager.ts`), and
+keeps it while a process shared by several threads still runs; the next session of the thread
+reuses it. Conn kept the old credential for every provider, so `t3_worktree_status` with it
+stayed `ok` here and turned into a 401 on the T3 server a few milliseconds after the handoff
+returned. That race made `parity` fail at random.
+
+Now `Session::close` answers `Closed::RuntimeStopped` or `Closed::RuntimeShared`. Claude
+(one query process per session) and ACP (one agent per session) stop; Codex stops only with
+its last session, since one `app-server` per instance serves every Codex thread. The engine
+revokes after the close when the process stopped, together with the credentials it kept for
+that instance. When the process still runs, it keeps the credential for the thread and the
+next session reuses it while it still fits (instance, subagent, browser access), as T3's
+`prepareMcpSession` does. Deleting the thread revokes a kept credential. `parity` waits until
+both servers refuse the old Claude credential (15 s limit) and compares the 401 replies.
+Proofs: engine tests `a_workspace_handoff_revokes_the_old_session_tools` and
+`a_handoff_on_a_shared_process_keeps_and_reuses_the_tools`; Codex
+`close_reports_whether_the_app_server_keeps_running`; `/mcp`
+`a_handoff_on_a_shared_codex_process_keeps_and_reuses_the_credential` (real Codex provider on a
+scripted app-server, two threads, an MCP call with the continuation's credential).
+
+Still different from T3, not changed here: archiving a thread does not close its session or
+revoke its live credential (T3 detaches with `revokeMcpCredential`). With one Codex thread,
+Conn stops the app-server on close, so its handoff revokes; T3 keeps its shared process.
+
 ## Forks show their inherited history (2026-11-19)
 
 - **Served:** a run fork that is not a side chat opens with the history it inherits, in every
@@ -236,6 +263,37 @@ invalid IDs and URLs, comments and values containing spaces or equals signs. Thi
 no bootstrap command. Orbit still supplies live lifecycle state and still configures the
 workspace project and access separately.
 
+## Devices (2026-11-19)
+
+`device.*` (10), real `subscribeDeviceState`, `/api/device-hub/*` and the tools `device_list`,
+`device_open`, `device_screenshot` and `device_close` are served by `crates/conn-devices`.
+Hosts: an SSH host (the main path from a Linux container: T3's Node bootstrap on the Mac, one
+`ssh -L` for the hub and the agent-device daemon, reconnects after three missed probes) and
+this machine (npm installs under `<home>/tools`, the hub and daemon as children; the hub
+stops with SIGTERM, then SIGKILL after 5 s). Config writes run on the blocking pool; one lock
+covers launcher bind, release and prune, as T3's; shutdown stops all hosts at once. Detail and
+actions use simctl, serve-sim's helper and adb as T3 does. A thread gets the `device`
+capability as T3 grants it (`enableDeviceSupport` and agent access); archive and delete close
+its sessions. The bootstrap script, the launcher, the tool pins and the proxy allow-lists are
+generated from `apps/server` (`tools/gen-devices.mjs --check`).
+
+Proof: `crates/conn-devices/tools/conformance.mjs` (in `tools/check.sh`) runs both servers on
+a stand-in `ssh` (a Mac, its hub and daemon) and `npm`: 61 checks equal after normalising
+ids, ports and paths, among them every RPC answer, the hub proxy (MJPEG still frame included),
+the four tools, the launcher's agent-device runs, every distinct ssh argv and stdin and hub
+request, and both servers' answers through the contract decoders. `effect-client.mjs` decodes
+all 10 methods. Live on mini (2026-11-19): `device.testHost` probed nick.local read-only (iOS
+available, 4.6 s); the local host installed expo-device-hub 0.22.1, ran the hub, and reported
+iOS incomplete (Command Line Tools only, no simctl), through the proxy too.
+
+Known differences: Expo and Simlock hosts are not served (`supportsEasHosts` and
+`supportsSimlockHosts` left out; `device.easAccount` and `device.simlockIdentity` answer the T3
+device service's own typed error for that case). Codex and Claude prompts do not add T3's
+device text and Claude's SubagentStart hook yet (the README of `conn-provider-codex` already
+lists device tools as off). The local hub is restarted at the next use, not supervised; old
+tool versions are not pruned. The open context (`workspaceRoot`) is not passed: only Expo
+hosts read it.
+
 ## Released and running in Orbit (2026-11-16)
 
 - **Release `conn-server-v0.1.0`** (Conn `a7755b30bd`): the release workflow's first run built
@@ -353,7 +411,6 @@ Still red:
 - `round_trip`: the new `get_config` sample has `worktreeCleanup: null` in a project override.
   `optionalKey(NullOr(T))` is generated as `Option<T>`, so null is dropped. Fixing it in
   `gen-contract.mjs` changes about 2,330 fields.
-- parity: `t3_worktree_status` after a handoff is an RPC error on the T3 server and `ok` here.
 - On mini: claude conformance (`env: : No such file`, red on 2026-11-17 as well) and canary
   (writes to the decoy home from the CommandLineTools python cache).
 

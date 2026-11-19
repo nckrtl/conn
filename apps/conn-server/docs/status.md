@@ -113,7 +113,9 @@ workspace project and access separately.
 `device_open`, `device_screenshot` and `device_close` are served by `crates/conn-devices`.
 Hosts: an SSH host (the main path from a Linux container: T3's Node bootstrap on the Mac, one
 `ssh -L` for the hub and the agent-device daemon, reconnects after three missed probes) and
-this machine (npm installs under `<home>/tools`, the hub and daemon as children). Detail and
+this machine (npm installs under `<home>/tools`, the hub and daemon as children; the hub
+stops with SIGTERM, then SIGKILL after 5 s). Config writes run on the blocking pool; one lock
+covers launcher bind, release and prune, as T3's; shutdown stops all hosts at once. Detail and
 actions use simctl, serve-sim's helper and adb as T3 does. A thread gets the `device`
 capability as T3 grants it (`enableDeviceSupport` and agent access); archive and delete close
 its sessions. The bootstrap script, the launcher, the tool pins and the proxy allow-lists are

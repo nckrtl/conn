@@ -865,14 +865,43 @@ pub(crate) fn start_next_queued(
     if !thread["archivedAt"].is_null() {
         return Ok(None);
     }
-    let next = queued_runs(tx, thread_id)?
-        .into_iter()
-        .find(|run| match only {
-            Some(id) => run["id"] == id,
-            None => run["queueHeld"] != true,
-        });
-    let Some(mut run) = next else {
-        return Ok(None);
+    let mut only = only;
+    let mut run = loop {
+        let next = queued_runs(tx, thread_id)?
+            .into_iter()
+            .find(|run| match only {
+                Some(id) => run["id"] == id,
+                None => run["queueHeld"] != true,
+            });
+        let Some(run) = next else {
+            return Ok(None);
+        };
+        // A queued pull request wake whose watches all moved on is dropped, and one that
+        // outlived some of them tells only the current ones (`startNextQueuedRun`).
+        let message_id = run["userMessageId"].as_str().unwrap_or_default();
+        let Some(message) = tx
+            .entity(thread_id, "messages", message_id)?
+            .filter(|m| m["notification"]["source"]["kind"] == "monitor")
+        else {
+            break run;
+        };
+        let messages = tx.entities(thread_id, "messages")?;
+        let run_id = run["id"].as_str().unwrap_or_default().to_owned();
+        if crate::pull_requests::stale_wake(&thread, &messages, &message) {
+            finish_run(tx, thread_id, &run_id, "cancelled", None)?;
+            only = None;
+            continue;
+        }
+        if let Some(mut current) = crate::pull_requests::current_wake(&thread, &messages, &message)
+        {
+            current["updatedAt"] = json!(tx.now());
+            let mut write = Draft::new(thread_id, "message.updated", current).run(Some(&run_id));
+            if let Some(root) = run["rootNodeId"].as_str() {
+                write = write.node(Some(root));
+            }
+            tx.append(write)?;
+        }
+        break run;
     };
     let run_id = run["id"].as_str().unwrap_or_default().to_owned();
     let root = run["rootNodeId"].as_str().unwrap_or_default().to_owned();
@@ -2481,6 +2510,20 @@ fn thread_pull_request_watch(tx: &mut Tx<'_>, command: Value) -> Outcome {
     tx.append(
         Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
     )?;
+    Ok(vec![])
+}
+
+/// `thread.pull-request-watch.checks-reopen`, sent when an agent's push command ends
+/// (`PullRequestSyncReactor.reopenWatchedChecks`).
+pub(crate) fn pull_request_watch_checks_reopen(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    let thread = live_thread(tx, &thread_id)?;
+    if let Some(updated) = crate::pull_requests::reopen_checks(&thread) {
+        let cid = command["commandId"].as_str().map(str::to_owned);
+        tx.append(
+            Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+        )?;
+    }
     Ok(vec![])
 }
 

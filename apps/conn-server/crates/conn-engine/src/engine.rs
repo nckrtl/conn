@@ -691,6 +691,8 @@ impl Inner {
             Some(crate::secret_requests::record as commands::Handler)
         } else if command_type == "thread.pull-request-watch.sync" {
             Some(commands::pull_request_watch_sync as commands::Handler)
+        } else if command_type == "thread.pull-request-watch.checks-reopen" {
+            Some(commands::pull_request_watch_checks_reopen as commands::Handler)
         } else {
             commands::handler(&command_type)
         };

@@ -46,6 +46,7 @@ mod html_cleanup;
 mod output;
 mod projects;
 mod pull_requests;
+mod push;
 mod reads;
 mod restart;
 mod rollback;

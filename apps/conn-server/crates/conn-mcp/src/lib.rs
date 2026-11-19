@@ -74,7 +74,7 @@ pub struct McpConfig {
 
 /// One call into the server's pull request panel: `(operation, input)` to the result, or the
 /// contract failure (`PullRequestUnavailableError`, `PullRequestOperationError`, ...). The
-/// operations are `watchSummary`, `locateProject`, `reviewGuide` and `generateReviewGuide`.
+/// operations are `watchSummary`, `locateProject` and `reviewGuide`.
 pub type PullRequestHost = Arc<
     dyn Fn(&'static str, Value) -> conn_engine::BoxFuture<'static, Result<Value, Value>>
         + Send

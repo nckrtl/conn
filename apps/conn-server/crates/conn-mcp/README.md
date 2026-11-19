@@ -184,7 +184,7 @@ Codex). `preview_*` in **O** names all 13 preview tools.
 | `list_thread_pull_requests` | served (part 4) | reads | | |
 | `watch_pull_request` | served (new) | writesThreads | hidden from delegated children | P |
 | `unwatch_pull_request` | served (new) | writesThreads | hidden from delegated children | P |
-| `write_pull_request_guides` | served (new) | writesWithCapability | answers the panel's "guides off" per PR | |
+| `write_pull_request_guides` | not served | writesWithCapability | server: a review guide generator (T3's `PullRequestReviewGuideService`) | |
 | `read_pull_request_guide` | served (new) | reads | the panel's stored guide | |
 | `schedule_task` | served | either(writesEnvironment, writes) | | O |
 | `list_scheduled_tasks` | served | reads | | |
@@ -339,14 +339,14 @@ uncached `summary` through the server's GitHub panel (`McpConfig::pull_requests`
 engine's `thread.pull-request.watch`. Only a `PullRequestUnavailableError` from the host
 refuses the watch, with its message; other host failures leave the watch to recover. Both
 tools are hidden from delegated children (`src/subagent-hidden.txt`).
-`read_pull_request_guide` and `write_pull_request_guides` follow the toolkit's `locateAll`:
-the panel names the project that checks out the repository (`locateProject`), the stored guide
-comes from the panel's `reviewGuide`, and each write answers the panel's
-`generateReviewGuide` failure ("guides off") as `outcome: failed`. The watch loop that wakes
-the thread is the server's (`conn-server/src/methods/pull_requests/watches.rs`).
+`read_pull_request_guide` follows the toolkit's `locateAll`: the panel names the project that
+checks out the repository (`locateProject`), and the stored guide comes from the panel's
+`reviewGuide`. `write_pull_request_guides` is not served: the server has no review guide
+generator, so the tool would always fail. The watch loop that wakes the thread is the
+server's (`conn-server/src/methods/pull_requests/watches.rs`).
 
 Nested array elements are type-checked field by field (`catalog::check_arguments`), as
-Effect decodes `write_pull_request_guides`' `pullRequests` and `create_threads`' `threads`.
+Effect decodes `create_threads`' `threads`.
 
 ## HTML rendering
 

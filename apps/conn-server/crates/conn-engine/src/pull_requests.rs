@@ -435,6 +435,142 @@ pub(crate) fn entry_key(entry: &Value) -> Value {
     key_json(&key_of(entry))
 }
 
+// ---- Queued wakes: `isStalePullRequestWatchWake`, `currentPullRequestWatchWake` -------------
+
+/// `monitorPullRequestStamps`: the pull requests a `monitor` notice speaks for.
+fn monitor_stamps(notification: &Value) -> Vec<Value> {
+    let source = &notification["source"];
+    if source["kind"] != "monitor" || !source["pullRequest"].is_object() {
+        return Vec::new();
+    }
+    let mut stamps = vec![source["pullRequest"].clone()];
+    stamps.extend(
+        source["otherPullRequests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
+    stamps
+}
+
+/// `isStalePullRequestWatchStamp`.
+fn stale_stamp(thread: &Value, messages: &[Value], stamp: &Value) -> bool {
+    let key = key_of(stamp);
+    let links = links_of(thread);
+    let Some(link) = visible_match(&links, &key) else {
+        return true;
+    };
+    let started = &stamp["watchStartedAt"];
+    let watch = link.get("watch").filter(|w| w.is_object());
+    if stamp["watchEnded"] == true {
+        // The final notice outlives its watch, but a replacement watch supersedes it.
+        let latest = watch.or_else(|| link.get("endedWatch").filter(|w| w.is_object()));
+        return latest.map(|w| &w["startedAt"]) != Some(started);
+    }
+    let Some(watch) = watch else {
+        // A watch the server ended with a final notice still owes the wakes queued before it.
+        let ended_with_notice = messages.iter().any(|message| {
+            monitor_stamps(&message["notification"])
+                .iter()
+                .any(|ending| {
+                    ending["watchEnded"] == true
+                        && &ending["watchStartedAt"] == started
+                        && key_of(ending) == key
+                })
+        });
+        return !ended_with_notice
+            || &link["endedWatch"]["startedAt"] != started
+            || snapshot_ends_watch(&link["snapshot"], started.as_str().unwrap_or_default());
+    };
+    &watch["startedAt"] != started
+        || (!stamp["headSha"].is_null() && watch["headSha"] != stamp["headSha"])
+        || snapshot_ends_watch(
+            &link["snapshot"],
+            watch["startedAt"].as_str().unwrap_or_default(),
+        )
+}
+
+/// `isStalePullRequestWatchWake`: every pull request a queued wake speaks for has moved on.
+pub(crate) fn stale_wake(thread: &Value, messages: &[Value], message: &Value) -> bool {
+    let stamps = monitor_stamps(&message["notification"]);
+    !stamps.is_empty() && stamps.iter().all(|s| stale_stamp(thread, messages, s))
+}
+
+/// `currentPullRequestWatchWake`: a queued wake for several pull requests, rebuilt from the
+/// ones still current, or `None` when it needs no change.
+pub(crate) fn current_wake(thread: &Value, messages: &[Value], message: &Value) -> Option<Value> {
+    use conn_source_control::pull_requests::watch::{Wake, combine};
+    let stamps = monitor_stamps(&message["notification"]);
+    if stamps.len() < 2 {
+        return None;
+    }
+    let current: Vec<&Value> = stamps
+        .iter()
+        .filter(|s| !stale_stamp(thread, messages, s))
+        .collect();
+    let (first, rest) = current.split_first()?;
+    if rest.len() == stamps.len() - 1 {
+        return None;
+    }
+    let sections: Vec<Wake> = current
+        .iter()
+        .filter_map(|stamp| {
+            let section = stamp.get("section").filter(|s| s.is_object())?;
+            Some(Wake {
+                text: section["text"].as_str().unwrap_or_default().to_owned(),
+                outcome: match section["outcome"].as_str() {
+                    Some("failed") => "failed",
+                    Some("completed") => "completed",
+                    _ => "updated",
+                },
+                summary: section["summary"].as_str().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect();
+    if sections.len() != current.len() {
+        return None;
+    }
+    let wake = combine(&sections)?;
+    let mut source = json!({"kind": "monitor"});
+    let mut primary = (*first).clone();
+    if rest.is_empty()
+        && let Some(map) = primary.as_object_mut()
+    {
+        map.remove("section");
+    }
+    source["pullRequest"] = primary;
+    if !rest.is_empty() {
+        source["otherPullRequests"] = json!(rest);
+    }
+    let mut updated = message.clone();
+    updated["text"] = json!(wake.text);
+    updated["notification"] =
+        json!({"source": source, "outcome": wake.outcome, "summary": wake.summary});
+    Some(updated)
+}
+
+/// `thread.pull-request-watch.checks-reopen`: a push can start new checks, so each watch
+/// forgets whether checks were running. `None` when no watch had an answer.
+pub(crate) fn reopen_checks(thread: &Value) -> Option<Value> {
+    let links = thread["pullRequests"].as_array()?;
+    if !links.iter().any(|l| {
+        l.get("watch")
+            .is_some_and(|w| w.get("checksPending").is_some())
+    }) {
+        return None;
+    }
+    let mut updated = thread.clone();
+    if let Some(links) = updated["pullRequests"].as_array_mut() {
+        for link in links {
+            if let Some(watch) = link.get_mut("watch").and_then(Value::as_object_mut) {
+                watch.remove("checksPending");
+            }
+        }
+    }
+    Some(updated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

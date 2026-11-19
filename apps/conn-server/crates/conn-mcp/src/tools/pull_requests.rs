@@ -5,7 +5,8 @@
 //! (`conn_source_control::registry`), as T3's come from `sourceControlDefinitions`.
 //!
 //! `watch_pull_request` and `unwatch_pull_request` follow `PullRequestWatchService.setWatching`;
-//! `read_pull_request_guide` and `write_pull_request_guides` follow the toolkit's `locateAll`.
+//! `read_pull_request_guide` follows the toolkit's `locateAll`. `write_pull_request_guides` is
+//! not served: the server has no review guide generator.
 //! Their host reads go through the server's GitHub panel (`McpConfig::pull_requests`).
 
 use std::collections::{BTreeSet, HashMap};
@@ -899,70 +900,6 @@ pub(crate) async fn read_guide(cx: &Cx<'_>, args: &Args) -> ToolResult {
     out.insert("currentHeadSha".into(), current);
     out.insert("stale".into(), json!(stale));
     Ok(Value::Object(out))
-}
-
-/// `write_pull_request_guides`: one outcome per target, in order.
-pub(crate) async fn write_guides(cx: &Cx<'_>, args: &Args) -> ToolResult {
-    cx.writing_caller().await?;
-    let mut guides = Vec::new();
-    for input in args
-        .get("pullRequests")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let input = input.as_object().cloned().unwrap_or_default();
-        let located = locate(cx, &input).await;
-        let target = match located.target {
-            Ok(target) => target,
-            Err(failure) => {
-                guides.push(json!({
-                    "host": input.get("host").and_then(Value::as_str).unwrap_or_default(),
-                    "repository": input.get("repository").and_then(Value::as_str).unwrap_or_default(),
-                    "number": input.get("number").and_then(Value::as_u64).unwrap_or(0),
-                    "url": input.get("url").and_then(Value::as_str).unwrap_or_default(),
-                    "outcome": "failed", "detail": failure,
-                }));
-                continue;
-            }
-        };
-        let mut outcome = target.json();
-        let Some(project) = located.project else {
-            outcome.insert("outcome".into(), json!("failed"));
-            outcome.insert(
-                "detail".into(),
-                json!(project_not_found(&target.key.repository)),
-            );
-            guides.push(Value::Object(outcome));
-            continue;
-        };
-        let answer = cx
-            .pull_request_host("generateReviewGuide", guide_reference(&project, &target))
-            .await;
-        match answer {
-            Some(Ok(result)) => {
-                let started = result["started"] == true;
-                outcome.insert(
-                    "outcome".into(),
-                    json!(if started { "started" } else { "running" }),
-                );
-                outcome.insert("detail".into(), Value::Null);
-            }
-            Some(Err(error)) => {
-                outcome.insert("outcome".into(), json!("failed"));
-                outcome.insert("detail".into(), json!(guide_failure_detail(&error)));
-            }
-            None => {
-                outcome.insert("outcome".into(), json!("failed"));
-                outcome.insert(
-                    "detail".into(),
-                    json!("This server cannot generate review guides yet."),
-                );
-            }
-        }
-        guides.push(Value::Object(outcome));
-    }
-    Ok(json!({"guides": guides}))
 }
 
 #[cfg(test)]

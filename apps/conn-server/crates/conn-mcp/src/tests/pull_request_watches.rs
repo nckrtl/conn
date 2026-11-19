@@ -1,10 +1,9 @@
-//! `watch_pull_request`, `unwatch_pull_request`, `read_pull_request_guide` and
-//! `write_pull_request_guides` on a stand-in pull request panel
+//! `watch_pull_request`, `unwatch_pull_request` and `read_pull_request_guide` on a stand-in pull request panel
 //! (`PullRequestWatchService.setWatching`, the toolkit's `locateAll`).
 
 use super::*;
 
-/// The panel's answers: a summary in `state`, the stored guide, and guides off.
+/// The panel's answers: a summary in `state` and the stored guide.
 fn host(state: &'static str) -> crate::PullRequestHost {
     Arc::new(move |operation, input: Value| {
         Box::pin(async move {
@@ -17,8 +16,7 @@ fn host(state: &'static str) -> crate::PullRequestHost {
                 "reviewGuide" => Ok(json!({"guide": guide(), "run": null,
                     "currentHeadSha": format!("new-{}", input["number"])})),
                 _ => Err(json!({"_tag": "PullRequestOperationError",
-                    "operation": "generateReviewGuide",
-                    "detail": "Review guides are off. Turn them on in Settings → Source control & issues."})),
+                    "operation": operation, "detail": "unexpected"})),
             }
         }) as conn_engine::BoxFuture<'static, Result<Value, Value>>
     })
@@ -160,7 +158,7 @@ async fn merged_and_unreadable_pull_requests_are_refused() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn guides_read_the_store_and_report_each_write() {
+async fn guides_read_the_store_and_the_write_is_not_offered() {
     let f = with_host(fixture("pr-guides"), "open");
     let mut swamp = Client::open(&f.service, client(true)).await;
     let read = swamp
@@ -179,29 +177,12 @@ async fn guides_read_the_store_and_report_each_write() {
         .await,
         "This is not a recognised pull request URL. Pass repository and number instead."
     );
-    let written = swamp
-        .ok(
-            "write_pull_request_guides",
-            json!({"pullRequests": [{"url": URL}, {"url": "nope"}]}),
-        )
-        .await;
-    assert_eq!(written["guides"][0]["outcome"], "failed");
-    assert_eq!(
-        written["guides"][0]["detail"],
-        "Review guides are off. Turn them on in Settings → Source control & issues."
-    );
-    assert_eq!(
-        written["guides"][1],
-        json!({"host": "", "repository": "", "number": 0, "url": "nope", "outcome": "failed",
-            "detail": "This is not a recognised pull request URL. Pass repository and number instead."})
-    );
-    let mut reader = Client::open(&f.service, client(false)).await;
-    let refused = plain_failure(
-        &mut reader,
+    // No review guide generator here, so the write tool is not offered (capability rule).
+    not_offered(
+        &mut swamp,
         "write_pull_request_guides",
         json!({"pullRequests": [{"url": URL}]}),
     )
     .await;
-    assert!(refused.contains("read-only access"), "{refused}");
     f.service.config.engine.shutdown().await;
 }

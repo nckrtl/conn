@@ -634,6 +634,9 @@ async fn read_remarks(
 /// is not taken as the baseline.
 pub(super) async fn run(panel: Arc<Panel>) {
     let (tx, mut rx) = mpsc::channel::<String>(16);
+    // New watches beyond the channel's room are not lost: they ask for one more full pass.
+    let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let overflowed = overflow.clone();
     let input = conn_contract::from_json(json!({"requestCompletionMarker": true}));
     if let Ok(input) = input
         && let Ok(mut shell) = panel.engine.subscribe_shell(input).await
@@ -663,7 +666,9 @@ pub(super) async fn run(panel: Arc<Panel>) {
                             .unwrap_or_default();
                         for life in now.iter().filter(|life| !before.contains(life)) {
                             if let Some((key, _)) = life.split_once(' ') {
-                                let _ = tx.try_send(key.to_owned());
+                                if tx.try_send(key.to_owned()).is_err() {
+                                    overflowed.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
                             }
                         }
                         if known.len() >= MAX_OBSERVED_THREADS {
@@ -687,6 +692,9 @@ pub(super) async fn run(panel: Arc<Panel>) {
         tokio::select! {
             _ = sweep.tick() => watcher.pass(None).await,
             Some(key) = rx.recv() => watcher.pass(Some(&key)).await,
+        }
+        if overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            watcher.pass(None).await;
         }
     }
 }

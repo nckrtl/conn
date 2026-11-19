@@ -21,7 +21,7 @@ The specification is `packages/source-control-core`, `packages/source-control-gi
 | `pr` in VCS status | Not served (always `null`) |
 | `pullRequests.*` (35) | GitHub panel reads and writes, including stacks and stored guides. `runAction` and `generateReviewGuide` register typed refusals; those operations are unavailable. |
 | Engine commands for linked pull requests (7) | `thread.pull-request.link` and `unlink` as T3's decider (part 4); the other 5 refused |
-| `/mcp` pull request tools (9) | 5 served (part 4): `link_pull_request(s)`, `unlink_pull_request(s)`, `list_thread_pull_requests`; `watch`/`unwatch` and the 2 guide tools not served |
+| `/mcp` pull request tools (9) | 8 served: the 5 link tools, `watch`/`unwatch_pull_request`, `read_pull_request_guide`; `write_pull_request_guides` not served (no guide generator) |
 
 ## Modules
 

@@ -1,13 +1,20 @@
-import type { OrbitTaskLane } from "@t3tools/client-runtime/orbit-gateway";
+import type {
+  InsightId,
+  OrbitTaskInsightsPeriod,
+  OrbitTaskLane,
+} from "@t3tools/client-runtime/orbit-gateway";
+import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "../../lib/storage";
+import type { PullRequestDetailTab } from "../../rightPanelStore";
 
 // Where each thread's Tasks tab is, kept outside the panel because only the active surface
 // mounts. Keyed per thread like the panel's tabs; other panel apps keep their own state.
 
-export type TasksDetailTab = "brief" | "agents";
+/** "subtasks" exists on the task only; a subtask shows Brief and Agents. */
+export type TasksDetailTab = "brief" | "subtasks" | "agents";
 
 export interface TasksNavigation {
   readonly originThreadKey?: string;
@@ -21,8 +28,21 @@ export interface TasksNavigation {
   readonly taskTab?: TasksDetailTab | undefined;
   readonly boardScroll: { readonly top: number; readonly left: number };
   readonly detailScrollTop: number;
+  /** The task's pull request, open one level below the task. The task keeps its own tab. */
+  readonly pullRequest?: TasksPullRequest | null | undefined;
   /** When this thread's Tasks navigation last changed, for the cap below. */
   readonly updatedAt: number;
+}
+
+/** Where Conn reads a task's pull request: the project that hosts its repository. */
+export interface TasksPullRequest {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly repository: string;
+  readonly number: number;
+  readonly host?: string | undefined;
+  readonly url: string;
+  readonly tab?: PullRequestDetailTab | undefined;
 }
 
 /** Only the threads changed most recently keep their place, so storage stays bounded. */
@@ -50,6 +70,22 @@ export const DEFAULT_TASKS_NAVIGATION: TasksNavigation = {
   updatedAt: 0,
 };
 
+/** The same task comes back where it was; another one opens at its brief, from the top. */
+function openedTask(current: TasksNavigation, taskId: number): TasksNavigation {
+  return current.taskId === taskId
+    ? { ...current, view: "task", pullRequest: null }
+    : {
+        ...current,
+        view: "task",
+        taskId,
+        subtaskId: null,
+        tab: "brief",
+        taskTab: undefined,
+        detailScrollTop: 0,
+        pullRequest: null,
+      };
+}
+
 interface TasksPanelState {
   readonly byThreadKey: Readonly<Record<string, TasksNavigation>>;
   readonly handoff: (sourceKey: string, targetKey: string) => void;
@@ -58,6 +94,15 @@ interface TasksPanelState {
   readonly openSubtask: (threadKey: string, subtaskId: number | null, tab?: TasksDetailTab) => void;
   readonly setTab: (threadKey: string, tab: TasksDetailTab) => void;
   readonly showBoard: (threadKey: string) => void;
+  /** Opens the task's pull request below the task, from its row or a board card's badge. */
+  readonly openPullRequest: (
+    threadKey: string,
+    taskId: number,
+    pullRequest: TasksPullRequest,
+  ) => void;
+  /** Back up from the pull request to the task, on the tab the task had open. */
+  readonly closePullRequest: (threadKey: string) => void;
+  readonly setPullRequestTab: (threadKey: string, tab: PullRequestDetailTab) => void;
   readonly saveBoardScroll: (threadKey: string, top: number, left: number) => void;
   readonly saveDetailScroll: (threadKey: string, top: number) => void;
 }
@@ -95,19 +140,34 @@ export const useTasksPanelStore = create<TasksPanelState>()(
               }),
             };
           }),
+        // A card opens the task itself; its PR badge opens the pull request.
         openTask: (threadKey, taskId) =>
-          update(threadKey, (current) =>
-            current.taskId === taskId
-              ? { ...current, view: "task" }
+          update(threadKey, (current) => openedTask(current, taskId)),
+        openPullRequest: (threadKey, taskId, pullRequest) =>
+          update(threadKey, (current) => {
+            const task = openedTask(current, taskId);
+            // The PR sits below the task itself, so a subtask the task had open closes; the
+            // task comes back on its own tab.
+            return task.subtaskId === null
+              ? { ...task, pullRequest }
               : {
-                  ...current,
-                  view: "task",
-                  taskId,
+                  ...task,
                   subtaskId: null,
-                  tab: "brief",
+                  tab: task.taskTab ?? "brief",
                   taskTab: undefined,
                   detailScrollTop: 0,
-                },
+                  pullRequest,
+                };
+          }),
+        closePullRequest: (threadKey) =>
+          update(threadKey, (current) =>
+            current.pullRequest ? { ...current, pullRequest: null } : current,
+          ),
+        setPullRequestTab: (threadKey, tab) =>
+          update(threadKey, (current) =>
+            !current.pullRequest || current.pullRequest.tab === tab
+              ? current
+              : { ...current, pullRequest: { ...current.pullRequest, tab } },
           ),
         openSubtask: (threadKey, subtaskId, tab) =>
           update(threadKey, (current) => {
@@ -128,7 +188,7 @@ export const useTasksPanelStore = create<TasksPanelState>()(
             return {
               ...current,
               subtaskId,
-              tab: tab ?? current.tab,
+              tab: tab ?? (current.tab === "subtasks" ? "brief" : current.tab),
               taskTab,
               detailScrollTop: 0,
             };
@@ -177,30 +237,42 @@ export const useTasksPanelStore = create<TasksPanelState>()(
   ),
 );
 
+const toggled = <T>(list: ReadonlyArray<T>, entry: T) =>
+  list.includes(entry) ? list.filter((item) => item !== entry) : [...list, entry];
+
 /**
- * Board lanes the user turned off: one setting for every thread and window, under its own key so
- * a toggle never writes thread navigation.
+ * Board settings: lanes and insights the user turned off, and the insights period. One setting
+ * for every thread and window, under its own key so a toggle never writes thread navigation.
+ * Turned-off lists, so a lane or insight added later shows by default.
  */
-export const useTasksBoardLanes = create<{
+export const useTasksBoardSettings = create<{
   readonly hiddenLanes: ReadonlyArray<OrbitTaskLane>;
+  readonly hiddenInsights: ReadonlyArray<InsightId>;
+  readonly insightPeriod: OrbitTaskInsightsPeriod;
   readonly toggleLane: (lane: OrbitTaskLane) => void;
+  readonly toggleInsight: (insight: InsightId) => void;
+  readonly setInsightPeriod: (period: OrbitTaskInsightsPeriod) => void;
 }>()(
   persist(
     (set) => ({
       hiddenLanes: [],
-      toggleLane: (lane) =>
-        set((state) => ({
-          hiddenLanes: state.hiddenLanes.includes(lane)
-            ? state.hiddenLanes.filter((entry) => entry !== lane)
-            : [...state.hiddenLanes, lane],
-        })),
+      hiddenInsights: [],
+      insightPeriod: "30d",
+      toggleLane: (lane) => set((state) => ({ hiddenLanes: toggled(state.hiddenLanes, lane) })),
+      toggleInsight: (insight) =>
+        set((state) => ({ hiddenInsights: toggled(state.hiddenInsights, insight) })),
+      setInsightPeriod: (insightPeriod) => set({ insightPeriod }),
     }),
     {
       name: "conn:tasks-board:v1",
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),
-      partialize: (state) => ({ hiddenLanes: state.hiddenLanes }),
+      partialize: (state) => ({
+        hiddenLanes: state.hiddenLanes,
+        hiddenInsights: state.hiddenInsights,
+        insightPeriod: state.insightPeriod,
+      }),
     },
   ),
 );
@@ -208,7 +280,7 @@ export const useTasksBoardLanes = create<{
 // Another window's toggle lands in storage; read it so this window never writes a stale copy.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
-    if (event.key === "conn:tasks-board:v1") void useTasksBoardLanes.persist.rehydrate();
+    if (event.key === "conn:tasks-board:v1") void useTasksBoardSettings.persist.rehydrate();
   });
 }
 

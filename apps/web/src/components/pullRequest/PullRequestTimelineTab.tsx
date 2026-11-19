@@ -12,6 +12,8 @@ import type {
   PullRequestComment,
   PullRequestDetailView,
   PullRequestRef,
+  PullRequestReviewThread,
+  PullRequestThreadComment,
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import {
@@ -20,9 +22,11 @@ import {
   ExternalLinkIcon,
   FileCode2Icon,
   GitCommitHorizontalIcon,
+  HammerIcon,
   MessageSquareIcon,
   MessageSquarePlusIcon,
 } from "lucide-react";
+import * as Schema from "effect/Schema";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
 
 import { m } from "~/i18n/messages";
@@ -40,13 +44,18 @@ import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   buildPullRequestTimeline,
+  filterPullRequestTimelineEvents,
+  mergePullRequestThreadComments,
   groupPullRequestTimelineConversations,
   pullRequestTimelineEventMatches,
   type PullRequestTimelineRow,
   isPullRequestVerdictStale,
   newestPullRequestCommitAt,
+  pullRequestFindingKey,
   pullRequestReviewOutcome,
+  visibleBody,
   type PullRequestChatSubject,
+  type PullRequestFinding,
   type PullRequestReviewOutcome,
   type PullRequestTimelineEvent,
   type PullRequestTimelineThread,
@@ -58,6 +67,8 @@ import { PullRequestMarkdownEditor } from "./PullRequestMarkdownEditor";
 import { PullRequestReactionBar } from "./PullRequestReactions";
 import { canReactPullRequestComment } from "@t3tools/client-runtime/pull-request-reactions";
 import { PullRequestResolveThreadButton } from "./PullRequestResolveThreadButton";
+import { PullRequestThreadReplyBox } from "./PullRequestReviewAnnotation";
+import { pullRequestThreadReplyKey, usePullRequestReviewStore } from "./pullRequestReviewStore";
 import {
   PullRequestActorAvatar,
   PullRequestDiffStat,
@@ -66,6 +77,7 @@ import {
   pullRequestReviewOutcomeLabel,
   pullRequestReviewOutcomeStaleLabel,
   pullRequestReviewOutcomeToneClassName,
+  resolvePullRequestState,
 } from "./pullRequestPresentation";
 import { PullRequestGlyph } from "./pullRequestIcons";
 import {
@@ -81,11 +93,55 @@ interface ReactionSurface {
   readonly canReact: (event: PullRequestTimelineEvent) => boolean;
   /** Absent where there is no composer beside the panel to add a remark to. */
   readonly onAddToChat?: ((comment: PullRequestComment) => void) | undefined;
+  /** Adds a review thread with every comment loaded so far. */
+  readonly onAddThreadToChat?: ((thread: PullRequestReviewThread) => void) | undefined;
   readonly environmentId: EnvironmentId;
   readonly threadRef: ScopedThreadRef | null;
   readonly reference: PullRequestRef;
   readonly completionScope: PullRequestCompletionScope | null;
   readonly onRefresh: () => void;
+  /** Absent where findings cannot be handed to an agent. */
+  readonly fix?:
+    | {
+        readonly findingFor: (event: PullRequestTimelineEvent) => PullRequestFinding | null;
+        readonly onFix: (finding: PullRequestFinding) => void;
+        readonly pending: string | null;
+        readonly label: string;
+      }
+    | undefined;
+}
+
+function FixFindingButton({
+  event,
+  reactions,
+}: {
+  event: PullRequestTimelineEvent;
+  reactions: ReactionSurface;
+}) {
+  const gt = useGT();
+  const fix = reactions.fix;
+  const finding = fix?.findingFor(event) ?? null;
+  if (!fix || finding === null) return null;
+  const label = fix.pending === pullRequestFindingKey(finding) ? gt("Preparing...") : fix.label;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="icon-xs"
+            variant="ghost-muted"
+            className="shrink-0"
+            aria-label={label}
+            disabled={fix.pending !== null}
+            onClick={() => fix.onFix(finding)}
+          />
+        }
+      >
+        <HammerIcon className="size-3.5" />
+      </TooltipTrigger>
+      <TooltipPopup>{label}</TooltipPopup>
+    </Tooltip>
+  );
 }
 
 function TimelineBody({
@@ -94,15 +150,17 @@ function TimelineBody({
   cwd,
   environmentId,
   threadRef,
+  className = "mt-3",
 }: {
   body: string;
   markdown: boolean;
   cwd: string;
   environmentId: EnvironmentId;
   threadRef: ScopedThreadRef | null;
+  className?: string;
 }) {
   return (
-    <div className="mt-3">
+    <div className={className}>
       {markdown ? (
         <PullRequestMarkdown
           text={body}
@@ -111,14 +169,14 @@ function TimelineBody({
           threadRef={threadRef}
         />
       ) : (
-        <p className="whitespace-pre-wrap text-xs text-muted-foreground">{body}</p>
+        <p className="whitespace-pre-wrap text-sm text-muted-foreground">{body}</p>
       )}
     </div>
   );
 }
 
 function ActorName({ actor }: { actor: PullRequestActor | null }) {
-  return <span className="font-semibold text-foreground">{actor?.login ?? "ghost"}</span>;
+  return <span className="font-medium text-foreground">{actor?.login ?? "ghost"}</span>;
 }
 
 function TimelineMarker({
@@ -131,7 +189,7 @@ function TimelineMarker({
   return (
     <span
       className={cn(
-        "absolute left-0 top-1/2 z-10 flex size-8 -translate-y-1/2 items-center justify-center bg-background",
+        "absolute left-0 top-2.5 z-10 flex size-6 items-center justify-center rounded-full bg-background",
         className,
       )}
     >
@@ -143,7 +201,7 @@ function TimelineMarker({
 function IconMarker({ icon, className }: { icon: ReactNode; className?: string | undefined }) {
   return (
     <TimelineMarker className={className}>
-      <span className="flex size-7 items-center justify-center bg-background text-muted-foreground">
+      <span className="flex size-6 items-center justify-center bg-background text-muted-foreground">
         {icon}
       </span>
     </TimelineMarker>
@@ -169,7 +227,7 @@ function ActorTimelineMarker({
       <PullRequestActorAvatar
         actor={actor}
         className={cn(
-          "size-7 bg-muted text-3xs transition-opacity",
+          "size-6 bg-muted text-3xs transition-opacity",
           muted && "opacity-45 grayscale",
         )}
       />
@@ -183,20 +241,21 @@ function friendlyReviewState(value: string): string {
 }
 
 function ReviewStateBadge({ state }: { state: string }) {
-  return (
-    <span className="text-3xs font-medium text-muted-foreground">{friendlyReviewState(state)}</span>
-  );
+  return <span className="text-muted-foreground">{friendlyReviewState(state)}</span>;
 }
 
 function AddToChatButton({
   comment,
   reactions,
+  onAdd,
 }: {
   comment: PullRequestComment;
   reactions: ReactionSurface;
+  /** Adds something larger than the comment, such as its whole conversation. */
+  onAdd?: (() => void) | undefined;
 }) {
   const gt = useGT();
-  const onAddToChat = reactions.onAddToChat;
+  const onAddToChat = onAdd ?? (reactions.onAddToChat && (() => reactions.onAddToChat?.(comment)));
   return onAddToChat === undefined ? null : (
     <Tooltip>
       <TooltipTrigger
@@ -204,13 +263,13 @@ function AddToChatButton({
           <Button
             size="icon-xs"
             variant="ghost-muted"
-            className="-mt-1 shrink-0"
+            className="shrink-0"
             aria-label={gt("Add to chat")}
-            onClick={() => onAddToChat(comment)}
+            onClick={onAddToChat}
           />
         }
       >
-        <MessageSquarePlusIcon className="size-3" />
+        <MessageSquarePlusIcon className="size-3.5" />
       </TooltipTrigger>
       <TooltipPopup>
         <T>Add to chat</T>
@@ -225,11 +284,11 @@ function OpenOnHostButton({ url, onOpen }: { url: string | null; onOpen: (url: s
     <Button
       size="icon-xs"
       variant="ghost-muted"
-      className="-mr-1 shrink-0"
+      className="shrink-0"
       aria-label={gt("Open activity on host")}
       onClick={() => onOpen(url)}
     >
-      <ExternalLinkIcon className="size-3" />
+      <ExternalLinkIcon className="size-3.5" />
     </Button>
   );
 }
@@ -243,6 +302,7 @@ function ConversationCard({
   showPath = true,
   reply = false,
   resolveButton = null,
+  addToChat,
 }: {
   event: PullRequestTimelineEvent;
   editable: PullRequestComment | null;
@@ -253,6 +313,8 @@ function ConversationCard({
   /** A reply goes with its conversation, from the card that heads it. */
   reply?: boolean;
   resolveButton?: ReactNode;
+  /** Replaces adding the comment alone, for a card that heads a whole conversation. */
+  addToChat?: (() => void) | undefined;
 }) {
   const gt = useGT();
   const canReact = reactions.canReact(event);
@@ -286,14 +348,22 @@ function ConversationCard({
             "data-pr-link-target": true,
             tabIndex: -1,
             // Inset: the collapsible panel clips an outer ring's left and right edges.
-            className: "group rounded-lg py-2 ring-1 ring-inset ring-primary/40 outline-none",
+            className:
+              "group overflow-hidden rounded-lg border border-(--shell-divider) ring-1 ring-inset ring-primary/40 outline-none",
           }
-        : { className: "group py-2" })}
+        : {
+            className: "group overflow-hidden rounded-lg border border-(--shell-divider)",
+          })}
     >
-      <div className="px-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <div
+        className={cn(
+          "bg-muted/25 py-1.5 ps-3 pe-1.5 [--control-radius:9999px] dark:bg-foreground/4",
+          (event.body || editing) && "border-b border-(--shell-divider)",
+        )}
+      >
+        <div className="flex min-h-7 min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
+            <div className="flex min-w-0 items-baseline gap-x-1.5 text-sm leading-5">
               {event.kind === "review" ? (
                 <T>
                   <Var>
@@ -315,11 +385,12 @@ function ConversationCard({
                 </>
               )}
               {event.reviewState ? <ReviewStateBadge state={event.reviewState} /> : null}
-            </div>
-            <PullRequestMetaLine className="mt-1 flex-wrap text-2xs text-muted-foreground">
-              <span>
-                <RelativeTime timestamp={event.at} />
+              {/* The time sits on the name's line, so the header is one row. */}
+              <span className="shrink-0 text-muted-foreground">
+                · <RelativeTime timestamp={event.at} />
               </span>
+            </div>
+            <PullRequestMetaLine className="mt-0.5 flex-wrap text-sm text-muted-foreground empty:hidden">
               {showPath && event.path ? (
                 <span className="inline-flex min-w-0 items-center gap-1">
                   <FileCode2Icon aria-hidden className="size-3 shrink-0" />
@@ -334,9 +405,10 @@ function ConversationCard({
               onClick={() => setEditing(true)}
             />
           ) : null}
+          {reply ? null : <FixFindingButton event={event} reactions={reactions} />}
           {resolveButton}
-          {event.body && event.comment && !reply ? (
-            <AddToChatButton comment={event.comment} reactions={reactions} />
+          {event.comment && !reply && (addToChat || event.body) ? (
+            <AddToChatButton comment={event.comment} reactions={reactions} onAdd={addToChat} />
           ) : null}
           {canReact || event.reactions.length > 0 ? (
             <PullRequestReactionBar
@@ -353,7 +425,7 @@ function ConversationCard({
         </div>
       </div>
       {editing && editable !== null ? (
-        <div className="px-2 pb-2 pt-3">
+        <div className="px-3 py-3">
           <PullRequestMarkdownEditor
             value={editable.body}
             cwd={cwd}
@@ -367,8 +439,9 @@ function ConversationCard({
           />
         </div>
       ) : event.body ? (
-        <div className="px-2 pb-2">
+        <div className="px-3 py-3">
           <TimelineBody
+            className=""
             body={event.body}
             markdown={event.markdown}
             cwd={cwd}
@@ -416,10 +489,9 @@ function ConversationGroup({
   if (first === undefined) return null;
 
   return (
-    <div className="relative mb-5 pl-12 [contain-intrinsic-block-size:48px] [content-visibility:auto]">
+    <div className="relative py-3 pl-9 [contain-intrinsic-block-size:60px] [content-visibility:auto]">
       <ActorTimelineMarker
         actors={actors}
-        className="top-6"
         fallback={<MessageSquareIcon className="size-3.5" />}
         muted={!open}
       />
@@ -427,18 +499,18 @@ function ConversationGroup({
         <div>
           <CollapsibleTrigger
             className={cn(
-              "flex w-full min-w-0 items-center gap-3 py-2 text-left transition-opacity hover:opacity-100",
-              open ? "text-foreground opacity-100" : "text-muted-foreground opacity-55",
+              "group/trigger flex w-full min-w-0 cursor-pointer items-center gap-3 text-left",
+              "text-foreground/90",
             )}
           >
             <span className="min-w-0 flex-1">
-              <span className="block text-xs font-semibold">
+              <span className="block text-sm leading-5 font-medium">
                 {gt("{count, plural, one {{formatted} comment} other {{formatted} comments}}", {
                   count: events.length,
                   formatted: events.length.toLocaleString(),
                 })}
               </span>
-              <span className="block truncate text-3xs text-muted-foreground">
+              <span className="mt-0.5 block truncate text-sm text-muted-foreground">
                 {gt("{count, plural, one {{formatted} author} other {{formatted} authors}}", {
                   count: actors.length,
                   formatted: actors.length.toLocaleString(),
@@ -449,14 +521,14 @@ function ConversationGroup({
             <ChevronDownIcon
               aria-hidden
               className={cn(
-                "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                "size-4 shrink-0 text-muted-foreground transition-transform",
                 open && "rotate-180",
               )}
             />
           </CollapsibleTrigger>
           <CollapsiblePanel>
             {open ? (
-              <div className="mt-1 space-y-1">
+              <div className="mt-3 space-y-2">
                 {events.map((event) => (
                   <ConversationCard
                     // Host comment ids can collide across pull requests.
@@ -506,72 +578,176 @@ function ReviewThreadEvent({
         )) ||
       (!thread.isResolved && !dismissed),
   );
-  const replyCount = thread.replies.length + thread.moreReplies;
+  const reviewThread = detail.reviewThreads.find((candidate) => candidate.id === thread.id);
+  const overviewThread = detail.overviewThreads?.find((candidate) => candidate.id === thread.id);
+  const hostThread = reviewThread ?? overviewThread;
+  const canReply =
+    hostThread !== undefined &&
+    detail.capabilities.review.reply &&
+    detail.viewerPermissions.comment;
+  const replyToThread = useAtomCommand(pullRequestEnvironment.replyToThread, {
+    reportFailure: false,
+  });
+  const loadThreadComments = useAtomCommand(pullRequestEnvironment.threadComments, {
+    reportFailure: false,
+  });
+  // The draft lives in a store, so folding, resolving or scrolling the row away keeps it.
+  const replyKey = pullRequestThreadReplyKey(reactions.reference, thread.id);
+  const replyDraft = usePullRequestReviewStore((store) => store.threadReplies[replyKey]);
+  const replying = replyDraft !== undefined;
+  const setReplyDraft = (body: string) =>
+    usePullRequestReviewStore.getState().setThreadReply(replyKey, body);
+  const sending = usePullRequestReviewStore(
+    (store) => store.threadRepliesSending[replyKey] === true,
+  );
+  const [loaded, setLoaded] = useState<{
+    readonly comments: ReadonlyArray<PullRequestThreadComment>;
+    readonly nextCursor: string | null;
+  } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const comments = mergePullRequestThreadComments(
+    hostThread?.comments ?? [],
+    loaded?.comments ?? [],
+  );
+  const nextCommentsCursor =
+    loaded === null ? (hostThread?.nextCommentsCursor ?? null) : loaded.nextCursor;
+  // Comments loaded past the first page join the replies the way the Timeline builds them.
+  const replies =
+    loaded === null || hostThread === undefined
+      ? thread.replies
+      : (buildPullRequestTimeline({
+          ...detail,
+          commits: [],
+          reviewThreads: reviewThread ? [{ ...reviewThread, comments: [...comments] }] : [],
+          overviewThreads: overviewThread ? [{ ...overviewThread, comments: [...comments] }] : [],
+        }).find((candidate) => candidate.thread?.id === thread.id)?.thread?.replies ??
+        thread.replies);
+  const replyCount =
+    loaded === null
+      ? thread.replies.length + thread.moreReplies
+      : replies.length +
+        (nextCommentsCursor === null
+          ? 0
+          : Math.max(0, (hostThread?.commentCount ?? 0) - 1 - replies.length));
+  const onAddThreadToChat = reactions.onAddThreadToChat;
+  const addThreadToChat =
+    onAddThreadToChat && reviewThread && comments.some((comment) => visibleBody(comment.body))
+      ? () => onAddThreadToChat({ ...reviewThread, comments })
+      : undefined;
+  const sendReply = async (text: string) => {
+    const body = text.trim();
+    const store = usePullRequestReviewStore.getState();
+    if (body.length === 0 || store.threadRepliesSending[replyKey]) return;
+    store.setThreadReplySending(replyKey, true);
+    const result = await replyToThread({
+      environmentId: reactions.environmentId,
+      input: { ...reactions.reference, threadId: thread.id, body },
+    });
+    usePullRequestReviewStore.getState().setThreadReplySending(replyKey, false);
+    if (result._tag === "Failure") {
+      toastManager.add({ type: "error", title: m(msg("Reply could not be posted")) });
+      return;
+    }
+    usePullRequestReviewStore.getState().closeThreadReply(replyKey, text);
+    // Comments past the first page were loaded; the refresh brings only the first again.
+    setLoaded((previous) =>
+      previous === null
+        ? previous
+        : {
+            ...previous,
+            nextCursor: previous.nextCursor ?? hostThread?.nextCommentsCursor ?? null,
+          },
+    );
+    reactions.onRefresh();
+  };
+  const loadMore = async (cursor: string) => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    const result = await loadThreadComments({
+      environmentId: reactions.environmentId,
+      input: { ...reactions.reference, threadId: thread.id, cursor },
+    });
+    setLoadingMore(false);
+    if (result._tag === "Failure") {
+      toastManager.add({ type: "error", title: m(msg("More comments could not be loaded")) });
+      return;
+    }
+    setLoaded((previous) => ({
+      comments: mergePullRequestThreadComments(previous?.comments ?? [], result.value.comments),
+      nextCursor: result.value.nextCursor,
+    }));
+  };
 
   return (
-    <div className="group relative mb-5 pl-12 [contain-intrinsic-block-size:48px] [content-visibility:auto]">
+    <div className="group relative py-3 pl-9 [contain-intrinsic-block-size:60px] [content-visibility:auto]">
       <ActorTimelineMarker
         actors={event.actor ? [event.actor] : []}
-        className="top-4"
         fallback={<MessageSquareIcon className="size-3.5" />}
         muted={!expanded}
       />
+      {/* The file as the row's title, its state and people as the meta line. */}
       <button
         type="button"
-        className="flex w-full min-w-0 items-center gap-2 px-2 py-2 text-left text-2xs text-muted-foreground hover:text-foreground"
+        className={cn(
+          "flex w-full min-w-0 cursor-pointer items-start gap-3 text-left",
+          expanded ? "text-foreground/90" : "text-muted-foreground hover:text-foreground/90",
+        )}
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
       >
-        {thread.path === null ? (
-          <span className="min-w-0 truncate">
-            <T context="review thread without a file">Overview</T>
-          </span>
-        ) : (
-          <>
-            <FileCode2Icon aria-hidden className="size-3 shrink-0" />
-            <span className="min-w-0 truncate font-mono">
-              {thread.line === null ? thread.path : `${thread.path}:${thread.line}`}
-            </span>
-          </>
-        )}
-        {thread.isResolved ? (
-          <span className="inline-flex shrink-0 items-center gap-1 font-medium text-success-foreground">
-            <CircleCheckIcon aria-hidden className="size-3" />
-            <T context="review thread state">Resolved</T>
-          </span>
-        ) : null}
-        {dismissed ? (
-          <span className="shrink-0 font-medium">
-            <T>Review dismissed</T>
-          </span>
-        ) : null}
-        {thread.isOutdated ? (
-          <span className="shrink-0 font-medium">
-            <T context="review thread state">Outdated</T>
-          </span>
-        ) : null}
-        {expanded ? null : (
-          <span className="shrink-0">
-            · {event.actor?.login ?? "ghost"}
-            {replyCount > 0 ? (
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-1.5 text-sm leading-5 font-medium">
+            {thread.path === null ? (
+              <span className="min-w-0 truncate">
+                <T context="review thread without a file">Overview</T>
+              </span>
+            ) : (
               <>
-                {" "}
-                ·{" "}
+                <FileCode2Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 truncate">
+                  {thread.line === null ? thread.path : `${thread.path}:${thread.line}`}
+                </span>
+              </>
+            )}
+          </span>
+          <PullRequestMetaLine className="mt-1 flex-wrap text-sm text-muted-foreground">
+            {thread.isResolved ? (
+              <span className="inline-flex shrink-0 items-center gap-1 text-success-foreground">
+                <CircleCheckIcon aria-hidden className="size-3.5" />
+                <T context="review thread state">Resolved</T>
+              </span>
+            ) : null}
+            {dismissed ? (
+              <span className="shrink-0">
+                <T>Review dismissed</T>
+              </span>
+            ) : null}
+            {thread.isOutdated ? (
+              <span className="shrink-0">
+                <T context="review thread state">Outdated</T>
+              </span>
+            ) : null}
+            <span className="shrink-0">{event.actor?.login ?? "ghost"}</span>
+            {replyCount > 0 ? (
+              <span className="shrink-0">
                 {gt("{count, plural, one {{formatted} reply} other {{formatted} replies}}", {
                   count: replyCount,
                   formatted: replyCount.toLocaleString(),
                 })}
-              </>
+              </span>
             ) : null}
-          </span>
-        )}
+          </PullRequestMetaLine>
+        </span>
         <ChevronDownIcon
           aria-hidden
-          className={cn("ml-auto size-3.5 shrink-0 transition-transform", expanded && "rotate-180")}
+          className={cn(
+            "mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform",
+            expanded && "rotate-180",
+          )}
         />
       </button>
       {expanded ? (
-        <>
+        <div className="mt-4">
           <ConversationCard
             event={event}
             editable={editable.get(event.id) ?? null}
@@ -579,6 +755,7 @@ function ReviewThreadEvent({
             onOpen={onOpen}
             reactions={reactions}
             showPath={false}
+            {...(addThreadToChat ? { addToChat: addThreadToChat } : {})}
             resolveButton={
               <PullRequestResolveThreadButton
                 environmentId={reactions.environmentId}
@@ -589,27 +766,70 @@ function ReviewThreadEvent({
               />
             }
           />
-          {thread.replies.length > 0 ? (
-            <div className="ml-2 space-y-1 border-l border-(--shell-divider)! pl-3">
-              {thread.replies.map((reply) => (
-                <ConversationCard
+          {replies.length > 0 ? (
+            // Each reply card hangs off a line that runs down from the comment it answers.
+            <div className="mt-2 space-y-2 ps-6">
+              {replies.map((reply) => (
+                <div
                   key={reply.id}
-                  event={reply}
-                  editable={editable.get(reply.id) ?? null}
-                  cwd={cwd}
-                  onOpen={onOpen}
-                  reactions={reactions}
-                  showPath={false}
-                  reply
-                />
+                  className="relative before:absolute before:top-5 before:-left-3 before:h-px before:w-3 before:bg-(--shell-divider) after:absolute after:-top-2 after:bottom-0 after:-left-3 after:w-px after:bg-(--shell-divider) last:after:bottom-auto last:after:h-7"
+                >
+                  <ConversationCard
+                    event={reply}
+                    editable={
+                      editable.get(reply.id) ??
+                      (reply.comment && canEditPullRequestComment(detail, reply.comment)
+                        ? reply.comment
+                        : null)
+                    }
+                    cwd={cwd}
+                    onOpen={onOpen}
+                    reactions={reactions}
+                    showPath={false}
+                    reply
+                  />
+                </div>
               ))}
             </div>
           ) : null}
-        </>
-      ) : null}
-      {thread.hasMoreReplies ? (
-        <div className="px-2">
-          <PullRequestMoreReplies {...thread} />
+          {nextCommentsCursor !== null ? (
+            <div className="mt-2 ps-6">
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={loadingMore}
+                onClick={() => void loadMore(nextCommentsCursor)}
+              >
+                {loadingMore ? gt("Loading...") : gt("Load more comments")}
+              </Button>
+            </div>
+          ) : thread.hasMoreReplies ? (
+            <div className="mt-2 ps-6">
+              <PullRequestMoreReplies {...thread} />
+            </div>
+          ) : null}
+          {canReply ? (
+            <div className="mt-2 ps-6">
+              {replying ? (
+                <PullRequestThreadReplyBox
+                  className="rounded-lg border border-(--shell-divider) p-3"
+                  environmentId={reactions.environmentId}
+                  reference={reactions.reference}
+                  threadId={thread.id}
+                  completionScope={reactions.completionScope}
+                  pending={sending}
+                  value={replyDraft ?? ""}
+                  onValueChange={setReplyDraft}
+                  onSend={(text) => void sendReply(text)}
+                  onCancel={() => usePullRequestReviewStore.getState().closeThreadReply(replyKey)}
+                />
+              ) : (
+                <Button size="xs" variant="ghost" onClick={() => setReplyDraft("")}>
+                  <T context="verb, button">Reply</T>
+                </Button>
+              )}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -627,7 +847,7 @@ function CommitEvent({
   return (
     <button
       type="button"
-      className="group relative mb-5 block w-full cursor-pointer rounded-sm pl-12 text-left outline-none [contain-intrinsic-block-size:48px] [content-visibility:auto] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      className="group relative block w-full cursor-pointer rounded-sm py-3 pl-9 text-left outline-none [contain-intrinsic-block-size:48px] [content-visibility:auto] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       aria-label={gt("View commit {sha}", { sha: event.id })}
       onClick={() => onOpen(event.id)}
     >
@@ -635,23 +855,24 @@ function CommitEvent({
         actors={event.commitAuthors}
         fallback={<GitCommitHorizontalIcon className="size-3.5" />}
       />
-      <div className="flex min-w-0 items-center gap-2.5 py-1.5">
+      <div className="flex min-w-0 items-start gap-3">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-semibold text-foreground transition-colors group-hover:text-primary">
+          <div className="truncate text-sm leading-5 font-medium text-foreground/90 transition-colors group-hover:text-foreground">
             {event.body ?? gt("Untitled commit")}
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-3xs text-muted-foreground">
-            <code className="font-mono">{event.id.slice(0, 7)}</code>
+          {/* The commit id in the interface font, then the time, with the dot used everywhere else. */}
+          <PullRequestMetaLine className="mt-0.5 flex-wrap text-sm text-muted-foreground">
+            <span>{event.id.slice(0, 7)}</span>
             <span>
               <RelativeTime timestamp={event.at} />
             </span>
-          </div>
+          </PullRequestMetaLine>
         </div>
         {event.additions !== null && event.deletions !== null ? (
           <PullRequestDiffStat
             additions={event.additions}
             deletions={event.deletions}
-            className="ml-auto shrink-0 font-mono text-3xs"
+            className="ml-auto shrink-0 font-mono text-sm leading-5"
           />
         ) : null}
       </div>
@@ -667,12 +888,17 @@ function LifecycleEvent({
   term: ChangeRequestTermKind;
 }) {
   const gt = useGT();
+  // The event's icon sits in a circle in the colour of the state it leads to.
+  const state = resolvePullRequestState({
+    state: event.kind === "merged" ? "merged" : event.kind === "opened" ? "open" : "closed",
+    isDraft: false,
+  });
   const presentation =
     event.kind === "opened"
       ? {
           icon: <PullRequestGlyph.pullRequest className="size-3.5" />,
           label: gt(
-            "{term, select, mr {Merge request} cr {Change request} other {Pull request}} opened",
+            "opened this {term, select, mr {merge request} cr {change request} other {pull request}}",
             { term },
           ),
         }
@@ -680,27 +906,36 @@ function LifecycleEvent({
         ? {
             icon: <PullRequestGlyph.merged className="size-3.5" />,
             label: gt(
-              "{term, select, mr {Merge request} cr {Change request} other {Pull request}} merged",
+              "merged this {term, select, mr {merge request} cr {change request} other {pull request}}",
               { term },
             ),
           }
         : {
             icon: <PullRequestGlyph.closed className="size-3.5" />,
             label: gt(
-              "{term, select, mr {Merge request} cr {Change request} other {Pull request}} closed",
+              "closed this {term, select, mr {merge request} cr {change request} other {pull request}}",
               { term },
             ),
           };
 
   return (
-    <div className="relative mb-5 pl-12 [contain-intrinsic-block-size:48px] [content-visibility:auto]">
-      <IconMarker icon={presentation.icon} />
-      <div className="py-1.5 text-xs">
+    <div className="relative py-3 pl-9 [contain-intrinsic-block-size:60px] [content-visibility:auto]">
+      <TimelineMarker>
+        <span
+          className={cn(
+            "flex size-6 items-center justify-center rounded-full bg-current/15 ring-1 ring-current/25 ring-inset",
+            state.toneClassName,
+          )}
+        >
+          {presentation.icon}
+        </span>
+      </TimelineMarker>
+      <div className="text-sm leading-5">
         <div className="flex flex-wrap items-center gap-1.5">
           {event.actor ? <ActorName actor={event.actor} /> : null}
-          <span className="font-semibold text-foreground">{presentation.label}</span>
+          <span className="text-muted-foreground">{presentation.label}</span>
         </div>
-        <div className="mt-0.5 text-2xs text-muted-foreground">
+        <div className="mt-0.5 text-sm text-muted-foreground">
           <RelativeTime timestamp={event.at} />
         </div>
       </div>
@@ -741,15 +976,14 @@ function ReviewVerdictEvent({
   const resolve = useMessages();
   const canReact = reactions.canReact(event);
   return (
-    <div className="group relative mb-5 pl-12 [contain-intrinsic-block-size:48px] [content-visibility:auto]">
+    <div className="group relative py-3 pl-9 [contain-intrinsic-block-size:60px] [content-visibility:auto]">
       <ActorTimelineMarker
         actors={event.actor ? [event.actor] : []}
-        className="top-6"
         fallback={<PullRequestReviewOutcomeIcon outcome={outcome} />}
       />
-      <div className="flex min-w-0 flex-wrap items-center gap-2 py-1.5">
+      <div className="flex min-w-0 flex-wrap items-start gap-2 [--control-radius:9999px]">
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-sm leading-5">
             <ActorName actor={event.actor} />
             <Tooltip disabled={!stale}>
               <TooltipTrigger
@@ -777,7 +1011,7 @@ function ReviewVerdictEvent({
             </Tooltip>
           </div>
           <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <PullRequestMetaLine className="flex-wrap text-2xs text-muted-foreground">
+            <PullRequestMetaLine className="flex-wrap text-sm text-muted-foreground">
               <span>
                 <RelativeTime timestamp={event.at} />
               </span>
@@ -790,6 +1024,7 @@ function ReviewVerdictEvent({
             </PullRequestMetaLine>
           </div>
         </div>
+        <FixFindingButton event={event} reactions={reactions} />
         {event.body && event.comment ? (
           <AddToChatButton comment={event.comment} reactions={reactions} />
         ) : null}
@@ -819,6 +1054,111 @@ function ReviewVerdictEvent({
   );
 }
 
+/** What "Fix in a thread" hands over for a timeline comment, or null when there is nothing to fix. */
+function timelineFinding(
+  detail: PullRequestDetailView,
+  event: PullRequestTimelineEvent,
+): PullRequestFinding | null {
+  const comment = event.comment;
+  if (comment === undefined || (comment.kind !== "review" && comment.kind !== "review-comment"))
+    return null;
+  if (pullRequestReviewOutcome(comment.reviewState) === "approved") return null;
+  // An overview thread has no line to attach, so it goes as its opening remark.
+  const thread =
+    event.thread?.path == null
+      ? undefined
+      : detail.reviewThreads.find((candidate) => candidate.id === event.thread?.id);
+  if (thread !== undefined) return { kind: "thread", thread };
+  return visibleBody(comment.body) === null ? null : { kind: "comment", comment };
+}
+
+/** Review threads drawn as the Timeline draws them, for threads the Code tab's diff cannot place. */
+export function PullRequestThreadList({
+  detail,
+  threadIds,
+  environmentId,
+  reference,
+  onAddToChat,
+  onRefresh,
+  pendingFinding = null,
+  fixFindingLabel,
+  onFixFinding,
+}: {
+  detail: PullRequestDetailView;
+  threadIds: ReadonlySet<string>;
+  environmentId: EnvironmentId;
+  reference: PullRequestRef;
+  onAddToChat?: ((subject: PullRequestChatSubject) => void) | undefined;
+  onRefresh: () => void;
+  pendingFinding?: string | null;
+  fixFindingLabel?: string | undefined;
+  onFixFinding?: ((finding: PullRequestFinding) => void) | undefined;
+}) {
+  const gt = useGT();
+  const resolve = useMessages();
+  const threads = buildPullRequestTimeline(detail, resolve).flatMap((event) =>
+    event.thread !== undefined && threadIds.has(event.thread.id)
+      ? [{ event, thread: event.thread }]
+      : [],
+  );
+  const reactions: ReactionSurface = {
+    revealAnchor: null,
+    canReact: (event) =>
+      event.comment !== undefined && canReactPullRequestComment(detail, event.comment),
+    onAddToChat: onAddToChat && ((comment) => onAddToChat({ kind: "comment", comment })),
+    onAddThreadToChat: onAddToChat && ((thread) => onAddToChat({ kind: "thread", thread })),
+    environmentId,
+    threadRef: null,
+    reference,
+    completionScope: pullRequestCompletionScope(detail, environmentId, reference),
+    onRefresh,
+    fix: onFixFinding && {
+      findingFor: (event) => timelineFinding(detail, event),
+      onFix: onFixFinding,
+      pending: pendingFinding,
+      label: fixFindingLabel ?? gt("Fix in a thread"),
+    },
+  };
+  const editable = new Map(
+    threads
+      .flatMap(({ event }) => [event, ...(event.thread?.replies ?? [])])
+      .flatMap((event) => (event.comment ? [event.comment] : []))
+      .filter((comment) => canEditPullRequestComment(detail, comment))
+      .map((comment) => [comment.id, comment] as const),
+  );
+  const openOnHost = (url: string) => {
+    void readLocalApi()?.shell.openExternal(url);
+  };
+  return (
+    <div>
+      {threads.map(({ event, thread }) => (
+        <ReviewThreadEvent
+          key={event.id}
+          event={event}
+          thread={thread}
+          detail={detail}
+          editable={editable}
+          cwd={detail.workspaceRoot}
+          onOpen={openOnHost}
+          reactions={reactions}
+        />
+      ))}
+    </div>
+  );
+}
+
+export const PULL_REQUEST_COMMENT_FILTER_STORAGE_KEY = "t3code:pull-request-comment-filter:v1";
+export const PullRequestCommentFilterSchema = Schema.Struct({
+  bots: Schema.Boolean,
+  resolved: Schema.Boolean,
+});
+export type PullRequestCommentFilter = typeof PullRequestCommentFilterSchema.Type;
+export const DEFAULT_PULL_REQUEST_COMMENT_FILTER: PullRequestCommentFilter = {
+  bots: false,
+  resolved: false,
+};
+const SHOW_ALL_COMMENTS: PullRequestCommentFilter = { bots: true, resolved: true };
+
 export function PullRequestTimelineTab({
   revealUrl,
   onRevealSettled,
@@ -828,9 +1168,13 @@ export function PullRequestTimelineTab({
   threadRef = null,
   reference,
   order,
+  filter = SHOW_ALL_COMMENTS,
   onOpenCommit,
   onAddToChat,
   onRefresh,
+  pendingFinding = null,
+  fixFindingLabel,
+  onFixFinding,
 }: {
   /** A clicked link to scroll to and mark, until onRevealSettled reports it shown. */
   revealUrl?: string | undefined;
@@ -841,12 +1185,18 @@ export function PullRequestTimelineTab({
   threadRef?: ScopedThreadRef | null;
   reference: PullRequestRef;
   order: "newest" | "oldest";
+  /** The saved comment filter: whether bot comments and finished conversations show. */
+  filter?: PullRequestCommentFilter;
   onOpenCommit: (oid: string) => void;
   onAddToChat?: (subject: PullRequestChatSubject) => void;
   onRefresh: () => void;
+  pendingFinding?: string | null;
+  fixFindingLabel?: string;
+  onFixFinding?: (finding: PullRequestFinding) => void;
 }) {
+  const gt = useGT();
   const resolve = useMessages();
-  const events = buildPullRequestTimeline(detail, resolve);
+  const allEvents = buildPullRequestTimeline(detail, resolve);
   const location = parsePullRequestAnchor(revealUrl);
   const revealAnchor = location?.kind === "timeline" ? location.anchor : null;
   // The linked item stays marked and open after it is shown, until another link replaces it.
@@ -865,6 +1215,9 @@ export function PullRequestTimelineTab({
   const listRef = useRef<LegendListRef | null>(null);
   const matches = (event: PullRequestTimelineEvent) =>
     anchor !== null && pullRequestTimelineEventMatches(event, anchor);
+  // A linked item shows even when the saved filter hides it, so the link always lands.
+  const shown = new Set(filterPullRequestTimelineEvents(allEvents, filter));
+  const events = allEvents.filter((event) => shown.has(event) || matches(event));
 
   const term = changeRequestTermKind(sourceControlClients.get(detail.provider).changeRequest);
   const newestCommitAt = newestPullRequestCommitAt(detail.commits);
@@ -873,11 +1226,18 @@ export function PullRequestTimelineTab({
     canReact: (event) =>
       event.comment !== undefined && canReactPullRequestComment(detail, event.comment),
     onAddToChat: onAddToChat && ((comment) => onAddToChat({ kind: "comment", comment })),
+    onAddThreadToChat: onAddToChat && ((thread) => onAddToChat({ kind: "thread", thread })),
     environmentId,
     threadRef,
     reference,
     completionScope: pullRequestCompletionScope(detail, environmentId, reference),
     onRefresh,
+    fix: onFixFinding && {
+      findingFor: (event) => timelineFinding(detail, event),
+      onFix: onFixFinding,
+      pending: pendingFinding,
+      label: fixFindingLabel ?? gt("Fix in a thread"),
+    },
   };
   const editable = new Map(
     events
@@ -971,7 +1331,7 @@ export function PullRequestTimelineTab({
 
   if (events.length === 0) {
     return (
-      <div ref={scrollerRef} className="scrollbar-gutter-both h-full overflow-y-auto px-4 py-5">
+      <div ref={scrollerRef} className="h-full overflow-y-auto px-4.5 py-5">
         <div className="flex flex-col items-center justify-center py-16 text-center text-muted-foreground">
           <PullRequestGlyph.pullRequest className="mb-2 size-5" />
           <p className="text-ui">
@@ -995,18 +1355,19 @@ export function PullRequestTimelineTab({
       keyExtractor={rowKey}
       renderItem={renderRow}
       estimatedItemSize={140}
-      className="scrollbar-gutter-both h-full px-4"
-      contentContainerClassName="relative mx-auto w-full max-w-3xl before:absolute before:bottom-10 before:left-[15px] before:top-6 before:w-px before:bg-border/45"
+      className="h-full px-4.5"
+      contentContainerClassName="relative w-full before:absolute before:top-7.5 before:bottom-10.5 before:left-3 before:w-px before:-translate-x-1/2 before:bg-(--shell-divider)"
       ListHeaderComponent={
         anchor !== null && targetIndex < 0 && revealUrl === undefined ? (
           <p role="status" className="py-4 text-xs text-muted-foreground">
             <T>The linked item is not in the loaded activity.</T>
           </p>
         ) : (
-          <div className="h-5" />
+          // The first avatar sits 18px under the tab line, like its 18px side inset.
+          <div className="h-2" />
         )
       }
-      ListFooterComponent={<div className="h-5" />}
+      ListFooterComponent={<div className="h-1" />}
     />
   );
 }

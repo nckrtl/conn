@@ -1,3 +1,4 @@
+import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -44,6 +45,35 @@ describe("tasksPanelStore", () => {
     store().openSubtask("env:tabs", 485, "agents");
     store().openSubtask("env:tabs", null);
     expect(at("env:tabs")).toMatchObject({ subtaskId: null, tab: "agents" });
+  });
+
+  it("opens a task's PR below the task and goes back up to the tab the task had open", () => {
+    const pullRequest = {
+      environmentId: EnvironmentId.make("env"),
+      projectId: ProjectId.make("project"),
+      repository: "nckrtl/conn",
+      number: 1931,
+      url: "https://github.com/nckrtl/conn/pull/1931",
+    };
+    store().openTask("env:pr", 482);
+    store().setTab("env:pr", "agents");
+    store().openPullRequest("env:pr", 482, pullRequest);
+    store().setPullRequestTab("env:pr", "timeline");
+    expect(at("env:pr")).toMatchObject({
+      taskId: 482,
+      tab: "agents",
+      pullRequest: { number: 1931, tab: "timeline" },
+    });
+    store().closePullRequest("env:pr");
+    expect(at("env:pr")).toMatchObject({ taskId: 482, tab: "agents", pullRequest: null });
+
+    // A board badge opens another task's PR on that task's brief; the card opens the task itself.
+    store().showBoard("env:pr");
+    store().openPullRequest("env:pr", 470, pullRequest);
+    expect(at("env:pr")).toMatchObject({ view: "task", taskId: 470, tab: "brief" });
+    store().showBoard("env:pr");
+    store().openTask("env:pr", 470);
+    expect(at("env:pr")).toMatchObject({ view: "task", taskId: 470, pullRequest: null });
   });
 
   it("opens a subtask from the Subtasks tab on its brief, and comes back to Subtasks", () => {

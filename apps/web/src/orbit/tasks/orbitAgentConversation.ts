@@ -118,8 +118,9 @@ export function useOrbitTaskNavigation(threadKey: string) {
         setError(cause instanceof Error ? cause.message : "Could not open this conversation.");
     }
   };
-  const openPullRequest = (url: string) => {
-    if (!source) return;
+  /** A task's PR opens one level below the task, inside this Tasks tab. */
+  const openPullRequest = (taskId: number, url: string): boolean => {
+    if (!source) return false;
     sequence.current.id += 1;
     const target = pullRequestLinkPanelTarget({
       url,
@@ -131,10 +132,10 @@ export function useOrbitTaskNavigation(threadKey: string) {
       setError(
         "No connected project can open this pull request. Connect its repository in Connections, then try again.",
       );
-      return;
+      return false;
     }
     setError(null);
-    useRightPanelStore.getState().openPullRequest(source, {
+    tasksPanelActions().openPullRequest(threadKey, taskId, {
       environmentId: target.project.environmentId,
       projectId: target.project.id,
       repository: target.repository,
@@ -142,6 +143,7 @@ export function useOrbitTaskNavigation(threadKey: string) {
       ...(target.host === undefined ? {} : { host: target.host }),
       url,
     });
+    return true;
   };
   const returnToOrigin = () => {
     const key = useTasksPanelStore.getState().byThreadKey[threadKey]?.originThreadKey;

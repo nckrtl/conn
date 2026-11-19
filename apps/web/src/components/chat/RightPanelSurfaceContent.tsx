@@ -275,6 +275,10 @@ export function RightPanelSurfaceContent(props: {
         <TasksPanel
           threadKey={scopedThreadKey(threadRef)}
           orbitProjectId={props.connProject.orbitProjectId}
+          shortcuts={{
+            enabled: visible && props.activeSurfaceId === surface.id,
+            getContext: props.getShortcutContext,
+          }}
         />
       );
     case "side-chat":

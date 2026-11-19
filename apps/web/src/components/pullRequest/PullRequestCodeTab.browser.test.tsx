@@ -231,7 +231,9 @@ it("restores saved Viewed folds, follows cleared marks, and allows explicit expa
     .element(screen.getByRole("button", { name: "Expand diff", exact: true }))
     .toHaveAttribute("aria-expanded", "false");
 
-  await screen.getByRole("button", { name: "Expand diff", exact: true }).click();
+  // The row click is pointer-only; the hidden fold control serves keyboards.
+  screen.getByRole("button", { name: "Expand diff", exact: true }).element().focus();
+  await userEvent.keyboard("{Enter}");
   await expect.element(screen.getByText("three()", { exact: true })).toBeVisible();
   screen.getByRole("checkbox", { name: "Viewed" }).element().focus();
   await userEvent.keyboard(" ");

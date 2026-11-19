@@ -28,7 +28,10 @@ match T3 is open.
   (401, 403), `{threadId, title, updatedAt, items}` with the whole visible turn items (not cut
   for transport), `thread_transcript_too_large` (400) when the header line plus one JSON line
   per item passes `PROVIDER_SEND_TURN_MAX_FILE_BYTES`, `thread_not_found` as
-  `EnvironmentResourceNotFoundError` (404), at most two exports at once. The limit and the
+  `EnvironmentResourceNotFoundError` (404), at most two exports at once. The engine reads
+  the visible rows one at a time off the runtime thread, writes the body as it reads, and
+  stops at the first row past the limit; the handler sends the prepared bytes. Peak memory is
+  the body (at most 50 MiB) plus one row, never the whole thread. The limit and the
   header text are generated (`tools/gen-upstream.mjs`). Not on the managed ingress: its
   reader profile has no composer.
 - **Proof:** `idle-diff` reads the route on both servers in six thread states (two completed
@@ -36,7 +39,8 @@ match T3 is open.
   refusals. It fails on status, content type, refusal body, top-level keys, a body the
   contract's JSON codec does not decode, or a body that is not the server's own thread
   snapshot cut down (T3's snapshot passed through `projectTurnItemForWire`). 33 comparisons,
-  no failure.
+  no failure. An engine test proves the early stop: a row past the limit that the reader
+  cannot parse fails a whole read but not a read that stops before it.
 - **Known differences (info):** the items differ where the two engines record a turn
   differently, as in the thread view: no "Workspace ready" item, no `providerThreadId` on the
   first user message, ordinals that do not restart per run, no title on a provider error

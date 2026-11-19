@@ -532,6 +532,112 @@ impl Store {
         Ok(Some((Value::Object(projection), omitted)))
     }
 
+    /// `GET /api/orchestration/threads/:threadId/transcript`, encoded: the thread's visible
+    /// turn items read one at a time in timeline order, written straight into the JSON body.
+    /// It stops at the first row that would make the file the client builds (the header line
+    /// plus one line per item, T3's `getThreadTranscript`) pass `limit` bytes, so a long
+    /// thread never sits in memory whole. Only the runs and attempts are read as a whole.
+    pub(crate) fn thread_transcript(
+        &self,
+        thread_id: &str,
+        environment_id: &str,
+        limit: u64,
+    ) -> StoreResult<crate::ThreadTranscript> {
+        use crate::ThreadTranscript;
+        let row = self
+            .conn
+            .query_row(
+                "SELECT thread, activity_at, deleted FROM threads WHERE id = ?1",
+                [thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(err)?;
+        let Some((thread, updated_at, false)) = row else {
+            return Ok(ThreadTranscript::NotFound);
+        };
+        let thread = parse(thread)?;
+        let (Some(id), Some(title)) = (thread["id"].as_str(), thread["title"].as_str()) else {
+            return Err(format!("store: thread {thread_id} has no id or title"));
+        };
+        let mut size = crate::transcript::header_bytes([title, environment_id, id, &updated_at]);
+        if size > limit {
+            return Ok(ThreadTranscript::TooLarge);
+        }
+        let mut rule = crate::visibility::Visibility::new(
+            &entities(&self.conn, thread_id, "runs")?,
+            &entities(&self.conn, thread_id, "attempts")?,
+        );
+        if rule.needs_interrupts() {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT DISTINCT json_extract(body, '$.runId') FROM entities
+                     WHERE thread_id = ?1 AND kind = 'turnItems'
+                     AND json_extract(body, '$.type') = 'run_interrupt_request'
+                     AND json_extract(body, '$.runId') IS NOT NULL",
+                )
+                .map_err(err)?;
+            let runs = stmt
+                .query_map([thread_id], |row| row.get::<_, String>(0))
+                .map_err(err)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(err)?;
+            rule.set_interrupted(runs);
+        }
+        let mut body = crate::transcript::Body::new();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT body FROM entities WHERE thread_id = ?1 AND kind = 'turnItems'
+                 ORDER BY ordinal, id",
+            )
+            .map_err(err)?;
+        let mut rows = stmt.query([thread_id]).map_err(err)?;
+        let mut position = 0u64;
+        while let Some(row) = rows.next().map_err(err)? {
+            let text = row
+                .get_ref(0)
+                .map_err(err)?
+                .as_str()
+                .map_err(|e| format!("store: a stored row is not text: {e}"))?;
+            let item: Value = serde_json::from_str(text)
+                .map_err(|e| format!("store: a stored row is not JSON: {e}"))?;
+            if !rule.shows(&item) {
+                continue;
+            }
+            // The stored text is the item's compact JSON; its line in the file is longer. A
+            // row that cannot fit is refused before it is encoded.
+            if size.saturating_add(text.len() as u64).saturating_add(1) > limit {
+                return Ok(ThreadTranscript::TooLarge);
+            }
+            let source_item_id = item["id"].clone();
+            let row = json!({
+                "position": position,
+                "visibility": "local",
+                "sourceThreadId": thread_id,
+                "sourceItemId": source_item_id,
+                "item": item,
+            });
+            size = size.saturating_add(body.push(&row)?).saturating_add(1);
+            if size > limit {
+                return Ok(ThreadTranscript::TooLarge);
+            }
+            position += 1;
+        }
+        Ok(ThreadTranscript::Body(body.finish(
+            id,
+            title,
+            &updated_at,
+        )?))
+    }
+
     /// Stored events of one thread after `after`, at most `limit`, as `(sequence, event)`.
     pub(crate) fn thread_events_after(
         &self,

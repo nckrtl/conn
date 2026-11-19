@@ -4698,3 +4698,82 @@ async fn mcp_apps_calls_only_the_source_session_and_stores_context_without_a_ses
         "App requests never open sessions"
     );
 }
+
+/// `GET /api/orchestration/threads/:threadId/transcript`: the thread snapshot cut down, and a
+/// read that stops at the first row past the limit.
+#[tokio::test(flavor = "current_thread")]
+async fn a_transcript_is_the_visible_rows_and_stops_at_the_limit() {
+    let db = TempDb::new("transcript");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    for (command, text) in [("c2", "first"), ("c3", "second")] {
+        dispatch(&engine, message("t1", command, text)).await;
+        until_run_ends(&mut thread).await;
+    }
+    let read = |limit: u64| engine.thread_transcript("t1".into(), "env".into(), limit);
+    let crate::ThreadTranscript::Body(body) = read(u64::MAX).await.unwrap() else {
+        panic!("no transcript");
+    };
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    let snapshot = engine.thread_snapshot("t1".into()).await.unwrap().unwrap();
+    let projection = &snapshot["projection"];
+    assert_eq!(
+        body,
+        json!({"threadId": "t1", "title": projection["thread"]["title"],
+            "updatedAt": projection["updatedAt"], "items": projection["visibleTurnItems"]})
+    );
+    let items = body["items"].as_array().unwrap();
+    assert!(items.len() >= 4, "{body}");
+
+    // The file: the header line, then one line per row.
+    let header = crate::transcript::header_bytes([
+        body["title"].as_str().unwrap(),
+        "env",
+        "t1",
+        body["updatedAt"].as_str().unwrap(),
+    ]);
+    let line = |row: &Value| serde_json::to_vec(row).unwrap().len() as u64 + 1;
+    let file = header + items.iter().map(line).sum::<u64>();
+    assert!(matches!(
+        read(file).await.unwrap(),
+        crate::ThreadTranscript::Body(_)
+    ));
+    assert_eq!(
+        read(file - 1).await.unwrap(),
+        crate::ThreadTranscript::TooLarge
+    );
+    assert_eq!(
+        read(header - 1).await.unwrap(),
+        crate::ThreadTranscript::TooLarge
+    );
+    assert_eq!(
+        engine
+            .thread_transcript("nope".into(), "env".into(), u64::MAX)
+            .await
+            .unwrap(),
+        crate::ThreadTranscript::NotFound
+    );
+
+    // A row after the second one that SQLite stores but serde_json refuses (a lone
+    // surrogate): a whole read fails on it, a read whose limit ends at the second row answers
+    // too large without reaching it.
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute(
+        r#"INSERT INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
+         VALUES ('t1', 'turnItems', 'zz-broken', 999999, 999999, 999999999,
+                 '{"text":"\ud800"}')"#,
+        [],
+    )
+    .unwrap();
+    assert!(read(u64::MAX).await.is_err());
+    let two_rows = header + line(&items[0]) + line(&items[1]);
+    assert_eq!(
+        read(two_rows).await.unwrap(),
+        crate::ThreadTranscript::TooLarge
+    );
+}

@@ -13,6 +13,15 @@ export interface OrbitAgentNavigationPorts {
   readonly navigate: (target: ScopedThreadRef) => Promise<void>;
 }
 
+/** Where a Tasks click starts: the board, a task, or one of its subtasks, of one thread. */
+export function tasksNavigationPlace(
+  threadKey: string,
+  shown: { readonly taskId: number | null; readonly subtaskId: number | null } | null,
+): string {
+  if (shown === null || shown.taskId === null) return `${threadKey}|board`;
+  return `${threadKey}|${shown.taskId}|${shown.subtaskId ?? "task"}`;
+}
+
 /**
  * Click work in Tasks belongs to the place it started (one task, or the board, of one thread).
  * Leaving that place, or starting newer work, makes the pending work stale.

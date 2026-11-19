@@ -5,6 +5,7 @@ import {
   createTasksNavigationGuard,
   openOrbitAgentConversation,
   prepareOrbitConversationEnvironment,
+  tasksNavigationPlace,
   type OrbitAgentNavigationPorts,
 } from "./taskNavigation.logic";
 import { tasksPanelActions, useTasksPanelStore } from "./tasksPanelStore";
@@ -112,7 +113,7 @@ describe("Orbit task navigation", () => {
     expect(useTasksPanelStore.getState().byThreadKey[scopedThreadKey(remote)]).toBeUndefined();
   });
 
-  it("drops a pending agent click once the user leaves its task, also for the board", async () => {
+  it("drops a pending agent click once the user leaves its task or subtask, also for the board", async () => {
     const { ports, navigated } = setup();
     const guard = createTasksNavigationGuard();
     guard.enter("thread|482");
@@ -133,6 +134,16 @@ describe("Orbit task navigation", () => {
     release();
     await opened;
     expect(navigated).toEqual([]);
+
+    // A subtask's agent click is dropped when the path leads back up to its task.
+    const subtask = tasksNavigationPlace("thread", { taskId: 482, subtaskId: 484 });
+    const task = tasksNavigationPlace("thread", { taskId: 482, subtaskId: null });
+    expect(subtask).not.toBe(task);
+    expect(tasksNavigationPlace("thread", null)).toBe("thread|board");
+    guard.enter(subtask);
+    const fromSubtask = guard.begin();
+    guard.enter(task);
+    expect(fromSubtask()).toBe(false);
 
     // Staying on the same task keeps a click current; newer work replaces it.
     guard.enter("thread|470");

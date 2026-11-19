@@ -138,7 +138,9 @@ function TasksPanelContent(props: TasksPanelProps) {
   // One instance for the board and the task, so an error from a card's PR badge shows on the task.
   const orbitNavigation = useOrbitTaskNavigation(
     props.threadKey,
-    navigation.view === "task" ? navigation.taskId : null,
+    navigation.view === "task" && navigation.taskId !== null
+      ? { taskId: navigation.taskId, subtaskId: navigation.subtaskId }
+      : null,
   );
   const [liveStatus, setLiveStatus] = useState<OrbitTasksLiveStatus>("connecting");
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds the summary connection only while this Tasks surface is mounted

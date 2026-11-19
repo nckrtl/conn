@@ -18,6 +18,7 @@ import { beginSidebarPeek, isSidebarListedNow } from "../sidebarHiddenThreads";
 import { tasksPanelActions, useTasksPanelStore } from "./tasksPanelStore";
 import {
   createTasksNavigationGuard,
+  tasksNavigationPlace,
   openOrbitAgentConversation,
   prepareOrbitConversationEnvironment,
 } from "./taskNavigation.logic";
@@ -73,23 +74,28 @@ async function prepareKnownEnvironment(
 }
 
 /**
- * Clicks that leave the Tasks surface: agents and pull requests. `taskId` is the task on screen
- * (null on the board); leaving it cancels a pending agent click, and its errors stay with it.
+ * Clicks that leave the Tasks surface: agents and pull requests. `shown` is the task or subtask
+ * on screen (null on the board); leaving it cancels a pending agent click. Errors stay with the
+ * task they belong to.
  */
-export function useOrbitTaskNavigation(threadKey: string, shownTaskId: number | null) {
+export function useOrbitTaskNavigation(
+  threadKey: string,
+  shown: { readonly taskId: number; readonly subtaskId: number | null } | null,
+) {
   const router = useRouter();
   const [guard] = useState(createTasksNavigationGuard);
+  const location = tasksNavigationPlace(threadKey, shown);
   const placeOf = (taskId: number | null) => `${threadKey}|${taskId ?? "board"}`;
-  const place = placeOf(shownTaskId);
+  const place = placeOf(shown?.taskId ?? null);
   const [error, setError] = useState<{ readonly place: string; readonly message: string } | null>(
     null,
   );
   const source = parseScopedThreadKey(threadKey);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- invalidates pending click work when the task on screen or the Tasks surface leaves
   useEffect(() => {
-    guard.enter(place);
+    guard.enter(location);
     return guard.leave;
-  }, [guard, place]);
+  }, [guard, location]);
   const navigate = async (ref: OrbitConversationRef, peek = true) => {
     if (!source) return;
     const stillHere = guard.begin();

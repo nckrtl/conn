@@ -333,50 +333,53 @@ function TasksBoard(props: {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <BoardToolbar />
-      <TasksInsightsStrip orbitProjectId={props.orbitProjectId} query={query} />
-      <div
-        ref={scrollRef}
-        onScrollEnd={(event) =>
-          tasksPanelActions().saveBoardScroll(
-            props.threadKey,
-            event.currentTarget.scrollTop,
-            event.currentTarget.scrollLeft,
-          )
-        }
-        className="scrollbar-inset flex min-h-0 flex-1 gap-2 overflow-x-auto p-4.5"
-      >
-        {tasksBoardLanes(props.tasks, { query, hiddenLanes }).map((lane) => (
-          <section
-            key={lane.id}
-            aria-label={lane.label}
-            className="flex min-w-48 flex-1 basis-0 flex-col rounded-xl bg-(--shell-highlight)/60 p-1.5 dark:bg-(--shell-highlight)/30"
-          >
-            <div className="flex h-8 shrink-0 items-center justify-between px-2 text-ui text-muted-foreground">
-              <span className="font-medium">{lane.label}</span>
-              <span className="tabular-nums">
-                {searching ? `${lane.tasks.length} of ${lane.total}` : lane.tasks.length}
-              </span>
-            </div>
-            <LaneList threadKey={props.threadKey} lane={lane.id} top={laneScroll?.[lane.id] ?? 0}>
-              {lane.tasks.map((task) => (
-                <TaskCard
-                  key={task.id}
-                  task={task}
-                  onOpen={(laneTop) => {
-                    // The lane unmounts at once, before a running scroll reports its end.
-                    useTasksLaneScroll.getState().save(props.threadKey, lane.id, laneTop);
-                    tasksPanelActions().openTask(props.threadKey, task.id);
-                  }}
-                />
-              ))}
-              {lane.tasks.length === 0 ? (
-                <li className="px-3 py-4 text-center text-ui text-muted-foreground/70">
-                  {searching && lane.total > 0 ? "No matches" : "Nothing here"}
-                </li>
-              ) : null}
-            </LaneList>
-          </section>
-        ))}
+      {/* A short panel scrolls the insights away, so the lanes keep room for their cards. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <TasksInsightsStrip orbitProjectId={props.orbitProjectId} query={query} />
+        <div
+          ref={scrollRef}
+          onScrollEnd={(event) =>
+            tasksPanelActions().saveBoardScroll(
+              props.threadKey,
+              event.currentTarget.scrollTop,
+              event.currentTarget.scrollLeft,
+            )
+          }
+          className="scrollbar-inset flex min-h-64 flex-1 gap-2 overflow-x-auto p-4.5"
+        >
+          {tasksBoardLanes(props.tasks, { query, hiddenLanes }).map((lane) => (
+            <section
+              key={lane.id}
+              aria-label={lane.label}
+              className="flex min-w-48 flex-1 basis-0 flex-col rounded-xl bg-(--shell-highlight)/60 p-1.5 dark:bg-(--shell-highlight)/30"
+            >
+              <div className="flex h-8 shrink-0 items-center justify-between px-2 text-ui text-muted-foreground">
+                <span className="font-medium">{lane.label}</span>
+                <span className="tabular-nums">
+                  {searching ? `${lane.tasks.length} of ${lane.total}` : lane.tasks.length}
+                </span>
+              </div>
+              <LaneList threadKey={props.threadKey} lane={lane.id} top={laneScroll?.[lane.id] ?? 0}>
+                {lane.tasks.map((task) => (
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onOpen={(laneTop) => {
+                      // The lane unmounts at once, before a running scroll reports its end.
+                      useTasksLaneScroll.getState().save(props.threadKey, lane.id, laneTop);
+                      tasksPanelActions().openTask(props.threadKey, task.id);
+                    }}
+                  />
+                ))}
+                {lane.tasks.length === 0 ? (
+                  <li className="px-3 py-4 text-center text-ui text-muted-foreground/70">
+                    {searching && lane.total > 0 ? "No matches" : "Nothing here"}
+                  </li>
+                ) : null}
+              </LaneList>
+            </section>
+          ))}
+        </div>
       </div>
     </div>
   );

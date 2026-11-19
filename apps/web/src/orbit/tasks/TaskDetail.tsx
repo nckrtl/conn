@@ -767,11 +767,7 @@ function TaskKeyValues(props: { task: OrbitTaskDetail }) {
         ) : usage.lines.added === 0 && usage.lines.deleted === 0 ? (
           <span className="text-muted-foreground">{gt("No changes")}</span>
         ) : (
-          <PullRequestDiffStat
-            additions={usage.lines.added}
-            deletions={usage.lines.deleted}
-            className="font-mono"
-          />
+          <PullRequestDiffStat additions={usage.lines.added} deletions={usage.lines.deleted} />
         )}
       </TaskMetaRow>
     </div>

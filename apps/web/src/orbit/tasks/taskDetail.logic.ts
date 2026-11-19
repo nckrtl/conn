@@ -253,9 +253,14 @@ export function taskUsage(metrics: OrbitTaskMetrics): {
   readonly lines: { readonly added: number; readonly deleted: number } | null;
   readonly description: string;
 } {
-  const duration =
-    metrics.durationMs === null ? "Duration unknown" : durationText(metrics.durationMs);
-  const tokens = metrics.tokens === null ? "tokens unknown" : tokensText(metrics.tokens);
+  // A dash stands for an unreported value; with neither reported, one dash.
+  const text =
+    metrics.durationMs === null && metrics.tokens === null
+      ? "–"
+      : [
+          metrics.durationMs === null ? "–" : durationText(metrics.durationMs),
+          metrics.tokens === null ? "–" : tokensText(metrics.tokens),
+        ].join(" · ");
   const lines =
     metrics.linesAdded === null || metrics.linesDeleted === null
       ? null
@@ -271,7 +276,7 @@ export function taskUsage(metrics: OrbitTaskMetrics): {
       ? "Branch diff not reported yet."
       : `Branch diff against the default branch at the last report: ${lines.added.toLocaleString()} added, ${lines.deleted.toLocaleString()} removed.`,
   ].join(" ");
-  return { text: `${duration} · ${tokens}`, lines, description };
+  return { text, lines, description };
 }
 
 export function agentRowInteraction(row: AgentRowModel): "button" | "text" {

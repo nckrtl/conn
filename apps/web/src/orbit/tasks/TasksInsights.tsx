@@ -47,13 +47,8 @@ function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number |
         const value: InsightsState = client
           ? await client.getTaskInsights(project === null ? { period } : { period, project })
           : { status: "error", reason: "unreachable", message: m(msg("No Orbit Gateway here.")) };
-        // A failed re-read keeps the numbers already shown.
-        if (!disposed)
-          setState((current) =>
-            value.status === "error" && current.key === key && current.value.status === "ok"
-              ? current
-              : { key, value },
-          );
+        // A failed re-read turns the numbers into dashes; stale numbers would read as current.
+        if (!disposed) setState({ key, value });
       });
     read();
     const timer = window.setInterval(read, INSIGHTS_POLL_MS);
@@ -65,17 +60,18 @@ function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number |
   return state.key === key ? state.value : ({ status: "loading" } as const);
 }
 
-/** Static classes per count: two rows, the last cell spanning the gap on an odd count. */
-const GRID_LAYOUT: Readonly<Record<number, string>> = {
-  1: "grid-cols-3",
-  2: "grid-cols-3",
-  3: "grid-cols-2 [&>*:last-child]:col-span-2",
-  4: "grid-cols-2",
-  5: "grid-cols-2 @xl:grid-cols-3 @xl:[&>*:last-child]:col-span-2",
-  6: "grid-cols-2 @xl:grid-cols-3",
-  7: "grid-cols-2 @3xl:grid-cols-4 [&>*:last-child]:col-span-2",
-  8: "grid-cols-2 @3xl:grid-cols-4",
-};
+/**
+ * Two rows whatever the panel's width, the last cell spanning the gap on an odd count. Cells keep
+ * a readable width; a narrow panel scrolls the strip sideways instead of adding rows.
+ */
+function insightGrid(count: number) {
+  const columns = count <= 2 ? 3 : Math.ceil(count / 2);
+  const rows = count <= 2 ? 1 : 2;
+  return {
+    gridTemplateColumns: `repeat(${columns}, minmax(10rem, 1fr))`,
+    lastSpan: rows === 2 ? columns * 2 - count + 1 : 1,
+  };
+}
 
 /** The overall line in the expanded chart; per-provider lines need a per-provider history. */
 const TREND_COLOR = "var(--info)";
@@ -160,6 +156,8 @@ function InsightCard(props: {
   hint: string;
   scope: string;
   onExpand: () => void;
+  /** Columns this cell spans, for the last cell on an odd count. */
+  span: number;
 }) {
   const gt = useGT();
   const messages = useMessages();
@@ -170,15 +168,16 @@ function InsightCard(props: {
       <TooltipTrigger
         delay={400}
         render={
-          // No fill: a line right of and below each cell; the strip clips the outer ones.
+          // No fill: a line left of and above each cell; the strip clips the outer ones.
           <button
             type="button"
             onClick={props.onExpand}
+            style={props.span > 1 ? { gridColumn: `span ${props.span}` } : undefined}
             aria-label={gt("{label}: {value}. Show chart", {
               label: props.label,
               value: value ?? gt("not reported"),
             })}
-            className="flex min-w-0 cursor-pointer flex-col gap-1 border-e border-b px-4.5 pt-3.5 pb-3.25 text-left border-(--shell-divider)! transition-colors outline-none hover:bg-(--shell-highlight)/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+            className="flex min-w-0 cursor-pointer flex-col gap-1 border-s border-t px-4.5 pt-3.5 pb-3.25 text-left border-(--shell-divider)! transition-colors outline-none hover:bg-(--shell-highlight)/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
           />
         }
       >
@@ -186,7 +185,7 @@ function InsightCard(props: {
         <span className="flex min-w-0 items-baseline gap-2">
           <span
             className={cn(
-              "text-lg leading-6 font-medium tabular-nums",
+              "text-lg leading-6 font-medium whitespace-nowrap tabular-nums",
               value === null ? "text-muted-foreground/60" : "text-foreground",
             )}
           >
@@ -299,6 +298,7 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
   const [gridHeight, setGridHeight] = useState(0);
   if (shown.length === 0) return null;
   const open = shown.find((spec) => spec.id === expanded);
+  const grid = insightGrid(shown.length);
   const days = period === "7d" ? 7 : 30;
   const searching = props.query.trim().length > 0;
   const scope =
@@ -313,7 +313,7 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
   return (
     <section
       aria-label={gt("Task insights, last {days} days", { days })}
-      className="@container shrink-0 overflow-hidden border-b border-(--shell-divider)!"
+      className="@container scrollbar-inset shrink-0 overflow-x-auto overflow-y-hidden border-b border-(--shell-divider)!"
     >
       {open ? (
         <InsightDetail
@@ -326,8 +326,12 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
           onBack={() => setExpanded(null)}
         />
       ) : (
-        <div ref={gridRef} className={cn("-me-px -mb-px grid", GRID_LAYOUT[shown.length])}>
-          {shown.map((spec) => (
+        <div
+          ref={gridRef}
+          className="-ms-px -mt-px grid"
+          style={{ gridTemplateColumns: grid.gridTemplateColumns }}
+        >
+          {shown.map((spec, index) => (
             <InsightCard
               key={spec.id}
               spec={spec}
@@ -336,6 +340,7 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
               trend={insightTrend(insights, spec.id)}
               hint={hint(spec.id, insights)}
               scope={scope}
+              span={index === shown.length - 1 ? grid.lastSpan : 1}
               onExpand={() => {
                 setGridHeight(gridRef.current?.offsetHeight ?? 0);
                 setExpanded(spec.id);

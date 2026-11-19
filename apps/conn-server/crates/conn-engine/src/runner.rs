@@ -1900,21 +1900,16 @@ impl Inner {
         self.shutting_down.load(Ordering::SeqCst)
     }
 
+    /// Ends the thread's provider session and revokes the agent tools it got. A workspace
+    /// handoff closes the session this way too: T3 releases a per-thread provider process on
+    /// detach and revokes its MCP credential with it (`releaseEntry` in
+    /// `ProviderSessionManager.ts`); only a process shared by several threads (T3's Codex app
+    /// server) keeps it, and every provider here runs one process per thread.
     pub(crate) async fn close_session(&self, thread_id: &str) {
-        self.close_session_inner(thread_id, true).await;
-    }
-
-    pub(crate) async fn close_workspace_session(&self, thread_id: &str) {
-        self.close_session_inner(thread_id, false).await;
-    }
-
-    async fn close_session_inner(&self, thread_id: &str, revoke_tools: bool) {
         let live = lock(&self.live).remove(thread_id);
         if let Some(live) = live {
             self.command_output.finish_thread(thread_id);
-            if revoke_tools {
-                self.revoke_tools(live.tools_key.as_deref());
-            }
+            self.revoke_tools(live.tools_key.as_deref());
             live.session.close().await;
             // `notify_one` keeps a permit, so a pump not yet waiting still sees it.
             live.closed.notify_one();

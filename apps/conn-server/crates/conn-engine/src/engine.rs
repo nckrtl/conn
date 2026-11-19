@@ -848,7 +848,6 @@ impl Inner {
             }
             Effect::Respond { thread_id, request } => self.respond(thread_id, request).await,
             Effect::CloseSession { thread_id } => self.close_session(&thread_id).await,
-            Effect::DetachWorkspace { thread_id } => self.close_workspace_session(&thread_id).await,
             Effect::ApplyModelSelection {
                 thread_id,
                 selection,

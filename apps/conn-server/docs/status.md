@@ -21,6 +21,18 @@ the run stays open. Waiting for terminal confirmation is deliberate. `idle-diff`
 split in `KNOWN` as `intermittent`; a gate either side misses still fails it. Whether to
 match T3 is open.
 
+## A handoff revokes the caller's credential (2026-11-19)
+
+A worktree handoff detaches the calling thread's provider session. T3 then releases that
+per-thread process and revokes its MCP credential (`releaseEntry` in
+`ProviderSessionManager.ts`); only a process shared by several threads keeps it. Conn kept the
+old credential usable, so `t3_worktree_status` with it stayed `ok` here and turned into a
+401 on the T3 server a few milliseconds after the handoff returned. That race made `parity`
+fail at random. Now the engine closes the session the same way for a handoff as for any
+close, and revokes the credential; every provider here runs one process per thread. `parity`
+waits until both servers refuse the old credential (15 s limit) and compares the 401
+replies. Engine test: `a_workspace_handoff_revokes_the_old_session_tools`.
+
 ## Forks show their inherited history (2026-11-19)
 
 - **Served:** a run fork that is not a side chat opens with the history it inherits, in every
@@ -291,7 +303,6 @@ Still red:
 - `round_trip`: the new `get_config` sample has `worktreeCleanup: null` in a project override.
   `optionalKey(NullOr(T))` is generated as `Option<T>`, so null is dropped. Fixing it in
   `gen-contract.mjs` changes about 2,330 fields.
-- parity: `t3_worktree_status` after a handoff is an RPC error on the T3 server and `ok` here.
 - On mini: claude conformance (`env: : No such file`, red on 2026-11-17 as well) and canary
   (writes to the decoy home from the CommandLineTools python cache).
 

@@ -2969,6 +2969,48 @@ async fn the_host_grants_tools_claims_attachments_and_hears_closes() {
     assert_eq!(*host.revoked.lock().unwrap(), ["key:t1"]);
 }
 
+/// A workspace handoff releases the per-thread provider process and revokes its MCP
+/// credential, as T3's `releaseEntry` does; the continuation's session gets a new one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_workspace_handoff_revokes_the_old_session_tools() {
+    let db = TempDb::new("handoff-revokes");
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    assert!(host.revoked.lock().unwrap().is_empty());
+
+    dispatch(
+        &engine,
+        json!({"type": "thread.metadata.update", "commandId": "c3", "threadId": "t1",
+               "worktreePath": "/tmp/handoff-worktree", "expectedWorktreePath": null,
+               "continuation": {"messageId": "m-next", "text": "hang"}}),
+    )
+    .await;
+    timeout(Duration::from_secs(10), async {
+        while host.revoked.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the handoff revokes the old session's tools");
+    assert_eq!(*host.revoked.lock().unwrap(), ["key:t1"]);
+}
+
 /// Two fake providers, `claudeAgent` and `codex`, as a server with both configured.
 fn open_two(db: &TempDb) -> (SqliteEngine, Arc<FakeProvider>, Arc<FakeProvider>) {
     let claude = Arc::new(FakeProvider::new("claudeAgent"));

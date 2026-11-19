@@ -48,11 +48,10 @@ pub(crate) enum Effect {
         thread_id: String,
         request: Value,
     },
+    /// Ends the provider process and revokes its MCP credential. A workspace move does this
+    /// too, as T3 does for a per-thread provider process; the queued continuation gets a new
+    /// credential.
     CloseSession {
-        thread_id: String,
-    },
-    /// A workspace move ends the process while keeping the caller's MCP credential usable.
-    DetachWorkspace {
         thread_id: String,
     },
     /// Sends a model selection to the thread's running provider turn
@@ -92,7 +91,6 @@ impl Effect {
             | Self::StopBackgroundWork { thread_id, .. }
             | Self::Respond { thread_id, .. }
             | Self::CloseSession { thread_id }
-            | Self::DetachWorkspace { thread_id }
             | Self::ApplyModelSelection { thread_id, .. }
             | Self::CleanupHtmlAttachments { thread_id, .. }
             | Self::ThreadClosed { thread_id, .. } => Some(thread_id),
@@ -1863,7 +1861,7 @@ fn thread_metadata_update(tx: &mut Tx<'_>, command: Value) -> Outcome {
         }
         effects.insert(
             0,
-            Effect::DetachWorkspace {
+            Effect::CloseSession {
                 thread_id: thread_id.clone(),
             },
         );

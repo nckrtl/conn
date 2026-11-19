@@ -193,7 +193,10 @@ pub(crate) async fn handle(
                         exposure.listed(&thread.provider_session_id, name)
                     })
                 }
-                _ => catalog::list_result(matches!(caller, Caller::Client(_))),
+                _ => catalog::list_result(
+                    matches!(caller, Caller::Client(_)),
+                    service.links_enabled()
+                ),
             }
         ),
         "tools/call" => {
@@ -240,8 +243,13 @@ async fn call(
     let Some(name) = params["name"].as_str() else {
         return invalid("Invalid method parameters");
     };
-    let found =
-        catalog::tool(name).filter(|_| catalog::offered(name, matches!(caller, Caller::Client(_))));
+    let found = catalog::tool(name).filter(|_| {
+        catalog::offered_with_links(
+            name,
+            matches!(caller, Caller::Client(_)),
+            service.links_enabled(),
+        )
+    });
     let Some((tool, order)) = found else {
         return invalid(&format!("Tool '{name}' not found"));
     };

@@ -689,6 +689,8 @@ impl Inner {
         };
         let handler = if command_type == "secret_request.record" {
             Some(crate::secret_requests::record as commands::Handler)
+        } else if command_type == "link_request.record" {
+            Some(crate::link_requests::record as commands::Handler)
         } else {
             commands::handler(&command_type)
         };
@@ -976,23 +978,25 @@ impl Inner {
                 return Err((format!("Thread {thread_id} does not exist."), false));
             }
         } else {
-            let (_, replayed) = self
-                .dispatch_value(json!({
-                    "type": "thread.create",
-                    "commandId": command_id,
-                    "threadId": thread_id,
-                    "projectId": input["projectId"],
-                    "title": input["title"],
-                    "modelSelection": input["modelSelection"],
-                    "runtimeMode": input["runtimeMode"],
-                    "interactionMode": input["interactionMode"],
-                    "branch": if branch.is_string() { branch } else { Value::Null },
-                    "worktreePath": worktree_path,
-                    "createdBy": created_by,
-                    "creationSource": creation_source,
-                }))
-                .await
-                .map_err(to_err)?;
+            let mut create = json!({
+                "type": "thread.create",
+                "commandId": command_id,
+                "threadId": thread_id,
+                "projectId": input["projectId"],
+                "title": input["title"],
+                "modelSelection": input["modelSelection"],
+                "runtimeMode": input["runtimeMode"],
+                "interactionMode": input["interactionMode"],
+                "branch": if branch.is_string() { branch } else { Value::Null },
+                "worktreePath": worktree_path,
+                "createdBy": created_by,
+                "creationSource": creation_source,
+            });
+            // The link a linked caller acts for: the thread carries it (`startsThreads`).
+            if let Some(origin) = input.get("linkOrigin").filter(|o| o.is_object()) {
+                create["linkOrigin"] = origin.clone();
+            }
+            let (_, replayed) = self.dispatch_value(create).await.map_err(to_err)?;
             resumed = replayed;
         }
         let mut sequence = None;
@@ -1121,6 +1125,22 @@ impl Engine for SqliteEngine {
             self.inner
                 .db(move |store| store.created_run_status(&command_id))
                 .await
+        })
+    }
+
+    fn record_link_request(&self, mut input: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let Some(fields) = input.as_object_mut() else {
+                return Err("Invalid link request.".into());
+            };
+            fields.insert("type".into(), json!("link_request.record"));
+            self.inner
+                .dispatch_value(input)
+                .await
+                .map(|_| ())
+                .map_err(|e| match e {
+                    DispatchError::Rejected(e) | DispatchError::Internal(e) => e,
+                })
         })
     }
 

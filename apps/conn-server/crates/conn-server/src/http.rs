@@ -280,6 +280,7 @@ struct PairingTokenRequest {
     label: Option<String>,
     scopes: Option<Vec<String>>,
     access: Option<String>,
+    purpose: Option<String>,
 }
 
 /// The bearer session behind a request, or the 401 refusing it.
@@ -341,7 +342,35 @@ async fn pairing_token(
         Err(response) => return *response,
     };
     let request = body.map(|Json(b)| b).unwrap_or_default();
-    // MCP approval codes (`access`) need the MCP OAuth flow, which this server lacks.
+    // A peer-link code (`peerLinkPairingCodes`): the scopes its access needs, spent only by a link.
+    if let (Some(access), Some("peer-link")) =
+        (request.access.as_deref(), request.purpose.as_deref())
+        && auth::is_mcp_access(access)
+    {
+        if let Some(missing) = auth::mcp_client_scopes(access)
+            .iter()
+            .find(|s| !principal.has_scope(s))
+        {
+            return scope_required(missing);
+        }
+        let label = request.label.filter(|l| !l.trim().is_empty());
+        let issued = match state.auth.issue_peer_link_pairing(access, label) {
+            Ok(issued) => issued,
+            Err(e) => return internal("pairing_credential_issuance_failed", e),
+        };
+        let mut body = json!({
+            "id": issued.id,
+            "credential": issued.code,
+            "expiresAt": iso_from_ms(issued.expires_at_ms),
+            "access": access,
+            "purpose": "peer-link",
+        });
+        if let Some(label) = issued.label {
+            body["label"] = json!(label);
+        }
+        return no_store(Json(body).into_response());
+    }
+    // MCP approval codes (`access` alone) are not served: only peer-link codes are.
     if request.access.is_some() {
         return error(
             StatusCode::BAD_REQUEST,

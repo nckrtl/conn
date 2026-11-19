@@ -84,11 +84,14 @@ async fn run(state: PathBuf, cases: Vec<Value>) -> Result<Vec<Value>, Error> {
         annotations: None,
         secrets: None,
         panels: None,
+        peers: None,
+        settings: None,
         files: Some(files),
     });
     let client = Caller::Client(ClientCaller {
         session_id: "html-parity".into(),
         max_runtime_mode: Some("full-access"),
+        ..ClientCaller::default()
     });
     let client_headers = open(&service, &client).await?;
     let mut agents = Vec::new();

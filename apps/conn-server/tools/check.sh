@@ -199,6 +199,9 @@ run 4 120 "webhook-diff" node crates/conn-features/tools/webhook-diff.mjs "$rele
 run 4 120 "limits-diff" node crates/conn-server/tools/limits-diff.mjs
 run 3 180 "parity" \
   node crates/conn-mcp/tools/parity.mjs "$release/examples/replay_server"
+# Peer links between two servers: T3 → T3 against Conn → Conn, Conn → T3 and T3 → Conn.
+run 3 180 "peer-links-diff" \
+  node crates/conn-server/tools/peer-links-diff.mjs "$release/examples/replay_server"
 # Orbit's idle check: the shell route in 14 states on both servers, Codex on a stub (no model).
 run 4 180 "idle-diff" node crates/conn-server/tools/idle-diff.mjs "$release/conn-server"
 run 2 120 "codex instructions --check" \

@@ -40,6 +40,15 @@ fn fixture_with(
     host: Option<Arc<dyn conn_engine::EngineHost>>,
     provider: FakeProvider,
 ) -> Fixture {
+    fixture_full(name, host, provider, None)
+}
+
+fn fixture_full(
+    name: &str,
+    host: Option<Arc<dyn conn_engine::EngineHost>>,
+    provider: FakeProvider,
+    peers: Option<Arc<dyn crate::Peers>>,
+) -> Fixture {
     let dir = std::env::temp_dir().join(format!("conn-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -67,6 +76,8 @@ fn fixture_with(
             hub: conn_vcs::VcsHub::default(),
         }),
         panels: Some(conn_features::panels::PanelBroker::default()),
+        peers,
+        settings: None,
         test_logins: Some(conn_features::test_logins::TestLogins::new(&dir)),
         secrets: Some(conn_features::secrets::SecretRequests::new(
             &dir,
@@ -97,6 +108,7 @@ fn client(write: bool) -> Caller {
     Caller::Client(ClientCaller {
         session_id: if write { "swamp" } else { "reader" }.into(),
         max_runtime_mode: write.then_some("full-access"),
+        ..ClientCaller::default()
     })
 }
 
@@ -358,8 +370,9 @@ async fn transport_answers_as_the_typescript_server() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     // An outside client is not offered the tools that act as a calling thread.
+    // Without peer links here, the link tools are hidden too.
     let offered: Vec<_> = catalog::names()
-        .filter(|name| catalog::offered(name, true))
+        .filter(|name| catalog::offered_with_links(name, true, false))
         .collect();
     assert_eq!(names, offered);
     assert!(!names.contains(&"delegate_task"));
@@ -1710,8 +1723,6 @@ const NAMED_NOT_SERVED: &[&str] = &[
     "device_open",
     "device_screenshot",
     "fill_credential",
-    "t3_environment_link",
-    "t3_environment_links",
     "unwatch_pull_request",
     "watch_pull_request",
 ];
@@ -1781,6 +1792,8 @@ async fn fixture_with_tasks(name: &str) -> Fixture {
         refresh_provider: None,
         worktrees: None,
         panels: Some(conn_features::panels::PanelBroker::default()),
+        peers: None,
+        settings: None,
         secrets: config.secrets.clone(),
         test_logins: base.service.config.test_logins.clone(),
         engine,
@@ -2269,6 +2282,7 @@ async fn annotation_tools_report_a_conflict_and_refuse_callers_outside_a_thread(
     idle_agent.ok("annotations_list", json!({})).await;
 }
 
+mod peers;
 mod threads_handoff;
 
 #[tokio::test(flavor = "current_thread")]

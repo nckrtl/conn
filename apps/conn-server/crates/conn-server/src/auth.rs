@@ -79,6 +79,14 @@ pub const MAX_TTL_MS: u64 = 10 * 366 * 24 * 60 * MINUTE_MS;
 pub const SUBJECT_ONE_TIME_TOKEN: &str = "one-time-token";
 pub const SUBJECT_CLI_SESSION: &str = "cli-issued-session";
 pub const SUBJECT_DESKTOP_BOOTSTRAP: &str = "desktop-bootstrap";
+/// Sessions MCP OAuth issues to outside agents and peer links (`MCP_CLIENT_SUBJECT`).
+pub const SUBJECT_MCP_CLIENT: &str = "mcp-client";
+/// Pairing links bound to one purpose (`AuthPairingLinks.ts`): only the MCP sign-in they were
+/// made for may spend them, never a plain pairing.
+pub const MCP_APPROVAL_SUBJECT_PREFIX: &str = "mcp-approval:";
+pub const PEER_LINK_PAIRING_SUBJECT_PREFIX: &str = "mcp-approval:peer-link:";
+/// `MCP_CLIENT_SESSION_TTL`: 30 days.
+pub const MCP_CLIENT_SESSION_TTL_MS: u64 = 30 * 24 * 60 * MINUTE_MS;
 const METHOD_BEARER: &str = "bearer-access-token";
 
 type Hash = [u8; 32];
@@ -368,6 +376,67 @@ pub enum ExchangeError {
     Storage,
 }
 
+/// Why a pairing code could not approve an MCP sign-in (`ServerAuthMcpApprovalCodeError`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpCodeError {
+    UnknownOrUsed,
+    InsufficientScope,
+    Storage,
+}
+
+impl McpCodeError {
+    /// The T3 server's words for each reason.
+    pub fn message(&self) -> &'static str {
+        match self {
+            McpCodeError::InsufficientScope => {
+                "That pairing code cannot grant this access. It has not been used, so choose an access level it grants, or create a code with the standard scopes."
+            }
+            McpCodeError::UnknownOrUsed => {
+                "That pairing code is unknown, expired, or already used."
+            }
+            McpCodeError::Storage => "The code could not be checked. Try again.",
+        }
+    }
+}
+
+/// An MCP OAuth client, as `/mcp` sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpClientSession {
+    pub session_id: String,
+    pub label: String,
+    /// `AuthMcpClientAccess`.
+    pub access: String,
+    pub peer_link: bool,
+}
+
+/// `AuthMcpClientAccess` levels.
+pub const MCP_ACCESS_LEVELS: &[&str] = &[
+    "read-only",
+    "approval-required",
+    "auto-accept-edits",
+    "auto",
+    "full-access",
+];
+
+pub fn is_mcp_access(level: &str) -> bool {
+    MCP_ACCESS_LEVELS.contains(&level)
+}
+
+/// `mcpClientScopes`: the scopes an agent session gets for an access level.
+pub fn mcp_client_scopes(access: &str) -> Vec<String> {
+    let scopes: &[&str] = match access {
+        "read-only" => &["orchestration:read"],
+        "full-access" => &[
+            "orchestration:read",
+            "orchestration:operate",
+            "settings:write",
+            "source-control:write",
+        ],
+        _ => &["orchestration:read", "orchestration:operate"],
+    };
+    scopes.iter().map(|s| (*s).to_owned()).collect()
+}
+
 /// A client may not revoke its own session (`current_session_revoke_not_allowed`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct RevokeCurrentSession;
@@ -436,6 +505,12 @@ struct StoredSession {
     expires_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_connected_at_ms: Option<u64>,
+    /// An MCP client's approved runtime mode (`runtimeModeCeiling`); none for read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_mode_ceiling: Option<String>,
+    /// An MCP client session another environment holds as its peer link.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    peer_link: bool,
 }
 
 fn bearer_method() -> String {
@@ -669,7 +744,12 @@ impl AuthStore {
         let key = hash(&code.trim().to_ascii_uppercase());
         let mut outcome = Err(ExchangeError::InvalidCredential);
         let written = self.write(|state| {
-            let Some(grant) = state.pairing.get(&key) else {
+            // A purpose-bound code (`mcp-approval:…`) is only for the MCP sign-in it was made for.
+            let Some(grant) = state
+                .pairing
+                .get(&key)
+                .filter(|g| !g.subject.starts_with(MCP_APPROVAL_SUBJECT_PREFIX))
+            else {
                 return Vec::new();
             };
             let scopes = narrow(grant.scopes.clone(), requested);
@@ -728,6 +808,151 @@ impl AuthStore {
             vec![AccessChange::ClientUpserted(id)]
         })?;
         Ok(issued)
+    }
+
+    /// A one-time code that links another environment at `access` (`purpose: "peer-link"`):
+    /// it carries exactly the scopes that access needs, and only a peer link may spend it.
+    pub fn issue_peer_link_pairing(
+        &self,
+        access: &str,
+        label: Option<String>,
+    ) -> io::Result<IssuedPairingCode> {
+        let code = pairing_code();
+        let now = now_ms();
+        let link = StoredPairing {
+            id: uuid_v4(),
+            code_hash: hex(&hash(&code)),
+            scopes: mcp_client_scopes(access),
+            subject: format!("{PEER_LINK_PAIRING_SUBJECT_PREFIX}{access}"),
+            label,
+            created_at_ms: now,
+            expires_at_ms: expires_at(now, PAIRING_CODE_TTL_MS),
+        };
+        let issued = IssuedPairingCode {
+            id: link.id.clone(),
+            code: code.clone(),
+            label: link.label.clone(),
+            scopes: link.scopes.clone(),
+            created_at_ms: now,
+            expires_at_ms: link.expires_at_ms,
+        };
+        self.write(|state| {
+            state.pairing.insert(hash(&code), link.clone());
+            vec![AccessChange::PairingLinkUpserted(link.id.clone())]
+        })?;
+        Ok(issued)
+    }
+
+    /// Spends a pairing code for an MCP sign-in at `access` (`consumeMcpApprovalCode`). A plain
+    /// one-time code works when it carries the access's scopes; a purpose-bound one only for
+    /// its own purpose (`peer_link`) and level. Returns the access the session gets.
+    pub fn consume_mcp_code(
+        &self,
+        code: &str,
+        access: &str,
+        peer_link: bool,
+    ) -> Result<String, McpCodeError> {
+        let key = hash(&code.trim().to_ascii_uppercase());
+        let allowed = format!(
+            "{}{access}",
+            if peer_link {
+                PEER_LINK_PAIRING_SUBJECT_PREFIX
+            } else {
+                MCP_APPROVAL_SUBJECT_PREFIX
+            }
+        );
+        let required = mcp_client_scopes(access);
+        let mut outcome = Err(McpCodeError::UnknownOrUsed);
+        let written = self.write(|state| {
+            let Some(grant) = state.pairing.get(&key) else {
+                return Vec::new();
+            };
+            // T3 names a missing scope before a purpose that does not match.
+            if !required.iter().all(|s| grant.scopes.contains(s)) {
+                outcome = Err(McpCodeError::InsufficientScope);
+                return Vec::new();
+            }
+            if grant.subject.starts_with(MCP_APPROVAL_SUBJECT_PREFIX) && grant.subject != allowed {
+                return Vec::new();
+            }
+            let Some(grant) = state.pairing.remove(&key) else {
+                return Vec::new();
+            };
+            let level = grant
+                .subject
+                .strip_prefix(MCP_APPROVAL_SUBJECT_PREFIX)
+                .filter(|level| is_mcp_access(level))
+                .unwrap_or(access);
+            outcome = Ok(level.to_owned());
+            vec![AccessChange::PairingLinkRemoved(grant.id)]
+        });
+        if let Err(error) = written {
+            eprintln!("conn-server: could not save auth state: {error}");
+            return Err(McpCodeError::Storage);
+        }
+        outcome
+    }
+
+    /// A session for an MCP client signed in through OAuth (`issueMcpClientSession`).
+    pub fn issue_mcp_client_session(
+        &self,
+        label: &str,
+        access: &str,
+        peer_link: bool,
+        client: ClientInfo,
+    ) -> io::Result<IssuedSession> {
+        let mut client = client;
+        client.label = Some(label.to_owned());
+        client.device_type = "bot".into();
+        let (token, mut session) = new_session(
+            SUBJECT_MCP_CLIENT.into(),
+            mcp_client_scopes(access),
+            client,
+            MCP_CLIENT_SESSION_TTL_MS,
+        );
+        session.runtime_mode_ceiling = (access != "read-only").then(|| access.to_owned());
+        session.peer_link = peer_link;
+        let issued = IssuedSession {
+            token: token.clone(),
+            principal: principal_of(&session),
+            client: session.client.clone(),
+        };
+        self.write(|state| {
+            let id = session.id.clone();
+            state.sessions.insert(hash(&token), session.clone());
+            vec![AccessChange::ClientUpserted(id)]
+        })?;
+        Ok(issued)
+    }
+
+    /// The MCP client behind a bearer token (`authenticateMcpClient`), or `None` for any other
+    /// session.
+    pub fn authenticate_mcp_client(&self, token: &str) -> Option<McpClientSession> {
+        let now = now_ms();
+        let mut state = self.lock();
+        self.refresh(&mut state);
+        let session = state
+            .sessions
+            .get(&hash(token))
+            .filter(|s| s.expires_at_ms > now && s.subject == SUBJECT_MCP_CLIENT)?;
+        let access = if session.scopes.iter().any(|s| s == "orchestration:operate") {
+            session
+                .runtime_mode_ceiling
+                .clone()
+                .unwrap_or_else(|| "approval-required".to_owned())
+        } else {
+            "read-only".to_owned()
+        };
+        Some(McpClientSession {
+            session_id: session.id.clone(),
+            label: session
+                .client
+                .label
+                .clone()
+                .unwrap_or_else(|| "MCP client".to_owned()),
+            access,
+            peer_link: session.peer_link,
+        })
     }
 
     pub fn authenticate_bearer(&self, token: &str) -> Option<Principal> {
@@ -1073,6 +1298,8 @@ fn new_session(
         issued_at_ms: now,
         expires_at_ms: expires_at(now, ttl_ms),
         last_connected_at_ms: None,
+        runtime_mode_ceiling: None,
+        peer_link: false,
     };
     (token, session)
 }

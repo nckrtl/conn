@@ -40,6 +40,12 @@ pub(crate) fn offered(tool: &str, outside: bool) -> bool {
     !outside || !OUTSIDE_HIDDEN.lines().any(|name| name == tool)
 }
 
+/// [`offered`], and tools that only serve links are hidden while links are off here
+/// (`hiddenWhileLinksOff`).
+pub(crate) fn offered_with_links(tool: &str, outside: bool, links: bool) -> bool {
+    offered(tool, outside) && (links || !crate::peers::hidden_while_links_off(tool))
+}
+
 pub(crate) fn line_name(line: &str) -> &str {
     line.strip_prefix("{\"name\":\"")
         .and_then(|rest| rest.split_once('"'))
@@ -47,8 +53,8 @@ pub(crate) fn line_name(line: &str) -> &str {
 }
 
 /// The `tools/list` result body, for a caller in a thread or an outside client.
-pub(crate) fn list_result(outside: bool) -> String {
-    list_filtered(|name| offered(name, outside) && name != "tool_search")
+pub(crate) fn list_result(outside: bool, links: bool) -> String {
+    list_filtered(|name| offered_with_links(name, outside, links) && name != "tool_search")
 }
 
 pub(crate) fn list_filtered(visible: impl Fn(&str) -> bool) -> String {
@@ -295,7 +301,7 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
             assert!(names().any(|n| n == tool["name"]));
         }
-        let list: Value = serde_json::from_str(&list_result(false)).unwrap();
+        let list: Value = serde_json::from_str(&list_result(false, true)).unwrap();
         assert_eq!(
             list["tools"].as_array().unwrap().len(),
             names().filter(|name| *name != "tool_search").count()
@@ -311,8 +317,9 @@ mod tests {
         let live = dump["result"]["tools"].as_array().unwrap();
         for line in lines() {
             let ours: Value = serde_json::from_str(line).unwrap();
-            // The dump is an outside client's list: the tools that act as a thread are missing.
-            if !offered(line_name(line), true) {
+            // The dump is an outside client's list with links off: the tools that act as a
+            // thread, and those that only serve links, are missing.
+            if !offered_with_links(line_name(line), true, false) {
                 assert!(live.iter().all(|t| t["name"] != ours["name"]));
                 continue;
             }

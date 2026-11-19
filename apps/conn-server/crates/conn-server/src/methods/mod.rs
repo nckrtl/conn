@@ -15,6 +15,7 @@ mod git_message;
 mod mcp_apps;
 pub(crate) mod orchestration;
 mod panels;
+mod peer_links;
 mod preview;
 mod projects;
 pub mod provider;
@@ -62,6 +63,10 @@ pub struct Deps {
     pub text_generators: Option<Arc<crate::text_generation::TextGenerators>>,
     /// Bumped when a provider's `ServerProvider` entry changes (`provider::ProviderStatus`).
     pub provider_status: provider::ProviderStatus,
+    /// MCP OAuth for outside agents and peer links (`crate::oauth`).
+    pub oauth: Option<Arc<crate::oauth::McpOAuth>>,
+    /// Links to other environments (`crate::peers`); without it `peerLinks.*` is not served.
+    pub peers: Option<Arc<crate::peers::PeerLinks>>,
 }
 
 impl std::fmt::Debug for Deps {
@@ -91,5 +96,6 @@ pub fn register_all(table: &mut MethodTable, deps: &Deps) {
     annotations::register(table, deps);
     source_control::register(table, deps);
     pull_requests::register(table, deps);
+    peer_links::register(table, deps);
     text_generation::register(table, deps);
 }

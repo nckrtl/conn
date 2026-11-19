@@ -178,15 +178,18 @@ if (missing.length > 0) {
 // conn-mcp knows one filter: tools that act as the calling thread are hidden from outside
 // clients (`hiddenFromOutsideClients`), listed in src/outside-hidden.txt. Any other filter on
 // one of ours would need a Rust check too.
+// The other: tools that only serve links are hidden while Linked environments is off
+// (`hiddenWhileLinksOff`), listed in src/links-hidden.txt.
 const outsideHidden = [];
+const linksHidden = [];
 const catalog = implemented.map((name) => {
   const { "x-conn-hiddenFor": hiddenFor, ...tool } = byName.get(name);
   if (hiddenFor !== undefined) {
-    if (hiddenFor.length !== 1 || hiddenFor[0] !== "outside") {
+    if (hiddenFor.length !== 1 || !["outside", "links-off"].includes(hiddenFor[0])) {
       console.error(`${name} is hidden for ${hiddenFor.join(", ")}; teach conn-mcp that filter.`);
       process.exit(1);
     }
-    outsideHidden.push(`${name}\n`);
+    (hiddenFor[0] === "outside" ? outsideHidden : linksHidden).push(`${name}\n`);
   }
   return tool;
 });
@@ -260,6 +263,27 @@ for (const name of implemented) {
     if (Exit.isSuccess(Schema.decodeUnknownExit(field)(null))) nullArguments.push(`${name} ${key}\n`);
   }
 }
+// Tools that run in a linked environment when `environmentId` names one: their parameters
+// take `OrchestratorMcpEnvironmentTarget` as `environmentId` (`takesLinkedEnvironment` in
+// McpToolAccess.ts). Other tools may name an environment for their own reasons.
+const { OrchestratorMcpEnvironmentTarget } = await import(
+  NodeURL.pathToFileURL(NodePath.join(repo, "packages/contracts/src/index.ts")).href
+);
+if (OrchestratorMcpEnvironmentTarget === undefined) throw new Error("OrchestratorMcpEnvironmentTarget moved");
+const linkedTargets = implemented
+  .filter((name) => effectTools.get(name)?.parametersSchema.fields?.environmentId === OrchestratorMcpEnvironmentTarget)
+  .map((name) => `${name}\n`);
+if (linkedTargets.length === 0) throw new Error("No tool takes a linked environment: the target check moved");
+const linkedTargetsOut = NodePath.join(here, "..", "src", "linked-targets.txt");
+// What `t3_environment_read` and `t3_environment_preferences_update` report for settings that
+// were never changed: T3's own `preferences` of `ServerSettings` decoded from `{}`.
+const { ServerSettings } = await import(
+  NodeURL.pathToFileURL(NodePath.join(repo, "packages/contracts/src/index.ts")).href
+);
+const { preferences: preferencesOf } = await src("mcp/toolkits/environment/handlers.ts");
+const preferenceDefaults = `${JSON.stringify(preferencesOf(Schema.decodeUnknownSync(ServerSettings)({})))}\n`;
+const preferenceDefaultsOut = NodePath.join(here, "..", "src", "preference-defaults.json");
+const linksHiddenOut = NodePath.join(here, "..", "src", "links-hidden.txt");
 const nullArgumentsOut = NodePath.join(here, "..", "src", "null-arguments.txt");
 const outsideHiddenOut = NodePath.join(here, "..", "src", "outside-hidden.txt");
 // Every tool apps/server registers, whoever may see it: the tests check the agent texts by it.
@@ -368,6 +392,9 @@ const outputs = [
   [NodePath.join(here, "..", "..", "conn-features", "src", "secret-texts.json"), secretTexts, "secret request texts"],
   [out, text, `${catalog.length} tools`],
   [outsideHiddenOut, outsideHidden.join(""), `${outsideHidden.length} tools hidden from outside clients`],
+  [linksHiddenOut, linksHidden.join(""), `${linksHidden.length} tools hidden while links are off`],
+  [linkedTargetsOut, linkedTargets.join(""), `${linkedTargets.length} tools that run in a linked environment`],
+  [preferenceDefaultsOut, preferenceDefaults, "environment preference defaults"],
   [allNamesOut, allNames, `${tools.length} tool names`],
   [runningTaskNextOut, ORCHESTRATOR_MCP_RUNNING_TASK_NEXT, "running task next text"],
   [nullArgumentsOut, nullArguments.join(""), `${nullArguments.length} arguments that keep null`],

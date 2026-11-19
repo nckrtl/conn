@@ -1176,6 +1176,7 @@ struct ThreadStop {
 fn thread_stop(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let c: ThreadStop = decode(command)?;
     live_thread(tx, &c.thread_id)?;
+    crate::link_requests::close_pending(tx, &c.thread_id)?;
     // Stop means stop: queued messages wait until the user sends again or resumes the queue.
     hold_queue(tx, &c.thread_id)?;
     let children = crate::families::stop_children(tx, &c.thread_id)?;
@@ -1600,6 +1601,7 @@ fn patch_thread(
 
 fn thread_archive(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let c: ThreadOnly = decode(command)?;
+    crate::link_requests::close_pending(tx, &c.thread_id)?;
     patch_thread(tx, &c.thread_id, "thread.archived", true, |t, now| {
         t["archivedAt"] = json!(now);
     })?;

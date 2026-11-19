@@ -273,6 +273,13 @@ pub async fn serve_with_instances(
         vcs,
         terminals: Some(terminals.clone()),
         text_generators: Some(text_generators),
+        oauth: Some(Arc::new(crate::oauth::McpOAuth::new(
+            &state_dir.join("secrets"),
+        ))),
+        peers: Some(crate::peers::PeerLinks::new(
+            environment.clone(),
+            engine.clone(),
+        )),
         ..Deps::default()
     };
     deps.mcp = crate::routes::mcp::service(&deps);

@@ -5,7 +5,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "../../lib/storage";
 import type { PullRequestDetailTab } from "../../rightPanelStore";
-import type { InsightId } from "./tasksInsights.logic";
+import type { InsightId } from "@t3tools/client-runtime/orbit-gateway";
 
 // Where each thread's Tasks tab is, kept outside the panel because only the active surface
 // mounts. Keyed per thread like the panel's tabs; other panel apps keep their own state.

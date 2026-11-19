@@ -4,6 +4,8 @@ import {
   orbitTaskLane,
   type OrbitGatewayTransport,
   type OrbitTaskDetail,
+  type OrbitTaskInsights,
+  type OrbitTaskInsightsPeriod,
   type OrbitTasksClient,
   type OrbitTasksLiveStatus,
   type OrbitTasksResult,
@@ -18,10 +20,16 @@ import { listAllTasks } from "./taskList";
 
 // Design and screenshot builds only: `EXPO_PUBLIC_CONN_TASKS_FIXTURE=1` at build time swaps the
 // Gateway for fixture data in the Gateway's wire form, so it still runs through the real decoder.
+// `EXPO_PUBLIC_CONN_TASKS_FIXTURE_INSIGHTS=unhandled` makes the board's numbers fail as live does.
 const USE_FIXTURES = process.env.EXPO_PUBLIC_CONN_TASKS_FIXTURE === "1";
 
 const transport: OrbitGatewayTransport = USE_FIXTURES
-  ? fixtureOrbitTasksTransport()
+  ? fixtureOrbitTasksTransport({
+      insights:
+        process.env.EXPO_PUBLIC_CONN_TASKS_FIXTURE_INSIGHTS === "unhandled"
+          ? "unhandled"
+          : "fixture",
+    })
   : orbitGatewayTransport;
 
 /** One client for the app, so a realtime notice reaches every open Tasks screen. */
@@ -128,6 +136,33 @@ export function useOrbitTask(taskId: number) {
     setRefreshing(false);
   };
   return { state, refreshing, refresh };
+}
+
+/** Orbit's numbers move slowly; the strip re-reads every few minutes, like the desktop board. */
+const INSIGHTS_POLL_MS = 300_000;
+
+/**
+ * The board's insights for the last `period`, read while the Tasks list is on screen. A failed
+ * read replaces the numbers: stale numbers would read as current.
+ */
+export function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod) {
+  const [state, setState] = useState<OrbitTasksState<OrbitTaskInsights>>({ status: "loading" });
+  useFocusEffect(
+    useCallback(() => {
+      let disposed = false;
+      const read = async () => {
+        const result = await orbitTasksClient.getTaskInsights({ period });
+        if (!disposed) setState(result);
+      };
+      void read();
+      const timer = setInterval(() => void read(), INSIGHTS_POLL_MS);
+      return () => {
+        disposed = true;
+        clearInterval(timer);
+      };
+    }, [period]),
+  );
+  return state;
 }
 
 /** Re-renders every 30 s while `active`, for minute timers on running rows. */

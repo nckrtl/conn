@@ -29,6 +29,11 @@ interface PullRequestReviewStoreState {
   readonly clear: (key: string) => void;
   readonly setSummary: (key: string, body: string) => void;
   readonly clearSummary: (key: string, submittedBody: string) => void;
+  /** Open reply boxes on Timeline threads, by `pullRequestThreadReplyKey`; rows remount freely. */
+  readonly threadReplies: Readonly<Record<string, string>>;
+  readonly setThreadReply: (key: string, body: string) => void;
+  /** Closes the box; with `submittedBody`, only when nothing was typed since sending it. */
+  readonly closeThreadReply: (key: string, submittedBody?: string) => void;
 }
 
 const EMPTY: ReadonlyArray<PendingReviewComment> = [];
@@ -36,6 +41,15 @@ const EMPTY: ReadonlyArray<PendingReviewComment> = [];
 export const usePullRequestReviewStore = create<PullRequestReviewStoreState>()((set) => ({
   drafts: {},
   summaries: {},
+  threadReplies: {},
+  setThreadReply: (key, body) =>
+    set((state) => ({ threadReplies: { ...state.threadReplies, [key]: body } })),
+  closeThreadReply: (key, submittedBody) =>
+    set((state) => {
+      if (submittedBody !== undefined && state.threadReplies[key] !== submittedBody) return state;
+      const { [key]: _removed, ...rest } = state.threadReplies;
+      return { threadReplies: rest };
+    }),
   addComment: (key, comment) =>
     set((state) => ({
       drafts: { ...state.drafts, [key]: [...(state.drafts[key] ?? EMPTY), comment] },
@@ -69,6 +83,10 @@ export const usePullRequestReviewStore = create<PullRequestReviewStoreState>()((
       return { summaries: rest };
     }),
 }));
+
+export function pullRequestThreadReplyKey(reference: PullRequestRef, threadId: string): string {
+  return JSON.stringify([pullRequestReviewKey(reference), threadId]);
+}
 
 export function usePendingReviewComments(
   reference: PullRequestRef,

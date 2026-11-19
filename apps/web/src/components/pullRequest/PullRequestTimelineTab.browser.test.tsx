@@ -309,3 +309,50 @@ it("adds a review thread to the chat as its whole conversation", async () => {
     }),
   });
 });
+
+it("keeps an unsent reply when resolving the thread remounts its row", async () => {
+  const note = { author: detail.author, createdAt: "2026-09-01T00:00:00Z", url: null };
+  const value = (isResolved: boolean): PullRequestDetailView => ({
+    ...detail,
+    number: 77,
+    commits: [],
+    capabilities: {
+      ...detail.capabilities,
+      review: { ...detail.capabilities.review, reply: true },
+    },
+    viewerPermissions: { ...detail.viewerPermissions, comment: true },
+    reviewThreads: [
+      {
+        id: "draft-thread",
+        path: "src/a.ts",
+        line: 3,
+        side: "right",
+        isResolved,
+        isOutdated: false,
+        comments: [{ ...note, id: "draft-root", body: "Rename this." }],
+      },
+    ],
+  });
+  const timeline = (isResolved: boolean) => (
+    <div style={{ height: 600 }}>
+      <PullRequestTimelineTab
+        scrollerRef={() => {}}
+        detail={value(isResolved)}
+        environmentId={EnvironmentId.make("environment")}
+        reference={value(isResolved)}
+        order="oldest"
+        onOpenCommit={() => {}}
+        onRefresh={() => {}}
+      />
+    </div>
+  );
+  await using screen = await render(timeline(false));
+  await screen.getByRole("button", { name: "Reply", exact: true }).click();
+  await screen.getByRole("textbox", { name: "Reply to this conversation" }).fill("Unsent");
+
+  await screen.rerender(timeline(true));
+  await screen.getByRole("button", { name: /src\/a\.ts/ }).click();
+  await expect
+    .element(screen.getByRole("textbox", { name: "Reply to this conversation" }))
+    .toHaveValue("Unsent");
+});

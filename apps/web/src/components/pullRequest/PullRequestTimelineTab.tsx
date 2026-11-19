@@ -68,6 +68,7 @@ import { PullRequestReactionBar } from "./PullRequestReactions";
 import { canReactPullRequestComment } from "@t3tools/client-runtime/pull-request-reactions";
 import { PullRequestResolveThreadButton } from "./PullRequestResolveThreadButton";
 import { PullRequestThreadReplyBox } from "./PullRequestReviewAnnotation";
+import { pullRequestThreadReplyKey, usePullRequestReviewStore } from "./pullRequestReviewStore";
 import {
   PullRequestActorAvatar,
   PullRequestDiffStat,
@@ -577,7 +578,6 @@ function ReviewThreadEvent({
         )) ||
       (!thread.isResolved && !dismissed),
   );
-  const replyCount = thread.replies.length + thread.moreReplies;
   const reviewThread = detail.reviewThreads.find((candidate) => candidate.id === thread.id);
   const overviewThread = detail.overviewThreads?.find((candidate) => candidate.id === thread.id);
   const hostThread = reviewThread ?? overviewThread;
@@ -591,9 +591,12 @@ function ReviewThreadEvent({
   const loadThreadComments = useAtomCommand(pullRequestEnvironment.threadComments, {
     reportFailure: false,
   });
-  // The draft lives outside the folded part, so folding the thread keeps an unsent reply.
-  const [replying, setReplying] = useState(false);
-  const [replyDraft, setReplyDraft] = useState("");
+  // The draft lives in a store, so folding, resolving or scrolling the row away keeps it.
+  const replyKey = pullRequestThreadReplyKey(reactions.reference, thread.id);
+  const replyDraft = usePullRequestReviewStore((store) => store.threadReplies[replyKey]);
+  const replying = replyDraft !== undefined;
+  const setReplyDraft = (body: string) =>
+    usePullRequestReviewStore.getState().setThreadReply(replyKey, body);
   const [sending, setSending] = useState(false);
   const [loaded, setLoaded] = useState<{
     readonly comments: ReadonlyArray<PullRequestThreadComment>;
@@ -617,6 +620,13 @@ function ReviewThreadEvent({
           overviewThreads: overviewThread ? [{ ...overviewThread, comments: [...comments] }] : [],
         }).find((candidate) => candidate.thread?.id === thread.id)?.thread?.replies ??
         thread.replies);
+  const replyCount =
+    loaded === null
+      ? thread.replies.length + thread.moreReplies
+      : replies.length +
+        (nextCommentsCursor === null
+          ? 0
+          : Math.max(0, (hostThread?.commentCount ?? 0) - 1 - replies.length));
   const onAddThreadToChat = reactions.onAddThreadToChat;
   const addThreadToChat =
     onAddThreadToChat && reviewThread && comments.some((comment) => visibleBody(comment.body))
@@ -635,8 +645,16 @@ function ReviewThreadEvent({
       toastManager.add({ type: "error", title: m(msg("Reply could not be posted")) });
       return;
     }
-    setReplyDraft("");
-    setReplying(false);
+    usePullRequestReviewStore.getState().closeThreadReply(replyKey, text);
+    // Comments past the first page were loaded; the refresh brings only the first again.
+    setLoaded((previous) =>
+      previous === null
+        ? previous
+        : {
+            ...previous,
+            nextCursor: previous.nextCursor ?? hostThread?.nextCommentsCursor ?? null,
+          },
+    );
     reactions.onRefresh();
   };
   const loadMore = async (cursor: string) => {
@@ -755,7 +773,12 @@ function ReviewThreadEvent({
                 >
                   <ConversationCard
                     event={reply}
-                    editable={editable.get(reply.id) ?? null}
+                    editable={
+                      editable.get(reply.id) ??
+                      (reply.comment && canEditPullRequestComment(detail, reply.comment)
+                        ? reply.comment
+                        : null)
+                    }
                     cwd={cwd}
                     onOpen={onOpen}
                     reactions={reactions}
@@ -792,13 +815,13 @@ function ReviewThreadEvent({
                   threadId={thread.id}
                   completionScope={reactions.completionScope}
                   pending={sending}
-                  value={replyDraft}
+                  value={replyDraft ?? ""}
                   onValueChange={setReplyDraft}
                   onSend={(text) => void sendReply(text)}
-                  onCancel={() => setReplying(false)}
+                  onCancel={() => usePullRequestReviewStore.getState().closeThreadReply(replyKey)}
                 />
               ) : (
-                <Button size="xs" variant="ghost" onClick={() => setReplying(true)}>
+                <Button size="xs" variant="ghost" onClick={() => setReplyDraft("")}>
                   <T context="verb, button">Reply</T>
                 </Button>
               )}

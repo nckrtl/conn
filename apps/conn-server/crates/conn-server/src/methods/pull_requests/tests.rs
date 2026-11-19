@@ -2208,6 +2208,11 @@ impl conn_provider::Provider for GuideModel {
     fn driver(&self) -> &str {
         "codex"
     }
+    fn server_provider_entry(&self, _: &str) -> Option<Value> {
+        Some(
+            json!({"enabled": true, "installed": true, "status": "ready", "auth": {"status": "authenticated"}}),
+        )
+    }
     fn capabilities(
         &self,
     ) -> conn_provider::BoxFuture<
@@ -2535,7 +2540,7 @@ async fn a_guide_is_written_from_a_temporary_checkout_and_a_second_request_joins
 }
 
 #[tokio::test]
-async fn guides_are_off_until_turned_on_and_an_unready_model_falls_back_to_codex() {
+async fn guides_are_off_until_turned_on_and_a_text_generator_falls_back_to_codex() {
     let dir = TestDir::new();
     let (work, head) = guide_repo(&dir);
     let (base, task) = guide_api(head).await;
@@ -2546,12 +2551,7 @@ async fn guides_are_off_until_turned_on_and_an_unready_model_falls_back_to_codex
         requests: Mutex::default(),
         saw_checkout: Mutex::default(),
     });
-    let panel = guide_panel(&dir, &work, &base, model.clone()).await;
-    let environment = panel.environment.clone().expect("environment");
-    let mut table = MethodTable::new();
-    register_panel(&mut table, panel.clone());
     // A fresh server has no `reviewGuidesEnabled`: T3's default is off.
-    std::fs::write(environment.settings.path(), "{}").expect("sparse settings");
     let fresh = Arc::new(
         ServerEnvironment::load(
             &dir.0,
@@ -2562,25 +2562,38 @@ async fn guides_are_off_until_turned_on_and_an_unready_model_falls_back_to_codex
         .expect("environment"),
     );
     assert_eq!(fresh.settings.for_client().get("reviewGuidesEnabled"), None);
+    let mut panel = guide_panel(&dir, &work, &base, model.clone()).await;
+    // guide_panel turned guides on in the shared settings file; start from none.
     fresh
         .settings
-        .update(json!({"textGenerationModelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-4-5"}}), None)
+        .update(json!({"reviewGuidesEnabled": false}), None)
         .expect("settings");
-    let mut off = guide_panel(&dir, &work, &base, model.clone()).await;
-    Arc::get_mut(&mut off).expect("new panel").environment = Some(fresh.clone());
-    let error = off
+    let settings = fresh.clone();
+    {
+        let p = Arc::get_mut(&mut panel).expect("new panel");
+        p.environment = Some(fresh.clone());
+        p.text_generators = Some(Arc::new(crate::text_generation::TextGenerators::new(
+            move || settings.settings.raw(),
+        )));
+    }
+    let error = panel
         .mcp_call("generateReviewGuide", guide_input())
         .await
-        .expect_err("off by default");
+        .expect_err("off");
     assert!(
         matches!(error, Failure::Fail(ref v) if v["detail"] == "Review guides are off. Turn them on in Settings → Source control & issues."),
         "{error:?}"
     );
+    // The title model is a text generator: it cannot read the checkout, so the ready Codex
+    // instance writes the guide.
     fresh
         .settings
-        .update(json!({"reviewGuidesEnabled": true}), None)
+        .update(json!({"reviewGuidesEnabled": true,
+            "textGenerators": {"router": {"kind": "openaiCompatible", "baseUrl": "http://127.0.0.1:1/v1"}},
+            "textGenerationModelSelection": {"instanceId": "router", "model": "m"}}), None)
         .expect("settings");
-    off.mcp_call("generateReviewGuide", guide_input())
+    panel
+        .mcp_call("generateReviewGuide", guide_input())
         .await
         .expect("started");
     for _ in 0..300 {
@@ -2589,15 +2602,14 @@ async fn guides_are_off_until_turned_on_and_an_unready_model_falls_back_to_codex
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let requests = model.requests.lock().expect("requests");
-    let request = requests.first().expect("the guide ran");
-    assert_eq!(
-        to_json(&request.model_selection)["instanceId"],
-        "codex",
-        "the Claude title model is not an instance here: Codex writes the guide"
-    );
-    drop(requests);
-    let _ = table;
+    {
+        let requests = model.requests.lock().expect("requests");
+        let run = panel.guide_runs.get("github.com/a/b#7");
+        let request = requests
+            .first()
+            .unwrap_or_else(|| panic!("the guide ran: {run}"));
+        assert_eq!(to_json(&request.model_selection)["instanceId"], "codex");
+    }
     task.abort();
 }
 

@@ -498,21 +498,16 @@ fn guide_selection(
     {
         selection["model"] = json!(prompts::DEFAULT_TEXT_GENERATION_MODEL);
     }
-    // `TextGeneration.generate`: a text generator cannot read the checkout, and a missing
-    // instance cannot run, so the first ready investigating agent writes the guide
-    // (`fallbackTextGenerationModelSelection`: default instances first, then configured ones).
+    // `TextGeneration.generate`: a text generator cannot read the checkout, so the first ready
+    // investigating agent writes the guide (`fallbackTextGenerationModelSelection`: default
+    // instances first, then configured ones; the thread default's custom model first on its
+    // instance). Any other selection runs as chosen, as in T3.
     let chosen = selection["instanceId"]
         .as_str()
         .unwrap_or("codex")
         .to_owned();
-    if generator(&chosen) || panel.providers.get(&chosen).is_none() {
+    if generator(&chosen) {
         let defaults = prompts::INVESTIGATING_DEFAULT_MODELS;
-        let model_for = |driver: &str| {
-            defaults
-                .iter()
-                .find(|(d, _)| *d == driver)
-                .map(|(_, model)| *model)
-        };
         let mut candidates: Vec<(String, &str)> = defaults
             .iter()
             .map(|(driver, _)| ((*driver).to_owned(), *driver))
@@ -523,19 +518,48 @@ fn guide_selection(
                 candidates.push((provider.instance_id().to_string(), d));
             }
         }
-        let fallback = candidates.into_iter().find(|(id, driver)| {
-            *id != chosen
-                && !generator(id)
-                && panel
-                    .providers
-                    .get(id)
-                    .is_some_and(|p| p.driver() == *driver)
-                && title::selection_enabled(settings, Some(project), id)
-        });
-        if let Some((id, driver)) = fallback
-            && let Some(model) = model_for(driver)
-        {
-            return json!({"instanceId": id, "model": model});
+        // T3's usability check on the provider's status entry: enabled, installed, signed in,
+        // not failing.
+        let ready = |id: &str, driver: &str| {
+            panel.providers.get(id).is_some_and(|p| {
+                p.driver() == driver
+                    && p.server_provider_entry("").is_some_and(|entry| {
+                        entry["enabled"] == true
+                            && entry["installed"] == true
+                            && entry.pointer("/auth/status") != Some(&json!("unauthenticated"))
+                            && entry["status"] != "error"
+                    })
+            })
+        };
+        let thread_default = settings
+            .get("defaultModelSelection")
+            .filter(|d| d.is_object());
+        for (id, driver) in candidates {
+            if id == chosen
+                || generator(&id)
+                || !title::selection_enabled(settings, Some(project), &id)
+                || !ready(&id, driver)
+            {
+                continue;
+            }
+            if let Some(default) = thread_default.filter(|d| {
+                d["instanceId"] == id.as_str()
+                    && settings
+                        .get("providerInstances")
+                        .and_then(|i| i.get(&id))
+                        .and_then(|i| i.pointer("/config/customModels"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|models| {
+                            models
+                                .iter()
+                                .any(|m| m == &d["model"] || m.get("slug") == Some(&d["model"]))
+                        })
+            }) {
+                return default.clone();
+            }
+            if let Some((_, model)) = defaults.iter().find(|(d, _)| *d == driver) {
+                return json!({"instanceId": id, "model": model});
+            }
         }
     }
     selection
@@ -642,7 +666,15 @@ async fn write(panel: Arc<Panel>, job: Job) -> Result<(), String> {
     let worktrees = panel
         .environment
         .as_ref()
-        .map_or_else(std::env::temp_dir, |e| e.state_dir.join("worktrees"));
+        .map_or_else(std::env::temp_dir, |e| {
+            // `<base>/worktrees`: the state folder is `<base>/userdata` unless named directly.
+            let base = if e.state_dir.file_name().is_some_and(|n| n == "userdata") {
+                e.state_dir.parent().unwrap_or(&e.state_dir)
+            } else {
+                &e.state_dir
+            };
+            base.join("worktrees")
+        });
     let prepared = checkout_head(
         &job.project,
         &worktrees,

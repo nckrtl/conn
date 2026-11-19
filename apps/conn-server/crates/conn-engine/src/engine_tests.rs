@@ -1322,6 +1322,8 @@ async fn link_and_branch_syncs_write_what_the_host_read() {
     )
     .await;
     let before = projection(&engine, "t1").await["thread"].clone();
+    // Let the clock move, so a sync that counted as activity would show.
+    tokio::time::sleep(Duration::from_millis(5)).await;
     let snapshot = json!({"state": "open", "title": "Fix the chip", "headBranch": "fix",
         "baseBranch": "main", "isDraft": false, "updatedAt": "2026-11-19T08:00:00Z",
         "syncedAt": "2026-11-19T09:00:00.000Z", "closedAt": null, "mergedAt": null,
@@ -1379,6 +1381,10 @@ async fn link_and_branch_syncs_write_what_the_host_read() {
     assert_eq!(thread["updatedAt"], before["updatedAt"]);
     let r = engine.shell_snapshot().await.unwrap()["threads"][0].clone();
     assert_eq!(r["branchPullRequest"], branch_pr, "the shell carries it");
+    assert_eq!(
+        r["updatedAt"], before["updatedAt"],
+        "the sidebar does not move the thread"
+    );
     // A second lookup that expected no pull request is stale now.
     assert!(
         engine

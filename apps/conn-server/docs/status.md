@@ -31,7 +31,9 @@ the thread branch's PR. Before, the engine refused `thread.pull-request-link.syn
   `commands.rs`): a link sync replaces the link's snapshot and stack and keeps `updatedAt`; a
   branch sync is refused with T3's text when the thread, its project or its pull requests
   changed after the lookup. The shell row carries `branchPullRequest` and `linkedPullRequest`
-  when the thread has them, as T3's does.
+  when the thread has them, as T3's does. A host sync (link, branch, watch read) no longer
+  moves the thread's `updatedAt` in the sidebar; before, every `thread.pull-request-synced`
+  did.
 - **The sweeps** (`conn-source-control/src/pull_requests/link_sync.rs` decides,
   `conn-server/src/methods/pull_requests/links.rs` reads GitHub through the panel's client and
   `gh`'s login). They run in the watch loop's task from #146, one read at a time, on T3's
@@ -50,8 +52,11 @@ the thread branch's PR. Before, the engine refused `thread.pull-request-link.syn
   the stale refusal, the shell field. `client-check`: the client's own reducers show the
   snapshot and the branch PR. Server test: on a stub GitHub with a stub `gh`, one sweep
   writes the link snapshot and the branch PR; the next one reads both and writes nothing. A
-  listener test covers the triggers.
-- **Known differences:** no sibling stack retries across groups; no per-host pause until a
+  listener test covers the triggers. Live (mini, scratch profile, Conn dev desktop): three
+  threads that linked nckrtl/conn#14 got its title and failing checks on the first sweep; a new
+  thread on the PR's head branch got #14 as its branch PR at the end of its turn. The linked
+  row shows title, failed-checks icon, author and "synced 1m ago"; the sidebar chip reads
+  "PR #14 - Open: <title>" (it read "status pending").- **Known differences:** no sibling stack retries across groups; no per-host pause until a
   rate limit's reset time (a limited read backs off as T3 does without one); no replacement
   of an older single `linkedPullRequest`; an agent's `gh pr merge` or a panel action is not
   re-read at once (the next sweep reads it); no lookup caches or fresh-git-state confirmation;

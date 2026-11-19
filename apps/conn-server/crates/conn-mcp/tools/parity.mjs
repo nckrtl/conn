@@ -46,7 +46,11 @@ const root = NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(
 const children = [];
 process.once("exit", () => {
   for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
-  NodeFS.rmSync(root, { recursive: true, force: true });
+  try {
+    NodeFS.rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  } catch {
+    // A server still writing as it stops; the temp folder goes with the next cleanup.
+  }
 });
 
 function scratchProject(name) {

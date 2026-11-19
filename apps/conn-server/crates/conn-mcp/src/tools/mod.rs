@@ -166,6 +166,11 @@ pub(crate) async fn call(
         caller,
         origin,
     };
+    // A native bearer session's scopes hold here and there alike: checked before the call
+    // goes local or to a linked environment.
+    if let Some(scope) = crate::peers::native_scope(name) {
+        cx.require_scope(scope)?;
+    }
     // A tool that takes a linked environment runs there when `environmentId` names another
     // one; its handler here never sees the field. Other tools name an environment for their
     // own reasons (the one to link or forget).

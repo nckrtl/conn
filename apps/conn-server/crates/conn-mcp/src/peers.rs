@@ -64,6 +64,17 @@ pub(crate) const LINKED_ENVIRONMENTS_OFF: &str = "Linked environments is off on 
 pub const LINKS_OFF_HERE: &str =
     "Linked environments is off on this machine. Turn it on in Settings → Labs.";
 
+/// The scope a native bearer session needs for a link or settings tool, as the matching RPC
+/// methods require (`peerLinks.*`, `server.updateSettings`).
+pub(crate) fn native_scope(tool: &str) -> Option<&'static str> {
+    match tool {
+        "t3_environment_links" => Some("access:read"),
+        "t3_environment_link" | "t3_environment_unlink" => Some("access:write"),
+        "t3_environment_preferences_update" => Some("settings:write"),
+        _ => None,
+    }
+}
+
 /// What `threadNotFound` adds while links are on, for a caller that may use them.
 pub(crate) const THREAD_IDS_HINT: &str = " Thread ids belong to one environment: for a thread on a linked one, find it with `t3_environment_links` and pass its `environmentId` to a tool that takes one.";
 
@@ -382,7 +393,6 @@ impl Cx<'_> {
 /// `t3_environment_links` (`PeerForwarding.links`).
 pub(crate) async fn links(cx: &Cx<'_>) -> ToolResult {
     cx.forwarding_caller().await?;
-    cx.require_scope("access:read")?;
     let Some(peers) = cx.peers().filter(|p| p.enabled()) else {
         return Err(fail("capability_denied", LINKED_ENVIRONMENTS_OFF));
     };
@@ -413,7 +423,6 @@ pub(crate) async fn links(cx: &Cx<'_>) -> ToolResult {
 /// `t3_environment_unlink`: forgets the link here; the peer lists the session until revoked.
 pub(crate) async fn unlink(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.environment_writer().await?;
-    cx.require_scope("access:write")?;
     let environment = args
         .get("environmentId")
         .and_then(Value::as_str)
@@ -435,7 +444,6 @@ pub(crate) async fn unlink(cx: &Cx<'_>, args: &Args) -> ToolResult {
 /// `t3_environment_link`: a card in the calling thread; returns at once.
 pub(crate) async fn link(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.environment_writer().await?;
-    cx.require_scope("access:write")?;
     let thread = cx.require_thread("t3_environment_link")?.clone();
     let Some(peers) = cx.peers().filter(|p| p.enabled()) else {
         return Err(fail("capability_denied", LINKS_OFF_HERE));
@@ -503,7 +511,6 @@ pub(crate) fn preferences(settings: &Map<String, Value>) -> Value {
 /// `t3_environment_preferences_update`: the omitted fields stay as they are.
 pub(crate) async fn preferences_update(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.environment_writer().await?;
-    cx.require_scope("settings:write")?;
     let Some(settings) = &cx.config().settings else {
         return Err(fail(
             "orchestration_error",

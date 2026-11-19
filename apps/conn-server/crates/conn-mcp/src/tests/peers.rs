@@ -348,3 +348,41 @@ async fn a_failed_thread_read_does_not_open_the_fence() {
     assert!(cx.fencing_link().await.is_err());
     assert!(cx.assert_not_linked("change this").await.is_err());
 }
+
+/// A native session without `settings:write` cannot change preferences on a linked
+/// environment either: refused here, and nothing reaches the peer.
+#[tokio::test(flavor = "current_thread")]
+async fn a_native_sessions_scopes_hold_for_a_linked_environment() {
+    let peers = Arc::new(StandIn {
+        enabled: true,
+        ..StandIn::default()
+    });
+    let f = fixture_full(
+        "peers-scopes-remote",
+        None,
+        FakeProvider::new("claudeAgent"),
+        Some(peers.clone()),
+    );
+    let operate_only = Caller::Client(ClientCaller {
+        session_id: "device".into(),
+        max_runtime_mode: Some("full-access"),
+        scopes: Some(vec![
+            "orchestration:read".into(),
+            "orchestration:operate".into(),
+        ]),
+        ..ClientCaller::default()
+    });
+    let mut device = Client::open(&f.service, operate_only).await;
+    let (code, message) = device
+        .failure(
+            "t3_environment_preferences_update",
+            json!({"environmentId": "env-peer", "newWorktreesStartFromOrigin": false}),
+        )
+        .await;
+    assert_eq!(code, "capability_denied");
+    assert!(message.contains("settings:write"), "{message}");
+    assert!(
+        crate::lock(&peers.calls).is_empty(),
+        "nothing went to the peer"
+    );
+}

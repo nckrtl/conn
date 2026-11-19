@@ -738,7 +738,7 @@ impl Store {
         };
         // The source's own inherited rows and its marker come first.
         if let Some((parent, parent_run)) = inherited_run_fork(&source)
-            && !seen.iter().any(|id| *id == parent)
+            && !seen.contains(&parent)
         {
             seen.push(source_id.to_owned());
             let created_at = source["createdAt"].as_str().unwrap_or_default();

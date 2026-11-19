@@ -18,6 +18,7 @@ import {
   SlidersHorizontalIcon,
   UnplugIcon,
 } from "lucide-react";
+import { useGT, useMessages } from "gt-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { ProjectMonogram } from "~/components/ProjectMonogram";
@@ -39,6 +40,7 @@ import {
   MenuGroup,
   MenuGroupLabel,
   MenuPopup,
+  MenuSeparator,
   MenuTrigger,
 } from "~/components/ui/menu";
 import { Spinner } from "~/components/ui/spinner";
@@ -48,6 +50,8 @@ import { PROJECT_ICON_COLORS } from "~/projectIconColors";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
 import { TaskDetail } from "./TaskDetail";
+import { TasksInsightsStrip } from "./TasksInsights";
+import { INSIGHT_PERIODS, INSIGHTS } from "./tasksInsights.logic";
 import { INPUT_TONE } from "./taskDetail.logic";
 import {
   followTasksUpdates,
@@ -60,7 +64,7 @@ import {
   useTasksBoardQuery,
   useTasksLaneScroll,
   useTasksNavigation,
-  useTasksBoardLanes,
+  useTasksBoardSettings,
 } from "./tasksPanelStore";
 
 type TaskListState = { readonly status: "loading" } | OrbitTasksResult<OrbitTasksPage>;
@@ -185,7 +189,14 @@ function TasksPanelContent(props: { threadKey: string; orbitProjectId: number | 
       />
     );
   }
-  return <TasksBoard threadKey={props.threadKey} tasks={tasks} scroll={navigation.boardScroll} />;
+  return (
+    <TasksBoard
+      threadKey={props.threadKey}
+      orbitProjectId={props.orbitProjectId}
+      tasks={tasks}
+      scroll={navigation.boardScroll}
+    />
+  );
 }
 
 function TasksNotice(props: { icon: ReactNode; title: string; text: string; action?: ReactNode }) {
@@ -214,14 +225,16 @@ function useRestoredScroll<T extends HTMLElement>(top: number, left: number) {
   return ref;
 }
 
-/** Search fills the row; Lanes sits in Conn's toolbar pill, like the terminal controls. */
+/** Search fills the row; board settings sit in Conn's toolbar pill, like the terminal controls. */
 function BoardToolbar() {
+  const gt = useGT();
+  const messages = useMessages();
   const query = useTasksBoardQuery((state) => state.query);
-  const hiddenLanes = useTasksBoardLanes((state) => state.hiddenLanes);
-  const hidden = hiddenLanes.length;
+  const settings = useTasksBoardSettings();
+  const hidden = settings.hiddenLanes.length;
   return (
     // Sits under the tab bar like the file view's breadcrumb row.
-    <div className="flex shrink-0 items-center gap-2 px-3 pt-toolbar pb-3">
+    <div className="flex shrink-0 items-center gap-2 border-b border-(--shell-divider)! px-4.5 py-toolbar">
       <InputGroup variant="soft" className="h-8 min-w-0 flex-1">
         <InputGroupAddon>
           <SearchIcon aria-hidden className="size-4 opacity-50" />
@@ -242,36 +255,61 @@ function BoardToolbar() {
             render={
               <button
                 type="button"
-                className="flex h-6.5 cursor-pointer items-center gap-1.5 rounded-(--control-radius) px-2 text-ui text-muted-foreground transition-colors hover:bg-(--shell-control) hover:text-foreground"
+                aria-label={gt("Board settings")}
+                className="flex size-6.5 cursor-pointer items-center justify-center rounded-(--control-radius) text-muted-foreground transition-colors hover:bg-(--shell-control) hover:text-foreground data-popup-open:bg-(--shell-control) data-popup-open:text-foreground"
               />
             }
           >
             <SlidersHorizontalIcon aria-hidden className="size-4" />
-            Lanes
-            {hidden > 0 ? (
-              <span className="text-muted-foreground/70 tabular-nums">
-                · {ORBIT_TASK_LANES.length - hidden} of {ORBIT_TASK_LANES.length}
-              </span>
-            ) : null}
           </MenuTrigger>
-          <MenuPopup align="end">
+          <MenuPopup align="end" className="min-w-52">
             <MenuGroup>
-              <MenuGroupLabel>Show lanes</MenuGroupLabel>
+              <MenuGroupLabel>{gt("Lanes")}</MenuGroupLabel>
               {ORBIT_TASK_LANES.map((lane) => {
-                const shown = !hiddenLanes.includes(lane.id);
+                const shown = !settings.hiddenLanes.includes(lane.id);
                 return (
                   <MenuCheckboxItem
                     key={lane.id}
                     checked={shown}
                     // One lane always stays on the board.
                     disabled={shown && hidden === ORBIT_TASK_LANES.length - 1}
-                    onCheckedChange={() => useTasksBoardLanes.getState().toggleLane(lane.id)}
+                    onCheckedChange={() => settings.toggleLane(lane.id)}
                     closeOnClick={false}
                   >
                     {lane.label}
                   </MenuCheckboxItem>
                 );
               })}
+            </MenuGroup>
+            <MenuSeparator />
+            <MenuGroup>
+              <MenuGroupLabel>{gt("Insights")}</MenuGroupLabel>
+              {INSIGHTS.map((insight) => (
+                <MenuCheckboxItem
+                  key={insight.id}
+                  checked={!settings.hiddenInsights.includes(insight.id)}
+                  onCheckedChange={() => settings.toggleInsight(insight.id)}
+                  closeOnClick={false}
+                >
+                  {messages(insight.label)}
+                </MenuCheckboxItem>
+              ))}
+            </MenuGroup>
+            <MenuSeparator />
+            <MenuGroup>
+              <MenuGroupLabel>{gt("Insights period")}</MenuGroupLabel>
+              {/* One choice, with the same check as the items above so the groups line up. */}
+              {INSIGHT_PERIODS.map((period) => (
+                <MenuCheckboxItem
+                  key={period}
+                  role="menuitemradio"
+                  checked={settings.insightPeriod === period}
+                  onCheckedChange={() => settings.setInsightPeriod(period)}
+                  closeOnClick={false}
+                >
+                  {period === "7d" ? gt("Last 7 days") : gt("Last 30 days")}
+                </MenuCheckboxItem>
+              ))}
             </MenuGroup>
           </MenuPopup>
         </Menu>
@@ -283,17 +321,19 @@ function BoardToolbar() {
 /** The visible lanes side by side, each a subtle container. Read-only: Orbit owns task state. */
 function TasksBoard(props: {
   threadKey: string;
+  orbitProjectId: number | null;
   tasks: ReadonlyArray<OrbitTaskSummary>;
   scroll: { readonly top: number; readonly left: number };
 }) {
   const laneScroll = useTasksLaneScroll((state) => state.byThreadKey[props.threadKey]);
   const scrollRef = useRestoredScroll<HTMLDivElement>(props.scroll.top, props.scroll.left);
   const query = useTasksBoardQuery((state) => state.query);
-  const hiddenLanes = useTasksBoardLanes((state) => state.hiddenLanes);
+  const hiddenLanes = useTasksBoardSettings((state) => state.hiddenLanes);
   const searching = query.trim().length > 0;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <BoardToolbar />
+      <TasksInsightsStrip orbitProjectId={props.orbitProjectId} query={query} />
       <div
         ref={scrollRef}
         onScrollEnd={(event) =>
@@ -303,7 +343,7 @@ function TasksBoard(props: {
             event.currentTarget.scrollLeft,
           )
         }
-        className="scrollbar-inset flex min-h-0 flex-1 gap-2 overflow-x-auto px-3 pb-3"
+        className="scrollbar-inset flex min-h-0 flex-1 gap-2 overflow-x-auto p-4.5"
       >
         {tasksBoardLanes(props.tasks, { query, hiddenLanes }).map((lane) => (
           <section

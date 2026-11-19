@@ -14,7 +14,6 @@ import {
   observeOrbitTask,
   subtaskLead,
   subtaskUsageText,
-  taskLevelAgents,
   taskUsage,
 } from "./taskDetail.logic";
 
@@ -44,6 +43,13 @@ describe("task detail", () => {
     expect(agentsFor(task, task.subtasks[0]!.id).earlier.map((row) => row.label)).toEqual([
       "Reviewer",
     ]);
+    const wholeTask = {
+      ...task,
+      agents: task.agents.map((agent) =>
+        agent.role === "reviewer" ? { ...agent, subtaskIds: [], current: true } : agent,
+      ),
+    };
+    expect(agentsFor(wholeTask, null).current.at(-1)?.label).toBe("Reviewer · whole task");
     const waiting = await fixture(465);
     expect(subtaskLead(waiting, waiting.subtasks[1]!)).toMatchObject({
       kind: "agent",
@@ -72,9 +78,9 @@ describe("task detail", () => {
       { kind: "done" },
       { kind: "agent", tone: "info" },
     ]);
-    expect(taskLevelAgents(task).map((row) => row.label)).toEqual([
+    expect(agentsFor(task, null).current.map((row) => row.label)).toEqual([
       "Implementer · all subtasks",
-      "Reviewer",
+      "Reviewer · Attachment chips in the composer",
     ]);
     expect(subtaskLead({ ...task, status: "waiting_for_review" }, task.subtasks[1]!)).toMatchObject(
       { kind: "agent", tone: "warning" },

@@ -167,6 +167,22 @@ async fn read_capped<R: AsyncRead + Unpin>(reader: Option<R>, cap: usize) -> Str
     String::from_utf8_lossy(&kept).into_owned()
 }
 
+/// Asks a child to stop with SIGTERM (the hub cleans up its capture sessions and recordings
+/// then), waits up to `grace`, and only then kills it.
+pub(crate) async fn terminate(child: &mut tokio::process::Child, grace: Duration) {
+    let pid = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(rustix::process::Pid::from_raw);
+    if let Some(pid) = pid {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 /// `PATH` lookup, as `which`: the first executable file named `name`.
 pub(crate) fn find_on_path(name: &str, path: Option<&str>) -> Option<PathBuf> {
     let path = path
@@ -209,6 +225,48 @@ mod tests {
             .output()
             .await;
         assert!(missing.not_found, "missing program");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminate_lets_the_child_clean_up_then_kills() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-devices-term-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap_or_default();
+        let marker = dir.join("cleaned");
+        let script = format!(
+            "trap 'echo done > {}; exit 0' TERM; echo ready; while :; do sleep 0.05; done",
+            marker.display()
+        );
+        let mut child = Run::new("sh", ["-c", script.as_str()])
+            .command()
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut stdout = child.stdout.take().unwrap_or_else(|| panic!("stdout"));
+        let mut ready = [0u8; 6];
+        let _ = stdout.read_exact(&mut ready).await;
+        terminate(&mut child, Duration::from_secs(5)).await;
+        assert!(marker.exists(), "the TERM handler ran");
+        // A child that ignores TERM is killed after the grace period.
+        let mut stubborn = Run::new(
+            "sh",
+            [
+                "-c",
+                "trap '' TERM; echo ready; while :; do sleep 0.05; done",
+            ],
+        )
+        .command()
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut out = stubborn.stdout.take().unwrap_or_else(|| panic!("stdout"));
+        let _ = out.read_exact(&mut ready).await;
+        terminate(&mut stubborn, Duration::from_millis(200)).await;
+        assert!(
+            stubborn.try_wait().ok().flatten().is_some(),
+            "killed after the grace period"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test(flavor = "current_thread")]

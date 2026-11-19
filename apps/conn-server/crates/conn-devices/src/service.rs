@@ -88,6 +88,9 @@ pub(crate) struct Inner {
     discovery_details: Mutex<HashMap<String, String>>,
     /// Launchers bound since start, by agent-device session.
     launchers: Mutex<HashMap<String, String>>,
+    /// Held while launchers are bound, released or pruned, as T3's `launcherLock`: each reads
+    /// the live sessions only after taking it, so a prune never deletes a new launcher.
+    launcher_lock: tokio::sync::Mutex<()>,
     /// `environment-id` as the file holds it: T3 hashes the raw text into a host's owner.
     environment_file: std::sync::OnceLock<String>,
 }
@@ -136,17 +139,22 @@ impl Devices {
             lifecycle: tokio::sync::Mutex::new(()),
             discovery_details: Mutex::new(HashMap::new()),
             launchers: Mutex::new(HashMap::new()),
+            launcher_lock: tokio::sync::Mutex::new(()),
             environment_file: std::sync::OnceLock::new(),
         }));
         let this = devices.clone();
         tokio::spawn(async move {
             // Sessions live in memory: launchers a previous run left behind go.
             let state_dir = this.0.config.state_dir.clone();
-            let raw = blocking(move || {
-                agent::prune_launchers(&state_dir, &[]);
-                std::fs::read_to_string(state_dir.join("environment-id")).ok()
-            })
-            .await;
+            let raw = {
+                let _guard = this.0.launcher_lock.lock().await;
+                let live = this.live_session_names();
+                blocking(move || {
+                    agent::prune_launchers(&state_dir, &live);
+                    std::fs::read_to_string(state_dir.join("environment-id")).ok()
+                })
+                .await
+            };
             if let Some(raw) = raw {
                 let _ = this.0.environment_file.set(raw);
             }
@@ -877,10 +885,15 @@ impl Devices {
             })
     }
 
+    /// The remote state folder of a host: T3 hashes the environment id as its file holds it,
+    /// read once at start (`environment_file`), else the id the server loaded.
     fn owner(&self, host_id: &str) -> String {
-        let id_file = self.0.config.state_dir.join("environment-id");
-        let environment = std::fs::read_to_string(id_file)
-            .unwrap_or_else(|_| self.0.config.state_dir.display().to_string());
+        let environment = self
+            .0
+            .environment_file
+            .get()
+            .cloned()
+            .unwrap_or_else(|| self.0.config.environment_id.clone());
         ssh::owner(
             &environment,
             &self.0.config.state_dir.display().to_string(),
@@ -958,6 +971,14 @@ impl Devices {
         Ok(file.display().to_string())
     }
 
+    fn live_session_names(&self) -> Vec<String> {
+        self.snapshot()
+            .sessions
+            .iter()
+            .map(|s| agent::session_name(&s.thread_id, &s.host_id, &s.device_id))
+            .collect()
+    }
+
     /// `agentLauncher`: the command agents run for one session; `None` once it closed.
     pub(crate) async fn agent_launcher(
         &self,
@@ -968,14 +989,6 @@ impl Devices {
     ) -> Result<Option<String>, DeviceError> {
         let local = |reason: &str| DeviceError::host(LOCAL_HOST_ID, Some(LOCAL_HOST_LABEL), reason);
         let session = agent::session_name(thread_id, host_id, device_id);
-        if !self
-            .snapshot()
-            .sessions
-            .iter()
-            .any(|s| s.thread_id == thread_id && s.host_id == host_id && s.device_id == device_id)
-        {
-            return Ok(None);
-        }
         let node = blocking(|| {
             crate::process::find_on_path("node", None)
                 .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
@@ -991,6 +1004,12 @@ impl Devices {
                     e.message(Tool::Agent),
                 )
             })?;
+        // The session is checked under the launcher lock, so a prune that runs meanwhile either
+        // sees it live or finishes before the launcher is written.
+        let _guard = self.0.launcher_lock.lock().await;
+        if !self.live_session_names().contains(&session) {
+            return Ok(None);
+        }
         let (state_dir, node_text, entry) = (
             self.0.config.state_dir.clone(),
             node.display().to_string(),
@@ -1007,6 +1026,7 @@ impl Devices {
     }
 
     async fn release_launchers(&self, sessions: &[Session]) {
+        let _guard = self.0.launcher_lock.lock().await;
         for session in sessions {
             let name =
                 agent::session_name(&session.thread_id, &session.host_id, &session.device_id);
@@ -1019,30 +1039,29 @@ impl Devices {
         }
     }
 
+    /// Ends the agent-device sessions of retired device sessions and removes their launchers.
+    /// The live sessions are read after the launcher lock is taken.
     async fn prune_launchers(&self) {
-        let live: Vec<String> = self
-            .snapshot()
-            .sessions
-            .iter()
-            .map(|s| agent::session_name(&s.thread_id, &s.host_id, &s.device_id))
-            .collect();
-        let retired: Vec<(String, String)> = {
+        let _guard = self.0.launcher_lock.lock().await;
+        let live = self.live_session_names();
+        let retired: Vec<String> = {
             let mut launchers = crate::lock(&self.0.launchers);
-            let gone: Vec<(String, String)> = launchers
-                .iter()
-                .filter(|(session, _)| !live.contains(session))
-                .map(|(s, l)| (s.clone(), l.clone()))
+            let gone: Vec<String> = launchers
+                .keys()
+                .filter(|session| !live.contains(session))
+                .cloned()
                 .collect();
-            for (session, _) in &gone {
-                launchers.remove(session);
-            }
-            gone
+            gone.iter()
+                .filter_map(|session| launchers.remove(session))
+                .collect()
         };
         if let Some(node) = crate::process::find_on_path("node", None) {
-            for (_, launcher) in &retired {
+            for launcher in &retired {
                 agent::release_launcher(&node.display().to_string(), launcher).await;
             }
         }
+        // Sessions opened while the releases ran are live too.
+        let live = self.live_session_names();
         let state_dir = self.0.config.state_dir.clone();
         blocking(move || agent::prune_launchers(&state_dir, &live)).await;
     }
@@ -1127,11 +1146,15 @@ impl Devices {
                     }
                 }),
                 agent_ready: Box::new(move |endpoint| {
-                    let Some(inner) = weak.upgrade() else {
-                        return Ok(());
-                    };
-                    let file = agent::config_path(&inner.config.state_dir, &id);
-                    agent::write_config(&file, endpoint).map_err(|e| e.to_string())
+                    let file = weak
+                        .upgrade()
+                        .map(|inner| agent::config_path(&inner.config.state_dir, &id));
+                    Box::pin(async move {
+                        let Some(file) = file else { return Ok(()) };
+                        blocking(move || agent::write_config(&file, &endpoint))
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
                 }),
             },
         )
@@ -1149,10 +1172,14 @@ impl Devices {
     }
 
     /// Stops every host's helpers, as the T3 server's finalizers do.
+    /// Every host stops at once, so one unreachable host cannot hold up the others; the caller
+    /// bounds the whole.
     pub async fn stop_all(&self) {
+        let mut stopping = tokio::task::JoinSet::new();
         for host in self.hosts() {
-            host.stop().await;
+            stopping.spawn(async move { host.stop().await });
         }
+        while stopping.join_next().await.is_some() {}
     }
 }
 
@@ -1256,4 +1283,115 @@ async fn check_android_video(ready: &Ready, host_id: &str) -> Result<(), DeviceE
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestSettings(watch::Sender<u64>);
+
+    impl SettingsAccess for TestSettings {
+        fn read(&self) -> Map<String, Value> {
+            Map::new()
+        }
+        fn update(&self, _patch: Value) -> BoxFuture<'static, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn changes(&self) -> watch::Receiver<u64> {
+            self.0.subscribe()
+        }
+    }
+
+    fn devices(name: &str) -> (Devices, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("conn-devices-{name}-{}", conn_support::uuid_v4()));
+        let state_dir = dir.join("userdata");
+        std::fs::create_dir_all(&state_dir).unwrap_or_default();
+        let devices = Devices::start(Config {
+            base_dir: dir.clone(),
+            cwd: dir.clone(),
+            environment_id: "env-1".into(),
+            settings: Arc::new(TestSettings(watch::Sender::new(0))),
+            state_dir,
+        });
+        (devices, dir)
+    }
+
+    fn session(thread: &str) -> Session {
+        Session {
+            thread_id: thread.into(),
+            host_id: "mac".into(),
+            device_id: "SIM".into(),
+            platform: "ios".into(),
+            opened_at: "2026-11-19T00:00:00.000Z".into(),
+        }
+    }
+
+    /// A prune that waits for the launcher lock while a device opens reads the sessions after
+    /// it gets the lock, so the new launcher stays. A prune that read them first (before the
+    /// lock, or before awaiting releases) would delete it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_waiting_prune_keeps_a_launcher_bound_meanwhile() {
+        let (devices, dir) = devices("prune");
+        // Let the start task finish its own prune.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let guard = devices.0.launcher_lock.lock().await;
+        let pruning = tokio::spawn({
+            let devices = devices.clone();
+            async move { devices.prune_launchers().await }
+        });
+        tokio::task::yield_now().await;
+        let opened = session("thread-new");
+        devices.publish(|s| s.sessions.push(opened.clone()));
+        let name = agent::session_name(&opened.thread_id, &opened.host_id, &opened.device_id);
+        let launcher = agent::bind_launcher(devices.state_dir(), "/node", "/entry.mjs", &name, &[])
+            .unwrap_or_default();
+        crate::lock(&devices.0.launchers).insert(name.clone(), launcher.clone());
+        drop(guard);
+        let _ = pruning.await;
+        assert!(
+            std::path::Path::new(&launcher).exists(),
+            "the new launcher stays"
+        );
+        assert!(
+            crate::lock(&devices.0.launchers).contains_key(&name),
+            "still bound"
+        );
+        // Once its session retires, the launcher goes.
+        devices.publish(|s| s.sessions.clear());
+        devices.prune_launchers().await;
+        assert!(
+            !std::path::Path::new(&launcher).exists(),
+            "a retired launcher goes"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The SSH host writes the daemon config through the async hook, off the runtime thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_agent_hook_writes_the_config() {
+        let (devices, dir) = devices("hook");
+        let host = devices.make_ssh_host(SshConfig {
+            id: "mac".into(),
+            label: "Mac".into(),
+            target: "192.0.2.10".into(),
+            identity_file: None,
+            port: None,
+        });
+        let endpoint = crate::host::AgentEndpoint {
+            base_url: "http://127.0.0.1:9".into(),
+            token: "t".into(),
+            entry_path: "/e".into(),
+        };
+        let written = (host.hooks.agent_ready)(endpoint).await;
+        assert!(written.is_ok(), "{written:?}");
+        let file = agent::config_path(devices.state_dir(), "mac");
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        assert_eq!(
+            text, r#"{"daemonAuthToken":"t","daemonBaseUrl":"http://127.0.0.1:9"}"#,
+            "config"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

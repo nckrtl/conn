@@ -24,6 +24,8 @@ use crate::{
 };
 
 const HUB_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the hub gets after SIGTERM before it is killed.
+const HUB_STOP_GRACE: Duration = Duration::from_secs(5);
 const DAEMON_READY_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -540,7 +542,7 @@ impl LocalHost {
         let (exited_tx, exited_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
             tokio::select! {
-                _ = stop_rx => { let _ = child.kill().await; }
+                _ = stop_rx => crate::process::terminate(&mut child, HUB_STOP_GRACE).await,
                 _ = child.wait() => {}
             }
             let _ = exited_tx.send(true);
@@ -713,7 +715,16 @@ impl LocalHost {
     pub(crate) async fn stop(&self) {
         let _guard = self.lock.lock().await;
         let running = crate::lock(&self.running).take();
-        drop(running);
+        // Dropping the hub's handle asks it to stop (SIGTERM, then SIGKILL); wait for its exit.
+        if let Some(running) = running {
+            let mut exited = running.hub.exited.clone();
+            drop(running);
+            let _ = tokio::time::timeout(
+                HUB_STOP_GRACE + Duration::from_secs(1),
+                exited.wait_for(|e| *e),
+            )
+            .await;
+        }
         let hub_file = self.env.agent_state_dir().join("hub.json");
         blocking(move || std::fs::remove_file(hub_file)).await.ok();
         self.stop_daemon().await;

@@ -427,7 +427,9 @@ struct Tunnel {
 }
 
 pub(crate) type StatusHook = Box<dyn Fn(&str, Option<String>) + Send + Sync>;
-pub(crate) type AgentReadyHook = Box<dyn Fn(&AgentEndpoint) -> Result<(), String> + Send + Sync>;
+/// Writes the daemon's config file off the runtime thread.
+pub(crate) type AgentReadyHook =
+    Box<dyn Fn(AgentEndpoint) -> crate::BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 /// Callbacks into the device service.
 pub(crate) struct Hooks {
@@ -450,7 +452,7 @@ struct Inner {
 pub(crate) struct SshHost {
     pub(crate) config: SshConfig,
     owner: String,
-    hooks: Hooks,
+    pub(crate) hooks: Hooks,
     lock: tokio::sync::Mutex<()>,
     inner: Mutex<Inner>,
 }
@@ -831,7 +833,7 @@ impl SshHost {
             }
         }
         if let Some(agent) = &agent {
-            (self.hooks.agent_ready)(agent).map_err(|e| {
+            (self.hooks.agent_ready)(agent.clone()).await.map_err(|e| {
                 HostError::new(id, "configuring agent access", HostErrorKind::Other(e))
             })?;
         }

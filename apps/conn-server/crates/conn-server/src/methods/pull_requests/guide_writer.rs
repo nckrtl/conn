@@ -498,6 +498,46 @@ fn guide_selection(
     {
         selection["model"] = json!(prompts::DEFAULT_TEXT_GENERATION_MODEL);
     }
+    // `TextGeneration.generate`: a text generator cannot read the checkout, and a missing
+    // instance cannot run, so the first ready investigating agent writes the guide
+    // (`fallbackTextGenerationModelSelection`: default instances first, then configured ones).
+    let chosen = selection["instanceId"]
+        .as_str()
+        .unwrap_or("codex")
+        .to_owned();
+    if generator(&chosen) || panel.providers.get(&chosen).is_none() {
+        let defaults = prompts::INVESTIGATING_DEFAULT_MODELS;
+        let model_for = |driver: &str| {
+            defaults
+                .iter()
+                .find(|(d, _)| *d == driver)
+                .map(|(_, model)| *model)
+        };
+        let mut candidates: Vec<(String, &str)> = defaults
+            .iter()
+            .map(|(driver, _)| ((*driver).to_owned(), *driver))
+            .collect();
+        for provider in panel.providers.snapshot() {
+            let driver = provider.driver();
+            if let Some((d, _)) = defaults.iter().find(|(d, _)| *d == driver) {
+                candidates.push((provider.instance_id().to_string(), d));
+            }
+        }
+        let fallback = candidates.into_iter().find(|(id, driver)| {
+            *id != chosen
+                && !generator(id)
+                && panel
+                    .providers
+                    .get(id)
+                    .is_some_and(|p| p.driver() == *driver)
+                && title::selection_enabled(settings, Some(project), id)
+        });
+        if let Some((id, driver)) = fallback
+            && let Some(model) = model_for(driver)
+        {
+            return json!({"instanceId": id, "model": model});
+        }
+    }
     selection
 }
 
@@ -598,10 +638,11 @@ async fn write(panel: Arc<Panel>, job: Job) -> Result<(), String> {
             .or_else(|| settings.get("reviewGuideInstructions"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+    // T3's server-managed `worktreesDir` (`<base>/worktrees`), not the user's setting.
     let worktrees = panel
         .environment
         .as_ref()
-        .map_or_else(std::env::temp_dir, |e| crate::host::worktrees_dir(e));
+        .map_or_else(std::env::temp_dir, |e| e.state_dir.join("worktrees"));
     let prepared = checkout_head(
         &job.project,
         &worktrees,
@@ -669,9 +710,9 @@ impl Panel {
         self: &Arc<Self>,
         input: &Value,
     ) -> Result<Value, Failure> {
-        let off = self.environment.as_ref().is_some_and(|environment| {
-            environment.settings.for_client().get("reviewGuidesEnabled")
-                == Some(&Value::Bool(false))
+        // `reviewGuidesEnabled` defaults to false; the settings here are sparse.
+        let off = self.environment.as_ref().is_none_or(|environment| {
+            environment.settings.for_client().get("reviewGuidesEnabled") != Some(&Value::Bool(true))
         });
         if off {
             return Err(operation_error(
@@ -740,7 +781,7 @@ impl Panel {
             json!({"_tag": "Running", "headSha": head, "startedAt": conn_support::time::now_iso()});
         // Claim under the lock, with the head read again, so a stale click cannot replace a
         // newer head's run.
-        let (run_id, claimed) = {
+        let (run_id, claimed, started) = {
             let _owner = self.guide_runs.ownership.lock().await;
             let latest = client
                 .detail(&lookup)
@@ -761,7 +802,7 @@ impl Panel {
                 Some(run)
                     if run.value["_tag"] == "Running" && run.value["headSha"] == head.as_str() =>
                 {
-                    (run.id, run.value.clone())
+                    (run.id, run.value.clone(), false)
                 }
                 _ => {
                     let id = self.guide_runs.next.fetch_add(1, Ordering::Relaxed);
@@ -772,11 +813,13 @@ impl Panel {
                             value: running.clone(),
                         },
                     );
-                    (id, running.clone())
+                    (id, running.clone(), true)
                 }
             }
         };
-        if claimed != running {
+        // The claim itself says whether this request started the run: two requests in one
+        // millisecond build equal `Running` values.
+        if !started {
             return Ok(
                 json!({"guide": stored, "run": claimed, "currentHeadSha": head, "started": false}),
             );

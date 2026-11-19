@@ -592,6 +592,8 @@ const titlePromptsRs = rustfmt(
     `pub(super) const REVIEW_GUIDE_PREFERENCES: [&str; 2] = [${reviewGuidePreferences.map(str).join(",")}];`,
     "/// `DEFAULT_TEXT_GENERATION_MODEL`: the default text generation selection's model (Codex).",
     `pub(crate) const DEFAULT_TEXT_GENERATION_MODEL: &str = ${str(contractsModel.DEFAULT_TEXT_GENERATION_MODEL)};`,
+    "/// `defaultTextGenerationModel` of the drivers that can write review guides, in T3's fallback order.",
+    `pub(crate) const INVESTIGATING_DEFAULT_MODELS: [(&str, &str); 2] = [${["codex", "claudeAgent"].map((d) => `(${str(d)}, ${str(contractsModel.DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[d] ?? contractsModel.DEFAULT_MODEL_BY_PROVIDER[d] ?? contractsModel.DEFAULT_TEXT_GENERATION_MODEL)})`).join(", ")}];`,
     "/// The guide's output schema, as T3 writes it for a CLI.",
     `pub(crate) const REVIEW_GUIDE_OUTPUT_SCHEMA: &str = ${str(JSON.stringify(textGenerationUtils.toJsonSchemaObject(prompts.buildReviewGuidePrompt(reviewGuideBase).outputSchema)))};`,
     "",

@@ -15,8 +15,8 @@ use super::js::{self, char_code_at, is_high_surrogate, is_low_surrogate, len16, 
 #[path = "generated.rs"]
 mod generated;
 pub(crate) use generated::{
-    COMMIT_POLICIES, COMMIT_SCHEMAS, DEFAULT_TEXT_GENERATION_MODEL, REVIEW_GUIDE_OUTPUT_SCHEMA,
-    TITLE_OUTPUT_SCHEMA,
+    COMMIT_POLICIES, COMMIT_SCHEMAS, DEFAULT_TEXT_GENERATION_MODEL, INVESTIGATING_DEFAULT_MODELS,
+    REVIEW_GUIDE_OUTPUT_SCHEMA, TITLE_OUTPUT_SCHEMA,
 };
 use generated::{COMMIT_PROMPTS, Part};
 

@@ -112,6 +112,11 @@ pub(super) async fn store(
     number: u32,
     guide: Value,
 ) -> Result<(), String> {
+    let text = guide.to_string();
+    // A guide the reader would refuse must not replace the readable one.
+    if text.len() > MAX_GUIDE_BYTES {
+        return Err("The review guide is too large to store.".into());
+    }
     tokio::task::spawn_blocking(move || {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
         connection
@@ -127,7 +132,7 @@ pub(super) async fn store(
                 "INSERT INTO pull_request_review_guides (host, repository, number, guide_json)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (host, repository, number) DO UPDATE SET guide_json = excluded.guide_json",
-                rusqlite::params![host, repository, number, guide.to_string()],
+                rusqlite::params![host, repository, number, text],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())

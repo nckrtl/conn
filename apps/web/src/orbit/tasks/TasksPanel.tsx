@@ -50,7 +50,7 @@ import { PROJECT_ICON_COLORS } from "~/projectIconColors";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
 import { useOrbitTaskNavigation } from "./orbitAgentConversation";
-import { TaskDetail, type TasksPanelShortcuts } from "./TaskDetail";
+import { TaskDetail, type TasksPanelHost } from "./TaskDetail";
 import { TasksInsightsStrip } from "./TasksInsights";
 import { INSIGHT_PERIODS, INSIGHTS } from "./tasksInsights.logic";
 import { INPUT_TONE } from "./taskDetail.logic";
@@ -111,7 +111,7 @@ function useOrbitTaskList(orbitProjectId: number | null) {
 type TasksPanelProps = {
   threadKey: string;
   orbitProjectId: number | null;
-  shortcuts: TasksPanelShortcuts;
+  host: TasksPanelHost;
 };
 
 export function TasksPanel(props: TasksPanelProps) {
@@ -136,7 +136,10 @@ function TasksPanelContent(props: TasksPanelProps) {
   const { state, retry } = useOrbitTaskList(props.orbitProjectId);
   const navigation = useTasksNavigation(props.threadKey);
   // One instance for the board and the task, so an error from a card's PR badge shows on the task.
-  const orbitNavigation = useOrbitTaskNavigation(props.threadKey);
+  const orbitNavigation = useOrbitTaskNavigation(
+    props.threadKey,
+    navigation.view === "task" ? navigation.taskId : null,
+  );
   const [liveStatus, setLiveStatus] = useState<OrbitTasksLiveStatus>("connecting");
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds the summary connection only while this Tasks surface is mounted
   useEffect(() => {
@@ -159,7 +162,7 @@ function TasksPanelContent(props: TasksPanelProps) {
         liveStatus={liveStatus}
         navigation={{ ...navigation, taskId: navigation.taskId }}
         orbitNavigation={orbitNavigation}
-        shortcuts={props.shortcuts}
+        host={props.host}
         listTitle={
           state.status === "ok"
             ? (state.value.tasks.find((task) => task.id === navigation.taskId)?.title ?? null)
@@ -546,7 +549,14 @@ function TaskCard(props: {
         <button
           type="button"
           onClick={(event) => props.onOpen(laneTop(event.currentTarget), pr.url)}
-          aria-label={gt("Pull request #{number}. Open it in Tasks", { number: pr.number })}
+          aria-label={
+            prState
+              ? gt("Pull request #{number} ({state}). Open it in Tasks", {
+                  number: pr.number,
+                  state: prState.label,
+                })
+              : gt("Pull request #{number}. Open it in Tasks", { number: pr.number })
+          }
           className={cn(
             "absolute right-3.25 bottom-2.75 flex cursor-pointer items-center gap-1 rounded-sm text-ui leading-4 tabular-nums hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none",
             prState?.toneClassName ?? "text-muted-foreground",

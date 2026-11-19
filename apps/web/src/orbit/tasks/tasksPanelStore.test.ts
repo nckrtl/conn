@@ -76,6 +76,29 @@ describe("tasksPanelStore", () => {
     expect(at("env:pr")).toMatchObject({ view: "task", taskId: 470, pullRequest: null });
   });
 
+  it("opens the PR from a badge even when that task had a subtask open", () => {
+    const pullRequest = {
+      environmentId: EnvironmentId.make("env"),
+      projectId: ProjectId.make("project"),
+      repository: "nckrtl/conn",
+      number: 1931,
+      url: "https://github.com/nckrtl/conn/pull/1931",
+    };
+    store().openTask("env:pr-sub", 482);
+    store().setTab("env:pr-sub", "subtasks");
+    store().openSubtask("env:pr-sub", 484, "agents");
+    store().showBoard("env:pr-sub");
+    store().openPullRequest("env:pr-sub", 482, pullRequest);
+    expect(at("env:pr-sub")).toMatchObject({
+      taskId: 482,
+      subtaskId: null,
+      tab: "subtasks",
+      pullRequest: { number: 1931 },
+    });
+    store().closePullRequest("env:pr-sub");
+    expect(at("env:pr-sub")).toMatchObject({ subtaskId: null, tab: "subtasks" });
+  });
+
   it("opens a subtask from the Subtasks tab on its brief, and comes back to Subtasks", () => {
     store().openTask("env:subtasks", 482);
     store().setTab("env:subtasks", "subtasks");

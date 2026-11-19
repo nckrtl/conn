@@ -141,7 +141,21 @@ export const useTasksPanelStore = create<TasksPanelState>()(
         openTask: (threadKey, taskId) =>
           update(threadKey, (current) => openedTask(current, taskId)),
         openPullRequest: (threadKey, taskId, pullRequest) =>
-          update(threadKey, (current) => ({ ...openedTask(current, taskId), pullRequest })),
+          update(threadKey, (current) => {
+            const task = openedTask(current, taskId);
+            // The PR sits below the task itself, so a subtask the task had open closes; the
+            // task comes back on its own tab.
+            return task.subtaskId === null
+              ? { ...task, pullRequest }
+              : {
+                  ...task,
+                  subtaskId: null,
+                  tab: task.taskTab ?? "brief",
+                  taskTab: undefined,
+                  detailScrollTop: 0,
+                  pullRequest,
+                };
+          }),
         closePullRequest: (threadKey) =>
           update(threadKey, (current) =>
             current.pullRequest ? { ...current, pullRequest: null } : current,

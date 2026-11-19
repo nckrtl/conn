@@ -1,3 +1,4 @@
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   orbitTaskEnvironment,
@@ -51,6 +52,7 @@ import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { PullRequestDetailPanel } from "~/components/pullRequest/PullRequestDetailPanel";
+import type { DraftId } from "~/composerDraftStore";
 import type { ShortcutMatchContext } from "~/keybindings";
 import { observeResize } from "~/lib/observeResize";
 import { usePullRequestPreviewTarget } from "~/lib/openPullRequestLink";
@@ -147,7 +149,7 @@ export function TaskDetail(props: {
   navigation: TasksNavigation & { readonly taskId: number };
   /** The board's row, shown in the path while the detail loads. */
   listTitle: string | null;
-  shortcuts: TasksPanelShortcuts;
+  host: TasksPanelHost;
   /** Shared with the board, so an error from a card's PR badge shows here. */
   orbitNavigation: OrbitTaskNavigation;
 }) {
@@ -273,7 +275,7 @@ export function TaskDetail(props: {
             threadKey={props.threadKey}
             task={state.value}
             pullRequest={pullRequest}
-            shortcuts={props.shortcuts}
+            host={props.host}
           />
         ) : (
           <TaskDetailBody
@@ -416,10 +418,12 @@ function TaskPage(props: {
   );
 }
 
-/** The right panel's keyboard context, for the pull request opened inside Tasks. */
-export interface TasksPanelShortcuts {
-  readonly enabled: boolean;
-  readonly getContext: () => ShortcutMatchContext;
+/** What the right panel gives the pull request opened inside Tasks, as it does its own PR tabs. */
+export interface TasksPanelHost {
+  readonly shortcutsEnabled: boolean;
+  readonly getShortcutContext: () => ShortcutMatchContext;
+  /** Where review comments go with Add to chat. */
+  readonly composerDraftTarget?: ScopedThreadRef | DraftId | undefined;
 }
 
 /**
@@ -430,7 +434,7 @@ function TaskPullRequest(props: {
   threadKey: string;
   task: OrbitTaskDetail;
   pullRequest: TasksPullRequest;
-  shortcuts: TasksPanelShortcuts;
+  host: TasksPanelHost;
 }) {
   const { pullRequest, task } = props;
   const threadRef = parseScopedThreadKey(props.threadKey);
@@ -446,14 +450,19 @@ function TaskPullRequest(props: {
         }}
         threadRef={threadRef}
         context="thread"
-        shortcutsEnabled={props.shortcuts.enabled}
-        getShortcutContext={props.shortcuts.getContext}
+        shortcutsEnabled={props.host.shortcutsEnabled}
+        getShortcutContext={props.host.getShortcutContext}
         initialTab={pullRequest.tab ?? "summary"}
         onTabChange={(tab) => tasksPanelActions().setPullRequestTab(props.threadKey, tab)}
-        // A stacked PR is not this task's: it opens as its own panel tab.
+        {...(props.host.composerDraftTarget
+          ? { composerDraftTarget: props.host.composerDraftTarget }
+          : {})}
+        // A stacked PR is not this task's: it opens as its own panel tab, read from the
+        // environment that hosts this one.
         onSelectPullRequest={(reference) => {
           if (!threadRef) return;
           useRightPanelStore.getState().openPullRequest(threadRef, {
+            environmentId: pullRequest.environmentId,
             projectId: reference.projectId,
             repository: reference.repository,
             number: reference.number,

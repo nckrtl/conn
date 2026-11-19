@@ -13,6 +13,31 @@ export interface OrbitAgentNavigationPorts {
   readonly navigate: (target: ScopedThreadRef) => Promise<void>;
 }
 
+/**
+ * Click work in Tasks belongs to the place it started (one task, or the board, of one thread).
+ * Leaving that place, or starting newer work, makes the pending work stale.
+ */
+export function createTasksNavigationGuard() {
+  let place: string | null = null;
+  let latest = 0;
+  return {
+    enter: (next: string) => {
+      if (next === place) return;
+      place = next;
+      latest += 1;
+    },
+    leave: () => {
+      place = null;
+      latest += 1;
+    },
+    /** Starts work; the returned check stays true until something newer happens. */
+    begin: () => {
+      const request = ++latest;
+      return () => request === latest;
+    },
+  };
+}
+
 /** Only an explicit click calls this boundary; Orbit record ids never enter routing. */
 export async function openOrbitAgentConversation(
   ref: OrbitConversationRef,

@@ -63,6 +63,35 @@ Not built: remote delegation (`delegate_task` with `target.environmentId`,
 OAuth approval page and the `.well-known` OAuth metadata (no browser sessions here); Orbit's
 Gateway link (`OrbitEnvironmentLink.ts`); MCP approval codes (`AUTO-…`).
 
+Review fixes (Codex, 6 findings, each with a test that fails without it): MCP client tokens
+are refused on native bearer, ticket and WebSocket paths, as T3's `rejectMcpClientAudience`;
+a native bearer session on `/mcp` keeps its scopes (`settings:write` for preferences,
+`access:read`/`access:write` for the link tools); the fence fails closed when the calling
+thread cannot be read; `/mcp` authentication and pairing-code writes run off the runtime
+thread; a link card answer runs in its own task, so it finishes and frees the card after the
+client leaves; a link keeps at most 8 addresses, once each, and at most 16 probes run at once.
+Known difference from the last: T3 keeps every address and probes them all.
+
+## Provider sign-in (2026-11-19)
+
+The six `provider.auth.*` methods are served, and `provider.auth.subscribe` now matches T3.
+T3 has no in-app sign-in for Claude, Codex (`setupMode` other than `managed`) or Grok: their
+instances carry no `ProviderAuthController`, so `ProviderAuthService` answers every call, the
+stream too, with `ProviderSetupError` ("This provider does not support sign-in in T3 Code.",
+or "This provider instance is no longer available." for an unknown id). It starts no CLI;
+users run `claude auth login` or `codex login`, and the status probe and the `auth.json`
+watch pick the result up. Our server does the same (`methods/provider.rs`). The stream
+answered an "idle" state before; T3 fails it, and no client subscribes for these providers
+(`setup.canAuthenticate: false` hides sign-in in web and iOS).
+
+Proof: `crates/conn-server/tools/provider-auth-diff.mjs` (in `tools/check.sh`) starts both
+servers with recording `claude`, `codex` and `grok` stubs, calls the seven methods for
+`claudeAgent`, `codex`, `grok` and an unknown id (36 calls), and compares every reply and the
+stub runs during the calls: all equal, no CLI run on either side. The start-up probes reach
+the stubs on both sides. Not built: T3's managed Codex sign-in (`setupMode: managed`) and
+`provider.chatgpt.*`. That flow is T3's own OAuth against `auth.openai.com`, with tokens in
+T3's secret store; AGENTS.md "Providers" forbids it here.
+
 ## Managed access, target side (item 4)
 
 `serve --managed-provision <file>` serves Orbit callers on a separate managed ingress and

@@ -176,11 +176,15 @@ export function PullRequestDetailTabBar<Tab extends string>({
   onTabIntent,
   inert,
   className,
+  focusRequest = 0,
   children,
 }: {
   tabs: ReadonlyArray<{ readonly value: Tab; readonly label: string }>;
   value: Tab;
-  onValueChange?: (tab: Tab) => void;
+  /** `keyboard` when arrow keys chose the tab, so the row that shows it next can take focus. */
+  onValueChange?: (tab: Tab, source?: "keyboard") => void;
+  /** Each new value moves focus to this row's active tab. */
+  focusRequest?: number;
   onTabIntent?: (tab: Tab) => void;
   inert?: boolean;
   className?: string;
@@ -192,6 +196,12 @@ export function PullRequestDetailTabBar<Tab extends string>({
   const pointerIntent = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- A rest timer still pending when the bar unmounts must not read for a closed panel.
   useEffect(() => () => clearTimeout(pointerIntent.current), []);
+  const tablistRef = useRef<HTMLDivElement | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- each tab has its own row, so focus must move into the row that shows the newly chosen tab
+  useEffect(() => {
+    if (focusRequest === 0) return;
+    tablistRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+  }, [focusRequest]);
   return (
     <nav
       className={cn(
@@ -201,7 +211,11 @@ export function PullRequestDetailTabBar<Tab extends string>({
       aria-label={gt("Pull request tabs")}
       inert={inert}
     >
-      <div role="tablist" className="flex shrink-0 items-center gap-5 self-stretch">
+      <div
+        ref={tablistRef}
+        role="tablist"
+        className="flex shrink-0 items-center gap-5 self-stretch"
+      >
         {tabs.map((tab) => {
           const active = tab.value === value;
           return (
@@ -219,10 +233,7 @@ export function PullRequestDetailTabBar<Tab extends string>({
                 const next =
                   tabs[(index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
                 if (!next) return;
-                onValueChange?.(next.value);
-                const buttons =
-                  event.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="tab"]');
-                buttons?.[tabs.indexOf(next)]?.focus();
+                onValueChange?.(next.value, "keyboard");
               }}
               onPointerEnter={
                 onTabIntent

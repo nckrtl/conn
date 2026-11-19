@@ -330,8 +330,9 @@ export function PullRequestDescriptionTab({
   const stopHolding = useRef<(() => void) | null>(null);
   const revealSummary = useEffectEvent(() => {
     const root = scrollRef.current;
-    if (revealUrl === undefined || !root) return;
-    if (location?.kind !== "summary" || location.anchor === "top") {
+    // Another tab owns links to anything else; it settles them once it shows them.
+    if (revealUrl === undefined || !root || location?.kind !== "summary") return;
+    if (location.anchor === "top") {
       stopHolding.current?.();
       root.scrollTop = 0;
       return onRevealSettled?.(revealUrl);
@@ -463,6 +464,7 @@ export function PullRequestChecksTab({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const revealChecks = useEffectEvent(() => {
     if (revealUrl === undefined || !scrollRef.current) return;
+    if (parsePullRequestAnchor(revealUrl)?.kind !== "checks") return;
     scrollRef.current.scrollTop = 0;
     onRevealSettled?.(revealUrl);
   });

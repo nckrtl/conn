@@ -32,6 +32,7 @@ import {
   ArrowDownUpIcon,
   CircleDotIcon,
   GitCommitHorizontalIcon,
+  ListFilterIcon,
   MessageSquareIcon,
   PanelRightIcon,
 } from "lucide-react";
@@ -116,7 +117,21 @@ import {
   PullRequestDescriptionTab,
   PullRequestPeopleRows,
 } from "./PullRequestSummaryTab";
-import { PullRequestTimelineTab } from "./PullRequestTimelineTab";
+import {
+  DEFAULT_PULL_REQUEST_COMMENT_FILTER,
+  PULL_REQUEST_COMMENT_FILTER_STORAGE_KEY,
+  PullRequestCommentFilterSchema,
+  PullRequestTimelineTab,
+} from "./PullRequestTimelineTab";
+import { useLocalStorage } from "~/hooks/useLocalStorage";
+import {
+  Menu,
+  MenuCheckboxItem,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuPopup,
+  MenuTrigger,
+} from "../ui/menu";
 import {
   buildAddSelectionToAgentHandoff,
   buildAskAboutGuideStopHandoff,
@@ -464,6 +479,13 @@ export function PullRequestDetailPanel({
     onTabChange?.(next);
   };
   const [timelineOrder, setTimelineOrder] = useState<"newest" | "oldest">("newest");
+  const [commentFilter, setCommentFilter] = useLocalStorage(
+    PULL_REQUEST_COMMENT_FILTER_STORAGE_KEY,
+    DEFAULT_PULL_REQUEST_COMMENT_FILTER,
+    PullRequestCommentFilterSchema,
+  );
+  // Arrow keys move between tabs, and each tab has its own row, so focus follows into that row.
+  const [tabFocusRequest, setTabFocusRequest] = useState(0);
   const [codeCommitScope, setCodeCommitScope] = useState<{
     readonly pullRequestKey: string;
     readonly oid: string | null;
@@ -1564,7 +1586,11 @@ export function PullRequestDetailPanel({
       <PullRequestDetailTabBar
         tabs={visibleTabs}
         value={tab}
-        onValueChange={selectTab}
+        onValueChange={(next, source) => {
+          selectTab(next);
+          if (source === "keyboard") setTabFocusRequest((count) => count + 1);
+        }}
+        focusRequest={tab === value ? tabFocusRequest : 0}
         onTabIntent={(item) => {
           if (item !== "code") return;
           void loadCodeTab();
@@ -2016,6 +2042,49 @@ export function PullRequestDetailPanel({
                         <span aria-hidden className="text-2xs text-muted-foreground/50">
                           ·
                         </span>
+                        <Menu>
+                          <MenuTrigger
+                            render={
+                              <button
+                                type="button"
+                                className={cn(
+                                  "flex size-7 cursor-pointer items-center justify-center rounded-full border border-(--toolbar-group-border) bg-(--toolbar-group-fill) transition-colors outline-none hover:bg-(--shell-control) focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                                  commentFilter.bots && commentFilter.resolved
+                                    ? "text-muted-foreground"
+                                    : "text-foreground",
+                                )}
+                              />
+                            }
+                            aria-label={gt("Filter comments")}
+                          >
+                            <ListFilterIcon aria-hidden className="size-3.5" />
+                          </MenuTrigger>
+                          <MenuPopup align="end">
+                            <MenuGroup>
+                              <MenuGroupLabel>
+                                <T context="which comments to show">Show</T>
+                              </MenuGroupLabel>
+                              <MenuCheckboxItem
+                                checked={commentFilter.bots}
+                                closeOnClick={false}
+                                onCheckedChange={(bots) =>
+                                  setCommentFilter((value) => ({ ...value, bots }))
+                                }
+                              >
+                                <T>Bot comments</T>
+                              </MenuCheckboxItem>
+                              <MenuCheckboxItem
+                                checked={commentFilter.resolved}
+                                closeOnClick={false}
+                                onCheckedChange={(resolved) =>
+                                  setCommentFilter((value) => ({ ...value, resolved }))
+                                }
+                              >
+                                <T>Resolved or dismissed</T>
+                              </MenuCheckboxItem>
+                            </MenuGroup>
+                          </MenuPopup>
+                        </Menu>
                         {/* A one-button pill, like the toolbar groups in the Code tab. */}
                         <button
                           type="button"
@@ -2051,6 +2120,7 @@ export function PullRequestDetailPanel({
                           threadRef={threadRef}
                           reference={reference}
                           order={timelineOrder}
+                          filter={commentFilter}
                           onOpenCommit={openCommit}
                           pendingFinding={handoff}
                           fixFindingLabel={handoffLabels.fixFinding}

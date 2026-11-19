@@ -54,7 +54,7 @@ function setup() {
 }
 
 import { act, render as renderUi } from "../../../test/render";
-import { PullRequestDescriptionTab } from "./PullRequestSummaryTab";
+import { PullRequestChecksTab, PullRequestDescriptionTab } from "./PullRequestSummaryTab";
 
 const detail: PullRequestDetailView = {
   provider: SourceControlProviderKind.make("github"),
@@ -177,4 +177,35 @@ it("leaves description checkboxes read-only without the right to edit it", async
   expect(screen.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(
     true,
   );
+});
+
+it("leaves a link to another tab's content for that tab to settle", async () => {
+  setup();
+  const settled = vi.fn();
+  const url = `${detail.url}#issuecomment-5`;
+  {
+    await using _description = await renderUi(
+      <PullRequestDescriptionTab
+        scrollerRef={() => {}}
+        revealUrl={url}
+        onRevealSettled={settled}
+        environmentId={EnvironmentId.make("environment")}
+        threadRef={null}
+        reference={detail}
+        detail={detail}
+        onRefresh={() => {}}
+      />,
+    );
+  }
+  await using _checks = await renderUi(
+    <PullRequestChecksTab
+      scrollerRef={() => {}}
+      revealUrl={url}
+      onRevealSettled={settled}
+      threadRef={null}
+      detail={detail}
+      onRefreshChecks={() => {}}
+    />,
+  );
+  expect(settled).not.toHaveBeenCalled();
 });

@@ -24,6 +24,7 @@ import {
   MessageSquareIcon,
   MessageSquarePlusIcon,
 } from "lucide-react";
+import * as Schema from "effect/Schema";
 import { msg, T, useGT, useMessages, Var } from "gt-react";
 
 import { m } from "~/i18n/messages";
@@ -41,6 +42,7 @@ import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   buildPullRequestTimeline,
+  filterPullRequestTimelineEvents,
   groupPullRequestTimelineConversations,
   pullRequestTimelineEventMatches,
   type PullRequestTimelineRow,
@@ -859,6 +861,18 @@ function ReviewVerdictEvent({
   );
 }
 
+export const PULL_REQUEST_COMMENT_FILTER_STORAGE_KEY = "t3code:pull-request-comment-filter:v1";
+export const PullRequestCommentFilterSchema = Schema.Struct({
+  bots: Schema.Boolean,
+  resolved: Schema.Boolean,
+});
+export type PullRequestCommentFilter = typeof PullRequestCommentFilterSchema.Type;
+export const DEFAULT_PULL_REQUEST_COMMENT_FILTER: PullRequestCommentFilter = {
+  bots: false,
+  resolved: false,
+};
+const SHOW_ALL_COMMENTS: PullRequestCommentFilter = { bots: true, resolved: true };
+
 export function PullRequestTimelineTab({
   revealUrl,
   onRevealSettled,
@@ -868,6 +882,7 @@ export function PullRequestTimelineTab({
   threadRef = null,
   reference,
   order,
+  filter = SHOW_ALL_COMMENTS,
   onOpenCommit,
   onAddToChat,
   onRefresh,
@@ -884,6 +899,8 @@ export function PullRequestTimelineTab({
   threadRef?: ScopedThreadRef | null;
   reference: PullRequestRef;
   order: "newest" | "oldest";
+  /** The saved comment filter: whether bot comments and finished conversations show. */
+  filter?: PullRequestCommentFilter;
   onOpenCommit: (oid: string) => void;
   onAddToChat?: (subject: PullRequestChatSubject) => void;
   onRefresh: () => void;
@@ -893,7 +910,7 @@ export function PullRequestTimelineTab({
 }) {
   const gt = useGT();
   const resolve = useMessages();
-  const events = buildPullRequestTimeline(detail, resolve);
+  const events = filterPullRequestTimelineEvents(buildPullRequestTimeline(detail, resolve), filter);
   const location = parsePullRequestAnchor(revealUrl);
   const revealAnchor = location?.kind === "timeline" ? location.anchor : null;
   // The linked item stays marked and open after it is shown, until another link replaces it.

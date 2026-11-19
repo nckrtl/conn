@@ -221,3 +221,42 @@ it("fixes an overview thread as its opening remark, since it has no line to atta
   await screen.getByRole("button", { name: "Fix in a thread" }).click();
   expect(onFixFinding).toHaveBeenCalledWith({ kind: "comment", comment: remark });
 });
+
+it("hides bot comments under the saved filter and shows them when the filter allows", async () => {
+  const value: PullRequestDetailView = {
+    ...detail,
+    commits: [],
+    comments: [
+      {
+        id: "bot",
+        kind: "issue-comment",
+        author: { login: "ci-bot", name: null, avatarUrl: null, isBot: true },
+        body: "Deployed a preview",
+        createdAt: "2026-09-01T00:00:00Z",
+        url: null,
+        path: null,
+        reviewState: null,
+      },
+    ],
+  };
+  const timeline = (filter: { bots: boolean; resolved: boolean }) => (
+    <div style={{ height: 600 }}>
+      <PullRequestTimelineTab
+        scrollerRef={() => {}}
+        detail={value}
+        environmentId={EnvironmentId.make("environment")}
+        reference={value}
+        order="oldest"
+        filter={filter}
+        onOpenCommit={() => {}}
+        onRefresh={() => {}}
+      />
+    </div>
+  );
+  await using screen = await render(timeline({ bots: false, resolved: false }));
+  await expect.element(screen.getByText("Pull request opened")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("1 comment");
+
+  await screen.rerender(timeline({ bots: true, resolved: false }));
+  await expect.element(screen.getByText("1 comment")).toBeVisible();
+});

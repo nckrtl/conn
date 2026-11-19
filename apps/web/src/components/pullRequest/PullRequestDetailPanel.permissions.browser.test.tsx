@@ -196,3 +196,18 @@ it("reads the first diff page once the pointer rests on the Code tab", async () 
     input: { projectId: detail.projectId, repository: detail.repository, number: detail.number },
   });
 });
+
+it("keeps focus on the chosen tab as arrow keys move through the tabs", async () => {
+  setup();
+  await using screen = await render(panel());
+  const description = screen.getByRole("tab", { name: "Description", exact: true });
+  await expect.element(description).toBeVisible();
+  await userEvent.click(description);
+
+  await userEvent.keyboard("{ArrowRight}");
+  await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Checks"));
+  expect(document.activeElement?.getAttribute("aria-selected")).toBe("true");
+  await userEvent.keyboard("{ArrowRight}");
+  await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Timeline"));
+  expect(document.activeElement?.getAttribute("aria-selected")).toBe("true");
+});

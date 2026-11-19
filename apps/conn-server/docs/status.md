@@ -348,6 +348,33 @@ Still red:
 - On mini: claude conformance (`env: : No such file`, red on 2026-11-17 as well) and canary
   (writes to the decoy home from the CommandLineTools python cache).
 
+## Followed to Conn `51f9f0bdab` (2026-11-19, second upstream merge)
+
+Compat only, no new features (Nick, 2026-11-19):
+
+- Contract, limits, GraphQL, MCP catalog and instruction texts regenerated; the contract's
+  optional `until` on pull request watches and new optional PR fields decode.
+- `fixtures/ts-tools-list.json` re-recorded (`parity.mjs --record-tools-list`).
+- T3's new PR and CI MCP tools (#26751, #26752, #38973) are not served; `ci_logs`, `ci_rerun`
+  and `pull_request_create` are named in agent texts but not served.
+- ACP: a titleless `tool_call_update` keeps the tool's earlier title (#38989).
+- `gen-tools.mjs` mocks `GitManager`, which T3's tool handlers now declare.
+
+## Followed to Conn `7eb4f676cf` (the 2026-11-19 sync)
+
+`tools/follow-conn.sh --capture`, then each red check followed as T3 does it:
+
+- Contract, scopes, routes, VCS and GitHub GraphQL tables regenerated (new
+  `issues.linkedThreads`); captures and instruction fixtures recaptured.
+- Preview: Chrome launch args carry a per-platform user agent (#38445); `gen-spec.mjs` emits
+  `userAgents` and `tabs.rs` fills or drops the `--user-agent` flag.
+- Threads: `titleRenamed` is tracked so a user rename stops automatic titles (#38683).
+- Codex title generation runs with the `T3 Code` originator unless the login env sets one
+  (#38464).
+- Auth: `relay:configure` is granted and maps to `relay:write` for legacy parents.
+- Instructions: `link_issue` line in PR linking; `link_issue` is named but not served by MCP.
+- Claude probe harness provides `ServerConfig` (T3's text generation now reads it, #38619).
+
 ## Followed to Conn `ea8a2d2e79` (the 2026-11-17 sync)
 
 `tools/follow-conn.sh --capture`, then each red check followed as T3 does it:

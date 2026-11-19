@@ -31,15 +31,23 @@ match T3 is open.
   `EnvironmentResourceNotFoundError` (404), at most two exports at once. The engine reads
   the visible rows one at a time off the runtime thread, writes the body as it reads, and
   stops at the first row past the limit; the handler sends the prepared bytes. Peak memory is
-  the body (at most 50 MiB) plus one row, never the whole thread. The limit and the
+  the body (at most 50 MiB) plus one row, never the whole thread.
+  Two partial indexes serve the reads (`turn_items_in_order` for the timeline,
+  `turn_item_interrupts` for Stop requests); a test checks both query plans (no temporary
+  sort, no scan of item bodies). A run fork that is not a side chat starts with the history it
+  inherits, as T3's `buildVisibleTurnItems`: the source's rows through the fork run (forks of
+  forks recursively), then the synthetic fork marker, all counted against the limit. The
+  thread snapshot does not carry inherited rows yet; that is an engine gap of the thread view. The limit and the
   header text are generated (`tools/gen-upstream.mjs`). Not on the managed ingress: its
   reader profile has no composer.
 - **Proof:** `idle-diff` reads the route on both servers in six thread states (two completed
   turns, an approval, a question, a stop, a failed turn, a subagent with a wake turn) and four
   refusals. It fails on status, content type, refusal body, top-level keys, a body the
   contract's JSON codec does not decode, or a body that is not the server's own thread
-  snapshot cut down (T3's snapshot passed through `projectTurnItemForWire`). 33 comparisons,
-  no failure. An engine test proves the early stop: a row past the limit that the reader
+  snapshot cut down (T3's snapshot passed through `projectTurnItemForWire`). A `fork`
+  scenario forks a completed run over `/ws` and compares the fork's transcript before its
+  first message: row outline (position, visibility, type, owner) and the fork marker. 35
+  comparisons, no failure. An engine test proves the early stop: a row past the limit that the reader
   cannot parse fails a whole read but not a read that stops before it.
 - **Known differences (info):** the items differ where the two engines record a turn
   differently, as in the thread view: no "Workspace ready" item, no `providerThreadId` on the

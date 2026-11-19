@@ -1,7 +1,7 @@
 //! The thread transcript body (`OrchestrationV2ThreadTranscript`) and the size of the file the
 //! client builds from it (`threadTranscriptHeader` plus one JSON line per item).
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The byte length of `threadTranscriptHeader` for title, environment id, thread id and
 /// `updatedAt`, newline included.
@@ -19,30 +19,60 @@ fn json_len(value: &Value) -> u64 {
     serde_json::to_vec(value).map_or(0, |text| text.len() as u64)
 }
 
-/// The JSON body, written as rows arrive: `{"items":[...],"threadId":..,"title":..,
-/// "updatedAt":..}`. Each row is encoded once; its length is what the file line costs.
-pub(crate) struct Body {
+/// The rows of the JSON body, written as they arrive into `{"items":[...],"threadId":..,
+/// "title":..,"updatedAt":..}`, with the file size counted against the limit. Each row is
+/// encoded once; its length is what its file line costs.
+pub(crate) struct Rows {
     out: Vec<u8>,
-    rows: usize,
+    position: u64,
+    size: u64,
+    limit: u64,
 }
 
-impl Body {
-    pub(crate) fn new() -> Self {
+impl Rows {
+    /// Starts with the header line counted.
+    pub(crate) fn new(header: u64, limit: u64) -> Self {
         Self {
             out: b"{\"items\":[".to_vec(),
-            rows: 0,
+            position: 0,
+            size: header,
+            limit,
         }
     }
 
-    /// Appends one row and answers its encoded length.
-    pub(crate) fn push(&mut self, row: &Value) -> Result<u64, String> {
-        if self.rows > 0 {
+    pub(crate) fn fits(&self) -> bool {
+        self.size <= self.limit
+    }
+
+    /// Whether a row of at least `bytes` could still fit.
+    pub(crate) fn has_room(&self, bytes: u64) -> bool {
+        self.size.saturating_add(bytes).saturating_add(1) <= self.limit
+    }
+
+    /// Appends one row; `false` when it passes the limit (the body is then useless).
+    pub(crate) fn push(
+        &mut self,
+        visibility: &str,
+        source_thread_id: Value,
+        source_item_id: Value,
+        item: Value,
+    ) -> Result<bool, String> {
+        let row = json!({
+            "position": self.position,
+            "visibility": visibility,
+            "sourceThreadId": source_thread_id,
+            "sourceItemId": source_item_id,
+            "item": item,
+        });
+        if self.position > 0 {
             self.out.push(b',');
         }
         let before = self.out.len();
-        serde_json::to_writer(&mut self.out, row).map_err(|e| e.to_string())?;
-        self.rows += 1;
-        Ok((self.out.len() - before) as u64)
+        serde_json::to_writer(&mut self.out, &row).map_err(|e| e.to_string())?;
+        let line = (self.out.len() - before) as u64 + 1;
+        self.size = self.size.saturating_add(line);
+        self.position += 1;
+        Ok(self.fits())
     }
 
     pub(crate) fn finish(

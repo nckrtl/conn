@@ -4777,3 +4777,100 @@ async fn a_transcript_is_the_visible_rows_and_stops_at_the_limit() {
         crate::ThreadTranscript::TooLarge
     );
 }
+
+/// T3's `buildVisibleTurnItems` for a run fork: before its first message, a fork's transcript is
+/// the source's rows through the fork run, then the synthetic marker. A side chat shows only
+/// its own rows.
+#[tokio::test(flavor = "current_thread")]
+async fn a_fork_transcript_inherits_the_source_history_through_the_fork_run() {
+    let db = TempDb::new("transcript-fork");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    for (command, text) in [("c2", "first"), ("c3", "second")] {
+        dispatch(&engine, message("t1", command, text)).await;
+        until_run_ends(&mut thread).await;
+    }
+    let fork = |target: &str, command: &str, side_chat: bool| {
+        json!({
+            "type": "thread.fork", "commandId": command, "sourceThreadId": "t1",
+            "targetThreadId": target, "sourcePoint": {"type": "run", "runId": "run:t1:1"},
+            "sideChat": side_chat, "createdBy": "user", "creationSource": "web",
+        })
+    };
+    dispatch(&engine, fork("t2", "f1", false)).await;
+    dispatch(&engine, fork("t3", "f2", true)).await;
+    let read = |thread: &str| engine.thread_transcript(thread.into(), "env".into(), u64::MAX);
+    let body = |transcript| match transcript {
+        crate::ThreadTranscript::Body(body) => serde_json::from_slice::<Value>(&body).unwrap(),
+        other => panic!("{other:?}"),
+    };
+
+    let source = engine.thread_snapshot("t1".into()).await.unwrap().unwrap();
+    let mut expected: Vec<Value> = source["projection"]["visibleTurnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["item"]["runId"] == "run:t1:1")
+        .map(|row| {
+            let mut row = row.clone();
+            row["visibility"] = json!("inherited");
+            row
+        })
+        .collect();
+    assert!(!expected.is_empty());
+    let fork_view = projection(&engine, "t2").await;
+    let created_at = fork_view["thread"]["createdAt"].clone();
+    expected.push(json!({
+        "visibility": "synthetic", "sourceThreadId": "t1", "sourceItemId": "turn-item:fork:t2",
+        "item": {
+            "id": "turn-item:fork:t2", "threadId": "t2", "runId": null, "nodeId": null,
+            "providerTurnId": null, "nativeItemRef": null, "parentItemId": null, "ordinal": 0,
+            "status": "completed", "title": "Forked from conversation", "startedAt": null,
+            "completedAt": created_at, "updatedAt": created_at, "type": "fork",
+            "source": {"type": "run", "threadId": "t1", "runId": "run:t1:1"},
+            "targetThreadId": "t2",
+        },
+    }));
+    for (position, row) in expected.iter_mut().enumerate() {
+        row["position"] = json!(position);
+    }
+    assert_eq!(body(read("t2").await.unwrap())["items"], json!(expected));
+    assert_eq!(body(read("t3").await.unwrap())["items"], json!([]));
+
+    // The inherited rows count against the limit too.
+    assert_eq!(
+        engine
+            .thread_transcript("t2".into(), "env".into(), 1000)
+            .await
+            .unwrap(),
+        crate::ThreadTranscript::TooLarge
+    );
+}
+
+/// The transcript reads rows through indexes: no sort of the whole timeline before the first
+/// row, and no scan of every item body for Stop requests.
+#[test]
+fn transcript_queries_use_their_indexes() {
+    let db = TempDb::new("transcript-plans");
+    drop(open(&db));
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    let plan = |sql: &str| {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        stmt.query_map(["t1"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("; ")
+    };
+    let items = plan(crate::store::TRANSCRIPT_ITEMS_SQL);
+    assert!(items.contains("USING INDEX turn_items_in_order"), "{items}");
+    assert!(!items.contains("TEMP B-TREE"), "{items}");
+    let interrupts = plan(crate::store::TRANSCRIPT_INTERRUPTS_SQL);
+    assert!(interrupts.contains("turn_item_interrupts"), "{interrupts}");
+    assert!(!interrupts.contains("TEMP B-TREE"), "{interrupts}");
+}

@@ -377,6 +377,40 @@ class Side {
     return this.get(`/api/orchestration/threads/${encodeURIComponent(threadId)}/transcript`, headers);
   }
 
+  /** One RPC over `/ws`, as the web client calls it: a ticket, then one request. */
+  async rpc(tag, payload) {
+    const ticket = await fetch(`${this.origin}/api/auth/websocket-ticket`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.bearer}` },
+    });
+    if (!ticket.ok) throw new Error(`${this.name}: no WebSocket ticket (HTTP ${ticket.status})`);
+    const url = `${this.origin.replace(/^http/, "ws")}/ws?orchestrationProtocol=2&wsTicket=${encodeURIComponent((await ticket.json()).ticket)}`;
+    const socket = new WebSocket(url);
+    try {
+      await new Promise((resolve, reject) => {
+        socket.onopen = resolve;
+        socket.onerror = () => reject(new Error(`${this.name}: the RPC socket failed`));
+      });
+      return await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${this.name}: ${tag} did not answer in 20 s`)), 20_000);
+        socket.onmessage = (event) => {
+          for (const line of String(event.data).split("\n").filter(Boolean)) {
+            const frame = JSON.parse(line);
+            if (frame._tag === "Ping") socket.send(JSON.stringify({ _tag: "Pong" }));
+            if (frame._tag !== "Exit" || String(frame.requestId) !== "1") continue;
+            clearTimeout(timer);
+            frame.exit._tag === "Success"
+              ? resolve(frame.exit.value)
+              : reject(new Error(`${this.name} ${tag}: ${JSON.stringify(frame.exit).slice(0, 1000)}`));
+          }
+        };
+        socket.send(JSON.stringify({ _tag: "Request", id: "1", tag, payload, headers: [] }));
+      });
+    } finally {
+      socket.close();
+    }
+  }
+
   async get(path, headers) {
     const response = await fetch(`${this.origin}${path}`, {
       headers: headers ?? {
@@ -702,6 +736,51 @@ async function compareTranscript(pair, state, { thread = (side) => side.threadId
   });
 }
 
+/**
+ * The transcript of a run fork before its first message, on both servers: T3's
+ * `buildVisibleTurnItems` puts the source's rows through the fork run first, then a synthetic
+ * fork marker. Fails on status, content type, decode, the marker row, and the row outline
+ * (position, visibility, item type and whose row it is). T3's "Workspace ready" row, which
+ * this engine does not record, is left out of the outline; the full difference is `info`.
+ */
+async function compareForkTranscript(pair, state) {
+  const auth = (side) => ({
+    accept: "application/json",
+    authorization: `Bearer ${side.bearer}`,
+    "x-t3-orchestration-protocol": "2",
+  });
+  const [ts, conn] = await Promise.all(pair.map((side) => side.transcript(side.forkId, auth(side))));
+  const lines = [];
+  if (ts.status !== conn.status) lines.push(`FAIL http status: T3 ${ts.status} / Conn ${conn.status}`);
+  if (ts.contentType !== conn.contentType) lines.push(`FAIL content-type: T3 ${ts.contentType} / Conn ${conn.contentType}`);
+  const { decodeTranscript } = await transcriptSchema();
+  for (const [side, read] of [[pair[0], ts], [pair[1], conn]]) {
+    const decoded = decodeTranscript(read.body);
+    if (decoded !== undefined) lines.push(`FAIL ${side.name}: the contract does not decode it: ${decoded}`);
+  }
+  const outline = (side, body) => {
+    const owner = (id) => (id === side.threadId ? "source" : id === side.forkId ? "fork" : String(id));
+    return (body?.items ?? [])
+      .filter((row) => !(row.item?.type === "command_execution" && row.item?.title === "Workspace ready"))
+      .map((row) => `${row.visibility} ${row.item?.type} of ${owner(row.sourceThreadId)}`);
+  };
+  for (const d of differences(outline(pair[0], ts.body), outline(pair[1], conn.body))) lines.push(`FAIL outline${d}`);
+  const marker = (body) => (body?.items ?? []).find((row) => row.visibility === "synthetic");
+  const markers = [marker(ts.body), marker(conn.body)];
+  if (markers.some((m) => m === undefined)) lines.push("FAIL a side sends no fork marker");
+  else for (const d of differences(normalize(markers[0]), normalize(markers[1]))) {
+    // Ids normalize in first-seen order, so the marker's own position differs with the rows before it.
+    if (!d.startsWith(".position")) lines.push(`FAIL marker${d}`);
+  }
+  const positions = (body) => (body?.items ?? []).every((row, i) => row.position === i);
+  for (const [side, read] of [[pair[0], ts], [pair[1], conn]]) {
+    if (!positions(read.body)) lines.push(`FAIL ${side.name}: positions are not 0, 1, 2, ...`);
+  }
+  const info = differences(normalize(ts.body), normalize(conn.body)).map((d) => `body${d}`);
+  const items = Array.isArray(ts.body?.items) ? `, ${ts.body.items.length} items` : "";
+  record(pair, { state: `transcript: ${state}`, lines, info, notes: [], summary: `http ${ts.status}${items}` });
+}
+
 let transcriptSchemaLoad;
 /**
  * The contract's `OrchestrationV2ThreadTranscript` JSON decoder (`undefined` when it decodes)
@@ -927,6 +1006,31 @@ const SCENARIOS = [
       const done = await threadWhere(pair, "settled", (t) => terminal(t.status));
       await compare(pair, "after the wake turn", done);
       await compareTranscript(pair, "a turn with a subagent and a wake turn");
+    },
+  },
+  {
+    name: "fork",
+    transcript: () => fixture("simple"),
+    gates: [],
+    async run(pair) {
+      await both(pair, (side) => launch(side, { message: "Respond with the following text: fixture simple ok" }));
+      const done = await threadWhere(pair, "completed", (t) => terminal(t.status) && t.activityRunStatus == null);
+      await compare(pair, "a completed turn (before the fork)", done);
+      await both(pair, async (side) => {
+        const run = (await ownThread(side))?.latestRunId;
+        if (typeof run !== "string") throw new Error(`${side.name}: no latest run to fork`);
+        side.forkId = `thread-fork-${crypto.randomUUID()}`;
+        await side.rpc("orchestration.dispatchCommand", {
+          type: "thread.fork",
+          commandId: `fork-${crypto.randomUUID()}`,
+          sourceThreadId: side.threadId,
+          targetThreadId: side.forkId,
+          sourcePoint: { type: "run", runId: run },
+          createdBy: "user",
+          creationSource: "web",
+        });
+      });
+      await compareForkTranscript(pair, "a run fork before its first message");
     },
   },
   {

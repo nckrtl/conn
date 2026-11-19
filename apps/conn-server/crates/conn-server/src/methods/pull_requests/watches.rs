@@ -769,25 +769,42 @@ pub(super) async fn run(panel: Arc<Panel>) {
             }
         });
     }
-    let mut watcher = Watcher::new(panel.clone());
-    let mut links = Links::new(panel);
+    // The link sweep runs in its own task: a slow GitHub lookup there must not hold back a
+    // new watch's first read, or CI that ends meanwhile becomes the baseline and never wakes.
+    let mut links = Links::new(panel.clone());
+    let links_task = tokio::spawn(async move {
+        let mut link_sweep = tokio::time::interval(Duration::from_millis(link_sync::SWEEP_MS));
+        link_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = link_sweep.tick() => links.tick().await,
+                Some(request) = link_rx.recv() => links.handle(request).await,
+            }
+            if links_overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                links.tick().await;
+            }
+        }
+    });
+    let _stop_links = AbortOnDrop(links_task);
+    let mut watcher = Watcher::new(panel);
     let mut sweep = tokio::time::interval(SWEEP);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut link_sweep = tokio::time::interval(Duration::from_millis(link_sync::SWEEP_MS));
-    link_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = sweep.tick() => watcher.pass(None).await,
-            _ = link_sweep.tick() => links.tick().await,
             Some(key) = rx.recv() => watcher.pass(Some(&key)).await,
-            Some(request) = link_rx.recv() => links.handle(request).await,
         }
         if overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
             watcher.pass(None).await;
         }
-        if links_overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            links.tick().await;
-        }
+    }
+}
+
+/// Stops the link sweep's task when the watch loop ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

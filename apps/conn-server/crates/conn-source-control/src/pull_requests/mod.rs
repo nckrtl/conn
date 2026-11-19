@@ -456,6 +456,58 @@ impl Client {
         }
         Ok(stats)
     }
+    /// `listPullRequestsByHead` for many heads, as T3's background head resolver batches them
+    /// (`GraphQLResolver.aliased`, 25 per document): for each `(owner, name, head)`, every
+    /// state, newest 100. `None` for a head whose repository GitHub could not read.
+    pub async fn pull_requests_by_heads(
+        &self,
+        heads: &[(String, String, String)],
+    ) -> Result<Vec<Option<Vec<Value>>>, Error> {
+        const PER_DOCUMENT: usize = 25;
+        let mut answers = Vec::with_capacity(heads.len());
+        for batch in heads.chunks(PER_DOCUMENT) {
+            let query = generated::PULL_REQUESTS_BY_HEAD
+                .render_slices(batch.len())
+                .map_err(|_| Error::Failed("Could not build GitHub's head lookup.".into()))?;
+            let mut variables = serde_json::Map::new();
+            for (index, (owner, name, head)) in batch.iter().enumerate() {
+                for (key, value) in [
+                    ("owner", json!(owner)),
+                    ("name", json!(name)),
+                    ("head", json!(head)),
+                    ("states", json!(["OPEN", "CLOSED", "MERGED"])),
+                    ("first", json!(100)),
+                ] {
+                    variables.insert(format!("_{index}_{key}"), value);
+                }
+            }
+            let response = self
+                .request(
+                    Method::Post,
+                    self.graphql_path(),
+                    Some(json!({"query": query, "variables": variables})),
+                    "application/vnd.github+json",
+                    16_000_000,
+                )
+                .await?;
+            if response.truncated {
+                return Err(Error::Failed(
+                    "GitHub's response was too large to read.".into(),
+                ));
+            }
+            let raw: Value = serde_json::from_slice(&response.body).map_err(|_| {
+                Error::Failed("GitHub returned an invalid change request list.".into())
+            })?;
+            for index in 0..batch.len() {
+                answers.push(
+                    raw.pointer(&format!("/data/_{index}_repository/pullRequests/nodes"))
+                        .and_then(Value::as_array)
+                        .cloned(),
+                );
+            }
+        }
+        Ok(answers)
+    }
     pub async fn files_viewed(&self, lookup: &Lookup) -> Result<Value, Error> {
         self.file_pages(lookup, true).await
     }

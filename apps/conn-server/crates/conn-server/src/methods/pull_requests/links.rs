@@ -6,16 +6,15 @@
 //! `thread.pull-request.sync`: the pull request the sidebar chip shows. The decisions live in
 //! `conn_source_control::pull_requests::link_sync`; this file does the reads and dispatches.
 //!
-//! It runs in the watch loop's task (`watches::run`), so one GitHub read runs at a time.
+//! It runs in its own task beside the watch loop (`watches::run`), one GitHub read at a time,
+//! so a slow lookup never holds back a new watch's first read.
 
 use super::{Failure, Panel, Project};
 use conn_source_control::{
-    hosts::github_graphql::generated,
     pull_requests::{
-        Lookup,
         link_sync::{
-            self, BranchGroup, BranchProject, BranchSync, Group, LinkSync, ReadFailure, Scope,
-            StackNeed, StackRead,
+            self, BranchGroup, BranchHead, BranchProject, BranchSync, Group, LinkSync, ReadFailure,
+            Scope, StackNeed, StackRead,
         },
         normalize::{array, text},
     },
@@ -171,7 +170,12 @@ impl Links {
     }
 
     /// One branch lookup pass (`synchronize`): every active thread's branch, or one thread's.
+    /// The minute sweep after the first runs only while a client is in the foreground
+    /// (`backgroundPolicy.shouldRunOpportunisticWork`); a thread's own events always look up.
     async fn branches(&mut self, thread: Option<&str>) {
+        if thread.is_none() && self.started && !self.panel.opportunistic() {
+            return;
+        }
         let Ok(shell) = self.panel.engine.shell_snapshot().await else {
             return;
         };
@@ -184,65 +188,132 @@ impl Links {
         let groups = self
             .branches
             .groups(array(shell.get("threads")), thread, now);
+        // Git reads first, then one GitHub document per 25 heads of a host (T3 batches its
+        // background head lookups by host and credential), then the writes.
+        let mut prepared = Vec::new();
         for group in groups {
             let Some(project) = array(shell.get("projects"))
                 .iter()
                 .find(|p| text(p, "id") == group.project_id())
                 .cloned()
             else {
-                self.branches.finish(&group);
+                self.branches.finish(&group, &[]);
                 continue;
             };
-            self.lookup_branch(&group, &project, sequence, now).await;
+            let Ok(github) = self
+                .panel
+                .projects(&json!({"projectId": group.project_id()}))
+                .await
+            else {
+                continue;
+            };
+            let Some(github) = github.into_iter().next() else {
+                self.branches.finish(&group, &[]);
+                continue;
+            };
+            let root = text(&project, "workspaceRoot").to_owned();
+            // A worktree folder can outlive its `.git`; then the project's checkout answers.
+            let cwd = match group.worktree_path() {
+                Some(path) if exists(Path::new(path).join(".git")).await => path.to_owned(),
+                _ => root.clone(),
+            };
+            let head = match group.branch() {
+                Some(branch) => Some(head_of(&github, Path::new(&cwd), branch).await),
+                None => None,
+            };
+            prepared.push(Prepared {
+                group,
+                root,
+                cwd,
+                github,
+                head,
+                found: None,
+            });
+        }
+        self.look_up(&mut prepared).await;
+        for item in prepared {
+            self.write_branch(item, sequence, now).await;
         }
     }
 
-    async fn lookup_branch(
-        &mut self,
-        group: &BranchGroup,
-        project: &Value,
-        sequence: u64,
-        now: f64,
-    ) {
-        let Ok(github) = self
-            .panel
-            .projects(&json!({"projectId": group.project_id()}))
-            .await
-        else {
-            return;
-        };
-        let Some(github) = github.into_iter().next() else {
-            self.branches.finish(group);
-            return;
-        };
-        let root = text(project, "workspaceRoot");
-        // A worktree folder can outlive its `.git`; then the project's checkout answers.
-        let cwd = match group.worktree_path() {
-            Some(path) if exists(Path::new(path).join(".git")).await => path.to_owned(),
-            _ => root.to_owned(),
-        };
-        let detected = match group.branch() {
-            Some(branch) => match self.find(&github, Path::new(&cwd), branch).await {
-                Ok(found) => found,
-                Err(()) => {
-                    let ids: Vec<&str> = group.threads.iter().map(|t| text(t, "id")).collect();
-                    self.branches.fail(&ids);
-                    return;
+    /// Fills `found` for every prepared group with a branch: `Some(Ok(..))` when GitHub
+    /// answered.
+    async fn look_up(&self, prepared: &mut [Prepared]) {
+        let mut hosts: Vec<String> = prepared
+            .iter()
+            .filter(|p| p.head.is_some())
+            .map(|p| p.github.host.clone())
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        for host in hosts {
+            let members: Vec<usize> = (0..prepared.len())
+                .filter(|&i| {
+                    prepared
+                        .get(i)
+                        .is_some_and(|p| p.head.is_some() && p.github.host == host)
+                })
+                .collect();
+            let Some(first) = members.first().and_then(|&i| prepared.get(i)) else {
+                continue;
+            };
+            let Ok(client) = self.panel.client(&first.github, "listChangeRequests").await else {
+                continue;
+            };
+            let heads: Vec<(String, String, String)> = members
+                .iter()
+                .filter_map(|&i| prepared.get(i))
+                .map(|p| {
+                    let (owner, name) = p.github.repository.split_once('/').unwrap_or_default();
+                    let head = p.head.as_ref().map_or("", |h| h.head.name.as_str());
+                    (owner.to_owned(), name.to_owned(), head.to_owned())
+                })
+                .collect();
+            let Ok(answers) = client.pull_requests_by_heads(&heads).await else {
+                continue;
+            };
+            for (&i, nodes) in members.iter().zip(answers) {
+                if let Some(item) = prepared.get_mut(i) {
+                    item.found = nodes.map(|nodes| {
+                        let default = item.head.as_ref().and_then(|h| h.default_branch.clone());
+                        item.head.as_ref().and_then(|h| {
+                            link_sync::branch_pull_request(&nodes, &h.head, default.as_deref())
+                        })
+                    });
                 }
-            },
-            None => None,
+            }
+        }
+    }
+
+    async fn write_branch(&mut self, item: Prepared, sequence: u64, now: f64) {
+        let Prepared {
+            group,
+            root,
+            cwd,
+            github,
+            head,
+            found,
+        } = item;
+        let detected = match (&head, found) {
+            (None, _) => None,
+            (Some(_), Some(found)) => found,
+            (Some(_), None) => {
+                let ids: Vec<&str> = group.threads.iter().map(|t| text(t, "id")).collect();
+                self.branches.fail(&ids);
+                return;
+            }
         };
         if group.branch().is_some() {
             self.branches.record(&group.key, now, detected.is_some());
         }
         let target = BranchProject {
             id: group.project_id(),
-            workspace_root: root,
+            workspace_root: &root,
             repository: &github.repository,
         };
         let checked_out = match (&detected, group.branch()) {
             (Some(found), Some(branch))
-                if link_sync::needs_checkout_check(group, &target, Some(found)) =>
+                if link_sync::needs_checkout_check(&group, &target, Some(found)) =>
             {
                 conn_vcs::repo::config_get(
                     Path::new(&cwd),
@@ -256,8 +327,7 @@ impl Links {
             _ => false,
         };
         let mut previous = Map::new();
-        let candidate = link_sync::detected_reference(&target, detected.as_ref());
-        for saved in link_sync::previous_to_check(group, &candidate) {
+        for saved in link_sync::previous_to_check(&group, &target, detected.as_ref(), checked_out) {
             let reference = json!({"projectId": saved["projectId"], "host": github.host,
                 "repository": saved["repository"], "number": saved["number"]});
             if let Ok((project, client, lookup)) =
@@ -270,8 +340,8 @@ impl Links {
                 previous.insert(text(&saved, "url").to_owned(), summary);
             }
         }
-        let commands = link_sync::plan_branch(
-            group,
+        let plan = link_sync::plan_branch(
+            &group,
             &target,
             detected.as_ref(),
             checked_out,
@@ -279,58 +349,70 @@ impl Links {
             sequence,
             &mut conn_support::uuid_v4,
         );
-        self.branches.finish(group);
-        for command in commands {
+        self.branches.finish(&group, &plan.failed);
+        for command in plan.commands {
             if self.dispatch(command.clone()).await.is_err() {
                 self.branches.fail(&[text(&command, "threadId")]);
             }
         }
     }
+}
 
-    /// `branchPullRequest`: the branch's pull request on the project's GitHub repository, from
-    /// the head repository the branch pushes to (its upstream remote, else the project's).
-    async fn find(&self, project: &Project, cwd: &Path, branch: &str) -> Result<Option<Value>, ()> {
-        let remote = conn_vcs::repo::config_get(cwd, &format!("branch.{branch}.remote"))
+/// A branch group ready for its GitHub lookup.
+struct Prepared {
+    group: BranchGroup,
+    root: String,
+    cwd: String,
+    github: Project,
+    head: Option<HeadQuery>,
+    /// `None`: not looked up, or GitHub failed. `Some(found)`: GitHub answered.
+    found: Option<Option<Value>>,
+}
+
+struct HeadQuery {
+    head: BranchHead,
+    default_branch: Option<String>,
+}
+
+/// `resolveBranchHeadContext`: a branch with an upstream pushes to that remote's branch
+/// (`branch.<b>.remote`, `branch.<b>.merge`), as Conn's checkout of someone's pull request
+/// sets it up; otherwise its own name in the project's repository. The default branch is
+/// `origin`'s, else the first remote's.
+async fn head_of(project: &Project, cwd: &Path, branch: &str) -> HeadQuery {
+    let config = |key: String| async move {
+        conn_vcs::repo::config_get(cwd, &key)
             .await
             .ok()
             .flatten()
-            .filter(|r| !r.is_empty() && r != ".");
-        let mut head = project.repository.clone();
-        if let Some(remote) = &remote
-            && let Ok(Some(url)) =
-                conn_vcs::repo::config_get(cwd, &format!("remote.{remote}.url")).await
+            .filter(|v| !v.is_empty())
+    };
+    let remote = config(format!("branch.{branch}.remote"))
+        .await
+        .filter(|r| r != ".");
+    let merge = config(format!("branch.{branch}.merge")).await;
+    let mut head = BranchHead {
+        branch: branch.to_owned(),
+        name: branch.to_owned(),
+        repository: project.repository.clone(),
+    };
+    if let (Some(remote), Some(merge)) = (remote, merge) {
+        head.name = merge
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&merge)
+            .to_owned();
+        if let Some(url) = config(format!("remote.{remote}.url")).await
             && let Some((_, repository)) = registry::git_remote_repository(&url)
         {
-            head = repository;
+            head.repository = repository;
         }
-        // The default branch of `origin`, else of the first remote, as T3 reads it.
-        let default = conn_vcs::repo::Remotes::load(cwd)
-            .await
-            .ok()
-            .and_then(|remotes| remotes.primary_default);
-        let client = self
-            .panel
-            .client(project, "listChangeRequests")
-            .await
-            .map_err(|_| ())?;
-        let lookup = Lookup::new(&project.repository, 1).map_err(|_| ())?;
-        let result = client
-            .graphql(
-                &generated::PULL_REQUESTS_BY_HEAD,
-                json!({"owner": lookup.owner, "name": lookup.name, "head": branch,
-                    "states": ["OPEN", "CLOSED", "MERGED"], "first": 100}),
-            )
-            .await
-            .map_err(|_| ())?;
-        if result["repository"].is_null() {
-            return Err(());
-        }
-        Ok(link_sync::branch_pull_request(
-            array(result.pointer("/repository/pullRequests/nodes")),
-            branch,
-            &head,
-            default.as_deref(),
-        ))
+    }
+    let default_branch = conn_vcs::repo::Remotes::load(cwd)
+        .await
+        .ok()
+        .and_then(|remotes| remotes.primary_default);
+    HeadQuery {
+        head,
+        default_branch,
     }
 }
 

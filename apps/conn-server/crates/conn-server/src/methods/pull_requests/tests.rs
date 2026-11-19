@@ -143,6 +143,7 @@ fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
         linked: watch::channel(0).0,
         monitor: OnceCell::new(),
         reports: Mutex::new(VecDeque::new()),
+        activity: Default::default(),
     })
 }
 async fn call(table: &MethodTable, tag: &str, input: Value) -> Result<Value, Failure> {
@@ -1618,38 +1619,109 @@ async fn a_watched_pull_request_wakes_its_thread_when_its_checks_or_comments_cha
     task.abort();
 }
 
-/// The link sweep reads a linked pull request through `gh`'s login and writes its snapshot
-/// (`thread.pull-request-link.sync`), and looks the thread's branch up and writes its pull
-/// request (`thread.pull-request.sync`), as T3's `PullRequestSyncReactor` and
-/// `ThreadPullRequestService` do. A second sweep a minute later changes nothing.
-#[tokio::test]
-async fn the_link_sweep_writes_link_snapshots_and_the_branch_pull_request() {
-    use axum::{Json, Router, routing::post};
-    let dir = TestDir::new();
-    let shell = shell(&dir.0);
-    let reads = Arc::new(Mutex::new(Vec::<String>::new()));
-    let seen = reads.clone();
-    let router = Router::new().route(
-        "/graphql",
-        post(move |Json(body): Json<Value>| {
-            let seen = seen.clone();
-            async move {
-                let name = text(&body, "operationName").to_owned();
-                seen.lock().expect("reads").push(name.clone());
-                let mut pr: Value = serde_json::from_str(include_str!(
-                    "../../../../conn-source-control/src/pull_requests/sample.json"
-                ))
-                .expect("sample");
-                pr["updatedAt"] = json!("2030-01-01T00:00:00Z");
-                let data = if name == "PullRequestsByHead" {
-                    json!({"repository": {"pullRequests": {"nodes": [pr]}}})
-                } else {
-                    json!({"repository": {"pullRequest": pr}})
-                };
-                Json(json!({"data": data}))
-            }
-        }),
-    );
+/// A stub GitHub for the link sweep. Pull request 7 (`sample.json`, head `feature`) lives in
+/// `head_repository`; head lookups are recorded and can be held open; summaries can fail.
+struct HeadStub {
+    head_repository: String,
+    asked: Mutex<Vec<String>>,
+    reads: Mutex<Vec<String>>,
+    fail_summary: bool,
+    /// Held head lookups wait for `release`; `entered` tells that one is held.
+    hold: bool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl HeadStub {
+    fn new(head_repository: &str) -> Arc<Self> {
+        Arc::new(Self {
+            head_repository: head_repository.into(),
+            asked: Mutex::new(Vec::new()),
+            reads: Mutex::new(Vec::new()),
+            fail_summary: false,
+            hold: false,
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+async fn head_api(stub: Arc<HeadStub>) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{Json, Router, routing::get, routing::post};
+    let router = Router::new()
+        .route(
+            "/user",
+            get(|| async { Json(json!({"id": 12, "login": "nick"})) }),
+        )
+        .route(
+            "/graphql",
+            post(move |Json(body): Json<Value>| {
+                let stub = stub.clone();
+                async move {
+                    let query = text(&body, "query").to_owned();
+                    let mut pr: Value = serde_json::from_str(include_str!(
+                        "../../../../conn-source-control/src/pull_requests/sample.json"
+                    ))
+                    .expect("sample");
+                    pr["updatedAt"] = json!("2030-01-01T00:00:00Z");
+                    pr["headRepository"]["nameWithOwner"] = json!(stub.head_repository);
+                    if query.starts_with("query PullRequestsByHead") {
+                        stub.reads
+                            .lock()
+                            .expect("reads")
+                            .push("PullRequestsByHead".into());
+                        if stub.hold {
+                            stub.entered.notify_one();
+                            stub.release.notified().await;
+                        }
+                        let mut data = serde_json::Map::new();
+                        for index in 0.. {
+                            let Some(head) = body["variables"][format!("_{index}_head")].as_str()
+                            else {
+                                break;
+                            };
+                            stub.asked.lock().expect("asked").push(head.to_owned());
+                            let nodes = if head == "feature" {
+                                json!([pr])
+                            } else {
+                                json!([])
+                            };
+                            data.insert(
+                                format!("_{index}_repository"),
+                                json!({"pullRequests": {"nodes": nodes}}),
+                            );
+                        }
+                        return Json(json!({"data": data}));
+                    }
+                    let name = query
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|n| n.split('(').next())
+                        .unwrap_or_default()
+                        .to_owned();
+                    stub.reads.lock().expect("reads").push(name.clone());
+                    if name == "PullRequestSummary" && stub.fail_summary {
+                        return Json(json!({"errors": [{"type": "INTERNAL", "message": "boom"}]}));
+                    }
+                    if name != "PullRequestSummary" {
+                        let empty = json!({"nodes": [], "pageInfo": {"hasNextPage": false}});
+                        for key in ["comments", "reviews", "reviewThreads", "reviewDismissals"] {
+                            pr[key] = empty.clone();
+                        }
+                    }
+                    let data = if name == "RoutingIdentityViewer" {
+                        json!({"viewer": {"databaseId": 12, "login": "nick"}})
+                    } else {
+                        json!({"viewer": {"login": "nick"}, "repository": {"pullRequest": pr,
+                            "mergeCommitAllowed": true, "squashMergeAllowed": true,
+                            "rebaseMergeAllowed": true, "autoMergeAllowed": true,
+                            "viewerPermission": "WRITE"}})
+                    };
+                    Json(json!({"data": data}))
+                }
+            }),
+        )
+        .fallback(|| async { axum::http::StatusCode::NOT_FOUND });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -1657,16 +1729,41 @@ async fn the_link_sweep_writes_link_snapshots_and_the_branch_pull_request() {
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("stub API");
     });
-    let thread = json!({"id": "t1", "projectId": "p1", "title": "T", "branch": "feature",
+    (base, task)
+}
+
+fn branch_thread(id: &str, branch: &str) -> Value {
+    json!({"id": id, "projectId": "p1", "title": "T", "branch": branch,
         "worktreePath": null, "createdAt": "2026-11-16T00:00:00.000Z",
         "updatedAt": "2026-11-16T00:00:00.000Z", "archivedAt": null, "settledAt": null,
-        "settledOverride": null, "lineage": {"relationshipToParent": null},
-        "pullRequests": [{"host": "github.com", "repository": "a/b", "number": 7,
-            "url": "https://github.com/a/b/pull/7", "source": "manual",
-            "linkedAt": "2026-11-16T00:00:00.000Z", "snapshot": null, "stack": null}]});
+        "settledOverride": null, "lineage": {"relationshipToParent": null}, "pullRequests": []})
+}
+
+fn foreground(panel: &Panel) {
+    panel
+        .activity
+        .report_activity(&json!({"clientId": "web-1", "visible": true,
+        "focused": true, "recentlyInteracted": false, "scopes": []}));
+}
+
+/// The link sweep reads a linked pull request through `gh`'s login and writes its snapshot
+/// (`thread.pull-request-link.sync`), and looks the thread's branch up and writes its pull
+/// request (`thread.pull-request.sync`), as T3's `PullRequestSyncReactor` and
+/// `ThreadPullRequestService` do. The minute sweeps after that look branches up only while a
+/// client is in the foreground (`shouldRunOpportunisticWork`); the link reads go on.
+#[tokio::test]
+async fn the_link_sweep_writes_link_snapshots_and_the_branch_pull_request() {
+    let dir = TestDir::new();
+    let shell = shell(&dir.0);
+    let stub = HeadStub::new("a/b");
+    let (base, task) = head_api(stub.clone()).await;
+    let mut thread = branch_thread("t1", "feature");
+    thread["pullRequests"] = json!([{"host": "github.com", "repository": "a/b", "number": 7,
+        "url": "https://github.com/a/b/pull/7", "source": "manual",
+        "linkedAt": "2026-11-16T00:00:00.000Z", "snapshot": null, "stack": null}]);
     shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread]);
     let panel = panel(shell.clone(), &dir, &base);
-    let mut links = links::Links::new(panel);
+    let mut links = links::Links::new(panel.clone());
     links.tick().await;
     let dispatched = std::mem::take(&mut *shell.dispatched.lock().expect("dispatched"));
     let [link_sync, branch_sync] = dispatched.as_slice() else {
@@ -1688,26 +1785,176 @@ async fn the_link_sweep_writes_link_snapshots_and_the_branch_pull_request() {
     );
     assert_eq!(branch_sync["expected"]["branch"], "feature");
     assert_eq!(branch_sync["expected"]["branchPullRequest"], Value::Null);
+    let take = |m: &Mutex<Vec<String>>| std::mem::take(&mut *m.lock().expect("reads"));
     assert_eq!(
-        *reads.lock().expect("reads"),
+        take(&stub.reads),
         ["PullRequestSummary", "PullRequestsByHead"]
     );
-
-    // With both written, the next sweep reads again (an open, recently updated pull request
-    // stays on the minute cadence) but writes nothing.
     {
         let mut state = shell.snapshot.lock().expect("snapshot");
         state["threads"][0]["pullRequests"][0]["snapshot"] = snapshot.clone();
         state["threads"][0]["branchPullRequest"] = branch_sync["branchPullRequest"].clone();
     }
-    reads.lock().expect("reads").clear();
+    // No client: the open, recently updated link is read again, the branch is not.
     links.tick().await;
-    assert!(shell.dispatched.lock().expect("dispatched").is_empty());
+    assert_eq!(take(&stub.reads), ["PullRequestSummary"]);
+    // A client in the foreground: both, and nothing changed.
+    foreground(&panel);
+    links.tick().await;
     assert_eq!(
-        *reads.lock().expect("reads"),
+        take(&stub.reads),
         ["PullRequestSummary", "PullRequestsByHead"]
     );
+    assert!(shell.dispatched.lock().expect("dispatched").is_empty());
     task.abort();
+}
+
+/// Branches of several threads share one GitHub document (T3 batches its background head
+/// lookups), and a checkout of a fork's pull request is looked up by the head it pushes to:
+/// local `t3code/pr-7/feature`, upstream `fork`'s `feature`, in `forker/b`.
+#[tokio::test]
+async fn a_fork_checkout_is_looked_up_by_its_published_head_in_one_batch() {
+    let dir = TestDir::new();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir.0)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "branch.t3code/pr-7/feature.remote", "fork"]);
+    git(&[
+        "config",
+        "branch.t3code/pr-7/feature.merge",
+        "refs/heads/feature",
+    ]);
+    git(&[
+        "config",
+        "remote.fork.url",
+        "https://github.com/forker/b.git",
+    ]);
+    let shell = shell(&dir.0);
+    let stub = HeadStub::new("forker/b");
+    let (base, task) = head_api(stub.clone()).await;
+    shell.snapshot.lock().expect("snapshot")["threads"] = json!([
+        branch_thread("t1", "t3code/pr-7/feature"),
+        branch_thread("t2", "other"),
+    ]);
+    let panel = panel(shell.clone(), &dir, &base);
+    let mut links = links::Links::new(panel);
+    links.tick().await;
+    assert_eq!(*stub.reads.lock().expect("reads"), ["PullRequestsByHead"]);
+    assert_eq!(*stub.asked.lock().expect("asked"), ["feature", "other"]);
+    let dispatched = shell.dispatched.lock().expect("dispatched").clone();
+    let [found] = dispatched.as_slice() else {
+        panic!("one command: {dispatched:?}")
+    };
+    assert_eq!(found["threadId"], "t1");
+    assert_eq!(found["branchPullRequest"]["number"], 7);
+    task.abort();
+}
+
+/// A thread keeps its saved pull request when the lookup finds none and the saved one cannot
+/// be read; T3 then leaves the thread as it is and tries again later.
+#[tokio::test]
+async fn a_failed_read_of_the_saved_pull_request_clears_nothing() {
+    let dir = TestDir::new();
+    let shell = shell(&dir.0);
+    let stub = Arc::new(HeadStub {
+        fail_summary: true,
+        ..Arc::try_unwrap(HeadStub::new("a/b"))
+            .ok()
+            .expect("one owner")
+    });
+    let (base, task) = head_api(stub.clone()).await;
+    let mut thread = branch_thread("t1", "gone");
+    thread["branchPullRequest"] = json!({"projectId": "p1", "repository": "a/b", "number": 9,
+        "url": "https://github.com/a/b/pull/9"});
+    shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread]);
+    let panel = panel(shell.clone(), &dir, &base);
+    let mut links = links::Links::new(panel);
+    links.tick().await;
+    assert_eq!(
+        *stub.reads.lock().expect("reads"),
+        ["PullRequestsByHead", "PullRequestSummary"]
+    );
+    assert!(
+        shell.dispatched.lock().expect("dispatched").is_empty(),
+        "the saved pull request stays"
+    );
+    task.abort();
+}
+
+/// A new watch's first read does not wait for a branch lookup that GitHub holds open: the
+/// link sweep runs beside the watch loop, so CI that ends during the lookup is not taken as
+/// the baseline (#146).
+#[tokio::test]
+async fn a_new_watch_is_read_while_a_branch_lookup_is_held_open() {
+    let dir = TestDir::new();
+    let shell = shell(&dir.0);
+    let stub = Arc::new(HeadStub {
+        hold: true,
+        ..Arc::try_unwrap(HeadStub::new("a/b"))
+            .ok()
+            .expect("one owner")
+    });
+    let (base, task) = head_api(stub.clone()).await;
+    shell.snapshot.lock().expect("snapshot")["threads"] = json!([branch_thread("t1", "feature")]);
+    let panel = panel(shell.clone(), &dir, &base);
+    let loop_task = tokio::spawn(watches::run(panel));
+    tokio::time::timeout(Duration::from_secs(10), stub.entered.notified())
+        .await
+        .expect("the branch lookup is held");
+    // The thread gets a watch on pull request 7 while the lookup is held.
+    let line = include_str!("../../../../conn-contract/tests/fixtures/sampled.jsonl")
+        .lines()
+        .find(|l| l.contains(r#""key":"rpc::orchestration::subscribe_shell::Item","value":{"kind":"thread.updated""#))
+        .expect("a sampled thread update");
+    let mut item: Value = serde_json::from_str::<Value>(line).expect("sample")["value"].clone();
+    let started = "2026-11-16T00:00:00.000Z";
+    let thread = &mut item["thread"];
+    for (key, value) in [
+        ("id", json!("t1")),
+        ("projectId", json!("p1")),
+        ("settledAt", Value::Null),
+        ("settledOverride", Value::Null),
+        ("archivedAt", Value::Null),
+        ("branch", json!("feature")),
+        ("worktreePath", Value::Null),
+    ] {
+        thread[key] = value;
+    }
+    thread["lineage"]["relationshipToParent"] = Value::Null;
+    thread["pullRequests"] = json!([{"host": "github.com", "repository": "a/b", "number": 7,
+        "url": "https://github.com/a/b/pull/7", "source": "agent", "linkedAt": started,
+        "snapshot": null, "stack": null,
+        "watch": {"startedAt": started, "headSha": null, "failedChecks": [], "passed": false,
+            "passedChecks": [], "conflicting": false, "awaitingBaseline": "all",
+            "remarksThrough": started, "remarkIds": [], "wakes": 0}}]);
+    shell.snapshot.lock().expect("snapshot")["threads"] = json!([item["thread"].clone()]);
+    shell
+        .live
+        .send(from_json(item).expect("a shell item"))
+        .expect("the listener is subscribed");
+    let read = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !shell.syncs.lock().expect("syncs").is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    stub.release.notify_waiters();
+    loop_task.abort();
+    task.abort();
+    read.expect("the watch was read while the lookup was held");
+    let sync = shell.syncs.lock().expect("syncs")[0].clone();
+    assert_eq!(sync["startedAt"], started, "{sync}");
 }
 
 /// The shell listener asks the link sweep for what T3's reactors react to: a new link without a

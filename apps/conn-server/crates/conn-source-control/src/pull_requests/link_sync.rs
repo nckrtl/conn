@@ -325,6 +325,41 @@ pub struct LinkSync {
     failed: HashMap<String, (f64, f64)>,
     missing: HashSet<String>,
     linked_this_sweep: HashSet<String>,
+    /// This sweep's groups as stacks see them: key, project, and each link's native stack key
+    /// and layer numbers. Cleared at the start of every sweep.
+    sweep_stacks: Vec<SweepStacks>,
+    /// `stacksReadThisSweep`: the stacks the host answered this sweep, by group.
+    stacks_read: HashMap<String, Value>,
+}
+
+#[derive(Debug)]
+struct SweepStacks {
+    key: String,
+    project_id: String,
+    /// Per link: its host and repository, and its stored stack.
+    links: Vec<(ThreadPullRequestKey, Value)>,
+}
+
+/// `nativeStackKeyOf`: stack ids are unique only within a repository.
+fn native_stack_key(link: &ThreadPullRequestKey, stack: &Value) -> String {
+    let id = match &stack["id"] {
+        Value::String(id) => id.clone(),
+        other => other.to_string(),
+    };
+    format!("{}/{}#stack:{id}", link.host, link.repository)
+}
+
+/// `sameLayerNumbers`.
+fn same_layer_numbers(left: &Value, right: &Value) -> bool {
+    let numbers = |v: &Value| -> Vec<Value> {
+        v["layers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|l| l["number"].clone())
+            .collect()
+    };
+    numbers(left) == numbers(right)
 }
 
 fn group_key(project_id: &str, pr_key: &str) -> String {
@@ -395,6 +430,22 @@ impl LinkSync {
         self.missing.retain(|k| live.contains(k.as_str()));
         self.requested.retain(|k| live.contains(k.as_str()));
         self.linked_this_sweep.clear();
+        self.stacks_read.clear();
+        self.sweep_stacks = groups
+            .iter()
+            .map(|g| SweepStacks {
+                key: g.key.clone(),
+                project_id: g
+                    .first()
+                    .map(|e| text(&e.thread, "projectId").to_owned())
+                    .unwrap_or_default(),
+                links: g
+                    .entries
+                    .iter()
+                    .map(|e| (key_of(&e.link), e.link["stack"].clone()))
+                    .collect(),
+            })
+            .collect();
         groups
             .into_iter()
             .filter(|g| scope == Scope::All || self.requested.contains(&g.key))
@@ -539,6 +590,9 @@ impl LinkSync {
                 return Vec::new();
             }
         };
+        if let Some(fetched) = &fetched {
+            self.flag_stale_siblings(group, fetched);
+        }
         self.last_synced.insert(group.key.clone(), now);
         self.failed.remove(&group.key);
         self.requested.remove(&group.key);
@@ -609,6 +663,35 @@ impl LinkSync {
             }
         }
         commands
+    }
+
+    /// New upper layers leave older members' fields unchanged, so a member of the stack just
+    /// read whose layer list differs reads its stack again on the next sweep. Only members in
+    /// the same project: other credentials can see lists that never agree.
+    fn flag_stale_siblings(&mut self, group: &Group, fetched: &Value) {
+        self.stacks_read.insert(group.key.clone(), fetched.clone());
+        let Some(first) = group.first() else { return };
+        if fetched.is_null() {
+            return;
+        }
+        let fetched_key = native_stack_key(&key_of(&first.link), fetched);
+        let project_id = text(&first.thread, "projectId");
+        let stale: Vec<String> = self
+            .sweep_stacks
+            .iter()
+            .filter(|sibling| sibling.key != group.key && sibling.project_id == project_id)
+            .filter(|sibling| {
+                let read = self.stacks_read.get(&sibling.key);
+                sibling.links.iter().any(|(link, stored)| {
+                    let stack = read.unwrap_or(stored);
+                    !stack.is_null()
+                        && native_stack_key(link, stack) == fetched_key
+                        && !same_layer_numbers(stack, fetched)
+                })
+            })
+            .map(|sibling| sibling.key.clone())
+            .collect();
+        self.retry_stacks.extend(stale);
     }
 
     /// A dispatch failed: the group reads its stack again next sweep (`syncGroup`'s catch).
@@ -687,11 +770,16 @@ impl BranchSync {
         }
     }
 
-    /// `finishBackfill`: the group's lookup answered.
-    pub fn finish(&mut self, group: &BranchGroup) {
+    /// `finishBackfill`: the group's lookup answered; `failed` threads keep their attempts.
+    pub fn finish(&mut self, group: &BranchGroup, failed: &[String]) {
         for t in &group.threads {
-            self.backfill.remove(text(t, "id"));
+            let id = text(t, "id");
+            if !failed.iter().any(|f| f == id) {
+                self.backfill.remove(id);
+            }
         }
+        let ids: Vec<&str> = failed.iter().map(String::as_str).collect();
+        self.fail(&ids);
     }
 
     /// `failBackfill`: a lookup or a write failed; the thread has one attempt less.
@@ -825,19 +913,34 @@ impl BranchSync {
     }
 }
 
-/// `findLatestPrForHeadContext` on GitHub's `PullRequestsByHead` nodes: the branch's newest
-/// open pull request, else its newest one. A pull request from another head repository (a
-/// fork reusing the name) does not count. On the default branch only an open one counts.
-/// The answer is a `GitBranchPullRequest`: `{number, url, state, closedAt, mergedAt}`.
+/// A branch's head as GitHub knows it (`BranchHeadContext`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchHead {
+    /// The local branch.
+    pub branch: String,
+    /// The published head name: the upstream's branch, else the local name.
+    pub name: String,
+    /// `owner/name` of the repository the head lives in: the upstream remote's, else the
+    /// project's.
+    pub repository: String,
+}
+
+/// `findLatestPrForHeadContext` on GitHub's `PullRequestsByHead` nodes: the newest open pull
+/// request of the head, else its newest one. `head` is the published head: the name the
+/// branch pushes to (its upstream), which differs from the local `branch` after a checkout
+/// of someone's pull request. A pull request from another head repository (a fork reusing
+/// the name) does not count. On the default branch only an open one counts. The answer is a
+/// `GitBranchPullRequest`: `{number, url, state, closedAt, mergedAt}`.
 pub fn branch_pull_request(
     nodes: &[Value],
-    branch: &str,
-    head_repository: &str,
+    head: &BranchHead,
     default_branch: Option<&str>,
 ) -> Option<Value> {
+    let branch = head.branch.as_str();
+    let head_repository = head.repository.as_str();
     let mut candidates: Vec<Value> = nodes
         .iter()
-        .filter(|node| text(node, "headRefName") == branch)
+        .filter(|node| text(node, "headRefName") == head.name)
         .filter(|node| {
             let head = text(&node["headRepository"], "nameWithOwner");
             head.is_empty() || head.eq_ignore_ascii_case(head_repository)
@@ -935,23 +1038,66 @@ pub fn needs_checkout_check(
     })
 }
 
-/// The threads that keep a saved merged or closed pull request when the lookup found none:
-/// threads on a branch without a worktree. The caller reads each saved one's summary.
-pub fn previous_to_check(group: &BranchGroup, candidate: &Value) -> Vec<Value> {
-    if !candidate.is_null() {
-        return Vec::new();
+/// The pull request a thread would save before its saved one is checked: the found one, or
+/// none when it closed before the thread was made and T3 did not check it out.
+fn candidate_for(
+    group: &BranchGroup,
+    project: &BranchProject<'_>,
+    detected: Option<&Value>,
+    checked_out: bool,
+    thread: &Value,
+) -> Value {
+    let reference = detected_reference(project, detected);
+    let historical = detected.is_some_and(|d| {
+        predates_thread(d, &thread["createdAt"])
+            && !same_pull_request(&thread["branchPullRequest"], &reference)
+    });
+    let drops = needs_checkout_check(group, project, detected) && !checked_out;
+    if drops && historical {
+        Value::Null
+    } else {
+        reference
     }
+}
+
+/// Whether a thread's saved pull request must be read before its branch pull request is
+/// cleared: no candidate, a branch without a worktree, and a saved one.
+fn checks_saved(thread: &Value, candidate: &Value) -> bool {
+    candidate.is_null()
+        && has(thread, "branch")
+        && thread["worktreePath"].is_null()
+        && has(thread, "branchPullRequest")
+}
+
+/// The saved pull requests whose summary the caller reads before [`plan_branch`]: a thread on
+/// a branch without a worktree keeps a merged or closed one when the lookup found none, or
+/// only one that closed before the thread was made.
+pub fn previous_to_check(
+    group: &BranchGroup,
+    project: &BranchProject<'_>,
+    detected: Option<&Value>,
+    checked_out: bool,
+) -> Vec<Value> {
     group
         .threads
         .iter()
-        .filter(|t| has(t, "branch") && t["worktreePath"].is_null() && has(t, "branchPullRequest"))
+        .filter(|t| checks_saved(t, &candidate_for(group, project, detected, checked_out, t)))
         .map(|t| t["branchPullRequest"].clone())
         .collect()
 }
 
+/// What a branch lookup writes, and the threads it could not decide.
+#[derive(Debug, Default)]
+pub struct BranchPlan {
+    pub commands: Vec<Value>,
+    /// Threads whose saved pull request could not be read: T3 leaves them as they are and
+    /// tries again later (`failBackfill`).
+    pub failed: Vec<String>,
+}
+
 /// The `thread.pull-request.sync` commands for a group after its lookup. `checked_out`: the
 /// answer of [`needs_checkout_check`]'s git read (false when not needed). `previous`: the
-/// summaries read for [`previous_to_check`], by pull request URL.
+/// summaries read for [`previous_to_check`], by pull request URL; a missing one failed.
 pub fn plan_branch(
     group: &BranchGroup,
     project: &BranchProject<'_>,
@@ -960,38 +1106,27 @@ pub fn plan_branch(
     previous: &Map<String, Value>,
     snapshot_sequence: u64,
     uuid: &mut dyn FnMut() -> String,
-) -> Vec<Value> {
-    let reference = detected_reference(project, detected);
-    let historical = |t: &Value| {
-        detected.is_some_and(|d| {
-            predates_thread(d, &t["createdAt"])
-                && !same_pull_request(&t["branchPullRequest"], &reference)
-        })
-    };
-    let drops = needs_checkout_check(group, project, detected) && !checked_out;
-    let mut commands = Vec::new();
+) -> BranchPlan {
+    let mut plan = BranchPlan::default();
     for thread in &group.threads {
-        let mut branch_pull_request = if drops && historical(thread) {
-            Value::Null
-        } else {
-            reference.clone()
-        };
+        let thread_id = text(thread, "id");
+        let mut branch_pull_request = candidate_for(group, project, detected, checked_out, thread);
         let saved = thread.get("branchPullRequest").unwrap_or(&Value::Null);
-        if branch_pull_request.is_null()
-            && has(thread, "branch")
-            && thread["worktreePath"].is_null()
-            && !saved.is_null()
-            && let Some(summary) = previous.get(text(saved, "url"))
-            && summary["headBranch"] == thread["branch"]
-            && matches!(summary["state"].as_str(), Some("merged" | "closed"))
-        {
-            branch_pull_request = saved.clone();
+        if checks_saved(thread, &branch_pull_request) {
+            let Some(summary) = previous.get(text(saved, "url")) else {
+                plan.failed.push(thread_id.to_owned());
+                continue;
+            };
+            if summary["headBranch"] == thread["branch"]
+                && matches!(summary["state"].as_str(), Some("merged" | "closed"))
+            {
+                branch_pull_request = saved.clone();
+            }
         }
         if same_pull_request(saved, &branch_pull_request) {
             continue;
         }
-        let thread_id = text(thread, "id");
-        commands.push(json!({
+        plan.commands.push(json!({
             "type": "thread.pull-request.sync",
             "commandId": format!("server:thread-pull-request:{thread_id}:{}", uuid()),
             "threadId": thread_id,
@@ -1007,7 +1142,7 @@ pub fn plan_branch(
             "branchPullRequest": branch_pull_request,
         }));
     }
-    commands
+    plan
 }
 
 #[cfg(test)]
@@ -1105,11 +1240,20 @@ mod tests {
             node(2, "OPEN", "2027-01-14T00:00:00Z", "o/r"),
             node(4, "OPEN", "2027-01-16T00:00:00Z", "fork/r"),
         ];
-        let found = branch_pull_request(&nodes, "fix", "O/R", Some("main")).expect("found");
+        let head = |branch: &str, name: &str, repository: &str| BranchHead {
+            branch: branch.into(),
+            name: name.into(),
+            repository: repository.into(),
+        };
+        let found =
+            branch_pull_request(&nodes, &head("fix", "fix", "O/R"), Some("main")).expect("found");
         assert_eq!(found["number"], 2);
-        assert_eq!(
-            branch_pull_request(&nodes[..1], "main", "o/r", Some("main")),
-            None
-        );
+        // A checkout of a fork's pull request: local `t3code/pr-4/fix`, published `fix`.
+        let fork = head("t3code/pr-4/fix", "fix", "fork/r");
+        let found = branch_pull_request(&nodes, &fork, Some("main")).expect("the fork's");
+        assert_eq!(found["number"], 4);
+        // On the default branch only an open pull request counts.
+        let main = head("main", "fix", "o/r");
+        assert_eq!(branch_pull_request(&nodes[..1], &main, Some("main")), None);
     }
 }

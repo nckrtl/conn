@@ -6,7 +6,7 @@ import { repoRoot } from "./monorepo.mjs";
 import { cargoBuildEnv } from "./sealed-env.mjs";
 
 const examples = [
-  ["release", "conn-server", "effect_fixture", "replay_server", "settings_secrets", "text_generation", "model_manifest_cache", "mcp_apps"],
+  ["release", "conn-server", "effect_fixture", "replay_server", "settings_secrets", "text_generation", "model_manifest_cache", "mcp_apps", "background_gate"],
   ["release", "conn-engine", "export_turn", "tool_output_cases", "pr_link_sync_cases"],
   ["release", "conn-source-control", "registry_cases", "pr_watch_cases"],
   ["release", "conn-features", "webhook_functions"],

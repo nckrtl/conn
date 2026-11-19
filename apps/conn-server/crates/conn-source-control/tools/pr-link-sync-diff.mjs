@@ -7,14 +7,20 @@
 // (which pull requests and branches each sweep asks the host for), the commands, and the
 // threads at the end must be equal.
 //
-//   node crates/conn-source-control/tools/pr-link-sync-diff.mjs <examples/pr_link_sync_cases binary>
+// It also runs T3's own `BackgroundPolicy` (`shouldRunOpportunisticWork`, which gates the
+// periodic branch lookup) and ours (`crates/conn-server/examples/background_gate.rs`) on the
+// same settings and client activity reports.
+//
+//   node crates/conn-source-control/tools/pr-link-sync-diff.mjs <examples/pr_link_sync_cases> <examples/background_gate>
 import * as NodeChildProcess from "node:child_process";
 
 import { importSource, packageImporter } from "../../../tools/monorepo.mjs";
 import { sealedEnvTemp } from "../../../tools/sealed-env.mjs";
 
-const [binary] = process.argv.slice(2);
-if (!binary) throw new Error("usage: pr-link-sync-diff.mjs <examples/pr_link_sync_cases binary>");
+const [binary, gateBinary] = process.argv.slice(2);
+if (!binary || !gateBinary) {
+  throw new Error("usage: pr-link-sync-diff.mjs <examples/pr_link_sync_cases> <examples/background_gate>");
+}
 
 const server = packageImporter("apps/server");
 const Effect = await server("effect/Effect");
@@ -26,6 +32,7 @@ const DateTime = await server("effect/DateTime");
 const SecureRandom = await server("effect/crypto/SecureRandom");
 const { TestClock } = await server("effect/testing");
 const References = await server("effect/References");
+const Schema = await server("effect/Schema");
 const Contracts = await importSource("packages/contracts/src/index.ts");
 const NodeServices = await server("@effect/platform-node/NodeServices");
 const src = (path) => importSource(`apps/server/src/${path}`);
@@ -43,6 +50,10 @@ const [
   src("project/RepositoryIdentityResolver.ts"),
   src("background/BackgroundPolicy.ts"),
   src("serverActivation.ts"),
+]);
+const [HostPowerMonitor, ServerSettings] = await Promise.all([
+  src("background/HostPowerMonitor.ts"),
+  src("serverSettings.ts"),
 ]);
 
 // ---- Inputs ------------------------------------------------------------------------------
@@ -127,6 +138,17 @@ const linkCases = [
       [[key(8), summary(8, { stack: { number: 77 } })], [key(9), summary(9, { stack: { number: 77 } })]],
       { stacks: { [key(8)]: stackOf([8, 9]), [key(9)]: stackOf([8, 9]) } },
     ) }] },
+  { name: "a stack read that finds a new layer makes the older members read theirs again",
+    threads: [thread("t1", { pullRequests: [
+      link(40, snapshotOf(summary(40)), { stack: { kind: "native", ...stackOf([40, 41]) } }),
+      link(41, snapshotOf(summary(41)), { stack: { kind: "native", ...stackOf([40, 41]) } }),
+    ] })],
+    steps: [{ minutes: 2, ...answers(
+      [[key(40), summary(40, { title: "Renamed", stack: { number: 77 } })],
+       [key(41), summary(41, { stack: { number: 77 } })],
+       [key(42), summary(42, { stack: { number: 77 } })]],
+      { stacks: { [key(40)]: stackOf([40, 41, 42]), [key(41)]: stackOf([40, 41, 42]), [key(42)]: stackOf([40, 41, 42]) } },
+    ) }] },
   { name: "one read serves two threads",
     threads: [thread("t1", { pullRequests: [link(10)] }), thread("t2", { pullRequests: [link(10)] })],
     steps: [{ minutes: 1, ...answers([[key(10), summary(10)]]) }] },
@@ -183,6 +205,15 @@ const branchCases = [
       [prUrl(26)]: summary(26, { headBranch: "fix", state: "merged", mergedAt: ago(30) }),
       [prUrl(27)]: summary(27, { headBranch: "gone", state: "open" }),
     },
+    steps: [{ minutes: 1 }] },
+  { name: "a candidate that predates the thread checks the saved pull request first",
+    threads: [thread("t1", { branch: "fix", createdAt: ago(60), branchPullRequest: reference(30) })],
+    detected: { fix: detected(31, { state: "merged", mergedAt: ago(120) }) },
+    previous: { [prUrl(30)]: summary(30, { headBranch: "fix", state: "merged", mergedAt: ago(90) }) },
+    steps: [{ minutes: 1 }] },
+  { name: "a saved pull request that cannot be read stays",
+    threads: [thread("t1", { branch: "gone", branchPullRequest: reference(32) })],
+    detected: { gone: null },
     steps: [{ minutes: 1 }] },
   { name: "subagent threads wait for their own events",
     threads: [thread("t1", { branch: "fix", lineage: { parentThreadId: "t0", relationshipToParent: "subagent", rootThreadId: "t0" } })],
@@ -481,8 +512,76 @@ cases.forEach((c, index) => {
     console.error(`case ${index} (${c.kind}: ${c.name}) differs\n  T3:   ${w}\n  ours: ${g}`);
   }
 });
+
+// ---- The client-activity gate --------------------------------------------------------------
+
+const report = (extra = {}) => ({
+  clientId: "web-1", clientKind: "web", visible: true, focused: true, recentlyInteracted: false,
+  scopes: [], ...extra,
+});
+const custom = (baseProfile, overrides = {}) => ({
+  backgroundActivity: { schemaVersion: 1, profile: "custom", ...(baseProfile ? { baseProfile } : {}), overrides },
+});
+const lowPower = report({ lowPowerMode: "true" });
+const gateCases = [
+  { settings: {}, reports: [] },
+  { settings: {}, reports: [report()] },
+  { settings: {}, reports: [report({ focused: false })] },
+  { settings: {}, reports: [report({ focused: false, recentlyInteracted: true })] },
+  { settings: {}, reports: [report({ visible: false })] },
+  { settings: {}, reports: [lowPower] },
+  { settings: {}, reports: [report({ lowPowerMode: "false" })] },
+  { settings: {}, reports: [report({ lowPowerMode: "unknown" })] },
+  { settings: { backgroundActivity: { schemaVersion: 1, profile: "performance", overrides: {} } }, reports: [lowPower] },
+  { settings: { backgroundActivity: { schemaVersion: 1, profile: "battery-saver", overrides: {} } }, reports: [lowPower] },
+  { settings: { backgroundActivity: { schemaVersion: 1, profile: "battery-saver", overrides: {} } }, reports: [report()] },
+  { settings: custom("performance"), reports: [lowPower] },
+  { settings: custom("battery-saver"), reports: [lowPower] },
+  { settings: custom(undefined), reports: [lowPower] },
+  { settings: custom("balanced", { pauseWhenClientLowPower: false }), reports: [lowPower] },
+  { settings: custom("performance", { pauseWhenClientLowPower: true }), reports: [lowPower] },
+  { settings: { backgroundActivityProfile: "performance" }, reports: [lowPower] },
+  { settings: { backgroundActivityProfile: "battery-saver" }, reports: [lowPower] },
+  { settings: { backgroundActivityProfile: "performance", backgroundActivity: { schemaVersion: 1, profile: "battery-saver", overrides: {} } }, reports: [lowPower] },
+  { settings: {}, reports: [lowPower, report({ clientId: "web-2" })] },
+  { settings: {}, reports: [report(), report({ visible: false })] },
+];
+const decodeSettings = Schema.decodeUnknownSync(Schema.toCodecJson(Contracts.ServerSettings));
+const t3Gate = (c) =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const policy = yield* BackgroundPolicy.make();
+      for (const r of c.reports) yield* policy.reportClientActivity("session-1", "rpc-1", r);
+      return yield* policy.shouldRunOpportunisticWork;
+    }).pipe(
+      Effect.provide(Layer.mergeAll(
+        Layer.effect(HostPowerMonitor.HostPowerMonitor, HostPowerMonitor.make()),
+        Layer.mock(ServerSettings.ServerSettingsService)({ getSettings: Effect.succeed(decodeSettings(c.settings)) }),
+      )),
+      Effect.scoped,
+    ),
+  );
+const gateExpected = [];
+for (const c of gateCases) gateExpected.push(await t3Gate(c));
+const gate = NodeChildProcess.spawnSync(gateBinary, [], {
+  input: JSON.stringify(gateCases), env: sealedEnvTemp(), maxBuffer: 1024 * 1024,
+});
+if (gate.error) throw gate.error;
+if (gate.status !== 0) throw new Error(`${gateBinary} exited ${gate.status}: ${gate.stderr}`);
+const gateActual = JSON.parse(gate.stdout.toString());
+gateCases.forEach((c, index) => {
+  if (gateExpected[index] !== gateActual[index]) {
+    failures += 1;
+    console.error(`gate case ${index} differs: T3 ${gateExpected[index]}, ours ${gateActual[index]}: ${JSON.stringify(c)}`);
+  }
+});
+if (!gateExpected.includes(true) || !gateExpected.includes(false)) {
+  failures += 1;
+  console.error("gate cases must cover both answers");
+}
+
 if (failures > 0) {
-  console.error(`pr-link-sync-diff: ${failures} of ${cases.length} cases differ`);
+  console.error(`pr-link-sync-diff: ${failures} of ${cases.length + gateCases.length} cases differ`);
   process.exit(1);
 }
-console.log(`pr-link-sync-diff: ${cases.length} cases (${steps} sweeps, ${commandCount} commands) agree with T3`);
+console.log(`pr-link-sync-diff: ${cases.length} cases (${steps} sweeps, ${commandCount} commands) and ${gateCases.length} activity gate cases agree with T3`);

@@ -155,16 +155,15 @@ fn branch_pass(
             link_sync::needs_checkout_check(&group, &target, Some(d))
                 && case["checkedOut"].get(group.branch().unwrap_or_default()) == Some(&d["url"])
         });
-        let candidate = link_sync::detected_reference(&target, detected.as_ref());
         let mut previous = Map::new();
-        for saved in link_sync::previous_to_check(&group, &candidate) {
+        for saved in link_sync::previous_to_check(&group, &target, detected.as_ref(), checked_out) {
             let url = saved["url"].as_str().unwrap_or_default();
             if let Some(summary) = case["previous"].get(url) {
                 previous.insert(url.to_owned(), summary.clone());
             }
         }
         let mut n = 0;
-        for command in link_sync::plan_branch(
+        let plan = link_sync::plan_branch(
             &group,
             &target,
             detected.as_ref(),
@@ -175,11 +174,12 @@ fn branch_pass(
                 n += 1;
                 n.to_string()
             },
-        ) {
+        );
+        for command in plan.commands {
             apply(threads, &command, &iso);
             commands.push(strip(command));
         }
-        sync.finish(&group);
+        sync.finish(&group, &plan.failed);
     }
     json!({"at": now, "lookups": lookups, "commands": commands})
 }

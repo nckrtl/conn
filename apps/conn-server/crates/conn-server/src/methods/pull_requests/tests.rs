@@ -1665,6 +1665,9 @@ async fn head_api(stub: Arc<HeadStub>) -> (String, tokio::task::JoinHandle<()>) 
                     .expect("sample");
                     pr["updatedAt"] = json!("2030-01-01T00:00:00Z");
                     pr["headRepository"]["nameWithOwner"] = json!(stub.head_repository);
+                    let owner = stub.head_repository.split('/').next().unwrap_or_default();
+                    pr["headRepositoryOwner"]["login"] = json!(owner);
+                    pr["isCrossRepository"] = json!(stub.head_repository != "a/b");
                     if query.starts_with("query PullRequestsByHead") {
                         stub.reads
                             .lock()
@@ -1763,7 +1766,7 @@ async fn the_link_sweep_writes_link_snapshots_and_the_branch_pull_request() {
         "linkedAt": "2026-11-16T00:00:00.000Z", "snapshot": null, "stack": null}]);
     shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread]);
     let panel = panel(shell.clone(), &dir, &base);
-    let mut links = links::Links::new(panel.clone());
+    let mut links = links::Links::new(panel.clone(), links::Settles::default());
     links.tick().await;
     let dispatched = std::mem::take(&mut *shell.dispatched.lock().expect("dispatched"));
     let [link_sync, branch_sync] = dispatched.as_slice() else {
@@ -1845,7 +1848,7 @@ async fn a_fork_checkout_is_looked_up_by_its_published_head_in_one_batch() {
         branch_thread("t2", "other"),
     ]);
     let panel = panel(shell.clone(), &dir, &base);
-    let mut links = links::Links::new(panel);
+    let mut links = links::Links::new(panel, links::Settles::default());
     links.tick().await;
     assert_eq!(*stub.reads.lock().expect("reads"), ["PullRequestsByHead"]);
     assert_eq!(*stub.asked.lock().expect("asked"), ["feature", "other"]);
@@ -1876,7 +1879,7 @@ async fn a_failed_read_of_the_saved_pull_request_clears_nothing() {
         "url": "https://github.com/a/b/pull/9"});
     shell.snapshot.lock().expect("snapshot")["threads"] = json!([thread]);
     let panel = panel(shell.clone(), &dir, &base);
-    let mut links = links::Links::new(panel);
+    let mut links = links::Links::new(panel, links::Settles::default());
     links.tick().await;
     assert_eq!(
         *stub.reads.lock().expect("reads"),
@@ -2000,4 +2003,165 @@ fn thread_updates_ask_the_link_sweep_for_what_t3_reacts_to() {
         ask(Some(&synced), &settled),
         [Request::Settled(vec!["github.com/a/b#7".into()])]
     );
+}
+
+/// Codex finding 4: a settle refresh that finds the request channel full is not lost. The
+/// next minute sweep reads the settled thread's open link, which a plain sweep skips.
+#[test]
+fn a_settle_refresh_survives_a_full_request_channel() {
+    use conn_source_control::pull_requests::link_sync::{LinkSync, Scope};
+    use links::{Request, Settles, route, take_settles};
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Request>(1);
+    assert!(tx.try_send(Request::Branch("other".into())).is_ok());
+    let settles = Settles::default();
+    let key = "github.com/a/b#7".to_owned();
+    assert!(
+        !route(Request::Settled(vec![key]), &tx, &settles),
+        "the channel is full"
+    );
+    let thread = json!({"id": "t1", "projectId": "p1", "settledAt": "2027-01-15T08:00:00.000Z",
+        "settledOverride": null, "pullRequests": [{"host": "github.com", "repository": "a/b",
+        "number": 7, "url": "https://github.com/a/b/pull/7", "source": "manual", "stack": null,
+        "snapshot": {"state": "open", "updatedAt": "2027-01-15T08:00:00.000Z"}}]});
+    let now = 1_800_000_000_000.0;
+    let mut plain = LinkSync::default();
+    assert!(
+        plain
+            .begin(std::slice::from_ref(&thread), Scope::All, now)
+            .is_empty(),
+        "a plain sweep skips a settled thread"
+    );
+    let mut sync = LinkSync::default();
+    take_settles(&settles, &mut sync);
+    assert_eq!(
+        sync.begin(std::slice::from_ref(&thread), Scope::All, now)
+            .len(),
+        1,
+        "the overflowed settle refresh is read"
+    );
+}
+
+/// A scratch repository with GitHub-looking remotes that push to local bare repositories
+/// (`url.<bare>.insteadOf`), as T3's `configureVisibleRemoteUrlWithLocalRewrite`.
+struct HeadRepo {
+    dir: TestDir,
+}
+
+impl HeadRepo {
+    fn new(remotes: &[(&str, &str)]) -> Self {
+        let dir = TestDir::new();
+        let repo = Self { dir };
+        let work = repo.dir.0.join("work");
+        std::fs::create_dir_all(&work).expect("work dir");
+        repo.git(&["init", "-q", "-b", "main"]);
+        repo.git(&["config", "user.name", "Test"]);
+        repo.git(&["config", "user.email", "test@example.com"]);
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "Initial"]);
+        for (name, repository) in remotes {
+            let bare = repo.dir.0.join(format!("{name}.git"));
+            let status = std::process::Command::new("git")
+                .args(["init", "-q", "--bare"])
+                .arg(&bare)
+                .status()
+                .expect("git");
+            assert!(status.success());
+            let url = format!("git@github.com:{repository}.git");
+            repo.git(&["remote", "add", name, &url]);
+            let rewrite = format!("url.{}.insteadOf", bare.display());
+            repo.git(&["config", &rewrite, &url]);
+        }
+        repo
+    }
+
+    fn work(&self) -> PathBuf {
+        self.dir.0.join("work")
+    }
+
+    fn git(&self, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(self.work())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn project(&self) -> Project {
+        Project {
+            id: "p1".into(),
+            title: "r".into(),
+            root: self.work(),
+            host: "github.com".into(),
+            repository: "o/r".into(),
+        }
+    }
+}
+
+/// Codex finding 1 (T3 GitManager.test.ts "status finds a PR pushed under the branch's own
+/// name despite a default upstream"): `feature` made from `origin/main` and pushed without
+/// `-u` still tracks `origin/main`; its head is `feature`, not the base `main`.
+#[tokio::test]
+async fn a_branch_tracking_its_base_is_looked_up_by_its_own_name() {
+    let repo = HeadRepo::new(&[("origin", "o/r")]);
+    repo.git(&["push", "-q", "-u", "origin", "main"]);
+    repo.git(&["remote", "set-head", "origin", "main"]);
+    repo.git(&["checkout", "-q", "-b", "feature", "origin/main"]);
+    let project = repo.project();
+    // Not pushed yet: its upstream is its base, so there is nothing to look up.
+    assert!(
+        links::head_of(&project, &repo.work(), "feature")
+            .await
+            .is_none()
+    );
+    repo.git(&["push", "-q", "origin", "feature"]);
+    let query = links::head_of(&project, &repo.work(), "feature")
+        .await
+        .expect("looked up");
+    assert_eq!(query.head.name, "feature");
+    assert_eq!(query.head.repository, "o/r");
+    assert!(!query.head.cross_repository);
+    assert_eq!(query.default_branch.as_deref(), Some("main"));
+}
+
+/// Codex finding 2 (T3 GitManager.test.ts "finds a fork PR for a branch pushed without an
+/// upstream"): `git push fork feature` without `-u` publishes the head in the fork.
+#[tokio::test]
+async fn a_branch_pushed_to_a_fork_without_upstream_is_looked_up_in_the_fork() {
+    let repo = HeadRepo::new(&[("origin", "o/r"), ("fork", "contributor/r")]);
+    repo.git(&["push", "-q", "-u", "origin", "main"]);
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "Feature"]);
+    repo.git(&["push", "-q", "fork", "feature"]);
+    let project = repo.project();
+    let query = links::head_of(&project, &repo.work(), "feature")
+        .await
+        .expect("looked up");
+    assert_eq!(query.head.name, "feature");
+    assert_eq!(query.head.repository, "contributor/r");
+    assert!(query.head.cross_repository);
+    // Still found after a local commit on top of the pushed one.
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "Continue"]);
+    let query = links::head_of(&project, &repo.work(), "feature")
+        .await
+        .expect("looked up");
+    assert_eq!(query.head.repository, "contributor/r");
+    // The fork's pull request is the branch's, not another fork's with the same name.
+    let node = |n: u64, owner: &str| {
+        json!({"number": n, "url": format!("https://github.com/o/r/pull/{n}"),
+            "state": "OPEN", "headRefName": "feature", "isCrossRepository": true,
+            "updatedAt": "2027-01-15T00:00:00Z",
+            "headRepository": {"nameWithOwner": format!("{owner}/r")},
+            "headRepositoryOwner": {"login": owner}})
+    };
+    let found = conn_source_control::pull_requests::link_sync::branch_pull_request(
+        &[node(40, "someone-else"), node(41, "contributor")],
+        &query.head,
+        query.default_branch.as_deref(),
+    )
+    .expect("found");
+    assert_eq!(found["number"], 41);
 }

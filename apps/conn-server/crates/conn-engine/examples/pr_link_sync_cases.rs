@@ -175,11 +175,16 @@ fn branch_pass(
                 n.to_string()
             },
         );
+        let writing: Vec<String> = plan.writing().into_iter().map(str::to_owned).collect();
+        let writing: Vec<&str> = writing.iter().map(String::as_str).collect();
+        sync.finish(&group, &plan.failed, &writing);
         for command in plan.commands {
             apply(threads, &command, &iso);
+            if let Some(id) = command["threadId"].as_str() {
+                sync.written(id);
+            }
             commands.push(strip(command));
         }
-        sync.finish(&group, &plan.failed);
     }
     json!({"at": now, "lookups": lookups, "commands": commands})
 }

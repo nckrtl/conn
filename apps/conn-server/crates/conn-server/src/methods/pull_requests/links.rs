@@ -22,21 +22,63 @@ use conn_source_control::{
 };
 use conn_support::time::{iso_from_ms, now_ms};
 use serde_json::{Map, Value, json};
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::mpsc;
 
 /// What the shell listener asks the sweep for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Request {
     /// A link without a snapshot appeared (`requestUnsyncedLinks`).
     Unsynced { project_id: String, link: Value },
-    /// A thread settled: read its open and closed links once (`refreshUnmergedLinks`).
+    /// A thread settled: read its open and closed links once (`refreshUnmergedLinks`). The
+    /// listener moves the keys into [`Settles`] and sends this empty as a wake-up.
     Settled(Vec<String>),
     /// A thread's own event: look its branch up at once.
     Branch(String),
 }
 
+/// Settle refreshes waiting for the link sweep (`pendingRequests`). They live here, not only in
+/// the request channel: a full channel drops its message, and a normal sweep skips links whose
+/// threads have all settled, so a pull request merged before the settle would stay open.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Settles(Arc<Mutex<HashSet<String>>>);
+
+impl Settles {
+    pub(super) fn add(&self, keys: Vec<String>) {
+        if let Ok(mut pending) = self.0.lock() {
+            pending.extend(keys);
+        }
+    }
+
+    pub(super) fn take(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|mut pending| pending.drain().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Hands one request from the shell listener to the link sweep. Settle keys go to `settles`
+/// first; the channel only wakes the sweep. Returns `false` when the channel was full: the
+/// caller then asks for a full sweep, which takes in the waiting settles too.
+pub(super) fn route(request: Request, tx: &mpsc::Sender<Request>, settles: &Settles) -> bool {
+    let request = match request {
+        Request::Settled(keys) => {
+            settles.add(keys);
+            Request::Settled(Vec::new())
+        }
+        other => other,
+    };
+    tx.try_send(request).is_ok()
+}
+
 pub(super) struct Links {
     panel: Arc<Panel>,
+    settles: Settles,
     links: LinkSync,
     branches: BranchSync,
     started: bool,
@@ -60,16 +102,23 @@ fn rate_limited(failure: &Failure) -> bool {
 }
 
 impl Links {
-    pub(super) fn new(panel: Arc<Panel>) -> Self {
+    pub(super) fn new(panel: Arc<Panel>, settles: Settles) -> Self {
         Self {
             panel,
+            settles,
             links: LinkSync::default(),
             branches: BranchSync::default(),
             started: false,
         }
     }
 
+    /// Moves the waiting settle refreshes into the sweep's requests.
+    fn take_settles(&mut self) {
+        take_settles(&self.settles, &mut self.links);
+    }
+
     pub(super) async fn handle(&mut self, request: Request) {
+        self.take_settles();
         match request {
             Request::Unsynced { project_id, link } => {
                 self.links.request_unsynced(&project_id, &link);
@@ -87,6 +136,7 @@ impl Links {
 
     /// The minute sweep: due links, then branches.
     pub(super) async fn tick(&mut self) {
+        self.take_settles();
         self.sweep(Scope::All).await;
         self.branches(None).await;
     }
@@ -197,7 +247,7 @@ impl Links {
                 .find(|p| text(p, "id") == group.project_id())
                 .cloned()
             else {
-                self.branches.finish(&group, &[]);
+                self.branches.finish(&group, &[], &[]);
                 continue;
             };
             let Ok(github) = self
@@ -208,7 +258,7 @@ impl Links {
                 continue;
             };
             let Some(github) = github.into_iter().next() else {
-                self.branches.finish(&group, &[]);
+                self.branches.finish(&group, &[], &[]);
                 continue;
             };
             let root = text(&project, "workspaceRoot").to_owned();
@@ -218,7 +268,7 @@ impl Links {
                 _ => root.clone(),
             };
             let head = match group.branch() {
-                Some(branch) => Some(head_of(&github, Path::new(&cwd), branch).await),
+                Some(branch) => head_of(&github, Path::new(&cwd), branch).await,
                 None => None,
             };
             prepared.push(Prepared {
@@ -347,12 +397,23 @@ impl Links {
             sequence,
             &mut conn_support::uuid_v4,
         );
-        self.branches.finish(&group, &plan.failed);
+        // A thread leaves the start-up backfill only once its write lands: a refused write
+        // (the stale-write guard) is looked up again.
+        self.branches.finish(&group, &plan.failed, &plan.writing());
         for command in plan.commands {
-            if self.dispatch(command.clone()).await.is_err() {
-                self.branches.fail(&[text(&command, "threadId")]);
+            let thread_id = text(&command, "threadId").to_owned();
+            if self.dispatch(command).await.is_ok() {
+                self.branches.written(&thread_id);
+            } else {
+                self.branches.fail(&[&thread_id]);
             }
         }
+    }
+}
+
+pub(super) fn take_settles(settles: &Settles, links: &mut LinkSync) {
+    for key in settles.take() {
+        links.request(key);
     }
 }
 
@@ -367,16 +428,65 @@ struct Prepared {
     found: Option<Option<Value>>,
 }
 
-struct HeadQuery {
-    head: BranchHead,
-    default_branch: Option<String>,
+pub(super) struct HeadQuery {
+    pub(super) head: BranchHead,
+    pub(super) default_branch: Option<String>,
 }
 
-/// `resolveBranchHeadContext`: a branch with an upstream pushes to that remote's branch
-/// (`branch.<b>.remote`, `branch.<b>.merge`), as Conn's checkout of someone's pull request
-/// sets it up; otherwise its own name in the project's repository. The default branch is
-/// `origin`'s, else the first remote's.
-async fn head_of(project: &Project, cwd: &Path, branch: &str) -> HeadQuery {
+/// `resolveBranchHeadContext` for a published remote: the head is `name` in that remote's
+/// repository, or in the project's when there is no remote. A remote that is not a GitHub
+/// repository leaves the head's identity unknown.
+fn head_context(
+    project: &Project,
+    branch: &str,
+    name: &str,
+    remote_url: Option<&str>,
+    has_remote: bool,
+) -> BranchHead {
+    let repository = match (has_remote, remote_url) {
+        (false, _) => project.repository.clone(),
+        (true, Some(url)) => registry::git_remote_repository(url)
+            .map(|(_, repository)| repository)
+            .unwrap_or_default(),
+        (true, None) => String::new(),
+    };
+    let cross_repository =
+        !repository.is_empty() && !repository.eq_ignore_ascii_case(&project.repository);
+    BranchHead {
+        branch: branch.to_owned(),
+        name: name.to_owned(),
+        repository,
+        cross_repository,
+    }
+}
+
+/// `isPullRequestWorktreeLocalBranchName`: `t3code/pr-<n>/…` or `t3code-pr-<n>-…`.
+fn is_pull_request_branch(branch: &str) -> bool {
+    let Some(rest) = branch.strip_prefix("t3code") else {
+        return false;
+    };
+    let Some(rest) = rest
+        .strip_prefix(['/', '-'])
+        .and_then(|r| r.strip_prefix("pr-"))
+    else {
+        return false;
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && rest[digits..].starts_with(['/', '-'])
+}
+
+/// `resolveLookupHeadContext`: where the branch's pull request head lives, or `None` when the
+/// branch has nothing published to look up.
+///
+/// - A branch with an upstream pushes to that remote's branch (`branch.<b>.remote`,
+///   `branch.<b>.merge`), as Conn's checkout of someone's pull request sets it up.
+/// - A branch without one that was pushed (`git push fork feature`) is looked up in the remote
+///   that has its commit (`refs/remotes/<remote>/<b>`).
+/// - An upstream that is the branch's base (`git checkout -b feature origin/main`) is not its
+///   head: the branch's own name on the remote that has it is, and with none there is nothing.
+///
+/// The default branch is `origin`'s, else the first remote's.
+pub(super) async fn head_of(project: &Project, cwd: &Path, branch: &str) -> Option<HeadQuery> {
     let config = |key: String| async move {
         conn_vcs::repo::config_get(cwd, &key)
             .await
@@ -384,34 +494,71 @@ async fn head_of(project: &Project, cwd: &Path, branch: &str) -> HeadQuery {
             .flatten()
             .filter(|v| !v.is_empty())
     };
-    let remote = config(format!("branch.{branch}.remote"))
-        .await
-        .filter(|r| r != ".");
-    let merge = config(format!("branch.{branch}.merge")).await;
-    let mut head = BranchHead {
-        branch: branch.to_owned(),
-        name: branch.to_owned(),
-        repository: project.repository.clone(),
+    let context = |remote: Option<String>, name: String| async move {
+        let url = match &remote {
+            Some(remote) => config(format!("remote.{remote}.url")).await,
+            None => None,
+        };
+        (
+            head_context(project, branch, &name, url.as_deref(), remote.is_some()),
+            remote,
+        )
     };
-    if let (Some(remote), Some(merge)) = (remote, merge) {
-        head.name = merge
-            .strip_prefix("refs/heads/")
-            .unwrap_or(&merge)
-            .to_owned();
-        if let Some(url) = config(format!("remote.{remote}.url")).await
-            && let Some((_, repository)) = registry::git_remote_repository(&url)
-        {
-            head.repository = repository;
-        }
-    }
     let default_branch = conn_vcs::repo::Remotes::load(cwd)
         .await
         .ok()
         .and_then(|remotes| remotes.primary_default);
-    HeadQuery {
-        head,
-        default_branch,
+    let branch_remote = config(format!("branch.{branch}.remote")).await;
+    let merge = config(format!("branch.{branch}.merge")).await;
+    let has_upstream = branch_remote.is_some() && merge.is_some();
+    let remote = branch_remote.clone().filter(|r| r != ".");
+    let name = match (&remote, &merge) {
+        (Some(_), Some(merge)) => merge
+            .strip_prefix("refs/heads/")
+            .unwrap_or(merge)
+            .to_owned(),
+        _ => branch.to_owned(),
+    };
+    let found = |head: BranchHead| {
+        Some(HeadQuery {
+            head,
+            default_branch: default_branch.clone(),
+        })
+    };
+    let (head, remote) = context(remote, name.clone()).await;
+    if !has_upstream {
+        let published = conn_vcs::repo::published_branch_remote(cwd, branch)
+            .await
+            .ok()
+            .flatten();
+        if let Some(published) = published
+            && Some(&published) != remote.as_ref()
+        {
+            let (head, _) = context(Some(published), branch.to_owned()).await;
+            return found(head);
+        }
     }
+    let tracks_fork_head = head.cross_repository
+        && (remote.as_deref() != Some("origin") || is_pull_request_branch(branch));
+    if name == branch || tracks_fork_head {
+        return found(head);
+    }
+    let base = match config(format!("branch.{branch}.t3-merge-base")).await {
+        Some(base) => Some(base),
+        None => config(format!("branch.{branch}.gh-merge-base")).await,
+    };
+    let upstream_is_base = Some(&name) == default_branch.as_ref()
+        || (default_branch.is_none() && (name == "main" || name == "master"))
+        || Some(&name) == base.as_ref();
+    if !upstream_is_base {
+        return found(head);
+    }
+    let tracking = conn_vcs::repo::remote_tracking_remote(cwd, branch, remote.as_deref())
+        .await
+        .ok()
+        .flatten()?;
+    let (head, _) = context(Some(tracking), branch.to_owned()).await;
+    found(head)
 }
 
 async fn exists(path: std::path::PathBuf) -> bool {

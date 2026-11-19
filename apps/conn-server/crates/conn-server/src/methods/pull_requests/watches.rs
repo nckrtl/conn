@@ -10,7 +10,7 @@
 
 use super::{
     Panel, ReadKey,
-    links::{Links, Request},
+    links::{self, Links, Request},
 };
 use conn_source_control::pull_requests::{
     link_sync,
@@ -709,6 +709,8 @@ pub(super) async fn run(panel: Arc<Panel>) {
     let overflowed = overflow.clone();
     let links_overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let links_overflowed = links_overflow.clone();
+    let settles = links::Settles::default();
+    let link_settles = settles.clone();
     let input = conn_contract::from_json(json!({"requestCompletionMarker": true}));
     if let Ok(input) = input
         && let Ok(mut shell) = panel.engine.subscribe_shell(input).await
@@ -751,7 +753,7 @@ pub(super) async fn run(panel: Arc<Panel>) {
                             }
                         }
                         for request in link_requests(thread, before.as_ref(), &now) {
-                            if link_tx.try_send(request).is_err() {
+                            if !links::route(request, &link_tx, &settles) {
                                 links_overflowed.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
@@ -771,7 +773,7 @@ pub(super) async fn run(panel: Arc<Panel>) {
     }
     // The link sweep runs in its own task: a slow GitHub lookup there must not hold back a
     // new watch's first read, or CI that ends meanwhile becomes the baseline and never wakes.
-    let mut links = Links::new(panel.clone());
+    let mut links = Links::new(panel.clone(), link_settles);
     let links_task = tokio::spawn(async move {
         let mut link_sweep = tokio::time::interval(Duration::from_millis(link_sync::SWEEP_MS));
         link_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -770,16 +770,28 @@ impl BranchSync {
         }
     }
 
-    /// `finishBackfill`: the group's lookup answered; `failed` threads keep their attempts.
-    pub fn finish(&mut self, group: &BranchGroup, failed: &[String]) {
+    /// `finishBackfill`: the group's lookup answered. `failed` threads lose one attempt;
+    /// threads in `writing` stay until their write lands ([`Self::written`]) or fails
+    /// ([`Self::fail`]), as T3 deletes a thread's entry only after its dispatch.
+    pub fn finish(&mut self, group: &BranchGroup, failed: &[String], writing: &[&str]) {
         for t in &group.threads {
             let id = text(t, "id");
-            if !failed.iter().any(|f| f == id) {
+            if !failed.iter().any(|f| f == id) && !writing.contains(&id) {
                 self.backfill.remove(id);
             }
         }
         let ids: Vec<&str> = failed.iter().map(String::as_str).collect();
         self.fail(&ids);
+    }
+
+    /// A thread's `thread.pull-request.sync` was accepted: it leaves the backfill.
+    pub fn written(&mut self, thread_id: &str) {
+        self.backfill.remove(thread_id);
+    }
+
+    /// Whether the thread still waits in the start-up backfill.
+    pub fn backfilling(&self, thread_id: &str) -> bool {
+        self.backfill.contains_key(thread_id)
     }
 
     /// `failBackfill`: a lookup or a write failed; the thread has one attempt less.
@@ -920,16 +932,65 @@ pub struct BranchHead {
     pub branch: String,
     /// The published head name: the upstream's branch, else the local name.
     pub name: String,
-    /// `owner/name` of the repository the head lives in: the upstream remote's, else the
-    /// project's.
+    /// `owner/name` of the repository the head lives in: the published remote's, else the
+    /// project's. Empty when the remote is not a GitHub repository.
     pub repository: String,
+    /// The head lives in another repository than the project's (a fork).
+    pub cross_repository: bool,
+}
+
+fn lowered(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_lowercase())
+}
+
+/// `parseRepositoryOwnerLogin`: the first path segment.
+fn owner_of(repository: Option<&str>) -> Option<String> {
+    repository
+        .and_then(|r| r.split('/').next())
+        .and_then(lowered)
+}
+
+/// `matchesBranchHeadContext` on a `PullRequestsByHead` node: the head name must match, a
+/// known head owner or repository must match, and a pull request from another repository
+/// counts only when both sides know the head's identity (a deleted fork's does not).
+pub fn matches_head(node: &Value, head: &BranchHead) -> bool {
+    if text(node, "headRefName") != head.name {
+        return false;
+    }
+    let expected_repository = lowered(&head.repository);
+    let expected_owner = owner_of(expected_repository.as_deref());
+    let pr_repository = node["headRepository"]["nameWithOwner"]
+        .as_str()
+        .and_then(lowered);
+    let pr_owner = node["headRepositoryOwner"]["login"]
+        .as_str()
+        .and_then(lowered)
+        .or_else(|| owner_of(pr_repository.as_deref()));
+    if let (Some(expected), Some(actual)) = (&expected_repository, &pr_repository)
+        && expected != actual
+    {
+        return false;
+    }
+    if let (Some(expected), Some(actual)) = (&expected_owner, &pr_owner)
+        && expected != actual
+    {
+        return false;
+    }
+    let expected_known = expected_repository.is_some() || expected_owner.is_some();
+    let pr_known = pr_repository.is_some() || pr_owner.is_some();
+    let pr_cross = node["isCrossRepository"].as_bool();
+    if head.cross_repository {
+        return pr_cross != Some(false) && !(expected_known && !pr_known);
+    }
+    !(pr_cross == Some(true) && (!expected_known || !pr_known))
 }
 
 /// `findLatestPrForHeadContext` on GitHub's `PullRequestsByHead` nodes: the newest open pull
 /// request of the head, else its newest one. `head` is the published head: the name the
 /// branch pushes to (its upstream), which differs from the local `branch` after a checkout
-/// of someone's pull request. A pull request from another head repository (a fork reusing
-/// the name) does not count. On the default branch only an open one counts. The answer is a
+/// of someone's pull request. Only pull requests that [`matches_head`] count: not a fork
+/// reusing the name, nor a deleted fork's. On the default branch only an open one counts. The answer is a
 /// `GitBranchPullRequest`: `{number, url, state, closedAt, mergedAt}`.
 pub fn branch_pull_request(
     nodes: &[Value],
@@ -937,14 +998,9 @@ pub fn branch_pull_request(
     default_branch: Option<&str>,
 ) -> Option<Value> {
     let branch = head.branch.as_str();
-    let head_repository = head.repository.as_str();
     let mut candidates: Vec<Value> = nodes
         .iter()
-        .filter(|node| text(node, "headRefName") == head.name)
-        .filter(|node| {
-            let head = text(&node["headRepository"], "nameWithOwner");
-            head.is_empty() || head.eq_ignore_ascii_case(head_repository)
-        })
+        .filter(|node| matches_head(node, head))
         .filter_map(|node| {
             let state = match text(node, "state") {
                 "OPEN" => "open",
@@ -1093,6 +1149,13 @@ pub struct BranchPlan {
     /// Threads whose saved pull request could not be read: T3 leaves them as they are and
     /// tries again later (`failBackfill`).
     pub failed: Vec<String>,
+}
+
+impl BranchPlan {
+    /// The threads a command writes.
+    pub fn writing(&self) -> Vec<&str> {
+        self.commands.iter().map(|c| text(c, "threadId")).collect()
+    }
 }
 
 /// The `thread.pull-request.sync` commands for a group after its lookup. `checked_out`: the
@@ -1244,6 +1307,7 @@ mod tests {
             branch: branch.into(),
             name: name.into(),
             repository: repository.into(),
+            cross_repository: !repository.eq_ignore_ascii_case("o/r"),
         };
         let found =
             branch_pull_request(&nodes, &head("fix", "fix", "O/R"), Some("main")).expect("found");
@@ -1255,5 +1319,77 @@ mod tests {
         // On the default branch only an open pull request counts.
         let main = head("main", "fix", "o/r");
         assert_eq!(branch_pull_request(&nodes[..1], &main, Some("main")), None);
+    }
+
+    /// Codex finding 3 (T3 `matchesBranchHeadContext`): a pull request from a deleted fork
+    /// (`headRepository: null`) with the same head name is not the branch's own.
+    #[test]
+    fn a_deleted_forks_pull_request_does_not_match_a_branch() {
+        let own = BranchHead {
+            branch: "feature".into(),
+            name: "feature".into(),
+            repository: "o/r".into(),
+            cross_repository: false,
+        };
+        let deleted = json!({"number": 7, "url": "https://github.com/o/r/pull/7",
+            "state": "OPEN", "headRefName": "feature", "updatedAt": "2027-01-15T00:00:00Z",
+            "isCrossRepository": true, "headRepository": null, "headRepositoryOwner": null});
+        assert!(!matches_head(&deleted, &own));
+        assert_eq!(
+            branch_pull_request(std::slice::from_ref(&deleted), &own, Some("main")),
+            None
+        );
+        // Another owner's fork is not ours either, even with the repository unknown.
+        let other = json!({"number": 8, "headRefName": "feature", "isCrossRepository": true,
+            "headRepository": null, "headRepositoryOwner": {"login": "someone"}});
+        let fork = BranchHead {
+            repository: "contributor/r".into(),
+            cross_repository: true,
+            ..own.clone()
+        };
+        assert!(!matches_head(&other, &fork));
+        // A fork head needs the pull request's head identity.
+        assert!(!matches_head(&deleted, &fork));
+        let ours = json!({"number": 9, "headRefName": "feature", "isCrossRepository": true,
+            "headRepository": {"nameWithOwner": "Contributor/r"},
+            "headRepositoryOwner": {"login": "contributor"}});
+        assert!(matches_head(&ours, &fork));
+        assert!(!matches_head(&ours, &own));
+        // The project's own branch still matches without cross-repository data.
+        let plain = json!({"number": 10, "headRefName": "feature",
+            "headRepository": {"nameWithOwner": "o/r"}});
+        assert!(matches_head(&plain, &own));
+    }
+
+    /// Codex finding 5: a settled thread in the start-up backfill whose write is refused
+    /// (the stale-write guard) is looked up again by the next sweep.
+    #[test]
+    fn a_refused_backfill_write_is_retried() {
+        let thread = json!({"id": "t1", "projectId": "p", "branch": "feature",
+            "worktreePath": null, "settledAt": "2027-01-15T00:00:00.000Z",
+            "archivedAt": null, "branchPullRequest": null,
+            "lineage": {"relationshipToParent": null}});
+        let threads = vec![thread];
+        let mut sync = BranchSync::default();
+        sync.start_backfill(&threads);
+        let groups = sync.groups(&threads, None, NOW);
+        assert_eq!(groups.len(), 1);
+        let group = &groups[0];
+        let command = json!({"threadId": "t1"});
+        let plan = BranchPlan {
+            commands: vec![command],
+            failed: Vec::new(),
+        };
+        sync.finish(group, &plan.failed, &plan.writing());
+        // The dispatch is refused.
+        sync.fail(&["t1"]);
+        assert!(sync.backfilling("t1"));
+        let again = sync.groups(&threads, None, NOW + 60_000.0);
+        assert_eq!(again.len(), 1, "the settled thread is looked up again");
+        // A write that lands ends its backfill.
+        sync.finish(&again[0], &[], &["t1"]);
+        sync.written("t1");
+        assert!(!sync.backfilling("t1"));
+        assert!(sync.groups(&threads, None, NOW + 120_000.0).is_empty());
     }
 }

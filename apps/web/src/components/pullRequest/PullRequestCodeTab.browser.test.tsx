@@ -608,7 +608,13 @@ it("keeps replying to a conversation the diff cannot place", async () => {
 
   await screen.getByRole("button", { name: "Conversations not on the current diff (1)" }).click();
   await screen.getByRole("button", { name: "Reply", exact: true }).click();
-  await expect
-    .element(screen.getByRole("textbox", { name: "Reply to this conversation" }))
-    .toBeVisible();
+  const reply = screen.getByRole("textbox", { name: "Reply to this conversation" });
+  await reply.fill("Unsent");
+
+  // Folding the conversation keeps the draft.
+  const row = screen.getByRole("button", { name: /gone\.ts/ });
+  await row.click();
+  await expect.element(row).toHaveAttribute("aria-expanded", "false");
+  await row.click();
+  await expect.element(reply).toHaveValue("Unsent");
 });

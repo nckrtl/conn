@@ -638,7 +638,8 @@ function ReviewThreadEvent({
           )}
         />
       </button>
-      {expanded && body !== undefined ? <div className="mt-4">{body}</div> : null}
+      {/* Folded, the body stays mounted, so an unsent reply survives. */}
+      {body === undefined ? null : <div className={cn("mt-4", !expanded && "hidden")}>{body}</div>}
       {expanded && body === undefined ? (
         <div className="mt-4">
           <ConversationCard

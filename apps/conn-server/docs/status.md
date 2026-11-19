@@ -235,7 +235,7 @@ them, as with T3 (`PortScanner.ts`). Before, `subscribeDiscoveredLocalServers` a
 - **Served** (`src/local_servers/`): the subscription (first list at once, then changes;
   every 3 seconds while subscribed and a client is in the foreground) and the stop. Listeners
   from `/proc/net/tcp{,6}` with a bounded fd walk on Linux, else `lsof`; owners from a
-  terminal's process tree while it runs a command, or `T3CODE_THREAD_ID` in the listener's
+  terminal's process tree (background jobs too), or `T3CODE_THREAD_ID` in the listener's
   launch environment (agent CLIs themselves excluded); configured loopback URLs get one GET
   (1 s, no redirects, 15-second cache) and are listed when they answer HTML. A stop takes only
   a listed, owned server whose group holds neither this server, its ancestors nor a direct
@@ -243,8 +243,8 @@ them, as with T3 (`PortScanner.ts`). Before, `subscribeDiscoveredLocalServers` a
   limits and texts (`parse.rs`). Advertised: `localServerStop` (not on Windows).
 - **Proof:** `local-servers-diff` (new check, group 4): five listeners of its own (three with
   an agent thread, an HTML page, a JSON server) on both servers: the first list with five
-  configured URLs, two refused stops (unowned, wrong port), one stop on each side, and the
-  list after; equal. Unit tests for the parsers and the stop guard.
+  configured URLs, two refused stops (unowned, wrong port), one stop on each side, a terminal's
+  background server, and the list after; equal. Without the background-job fix it fails. Unit tests for the parsers and the stop guard.
 - **Known differences:** terminal ownership is read from the process table at the scan, where
   T3 registers it from its terminal subprocess poll; listener environments are read whenever
   a panel subscribes (T3 skips them while no agent ran); Codex is not told that a stopped

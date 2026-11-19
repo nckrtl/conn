@@ -103,6 +103,8 @@ class Side {
         ? [process.execPath, [GUARD_ARG, NodePath.join(MONOREPO, "apps/server/src/bin.ts"), "serve", "--no-browser", "--port", String(this.port), "--host", "127.0.0.1", "--base-dir", NodePath.join(this.dir, "base")],
             { ...sealedNodeEnv(this.dir), PATH: sealedEnv(this.dir).PATH, T3CODE_NO_BROWSER: "1", T3CODE_TELEMETRY_ENABLED: "false" }]
         : [rustBinary, ["serve", "--listen", `127.0.0.1:${this.port}`, "--state-dir", NodePath.join(this.dir, "state")], sealedEnv(this.dir)];
+    // Terminals need a real shell; a fresh HOME keeps it from reading any rc file of ours.
+    env.SHELL = "/bin/sh";
     const out = NodeFS.openSync(this.out, "a");
     const child = NodeChildProcess.spawn(command, args, { cwd: this.dir, env, detached: true, stdio: ["ignore", out, out] });
     NodeFS.closeSync(out);
@@ -233,6 +235,26 @@ try {
     if (alive(stopped.pid)) failures.push(`${stopped.name} still runs after its stop`);
   }
   if (!alive(a.pid) || !alive(page.pid)) failures.push("a stop ended a server it did not name");
+  // A server a thread's terminal started in the background (`server &`): each side's own.
+  const shellServers = await Promise.all(sides.map(async (side) => {
+    const port = await freePort();
+    const script = NodePath.join(root, `terminal-${side.kind}.mjs`);
+    NodeFS.writeFileSync(script, `import { createServer } from "node:http";\ncreateServer((q, r) => r.end("x")).listen(${port}, "127.0.0.1");\n`);
+    const ids = { threadId: "thread-terminal", terminalId: "term-1" };
+    const opened = await side.rpc("terminal.open", { ...ids, cwd: root, cols: 80, rows: 24 });
+    if (opened.ok === undefined) throw new Error(`${side.name}: terminal.open ${JSON.stringify(opened.failure).slice(0, 300)}`);
+    await side.rpc("terminal.write", { ...ids, data: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)} &\n` });
+    return port;
+  }));
+  const terminalView = (list, port) => list.servers.filter((s) => s.port === port).map(({ pid, port: _p, url: _u, ...rest }) => ({ ...rest, pid: typeof pid }));
+  let terminalLists = [];
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline; await sleep(500)) {
+    terminalLists = await Promise.all(sides.map((side) => side.firstList([])));
+    if (terminalLists.every((list, i) => list.servers.some((s) => s.port === shellServers[i] && s.terminal !== null))) break;
+  }
+  same("a terminal's background server", terminalView(terminalLists[0], shellServers[0]), terminalView(terminalLists[1], shellServers[1]));
+  if (!terminalLists[1].servers.some((s) => s.port === shellServers[1] && s.terminal?.terminalId === "term-1")) failures.push("Conn does not list its terminal's background server");
+  await Promise.all(sides.map((side) => side.rpc("terminal.close", { threadId: "thread-terminal", terminalId: "term-1" })));
   const after = await Promise.all(sides.map((side) => side.firstList(configuredUrls)));
   same("list after the stops", view(after[0]), view(after[1]));
   if (after[1].servers.some((s) => s.port === b.port || s.port === c.port)) failures.push("Conn still lists a stopped server");

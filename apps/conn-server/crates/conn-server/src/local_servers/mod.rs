@@ -64,7 +64,8 @@ impl StopError {
     }
 }
 
-/// The running terminals' shells while they run a command: (thread, terminal, shell pid).
+/// The running terminals' shells: (thread, terminal, shell pid). A shell with no child owns
+/// nothing ([`descendants`]).
 pub type TerminalShells = Arc<dyn Fn() -> Vec<(String, String, i64)> + Send + Sync>;
 /// Whether a client is in the foreground (`shouldRunOpportunisticWork`).
 pub type Foreground = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -73,7 +74,8 @@ struct Subscriber {
     id: u64,
     configured: Vec<String>,
     last: Vec<Server>,
-    tx: mpsc::Sender<Vec<Server>>,
+    /// The latest list: a subscriber that falls behind gets the newest one, never a stale one.
+    tx: tokio::sync::watch::Sender<Vec<Server>>,
 }
 
 struct ProbeEntry {
@@ -99,6 +101,8 @@ struct Inner {
     server_pid: i64,
     subscribers: Mutex<Vec<Subscriber>>,
     retained: AtomicU64,
+    /// Subscriptions still taking their first scan.
+    pending: std::sync::atomic::AtomicUsize,
     next_id: AtomicU64,
     polling: AtomicBool,
     caches: Mutex<Caches>,
@@ -166,6 +170,7 @@ impl LocalServers {
             server_pid: i64::from(std::process::id()),
             subscribers: Mutex::new(Vec::new()),
             retained: AtomicU64::new(0),
+            pending: std::sync::atomic::AtomicUsize::new(0),
             next_id: AtomicU64::new(1),
             polling: AtomicBool::new(false),
             caches: Mutex::new(Caches::default()),
@@ -173,36 +178,53 @@ impl LocalServers {
         }))
     }
 
-    /// `subscribeDiscoveredLocalServers`: the first list at once, then each change.
+    /// `subscribeDiscoveredLocalServers`: the first list at once, then each change. The
+    /// subscription runs in its own task, so a caller that goes away mid-scan still releases
+    /// what it retained.
     pub async fn subscribe(
         &self,
         configured: Vec<String>,
     ) -> Result<mpsc::Receiver<Value>, String> {
         let configured = parse::normalize_configured_urls(&configured);
-        if lock(&self.0.subscribers).len() >= MAX_SUBSCRIBERS {
-            return Err("Too many local server subscriptions.".into());
+        {
+            // Counted with the ones still scanning, under one lock, so the cap holds.
+            let subscribers = lock(&self.0.subscribers);
+            if subscribers.len() + self.0.pending.load(Ordering::SeqCst) >= MAX_SUBSCRIBERS {
+                return Err("Too many local server subscriptions.".into());
+            }
+            self.0.pending.fetch_add(1, Ordering::SeqCst);
         }
-        self.retain().await;
-        let initial = parse::project(&self.scan_snapshot(&configured).await, &configured);
         let (out, rx) = mpsc::channel::<Value>(4);
-        let (tx, mut changes) = mpsc::channel::<Vec<Server>>(4);
-        let id = self.0.next_id.fetch_add(1, Ordering::Relaxed);
-        let _ = out.send(list_json(&initial)).await;
-        lock(&self.0.subscribers).push(Subscriber {
-            id,
-            configured,
-            last: initial,
-            tx,
-        });
         let scanner = self.clone();
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    () = out.closed() => break,
-                    change = changes.recv() => match change {
-                        Some(servers) => if out.send(list_json(&servers)).await.is_err() { break },
-                        None => break,
-                    },
+            scanner.retain().await;
+            let initial = parse::project(&scanner.scan_snapshot(&configured).await, &configured);
+            let (tx, mut changes) = tokio::sync::watch::channel(initial.clone());
+            let id = scanner.0.next_id.fetch_add(1, Ordering::Relaxed);
+            {
+                let mut subscribers = lock(&scanner.0.subscribers);
+                subscribers.push(Subscriber {
+                    id,
+                    configured,
+                    last: initial.clone(),
+                    tx,
+                });
+                scanner.0.pending.fetch_sub(1, Ordering::SeqCst);
+            }
+            if out.send(list_json(&initial)).await.is_ok() {
+                loop {
+                    tokio::select! {
+                        () = out.closed() => break,
+                        changed = changes.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                            let servers = changes.borrow_and_update().clone();
+                            if out.send(list_json(&servers)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             lock(&scanner.0.subscribers).retain(|s| s.id != id);
@@ -268,21 +290,13 @@ impl LocalServers {
             all
         };
         let snapshot = self.scan_snapshot(&configured).await;
-        let changed: Vec<(mpsc::Sender<Vec<Server>>, Vec<Server>)> = {
-            let mut subscribers = lock(&self.0.subscribers);
-            subscribers
-                .iter_mut()
-                .filter_map(|s| {
-                    let next = parse::project(&snapshot, &s.configured);
-                    (next != s.last).then(|| {
-                        s.last.clone_from(&next);
-                        (s.tx.clone(), next)
-                    })
-                })
-                .collect()
-        };
-        for (tx, servers) in changed {
-            let _ = tx.try_send(servers);
+        let mut subscribers = lock(&self.0.subscribers);
+        for s in subscribers.iter_mut() {
+            let next = parse::project(&snapshot, &s.configured);
+            if next != s.last {
+                s.last.clone_from(&next);
+                s.tx.send_replace(next);
+            }
         }
     }
 
@@ -933,7 +947,7 @@ fn list_json(servers: &[Server]) -> Value {
     })
 }
 
-/// The terminals that run a command, for [`LocalServers::new`].
+/// The running terminals, for [`LocalServers::new`].
 pub fn terminal_shells(terminals: Option<conn_terminal::TerminalManager>) -> TerminalShells {
     Arc::new(move || {
         terminals
@@ -941,10 +955,9 @@ pub fn terminal_shells(terminals: Option<conn_terminal::TerminalManager>) -> Ter
             .map(|t| {
                 t.list()
                     .into_iter()
-                    .filter(|s| {
-                        s.has_running_subprocess
-                            && matches!(s.status, conn_contract::TerminalSessionStatus::Running)
-                    })
+                    // Every running shell: a background job (`server &`) is no foreground
+                    // job, but T3 still owns it through the shell's process tree.
+                    .filter(|s| matches!(s.status, conn_contract::TerminalSessionStatus::Running))
                     .filter_map(|s| Some((s.thread_id, s.terminal_id, s.pid?)))
                     .collect()
             })

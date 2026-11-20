@@ -115,6 +115,16 @@ export const arrowRightGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const arrowRightCircleGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M15 8A7 7 0 1 0 1 8a7 7 0 0 0 14 0ZM4.75 7.25a.75.75 0 0 0 0 1.5h4.69L8.22 9.97a.75.75 0 1 0 1.06 1.06l2.5-2.5a.75.75 0 0 0 0-1.06l-2.5-2.5a.75.75 0 0 0-1.06 1.06l1.22 1.22H4.75Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const arrowUpGlyph = [
   [
     "path",
@@ -151,6 +161,16 @@ export const arrowUpRightGlyph = [
     {
       fillRule: "evenodd",
       d: "M4.22 11.78a.75.75 0 0 1 0-1.06L9.44 5.5H5.75a.75.75 0 0 1 0-1.5h5.5a.75.75 0 0 1 .75.75v5.5a.75.75 0 0 1-1.5 0V6.56l-5.22 5.22a.75.75 0 0 1-1.06 0Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const arrowUpRightCircleGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1Zm-.75 10.25a.75.75 0 0 0 1.5 0V6.56l1.22 1.22a.75.75 0 1 0 1.06-1.06l-2.5-2.5a.75.75 0 0 0-1.06 0l-2.5 2.5a.75.75 0 0 0 1.06 1.06l1.22-1.22v4.69Z",
       clipRule: "evenodd",
     },
   ],
@@ -324,6 +344,21 @@ export const cameraGlyph = [
       clipRule: "evenodd",
     },
   ],
+] as const satisfies IconNode;
+export const carGlyph = [
+  [
+    "path",
+    {
+      d: "M2.908 2.067A.978.978 0 0 0 2 3.05V8h6V3.05a.978.978 0 0 0-.908-.983 32.481 32.481 0 0 0-4.184 0ZM12.919 4.722A.98.98 0 0 0 11.968 4H10a1 1 0 0 0-1 1v6.268A2 2 0 0 1 12 13h1a.977.977 0 0 0 .985-1 31.99 31.99 0 0 0-1.066-7.278Z",
+    },
+  ],
+  [
+    "path",
+    {
+      d: "M11 13a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM2 12V9h6v3a1 1 0 0 1-1 1 2 2 0 1 0-4 0 1 1 0 0 1-1-1Z",
+    },
+  ],
+  ["path", { d: "M6 13a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z" }],
 ] as const satisfies IconNode;
 export const chartGlyph = [
   [
@@ -579,6 +614,36 @@ export const composeGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const computerMiniGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M4 4h8a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm2.25 4a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 1 1 2.5 0Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const computerStudioGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M4 2.5h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Zm1.75 7.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 1 1 2.5 0Zm3.5 0a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 1 1 2.5 0Zm3.5 0a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 1 1 2.5 0Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const connectedGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M9.58 1.077a.75.75 0 0 1 .405.82L9.165 6h4.085a.75.75 0 0 1 .567 1.241l-6.5 7.5a.75.75 0 0 1-1.302-.638L6.835 10H2.75a.75.75 0 0 1-.567-1.241l6.5-7.5a.75.75 0 0 1 .897-.182Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const copyGlyph = [
   [
     "path",
@@ -662,6 +727,22 @@ export const desktopGlyph = [
       fillRule: "evenodd",
       d: "M2 4.25A2.25 2.25 0 0 1 4.25 2h7.5A2.25 2.25 0 0 1 14 4.25v5.5A2.25 2.25 0 0 1 11.75 12h-1.312c.1.128.21.248.328.36a.75.75 0 0 1 .234.545v.345a.75.75 0 0 1-.75.75h-4.5a.75.75 0 0 1-.75-.75v-.345a.75.75 0 0 1 .234-.545c.118-.111.228-.232.328-.36H4.25A2.25 2.25 0 0 1 2 9.75v-5.5Zm2.25-.75a.75.75 0 0 0-.75.75v4.5c0 .414.336.75.75.75h7.5a.75.75 0 0 0 .75-.75v-4.5a.75.75 0 0 0-.75-.75h-7.5Z",
       clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const deviceRotateGlyph = [
+  [
+    "path",
+    {
+      d: "M6.556 3.61a1.25 1.25 0 0 1 .56.324l4.95 4.95a1.25 1.25 0 0 1 0 1.768l-1.414 1.414a1.25 1.25 0 0 1-1.768 0l-4.95-4.95a1.25 1.25 0 0 1 0-1.768l1.414-1.414a1.25 1.25 0 0 1 1.208-.324Zm5.89-.69v-.17a.75.75 0 0 1 1.5 0V5a.75.75 0 0 1-.744.75h-2.256a.75.75 0 0 1 0-1.5h.73a5.25 5.25 0 0 0-2.764-1.42.75.75 0 0 1 .26-1.478 6.75 6.75 0 0 1 3.274 1.568ZM3.554 13.08v.17a.75.75 0 0 1-1.5 0V11a.75.75 0 0 1 .75-.75h2.25a.75.75 0 0 1 0 1.5h-.73a5.25 5.25 0 0 0 2.764 1.42.75.75 0 0 1-.26 1.478 6.75 6.75 0 0 1-3.274-1.568Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const diagnosticsGlyph = [
+  [
+    "path",
+    {
+      d: "M3 6a2 2 0 0 0 4 0V3h-.75a.75.75 0 0 1 0-1.5h1.5a.75.75 0 0 1 .75.75V6a3.375 3.375 0 0 1-1.025 2.475 3.375 3.375 0 0 1-1.725.951V10a3.128 3.128 0 0 0 6.197.602 2.25 2.25 0 1 1 1.514.033 4.375 4.375 0 0 1-1.316 2.635 4.5 4.5 0 0 1-3.27 1.355 4.5 4.5 0 0 1-3.27-1.355A4.5 4.5 0 0 1 4.25 10v-.574a3.375 3.375 0 0 1-1.725-.951A3.375 3.375 0 0 1 1.5 6V2.25a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5H3Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -858,6 +939,50 @@ export const fitScanGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const foldableBookGlyph = [
+  [
+    "path",
+    {
+      d: "M2 4.438a1.5 1.5 0 0 1 2.145-1.355l3.07 1.462a.5.5 0 0 1 .285.452v6.006a.5.5 0 0 1-.285.451l-3.07 1.462A1.5 1.5 0 0 1 2 11.562Zm9.855-1.355A1.5 1.5 0 0 1 14 4.438v7.124a1.5 1.5 0 0 1-2.145 1.354l-3.07-1.462a.5.5 0 0 1-.285-.451V4.997a.5.5 0 0 1 .285-.452Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableClosedGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M6 2h4a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm1.25 9h1.5a.75.75 0 0 1 0 1.5h-1.5a.75.75 0 0 1 0-1.5Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableLaptopGlyph = [
+  [
+    "path",
+    {
+      d: "M3.716 12.335 1.614 4.627A1.406 1.406 0 0 1 2.6 2.9l.905-.247a1.406 1.406 0 0 1 1.727.987l1.535 5.628-2.778 3.636a1.75 1.75 0 0 1-.273-.569Zm8.878 1.29h-7.19a1.75 1.75 0 0 1-.62-.114l2.777-3.636h5.033A1.406 1.406 0 0 1 14 11.281v.938a1.406 1.406 0 0 1-1.406 1.406Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableOpenGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M1 5a2 2 0 0 1 2-2h4a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H3a2 2 0 0 1-2-2Zm12-2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9a.5.5 0 0 1-.5-.5v-9A.5.5 0 0 1 9 3ZM3.75 9.5h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1 0-1.5Zm7.5 0h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1 0-1.5Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableTentGlyph = [
+  [
+    "path",
+    {
+      d: "M8.5 2.848a1.75 1.75 0 0 1 .956.706l4.74 7.11a1.406 1.406 0 0 1-.39 1.95l-.78.52a1.406 1.406 0 0 1-1.95-.39L8.5 8.88Zm-6.929 8.506a1.406 1.406 0 0 1 .233-.69l4.74-7.11a1.75 1.75 0 0 1 .956-.706V8.88l-2.576 3.864a1.406 1.406 0 0 1-1.95.39l-.78-.52a1.406 1.406 0 0 1-.623-1.26Z",
+    },
+  ],
+] as const satisfies IconNode;
 export const folderGlyph = [
   [
     "path",
@@ -926,6 +1051,14 @@ export const fullscreenGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const gitControlsGlyph = [
+  [
+    "path",
+    {
+      d: "M12 14a2 2 0 0 1-.75-3.854V5.5a.75.75 0 0 0-.75-.75h-.439l.469.47a.75.75 0 0 1-1.06 1.06L7.72 4.53a.75.75 0 0 1-.22-.521V4a.75.75 0 0 1 .22-.53l1.75-1.75a.75.75 0 0 1 1.06 1.06l-.469.47h.439a2.25 2.25 0 0 1 2.25 2.25v4.646A2 2 0 0 1 12 14ZM4.75 5.854V10.5a.75.75 0 0 0 .75.75h.439l-.469-.47a.75.75 0 0 1 1.06-1.06l1.75 1.749v.001a.75.75 0 0 1 .22.521V12a.75.75 0 0 1-.22.53l-1.75 1.75a.75.75 0 0 1-1.06-1.06l.469-.47H5.5a2.25 2.25 0 0 1-2.25-2.25V5.854a2 2 0 1 1 1.5 0Z",
+    },
+  ],
+] as const satisfies IconNode;
 export const globeGlyph = [
   [
     "path",
@@ -941,6 +1074,24 @@ export const goUpParentGlyph = [
     "path",
     {
       d: "M4.75 4.061 3.28 5.53a.75.75 0 0 1-1.06-1.06l2.749-2.75h.001a.75.75 0 0 1 1.06 0l2.75 2.75a.75.75 0 0 1-1.06 1.06L6.25 4.061V11.5c0 1 .5 1.5 1.5 1.5h6a.75.75 0 0 1 0 1.5h-6c-2 0-3-1-3-3Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const hashGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M7.487 2.89a.75.75 0 1 0-1.474-.28l-.455 2.388H3.61a.75.75 0 0 0 0 1.5h1.663l-.571 2.998H2.75a.75.75 0 0 0 0 1.5h1.666l-.403 2.114a.75.75 0 0 0 1.474.28l.456-2.394h2.973l-.403 2.114a.75.75 0 0 0 1.474.28l.456-2.394h1.947a.75.75 0 0 0 0-1.5h-1.661l.57-2.998h1.95a.75.75 0 0 0 0-1.5h-1.664l.402-2.108a.75.75 0 0 0-1.474-.28l-.455 2.388H7.085l.402-2.108ZM6.8 6.498l-.571 2.998h2.973l.57-2.998H6.8Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const headphonesGlyph = [
+  [
+    "path",
+    {
+      d: "M3.757 3.757A5.75 5.75 0 0 1 8 2a5.75 5.75 0 0 1 4.243 1.757A5.75 5.75 0 0 1 14 8v5c0 1-.5 1.5-1.5 1.5h-1c-1 0-1.5-.5-1.5-1.5v-2.75c0-1 .5-1.5 1.5-1.5h1V8a4.375 4.375 0 0 0-1.318-3.182A4.375 4.375 0 0 0 8 3.5a4.375 4.375 0 0 0-3.182 1.318A4.375 4.375 0 0 0 3.5 8v.75h1c1 0 1.5.5 1.5 1.5V13c0 1-.5 1.5-1.5 1.5h-1C2.5 14.5 2 14 2 13V8a5.75 5.75 0 0 1 1.757-4.243Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -1090,6 +1241,16 @@ export const layoutGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const letterSpacingGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M7.348 3.129a.75.75 0 0 1 1.364.134l2.249 6.747.002.006.749 2.247a.75.75 0 0 1-1.424.474L9.709 11H6.291l-.579 1.737a.75.75 0 0 1-1.424-.474l.749-2.247 2.251-6.753c.016-.047.036-.092.06-.134ZM2.486 13.396A.75.75 0 0 1 1 13.25V2.75a.75.75 0 0 1 1.5 0v10.5c0 .049-.005.098-.014.146Zm12.5 0a.75.75 0 0 1-1.486-.146V2.75a.75.75 0 0 1 1.5 0v10.5c0 .049-.005.098-.014.146ZM8 5.872 6.791 9.5h2.418Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const linkGlyph = [
   [
     "path",
@@ -1121,6 +1282,14 @@ export const listAddGlyph = [
     "path",
     {
       d: "M13.396 2.514A.75.75 0 0 1 13.25 4H2.75a.75.75 0 0 1 0-1.5h10.5c.049 0 .098.005.146.014Zm0 9A.75.75 0 0 1 13.25 13H2.75a.75.75 0 0 1 0-1.5h10.5c.049 0 .098.005.146.014Zm-1.41-1.618A.75.75 0 0 1 10.5 9.75V8.5H9.25a.75.75 0 0 1 0-1.5h1.25V5.75a.75.75 0 0 1 1.5 0V7h1.25a.75.75 0 0 1 0 1.5H12v1.25c0 .049-.005.098-.014.146Zm-5.34-2.882A.75.75 0 0 1 6.5 8.5H2.75a.75.75 0 0 1 0-1.5H6.5c.049 0 .098.005.146.014Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const listNumberedGlyph = [
+  [
+    "path",
+    {
+      d: "M2.995 1a.625.625 0 1 0 0 1.25h.38v2.125a.625.625 0 1 0 1.25 0v-2.75A.625.625 0 0 0 4 1H2.995ZM3.208 7.385a2.37 2.37 0 0 1 1.027-.124L2.573 8.923a.625.625 0 0 0 .439 1.067l1.987.011a.625.625 0 0 0 .006-1.25l-.49-.003.777-.776c.215-.215.335-.506.335-.809 0-.465-.297-.957-.842-1.078a3.636 3.636 0 0 0-1.993.121.625.625 0 1 0 .416 1.179ZM2.625 11a.625.625 0 1 0 0 1.25H4.25a.125.125 0 0 1 0 .25H3.5a.625.625 0 1 0 0 1.25h.75a.125.125 0 0 1 0 .25H2.625a.625.625 0 1 0 0 1.25H4.25a1.375 1.375 0 0 0 1.153-2.125A1.375 1.375 0 0 0 4.25 11H2.625ZM7.25 2a.75.75 0 0 0 0 1.5h6a.75.75 0 0 0 0-1.5h-6ZM7.25 7.25a.75.75 0 0 0 0 1.5h6a.75.75 0 0 0 0-1.5h-6ZM6.5 13.25a.75.75 0 0 1 .75-.75h6a.75.75 0 0 1 0 1.5h-6a.75.75 0 0 1-.75-.75Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -1167,6 +1336,16 @@ export const mailGlyph = [
     "path",
     {
       d: "M15 6.954 8.978 9.86a2.25 2.25 0 0 1-1.956 0L1 6.954V11.5A1.5 1.5 0 0 0 2.5 13h11a1.5 1.5 0 0 0 1.5-1.5V6.954Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const mailOpenGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M1.756 4.568A1.5 1.5 0 0 0 1 5.871V12.5A1.5 1.5 0 0 0 2.5 14h11a1.5 1.5 0 0 0 1.5-1.5V5.87a1.5 1.5 0 0 0-.756-1.302l-5.5-3.143a1.5 1.5 0 0 0-1.488 0l-5.5 3.143Zm1.82 2.963a.75.75 0 0 0-.653 1.35l4.1 1.98a2.25 2.25 0 0 0 1.955 0l4.1-1.98a.75.75 0 1 0-.653-1.35L8.326 9.51a.75.75 0 0 1-.652 0L3.575 7.53Z",
+      clipRule: "evenodd",
     },
   ],
 ] as const satisfies IconNode;
@@ -1231,6 +1410,16 @@ export const minimizeGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const moreCircleGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M15 8A7 7 0 1 1 1 8a7 7 0 0 1 14 0ZM8 9a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM5.5 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm6 1a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const moreHorizontalGlyph = [
   [
     "path",
@@ -1275,6 +1464,22 @@ export const newThreadBubbleGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const notificationsGlyph = [
+  [
+    "path",
+    {
+      d: "M3.6 1.7A.75.75 0 1 0 2.4.799a6.978 6.978 0 0 0-1.123 2.247.75.75 0 1 0 1.44.418c.187-.644.489-1.24.883-1.764ZM13.6.799a.75.75 0 1 0-1.2.9 5.48 5.48 0 0 1 .883 1.765.75.75 0 1 0 1.44-.418A6.978 6.978 0 0 0 13.6.799Z",
+    },
+  ],
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M8 1a4 4 0 0 1 4 4v2.379c0 .398.158.779.44 1.06l1.267 1.268a1 1 0 0 1 .293.707V11a1 1 0 0 1-1 1h-2a3 3 0 1 1-6 0H3a1 1 0 0 1-1-1v-.586a1 1 0 0 1 .293-.707L3.56 8.44A1.5 1.5 0 0 0 4 7.38V5a4 4 0 0 1 4-4Zm0 12.5A1.5 1.5 0 0 1 6.5 12h3A1.5 1.5 0 0 1 8 13.5Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const numberedListGlyph = [
   [
     "path",
@@ -1288,6 +1493,20 @@ export const offlineGlyph = [
     "path",
     {
       d: "M3.28 2.22a.75.75 0 0 0-1.06 1.06l4.782 4.783a1 1 0 0 0 .935.935l4.783 4.782a.75.75 0 1 0 1.06-1.06L8.998 7.937a1 1 0 0 0-.935-.935L3.28 2.22ZM3.05 12.95a7.003 7.003 0 0 1-1.33-8.047L2.86 6.04a5.501 5.501 0 0 0 1.25 5.849.75.75 0 1 1-1.06 1.06ZM5.26 10.74a3.87 3.87 0 0 1-1.082-3.38L5.87 9.052c.112.226.262.439.45.627a.75.75 0 1 1-1.06 1.061ZM12.95 3.05a7.003 7.003 0 0 1 1.33 8.048l-1.14-1.139a5.501 5.501 0 0 0-1.25-5.848.75.75 0 0 1 1.06-1.06ZM10.74 5.26a3.87 3.87 0 0 1 1.082 3.38L10.13 6.948a2.372 2.372 0 0 0-.45-.627.75.75 0 0 1 1.06-1.061Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const openInBrowserGlyph = [
+  [
+    "path",
+    {
+      d: "M6.22 8.72a.75.75 0 0 0 1.06 1.06l5.22-5.22v1.69a.75.75 0 0 0 1.5 0v-3.5a.75.75 0 0 0-.75-.75h-3.5a.75.75 0 0 0 0 1.5h1.69L6.22 8.72Z",
+    },
+  ],
+  [
+    "path",
+    {
+      d: "M3.5 6.75c0-.69.56-1.25 1.25-1.25H7A.75.75 0 0 0 7 4H4.75A2.75 2.75 0 0 0 2 6.75v4.5A2.75 2.75 0 0 0 4.75 14h4.5A2.75 2.75 0 0 0 12 11.25V9a.75.75 0 0 0-1.5 0v2.25c0 .69-.56 1.25-1.25 1.25h-4.5c-.69 0-1.25-.56-1.25-1.25v-4.5Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -1324,6 +1543,22 @@ export const panelMenuGlyph = [
       fillRule: "evenodd",
       d: "M2.586 2.586A2 2 0 0 1 4 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 .586-1.414ZM4.75 10a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Zm0-5.5a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Zm0 2.75a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Z",
       clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const pasteGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M11.986 3H12a2 2 0 0 1 2 2v6a2 2 0 0 1-1.5 1.937v-2.523a2.5 2.5 0 0 0-.732-1.768L8.354 5.232A2.5 2.5 0 0 0 6.586 4.5H4.063A2 2 0 0 1 6 3h.014A2.25 2.25 0 0 1 8.25 1h1.5a2.25 2.25 0 0 1 2.236 2ZM10.5 4v-.75a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V4h3Z",
+      clipRule: "evenodd",
+    },
+  ],
+  [
+    "path",
+    {
+      d: "M3 6a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-3.586a1 1 0 0 0-.293-.707L7.293 6.293A1 1 0 0 0 6.586 6H3Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -1385,6 +1620,14 @@ export const plugGlyph = [
     "path",
     {
       d: "M11.396 5.514A.75.75 0 0 1 12 6.25v2.5a3.875 3.875 0 0 1-1.172 2.828 3.875 3.875 0 0 1-2.078 1.108v1.064a.75.75 0 0 1-1.5 0v-1.064a3.875 3.875 0 0 1-2.078-1.108A3.875 3.875 0 0 1 4 8.75v-2.5a.75.75 0 0 1 .75-.75h.647V2.25a.75.75 0 0 1 1.5 0V5.5h2.205V2.25a.75.75 0 0 1 1.5 0V5.5h.648c.049 0 .098.005.146.014Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const plusMinusGlyph = [
+  [
+    "path",
+    {
+      d: "M8.736 9.896A.75.75 0 0 1 7.25 9.75v-3h-3a.75.75 0 0 1 0-1.5h3v-3a.75.75 0 0 1 1.5 0v3h3a.75.75 0 0 1 0 1.5h-3v3c0 .049-.005.098-.014.146Zm3.16 2.618A.75.75 0 0 1 11.75 14h-7.5a.75.75 0 0 1 0-1.5h7.5c.049 0 .098.005.146.014Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -1682,6 +1925,14 @@ export const settingsGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const shareGlyph = [
+  [
+    "path",
+    {
+      d: "M12 6a2 2 0 1 0-1.994-1.842L5.323 6.5a2 2 0 1 0 0 3l4.683 2.342a2 2 0 1 0 .67-1.342L5.995 8.158a2.03 2.03 0 0 0 0-.316L10.677 5.5c.353.311.816.5 1.323.5Z",
+    },
+  ],
+] as const satisfies IconNode;
 export const shieldGlyph = [
   [
     "path",
@@ -1736,6 +1987,14 @@ export const sidebarRightGlyph = [
       fillRule: "evenodd",
       d: "M2 12V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Zm7-8.5H4a.5.5 0 0 0-.5.5v8a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V4a.5.5 0 0 0-.5-.5Z",
       clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const skillGlyph = [
+  [
+    "path",
+    {
+      d: "M11.75 13a3 3 0 0 1-3-3 .75.75 0 0 0-1.5 0 3 3 0 1 1-5.665-1.378l.739-3.986A2 2 0 0 1 4.29 3h1.46a.75.75 0 0 1 0 1.5H4.29a.5.5 0 0 0-.492.41l-.41 2.217a3 3 0 0 1 3.261 1.071 2.25 2.25 0 0 1 2.702 0 3 3 0 0 1 3.261-1.071l-.41-2.217a.5.5 0 0 0-.492-.41h-1.46a.75.75 0 0 1 0-1.5h1.46a2 2 0 0 1 1.966 1.636l.739 3.986A3 3 0 0 1 11.75 13Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -1974,6 +2233,16 @@ export const textSearchGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const textSizeGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M4.093 2.889a.75.75 0 0 1 1.372.135l2.203 6.975c.006.017.011.033.016.05l.781 2.475a.75.75 0 0 1-1.43.452L6.411 11H3.089l-.624 1.976a.75.75 0 0 1-1.43-.452l.781-2.475c.005-.017.01-.033.016-.05l2.203-6.975c.015-.047.034-.092.058-.135Zm7.264 3.224a.75.75 0 0 1 1.349.133l2.25 6.25a.75.75 0 0 1-1.412.508l-.811-2.254h-1.466l-.811 2.254a.75.75 0 0 1-1.412-.508l2.25-6.25c.017-.046.038-.091.063-.133ZM4.75 5.741 3.563 9.5h2.374Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const themeGlyph = [
   [
     "path",
@@ -2182,6 +2451,16 @@ export const userApprovedGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const userCircleGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M15 8A7 7 0 1 1 1 8a7 7 0 0 1 14 0Zm-5-2a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM8 9c-1.825 0-3.422.977-4.295 2.437A5.49 5.49 0 0 0 8 13.5a5.49 5.49 0 0 0 4.294-2.063A4.997 4.997 0 0 0 8 9Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const userRejectedGlyph = [
   [
     "path",
@@ -2244,6 +2523,26 @@ export const whitespaceGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const wifiGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M14.188 7.063a8.75 8.75 0 0 0-12.374 0 .75.75 0 0 1-1.061-1.06c4.003-4.004 10.493-4.004 14.496 0a.75.75 0 1 1-1.061 1.06Zm-2.121 2.121a5.75 5.75 0 0 0-8.132 0 .75.75 0 0 1-1.06-1.06 7.25 7.25 0 0 1 10.252 0 .75.75 0 0 1-1.06 1.06Zm-2.122 2.122a2.75 2.75 0 0 0-3.889 0 .75.75 0 1 1-1.06-1.061 4.25 4.25 0 0 1 6.01 0 .75.75 0 0 1-1.06 1.06Zm-2.828 1.06a1.25 1.25 0 0 1 1.768 0 .75.75 0 0 1 0 1.06l-.355.355a.75.75 0 0 1-1.06 0l-.354-.354a.75.75 0 0 1 0-1.06Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const windowViewfinderGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M3 1.25A1.75 1.75 0 0 0 1.25 3v1.5a.75.75 0 0 0 1.5 0V3A.25.25 0 0 1 3 2.75h1.5a.75.75 0 0 0 0-1.5Zm8.5 0a.75.75 0 0 0 0 1.5H13a.25.25 0 0 1 .25.25v1.5a.75.75 0 0 0 1.5 0V3A1.75 1.75 0 0 0 13 1.25ZM2.75 11.5a.75.75 0 0 0-1.5 0V13c0 .966.784 1.75 1.75 1.75h1.5a.75.75 0 0 0 0-1.5H3a.25.25 0 0 1-.25-.25Zm12 0a.75.75 0 0 0-1.5 0V13a.25.25 0 0 1-.25.25h-1.5a.75.75 0 0 0 0 1.5H13A1.75 1.75 0 0 0 14.75 13ZM5.5 4.75h5a1.5 1.5 0 0 1 1.5 1.5v3.5a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 4 9.75v-3.5a1.5 1.5 0 0 1 1.5-1.5ZM6.25 6h3.5a.75.75 0 0 1 .75.75h0a.75.75 0 0 1-.75.75h-3.5a.75.75 0 0 1-.75-.75h0A.75.75 0 0 1 6.25 6Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const workflowGlyph = [
   [
     "path",
@@ -2267,6 +2566,52 @@ export const writeGuideGlyph = [
       fillRule: "evenodd",
       d: "M4 2a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V6.621a1.5 1.5 0 0 0-.44-1.06L9.94 2.439A1.5 1.5 0 0 0 8.878 2H4Zm1 5.75A.75.75 0 0 1 5.75 7h4.5a.75.75 0 0 1 0 1.5h-4.5A.75.75 0 0 1 5 7.75Zm0 3a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75Z",
       clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+
+/** 24px glyphs (viewBox 0 0 24 24) for icons drawn at 24px or more. */
+export const foldableBookGlyph24 = [
+  [
+    "path",
+    {
+      d: "M2.25 7.622a3 3 0 0 1 3.949-2.846l4.538 1.512A.75.75 0 0 1 11.25 7v10a.75.75 0 0 1-.513.712l-4.538 1.512a3 3 0 0 1-3.949-2.846Zm15.551-2.846a3 3 0 0 1 3.949 2.846v8.756a3 3 0 0 1-3.949 2.846l-4.538-1.512A.75.75 0 0 1 12.75 17V7a.75.75 0 0 1 .513-.712Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableClosedGlyph24 = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M8.25 2.25h7.5a3 3 0 0 1 3 3v13.5a3 3 0 0 1-3 3h-7.5a3 3 0 0 1-3-3V5.25a3 3 0 0 1 3-3Zm2.25 15h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1 0-1.5ZM16.125 6a1.125 1.125 0 1 1-2.25 0 1.125 1.125 0 1 1 2.25 0Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableLaptopGlyph24 = [
+  [
+    "path",
+    {
+      d: "M6.082 18.602 2.583 6.005a1.688 1.688 0 0 1 1.174-2.077l1.084-.301a1.688 1.688 0 0 1 2.078 1.174l2.789 10.042-3.339 4.392c-.127-.194-.224-.407-.287-.633Zm13.23 1.648H8.25c-.235 0-.466-.037-.687-.107l3.34-4.393h8.409A1.688 1.688 0 0 1 21 17.438v1.124a1.688 1.688 0 0 1-1.688 1.688Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableOpenGlyph24 = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M1.5 6.75a3 3 0 0 1 3-3h6a.75.75 0 0 1 .75.75v15a.75.75 0 0 1-.75.75h-6a3 3 0 0 1-3-3Zm18-3a3 3 0 0 1 3 3v10.5a3 3 0 0 1-3 3h-6a.75.75 0 0 1-.75-.75v-15a.75.75 0 0 1 .75-.75ZM6 15h2.25a.75.75 0 0 1 0 1.5H6A.75.75 0 0 1 6 15Zm9.75 0H18a.75.75 0 0 1 0 1.5h-2.25a.75.75 0 0 1 0-1.5Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableTentGlyph24 = [
+  [
+    "path",
+    {
+      d: "M12.75 4.629a2.25 2.25 0 0 1 1.158.929l7.003 11.204a1.688 1.688 0 0 1-.536 2.326l-.954.596a1.688 1.688 0 0 1-2.326-.536l-4.345-6.953ZM3.089 16.762l7.003-11.204a2.25 2.25 0 0 1 1.158-.929v7.566l-4.345 6.953a1.688 1.688 0 0 1-2.325.536l-.954-.596a1.688 1.688 0 0 1-.537-2.326Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -2368,6 +2713,7 @@ export const GLYPHS = {
   fullscreen: fullscreenGlyph,
   globe: globeGlyph,
   goUpParent: goUpParentGlyph,
+  hash: hashGlyph,
   heart: heartGlyph,
   help: helpGlyph,
   hide: hideGlyph,
@@ -2389,6 +2735,7 @@ export const GLYPHS = {
   lock: lockGlyph,
   login: loginGlyph,
   mail: mailGlyph,
+  mailOpen: mailOpenGlyph,
   maximize: maximizeGlyph,
   memory: memoryGlyph,
   mention: mentionGlyph,
@@ -2407,6 +2754,7 @@ export const GLYPHS = {
   paint: paintGlyph,
   panelBottom: panelBottomGlyph,
   panelMenu: panelMenuGlyph,
+  paste: pasteGlyph,
   pause: pauseGlyph,
   phone: phoneGlyph,
   pickElement: pickElementGlyph,
@@ -2566,6 +2914,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "circle-slash": GLYPHS.blocked,
   "circle-stop": GLYPHS.stopCircle,
   "circle-x": GLYPHS.clearCircle,
+  "clipboard-paste": GLYPHS.paste,
   clock: GLYPHS.clock,
   clock3: GLYPHS.clock,
   cloud: GLYPHS.cloud,
@@ -2621,6 +2970,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "grip-vertical": GLYPHS.dragHandle,
   hammer: GLYPHS.build,
   "hard-drive": GLYPHS.disk,
+  hash: GLYPHS.hash,
   heart: GLYPHS.heart,
   history: GLYPHS.history,
   home: GLYPHS.home,
@@ -2650,6 +3000,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "lock-open": GLYPHS.unlock,
   "log-in": GLYPHS.login,
   mail: GLYPHS.mail,
+  "mail-open": GLYPHS.mailOpen,
   maximize: GLYPHS.fullscreen,
   maximize2: GLYPHS.maximize,
   "memory-stick": GLYPHS.memory,
@@ -2744,6 +3095,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "text-wrap": GLYPHS.wrapLines,
   ticket: GLYPHS.ticket,
   timer: GLYPHS.timer,
+  trash: GLYPHS.delete,
   trash2: GLYPHS.delete,
   "trending-down": GLYPHS.trendDown,
   "trending-up": GLYPHS.trendUp,

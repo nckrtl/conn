@@ -193,8 +193,12 @@ the set maps it. Both mappings are needed: the dev server ignores tsconfig paths
 for pre-bundled packages. Colour icons with `text-*`, not `stroke-*`; for a halo
 use `stroke-background [paint-order:stroke]`.
 
-Project and workspace icons (any Lucide name a user picks) and hand-drawn
-`createLucideIcon` icons stay on `lucide-react/dynamic` and `lucide-react-original`.
+Icons with no Lucide name use a glyph by concept id: `connIcon("<concept>",
+<concept>Glyph)` from `src/icons/glyphs.generated.ts` (Mini PC and Workstation
+machines, SnapShots, screen rotation). Glyphs drawn at 24px or more use
+the set's 24px files, vendored one by one in `24/solid/` (the foldable postures
+in `DeviceDuoGlyph`, size-7); everything else is 16px. Project and workspace icons (any Lucide
+name a user picks) stay on `lucide-react/dynamic` and `lucide-react-original`.
 
 Sources:
 

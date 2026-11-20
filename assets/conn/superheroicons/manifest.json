@@ -2030,6 +2030,36 @@
       "name": "device-rotate",
       "library": "device-rotate",
       "meaning": "Rotate the preview device (portrait/landscape)"
+    },
+    "foldable-closed": {
+      "source": "generated",
+      "name": "foldable-closed",
+      "library": "foldable-closed",
+      "meaning": "Foldable posture: closed"
+    },
+    "foldable-open": {
+      "source": "generated",
+      "name": "foldable-open",
+      "library": "foldable-open",
+      "meaning": "Foldable posture: open flat"
+    },
+    "foldable-book": {
+      "source": "generated",
+      "name": "foldable-book",
+      "library": "foldable-book",
+      "meaning": "Foldable posture: book"
+    },
+    "foldable-laptop": {
+      "source": "generated",
+      "name": "foldable-laptop",
+      "library": "foldable-laptop",
+      "meaning": "Foldable posture: laptop stance"
+    },
+    "foldable-tent": {
+      "source": "generated",
+      "name": "foldable-tent",
+      "library": "foldable-tent",
+      "meaning": "Foldable posture: tent stance"
     }
   }
 }

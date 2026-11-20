@@ -7,16 +7,10 @@ import { GLYPH_BY_LUCIDE_NAME } from "./icons/glyphs.generated";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-// Menu item icons are Lucide names; they draw the same glyphs as `lucide-react`. Names the
-// icon set does not map yet borrow a mapped glyph.
-const MENU_ICON_ALIASES: Readonly<Record<string, string>> = {
-  trash: "trash2",
-  "mail-open": "mail",
-  hash: "tag",
-};
+// Menu item icons are Lucide names; they draw the same glyphs as `lucide-react`.
 
 function createIconElement(name: string, tone: "neutral" | "destructive"): SVGSVGElement | null {
-  const glyph = GLYPH_BY_LUCIDE_NAME[MENU_ICON_ALIASES[name] ?? name];
+  const glyph = GLYPH_BY_LUCIDE_NAME[name];
   if (!glyph || typeof document.createElementNS !== "function") {
     return null;
   }

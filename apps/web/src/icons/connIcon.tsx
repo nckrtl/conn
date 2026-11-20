@@ -12,6 +12,7 @@ import {
   type ReactNode,
   type RefAttributes,
 } from "react";
+import { useIconOverride } from "./iconOverride";
 
 export { createLucideIcon };
 export type LucideProps = OriginalLucideProps;
@@ -22,6 +23,14 @@ const ConnIconScopeContext = createContext(false);
 /** Conn: icons inside this scope (the thread timeline) draw Phosphor instead of Lucide. */
 export function ConnIconScope(props: { readonly children: ReactNode }) {
   return <ConnIconScopeContext value={true}>{props.children}</ConnIconScopeContext>;
+}
+
+/**
+ * Conn: draws Lucide again inside a `ConnIconScope`, for a part that must look the same wherever
+ * it shows, such as the Tasks board's card in the chat timeline.
+ */
+export function LucideIconScope(props: { readonly children: ReactNode }) {
+  return <ConnIconScopeContext value={false}>{props.children}</ConnIconScopeContext>;
 }
 
 function useConnIconScope() {
@@ -44,6 +53,8 @@ export function connIcon(
   const ConnIcon = forwardRef<SVGSVGElement, Omit<LucideProps, "ref">>(
     function ConnIcon(props, ref) {
       const scoped = useConnIconScope();
+      const override = useIconOverride(name, props, ref, scoped);
+      if (override) return override;
       if (!scoped) return <Lucide ref={ref} {...props} />;
       const {
         size = 24,

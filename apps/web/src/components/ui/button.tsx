@@ -25,6 +25,8 @@ const buttonVariants = cva(
         "icon-micro":
           "size-5 rounded-sm p-0 before:rounded-[calc(var(--radius-sm)-1px)] [&_svg:not([class*='size-'])]:size-3",
         "icon-tiny": "size-4 p-0 [&_svg:not([class*='size-'])]:size-3",
+        "icon-toolbar":
+          "size-6.5 p-0 sm:size-6.5 not-in-data-[slot=input-group]:[&_svg:not([class*='size-'])]:size-4 sm:not-in-data-[slot=input-group]:[&_svg:not([class*='size-'])]:size-3.5",
         "icon-sm": "size-8 sm:size-7",
         "icon-sm-pill": "size-8 rounded-full before:rounded-full sm:size-7",
         "icon-xl":
@@ -40,6 +42,8 @@ const buttonVariants = cva(
         "sm-pill": "h-8 gap-1.5 rounded-full px-2.5 sm:h-7",
         "sm-multiline":
           "min-h-8 gap-1.5 px-[calc(--spacing(2.5)-1px)] py-[calc(--spacing(1)-1px)] whitespace-normal sm:min-h-7",
+        toolbar:
+          "h-6.5 gap-1.5 px-2 text-sm sm:h-6.5 sm:text-ui [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5",
         xl: "h-11 px-[calc(--spacing(4)-1px)] text-lg sm:h-10 sm:text-base [&_svg:not([class*='size-'])]:size-5 sm:[&_svg:not([class*='size-'])]:size-4.5",
         xs: "h-7 gap-1 px-[calc(--spacing(2)-1px)] text-sm sm:h-6 sm:text-xs [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5",
       },

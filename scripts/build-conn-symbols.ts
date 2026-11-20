@@ -99,6 +99,278 @@ function transformPath(d: string): string {
   return out.join(" ");
 }
 
+// iOS custom symbols fill with the nonzero rule and ignore `fill-rule: evenodd`, which most
+// glyphs use for their cut-outs. So each evenodd path is rewritten for nonzero: every subpath
+// nested inside an odd number of others runs the opposite way to its container.
+type Point = readonly [number, number];
+type Segment =
+  | { readonly kind: "L"; readonly to: Point }
+  | { readonly kind: "C"; readonly c1: Point; readonly c2: Point; readonly to: Point }
+  | { readonly kind: "Q"; readonly c: Point; readonly to: Point }
+  | {
+      readonly kind: "A";
+      readonly rx: number;
+      readonly ry: number;
+      readonly rotation: number;
+      readonly large: number;
+      readonly sweep: number;
+      readonly to: Point;
+    };
+interface Subpath {
+  readonly start: Point;
+  readonly segments: Segment[];
+}
+
+/** Parses a path into closed-or-open subpaths of absolute L, C, Q and A segments. */
+function parseSubpaths(d: string): Subpath[] {
+  const tokens = d.match(/[a-zA-Z]|-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g) ?? [];
+  const subpaths: Subpath[] = [];
+  let i = 0;
+  let command = "";
+  let current: Point = [0, 0];
+  let start: Point = [0, 0];
+  let lastControl: Point | null = null;
+  let lastKind = "";
+  let sub: Subpath | null = null;
+  const num = () => Number(tokens[i++]);
+  const isNumber = () => i < tokens.length && !/[a-zA-Z]/.test(tokens[i]!);
+  while (i < tokens.length) {
+    if (/[a-zA-Z]/.test(tokens[i]!)) command = tokens[i++]!;
+    const rel = command === command.toLowerCase();
+    const pt = (): Point => {
+      const x = num();
+      const y = num();
+      return rel ? [current[0] + x, current[1] + y] : [x, y];
+    };
+    const upper = command.toUpperCase();
+    if (upper === "Z") {
+      current = start;
+      sub = null;
+      lastKind = "Z";
+      continue;
+    }
+    if (upper === "M") {
+      current = pt();
+      start = current;
+      sub = { start, segments: [] };
+      subpaths.push(sub);
+      command = rel ? "l" : "L";
+      lastKind = "M";
+      continue;
+    }
+    if (sub === null) {
+      sub = { start: current, segments: [] };
+      start = current;
+      subpaths.push(sub);
+    }
+    let segment: Segment;
+    switch (upper) {
+      case "L":
+        segment = { kind: "L", to: pt() };
+        break;
+      case "H": {
+        const x = num();
+        segment = { kind: "L", to: [rel ? current[0] + x : x, current[1]] };
+        break;
+      }
+      case "V": {
+        const y = num();
+        segment = { kind: "L", to: [current[0], rel ? current[1] + y : y] };
+        break;
+      }
+      case "C": {
+        const c1 = pt();
+        const c2 = pt();
+        segment = { kind: "C", c1, c2, to: pt() };
+        break;
+      }
+      case "S": {
+        const c1: Point =
+          lastKind === "C" && lastControl
+            ? [2 * current[0] - lastControl[0], 2 * current[1] - lastControl[1]]
+            : current;
+        const c2 = pt();
+        segment = { kind: "C", c1, c2, to: pt() };
+        break;
+      }
+      case "Q": {
+        const c = pt();
+        segment = { kind: "Q", c, to: pt() };
+        break;
+      }
+      case "T": {
+        const c: Point =
+          lastKind === "Q" && lastControl
+            ? [2 * current[0] - lastControl[0], 2 * current[1] - lastControl[1]]
+            : current;
+        segment = { kind: "Q", c, to: pt() };
+        break;
+      }
+      case "A": {
+        const rx = num();
+        const ry = num();
+        const rotation = num();
+        const large = num();
+        const sweep = num();
+        segment = { kind: "A", rx, ry, rotation, large, sweep, to: pt() };
+        break;
+      }
+      default:
+        throw new Error(`Unsupported path command ${command}`);
+    }
+    sub.segments.push(segment);
+    lastKind = segment.kind;
+    lastControl = segment.kind === "C" ? segment.c2 : segment.kind === "Q" ? segment.c : null;
+    current = segment.to;
+    if (!isNumber() && i < tokens.length && /[a-zA-Z]/.test(tokens[i]!)) continue;
+  }
+  return subpaths;
+}
+
+/** Points along a subpath, close enough for orientation and containment. */
+function sample(sub: Subpath): Point[] {
+  const points: Point[] = [sub.start];
+  let from = sub.start;
+  for (const s of sub.segments) {
+    if (s.kind === "L") points.push(s.to);
+    else if (s.kind === "C" || s.kind === "Q") {
+      for (let k = 1; k <= 12; k++) {
+        const t = k / 12;
+        const u = 1 - t;
+        points.push(
+          s.kind === "C"
+            ? [
+                u * u * u * from[0] +
+                  3 * u * u * t * s.c1[0] +
+                  3 * u * t * t * s.c2[0] +
+                  t * t * t * s.to[0],
+                u * u * u * from[1] +
+                  3 * u * u * t * s.c1[1] +
+                  3 * u * t * t * s.c2[1] +
+                  t * t * t * s.to[1],
+              ]
+            : [
+                u * u * from[0] + 2 * u * t * s.c[0] + t * t * s.to[0],
+                u * u * from[1] + 2 * u * t * s.c[1] + t * t * s.to[1],
+              ],
+        );
+      }
+    } else {
+      points.push(...sampleArc(from, s));
+    }
+    from = s.to;
+  }
+  return points;
+}
+
+/** Samples an SVG arc via its centre parameterisation (SVG 1.1, F.6.5). */
+function sampleArc(from: Point, a: Extract<Segment, { kind: "A" }>): Point[] {
+  const phi = (a.rotation * Math.PI) / 180;
+  const cos = Math.cos(phi);
+  const sin = Math.sin(phi);
+  const dx = (from[0] - a.to[0]) / 2;
+  const dy = (from[1] - a.to[1]) / 2;
+  const x1 = cos * dx + sin * dy;
+  const y1 = -sin * dx + cos * dy;
+  let rx = Math.abs(a.rx);
+  let ry = Math.abs(a.ry);
+  if (rx === 0 || ry === 0) return [a.to];
+  const lambda = (x1 * x1) / (rx * rx) + (y1 * y1) / (ry * ry);
+  if (lambda > 1) {
+    rx *= Math.sqrt(lambda);
+    ry *= Math.sqrt(lambda);
+  }
+  const num = rx * rx * ry * ry - rx * rx * y1 * y1 - ry * ry * x1 * x1;
+  const den = rx * rx * y1 * y1 + ry * ry * x1 * x1;
+  const coef = (a.large === a.sweep ? -1 : 1) * Math.sqrt(Math.max(0, num / den));
+  const cx1 = (coef * rx * y1) / ry;
+  const cy1 = (-coef * ry * x1) / rx;
+  const cx = cos * cx1 - sin * cy1 + (from[0] + a.to[0]) / 2;
+  const cy = sin * cx1 + cos * cy1 + (from[1] + a.to[1]) / 2;
+  const angle = (ux: number, uy: number, vx: number, vy: number) =>
+    Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+  const theta = angle(1, 0, (x1 - cx1) / rx, (y1 - cy1) / ry);
+  let delta = angle((x1 - cx1) / rx, (y1 - cy1) / ry, (-x1 - cx1) / rx, (-y1 - cy1) / ry);
+  if (!a.sweep && delta > 0) delta -= 2 * Math.PI;
+  if (a.sweep && delta < 0) delta += 2 * Math.PI;
+  const points: Point[] = [];
+  for (let k = 1; k <= 16; k++) {
+    const t = theta + (delta * k) / 16;
+    const px = rx * Math.cos(t);
+    const py = ry * Math.sin(t);
+    points.push([cos * px - sin * py + cx, sin * px + cos * py + cy]);
+  }
+  return points;
+}
+
+const signedArea = (points: Point[]) =>
+  points.reduce((sum, p, k) => {
+    const q = points[(k + 1) % points.length]!;
+    return sum + p[0] * q[1] - q[0] * p[1];
+  }, 0) / 2;
+
+function contains(polygon: Point[], p: Point): boolean {
+  let inside = false;
+  for (let k = 0, j = polygon.length - 1; k < polygon.length; j = k++) {
+    const [xi, yi] = polygon[k]!;
+    const [xj, yj] = polygon[j]!;
+    if (yi > p[1] !== yj > p[1] && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+
+function reverse(sub: Subpath): Subpath {
+  const points = [sub.start, ...sub.segments.map((s) => s.to)];
+  const segments: Segment[] = [];
+  for (let k = sub.segments.length - 1; k >= 0; k--) {
+    const s = sub.segments[k]!;
+    const to = points[k]!;
+    if (s.kind === "L") segments.push({ kind: "L", to });
+    else if (s.kind === "C") segments.push({ kind: "C", c1: s.c2, c2: s.c1, to });
+    else if (s.kind === "Q") segments.push({ kind: "Q", c: s.c, to });
+    else segments.push({ ...s, sweep: s.sweep ? 0 : 1, to });
+  }
+  return { start: points[points.length - 1]!, segments };
+}
+
+const fmt = (n: number) => String(Math.round(n * 10000) / 10000);
+const p = (pt: Point) => `${fmt(pt[0])} ${fmt(pt[1])}`;
+function serialize(subs: Subpath[]): string {
+  return subs
+    .map(
+      (sub) =>
+        `M${p(sub.start)}` +
+        sub.segments
+          .map((s) =>
+            s.kind === "L"
+              ? `L${p(s.to)}`
+              : s.kind === "C"
+                ? `C${p(s.c1)} ${p(s.c2)} ${p(s.to)}`
+                : s.kind === "Q"
+                  ? `Q${p(s.c)} ${p(s.to)}`
+                  : `A${fmt(s.rx)} ${fmt(s.ry)} ${fmt(s.rotation)} ${s.large} ${s.sweep} ${p(s.to)}`,
+          )
+          .join("") +
+        "Z",
+    )
+    .join("");
+}
+
+/** Rewrites an evenodd path so the nonzero rule fills the same area. */
+function evenOddToNonzero(d: string): string {
+  const subs = parseSubpaths(d);
+  const polygons = subs.map(sample);
+  return serialize(
+    subs.map((sub, k) => {
+      const probe = polygons[k]![0]!;
+      const depth = polygons.filter((other, j) => j !== k && contains(other, probe)).length;
+      const clockwise = signedArea(polygons[k]!) > 0;
+      return clockwise === (depth % 2 === 0) ? sub : reverse(sub);
+    }),
+  );
+}
+
 interface SymbolPath {
   readonly d: string;
   readonly evenOdd: boolean;
@@ -174,7 +446,10 @@ NodeFS.writeFileSync(
 );
 
 for (const [name, concept] of Object.entries(manifest.sf)) {
-  const paths = readGlyph(concept).map((p) => ({ ...p, d: transformPath(p.d) }));
+  const paths = readGlyph(concept).map((p) => ({
+    evenOdd: false,
+    d: transformPath(p.evenOdd ? evenOddToNonzero(p.d) : p.d),
+  }));
   const dir = NodePath.join(catalog, `${name}.symbolset`);
   NodeFS.mkdirSync(dir);
   NodeFS.writeFileSync(NodePath.join(dir, `${name}.svg`), symbolSvg(paths));

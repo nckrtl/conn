@@ -229,8 +229,16 @@ fn codex_install_state(runtime: Option<&conn_provider_codex::install::LocalRunti
     state
 }
 
+/// The runtime checks get `PATH` and `HOME` only: they need no model key, so none is passed on.
 async fn current_codex_runtime() -> Option<conn_provider_codex::install::LocalRuntime> {
-    conn_provider_codex::install::local_runtime(conn_support::login_env::child_env()).await
+    let environment = ["PATH", "HOME"]
+        .into_iter()
+        .filter_map(|name| {
+            conn_support::login_env::var_os(name)
+                .map(|value| (name.to_owned(), value.to_string_lossy().into_owned()))
+        })
+        .collect();
+    conn_provider_codex::install::local_runtime(environment).await
 }
 
 fn register_install(table: &mut MethodTable, deps: &Deps) {

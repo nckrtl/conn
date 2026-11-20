@@ -474,23 +474,9 @@ impl Inner {
         let id = match created {
             Ok(id) => id,
             Err(e) => {
-                // T3 keeps the folder on a conflict and otherwise removes it only while no
-                // project owns it, so another caller's files are never deleted.
-                let conflict = e
-                    .cause
-                    .as_ref()
-                    .is_some_and(|c| c["_tag"] == "ProjectConflictError");
-                let owned = self
-                    .db({
-                        let root = root.clone();
-                        move |store| store.project_owns_root(&root)
-                    })
-                    .await
-                    .unwrap_or(true);
-                if !conflict && !owned {
-                    let _ =
-                        tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&folder)).await;
-                }
+                // The folder stays: another request may own it by now, and removing it could
+                // take that project's files (T3 removes it only while no project owns it; this
+                // keeps it in every case).
                 return Err(e);
             }
         };
@@ -573,14 +559,18 @@ impl Inner {
 /// `normalizeWorkspaceRoot` without the disk: `~` expanded to `HOME`, a relative path taken
 /// from the working folder, `.` and `..` resolved by name (as Node's `path.resolve`).
 pub(crate) fn normalize_workspace_root(raw: &str) -> String {
-    let expanded = match raw.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default();
-            home.join(rest.trim_start_matches('/'))
-        }
-        _ => PathBuf::from(raw),
+    // `expandHomePath`: `~`, `~/` and `~\`.
+    let home = || {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+    };
+    let expanded = if raw == "~" {
+        home()
+    } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        home().join(rest.trim_start_matches(['/', '\\']))
+    } else {
+        PathBuf::from(raw)
     };
     let absolute = if expanded.is_absolute() {
         expanded
@@ -610,5 +600,18 @@ mod tests {
         assert_eq!(folder_name("  "), "project");
         assert_eq!(folder_name("Ünïcode 2"), "n-code-2");
         assert_eq!(folder_name(&"a".repeat(80)).len(), 64);
+    }
+
+    #[test]
+    fn workspace_roots_normalize_as_t3_resolves_them() {
+        use super::normalize_workspace_root as normalize;
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(normalize("/work/repo/."), "/work/repo");
+        assert_eq!(normalize("/work/./x/../repo/"), "/work/repo");
+        assert_eq!(normalize("~"), normalize(&home));
+        assert_eq!(normalize("~/repo"), normalize(&format!("{home}/repo")));
+        assert_eq!(normalize("~\\repo"), normalize(&format!("{home}/repo")));
+        assert_eq!(normalize("~//repo"), normalize(&format!("{home}/repo")));
+        assert!(normalize("~other").ends_with("/~other"));
     }
 }

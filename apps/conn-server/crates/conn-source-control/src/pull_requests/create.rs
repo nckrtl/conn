@@ -131,7 +131,10 @@ async fn draft_opened(result: &Value, drafts: &impl Drafts) -> Result<bool, Crea
 /// `createdPullRequestKey`: the pull request a GitHub URL names.
 fn draft_target(url: &str) -> Option<DraftTarget> {
     let parsed = url::Url::parse(url).ok()?;
-    let host = parsed.host_str()?.to_lowercase();
+    let host = match parsed.port() {
+        Some(port) => format!("{}:{port}", parsed.host_str()?.to_lowercase()),
+        None => parsed.host_str()?.to_lowercase(),
+    };
     let mut parts = parsed.path_segments()?;
     let (owner, name, kind, number) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
     let number: u64 = number.parse().ok().filter(|n| *n > 0)?;
@@ -158,6 +161,7 @@ async fn branch_details(cwd: &Path) -> Result<BranchDetails, CreateError> {
         cwd,
         ["status", "--porcelain=2", "--branch", "-z"],
     )
+    .max_stdout(16 * 1024 * 1024, conn_vcs::process::OnLimit::Fail)
     .run()
     .await
     .map_err(|_| CreateError::manager("statusDetails", "Failed to read git status."))?;
@@ -167,8 +171,13 @@ async fn branch_details(cwd: &Path) -> Result<BranchDetails, CreateError> {
         ahead_count: 0,
     };
     let (mut upstream_exists, mut unborn) = (false, false);
-    for record in output.stdout_text().split('\0') {
-        if record == "# branch.oid (initial)" {
+    let text = output.stdout_text();
+    let mut records = text.split('\0');
+    while let Some(record) = records.next() {
+        if record.starts_with("2 ") {
+            // A rename's original path is the next record; it is a path, not a header.
+            records.next();
+        } else if record == "# branch.oid (initial)" {
             unborn = true;
         } else if let Some(head) = record.strip_prefix("# branch.head ") {
             let head = head.trim();
@@ -540,7 +549,16 @@ struct GitHub<'a> {
 
 impl GitHub<'_> {
     async fn connect(&self, operation: &'static str) -> Result<(Client, Locator), CreateError> {
-        let locator = repositories::resolve_repository(self.ctx)
+        // The provider resolves with its detected remote's host as the hint, so `GH_REPO`
+        // names a repository on the checkout's own host.
+        let hint = match conn_vcs::repo::primary_remote(self.ctx.cwd).await {
+            Ok(Some(remote)) => remote_url(self.ctx.cwd, &remote)
+                .await
+                .as_deref()
+                .and_then(repositories::api_host_for_remote),
+            _ => None,
+        };
+        let locator = repositories::resolve_repository_on(self.ctx, hint.as_deref())
             .await
             .map_err(|e| CreateError::provider(operation, &Error::Failed(e.detail)))?;
         let client = Client::connect(self.ctx, &locator.host)
@@ -930,5 +948,44 @@ mod tests {
             })
         );
         assert_eq!(draft_target("https://github.com/acme/web/issues/7"), None);
+        assert_eq!(
+            draft_target("https://github.example.com:8443/acme/web/pull/7").map(|t| t.host),
+            Some("github.example.com:8443".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_renamed_path_is_not_read_as_a_branch_header() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-pr-create-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.com"]);
+        git(&["config", "protocol.allow", "never"]);
+        std::fs::write(dir.join("# branch.ab +0 -0"), "x\n").expect("write");
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        git(&["remote", "add", "origin", "https://github.com/acme/web.git"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["config", "branch.main.remote", "origin"]);
+        git(&["config", "branch.main.merge", "refs/heads/main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "unpushed"]);
+        git(&["mv", "# branch.ab +0 -0", "renamed"]);
+        let details = branch_details(&dir).await.expect("status");
+        assert_eq!(details.ahead_count, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

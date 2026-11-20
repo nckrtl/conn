@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Dev-only seeder for the mobile UI lab.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalConsole:off globalConsoleInEffect:off globalJsonInEffect:off - Dev-only seeder for the mobile UI lab.
 // Turns apps/mobile/scripts/lab/fixtures.mts into real V2 events in a lab server's database.
 // Run by apps/mobile/scripts/lab/lab.mts: once with the server stopped, then with --live once it is up.
 import * as NodeFS from "node:fs";
@@ -531,6 +531,6 @@ const program = Effect.gen(function* () {
   console.log(
     JSON.stringify({ seeded: LAB_THREADS.length, primaryThreadId: threadId(LAB_PRIMARY_THREAD) }),
   );
-}).pipe(Effect.provide(layerSeed), Effect.provide(NodeServices.layer), Effect.scoped);
+}).pipe(Effect.provide(Layer.provideMerge(layerSeed, NodeServices.layer)), Effect.scoped);
 
 await Effect.runPromise(program);

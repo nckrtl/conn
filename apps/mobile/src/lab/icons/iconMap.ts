@@ -174,4 +174,4 @@ export const TABLER_TO_CONCEPT: Readonly<Record<string, string>> = {
  * Tabler icons the app imports that have no concept (the original draws). Kept here so the
  * generator knows the full import list, and the report can name them.
  */
-export const TABLER_UNMAPPED: readonly string[] = ["IconClipboard"];
+export const TABLER_UNMAPPED: readonly string[] = [];

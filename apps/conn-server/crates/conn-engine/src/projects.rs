@@ -104,8 +104,9 @@ fn mutate(tx: &mut Tx<'_>, input: &Value) -> ProjectResult<(Value, Vec<Effect>)>
                         )
                     })?;
                 } else {
+                    // T3 fails to normalize the folder (`ProjectOperationError`).
                     return Err(ProjectFailure::tagged(
-                        "ProjectInvalidError",
+                        "ProjectOperationError",
                         format!("{root} is not a folder."),
                     ));
                 }

@@ -12,11 +12,12 @@ const saved = [
   "example.com", "https://example.com/login", "http://example.com", "www.example.com",
   "https://example.com:8443", "localhost:3000", "app.test", "127.0.0.1:8000", "[::1]:5173",
   "ftp://example.com", "  ", "not a url", "https://WWW.Example.COM/", "dev.localhost",
+  "\u0085myapp.test", "\u00a0example.com\ufeff", "\u2028example.com",
 ];
 const tabs = [
   "https://example.com/", "http://example.com/", "https://www.example.com/x",
   "https://example.com:8443/", "https://sub.example.com/", "http://localhost:3000/",
-  "https://localhost:3000/", "http://app.test/", "https://app.test/", "http://127.0.0.1:8000/",
+  "https://localhost:3000/", "http://app.test/", "https://app.test/", "http://127.0.0.1:8000/", "https://myapp.test/",
   "http://[::1]:5173/", "about:blank", "https://example.com:443/", "http://dev.localhost/",
 ];
 for (const url of saved) for (const tab of tabs) {
@@ -34,6 +35,11 @@ for (const setup of [
   "otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=9",
   "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=md5",
   "OTPAUTH://TOTP/x?secret=JBSWY3DPEHPK3PXP", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=1.5",
+  "otpauth://totp:123/x?secret=JBSWY3DPEHPK3PXP", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0x1e",
+  "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=%2030%20", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=3e1",
+  "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=Infinity", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=",
+  "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=0b110", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=inf",
+  "\u0085JBSWY3DPEHPK3PXP",
 ]) {
   const parsed = totp.parseTotpSetup(setup);
   cases.push({ kind: "totp", setup, now, expected: parsed === null ? null : totp.totpCode(parsed, now) });

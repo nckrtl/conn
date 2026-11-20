@@ -46,6 +46,10 @@ struct Tab {
     console_entries: std::collections::VecDeque<Value>,
     network_entries: std::collections::VecDeque<Value>,
     timeline: std::collections::VecDeque<Value>,
+    /// Test-login secrets filled into this tab, newest last (T3's `filledSecrets`, at most 32).
+    /// The page decides what it keeps, and console and network entries outlive the document,
+    /// so they are redacted until the tab closes.
+    filled: std::collections::VecDeque<String>,
     snapshot: Value,
     used: Instant,
     action: Arc<AsyncMutex<()>>,
@@ -379,7 +383,10 @@ impl Preview {
                     Ok(json!({}))
                 }
                 // The value goes only to CDP (`fillCredential`); no trace, no timeline.
-                "credentialFill" => crate::page::fill_credential(&browser, &session, &input).await,
+                "credentialFill" => {
+                    let remember = |value: &str| self.remember_filled(&id, value);
+                    crate::page::fill_credential(&browser, &session, &input, remember).await
+                }
                 "cdpEndpoint" => Err(Error(
                     "Not supported on server tabs: temporary CDP endpoints. Use a desktop tab."
                         .into(),
@@ -489,7 +496,8 @@ impl Preview {
                             snapshot["actionTimeline"] = json!(tab.timeline);
                         }
                     }
-                    let hidden = crate::page::secrets(&browser, &session).await?;
+                    let mut hidden = crate::page::secrets(&browser, &session).await?;
+                    hidden.extend(self.filled_secrets(&id));
                     let full_image = snapshot
                         .as_object_mut()
                         .and_then(|o| o.remove("fullScreenshot"));
@@ -622,7 +630,8 @@ impl Preview {
                             .into(),
                     ));
                     }
-                    let hidden = crate::page::secrets(&browser, &session).await?;
+                    let mut hidden = crate::page::secrets(&browser, &session).await?;
+                    hidden.extend(self.filled_secrets(&id));
                     crate::page::redact(&mut value, &hidden);
                     Ok(value)
                 }
@@ -697,6 +706,26 @@ impl Preview {
             trace.complete(&result);
         }
         result
+    }
+    /// `rememberFilledSecret`: keeps the 32 newest values filled into tab `id`.
+    fn remember_filled(&self, id: &str, value: &str) {
+        const MAX_REMEMBERED_SECRETS: usize = 32;
+        let mut state = lock(&self.0.state);
+        if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == id) {
+            tab.filled.retain(|held| held != value);
+            tab.filled.push_back(value.to_owned());
+            while tab.filled.len() > MAX_REMEMBERED_SECRETS {
+                tab.filled.pop_front();
+            }
+        }
+    }
+    fn filled_secrets(&self, id: &str) -> Vec<String> {
+        lock(&self.0.state)
+            .tabs
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.filled.iter().cloned().collect())
+            .unwrap_or_default()
     }
     pub fn status(&self, thread: &str, agent: &str, explicit: Option<&str>) -> Value {
         let mut state = lock(&self.0.state);
@@ -929,7 +958,7 @@ impl Preview {
                 appearance: "system".into(),
                 console_entries:std::collections::VecDeque::new(),
                 network_entries:std::collections::VecDeque::new(),
-                timeline:std::collections::VecDeque::new(),
+                timeline:std::collections::VecDeque::new(),filled:std::collections::VecDeque::new(),
                 snapshot: snapshot.clone(),
                 used: Instant::now(),
                 action:Arc::new(AsyncMutex::new(())),
@@ -1902,7 +1931,7 @@ impl Preview {
                 appearance:"system".into(),
                 console_entries:std::collections::VecDeque::new(),
                 network_entries:std::collections::VecDeque::new(),
-                timeline:std::collections::VecDeque::new(),
+                timeline:std::collections::VecDeque::new(),filled:std::collections::VecDeque::new(),
                 snapshot,
                 used:Instant::now(),
                 action:Arc::new(AsyncMutex::new(())),

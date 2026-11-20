@@ -24,7 +24,7 @@ const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 fn decode_base32(text: &str) -> Option<Vec<u8>> {
     let clean: String = text
         .chars()
-        .filter(|c| !(c.is_whitespace() || *c == '=' || *c == '-'))
+        .filter(|c| !(conn_support::text::is_js_space(*c) || *c == '=' || *c == '-'))
         .collect::<String>()
         .to_uppercase();
     if clean.is_empty() {
@@ -47,10 +47,11 @@ fn decode_base32(text: &str) -> Option<Vec<u8>> {
 
 /// `parseTotpSetup`: a base32 secret or an `otpauth://totp` URI; `None` when it is neither.
 pub fn parse_totp_setup(input: &str) -> Option<TotpSetup> {
-    let trimmed = input.trim();
+    let trimmed = conn_support::text::js_trim(input);
     if trimmed.len() >= 10 && trimmed.get(..10)?.eq_ignore_ascii_case("otpauth://") {
         let url = url::Url::parse(trimmed).ok()?;
-        if !url.host_str()?.eq_ignore_ascii_case("totp") {
+        // `url.host`: the host with its port, so `totp:123` is not `totp`.
+        if !url.host_str()?.eq_ignore_ascii_case("totp") || url.port().is_some() {
             return None;
         }
         let param = |name: &str| {
@@ -61,6 +62,9 @@ pub fn parse_totp_setup(input: &str) -> Option<TotpSetup> {
         let secret = decode_base32(&param("secret").unwrap_or_default())?;
         let digits: f64 = param("digits").map_or(Some(6.0), |d| number(&d))?;
         let period: f64 = param("period").map_or(Some(30.0), |p| number(&p))?;
+        if !period.is_finite() {
+            return None;
+        }
         let algorithm = match param("algorithm")
             .unwrap_or_else(|| "SHA1".into())
             .to_lowercase()
@@ -89,13 +93,40 @@ pub fn parse_totp_setup(input: &str) -> Option<TotpSetup> {
     })
 }
 
-/// JavaScript's `Number(text)` for the plain decimal forms a URI carries.
+/// JavaScript's `Number(text)`: trimmed, empty is 0, `0x`/`0o`/`0b` integers, `Infinity`, and
+/// decimals with an optional exponent; anything else is `NaN` (`None`).
 fn number(text: &str) -> Option<f64> {
-    let text = text.trim();
+    let text = conn_support::text::js_trim(text);
     if text.is_empty() {
         return Some(0.0);
     }
-    text.parse::<f64>().ok().filter(|n| n.is_finite())
+    let radix = |prefix: &str, radix: u32| {
+        let lower = text.get(..2)?.to_ascii_lowercase();
+        (lower == prefix)
+            .then(|| text.get(2..))
+            .flatten()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| u64::from_str_radix(digits, radix).ok())
+            .map(|n| n as f64)
+    };
+    if let Some(n) = radix("0x", 16)
+        .or_else(|| radix("0o", 8))
+        .or_else(|| radix("0b", 2))
+    {
+        return Some(n);
+    }
+    match text {
+        "Infinity" | "+Infinity" => return Some(f64::INFINITY),
+        "-Infinity" => return Some(f64::NEG_INFINITY),
+        _ => {}
+    }
+    let decimal = text
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'));
+    if !decimal || !text.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<f64>().ok()
 }
 
 fn hmac<D: Digest + Clone>(block: usize, key: &[u8], message: &[u8]) -> Vec<u8> {

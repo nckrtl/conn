@@ -511,6 +511,7 @@ pub(crate) async fn fill_credential(
     browser: &Browser,
     session: &str,
     input: &Value,
+    remember: impl Fn(&str),
 ) -> Result<Value, Error> {
     const GROUP: &str = "t3code-credential-fill";
     let status = |status: &str| Ok(json!({ "status": status }));
@@ -590,6 +591,12 @@ pub(crate) async fn fill_credential(
             return "origin_mismatch";
         }
         let value = input.get("value").cloned().unwrap_or(Value::Null);
+        // Remembered before it goes in, so redaction covers it from then on.
+        if field != "username"
+            && let Some(secret) = value.as_str()
+        {
+            remember(secret);
+        }
         match call(
             object,
             &scripts.credential_insert,

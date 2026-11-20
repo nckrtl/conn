@@ -44,7 +44,7 @@ fn explicit_scheme(text: &str) -> bool {
 
 /// `parseSavedUrl`.
 pub fn parse_saved_url(saved: &str) -> Option<SavedTarget> {
-    let trimmed = saved.trim();
+    let trimmed = conn_support::text::js_trim(saved);
     if trimmed.is_empty() {
         return None;
     }

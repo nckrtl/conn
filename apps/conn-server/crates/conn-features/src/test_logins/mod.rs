@@ -114,8 +114,8 @@ impl TestLogins {
             }
             let login = StoredLogin {
                 id: conn_support::uuid_v4(),
-                label: input.label.unwrap_or_default().trim().to_owned(),
-                url: input.url.trim().to_owned(),
+                label: conn_support::text::js_trim(&input.label.unwrap_or_default()).to_owned(),
+                url: conn_support::text::js_trim(&input.url).to_owned(),
                 username: input.username,
                 password: input.password,
                 otp_secret: nonempty(input.otp_secret),
@@ -139,10 +139,10 @@ impl TestLogins {
                 .find(|l| l.id == input.id)
                 .ok_or(TestLoginError::NotFound(input.id))?;
             if let Some(value) = input.label {
-                login.label = value.trim().to_owned();
+                login.label = conn_support::text::js_trim(&value).to_owned();
             }
             if let Some(value) = input.url {
-                login.url = value.trim().to_owned();
+                login.url = conn_support::text::js_trim(&value).to_owned();
             }
             if let Some(value) = input.username {
                 login.username = value;
@@ -186,7 +186,9 @@ impl TestLogins {
     }
 }
 fn nonempty(value: Option<String>) -> Option<String> {
-    value.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    value
+        .map(|s| conn_support::text::js_trim(&s).to_owned())
+        .filter(|s| !s.is_empty())
 }
 fn read(dir: &Path) -> Result<Vec<StoredLogin>, TestLoginError> {
     use std::io::Read;

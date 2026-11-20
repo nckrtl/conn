@@ -46,8 +46,13 @@ engine refused `thread.issue.link`.
   client's reducers. `parity.mjs`: the tools' refusals outside a thread. The Effect client
   decodes all 11 methods.
 - **Not built:** standalone trackers (Linear) and `issueTrackers.list/connect/bindProject`;
-  YAML issue forms in `templates`; issue URLs are read only in GitHub's canonical
-  `/<owner>/<repo>/issues/<n>` form.
+  YAML issue forms in `templates` (`blank_issues_enabled: false` in `config.yml` is read);
+  issue URLs are read only in GitHub's canonical `/<owner>/<repo>/issues/<n>` form.
+- **Known differences (review, 2026-11-20):** a project on a GitHub Enterprise host is
+  classified by its remote's host name, so its issue URLs are refused; `link_issue` checks the
+  caller's limits once, not again under the target's lock; `issues.linkedThreads` reads active
+  and archived threads in two snapshots, so a thread archived between them can show twice; a
+  missing `gh` reads as signed out.
 
 ## `fill_credential` (2026-11-20)
 

@@ -275,7 +275,11 @@ impl Panel {
     /// `list`: every GitHub repository the projects check out, each scope read once.
     async fn issue_list(&self, input: &Value) -> Result<Value, Failure> {
         let supported = self
-            .projects(&json!({"projectId": input.get("projectId")}))
+            // An absent projectId lists every project, as in T3.
+            .projects(&match input.get("projectId").filter(|id| !id.is_null()) {
+                Some(id) => json!({ "projectId": id }),
+                None => json!({}),
+            })
             .await
             .map_err(|_| operation("listProjects", "The project list could not be read.", None))?;
         let host = input

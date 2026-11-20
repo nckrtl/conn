@@ -1407,6 +1407,7 @@ async fn issue_tracker_matches_t3s_recorded_http_requests() {
                 .await
                 .map(|()| Value::Null),
             "listCandidates" => client.issue_candidate_list(scope).await,
+            "listTemplates" => client.issue_template_list(scope).await,
             "getViewer" => client.issue_viewer().await.map(Value::from),
             other => panic!("unknown recorded method {other}"),
         };

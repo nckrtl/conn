@@ -501,7 +501,38 @@ pub fn issue_templates(repository: &Value) -> Value {
                 "assignees": names("assignees", "login")})
         })
         .collect();
-    json!(templates)
+    json!({"templates": templates, "blankIssuesEnabled": blank_issues_enabled(repository)})
+}
+
+/// `blank_issues_enabled` from `.github/ISSUE_TEMPLATE/config.y(a)ml`, read as one top-level
+/// `key: false` line. YAML issue forms themselves are not read (T3 parses them with `yaml`).
+fn blank_issues_enabled(repository: &Value) -> bool {
+    let directory = repository.get("templateDirectory");
+    if directory
+        .and_then(|d| d.get("__typename"))
+        .and_then(Value::as_str)
+        != Some("Tree")
+    {
+        return true;
+    }
+    let config = array(directory.and_then(|d| d.get("entries")))
+        .iter()
+        .find(|entry| {
+            entry["name"].as_str().is_some_and(|name| {
+                matches!(
+                    name.to_ascii_lowercase().as_str(),
+                    "config.yml" | "config.yaml"
+                )
+            })
+        })
+        .and_then(|entry| entry["object"]["text"].as_str().map(str::to_owned));
+    !config.is_some_and(|text| {
+        text.lines().any(|line| {
+            let line = line.split('#').next().unwrap_or_default().trim_end();
+            line.strip_prefix("blank_issues_enabled:")
+                .is_some_and(|value| value.trim() == "false")
+        })
+    })
 }
 
 /// `searchQuery`.

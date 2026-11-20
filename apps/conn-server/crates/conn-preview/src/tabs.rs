@@ -378,6 +378,8 @@ impl Preview {
                     self.close(thread, Some(&id)).await?;
                     Ok(json!({}))
                 }
+                // The value goes only to CDP (`fillCredential`); no trace, no timeline.
+                "credentialFill" => crate::page::fill_credential(&browser, &session, &input).await,
                 "cdpEndpoint" => Err(Error(
                     "Not supported on server tabs: temporary CDP endpoints. Use a desktop tab."
                         .into(),

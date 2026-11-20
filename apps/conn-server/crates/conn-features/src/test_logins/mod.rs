@@ -12,8 +12,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+pub mod origin;
 #[cfg(test)]
 mod tests;
+pub mod totp;
 
 /// T3 has no count cap; bound each read and rewrite without keeping a cache.
 const MAX_LOGINS: usize = 1024;

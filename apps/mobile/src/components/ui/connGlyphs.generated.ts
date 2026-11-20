@@ -13,6 +13,12 @@ const adjustGlyph = [
     evenOdd: false,
   },
 ] satisfies ConnGlyphData;
+const agentGlyph = [
+  {
+    d: "M12.414 6.086A2 2 0 0 1 13 7.5v1.25h1.25a.75.75 0 0 1 0 1.5H13v1.25a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1.25H1.75a.75.75 0 0 1 0-1.5H3V7.5a2 2 0 0 1 2-2h2.25v-2h-1.5a.75.75 0 0 1 0-1.5H8a.75.75 0 0 1 .75.75V5.5H11a2 2 0 0 1 1.414.586Zm-1.556 2.618a.875.875 0 0 0-1.733.171v1.25a.875.875 0 0 0 1.75 0v-1.25c0-.057-.006-.114-.017-.171Zm-4 0a.875.875 0 0 0-1.733.171v1.25a.875.875 0 0 0 1.75 0v-1.25c0-.057-.006-.114-.017-.171Z",
+    evenOdd: true,
+  },
+] satisfies ConnGlyphData;
 const aiGlyph = [
   {
     d: "M5 4a.75.75 0 0 1 .738.616l.252 1.388A1.25 1.25 0 0 0 6.996 7.01l1.388.252a.75.75 0 0 1 0 1.476l-1.388.252A1.25 1.25 0 0 0 5.99 9.996l-.252 1.388a.75.75 0 0 1-1.476 0L4.01 9.996A1.25 1.25 0 0 0 3.004 8.99l-1.388-.252a.75.75 0 0 1 0-1.476l1.388-.252A1.25 1.25 0 0 0 4.01 6.004l.252-1.388A.75.75 0 0 1 5 4ZM12 1a.75.75 0 0 1 .721.544l.195.682c.118.415.443.74.858.858l.682.195a.75.75 0 0 1 0 1.442l-.682.195a1.25 1.25 0 0 0-.858.858l-.195.682a.75.75 0 0 1-1.442 0l-.195-.682a1.25 1.25 0 0 0-.858-.858l-.682-.195a.75.75 0 0 1 0-1.442l.682-.195a1.25 1.25 0 0 0 .858-.858l.195-.682A.75.75 0 0 1 12 1ZM10 11a.75.75 0 0 1 .728.568.968.968 0 0 0 .704.704.75.75 0 0 1 0 1.456.968.968 0 0 0-.704.704.75.75 0 0 1-1.456 0 .968.968 0 0 0-.704-.704.75.75 0 0 1 0-1.456.968.968 0 0 0 .704-.704A.75.75 0 0 1 10 11Z",
@@ -138,6 +144,12 @@ const checkCircleGlyph = [
   {
     d: "M8 15A7 7 0 1 0 8 1a7 7 0 0 0 0 14Zm3.844-8.791a.75.75 0 0 0-1.188-.918l-3.7 4.79-1.649-1.833a.75.75 0 1 0-1.114 1.004l2.25 2.5a.75.75 0 0 0 1.15-.043l4.25-5.5Z",
     evenOdd: true,
+  },
+] satisfies ConnGlyphData;
+const checklistGlyph = [
+  {
+    d: "M13.396 3.014A.75.75 0 0 1 13.25 4.5h-5a.75.75 0 0 1 0-1.5h5c.049 0 .098.005.146.014Zm0 4.25a.75.75 0 0 1-.146 1.486h-5a.75.75 0 0 1 0-1.5h5c.049 0 .098.005.146.014Zm0 4.25A.75.75 0 0 1 13.25 13h-5a.75.75 0 0 1 0-1.5h5c.049 0 .098.005.146.014Zm-8.77-9.68a.75.75 0 0 1 1.248.832l-2 3a.75.75 0 0 1-1.154.114l-1-1a.75.75 0 0 1 1.06-1.06l.353.353Zm0 8.5a.75.75 0 0 1 1.248.832l-2 3a.75.75 0 0 1-1.154.114l-1-1a.75.75 0 0 1 1.06-1.06l.353.353Z",
+    evenOdd: false,
   },
 ] satisfies ConnGlyphData;
 const chevronDownGlyph = [
@@ -372,6 +384,12 @@ const goUpParentGlyph = [
     evenOdd: false,
   },
 ] satisfies ConnGlyphData;
+const hashGlyph = [
+  {
+    d: "M7.487 2.89a.75.75 0 1 0-1.474-.28l-.455 2.388H3.61a.75.75 0 0 0 0 1.5h1.663l-.571 2.998H2.75a.75.75 0 0 0 0 1.5h1.666l-.403 2.114a.75.75 0 0 0 1.474.28l.456-2.394h2.973l-.403 2.114a.75.75 0 0 0 1.474.28l.456-2.394h1.947a.75.75 0 0 0 0-1.5h-1.661l.57-2.998h1.95a.75.75 0 0 0 0-1.5h-1.664l.402-2.108a.75.75 0 0 0-1.474-.28l-.455 2.388H7.085l.402-2.108ZM6.8 6.498l-.571 2.998h2.973l.57-2.998H6.8Z",
+    evenOdd: true,
+  },
+] satisfies ConnGlyphData;
 const headphonesGlyph = [
   {
     d: "M3.757 3.757A5.75 5.75 0 0 1 8 2a5.75 5.75 0 0 1 4.243 1.757A5.75 5.75 0 0 1 14 8v5c0 1-.5 1.5-1.5 1.5h-1c-1 0-1.5-.5-1.5-1.5v-2.75c0-1 .5-1.5 1.5-1.5h1V8a4.375 4.375 0 0 0-1.318-3.182A4.375 4.375 0 0 0 8 3.5a4.375 4.375 0 0 0-3.182 1.318A4.375 4.375 0 0 0 3.5 8v.75h1c1 0 1.5.5 1.5 1.5V13c0 1-.5 1.5-1.5 1.5h-1C2.5 14.5 2 14 2 13V8a5.75 5.75 0 0 1 1.757-4.243Z",
@@ -403,6 +421,12 @@ const imageGlyph = [
 const infoGlyph = [
   {
     d: "M15 8A7 7 0 1 1 1 8a7 7 0 0 1 14 0ZM9 5a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM6.75 8a.75.75 0 0 0 0 1.5h.75v1.75a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8.25 8h-1.5Z",
+    evenOdd: true,
+  },
+] satisfies ConnGlyphData;
+const keyGlyph = [
+  {
+    d: "M14 6a4 4 0 0 1-4.899 3.899l-1.955 1.955a.5.5 0 0 1-.353.146H5v1.5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1-.5-.5v-2.293a.5.5 0 0 1 .146-.353l3.955-3.955A4 4 0 1 1 14 6Zm-4-2a.75.75 0 0 0 0 1.5.5.5 0 0 1 .5.5.75.75 0 0 0 1.5 0 2 2 0 0 0-2-2Z",
     evenOdd: true,
   },
 ] satisfies ConnGlyphData;
@@ -452,6 +476,18 @@ const listNumberedGlyph = [
   {
     d: "M2.995 1a.625.625 0 1 0 0 1.25h.38v2.125a.625.625 0 1 0 1.25 0v-2.75A.625.625 0 0 0 4 1H2.995ZM3.208 7.385a2.37 2.37 0 0 1 1.027-.124L2.573 8.923a.625.625 0 0 0 .439 1.067l1.987.011a.625.625 0 0 0 .006-1.25l-.49-.003.777-.776c.215-.215.335-.506.335-.809 0-.465-.297-.957-.842-1.078a3.636 3.636 0 0 0-1.993.121.625.625 0 1 0 .416 1.179ZM2.625 11a.625.625 0 1 0 0 1.25H4.25a.125.125 0 0 1 0 .25H3.5a.625.625 0 1 0 0 1.25h.75a.125.125 0 0 1 0 .25H2.625a.625.625 0 1 0 0 1.25H4.25a1.375 1.375 0 0 0 1.153-2.125A1.375 1.375 0 0 0 4.25 11H2.625ZM7.25 2a.75.75 0 0 0 0 1.5h6a.75.75 0 0 0 0-1.5h-6ZM7.25 7.25a.75.75 0 0 0 0 1.5h6a.75.75 0 0 0 0-1.5h-6ZM6.5 13.25a.75.75 0 0 1 .75-.75h6a.75.75 0 0 1 0 1.5h-6a.75.75 0 0 1-.75-.75Z",
     evenOdd: false,
+  },
+] satisfies ConnGlyphData;
+const lockGlyph = [
+  {
+    d: "M8 1a3.5 3.5 0 0 0-3.5 3.5V7A1.5 1.5 0 0 0 3 8.5v5A1.5 1.5 0 0 0 4.5 15h7a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 11.5 7V4.5A3.5 3.5 0 0 0 8 1Zm2 6V4.5a2 2 0 1 0-4 0V7h4Z",
+    evenOdd: true,
+  },
+] satisfies ConnGlyphData;
+const mailOpenGlyph = [
+  {
+    d: "M1.756 4.568A1.5 1.5 0 0 0 1 5.871V12.5A1.5 1.5 0 0 0 2.5 14h11a1.5 1.5 0 0 0 1.5-1.5V5.87a1.5 1.5 0 0 0-.756-1.302l-5.5-3.143a1.5 1.5 0 0 0-1.488 0l-5.5 3.143Zm1.82 2.963a.75.75 0 0 0-.653 1.35l4.1 1.98a2.25 2.25 0 0 0 1.955 0l4.1-1.98a.75.75 0 1 0-.653-1.35L8.326 9.51a.75.75 0 0 1-.652 0L3.575 7.53Z",
+    evenOdd: true,
   },
 ] satisfies ConnGlyphData;
 const maximizeGlyph = [
@@ -535,6 +571,16 @@ const packageGlyph = [
     evenOdd: false,
   },
 ] satisfies ConnGlyphData;
+const pasteGlyph = [
+  {
+    d: "M11.986 3H12a2 2 0 0 1 2 2v6a2 2 0 0 1-1.5 1.937v-2.523a2.5 2.5 0 0 0-.732-1.768L8.354 5.232A2.5 2.5 0 0 0 6.586 4.5H4.063A2 2 0 0 1 6 3h.014A2.25 2.25 0 0 1 8.25 1h1.5a2.25 2.25 0 0 1 2.236 2ZM10.5 4v-.75a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V4h3Z",
+    evenOdd: true,
+  },
+  {
+    d: "M3 6a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-3.586a1 1 0 0 0-.293-.707L7.293 6.293A1 1 0 0 0 6.586 6H3Z",
+    evenOdd: false,
+  },
+] satisfies ConnGlyphData;
 const pauseGlyph = [
   {
     d: "M4.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-11a.5.5 0 0 0-.5-.5h-1ZM10.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-11a.5.5 0 0 0-.5-.5h-1Z",
@@ -545,6 +591,12 @@ const phoneGlyph = [
   { d: "M7.25 11.5a.75.75 0 0 0 0 1.5h1.5a.75.75 0 0 0 0-1.5h-1.5Z", evenOdd: false },
   {
     d: "M6 1a2.5 2.5 0 0 0-2.5 2.5v9A2.5 2.5 0 0 0 6 15h4a2.5 2.5 0 0 0 2.5-2.5v-9A2.5 2.5 0 0 0 10 1H6Zm4 1.5h-.5V3a.5.5 0 0 1-.5.5H7a.5.5 0 0 1-.5-.5v-.5H6a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1Z",
+    evenOdd: true,
+  },
+] satisfies ConnGlyphData;
+const pictureInPictureGlyph = [
+  {
+    d: "M14.091 2.659a2.125 2.125 0 0 1 .659 1.591v7.5A2.25 2.25 0 0 1 12.5 14h-9a2.25 2.25 0 0 1-2.25-2.25v-7.5A2.25 2.25 0 0 1 3.5 2h9a2.125 2.125 0 0 1 1.591.659ZM2.75 4.25v7.5a.75.75 0 0 0 .75.75h2.621C6.04 12.267 6 12.017 6 11.75v-3.5A2.25 2.25 0 0 1 8.25 6h4.25c.267 0 .517.04.75.121V4.25a.75.75 0 0 0-.75-.75h-9a.75.75 0 0 0-.75.75Z",
     evenOdd: true,
   },
 ] satisfies ConnGlyphData;
@@ -623,6 +675,12 @@ const questionGlyph = [
     evenOdd: true,
   },
 ] satisfies ConnGlyphData;
+const quoteGlyph = [
+  {
+    d: "M6.487 3.013A1.75 1.75 0 0 1 7 4.25v4a4.625 4.625 0 0 1-1.391 3.359A4.625 4.625 0 0 1 2.25 13a.75.75 0 0 1-.75-.75v-2.5A.75.75 0 0 1 2.25 9 .75.75 0 0 0 3 8.25v-.266A1.75 1.75 0 0 1 1.5 6.25v-2A1.75 1.75 0 0 1 3.25 2.5h2a1.75 1.75 0 0 1 1.237.513Zm7.5 0A1.75 1.75 0 0 1 14.5 4.25v4a4.625 4.625 0 0 1-1.391 3.359A4.625 4.625 0 0 1 9.75 13a.75.75 0 0 1-.75-.75v-2.5A.75.75 0 0 1 9.75 9a.75.75 0 0 0 .75-.75v-.266A1.75 1.75 0 0 1 9 6.25v-2a1.75 1.75 0 0 1 1.75-1.75h2a1.75 1.75 0 0 1 1.237.513Z",
+    evenOdd: false,
+  },
+] satisfies ConnGlyphData;
 const reactGlyph = [
   {
     d: "M15 8A7 7 0 1 1 1 8a7 7 0 0 1 14 0ZM6 8c.552 0 1-.672 1-1.5S6.552 5 6 5s-1 .672-1 1.5S5.448 8 6 8Zm5-1.5c0 .828-.448 1.5-1 1.5s-1-.672-1-1.5S9.448 5 10 5s1 .672 1 1.5Zm.005 4.245a.75.75 0 0 0-1.06 0 2.75 2.75 0 0 1-3.89 0 .75.75 0 0 0-1.06 1.06 4.25 4.25 0 0 0 6.01 0 .75.75 0 0 0 0-1.06Z",
@@ -682,6 +740,18 @@ const shareGlyph = [
     evenOdd: false,
   },
 ] satisfies ConnGlyphData;
+const shieldGlyph = [
+  {
+    d: "M8.5 1.709a.75.75 0 0 0-1 0 8.963 8.963 0 0 1-4.84 2.217.75.75 0 0 0-.654.72 10.499 10.499 0 0 0 5.647 9.672.75.75 0 0 0 .694-.001 10.499 10.499 0 0 0 5.647-9.672.75.75 0 0 0-.654-.719A8.963 8.963 0 0 1 8.5 1.71Z",
+    evenOdd: false,
+  },
+] satisfies ConnGlyphData;
+const shieldCheckGlyph = [
+  {
+    d: "M8.5 1.709a.75.75 0 0 0-1 0 8.963 8.963 0 0 1-4.84 2.217.75.75 0 0 0-.654.72 10.499 10.499 0 0 0 5.647 9.672.75.75 0 0 0 .694-.001 10.499 10.499 0 0 0 5.647-9.672.75.75 0 0 0-.654-.719A8.963 8.963 0 0 1 8.5 1.71Zm2.34 5.504a.75.75 0 0 0-1.18-.926L7.394 9.17l-1.156-.99a.75.75 0 1 0-.976 1.138l1.75 1.5a.75.75 0 0 0 1.078-.106l2.75-3.5Z",
+    evenOdd: true,
+  },
+] satisfies ConnGlyphData;
 const showGlyph = [
   { d: "M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z", evenOdd: false },
   {
@@ -705,6 +775,12 @@ const skillGlyph = [
   {
     d: "M11.75 13a3 3 0 0 1-3-3 .75.75 0 0 0-1.5 0 3 3 0 1 1-5.665-1.378l.739-3.986A2 2 0 0 1 4.29 3h1.46a.75.75 0 0 1 0 1.5H4.29a.5.5 0 0 0-.492.41l-.41 2.217a3 3 0 0 1 3.261 1.071 2.25 2.25 0 0 1 2.702 0 3 3 0 0 1 3.261-1.071l-.41-2.217a.5.5 0 0 0-.492-.41h-1.46a.75.75 0 0 1 0-1.5h1.46a2 2 0 0 1 1.966 1.636l.739 3.986A3 3 0 0 1 11.75 13Z",
     evenOdd: false,
+  },
+] satisfies ConnGlyphData;
+const snoozeGlyph = [
+  {
+    d: "M8 1a4 4 0 0 1 4 4v2.379c0 .398.158.779.44 1.06l1.267 1.268a1 1 0 0 1 .293.707V11a1 1 0 0 1-1 1h-2a3 3 0 1 1-6 0H3a1 1 0 0 1-1-1v-.586a1 1 0 0 1 .293-.707L3.56 8.44A1.5 1.5 0 0 0 4 7.38V5a4 4 0 0 1 4-4Zm0 12.5A1.5 1.5 0 0 1 6.5 12h3A1.5 1.5 0 0 1 8 13.5ZM6.75 4a.75.75 0 0 0 0 1.5h1.043L6.14 7.814A.75.75 0 0 0 6.75 9h2.5a.75.75 0 1 0 0-1.5H8.207L9.86 5.186A.75.75 0 0 0 9.25 4h-2.5Z",
+    evenOdd: true,
   },
 ] satisfies ConnGlyphData;
 const splitHorizontalGlyph = [
@@ -746,6 +822,12 @@ const targetGlyph = [
 const terminalWindowGlyph = [
   {
     d: "M2 4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4Zm2.22 1.97a.75.75 0 0 0 0 1.06l.97.97-.97.97a.75.75 0 1 0 1.06 1.06l1.5-1.5a.75.75 0 0 0 0-1.06l-1.5-1.5a.75.75 0 0 0-1.06 0ZM8.75 8.5a.75.75 0 0 0 0 1.5h2.5a.75.75 0 0 0 0-1.5h-2.5Z",
+    evenOdd: true,
+  },
+] satisfies ConnGlyphData;
+const testsGlyph = [
+  {
+    d: "M11 3.5v2.257c0 .597.237 1.17.659 1.591l2.733 2.733c.39.39.608.918.608 1.469a2.04 2.04 0 0 1-1.702 2.024C11.573 13.854 9.803 14 8 14s-3.573-.146-5.298-.426A2.04 2.04 0 0 1 1 11.55c0-.551.219-1.08.608-1.47l2.733-2.732A2.25 2.25 0 0 0 5 5.758V3.5h-.25a.75.75 0 0 1 0-1.5h6.5a.75.75 0 0 1 0 1.5H11ZM6.5 5.757V3.5h3v2.257a3.75 3.75 0 0 0 1.098 2.652l.158.158a3.36 3.36 0 0 0-.075.034c-.424.2-.916.194-1.335-.016l-1.19-.595a4.943 4.943 0 0 0-2.07-.52A3.75 3.75 0 0 0 6.5 5.757Z",
     evenOdd: true,
   },
 ] satisfies ConnGlyphData;
@@ -823,6 +905,12 @@ const toolGlyph = [
     evenOdd: false,
   },
 ] satisfies ConnGlyphData;
+const typeGlyph = [
+  {
+    d: "M2.939 2.939A1.5 1.5 0 0 1 4 2.5h7.5A1.5 1.5 0 0 1 13 4v1a.75.75 0 0 1-1.5 0V4h-3v8h1.25a.75.75 0 0 1 0 1.5h-4a.75.75 0 0 1 0-1.5H7V4H4v1a.75.75 0 0 1-1.5 0V4a1.5 1.5 0 0 1 .439-1.061Z",
+    evenOdd: false,
+  },
+] satisfies ConnGlyphData;
 const undoGlyph = [
   {
     d: "M12.5 9.75A2.75 2.75 0 0 0 9.75 7H4.56l2.22 2.22a.75.75 0 1 1-1.06 1.06l-3.5-3.5a.75.75 0 0 1 0-1.06l3.5-3.5a.75.75 0 0 1 1.06 1.06L4.56 5.5h5.19a4.25 4.25 0 0 1 0 8.5h-1a.75.75 0 0 1 0-1.5h1a2.75 2.75 0 0 0 2.75-2.75Z",
@@ -843,6 +931,12 @@ const uploadGlyph = [
   {
     d: "M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z",
     evenOdd: false,
+  },
+] satisfies ConnGlyphData;
+const usageGlyph = [
+  {
+    d: "M3.72 4.291A6.333 6.333 0 0 1 8 2.683a6.333 6.333 0 0 1 4.28 1.608 6.333 6.333 0 0 1 2.163 4.03 6.333 6.333 0 0 1-1.026 4.456A.5.5 0 0 1 13 13H3a.5.5 0 0 1-.417-.223 6.333 6.333 0 0 1-1.026-4.456 6.333 6.333 0 0 1 2.163-4.03Zm2.944 3.964a1.5 1.5 0 1 0 2.081 2.081l2.128-3.168a.75.75 0 0 0-1.041-1.041Z",
+    evenOdd: true,
   },
 ] satisfies ConnGlyphData;
 const userAddGlyph = [
@@ -908,6 +1002,7 @@ const workflowGlyph = [
 
 /** Glyph per SF Symbol name in the icon set's manifest. */
 export const CONN_GLYPH_BY_SF_NAME = {
+  alarm: snoozeGlyph,
   archivebox: archiveGlyph,
   "archivebox.fill": archiveGlyph,
   "arrow.branch": branchGlyph,
@@ -931,21 +1026,29 @@ export const CONN_GLYPH_BY_SF_NAME = {
   "arrow.uturn.backward": undoGlyph,
   "arrow.uturn.forward": redoGlyph,
   "bell.badge": notificationsGlyph,
+  bolt: fastGlyph,
   "bolt.circle": fastGlyph,
+  "bolt.fill": fastGlyph,
   "bolt.horizontal.circle": connectedGlyph,
   book: bookGlyph,
   brain: thinkingGlyph,
   "bubble.left": commentGlyph,
   "bubble.left.and.bubble.right": threadsGlyph,
   "bubble.left.and.text.bubble.right": threadsGlyph,
+  build: usageGlyph,
   "cable.connector": plugGlyph,
   "calendar.badge.clock": scheduledGlyph,
   camera: cameraGlyph,
   car: carGlyph,
+  "character.cursor.ibeam": typeGlyph,
   "chart.bar.xaxis": chartGlyph,
+  chat: threadGlyph,
+  check: checkGlyph,
+  checklist: checklistGlyph,
   checkmark: checkGlyph,
   "checkmark.circle": checkCircleGlyph,
   "checkmark.circle.fill": checkCircleGlyph,
+  "checkmark.shield": shieldCheckGlyph,
   "chevron.backward": chevronLeftGlyph,
   "chevron.down": chevronDownGlyph,
   "chevron.left": chevronLeftGlyph,
@@ -958,16 +1061,25 @@ export const CONN_GLYPH_BY_SF_NAME = {
   "circle.fill": circleGlyph,
   "circle.inset.filled": circleDotGlyph,
   clock: clockGlyph,
+  close: closeGlyph,
   cloud: cloudGlyph,
   commit: commitGlyph,
+  construction: buildGlyph,
   cube: packageGlyph,
   desktopcomputer: desktopGlyph,
   doc: fileGlyph,
+  "doc.on.clipboard": pasteGlyph,
   "doc.on.doc": copyGlyph,
   "doc.text": fileTextGlyph,
+  "doc.text.magnifyingglass": fileDiffGlyph,
   "document.on.document": copyGlyph,
+  edit: editGlyph,
   ellipsis: moreHorizontalGlyph,
+  "ellipsis.bubble": aiGlyph,
   "ellipsis.circle": moreCircleGlyph,
+  "envelope.badge": mailOpenGlyph,
+  "envelope.open": mailOpenGlyph,
+  error: errorCircleGlyph,
   "exclamationmark.circle": errorCircleGlyph,
   "exclamationmark.shield": needsApprovalGlyph,
   "exclamationmark.triangle": warningGlyph,
@@ -976,11 +1088,15 @@ export const CONN_GLYPH_BY_SF_NAME = {
   "face.smiling": reactGlyph,
   "file.diff": fileDiffGlyph,
   film: videoGlyph,
+  flask: testsGlyph,
+  flowchart: workflowGlyph,
   folder: folderGlyph,
   "folder.badge.plus": folderAddGlyph,
   "folder.fill": folderGlyph,
+  "gauge.with.dots.needle.33percent": usageGlyph,
   gearshape: settingsGlyph,
   "git.commit": commitGlyph,
+  "git.issue": circleDotGlyph,
   "git.pull-request.closed": pullRequestClosedGlyph,
   "git.pull-request.draft": pullRequestDraftGlyph,
   globe: globeGlyph,
@@ -991,6 +1107,7 @@ export const CONN_GLYPH_BY_SF_NAME = {
   "info.circle": infoGlyph,
   internaldrive: diskGlyph,
   iphone: phoneGlyph,
+  key: keyGlyph,
   keyboard: keyboardGlyph,
   "keyboard.chevron.compact.down": keyboardGlyph,
   laptopcomputer: laptopGlyph,
@@ -1000,12 +1117,17 @@ export const CONN_GLYPH_BY_SF_NAME = {
   "line.3.horizontal.decrease.circle.fill": filterGlyph,
   link: linkGlyph,
   "list.number": listNumberedGlyph,
+  lock: lockGlyph,
+  "lock.fill": lockGlyph,
+  "lock.shield": shieldGlyph,
   macmini: serverGlyph,
   macstudio: desktopGlyph,
   magnifyingglass: searchGlyph,
+  merge: mergeGlyph,
   mic: microphoneGlyph,
   minus: removeGlyph,
   moon: themeDarkGlyph,
+  number: hashGlyph,
   paintbrush: themeGlyph,
   pause: pauseGlyph,
   pencil: editGlyph,
@@ -1018,6 +1140,8 @@ export const CONN_GLYPH_BY_SF_NAME = {
   photo: imageGlyph,
   pin: pinGlyph,
   "pin.slash": unpinGlyph,
+  "pip.enter": pictureInPictureGlyph,
+  "pip.exit": pictureInPictureGlyph,
   play: playGlyph,
   plus: addGlyph,
   "plus.bubble": newThreadBubbleGlyph,
@@ -1025,8 +1149,13 @@ export const CONN_GLYPH_BY_SF_NAME = {
   "point.3.connected.trianglepath.dotted": workflowGlyph,
   "point.topleft.down.curvedto.point.bottomright.up": gitControlsGlyph,
   power: powerGlyph,
+  psychology: thinkingGlyph,
+  public: globeGlyph,
   "qrcode.viewfinder": qrCodeGlyph,
   "questionmark.bubble": questionGlyph,
+  "quote.bubble": quoteGlyph,
+  remove: removeGlyph,
+  robot: agentGlyph,
   safari: openInBrowserGlyph,
   server: serverGlyph,
   "server.rack": serverGlyph,
@@ -1035,6 +1164,7 @@ export const CONN_GLYPH_BY_SF_NAME = {
   skill: skillGlyph,
   "slash.circle": blockedGlyph,
   "slider.horizontal.3": adjustGlyph,
+  smartphone: phoneGlyph,
   sparkles: aiGlyph,
   "square.3.layers.3d": layersGlyph,
   "square.and.arrow.up": shareGlyph,
@@ -1060,9 +1190,12 @@ export const CONN_GLYPH_BY_SF_NAME = {
   ticket: ticketGlyph,
   timer: timerGlyph,
   trash: deleteGlyph,
+  "tray.and.arrow.down": downloadGlyph,
   "tray.and.arrow.up": uploadGlyph,
+  visibility: showGlyph,
   wifi: wifiGlyph,
   "wifi.slash": offlineGlyph,
+  wrench: toolGlyph,
   "wrench.and.screwdriver": toolGlyph,
   xmark: closeGlyph,
   "xmark.circle.fill": clearCircleGlyph,

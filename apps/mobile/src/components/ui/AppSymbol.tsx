@@ -8,14 +8,10 @@ export type { AppSymbolName, AppSymbolViewProps } from "./AppSymbol.android";
 
 // Conn: every name goes through expo-symbols. ConnSymbols.swift answers the SF names the
 // icon set maps with its glyphs, native toolbars and menus included.
-// App names that are not SF Symbols and have no Conn symbol yet.
-const SF_FALLBACKS: Readonly<Record<string, string>> = {
-  "git.issue": "smallcircle.filled.circle",
-};
 
 function AppSymbolView(props: AppSymbolViewProps) {
   const name = typeof props.name === "string" ? props.name : props.name.ios;
-  return <ExpoSymbolView {...props} name={(SF_FALLBACKS[name] ?? name) as SFSymbol} />;
+  return <ExpoSymbolView {...props} name={name as SFSymbol} />;
 }
 
 export const SymbolView = withUniwind(AppSymbolView);

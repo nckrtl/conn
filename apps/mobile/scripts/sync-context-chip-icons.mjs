@@ -19,27 +19,10 @@ const iconManifest = JSON.parse(
   NodeFS.readFileSync(NodePath.join(iconSetDirectory, "manifest.json"), "utf8"),
 );
 
-// Chip token -> Lucide name; the web skill chip draws Package.
-const chipIcons = {
-  bot: "Bot",
-  "circle-dashed": "CircleDashed",
-  film: "Film",
-  "git-merge": "GitMerge",
-  "git-pull-request-arrow": "GitPullRequestArrow",
-  "git-pull-request-closed": "GitPullRequestClosed",
-  "git-pull-request-draft": "GitPullRequestDraft",
-  image: "Image",
-  "message-circle": "MessageCircle",
-  "messages-square": "MessagesSquare",
-  "mouse-pointer-click": "MousePointerClick",
-  server: "Server",
-  terminal: "Terminal",
-  skill: "Package",
-};
+// Chip token -> glyph concept, from the icon set's `chips` map.
+const chipIcons = iconManifest.chips;
 
-function glyphSvg(lucideName) {
-  const concept = iconManifest.lucide[lucideName];
-  if (!concept) throw new Error(`The icon set maps no glyph for Lucide ${lucideName}`);
+function glyphSvg(concept) {
   return NodeFS.readFileSync(NodePath.join(iconSetDirectory, "16/solid", `${concept}.svg`), "utf8");
 }
 
@@ -61,8 +44,8 @@ async function renderIcon(token, svg, boxSize = 24) {
 NodeFS.rmSync(outputDirectory, { recursive: true, force: true });
 NodeFS.mkdirSync(outputDirectory, { recursive: true });
 
-for (const [token, lucideName] of Object.entries(chipIcons)) {
-  await renderIcon(token, glyphSvg(lucideName), 16);
+for (const [token, concept] of Object.entries(chipIcons)) {
+  await renderIcon(token, glyphSvg(concept), 16);
 }
 
 // Provider logos, so a model chip can show what the model menu shows. Native chips take images,

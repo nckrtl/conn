@@ -80,16 +80,19 @@ const glyphLines = allConcepts.map(
   (concept) =>
     `export const ${camel(concept)}Glyph = ${JSON.stringify(readGlyph(concept))} as const satisfies IconNode;`,
 );
-// The few glyphs Conn draws at 24px or more come from 24/solid (viewBox 0 0 24 24).
-const glyph24Dir = NodePath.join(setDir, "24/solid");
-const glyph24Lines = NodeFS.readdirSync(glyph24Dir)
-  .filter((file) => file.endsWith(".svg"))
-  .map((file) => file.slice(0, -4))
-  .sort()
-  .map(
-    (concept) =>
-      `export const ${camel(concept)}Glyph24 = ${JSON.stringify(readGlyph(concept, 24))} as const satisfies IconNode;`,
-  );
+// The few web glyphs drawn at 24px or more come from 24/solid. Mobile vendors the whole 24px
+// set, so web names its five explicitly.
+const WEB_GLYPHS_24 = [
+  "foldable-book",
+  "foldable-closed",
+  "foldable-laptop",
+  "foldable-open",
+  "foldable-tent",
+] as const;
+const glyph24Lines = WEB_GLYPHS_24.map(
+  (concept) =>
+    `export const ${camel(concept)}Glyph24 = ${JSON.stringify(readGlyph(concept, 24))} as const satisfies IconNode;`,
+);
 const LINT_ALLOW: Readonly<Record<string, string>> = {
   Sparkles:
     "// oxlint-disable-next-line t3code/no-sparkles-icon -- the rule targets call sites, not this export\n",

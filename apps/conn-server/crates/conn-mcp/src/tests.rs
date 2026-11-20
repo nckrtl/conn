@@ -3633,3 +3633,59 @@ async fn project_writes_create_update_delete_and_keep_scratch() {
         "{message}"
     );
 }
+
+/// `t3_thread_transfer`: a fork of a finished run, its transfer in `status` on the fork, and
+/// the engine's merge-back refusal.
+#[tokio::test(flavor = "current_thread")]
+async fn thread_transfer_forks_and_reports_status() {
+    let f = fixture("thread-transfer");
+    let mut c = Client::open(&f.service, client(true)).await;
+    let launched = c
+        .ok(
+            "t3_thread_launch",
+            json!({
+                "projectId": project_id(), "title": "Source", "message": "hello",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-5-5"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "workspaceStrategy": {"type": "root"},
+            }),
+        )
+        .await;
+    let source = launched["threadId"].as_str().unwrap().to_owned();
+    c.ok(
+        "t3_thread_wait",
+        json!({"threadId": source, "runId": launched["runId"], "timeoutMs": 10_000}),
+    )
+    .await;
+    let fork = c
+        .ok(
+            "t3_thread_transfer",
+            // The fake host takes no checkpoints, so the run is named, not `latest_stable`.
+            json!({"threadId": source, "action": "fork", "title": "Forked",
+                "sourcePoint": {"type": "run", "runId": launched["runId"]}}),
+        )
+        .await;
+    let target = fork["targetThreadId"].as_str().unwrap().to_owned();
+    assert!(
+        target.starts_with("mcp:") && target.ends_with(":fork"),
+        "{target}"
+    );
+    let status = c
+        .ok(
+            "t3_thread_transfer",
+            json!({"threadId": target, "action": "status"}),
+        )
+        .await;
+    let transfers = status["transfers"].as_array().unwrap();
+    assert_eq!(transfers.len(), 1, "{status}");
+    assert_eq!(transfers[0]["sourceThreadId"], source);
+    assert_eq!(transfers[0]["targetThreadId"], target);
+    let (code, message) = c
+        .failure(
+            "t3_thread_transfer",
+            json!({"threadId": target, "action": "merge_back", "targetThreadId": source}),
+        )
+        .await;
+    assert_eq!(code, "orchestration_error");
+    assert!(message.contains("merge a fork back"), "{message}");
+}

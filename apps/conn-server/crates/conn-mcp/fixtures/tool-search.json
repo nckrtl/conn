@@ -25,7 +25,7 @@
         "t3_thread_interrupt",
         "t3_thread_search",
         "t3_thread_configure",
-        "t3_thread_organize"
+        "t3_thread_transfer"
       ]
     },
     {
@@ -55,7 +55,7 @@
         "t3_thread_interrupt",
         "t3_thread_search",
         "t3_thread_configure",
-        "t3_thread_organize"
+        "t3_thread_transfer"
       ]
     },
     {

@@ -868,6 +868,13 @@ fn serves_a_published_theme_background_and_nothing_else() {
         served_path(f.files.resolve_asset(&token, &name, now)),
         Some(real_themes.join("night.jpg"))
     );
+    // The route serves only the file with the inode checked here, not a link swapped in later.
+    let Some(Served::File { identity, .. }) = f.files.resolve_asset(&token, &name, now) else {
+        panic!("no background served");
+    };
+    let inode =
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(themes.join("night.jpg")).unwrap());
+    assert_eq!(identity.map(|(_, ino)| ino), Some(inode));
     // Earlier extensions win; a link is never served.
     fs::write(themes.join("night.webp"), "webp").unwrap();
     assert_eq!(

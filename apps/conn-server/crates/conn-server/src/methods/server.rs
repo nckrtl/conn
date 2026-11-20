@@ -275,13 +275,14 @@ fn config_stream(
         // The theme stream sends the current set first, then each change after it.
         let mut themes_seen = None;
         if let Some(themes) = &themes {
+            // Marked before the read: a publish after it fires `changed` and is sent next.
+            if let Some(changes) = &mut theme_changes {
+                changes.mark_unchanged();
+            }
             let reader = themes.clone();
             let Ok(current) = tokio::task::spawn_blocking(move || reader.refresh()).await else {
                 return;
             };
-            if let Some(changes) = &mut theme_changes {
-                changes.mark_unchanged();
-            }
             themes_seen = Some(current.seq);
             if tx.send(Ok(themes_event(&current))).await.is_err() {
                 return;

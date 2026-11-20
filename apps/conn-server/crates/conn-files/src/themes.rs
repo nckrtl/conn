@@ -474,7 +474,10 @@ pub struct Themes {
 
 struct Inner {
     dir: PathBuf,
+    /// Held only to read or swap the snapshot, never across file reads.
     state: Mutex<State>,
+    /// One folder read at a time, so an older read never replaces a newer one.
+    reading: Mutex<()>,
     changes: watch::Sender<u64>,
     /// `publishSemaphore`: one publish-and-select at a time.
     publish: tokio::sync::Mutex<()>,
@@ -535,6 +538,7 @@ impl Themes {
             inner: Arc::new(Inner {
                 dir,
                 state: Mutex::default(),
+                reading: Mutex::new(()),
                 changes: watch::Sender::new(0),
                 publish: tokio::sync::Mutex::new(()),
             }),
@@ -564,12 +568,20 @@ impl Themes {
     /// Reads the folder again when its listing changed, and notifies subscribers when the
     /// published themes did. Blocking.
     pub fn refresh(&self) -> Snapshot {
+        let _reading = self
+            .inner
+            .reading
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let listing = listing(&self.inner.dir);
-        let mut state = self.lock();
-        if listing.is_some() && state.listing == listing {
-            return state.snapshot.clone();
+        {
+            let state = self.lock();
+            if listing.is_some() && state.listing == listing {
+                return state.snapshot.clone();
+            }
         }
         let themes = read_published(&self.inner.dir);
+        let mut state = self.lock();
         state.listing = listing;
         if *state.snapshot.themes != themes {
             state.snapshot = Snapshot {

@@ -771,7 +771,19 @@ impl Files {
                 let dir = fs::canonicalize(self.themes.dir()).ok()?;
                 crate::themes::is_theme_id(&theme_id).then_some(())?;
                 let (path, _) = crate::themes::find_background(&dir, &theme_id, None)?;
-                Some(file(path))
+                // The route serves only the file it opens with this device and inode, so a link
+                // swapped in after the check is refused, as T3 serves from its no-follow handle.
+                let meta = fs::symlink_metadata(&path)
+                    .ok()
+                    .filter(fs::Metadata::is_file)?;
+                Some(Served::File {
+                    path,
+                    download: false,
+                    file_name: None,
+                    mime_type: None,
+                    render_intent: None,
+                    identity: Some(identity(&meta)),
+                })
             }
             Claims::MediaFileExact {
                 file_path,

@@ -27,6 +27,7 @@ mod message;
 mod panels;
 mod preview;
 mod projects;
+mod pull_request_forge;
 mod pull_requests;
 mod scheduled;
 mod secrets;
@@ -136,6 +137,14 @@ pub(crate) const HANDLED: &[&str] = &[
     "unwatch_pull_request",
     "read_pull_request_guide",
     "write_pull_request_guides",
+    "pull_request_read",
+    "pull_request_list",
+    "pull_request_update",
+    "pull_request_respond",
+    "pull_request_review",
+    "pull_request_merge",
+    "ci_logs",
+    "ci_rerun",
     "annotations_list",
     "annotations_claim",
     "annotations_complete",
@@ -147,6 +156,7 @@ pub(crate) const HANDLED: &[&str] = &[
     "t3_queue",
     "t3_thread_configure",
     "t3_thread_organize",
+    "t3_thread_transfer",
     "send_to_user",
     "orchestrator_capabilities",
     "delegate_task",
@@ -163,6 +173,10 @@ pub(crate) const HANDLED: &[&str] = &[
     "t3_thread_launch",
     "t3_project_list",
     "t3_project_read",
+    "t3_project_create",
+    "t3_project_update",
+    "t3_project_delete",
+    "t3_project_clone",
     "t3_environment_read",
     "t3_environment_links",
     "t3_environment_link",
@@ -278,6 +292,10 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "orchestrator_capabilities" => projects::capabilities(cx, &args).await,
         "t3_project_list" => projects::list(cx, &args).await,
         "t3_project_read" => projects::read(cx, &args).await,
+        "t3_project_create" => projects::create(cx, &args).await,
+        "t3_project_update" => projects::update(cx, &args).await,
+        "t3_project_delete" => projects::delete(cx, &args).await,
+        "t3_project_clone" => projects::clone(cx, &args).await,
         "t3_environment_read" => Ok(projects::environment(cx)),
         "t3_environment_links" => crate::peers::links(cx).await,
         "t3_environment_link" => crate::peers::link(cx, &args).await,
@@ -295,6 +313,7 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "t3_queue" => manage::queue(cx, &args).await,
         "t3_thread_configure" => manage::configure(cx, &args).await,
         "t3_thread_organize" => manage::organize(cx, &args).await,
+        "t3_thread_transfer" => manage::transfer(cx, &args).await,
         "mcp_call" | "mcp_connect" => panels::invoke(cx, name, &args).await,
         "panel_open" => panels::open(cx, &args).await,
         "request_secret" => secrets::request(cx, &args).await,
@@ -323,6 +342,14 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "unwatch_pull_request" => pull_requests::set_watching(cx, &args, false).await,
         "read_pull_request_guide" => pull_requests::read_guide(cx, &args).await,
         "write_pull_request_guides" => pull_requests::write_guides(cx, &args).await,
+        "pull_request_read" => pull_request_forge::read(cx, &args).await,
+        "pull_request_list" => pull_request_forge::list(cx, &args).await,
+        "pull_request_update" => pull_request_forge::update(cx, &args).await,
+        "pull_request_respond" => pull_request_forge::respond(cx, &args).await,
+        "pull_request_review" => pull_request_forge::review(cx, &args).await,
+        "pull_request_merge" => pull_request_forge::merge(cx, &args).await,
+        "ci_logs" => pull_request_forge::ci_logs(cx, &args).await,
+        "ci_rerun" => pull_request_forge::ci_rerun(cx, &args).await,
         other => Err(fail(
             "capability_denied",
             format!("conn-server does not serve `{other}` yet."),

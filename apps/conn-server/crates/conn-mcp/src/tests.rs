@@ -89,6 +89,7 @@ fn fixture_with_provider(
         peers,
         settings: None,
         pull_requests: None,
+        clone_repository: None,
         test_logins: Some(conn_features::test_logins::TestLogins::new(&dir)),
         secrets: Some(conn_features::secrets::SecretRequests::new(
             &dir,
@@ -1732,13 +1733,7 @@ async fn search_puts_titles_first_and_keeps_slots_for_messages() {
 /// Tools that a text we send to an agent names and that this server does not serve. An agent
 /// told to call one finds no such tool. Serve one, and this test makes you strike it here.
 /// `preview_*` in the orchestration text also names all 13 preview tools.
-const NAMED_NOT_SERVED: &[&str] = &[
-    "ci_logs",
-    "ci_rerun",
-    "fill_credential",
-    "link_issue",
-    "pull_request_create",
-];
+const NAMED_NOT_SERVED: &[&str] = &["fill_credential", "link_issue", "pull_request_create"];
 
 /// Every text we send to an agent that can name a tool: the orchestration text and Claude's
 /// texts (`conn-mcp`), the `next` text of a running task, the Codex additional context
@@ -1809,6 +1804,7 @@ async fn fixture_with_tasks(name: &str) -> Fixture {
         peers: None,
         settings: None,
         pull_requests: None,
+        clone_repository: None,
         secrets: config.secrets.clone(),
         test_logins: base.service.config.test_logins.clone(),
         engine,
@@ -3546,3 +3542,150 @@ async fn mcp_panel_actions_use_the_ninety_second_action_timeout() {
 }
 
 mod pull_request_watches;
+
+/// `hiddenWithoutForge`: an agent whose project is on no forge loses the forge tools; an
+/// outside client and an agent on a forge keep them.
+#[test]
+fn forge_tools_are_hidden_only_without_a_forge() {
+    let agent = Caller::Thread(ThreadCaller {
+        thread_id: "t".into(),
+        provider_session_id: "s".into(),
+        provider_instance_id: "claudeAgent".into(),
+        subagent: false,
+        preview: false,
+        device: false,
+    });
+    let forge: Vec<&str> = include_str!("forge-hidden.txt").lines().collect();
+    assert_eq!(forge.len(), 8);
+    for name in &forge {
+        assert!(catalog::offered_to(name, &agent, true, true), "{name}");
+        assert!(!catalog::offered_to(name, &agent, true, false), "{name}");
+    }
+    assert!(catalog::offered_to(
+        "link_pull_request",
+        &agent,
+        true,
+        false
+    ));
+    let listed = catalog::list_for(&agent, true, false);
+    assert!(!listed.contains("\"name\":\"ci_logs\""));
+    assert!(catalog::list_for(&agent, true, true).contains("\"name\":\"ci_logs\""));
+}
+
+/// `t3_project_create`, `t3_project_update` and `t3_project_delete` on the engine; the scratch
+/// project is refused as T3's `isScratchProject` refuses it.
+#[tokio::test(flavor = "current_thread")]
+async fn project_writes_create_update_delete_and_keep_scratch() {
+    let f = fixture("project-writes");
+    let mut c = Client::open(&f.service, client(true)).await;
+    let root = f.dir.join("made");
+    let made = c
+        .ok(
+            "t3_project_create",
+            json!({"title": "Made", "workspaceRoot": root, "createWorkspaceRootIfMissing": true}),
+        )
+        .await;
+    assert!(root.is_dir());
+    assert!(made.get("hasCustomTitle").is_none());
+    let id = made["id"].as_str().unwrap().to_owned();
+    assert!(
+        id.starts_with("mcp:"),
+        "the command id names the project: {id}"
+    );
+    let (code, message) = c
+        .failure(
+            "t3_project_create",
+            json!({"title": "Again", "workspaceRoot": root}),
+        )
+        .await;
+    assert_eq!(
+        (code.as_str(), message.as_str()),
+        (
+            "invalid_request",
+            "The workspace is already registered to a project."
+        )
+    );
+    let renamed = c
+        .ok(
+            "t3_project_update",
+            json!({"projectId": id, "title": "Renamed"}),
+        )
+        .await;
+    assert_eq!(renamed["title"], "Renamed");
+    let deleted = c.ok("t3_project_delete", json!({"projectId": id})).await;
+    assert!(!deleted["deletedAt"].is_null());
+    let scratch = f
+        .service
+        .config
+        .engine
+        .call("projects.ensureScratch", json!({}))
+        .await
+        .unwrap();
+    let (code, message) = c
+        .failure(
+            "t3_project_delete",
+            json!({"projectId": scratch["projectId"]}),
+        )
+        .await;
+    assert_eq!(code, "invalid_request");
+    assert!(
+        message.starts_with("\"No project\" is the built-in scratch project"),
+        "{message}"
+    );
+}
+
+/// `t3_thread_transfer`: a fork of a finished run, its transfer in `status` on the fork, and
+/// the engine's merge-back refusal.
+#[tokio::test(flavor = "current_thread")]
+async fn thread_transfer_forks_and_reports_status() {
+    let f = fixture("thread-transfer");
+    let mut c = Client::open(&f.service, client(true)).await;
+    let launched = c
+        .ok(
+            "t3_thread_launch",
+            json!({
+                "projectId": project_id(), "title": "Source", "message": "hello",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-5-5"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "workspaceStrategy": {"type": "root"},
+            }),
+        )
+        .await;
+    let source = launched["threadId"].as_str().unwrap().to_owned();
+    c.ok(
+        "t3_thread_wait",
+        json!({"threadId": source, "runId": launched["runId"], "timeoutMs": 10_000}),
+    )
+    .await;
+    let fork = c
+        .ok(
+            "t3_thread_transfer",
+            // The fake host takes no checkpoints, so the run is named, not `latest_stable`.
+            json!({"threadId": source, "action": "fork", "title": "Forked",
+                "sourcePoint": {"type": "run", "runId": launched["runId"]}}),
+        )
+        .await;
+    let target = fork["targetThreadId"].as_str().unwrap().to_owned();
+    assert!(
+        target.starts_with("mcp:") && target.ends_with(":fork"),
+        "{target}"
+    );
+    let status = c
+        .ok(
+            "t3_thread_transfer",
+            json!({"threadId": target, "action": "status"}),
+        )
+        .await;
+    let transfers = status["transfers"].as_array().unwrap();
+    assert_eq!(transfers.len(), 1, "{status}");
+    assert_eq!(transfers[0]["sourceThreadId"], source);
+    assert_eq!(transfers[0]["targetThreadId"], target);
+    let (code, message) = c
+        .failure(
+            "t3_thread_transfer",
+            json!({"threadId": target, "action": "merge_back", "targetThreadId": source}),
+        )
+        .await;
+    assert_eq!(code, "orchestration_error");
+    assert!(message.contains("merge a fork back"), "{message}");
+}

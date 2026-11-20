@@ -21,6 +21,84 @@ the run stays open. Waiting for terminal confirmation is deliberate. `idle-diff`
 split in `KNOWN` as `intermittent`; a gate either side misses still fails it. Whether to
 match T3 is open.
 
+## `t3_thread_transfer` (2026-11-20)
+
+`t3_thread_transfer` is served (`conn-mcp/src/tools/manage.rs`, T3's `thread/handlers.ts`):
+`status` lists the thread's context transfers; `fork` dispatches `thread.fork` into
+`<commandId>:fork` from `sourcePoint` (default `latest_stable`), with `title`; `merge_back`
+reads both threads and dispatches `thread.merge_back`. Access as T3: `status` reads,
+the others write both threads.
+
+- **Known difference:** the engine still refuses `thread.merge_back` ("Conn Server cannot
+  merge a fork back yet."; it needs T3's `ContextHandoffService`), so `merge_back` fails after
+  T3's own checks.
+- **Proof:** `parity.mjs`: 8 calls on both servers (status, a fork with no stable run,
+  merge-back refusals, missing threads, bad input). `cargo test -p conn-mcp thread_transfer`:
+  a fork of a finished run, its transfer in the fork's `status`, the merge-back refusal.
+## PR forge tools and CI (2026-11-20)
+
+Agents can read, list, update, answer, review and merge a thread's PR, and read and re-run its
+CI, through `/mcp`: `pull_request_read`, `pull_request_list`, `pull_request_update`,
+`pull_request_respond`, `pull_request_review`, `pull_request_merge`, `ci_logs`, `ci_rerun`
+(`conn-mcp/src/tools/pull_request_forge.rs`, T3's `pullRequests/handlers.ts`). Before, they
+were unregistered. `pull_request_create` is not served yet (it needs `GitManager`'s PR flow).
+
+- **The panel acts now.** `pullRequests.runAction` ran nothing before ("This host cannot …").
+  It now runs T3's GitHub flow for `merge`, `enable-auto-merge`, `disable-auto-merge`,
+  `ready`, `draft`, `close`, `reopen`, `revert` and `update-branch`
+  (`conn-source-control/src/pull_requests/run_action.rs`), after T3's service checks: merge
+  and update methods, the viewer's permission (`ViewerPermissions`, or the detail read for a
+  branch update), the pinned head, and `removeAgentCreditsOnMerge` (`merge_message.rs`,
+  `removeAgentCredits`). The capabilities advertise these actions and methods. Not built,
+  still refused and not advertised: deleting the source branch, approving fork workflows and
+  stack actions (so `pull_request_merge` with `stack` is refused after T3's stack pinning).
+- **CI** (`checks.rs`): `readCheckLogs` (the job log through GitHub's redirect, 16 MiB, the
+  last lines as `tailLogLines`) and `rerunChecks` (a run's failed jobs together when they are
+  exactly the selection, else one job); the panel picks the failing checks or the named one
+  (`selectChecks`, five logs at most). A re-run reopens a watch's finished checks.
+- **Forge filter.** The 8 tools are hidden from an agent whose project is on no forge the
+  server reads (`hiddenWithoutForge`; `gen-tools.mjs` writes `forge-hidden.txt`); read per
+  request, kept a minute, at most 1,000 threads.
+- **Review lines** are placed by the PR's diff (`review_position_in_patch`,
+  `reviewPositionInPatch`), up to ten diff pages.
+- **Proof:** `gen-pr-cases.mjs` records T3's `runPullRequestAction` (22 cases: every action,
+  merge methods, merge queue, auto-merge on a clean PR, credit removal, branch update, a
+  missing PR), `readCheckLogs` (2) and `rerunChecks` (3) on an in-memory GitHub;
+  `run_actions_and_ci_match_t3s_recorded_http_requests` replays them on the same answers:
+  results and request traces equal (CI requests as a set; T3 sends them concurrently).
+  Characterizations from T3's functions: `removeAgentCredits` (15), `gitHubActionsJobId` (11),
+  `tailLogLines` (7), the light viewer permissions (49). `parity.mjs`: 23 calls of the new
+  tools on both servers (input checks, refusals outside a thread). Server tests: the
+  service's refusals, the head pin, actions refresh, a summary on request, an unknown check
+  name. A REST 404 no longer carries GitHub's text, as T3's policy reports it.
+- **Known differences:** the action summary T3 decodes from the mutation is read again
+  (`replyWithSummary`); no merged-PR event after a confirmed merge (link sync reads it on its
+  next sweep); node ids are read each time (T3 caches 1,000); GitHub only.
+
+## Project tools (2026-11-20)
+
+Agents can add, change, remove and clone projects through `/mcp`: `t3_project_create`,
+`t3_project_update`, `t3_project_delete`, `t3_project_clone`
+(`conn-mcp/src/tools/projects.rs`, T3's `project/handlers.ts`). Before, they were unregistered.
+
+- **On the engine's own calls:** a folder registers with `projects.mutate`
+  (`project.create`, id from the `mcp:` command id); no folder makes a repository from the
+  title (`projects.createNew`, with `commitError`); update and delete use `projects.mutate`.
+  Errors are worded as T3's `projectFailure`. The scratch project is refused, as
+  `isScratchProject` (a new engine call, `projects.isScratchRoot`, compares its folder). A
+  clone runs the server's `sourceControl.cloneRepository` (`McpConfig::clone_repository`).
+- **Access as T3's `writesEnvironment`:** full access; linked work may create and clone, not
+  update or delete. Returned projects drop the engine's `hasCustomTitle`.
+- **Changed:** a missing folder without `createWorkspaceRootIfMissing` is a
+  `ProjectOperationError` (T3 fails to normalize the folder), not `ProjectInvalidError`.
+- **Proof:** `parity.mjs`: 10 new calls on both servers (a registered folder, title-only with
+  scripts, a missing folder, a new folder, rename, delete, refusals, a failed clone, bad
+  input); values compared where they are not ids or paths. `cargo test -p conn-mcp
+  project_writes`: create, conflict, rename, delete, the scratch refusal.
+- **Known differences:** a clone keeps the server's clone timeout (T3 sets none for agents);
+  `projectClone.*` (the UI's tracked clone) is not served; T3's `ProjectCloneTracker.discard`
+  on delete has nothing to discard here.
+
 ## Review guide writing (2026-11-19)
 
 `pullRequests.generateReviewGuide` and `write_pull_request_guides` write a PR's review guide

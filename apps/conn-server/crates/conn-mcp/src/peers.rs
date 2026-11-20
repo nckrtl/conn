@@ -81,6 +81,14 @@ pub(crate) const THREAD_IDS_HINT: &str = " Thread ids belong to one environment:
 const NOT_LISTED: &str =
     "Not listed: not linked yet. Call t3_environment_link with a hint from the user's words.";
 
+fn full_access(limits: &crate::tools::Limits) -> Result<(), ToolError> {
+    if limits.runtime_mode == "full-access" && limits.interaction_mode == "default" {
+        Ok(())
+    } else {
+        Err(fail("capability_denied", FULL_ACCESS_REQUIRED))
+    }
+}
+
 const FULL_ACCESS_REQUIRED: &str = "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.";
 
 // Match local waits: return before MCP client timeouts and relay idle drops.
@@ -242,10 +250,13 @@ impl Cx<'_> {
         let limits = self.writing_caller().await?;
         self.assert_not_linked("change projects or environment settings")
             .await?;
-        if !(limits.runtime_mode == "full-access" && limits.interaction_mode == "default") {
-            return Err(fail("capability_denied", FULL_ACCESS_REQUIRED));
-        }
-        Ok(())
+        full_access(&limits)
+    }
+
+    /// `writesEnvironment` with `linkedCallers: "allowed"`: adding a project or a clone leaves
+    /// everything already here as it was, so linked work may do it.
+    pub(crate) async fn environment_writer_from_links(&self) -> Result<(), ToolError> {
+        full_access(&self.writing_caller().await?)
     }
 
     /// The check a call bound for a linked environment runs here first (`RemoteCheck`): the
@@ -255,6 +266,7 @@ impl Cx<'_> {
         let reads = match tool {
             "t3_pending_request" => action != Some("respond"),
             "t3_queue" => matches!(action, Some("list" | "read")),
+            "t3_thread_transfer" => action == Some("status"),
             "t3_thread_configure" => !args.contains_key("modelSelection"),
             "orchestrator_capabilities"
             | "t3_thread_list"
@@ -267,7 +279,10 @@ impl Cx<'_> {
             | "list_scheduled_tasks"
             | "list_thread_pull_requests"
             | "t3_worktree_list"
-            | "read_pull_request_guide" => true,
+            | "read_pull_request_guide"
+            | "pull_request_read"
+            | "pull_request_list"
+            | "ci_logs" => true,
             _ => false,
         };
         if reads {

@@ -2030,12 +2030,6 @@
       "name": "device-rotate",
       "library": "device-rotate",
       "meaning": "Rotate the preview device (portrait/landscape)"
-    },
-    "device-phone-laptop": {
-      "source": "generated",
-      "name": "device-phone-laptop",
-      "library": "device-phone-laptop",
-      "meaning": "Pick the device to emulate in the preview"
     }
   }
 }

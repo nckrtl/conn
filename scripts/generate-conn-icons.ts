@@ -70,8 +70,13 @@ const kebab = (name: string) => name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLo
 const lucideNames = Object.keys(manifest.lucide).sort();
 const concepts = [...new Set(lucideNames.map((name) => manifest.lucide[name]!))].sort();
 
-// One named export per glyph, so a module that needs a single glyph does not bundle the set.
-const glyphLines = concepts.map(
+// One named export per glyph in the set, so a module that needs a single glyph does not bundle
+// the set. Concepts without a Lucide name (hand-drawn replacements) are used by concept id.
+const allConcepts = NodeFS.readdirSync(glyphDir)
+  .filter((file) => file.endsWith(".svg"))
+  .map((file) => file.slice(0, -4))
+  .sort();
+const glyphLines = allConcepts.map(
   (concept) =>
     `export const ${camel(concept)}Glyph = ${JSON.stringify(readGlyph(concept))} as const satisfies IconNode;`,
 );

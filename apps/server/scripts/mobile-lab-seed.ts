@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Dev-only seeder for the mobile UI lab.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalConsole:off globalConsoleInEffect:off globalJsonInEffect:off - Dev-only seeder for the mobile UI lab.
 // Turns apps/mobile/scripts/lab/fixtures.mts into real V2 events in a lab server's database.
 // Run by apps/mobile/scripts/lab/lab.mts: once with the server stopped, then with --live once it is up.
 import * as NodeFS from "node:fs";

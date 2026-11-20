@@ -1,46 +1,33 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off - a one-off asset generator run by hand.
 /**
- * Builds Conn's iOS custom symbols, one `.symbolset` per `symbols.json` entry, from the Phosphor
- * icons in @phosphor-icons/react (see ConnSymbols.swift). Run it after changing symbols.json and
- * commit the output: `node scripts/build-conn-symbols.ts`.
+ * Builds Conn's iOS custom symbols, one `.symbolset` per SF name in the icon set's manifest
+ * (`sf` in assets/conn/superheroicons/manifest.json), from its 16px solid glyphs (see
+ * ConnSymbols.swift). Run it after changing the set and commit the output:
+ * `node scripts/build-conn-symbols.ts`.
  */
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
-import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
 const repoRoot = NodePath.resolve(import.meta.dirname, "..");
 const moduleDir = NodePath.join(repoRoot, "apps/mobile/modules/conn-symbols");
 const catalog = NodePath.join(moduleDir, "ios/ConnSymbols.xcassets");
-
-type Weight = "fill" | "bold" | "regular";
-type Entry = string | { icon: string; weight?: Weight; mirrored?: boolean };
-
-const webRequire = NodeModule.createRequire(NodePath.join(repoRoot, "apps/web/package.json"));
-// scripts has no React types; describe only the two calls used here.
-const React = webRequire("react") as {
-  createElement: (type: never, props: Record<string, unknown>) => unknown;
-};
-const { renderToStaticMarkup } = webRequire("react-dom/server") as {
-  renderToStaticMarkup: (element: unknown) => string;
-};
-const phosphorEntry = webRequire
-  .resolve("@phosphor-icons/react")
-  .replace("index.cjs.js", "index.es.js");
-const Phosphor = (await import(phosphorEntry)) as Record<string, unknown>;
+const setDir = NodePath.join(repoRoot, "assets/conn/superheroicons");
 
 // SF Symbols template geometry (points at a 100pt font, template v2 "M" row).
 const BASELINE_M = 1126;
 const CAPLINE_M = 1055.54;
-// Phosphor's 256-unit box maps to 90 units: its 224-unit drawing then reads about
-// the size of an SF Symbol, centred on the middle of the cap height.
+// The glyphs' 16-unit box maps to 90 units: their ~14-unit drawing then reads about the size
+// of an SF Symbol, centred on the middle of the cap height.
 const BOX = 90;
-const SCALE = BOX / 256;
+const SCALE = BOX / 16;
 const TOP = -(BASELINE_M - CAPLINE_M) / 2 - BOX / 2;
 const LEFT = 1500;
 
-/** Scales a path from the 256 box to the glyph box, optionally mirrored. */
-function transformPath(d: string, mirrored: boolean): string {
+/** Scales a path from the 16 box to the symbol box. */
+function transformPath(d: string): string {
+  const mirrored = false;
   const tokens = d.match(/[a-zA-Z]|-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g) ?? [];
   const out: string[] = [];
   const fmt = (n: number) => String(Math.round(n * 1000) / 1000);
@@ -103,7 +90,12 @@ function transformPath(d: string, mirrored: boolean): string {
   return out.join(" ");
 }
 
-function symbolSvg(paths: readonly string[]): string {
+interface SymbolPath {
+  readonly d: string;
+  readonly evenOdd: boolean;
+}
+
+function symbolSvg(paths: readonly SymbolPath[]): string {
   const guide = 'style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;"';
   const margin = (id: string, x: number) =>
     `<line id="${id}" ${guide} x1="${x}" x2="${x}" y1="${BASELINE_M - 100}" y2="${BASELINE_M + 20}"/>`;
@@ -125,16 +117,45 @@ function symbolSvg(paths: readonly string[]): string {
  </g>
  <g id="Symbols">
   <g id="Regular-M" transform="matrix(1 0 0 1 ${LEFT} ${BASELINE_M})">
-${paths.map((d) => `   <path d="${d}"/>`).join("\n")}
+${paths.map((p) => `   <path${p.evenOdd ? ' style="fill-rule:evenodd;"' : ""} d="${p.d}"/>`).join("\n")}
   </g>
  </g>
 </svg>
 `;
 }
 
-const symbols = JSON.parse(
-  NodeFS.readFileSync(NodePath.join(moduleDir, "symbols.json"), "utf8"),
-) as Record<string, Entry>;
+const manifest = JSON.parse(
+  NodeFS.readFileSync(NodePath.join(setDir, "manifest.json"), "utf8"),
+) as { readonly sf: Readonly<Record<string, string>> };
+
+/** Reads a glyph's paths in its 16-unit box; a rect becomes a rounded-rect path. */
+function readGlyph(concept: string): SymbolPath[] {
+  const file = NodePath.join(setDir, "16/solid", `${concept}.svg`);
+  if (!NodeFS.existsSync(file)) throw new Error(`no glyph for concept "${concept}" (${file})`);
+  const svg = NodeFS.readFileSync(file, "utf8");
+  const paths: SymbolPath[] = [];
+  for (const [, tag, raw] of svg.matchAll(/<(path|rect)\b([^>]*?)\/>/g)) {
+    const attrs = Object.fromEntries(
+      [...raw!.matchAll(/([a-z-]+)="([^"]*)"/g)].map((m) => [m[1]!, m[2]!]),
+    );
+    const evenOdd = attrs["fill-rule"] === "evenodd";
+    if (tag === "path") {
+      paths.push({ d: attrs.d!, evenOdd });
+    } else {
+      const [x, y, w, h] = ["x", "y", "width", "height"].map((key) => Number(attrs[key] ?? 0)) as [
+        number,
+        number,
+        number,
+        number,
+      ];
+      const r = Math.min(Number(attrs.rx ?? 0), w / 2, h / 2);
+      const d = `M${x + r} ${y}H${x + w - r}A${r} ${r} 0 0 1 ${x + w} ${y + r}V${y + h - r}A${r} ${r} 0 0 1 ${x + w - r} ${y + h}H${x + r}A${r} ${r} 0 0 1 ${x} ${y + h - r}V${y + r}A${r} ${r} 0 0 1 ${x + r} ${y}Z`;
+      paths.push({ d, evenOdd });
+    }
+  }
+  if (paths.length === 0) throw new Error(`${file}: no paths`);
+  return paths;
+}
 
 NodeFS.rmSync(catalog, { recursive: true, force: true });
 NodeFS.mkdirSync(catalog, { recursive: true });
@@ -143,19 +164,8 @@ NodeFS.writeFileSync(
   `${JSON.stringify({ info: { author: "xcode", version: 1 } }, null, 2)}\n`,
 );
 
-for (const [name, entry] of Object.entries(symbols)) {
-  const {
-    icon,
-    weight = "fill",
-    mirrored = false,
-  } = typeof entry === "string" ? { icon: entry } : entry;
-  const component = Phosphor[`${icon}Icon`];
-  if (!component) throw new Error(`${name}: Phosphor has no ${icon}`);
-  const markup = renderToStaticMarkup(React.createElement(component as never, { weight }));
-  const paths = [...markup.matchAll(/<path d="([^"]+)"/g)].map((match) =>
-    transformPath(match[1]!, mirrored),
-  );
-  if (paths.length === 0) throw new Error(`${name}: ${icon} rendered no paths`);
+for (const [name, concept] of Object.entries(manifest.sf)) {
+  const paths = readGlyph(concept).map((p) => ({ ...p, d: transformPath(p.d) }));
   const dir = NodePath.join(catalog, `${name}.symbolset`);
   NodeFS.mkdirSync(dir);
   NodeFS.writeFileSync(NodePath.join(dir, `${name}.svg`), symbolSvg(paths));
@@ -172,14 +182,34 @@ for (const [name, entry] of Object.entries(symbols)) {
   );
 }
 
-const names = Object.keys(symbols).sort();
+const names = Object.keys(manifest.sf).sort();
 NodeFS.writeFileSync(
   NodePath.join(moduleDir, "ios/ConnSymbolNames.swift"),
-  `// Generated by scripts/build-conn-symbols.ts from symbols.json. Do not edit.
+  `// Generated by scripts/build-conn-symbols.ts from assets/conn/superheroicons. Do not edit.
 let connSymbolNames: Set<String> = [
 ${names.map((name) => `  "${name}",`).join("\n")}
 ]
 `,
 );
+
+// Android draws the same glyphs with react-native-svg (AppSymbol.android.tsx).
+const camel = (concept: string) =>
+  concept.replace(/-([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
+const concepts = [...new Set(Object.values(manifest.sf))].sort();
+const androidOut = NodePath.join(repoRoot, "apps/mobile/src/components/ui/connGlyphs.generated.ts");
+NodeFS.writeFileSync(
+  androidOut,
+  `// Generated by scripts/build-conn-symbols.ts from assets/conn/superheroicons. Do not edit.
+import type { ConnGlyphData } from "./ConnGlyph";
+
+${concepts.map((concept) => `const ${camel(concept)}Glyph = ${JSON.stringify(readGlyph(concept))} satisfies ConnGlyphData;`).join("\n")}
+
+/** Glyph per SF Symbol name in the icon set's manifest. */
+export const CONN_GLYPH_BY_SF_NAME = {
+${names.map((name) => `  ${JSON.stringify(name)}: ${camel(manifest.sf[name]!)}Glyph,`).join("\n")}
+} as const;
+`,
+);
+NodeChildProcess.execFileSync("vp", ["fmt", androidOut], { cwd: repoRoot, stdio: "inherit" });
 
 console.log(`Wrote ${names.length} symbols to ${NodePath.relative(repoRoot, catalog)}.`);

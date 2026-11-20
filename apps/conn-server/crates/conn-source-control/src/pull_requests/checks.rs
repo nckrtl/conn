@@ -201,8 +201,7 @@ impl Client {
     ) -> Result<Vec<Value>, Error> {
         let root = format!("repos/{}/{}/actions", lookup.owner, lookup.name);
         // (check, job id, run id, detail)
-        let mut located: Vec<(&Value, Located)> =
-            Vec::with_capacity(checks.len());
+        let mut located: Vec<(&Value, Located)> = Vec::with_capacity(checks.len());
         for chunk in checks.chunks(CONCURRENCY) {
             let reads = chunk.iter().map(|check| self.locate_job(&root, check));
             for (check, result) in chunk
@@ -260,11 +259,7 @@ impl Client {
             .collect())
     }
 
-    async fn locate_job(
-        &self,
-        root: &str,
-        check: &Value,
-    ) -> Result<Located, Error> {
+    async fn locate_job(&self, root: &str, check: &Value) -> Result<Located, Error> {
         let Some(job) = actions_job_id(check.get("url").and_then(Value::as_str)) else {
             return Ok((None, None, Some(NOT_A_JOB.to_owned())));
         };

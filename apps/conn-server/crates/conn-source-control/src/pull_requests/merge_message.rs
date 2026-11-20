@@ -85,9 +85,7 @@ fn unlink_agent_footers(text: &str) -> String {
     'scan: while let Some(open) = rest.find('[') {
         out.push_str(rest.get(..open).unwrap_or_default());
         let after = rest.get(open + 1..).unwrap_or_default();
-        let label_end = after
-            .find(['[', ']', '\r', '\n'])
-            .unwrap_or(after.len());
+        let label_end = after.find(['[', ']', '\r', '\n']).unwrap_or(after.len());
         if label_end > 0
             && let Some(tail) = after.get(label_end..)
             && let Some(tail) = tail.strip_prefix(']')

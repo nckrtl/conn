@@ -173,10 +173,13 @@ fn decode_cursor(cursor: &str) -> Result<Value, ToolError> {
         .ok_or_else(|| message(CURSOR_INVALID))
 }
 
-fn trimmed_non_empty(value: &Value) -> bool {
+/// `TrimmedNonEmptyString` decoded: the text trimmed, if anything is left.
+fn trimmed_non_empty(value: &Value) -> Option<String> {
     value
         .as_str()
-        .is_some_and(|text| !text.is_empty() && text.trim() == text)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 fn non_negative_int(value: &Value) -> bool {
@@ -198,10 +201,8 @@ enum ReadCursor {
 
 fn read_cursor(cursor: &str) -> Result<ReadCursor, ToolError> {
     let value = decode_cursor(cursor)?;
-    if let Some(diff) = value.get("diff").filter(|d| trimmed_non_empty(d)) {
-        return Ok(ReadCursor::Diff(
-            diff.as_str().unwrap_or_default().to_owned(),
-        ));
+    if let Some(diff) = value.get("diff").and_then(trimmed_non_empty) {
+        return Ok(ReadCursor::Diff(diff));
     }
     let index = |key: &str| {
         value
@@ -226,24 +227,25 @@ fn read_cursor(cursor: &str) -> Result<ReadCursor, ToolError> {
     }
 }
 
-/// `PullRequestListCursors`: trimmed non-empty keys and values of at most 4,096 units.
+/// `PullRequestListCursors` decoded: keys and values trimmed and non-empty, values at most
+/// 4,096 units after trimming.
 fn list_cursors(cursor: &str) -> Result<Value, ToolError> {
     let value = decode_cursor(cursor)?;
-    let valid = value.as_object().is_some_and(|map| {
-        map.iter().all(|(key, value)| {
-            !key.is_empty()
-                && key.trim() == key
-                && trimmed_non_empty(value)
-                && value
-                    .as_str()
-                    .is_some_and(|v| v.encode_utf16().count() <= 4096)
-        })
-    });
-    if valid {
-        Ok(value)
-    } else {
-        Err(message(CURSOR_INVALID))
+    let Some(map) = value.as_object() else {
+        return Err(message(CURSOR_INVALID));
+    };
+    let mut out = Map::new();
+    for (key, value) in map {
+        let key = key.trim();
+        let value = trimmed_non_empty(value).filter(|v| v.encode_utf16().count() <= 4096);
+        match value {
+            Some(value) if !key.is_empty() => {
+                out.insert(key.to_owned(), json!(value));
+            }
+            _ => return Err(message(CURSOR_INVALID)),
+        }
     }
+    Ok(Value::Object(out))
 }
 
 // ---- pull_request_read --------------------------------------------------------------------
@@ -858,7 +860,11 @@ mod tests {
             read_cursor(&encode_cursor(&json!({"diff": "2"}))),
             Ok(ReadCursor::Diff(at)) if at == "2"
         ));
-        for bad in ["%%", "e30", &encode_cursor(&json!({"diff": " 2"}))] {
+        assert!(matches!(
+            read_cursor(&encode_cursor(&json!({"diff": " 2 "}))),
+            Ok(ReadCursor::Diff(at)) if at == "2"
+        ));
+        for bad in ["%%", "e30", &encode_cursor(&json!({"diff": "  "}))] {
             assert!(read_cursor(bad).is_err(), "{bad}");
         }
         assert!(list_cursors(&encode_cursor(&json!({"a": "b"}))).is_ok());

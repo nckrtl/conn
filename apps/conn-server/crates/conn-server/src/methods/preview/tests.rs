@@ -214,3 +214,21 @@ async fn desktop_tabs_are_records_and_their_desktop_hosts_them_for_agents() {
     browser.shutdown().await;
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn a_desktop_cannot_restore_an_id_from_this_servers_allocator() {
+    let root =
+        std::env::temp_dir().join(format!("conn-preview-restore-{}", conn_support::uuid_v4()));
+    let browser = conn_preview::tabs::Preview::new(root.clone());
+    let opened = browser.open_desktop("thread", &json!({})).unwrap();
+    let id = opened["tabId"].as_str().unwrap();
+    let epoch = id.rsplit_once('_').unwrap().1;
+    let mut forged = opened.clone();
+    forged["tabId"] = json!(format!("tab_zz_{epoch}"));
+    assert!(!browser.restore_desktop(&forged));
+    // A tab from an earlier server run is restored.
+    forged["tabId"] = json!("tab_1_earlier-epoch");
+    assert!(browser.restore_desktop(&forged));
+    assert!(browser.restore_desktop(&opened));
+    let _ = std::fs::remove_dir_all(root);
+}

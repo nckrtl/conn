@@ -304,7 +304,14 @@ impl Relay {
                         && h.environment_id == call.environment_id
                 })
             });
-            let Some(host) = explicit.or(assigned_host) else {
+            // An explicit tab that no desktop hosts is the server's own: never send it to the
+            // current desktop tab (T3 does, and the desktop then refuses it).
+            let current = if call.tab.is_some() {
+                None
+            } else {
+                assigned_host
+            };
+            let Some(host) = explicit.or(current) else {
                 if call.update_current_tab
                     && let Some(i) = assigned
                 {
@@ -394,6 +401,11 @@ impl Relay {
             ));
             (receiver, context)
         };
+        // A cancelled call (the agent's request went away) must not leave its entry behind.
+        let _pending = PendingGuard {
+            state: Arc::downgrade(&self.0),
+            request_id: context.request_id.clone(),
+        };
         let wait = if call.update_current_tab {
             context.timeout_ms.saturating_add(HOST_RESPONSE_GRACE_MS)
         } else {
@@ -452,6 +464,21 @@ impl Relay {
             value: result,
             tab: context.tab,
         }))
+    }
+}
+
+struct PendingGuard {
+    state: Weak<Mutex<State>>,
+    request_id: String,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            lock(&state)
+                .pending
+                .retain(|(id, _)| *id != self.request_id);
+        }
     }
 }
 

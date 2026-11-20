@@ -208,3 +208,39 @@ fn remote_errors_read_as_t3_reports_them() {
         "Preview automation client desktop-1 returned a malformed response for type."
     );
 }
+
+#[tokio::test]
+async fn a_cancelled_call_leaves_no_pending_request() {
+    let relay = Relay::default();
+    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let mut feed = relay.requests("s", &id).unwrap();
+    let worker = relay.clone();
+    let call_task = tokio::spawn(async move {
+        let mut long = call("click", Some("tab"), true);
+        long.timeout_ms = Some(60_000);
+        worker.invoke(long).await
+    });
+    let _ = request(&mut feed).await;
+    assert_eq!(lock(&relay.0).pending.len(), 1);
+    call_task.abort();
+    let _ = call_task.await;
+    assert!(lock(&relay.0).pending.is_empty());
+}
+
+#[tokio::test]
+async fn an_explicit_server_tab_stays_on_the_server_while_a_desktop_tab_is_current() {
+    let relay = Relay::default();
+    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let mut feed = relay.requests("s", &id).unwrap();
+    let worker = relay.clone();
+    let first = tokio::spawn(async move { worker.invoke(call("click", Some("tab"), true)).await });
+    let event = request(&mut feed).await;
+    answer(&relay, "s", &event, json!({"ok":true,"result":{}}));
+    assert!(first.await.unwrap().unwrap().is_ok());
+    assert!(
+        relay
+            .invoke(call("click", Some("server-tab"), true))
+            .await
+            .is_none()
+    );
+}

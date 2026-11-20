@@ -118,7 +118,12 @@ impl Preview {
         if let Some(existing) = state.desktop.iter().find(|s| s.id == id) {
             return existing.thread == thread;
         }
-        if state.desktop.len() >= MAX_DESKTOP_TABS {
+        // Ids with this server's epoch come only from its own allocator; an unknown one could
+        // collide with a tab it opens later.
+        if state.desktop.len() >= MAX_DESKTOP_TABS
+            || id.is_empty()
+            || id.ends_with(self.0.epoch.as_str())
+        {
             return false;
         }
         // Host identity belongs to the live relay, never the page's saved state.

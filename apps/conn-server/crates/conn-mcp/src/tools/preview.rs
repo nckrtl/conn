@@ -132,6 +132,15 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
             let relayed = result.map_err(relay_failure)?;
             target_tab = relayed.tab;
             let opened = relayed.value;
+            // Only `evaluate` answers with any JSON; the rest must be objects (T3 decodes them).
+            if operation != "evaluate" && !opened.is_object() {
+                return Err(ToolError::Preview {
+                    tag: "PreviewAutomationMalformedResponseError",
+                    message: format!(
+                        "Preview automation {operation} returned a malformed response."
+                    ),
+                });
+            }
             match (
                 name,
                 args.get("target"),
@@ -140,7 +149,14 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
                 ("preview_open", Some(target), Some(id)) => {
                     let input = json!({ "target": target });
                     match relay("navigate", input, Some(id.to_owned()), None, true).await {
-                        Some(result) => result.map_err(relay_failure)?.value,
+                        Some(result) => Some(result.map_err(relay_failure)?.value)
+                            .filter(Value::is_object)
+                            .ok_or_else(|| ToolError::Preview {
+                                tag: "PreviewAutomationMalformedResponseError",
+                                message:
+                                    "Preview automation navigate returned a malformed response."
+                                        .into(),
+                            })?,
                         None => opened,
                     }
                 }
@@ -183,7 +199,11 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     if operation == "status" && !desktop && value.get("tabs").is_none() {
         value["tabs"] = json!([]);
     }
-    if operation == "snapshot" && args.get("save").and_then(Value::as_bool) == Some(true) {
+    let withheld = value.pointer("/screenshot/data").and_then(Value::as_str) == Some("");
+    if operation == "snapshot"
+        && args.get("save").and_then(Value::as_bool) == Some(true)
+        && !withheld
+    {
         let data = value
             .pointer("/fullScreenshot/data")
             .or_else(|| value.pointer("/screenshot/data"))

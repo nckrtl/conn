@@ -44,13 +44,17 @@ itself, so nothing new is advertised.
   T3's refusal. `preview_cdp_endpoint` on a desktop tab returns the desktop's endpoint.
 - **Proof:** `crates/conn-mcp/tools/desktop-relay-parity.mjs` (in `parity.mjs`): T3's own
   `PreviewManager`, `PreviewAutomationBroker`, `DesktopTabRelay` and preview toolkits against
-  ours, with one stand-in desktop: 22 MCP cases equal (explicit and followed tabs, eleven
-  remote error kinds, recording, open, status, list, close) and the 21 requests the desktop
-  received equal. `effect-client.mjs`: open a desktop tab, a refused and an accepted
+  ours, with one stand-in desktop: 23 MCP cases equal (explicit and followed tabs, eleven
+  remote error kinds, a withheld screenshot, recording, open, status, list, close) and the
+  requests the desktop received equal. `effect-client.mjs`: open a desktop tab, a refused and an accepted
   registration, the stream's `connected` event and an answer over the real socket. Unit
   tests: conflict, session ownership, the 30 s registration expiry, timeouts that release a
   silent desktop, pending requests failed when the desktop leaves.
-- **Known differences:** bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
+- **Known differences:** a call that names a server tab stays on the server's browser while
+  a desktop tab is current (T3 sends it to the desktop, which refuses it). A desktop cannot
+  restore an unknown tab id from this server's own allocator. `preview.list` gives no
+  `host`/`hostedHere` (as T3's `preview.list`); `fill_credential` reads the server browser
+  only. Bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
   records, 256 pending requests, 256 agent assignments, 64 queued requests per desktop (a
   full queue answers `RequestQueueClosedError`). `preview_status` reads the desktop tabs one
   after another (T3: four at a time). `preview_act` input is not decoded per action before it

@@ -70,6 +70,11 @@ const cases = [
   { tool: "preview_dialog", args: { accept: true }, reply: { ok: false } },
   { tool: "preview_snapshot", args: {}, reply: fail("PreviewAutomationResultTooLargeError", { maximumBytes: 1024 }) },
   { tool: "preview_snapshot", args: { tabId: "$desktop", includeImage: true }, reply: fail("PreviewAutomationTabNotFoundError") },
+  {
+    tool: "preview_snapshot",
+    args: { includeImage: true, save: true },
+    reply: { ok: true, result: { ...SNAPSHOT, screenshot: { mimeType: "image/png", data: "", width: 0, height: 0 } } },
+  },
   { tool: "preview_cdp_endpoint", args: {}, reply: { ok: true, result: { endpoint: "ws://127.0.0.1:9/devtools/page/x", tabId: "$desktop" } } },
   { tool: "preview_recording_start", args: {} },
   { tool: "preview_open", args: { tabId: "$desktop", url: "http://localhost:3001", open: false }, reply: status("http://localhost:3001/") },

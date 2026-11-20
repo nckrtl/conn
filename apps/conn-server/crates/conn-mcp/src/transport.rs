@@ -177,6 +177,7 @@ pub(crate) async fn handle(
         return Reply::empty(StatusCode::ACCEPTED).with(PROTOCOL_HEADER, PROTOCOL_VERSION.into());
     }
 
+    let forge = service.forge_shown(&caller).await;
     let mut changed = false;
     let body = match method_name {
         "ping" | "logging/setLevel" => {
@@ -191,10 +192,10 @@ pub(crate) async fn handle(
                     let exposure = crate::lock(&service.exposure);
                     catalog::list_filtered(|name| {
                         exposure.listed(&thread.provider_session_id, name)
-                            && catalog::offered_to(name, &caller)
+                            && catalog::offered_to(name, &caller, service.links_enabled(), forge)
                     })
                 }
-                _ => catalog::list_for(&caller),
+                _ => catalog::list_for(&caller, service.links_enabled(), forge),
             }
         ),
         "tools/call" => {
@@ -202,7 +203,8 @@ pub(crate) async fn handle(
                 .get_mut("params")
                 .map(Value::take)
                 .unwrap_or_default();
-            let (result, list_changed) = call(service, &caller, &rpc_id, params, headers).await;
+            let (result, list_changed) =
+                call(service, &caller, &rpc_id, params, headers, forge).await;
             changed = list_changed;
             result
         }
@@ -231,6 +233,7 @@ async fn call(
     id: &Value,
     mut params: Value,
     headers: &HeaderMap,
+    forge: bool,
 ) -> (String, bool) {
     let invalid = |message: &str| (rpc_error(id, -32602, message), false);
     let mut arguments = match params["arguments"].take() {
@@ -241,7 +244,8 @@ async fn call(
     let Some(name) = params["name"].as_str() else {
         return invalid("Invalid method parameters");
     };
-    let found = catalog::tool(name).filter(|_| catalog::offered_to(name, caller));
+    let found = catalog::tool(name)
+        .filter(|_| catalog::offered_to(name, caller, service.links_enabled(), forge));
     let Some((tool, order)) = found else {
         return invalid(&format!("Tool '{name}' not found"));
     };
@@ -272,7 +276,11 @@ async fn call(
             let data = value
                 .get_mut("screenshot")
                 .and_then(Value::as_object_mut)
-                .and_then(|s| s.remove("data"))
+                .and_then(|s| {
+                    // T3 states the PNG type whatever the host sent (a desktop may omit it).
+                    s.insert("mimeType".into(), json!("image/png"));
+                    s.remove("data")
+                })
                 .unwrap_or(Value::Null);
             let url = value.get("url").cloned().unwrap_or(Value::Null);
             let (mut value, text, omitted) = crate::snapshot::bound_metadata(value);
@@ -284,10 +292,21 @@ async fn call(
                 content.push(json!({"type":"text","text":format!("Snapshot text was bounded. Omitted: {}.",omitted.join("; "))}));
                 value["omitted"] = json!(omitted);
             }
-            if include_image {
+            // An empty image is withheld: a desktop filled a secret into the page (T3's notice).
+            if data.as_str() == Some("") {
+                content.push(json!({"type":"text","text":SCREENSHOT_WITHHELD_NOTICE}));
+            } else if include_image {
                 content.push(json!({"type":"image","data":data,"mimeType":"image/png"}));
             }
             json!({"content":content,"structuredContent":value,"isError":false})
+        }
+        Ok(mut value) if name == "device_screenshot" => {
+            let data = value
+                .get_mut("screenshot")
+                .and_then(Value::as_object_mut)
+                .and_then(|s| s.remove("data"))
+                .unwrap_or(Value::Null);
+            json!({"content":[{"type":"text","text":value.to_string()},{"type":"image","data":data,"mimeType":"image/png"}],"structuredContent":value,"isError":false})
         }
         Ok(mut value) if name == "html_preview" => {
             let data = value
@@ -303,6 +322,13 @@ async fn call(
                     .as_array()
                     .is_some_and(|tools| !tools.is_empty());
             json!({"content": [{"type": "text", "text": value.to_string()}], "structuredContent": value, "isError": false})
+        }
+        Err(tools::ToolError::Image {
+            tag,
+            operation,
+            message,
+        }) => {
+            json!({"content":[{"type":"text","text":message}],"structuredContent":{"error":{"_tag":tag,"operation":operation,"failureCount":1,"message":message}},"isError":true})
         }
         Err(tools::ToolError::Failure { message, .. }) if name == "html_preview" => {
             json!({"content":[{"type":"text","text":message}],"structuredContent":{"error":{"_tag":"OrchestratorMcpFailure","operation":"preview","failureCount":1,"message":message}},"isError":true})
@@ -334,3 +360,6 @@ async fn call(
         changed,
     )
 }
+
+/// T3's `SCREENSHOT_WITHHELD_NOTICE` (`McpHttpServer.ts`).
+const SCREENSHOT_WITHHELD_NOTICE: &str = "No screenshot: a password or code was filled into this page, so it is not shown as an image. The text above is redacted. Navigate to another page to see screenshots again.";

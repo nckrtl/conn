@@ -26,7 +26,8 @@ const LAYOUT = {
     columns: 3,
     step: 162,
     height: 210,
-    chart: { width: 345, height: 126, gutter: 26, ticks: [0, 4, 8, 12], days: [0, 9, 19, 29] },
+    // Detail card: 393 screen − 2×12 gutter − 2×1 border − 2×12 padding.
+    chart: { width: 343, height: 126, gutter: 26, ticks: [0, 4, 8, 12], days: [0, 9, 19, 29] },
   },
   c: {
     rows: 1,
@@ -74,8 +75,8 @@ function Change(props: { readonly card: InsightCard }) {
 
 /** A corner that faces another card is half as round as one on the group's edge (production's blockRadius). */
 function radiusOf(row: number, rows: number, column: number, columns: number) {
-  // Corners that face another card are square; only the grid's outer corners round (8px).
-  const radius = (outer: boolean) => `${outer ? 8 : 0}px`;
+  // Corners that face another card are square; only the grid's outer corners round (12px).
+  const radius = (outer: boolean) => `${outer ? 12 : 0}px`;
   const left = column === 0;
   const right = column === columns - 1;
   return `${radius(row === 0 && left)} ${radius(row === 0 && right)} ${radius(row === rows - 1 && right)} ${radius(row === rows - 1 && left)}`;

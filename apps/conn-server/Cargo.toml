@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -28,6 +28,7 @@ conn-files = { path = "crates/conn-files" }
 conn-terminal = { path = "crates/conn-terminal" }
 conn-support = { path = "crates/conn-support" }
 conn-features = { path = "crates/conn-features" }
+conn-devices = { path = "crates/conn-devices" }
 # Fixed-time scheduled tasks run on the server's local calendar, across daylight saving, as
 # the T3 server's `DateTime.withCurrentZoneLocal`. The system's tz database only: no bundled
 # copy. Cost measured in crates/conn-features/README.md.

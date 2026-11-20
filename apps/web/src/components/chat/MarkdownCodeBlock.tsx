@@ -174,7 +174,7 @@ export function MarkdownCodeBlock({
   const defaultWrapped = useClientSettings((settings) => settings.wordWrap);
   const [wrapOverride, setWrapOverride] = useState<boolean | null>(null);
   const wrapped = wrapOverride ?? defaultWrapped;
-  // Wrap is offered only when a line runs past the block (or once the reader has toggled it).
+  // Wrap is offered only when a line runs past the block, or while wrapping is on (to turn it off).
   const bodyRef = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures whether the code scrolls sideways
@@ -248,7 +248,7 @@ export function MarkdownCodeBlock({
           role="toolbar"
           aria-label={gt("Code block actions")}
         >
-          {canWrap && (overflowing || wrapOverride !== null) ? (
+          {canWrap && (overflowing || wrapped) ? (
             <Tooltip>
               <TooltipTrigger
                 render={

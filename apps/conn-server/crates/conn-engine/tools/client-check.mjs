@@ -403,13 +403,22 @@ check("fork: lineage, a native fork, and the relationship graph", () => {
 });
 
 // Pull request links: T3's GitHub keys, a stack tombstone lifted by hand.
-check("pull requests: link, unlink and relink as T3 writes them", () => {
+check("pull requests and issues: link, unlink and relink as T3 writes them", () => {
   const followed = followThread(exported.pullRequestLinkItems);
   assert.equal(followed.status, "live");
   const kinds = exported.pullRequestLinkItems
     .filter((item) => item.event)
     .map((item) => item.event.type);
-  assert.deepEqual(kinds.slice(-4), Array(4).fill("thread.pull-request-synced"));
+  assert.deepEqual(kinds.slice(-10, -4), Array(6).fill("thread.pull-request-synced"));
+  assert.deepEqual(kinds.slice(-4), Array(4).fill("thread.issue-synced"));
+  // A link that is already there keeps the thread's time, so the sidebar does not move it.
+  const issueEvents = exported.pullRequestLinkItems.filter((item) => item.event?.type === "thread.issue-synced");
+  assert.equal(issueEvents[1].event.payload.updatedAt, issueEvents[0].event.payload.updatedAt);
+  // Issue links as T3's decider keeps them: one #12 (host in lower case), #13 gone.
+  assert.deepEqual(
+    followed.projection.thread.issues.map((link) => [link.host, link.scope, link.key, link.displayKey, link.source]),
+    [["github.com", "o/r", "12", "#12", "agent"]],
+  );
   const links = followed.projection.thread.pullRequests.map((link) => ({
     host: link.host,
     repository: link.repository,
@@ -421,6 +430,12 @@ check("pull requests: link, unlink and relink as T3 writes them", () => {
     { host: "github.com", repository: "o/r", number: 4, url: "https://github.com/O/R/pull/4", source: "manual" },
     { host: "github.com", repository: "o/r", number: 9, url: "https://github.com/o/r/pull/9", source: "manual" },
   ]);
+  // The link sweep's writes reach the client: #4's snapshot and the branch's pull request.
+  const [first] = followed.projection.thread.pullRequests;
+  assert.equal(first.snapshot.title, "Fix the chip");
+  assert.equal(first.snapshot.checksState, "failing");
+  assert.equal(first.snapshot.reviewDecision, "review-required");
+  assert.equal(followed.projection.thread.branchPullRequest.number, 4);
 });
 
 check("batch threads: creation appears in the parent timeline and keeps sender provenance", () => {

@@ -6,12 +6,12 @@
 }
 /* No container: the cards sit on the page and run off the right edge as you scroll. */
 [data-variant="b"] .m-ins-scroll {
-  scroll-padding-left: 8px;
+  scroll-padding-left: 12px;
 }
 [data-variant="b"] .m-ins-grid {
   grid-template-columns: repeat(3, 160px);
   gap: 2px;
-  padding: 0 8px;
+  padding: 0 12px;
 }
 /* The fade over the clipped edge is gone once the scroll reaches the end. */
 [data-variant="b"] .m-ins-fade {
@@ -55,8 +55,8 @@
 
 /* The chart card takes the cards' place, as a production card face. */
 [data-variant="b"] .m-ins-detail {
-  margin-inline: 8px;
-  border-radius: 8px;
+  margin-inline: 12px;
+  border-radius: 12px;
 }
 
 /* Only the top row has a border: its highlighted top edge. Everything else is borderless

@@ -99,6 +99,21 @@ from this tree.
   `conn-server-release.yml`. It makes a GitHub Release on `nckrtl/conn` with
   `conn-server-<version>-linux-x64.tar.gz` and its `.sha256`, not marked Latest; Orbit
   downloads it. Conn's `release.yml` takes only `v*.*.*` tags, so neither starts the other.
+- **Not served, by decision** (Nick, 2026-11-20). The Conn Server does not serve these
+  client areas. They stay unregistered, and parity work skips them:
+  - Resource telemetry: `subscribeResourceTelemetry`, the resource and process history and
+    its retry (the Settings › Diagnostics CPU and memory panel). Orbit tracks resources.
+  - The Usage page: `server.getUsageSummary` and `server.refreshUsageRates`.
+  - Session import: `agentSessions.scan` and `agentSessions.import`. No threads are
+    imported, including old T3 server threads when a container switches servers.
+  - Clone from the client: `projectClone.*`. The `/mcp` clone tool stays.
+  - The test-login group of the browser's key menu: `credentials.listForSite` and
+    `credentials.fillForSite`. Vault logins in that menu stay; the desktop fills them itself.
+  - Linear and other standalone trackers: `issueTrackers.*`. GitHub issues stay.
+
+  The Diagnostics panel, the Usage page and the key menu's test-login group may later be
+  removed from Conn itself.
+
 - **Exclusions.** Root Vite+ format, lint and test configs ignore `apps/conn-server/**`,
   `.github/scripts/ci-changes.cjs` treats it and the `conn-server-*` workflows as inert for
   Conn's CI, and `.gitignore` re-includes `apps/conn-server/helpers/sdk-host/build/`. On a
@@ -179,52 +194,59 @@ Sources:
 
 ### Icons
 
-Web thread timeline icons are Phosphor: solid by default, bold for carets and
-line glyphs whose solid form adds a box. Icons elsewhere stay Lucide.
-`ConnIconScope` around `MessagesTimeline` in `ChatView.tsx` selects Phosphor.
+Every web and desktop icon is a Superheroicons 16px solid glyph. The set is
+vendored in `assets/conn/superheroicons/` (`16/solid/*.svg`, `manifest.json`,
+README there); fix glyphs in github.com/nckrtl/superheroicons and copy them in.
+`manifest.json` maps each Lucide name Conn uses to a glyph.
 
-The web tsconfig and Vite's `resolve.alias` map `lucide-react` and `lucide` to
-Conn modules that pair each Lucide icon with a Phosphor icon. Upstream imports
-stay unchanged. A new upstream icon fails typecheck until it gets an entry. Both
-mappings are needed: the dev server ignores tsconfig paths for pre-bundled
-packages.
+`node scripts/generate-conn-icons.ts` writes `apps/web/src/icons/lucide-react.ts`:
+one component per Lucide name, with Lucide's props (`size`, `color`, `className`;
+stroke props are ignored) and the `lucide lucide-<name>` classes. The web
+tsconfig and Vite's `resolve.alias` map `lucide-react` to it, so upstream imports
+stay unchanged. A Lucide name missing from the manifest fails the typecheck until
+the set maps it. Both mappings are needed: the dev server ignores tsconfig paths
+for pre-bundled packages. Colour icons with `text-*`, not `stroke-*`; for a halo
+use `stroke-background [paint-order:stroke]`.
 
-Upstream removed icon morphing and `MorphIcon` (#33985); the 2026-11-12 sync took
-that removal, so toggles swap icons instantly through `lucide-react`. The `lucide`
-alias and `lucideNodes` (from `lucide-original`) remain for any `lucide` import. Project and workspace icons use
-`lucide-react/dynamic` and `lucide-react-original`.
-
-Sources:
-
-- Web (`apps/web/`): `src/icons/` (`lucide-react.ts`, `lucide.ts`,
-  `connIcon.tsx`), `tsconfig.json` (`paths`), `vite.config.ts`.
-- Components (`apps/web/src/components/`): `ChatView.tsx`,
-  `sidebar/workspaceVisuals.tsx`.
-
-### iOS icons
-
-On iOS, thread feed icons in messages and the work log are Phosphor. The rest of
-the app, including native toolbars, tab bars and menus, keeps SF Symbols.
-Android keeps Tabler. `AppSymbol.tsx` (upstream's iOS implementation since its platform-primitive
-refactor, #33173; Conn's version replaces it) also uses SF Symbols for git icons
-that upstream drew with Tabler.
-
-`symbols.json` maps SF names to Phosphor icons and weights: solid by default,
-bold for carets and line glyphs that solid would box. Inside `ConnSymbolScope`
-around `ThreadFeed` in `ThreadDetailScreen.tsx`, `AppSymbol.tsx` requests
-mapped names with a `conn.` prefix. `ConnSymbols.swift` swaps `UIImage`'s
-`systemImageNamed` methods only for those names.
-
-After changing `symbols.json`, run `node scripts/build-conn-symbols.ts`. It
-builds custom symbols and `ConnSymbolNames.swift`. Commit the output and rebuild
-the app.
+Icons with no Lucide name use a glyph by concept id: `connIcon("<concept>",
+<concept>Glyph)` from `src/icons/glyphs.generated.ts` (Mini PC and Workstation
+machines, SnapShots, screen rotation). Glyphs drawn at 24px or more use
+the set's 24px files, vendored one by one in `24/solid/` (the foldable postures
+in `DeviceDuoGlyph`, size-7); everything else is 16px. Project and workspace icons (any Lucide
+name a user picks) stay on `lucide-react/dynamic` and `lucide-react-original`.
 
 Sources:
 
-- `apps/mobile/modules/conn-symbols/` (`symbols.json`, `ios/`).
-- `scripts/build-conn-symbols.ts`.
-- Mobile (`apps/mobile/src/`): `components/ui/AppSymbol.tsx`,
-  `components/ConnSymbolScope.tsx`, `features/threads/ThreadDetailScreen.tsx`.
+- `assets/conn/superheroicons/`, `scripts/generate-conn-icons.ts`.
+- Web (`apps/web/`): `src/icons/` (`lucide-react.ts`, `connIcon.tsx`),
+  `tsconfig.json` (`paths`), `vite.config.ts`, `components/sidebar/workspaceVisuals.tsx`.
+
+### Mobile icons
+
+Mobile draws the Superheroicons **24px** solid set (`assets/conn/superheroicons/24/solid/`;
+web and desktop stay on 16px). The manifest's `sf` map names a glyph for each SF Symbol name
+the app uses.
+
+- iOS: `node scripts/build-conn-symbols.ts` builds a custom symbol per mapped name
+  (`ConnSymbols.xcassets`, `ConnSymbolNames.swift`). `ConnSymbols.swift` swaps
+  `UIImage`'s `systemImageNamed` methods so every caller gets them: `AppSymbol.tsx`
+  (expo-symbols), tab bars and menus. Unmapped names stay SF Symbols.
+- Native header buttons take template images instead (`assets/header-icons/`,
+  `src/native/connHeaderIcons.generated.ts`), so they draw the glyph at 24pt; build header
+  icons with `connHeaderIcon(name)` (react-navigation items) or `connScreensHeaderIcon(name)`
+  (react-native-screens items). `V5StackHeader` converts SF names itself.
+- Android: the same script writes `src/components/ui/connGlyphs.generated.ts`;
+  `AppSymbol.android.tsx` draws it with react-native-svg (`ConnGlyph.tsx`).
+- Composer chips: `apps/mobile/scripts/sync-context-chip-icons.mjs` renders the
+  manifest's `chips` from the 24px set.
+
+Run the scripts after changing the set and commit their output.
+
+Sources:
+
+- `assets/conn/superheroicons/`, `scripts/build-conn-symbols.ts`.
+- `apps/mobile/modules/conn-symbols/ios/`, `apps/mobile/src/components/ui/`
+  (`AppSymbol.tsx`, `AppSymbol.android.tsx`, `ConnGlyph.tsx`), `apps/mobile/src/native/connHeaderIcon.ts`.
 
 ### Workspaces
 
@@ -1355,16 +1377,14 @@ Sources:
      forward buttons out of `SidebarChromeHeader`. Take upstream's
      sidebar content changes inside that wrapper. The November 7 sync dropped
      all three; see [Shell design](#shell-design).
-   - `apps/web/src/components/ChatView.tsx`: keep `<ConnIconScope>` around
-     `<MessagesTimeline>`;
-     `apps/mobile/src/features/threads/ThreadDetailScreen.tsx`: keep
-     `<ConnSymbolScope>` around `<ThreadFeed>`.
+   - `apps/web/src/icons/lucide-react.ts`: generated; take upstream's new
+     Lucide names into `assets/conn/superheroicons/manifest.json` (ask the icon
+     set for a glyph) and regenerate.
    - `apps/mobile/src/components/ui/AppSymbol.tsx` (was `AppSymbol.ios.tsx` until 2026-11-10): keep Conn's version (no
-     Tabler; `conn.` names inside `ConnSymbolScope`).
+     Tabler; every name through expo-symbols and `ConnSymbols.swift`).
    - Work-log icon unions (`thread-work-log.tsx`): keep both sides' icons.
    - `apps/web/vite.config.ts` (`resolve.alias`), `apps/web/tsconfig.json`
-     (`paths`), `apps/web/package.json` (`lucide-react-original`,
-     `lucide-original`, `@phosphor-icons/react`), `apps/mobile/package.json`
+     (`paths`), `apps/web/package.json` (`lucide-react-original`), `apps/mobile/package.json`
      (the `-conn.tgz` tarballs) and `pnpm-workspace.yaml` (the Conn tarball's
      build allowance): keep the Conn entries next to upstream's.
    - Desktop relay routing: keep
@@ -1465,11 +1485,10 @@ Sources:
    `apps/desktop/src/window/DesktopWindow.test.ts`. Run `vp run i18n:check` and
    `vp run brand:check` ([i18n and the app name](#i18n-and-the-app-name)). Run `vp i`
    first: merges change dependencies. When the web typecheck reports a Lucide name missing from
-   `apps/web/src/icons/lucide-react.ts`, add a line for it (the Lucide icon and
-   the closest Phosphor icon). New SF Symbol names in the mobile thread feed
-   stay SF Symbols until they get an entry in
-   `apps/mobile/modules/conn-symbols/symbols.json` and
-   `node scripts/build-conn-symbols.ts` runs. If upstream bumps a vendored
+   `apps/web/src/icons/lucide-react.ts`, or the mobile typecheck an SF name missing
+   from `AppSymbolName`, ask the icon set to map it in
+   `assets/conn/superheroicons/manifest.json`, copy the set in, and run
+   `node scripts/generate-conn-icons.ts` and `node scripts/build-conn-symbols.ts`. If upstream bumps a vendored
    tarball in `apps/mobile/deps`, rebuild Conn's as described below.
 4. Publish the exact build commit to an origin `sync/` branch
    (`node scripts/publish-sync-branch.ts`; a dated `sync/<yyyy-mm-dd>` tip

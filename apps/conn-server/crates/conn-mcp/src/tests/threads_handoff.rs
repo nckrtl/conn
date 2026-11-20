@@ -18,6 +18,7 @@ async fn running_parent(f: &Fixture) -> (Value, Caller) {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     (parent, caller)
 }
@@ -115,6 +116,7 @@ async fn attachment_upload_is_owned_by_preparing_caller() {
         Caller::Client(ClientCaller {
             session_id: "other".into(),
             max_runtime_mode: Some("full-access"),
+            ..ClientCaller::default()
         }),
     )
     .await;
@@ -223,7 +225,7 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
-async fn git_project(f: &Fixture) -> PathBuf {
+pub(super) async fn git_project(f: &Fixture) -> PathBuf {
     let root = f.dir.join("repo");
     let path = root.clone();
     tokio::task::spawn_blocking(move || {

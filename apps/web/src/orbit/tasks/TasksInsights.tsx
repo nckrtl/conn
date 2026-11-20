@@ -10,6 +10,7 @@ import {
   type OrbitTaskInsights,
   type OrbitTaskInsightsPeriod,
   type OrbitTasksResult,
+  type TrendPoint,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { msg, useGT, useMessages } from "gt-react";
 import { TrendingDownIcon, TrendingUpIcon, XIcon } from "lucide-react";
@@ -56,11 +57,7 @@ const INSIGHTS_POLL_MS = 300_000;
 type InsightsState = { readonly status: "loading" } | OrbitTasksResult<OrbitTaskInsights>;
 
 function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number | null) {
-  const [state, setState] = useState<{ key: string; value: InsightsState }>({
-    key: "",
-    value: { status: "loading" },
-  });
-  const key = `${period}:${project ?? "all"}`;
+  const [state, setState] = useState<InsightsState>({ status: "loading" });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads Orbit's insights for the board's period and Project, and re-reads on a slow poll
   useEffect(() => {
     let disposed = false;
@@ -70,7 +67,7 @@ function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number |
           ? await client.getTaskInsights(project === null ? { period } : { period, project })
           : { status: "error", reason: "unreachable", message: m(msg("No Orbit Gateway here.")) };
         // A failed re-read turns the numbers into dashes; stale numbers would read as current.
-        if (!disposed) setState({ key, value });
+        if (!disposed) setState(value);
       });
     read();
     const timer = window.setInterval(read, INSIGHTS_POLL_MS);
@@ -78,8 +75,10 @@ function useOrbitTaskInsights(period: OrbitTaskInsightsPeriod, project: number |
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [key, period, project]);
-  return state.key === key ? state.value : ({ status: "loading" } as const);
+  }, [period, project]);
+  // A new period or Project keeps the previous numbers on screen until Orbit answers, then replaces
+  // them; dashes in between would flash the tiles empty.
+  return state;
 }
 
 /**
@@ -170,9 +169,13 @@ function useInsightHint() {
   return (id: InsightId, insights: OrbitTaskInsights | null) => {
     switch (id) {
       case "completed":
-        return gt(
-          "Tasks that merged in the period. The line counts the merges in the days up to each point.",
-        );
+        return insights?.period === "24h"
+          ? gt(
+              "Tasks that merged in the period. The line counts the merges in the hours up to each point.",
+            )
+          : gt(
+              "Tasks that merged in the period. The line counts the merges in the days up to each point.",
+            );
       case "spent":
         return gt(
           "All agent tokens of the tasks that ended, replaced threads included. More tasks spend more, so a change is neither good nor bad.",
@@ -207,7 +210,7 @@ function InsightCard(props: {
   spec: InsightSpec;
   label: string;
   result: InsightResult;
-  trend: ReadonlyArray<{ date: string; value: number | null }> | null;
+  trend: ReadonlyArray<TrendPoint> | null;
   hint: string;
   scope: string;
   onExpand: () => void;
@@ -365,19 +368,24 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
   const open = shown.find((spec) => spec.id === expanded);
   const grid = insightGrid(shown.length);
   const days = period === "7d" ? 7 : 30;
+  const periodScope =
+    period === "24h"
+      ? gt("Last 24 hours against the 24 before.")
+      : gt("Last {days} days against the {days} before.", { days });
   const searching = props.query.trim().length > 0;
   const scope =
     state.status === "error"
       ? gt("Orbit did not answer: {message}", { message: state.message })
-      : [
-          gt("Last {days} days against the {days} before.", { days }),
-          searching ? gt("The search does not narrow these numbers.") : null,
-        ]
+      : [periodScope, searching ? gt("The search does not narrow these numbers.") : null]
           .filter((part) => part !== null)
           .join(" ");
   return (
     <section
-      aria-label={gt("Task insights, last {days} days", { days })}
+      aria-label={
+        period === "24h"
+          ? gt("Task insights, last 24 hours")
+          : gt("Task insights, last {days} days", { days })
+      }
       className="@container relative shrink-0 border-b border-(--shell-divider)! [--fade-end:0] [--fade-start:0]"
     >
       {/* No scrollbar: the edges fade out while there is more to scroll to. */}

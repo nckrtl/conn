@@ -29,45 +29,36 @@ import {
 
 // How many label chips fit grows with the meta line: one, two, then three. The rest fold into a
 // "+N" chip of the same shape, one per width, so the count always matches the chips shown.
+const LABEL_SLOTS = [
+  { chip: "inline-flex", overflow: "inline-flex @xl/pr-row-meta:hidden" },
+  {
+    chip: "hidden @xl/pr-row-meta:inline-flex",
+    overflow: "hidden @xl/pr-row-meta:inline-flex @3xl/pr-row-meta:hidden",
+  },
+  { chip: "hidden @3xl/pr-row-meta:inline-flex", overflow: "hidden @3xl/pr-row-meta:inline-flex" },
+] as const;
+
 function PullRequestRowLabels({ labels }: { labels: EnvironmentPullRequestEntry["labels"] }) {
   if (labels.length === 0) return null;
-  const [first, second, third] = labels;
   return (
     <span className="flex min-w-0 items-center gap-1.5">
-      {first ? <PullRequestLabelChip label={first} size="pill" /> : null}
-      {second ? (
-        <PullRequestLabelChip
-          label={second}
-          size="pill"
-          className="hidden @xl/pr-row-meta:inline-flex"
-        />
-      ) : null}
-      {third ? (
-        <PullRequestLabelChip
-          label={third}
-          size="pill"
-          className="hidden @3xl/pr-row-meta:inline-flex"
-        />
-      ) : null}
-      {labels.length > 1 && first ? (
-        <Badge variant="secondary" size="pill" className="@xl/pr-row-meta:hidden">
-          +{labels.length - 1}
-        </Badge>
-      ) : null}
-      {labels.length > 2 && second ? (
-        <Badge
-          variant="secondary"
-          size="pill"
-          className="hidden @xl/pr-row-meta:inline-flex @3xl/pr-row-meta:hidden"
-        >
-          +{labels.length - 2}
-        </Badge>
-      ) : null}
-      {labels.length > 3 && third ? (
-        <Badge variant="secondary" size="pill" className="hidden @3xl/pr-row-meta:inline-flex">
-          +{labels.length - 3}
-        </Badge>
-      ) : null}
+      {LABEL_SLOTS.map((slot, index) =>
+        labels[index] ? (
+          <span key={labels[index].name} className={slot.chip}>
+            <PullRequestLabelChip label={labels[index]} size="pill" />
+          </span>
+        ) : null,
+      )}
+      {LABEL_SLOTS.map((slot, index) => {
+        const remaining = labels.length - index - 1;
+        return remaining > 0 && labels[index] ? (
+          <span key={slot.overflow} className={slot.overflow}>
+            <Badge variant="secondary" size="pill">
+              +{remaining}
+            </Badge>
+          </span>
+        ) : null;
+      })}
     </span>
   );
 }

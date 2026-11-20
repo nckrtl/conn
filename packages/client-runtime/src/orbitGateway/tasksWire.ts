@@ -296,18 +296,29 @@ const InsightsSummary = Schema.Struct({
 
 const InsightsEnvelope = Schema.Struct({
   data: Schema.Struct({
-    period: Schema.Literals(["7d", "30d"]),
+    period: Schema.Literals(["24h", "7d", "30d"]),
     current: InsightsSummary,
     previous: InsightsSummary,
     weekly: Schema.optionalKey(Schema.Array(Schema.Unknown)),
     daily: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+    hourly: Schema.optionalKey(Schema.Array(Schema.Unknown)),
     breakdowns: Schema.optionalKey(
       Schema.Struct({ model: Schema.optionalKey(Schema.Array(Schema.Unknown)) }),
     ),
   }),
 });
 const InsightsWeek = Schema.Struct({ week_start: Schema.String, tokens_per_merged_pr: AnyValue });
-const InsightsDay = Schema.Struct({ date: Schema.String, merged: Schema.Number });
+// A bucket carries its own numbers under the summary's names (Orbit 6112); an older Gateway sends merges only.
+const InsightsDay = Schema.Struct({
+  ...InsightsSummary.fields,
+  date: Schema.String,
+  merged: Schema.Number,
+});
+const InsightsHour = Schema.Struct({
+  ...InsightsSummary.fields,
+  hour: Schema.String,
+  merged: Schema.Number,
+});
 const InsightsBreakdownRow = Schema.Struct({
   key: Schema.String,
   label: Schema.String,
@@ -320,6 +331,7 @@ const InsightsBreakdownRow = Schema.Struct({
 const decodeInsights = Schema.decodeUnknownOption(InsightsEnvelope);
 const decodeInsightsWeek = Schema.decodeUnknownOption(InsightsWeek);
 const decodeInsightsDay = Schema.decodeUnknownOption(InsightsDay);
+const decodeInsightsHour = Schema.decodeUnknownOption(InsightsHour);
 const decodeInsightsBreakdownRow = Schema.decodeUnknownOption(InsightsBreakdownRow);
 
 const insightsSummary = (value: typeof InsightsSummary.Type): OrbitTaskInsightsSummary => ({
@@ -361,6 +373,12 @@ export function decodeOrbitTaskInsights(json: unknown): OrbitTaskInsights | null
       daily: eachRow(data.daily, decodeInsightsDay, (day) => ({
         date: day.date,
         merged: day.merged,
+        values: insightsSummary(day),
+      })),
+      hourly: eachRow(data.hourly, decodeInsightsHour, (hour) => ({
+        hour: hour.hour,
+        merged: hour.merged,
+        values: insightsSummary(hour),
       })),
       byModel: eachRow(
         data.breakdowns?.model,

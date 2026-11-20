@@ -32,6 +32,8 @@ pub struct Host {
     pub environment: Arc<Environment>,
     /// Set once the service exists; it needs the engine, which needs this host.
     pub scheduled_tasks: OnceLock<conn_features::scheduled::ScheduledTasks>,
+    /// Device sessions a closed thread held (`ResourceCleanupService.cleanupDevices`).
+    pub devices: OnceLock<conn_devices::Devices>,
 }
 
 impl std::fmt::Debug for Host {
@@ -59,6 +61,24 @@ impl Host {
     }
 }
 
+impl Host {
+    fn credential_request(&self, session: AgentSession) -> ThreadCredentialRequest {
+        ThreadCredentialRequest {
+            preview: crate::settings::agent_browser_access(
+                &self.environment.settings.raw(),
+                session.project_id.as_deref(),
+            ),
+            device: conn_devices::agent_device_access(
+                &self.environment.settings.raw(),
+                session.project_id.as_deref(),
+            ),
+            thread_id: session.thread_id,
+            provider_instance_id: session.provider_instance_id,
+            subagent: session.subagent,
+        }
+    }
+}
+
 impl EngineHost for Host {
     fn provider_instance_enabled(&self, project_id: Option<&str>, instance_id: &str) -> bool {
         crate::settings::provider_instance_enabled(
@@ -76,25 +96,23 @@ impl EngineHost for Host {
     }
 
     fn agent_tools(&self, session: AgentSession) -> Option<AgentTools> {
-        let entry = self
-            .mcp
-            .get()?
-            .issue_thread_credential(ThreadCredentialRequest {
-                thread_id: session.thread_id,
-                provider_instance_id: session.provider_instance_id,
-                subagent: session.subagent,
-                preview: crate::settings::agent_browser_access(
-                    &self.environment.settings.raw(),
-                    session.project_id.as_deref(),
-                ),
-            });
+        let request = self.credential_request(session);
+        let device_tools = request.device;
+        let entry = self.mcp.get()?.issue_thread_credential(request);
         Some(AgentTools {
             servers: vec![McpServer {
+                device_tools,
                 name: conn_mcp::SERVER_NAME.to_owned(),
                 url: entry.url,
                 headers: vec![("Authorization".to_owned(), entry.authorization)],
             }],
             key: entry.provider_session_id,
+        })
+    }
+
+    fn agent_tools_fit(&self, session: &AgentSession, key: &str) -> bool {
+        self.mcp.get().is_some_and(|mcp| {
+            mcp.thread_credential_fits(key, &self.credential_request(session.clone()))
         })
     }
 
@@ -222,6 +240,11 @@ impl EngineHost for Host {
                     terminal_id: None,
                     delete_history: Some(reason == ThreadClose::Deleted),
                 });
+                // The thread's device sessions end; the devices stay on for other threads.
+                if let Some(devices) = self.devices.get().cloned() {
+                    let thread_id = thread_id.to_owned();
+                    tokio::spawn(async move { devices.cleanup_thread(&thread_id).await });
+                }
             }
         }
         // `ResourceCleanupService`: a deleted thread takes the tasks bound to it.
@@ -303,6 +326,7 @@ mod tests {
             terminals: crate::methods::terminal::manager(Some(&environment)),
             environment: environment.clone(),
             scheduled_tasks: OnceLock::new(),
+            devices: OnceLock::new(),
         };
         host.mcp.set(service.clone()).unwrap();
         let issue = |project: Option<&str>| {

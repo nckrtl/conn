@@ -1094,6 +1094,7 @@ impl Tx<'_> {
         } = draft;
         let collection = collection_of(event_type);
         let mut inserted = false;
+        let mut keeps_activity = false;
         if let Some(kind) = collection {
             let id = payload["id"].as_str().unwrap_or_default().to_owned();
             let existing: Option<(i64, Option<i64>)> = self
@@ -1146,6 +1147,16 @@ impl Tx<'_> {
         } else if event_type.starts_with("thread.") {
             let project_id = payload["projectId"].as_str().unwrap_or_default().to_owned();
             let deleted = event_type == "thread.deleted";
+            // A host sync (link snapshot, branch pull request, watch read) keeps the thread's
+            // `updatedAt`, as T3's deciders do; the sidebar must not move the thread.
+            // An issue link that was already there changes nothing either.
+            keeps_activity = matches!(
+                event_type,
+                "thread.pull-request-synced" | "thread.issue-synced"
+            ) && payload["updatedAt"].is_string()
+                && self
+                    .thread(&thread_id)?
+                    .is_some_and(|old| old["updatedAt"] == payload["updatedAt"]);
             if deleted {
                 self.tx
                     .execute(
@@ -1157,8 +1168,9 @@ impl Tx<'_> {
             self.tx
                 .execute(
                     "INSERT INTO threads (id, project_id, deleted, activity_at, thread) VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(id) DO UPDATE SET project_id = ?2, deleted = ?3, activity_at = ?4, thread = ?5",
-                    params![thread_id, project_id, deleted, self.now, payload.to_string()],
+                     ON CONFLICT(id) DO UPDATE SET project_id = ?2, deleted = ?3,
+                       activity_at = CASE WHEN ?6 THEN activity_at ELSE ?4 END, thread = ?5",
+                    params![thread_id, project_id, deleted, self.now, payload.to_string(), keeps_activity],
                 )
                 .map_err(err)?;
         } else if event_type == "provider-session.detached" {
@@ -1192,7 +1204,7 @@ impl Tx<'_> {
                 params![seq as i64, thread_id, command_id, event_type, streaming, event.to_string()],
             )
             .map_err(err)?;
-        if collection.is_some() || event_type.starts_with("thread.") {
+        if collection.is_some() || (event_type.starts_with("thread.") && !keeps_activity) {
             self.tx
                 .execute(
                     "UPDATE threads SET activity_at = ?2 WHERE id = ?1",
@@ -1343,6 +1355,18 @@ impl Tx<'_> {
             .map_err(err)
     }
 
+    /// The sequence of the thread's latest stored event, or 0.
+    pub(crate) fn thread_latest_sequence(&self, thread_id: &str) -> StoreResult<u64> {
+        self.tx
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE thread_id = ?1",
+                [thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|seq| seq.max(0) as u64)
+            .map_err(err)
+    }
+
     /// A project that was not deleted.
     pub(crate) fn project(&self, project_id: &str) -> StoreResult<Option<Value>> {
         Ok(self
@@ -1364,9 +1388,11 @@ impl Tx<'_> {
             .transpose()
     }
 
-    /// The project row that owns `workspace_root`, deleted or not.
+    /// The project row that owns `workspace_root`, deleted or not. Rows an older version stored
+    /// unnormalized (`/work/repo/.`) are found by their normalized folder, a live one first.
     pub(crate) fn project_by_root(&self, workspace_root: &str) -> StoreResult<Option<Value>> {
-        self.tx
+        let exact = self
+            .tx
             .query_row(
                 "SELECT body FROM projects WHERE workspace_root = ?1",
                 [workspace_root],
@@ -1375,7 +1401,28 @@ impl Tx<'_> {
             .optional()
             .map_err(err)?
             .map(parse)
-            .transpose()
+            .transpose()?;
+        if exact.as_ref().is_some_and(|p| p["deletedAt"].is_null()) {
+            return Ok(exact);
+        }
+        let wanted = crate::projects::normalize_workspace_root(workspace_root);
+        let mut statement = self.tx.prepare("SELECT body FROM projects").map_err(err)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(err)?;
+        let mut deleted = None;
+        for row in rows {
+            let project = parse(row.map_err(err)?)?;
+            let root = project["workspaceRoot"].as_str().unwrap_or_default();
+            if crate::projects::normalize_workspace_root(root) != wanted {
+                continue;
+            }
+            if project["deletedAt"].is_null() {
+                return Ok(Some(project));
+            }
+            deleted.get_or_insert(project);
+        }
+        Ok(exact.or(deleted))
     }
 
     /// Writes a project row and its shell change: `project.updated`, or `project.removed`

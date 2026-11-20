@@ -40,6 +40,24 @@ fn fixture_with(
     host: Option<Arc<dyn conn_engine::EngineHost>>,
     provider: FakeProvider,
 ) -> Fixture {
+    fixture_full(name, host, provider, None)
+}
+
+fn fixture_full(
+    name: &str,
+    host: Option<Arc<dyn conn_engine::EngineHost>>,
+    provider: FakeProvider,
+    peers: Option<Arc<dyn crate::Peers>>,
+) -> Fixture {
+    fixture_with_provider(name, host, Arc::new(provider), peers)
+}
+
+fn fixture_with_provider(
+    name: &str,
+    host: Option<Arc<dyn conn_engine::EngineHost>>,
+    provider: Arc<dyn conn_provider::Provider>,
+    peers: Option<Arc<dyn crate::Peers>>,
+) -> Fixture {
     let dir = std::env::temp_dir().join(format!("conn-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -50,11 +68,12 @@ fn fixture_with(
         title: "Project".into(),
         workspace_root: ROOT.into(),
     }];
-    config.providers = vec![Arc::new(provider)];
+    config.providers = vec![provider];
     config.host = host.or_else(|| Some(Arc::new(threads_handoff::FilesHost(files.clone()))));
     let engine = Arc::new(SqliteEngine::open(config).unwrap());
     let service = McpService::new(McpConfig {
         preview: Some(conn_preview::tabs::Preview::new(dir.clone())),
+        devices: None,
         refresh_provider: None,
         files: Some(files),
         worktrees: Some(crate::WorktreeConfig {
@@ -67,7 +86,10 @@ fn fixture_with(
             hub: conn_vcs::VcsHub::default(),
         }),
         panels: Some(conn_features::panels::PanelBroker::default()),
+        peers,
+        settings: None,
         pull_requests: None,
+        clone_repository: None,
         test_logins: Some(conn_features::test_logins::TestLogins::new(&dir)),
         secrets: Some(conn_features::secrets::SecretRequests::new(
             &dir,
@@ -98,6 +120,7 @@ fn client(write: bool) -> Caller {
     Caller::Client(ClientCaller {
         session_id: if write { "swamp" } else { "reader" }.into(),
         max_runtime_mode: write.then_some("full-access"),
+        ..ClientCaller::default()
     })
 }
 
@@ -194,9 +217,8 @@ impl<'a> Client<'a> {
             serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap(),
             value
         );
-        let (definition, _) = catalog::tool(tool).unwrap();
-        if let Some(schema) = definition.get("outputSchema") {
-            conforms(schema, &value, tool).unwrap();
+        if let Some(schema) = catalog::result_schema(tool) {
+            catalog::conforms(&schema, &value, tool).unwrap();
         }
         value
     }
@@ -220,53 +242,52 @@ impl<'a> Client<'a> {
     }
 }
 
-/// The JSON Schema subset the advertised output schemas use.
-fn conforms(schema: &Value, value: &Value, at: &str) -> Result<(), String> {
-    if let Some(options) = schema["anyOf"].as_array() {
-        return if options.iter().any(|o| conforms(o, value, at).is_ok()) {
-            Ok(())
-        } else {
-            Err(format!("{at}: {value} matches no anyOf branch"))
-        };
+/// A forwarded result is checked against its tool's success shape (`PeerMcpClient`).
+#[test]
+fn forwarded_results_must_match_their_tool() {
+    assert!(!crate::tool_result_matches("t3_thread_launch", &json!({})));
+    assert!(!crate::tool_result_matches(
+        "t3_thread_search",
+        &json!({"matches": "none"})
+    ));
+    assert!(crate::tool_result_matches(
+        "t3_thread_search",
+        &json!({"matches": [], "extra": true})
+    ));
+    assert!(!crate::tool_result_matches("no_such_tool", &json!({})));
+    // Union results (left out of `tools/list`) are checked too: an empty answer is refused.
+    for tool in [
+        "t3_thread_organize",
+        "t3_pending_request",
+        "t3_queue",
+        "t3_thread_configure",
+        "t3_workflow_stop",
+    ] {
+        assert!(catalog::result_schema(tool).is_some(), "{tool}");
     }
-    if let Some(allowed) = schema["enum"].as_array()
-        && !allowed.contains(value)
-    {
-        return Err(format!("{at}: {value} not in {allowed:?}"));
-    }
-    let ok = match schema["type"].as_str() {
-        Some("string") => value.is_string(),
-        Some("integer") => value.is_i64() || value.is_u64(),
-        Some("number") => value.is_number(),
-        Some("boolean") => value.is_boolean(),
-        Some("null") => value.is_null(),
-        Some("array") => {
-            for (i, item) in value.as_array().into_iter().flatten().enumerate() {
-                conforms(&schema["items"], item, &format!("{at}[{i}]"))?;
-            }
-            value.is_array()
-        }
-        Some("object") => {
-            let Some(object) = value.as_object() else {
-                return Err(format!("{at}: {value} is not an object"));
-            };
-            for key in schema["required"].as_array().into_iter().flatten() {
-                let key = key.as_str().unwrap();
-                if !object.contains_key(key) {
-                    return Err(format!("{at}: missing {key}"));
-                }
-            }
-            for (key, property) in schema["properties"].as_object().into_iter().flatten() {
-                if let Some(field) = object.get(key) {
-                    conforms(property, field, &format!("{at}.{key}"))?;
-                }
-            }
-            true
-        }
-        _ => true,
-    };
-    ok.then_some(())
-        .ok_or_else(|| format!("{at}: {value} is not {}", schema["type"]))
+    assert!(!crate::tool_result_matches("t3_queue", &json!({})));
+    assert!(!crate::tool_result_matches(
+        "t3_workflow_stop",
+        &Value::Null
+    ));
+    assert!(crate::tool_result_matches(
+        "t3_thread_organize",
+        &json!({"sequence": 3})
+    ));
+    // T3 decodes `1.0` as the integer 1; a string past `maxLength` is refused.
+    assert!(crate::tool_result_matches(
+        "t3_thread_organize",
+        &json!({"sequence": 3.0})
+    ));
+    assert!(!crate::tool_result_matches(
+        "t3_thread_organize",
+        &json!({"sequence": 3.5})
+    ));
+    let long = "x".repeat(241);
+    let schema = json!({"type": "string", "maxLength": 240});
+    assert!(catalog::conforms(&schema, &json!(long), "s").is_err());
+    assert!(catalog::conforms(&schema, &json!("😀".repeat(120)), "s").is_ok());
+    assert!(catalog::conforms(&schema, &json!("😀".repeat(121)), "s").is_err());
 }
 
 #[test]
@@ -359,8 +380,9 @@ async fn transport_answers_as_the_typescript_server() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     // An outside client is not offered the tools that act as a calling thread.
+    // Without peer links here, the link tools are hidden too.
     let offered: Vec<_> = catalog::names()
-        .filter(|name| catalog::offered(name, true))
+        .filter(|name| catalog::offered_with_links(name, true, false))
         .collect();
     assert_eq!(names, offered);
     assert!(!names.contains(&"delegate_task"));
@@ -643,6 +665,7 @@ async fn an_agent_delegates_a_task_and_is_woken() {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     assert_eq!(entry.url, "http://127.0.0.1:4711/mcp");
     let token = entry.authorization.strip_prefix("Bearer ").unwrap();
@@ -762,6 +785,7 @@ fn credentials_expire_when_idle_and_stay_bounded() {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     };
     let (token, _) = credentials.issue(request());
     assert!(credentials.resolve(&token).is_some());
@@ -785,6 +809,7 @@ fn a_credential_counts_idle_time_the_wall_clock_shows_after_a_freeze() {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     credentials.jump_wall(Duration::from_secs(10 * 60));
     assert!(credentials.resolve(&token).is_some(), "10 minutes: alive");
@@ -820,6 +845,7 @@ fn caller_namespaces_key_idempotency_per_credential() {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     assert_eq!(thread.namespace(), "p");
     assert_eq!(client(true).namespace(), "client:swamp");
@@ -852,6 +878,7 @@ fn agent_of(f: &Fixture, thread_id: &str) -> Caller {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     let token = entry.authorization.strip_prefix("Bearer ").unwrap();
     Caller::Thread(f.service.resolve_thread_token(token).unwrap())
@@ -1706,18 +1733,7 @@ async fn search_puts_titles_first_and_keeps_slots_for_messages() {
 /// Tools that a text we send to an agent names and that this server does not serve. An agent
 /// told to call one finds no such tool. Serve one, and this test makes you strike it here.
 /// `preview_*` in the orchestration text also names all 13 preview tools.
-const NAMED_NOT_SERVED: &[&str] = &[
-    "ci_logs",
-    "ci_rerun",
-    "device_list",
-    "device_open",
-    "device_screenshot",
-    "fill_credential",
-    "link_issue",
-    "pull_request_create",
-    "t3_environment_link",
-    "t3_environment_links",
-];
+const NAMED_NOT_SERVED: &[&str] = &["pull_request_create"];
 
 /// Every text we send to an agent that can name a tool: the orchestration text and Claude's
 /// texts (`conn-mcp`), the `next` text of a running task, the Codex additional context
@@ -1781,10 +1797,14 @@ async fn fixture_with_tasks(name: &str) -> Fixture {
     let config = &base.service.config;
     let service = McpService::new(McpConfig {
         preview: None,
+        devices: None,
         refresh_provider: None,
         worktrees: None,
         panels: Some(conn_features::panels::PanelBroker::default()),
+        peers: None,
+        settings: None,
         pull_requests: None,
+        clone_repository: None,
         secrets: config.secrets.clone(),
         test_logins: base.service.config.test_logins.clone(),
         engine,
@@ -2273,6 +2293,8 @@ async fn annotation_tools_report_a_conflict_and_refuse_callers_outside_a_thread(
     idle_agent.ok("annotations_list", json!({})).await;
 }
 
+mod peers;
+mod shared_runtime;
 mod threads_handoff;
 
 #[tokio::test(flavor = "current_thread")]
@@ -2320,6 +2342,7 @@ async fn deferred_clients_load_tools_by_provider_session_and_receive_list_change
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     let client = Client::open(&f.service, caller.clone()).await;
     let session = client.session.as_deref().unwrap();
@@ -2986,6 +3009,7 @@ async fn html_preview_validates_before_launch_and_reads_without_a_live_turn() {
         subagent: false,
 
         preview: false,
+        device: false,
     });
     let mut agent = Client::open(&f.service, caller).await;
     client
@@ -3449,12 +3473,14 @@ fn preview_grant_is_retained_per_credential() {
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: false,
+        device: false,
     });
     let (granted, _) = credentials.issue(ThreadCredentialRequest {
         thread_id: "t".into(),
         provider_instance_id: "claudeAgent".into(),
         subagent: false,
         preview: true,
+        device: false,
     });
     assert!(!credentials.resolve(&denied).unwrap().preview);
     assert!(credentials.resolve(&granted).unwrap().preview);
@@ -3516,3 +3542,203 @@ async fn mcp_panel_actions_use_the_ninety_second_action_timeout() {
 }
 
 mod pull_request_watches;
+
+/// `hiddenWithoutForge`: an agent whose project is on no forge loses the forge tools; an
+/// outside client and an agent on a forge keep them.
+#[test]
+fn forge_tools_are_hidden_only_without_a_forge() {
+    let agent = Caller::Thread(ThreadCaller {
+        thread_id: "t".into(),
+        provider_session_id: "s".into(),
+        provider_instance_id: "claudeAgent".into(),
+        subagent: false,
+        preview: false,
+        device: false,
+    });
+    let forge: Vec<&str> = include_str!("forge-hidden.txt").lines().collect();
+    assert_eq!(forge.len(), 8);
+    for name in &forge {
+        assert!(catalog::offered_to(name, &agent, true, true), "{name}");
+        assert!(!catalog::offered_to(name, &agent, true, false), "{name}");
+    }
+    assert!(catalog::offered_to(
+        "link_pull_request",
+        &agent,
+        true,
+        false
+    ));
+    let listed = catalog::list_for(&agent, true, false);
+    assert!(!listed.contains("\"name\":\"ci_logs\""));
+    assert!(catalog::list_for(&agent, true, true).contains("\"name\":\"ci_logs\""));
+}
+
+/// `t3_project_create`, `t3_project_update` and `t3_project_delete` on the engine; the scratch
+/// project is refused as T3's `isScratchProject` refuses it.
+#[tokio::test(flavor = "current_thread")]
+async fn project_writes_create_update_delete_and_keep_scratch() {
+    let f = fixture("project-writes");
+    let mut c = Client::open(&f.service, client(true)).await;
+    let root = f.dir.join("made");
+    let made = c
+        .ok(
+            "t3_project_create",
+            json!({"title": "Made", "workspaceRoot": root, "createWorkspaceRootIfMissing": true}),
+        )
+        .await;
+    assert!(root.is_dir());
+    assert!(made.get("hasCustomTitle").is_none());
+    let id = made["id"].as_str().unwrap().to_owned();
+    assert!(
+        id.starts_with("mcp:"),
+        "the command id names the project: {id}"
+    );
+    let (code, message) = c
+        .failure(
+            "t3_project_create",
+            json!({"title": "Again", "workspaceRoot": root}),
+        )
+        .await;
+    assert_eq!(
+        (code.as_str(), message.as_str()),
+        (
+            "invalid_request",
+            "The workspace is already registered to a project."
+        )
+    );
+    let renamed = c
+        .ok(
+            "t3_project_update",
+            json!({"projectId": id, "title": "Renamed"}),
+        )
+        .await;
+    assert_eq!(renamed["title"], "Renamed");
+    let deleted = c.ok("t3_project_delete", json!({"projectId": id})).await;
+    assert!(!deleted["deletedAt"].is_null());
+    let scratch = f
+        .service
+        .config
+        .engine
+        .call("projects.ensureScratch", json!({}))
+        .await
+        .unwrap();
+    let (code, message) = c
+        .failure(
+            "t3_project_delete",
+            json!({"projectId": scratch["projectId"]}),
+        )
+        .await;
+    assert_eq!(code, "invalid_request");
+    assert!(
+        message.starts_with("\"No project\" is the built-in scratch project"),
+        "{message}"
+    );
+}
+
+/// `t3_thread_transfer`: a fork of a finished run, its transfer in `status` on the fork, and
+/// the engine's merge-back refusal.
+#[tokio::test(flavor = "current_thread")]
+async fn thread_transfer_forks_and_reports_status() {
+    let f = fixture("thread-transfer");
+    let mut c = Client::open(&f.service, client(true)).await;
+    let launched = c
+        .ok(
+            "t3_thread_launch",
+            json!({
+                "projectId": project_id(), "title": "Source", "message": "hello",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-5-5"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "workspaceStrategy": {"type": "root"},
+            }),
+        )
+        .await;
+    let source = launched["threadId"].as_str().unwrap().to_owned();
+    c.ok(
+        "t3_thread_wait",
+        json!({"threadId": source, "runId": launched["runId"], "timeoutMs": 10_000}),
+    )
+    .await;
+    let fork = c
+        .ok(
+            "t3_thread_transfer",
+            // The fake host takes no checkpoints, so the run is named, not `latest_stable`.
+            json!({"threadId": source, "action": "fork", "title": "Forked",
+                "sourcePoint": {"type": "run", "runId": launched["runId"]}}),
+        )
+        .await;
+    let target = fork["targetThreadId"].as_str().unwrap().to_owned();
+    assert!(
+        target.starts_with("mcp:") && target.ends_with(":fork"),
+        "{target}"
+    );
+    let status = c
+        .ok(
+            "t3_thread_transfer",
+            json!({"threadId": target, "action": "status"}),
+        )
+        .await;
+    let transfers = status["transfers"].as_array().unwrap();
+    assert_eq!(transfers.len(), 1, "{status}");
+    assert_eq!(transfers[0]["sourceThreadId"], source);
+    assert_eq!(transfers[0]["targetThreadId"], target);
+    let (code, message) = c
+        .failure(
+            "t3_thread_transfer",
+            json!({"threadId": target, "action": "merge_back", "targetThreadId": source}),
+        )
+        .await;
+    assert_eq!(code, "orchestration_error");
+    assert!(message.contains("merge a fork back"), "{message}");
+}
+
+/// `fill_credential` for an agent: an unknown login, then a saved one with no tab open. Only a
+/// status and T3's message come back.
+#[tokio::test(flavor = "current_thread")]
+async fn fill_credential_answers_with_a_status_only() {
+    let f = fixture("fill-credential");
+    let mut outside = Client::open(&f.service, client(true)).await;
+    let launched = outside
+        .ok(
+            "t3_thread_launch",
+            json!({
+                "projectId": project_id(), "title": "Fill", "message": "hang",
+                "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-5-5"},
+                "runtimeMode": "full-access", "interactionMode": "default",
+                "workspaceStrategy": {"type": "root"},
+            }),
+        )
+        .await;
+    let entry = f.service.issue_thread_credential(ThreadCredentialRequest {
+        thread_id: launched["threadId"].as_str().unwrap().to_owned(),
+        provider_instance_id: "claudeAgent".into(),
+        subagent: false,
+        preview: true,
+        device: false,
+    });
+    let token = entry.authorization.strip_prefix("Bearer ").unwrap();
+    let agent = Caller::Thread(f.service.resolve_thread_token(token).unwrap());
+    let mut c = Client::open(&f.service, agent).await;
+    let missing = c
+        .ok(
+            "fill_credential",
+            json!({"itemId": "login:none", "field": "password"}),
+        )
+        .await;
+    assert_eq!(
+        missing,
+        json!({"status": "item_not_found", "message": "No login with this id. Call request_credentials first."})
+    );
+    let saved = c
+        .ok(
+            "save_test_login",
+            json!({"url": "http://app.test", "username": "tester", "password": "fixture-only"}),
+        )
+        .await;
+    let result = c
+        .ok(
+            "fill_credential",
+            json!({"itemId": saved["id"], "field": "password"}),
+        )
+        .await;
+    assert_eq!(result["status"], "tab_unavailable");
+    assert!(!result.to_string().contains("fixture-only"));
+}

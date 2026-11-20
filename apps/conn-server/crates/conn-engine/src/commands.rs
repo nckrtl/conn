@@ -48,11 +48,10 @@ pub(crate) enum Effect {
         thread_id: String,
         request: Value,
     },
+    /// Ends the provider session; a workspace move does this too. Its MCP credential is
+    /// revoked when the process ends, and kept for the thread's next session while a shared
+    /// process (Codex's `app-server`) still runs, as T3 does.
     CloseSession {
-        thread_id: String,
-    },
-    /// A workspace move ends the process while keeping the caller's MCP credential usable.
-    DetachWorkspace {
         thread_id: String,
     },
     /// Sends a model selection to the thread's running provider turn
@@ -92,7 +91,6 @@ impl Effect {
             | Self::StopBackgroundWork { thread_id, .. }
             | Self::Respond { thread_id, .. }
             | Self::CloseSession { thread_id }
-            | Self::DetachWorkspace { thread_id }
             | Self::ApplyModelSelection { thread_id, .. }
             | Self::CleanupHtmlAttachments { thread_id, .. }
             | Self::ThreadClosed { thread_id, .. } => Some(thread_id),
@@ -155,8 +153,11 @@ pub(crate) fn handler(command_type: &str) -> Option<Handler> {
         "thread.tag.set" => thread_tag_set,
         "thread.mark-unread" => thread_mark_unread,
         "thread.pull-request.link" => thread_pull_request_link,
+        "thread.issue.link" | "thread.issue.unlink" => thread_issue_link,
         "thread.pull-request.unlink" => thread_pull_request_unlink,
         "thread.pull-request.watch" => thread_pull_request_watch,
+        "thread.pull-request-link.sync" => thread_pull_request_link_sync,
+        "thread.pull-request.sync" => thread_pull_request_sync,
         "thread.user-input.dismiss" => thread_user_input_dismiss,
         "provider-session.detach" => provider_session_detach,
         "provider.switch" => provider_switch,
@@ -182,14 +183,8 @@ pub(crate) fn refusal(command_type: &str) -> &'static str {
         "thread.guest-share.close" | "thread.guest-message.dismiss" => {
             "Conn Server does not share threads with guests."
         }
-        "thread.pull-request-link.sync" | "thread.pull-request.sync" => {
-            "Conn Server does not sync pull request links from the host yet."
-        }
         "notification.delivery.accept" => {
             "Conn Server does not deliver background notifications yet."
-        }
-        "thread.issue.link" | "thread.issue.unlink" => {
-            "Conn Server does not link issues to threads yet."
         }
         "subagent.stop" => {
             "Conn Server cannot stop a single subagent yet; stop the thread instead."
@@ -1214,6 +1209,7 @@ fn thread_stop(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let command_id = command["commandId"].as_str().map(str::to_owned);
     let c: ThreadStop = decode(command)?;
     let mut thread = live_thread(tx, &c.thread_id)?;
+    crate::link_requests::close_pending(tx, &c.thread_id)?;
     // Stop means stop: queued messages wait until the user sends again or resumes the queue.
     hold_queue(tx, &c.thread_id)?;
     // Stop also ends the thread's pull request watches.
@@ -1650,6 +1646,7 @@ fn patch_thread(
 
 fn thread_archive(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let c: ThreadOnly = decode(command)?;
+    crate::link_requests::close_pending(tx, &c.thread_id)?;
     patch_thread(tx, &c.thread_id, "thread.archived", true, |t, now| {
         t["archivedAt"] = json!(now);
         crate::pull_requests::end_watches(t);
@@ -1871,7 +1868,7 @@ fn thread_metadata_update(tx: &mut Tx<'_>, command: Value) -> Outcome {
         }
         effects.insert(
             0,
-            Effect::DetachWorkspace {
+            Effect::CloseSession {
                 thread_id: thread_id.clone(),
             },
         );
@@ -2455,8 +2452,121 @@ fn thread_pull_request_link(tx: &mut Tx<'_>, command: Value) -> Outcome {
     Ok(vec![])
 }
 
+/// `threadIssueKeyOf`: tracker, host and scope compared trimmed and in lower case, key trimmed.
+fn issue_key(link: &Value) -> (String, String, String, String) {
+    let text = |key: &str| link[key].as_str().unwrap_or_default().trim().to_owned();
+    (
+        link["tracker"].as_str().unwrap_or_default().to_owned(),
+        text("host").to_lowercase(),
+        text("scope").to_lowercase(),
+        text("key"),
+    )
+}
+
+/// `thread.issue.link` and `thread.issue.unlink`: T3's decider over the thread's `issues`;
+/// `thread.issue-synced` with the thread either way, as T3 emits it.
+fn thread_issue_link(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    let mut thread = live_thread(tx, &thread_id)?;
+    let now = tx.now().to_owned();
+    let mut links = thread["issues"].as_array().cloned().unwrap_or_default();
+    let key = issue_key(&command);
+    let existing = links.iter().position(|link| issue_key(link) == key);
+    let changed = match (command["type"].as_str(), existing) {
+        (Some("thread.issue.unlink"), Some(index)) => {
+            links.remove(index);
+            true
+        }
+        (Some("thread.issue.link"), None) => {
+            let link = json!({
+                "tracker": command["tracker"],
+                "host": key.1,
+                "scope": command["scope"].as_str().unwrap_or_default().trim(),
+                "key": key.3,
+                "projectId": command["projectId"],
+                "url": command["url"],
+                "displayKey": command["displayKey"],
+                "title": command["title"],
+                "source": command["source"],
+                "linkedAt": now,
+            });
+            links.push(link);
+            true
+        }
+        _ => false,
+    };
+    if changed && let Some(map) = thread.as_object_mut() {
+        map.insert("issues".into(), json!(links));
+        map.insert("updatedAt".into(), json!(now));
+    }
+    let cid = command["commandId"].as_str().map(str::to_owned);
+    tx.append(Draft::new(&thread_id, "thread.issue-synced", thread).command(cid.as_deref()))?;
+    Ok(vec![])
+}
+
 fn thread_pull_request_unlink(tx: &mut Tx<'_>, command: Value) -> Outcome {
     thread_pull_request_link(tx, command)
+}
+
+/// `thread.pull-request-link.sync`, from the server's link sweep: the snapshot and stack a host
+/// read gave. T3 emits `thread.pull-request-link-updated` (one link); this store keeps whole
+/// threads, so it emits `thread.pull-request-synced`. Nothing when no link has the key.
+fn thread_pull_request_link_sync(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    let thread = live_thread(tx, &thread_id)?;
+    if let Some(updated) = crate::pull_requests::decide_link_sync(&thread, &command) {
+        let cid = command["commandId"].as_str().map(str::to_owned);
+        tx.append(
+            Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+        )?;
+    }
+    Ok(vec![])
+}
+
+/// `thread.pull-request.sync`, from the server's branch lookup: the branch's pull request. The
+/// guards are T3's: the thread must still have the branch, worktree, project and pull requests
+/// the lookup saw, and a replacement of the older single link must see no newer event.
+fn thread_pull_request_sync(tx: &mut Tx<'_>, command: Value) -> Outcome {
+    let thread_id = command["threadId"].as_str().unwrap_or_default().to_owned();
+    let thread = live_thread(tx, &thread_id)?;
+    if !is_null(&thread, "archivedAt") {
+        return reject(format!("Thread {thread_id} is archived."));
+    }
+    let expected = &command["expected"];
+    let project_id = command["projectId"].as_str().unwrap_or_default();
+    let project = tx.project(project_id)?;
+    let replaces = command
+        .get("linkedPullRequest")
+        .is_some_and(Value::is_object);
+    let newer = replaces
+        && tx.thread_latest_sequence(&thread_id)?
+            > command["snapshotSequence"].as_u64().unwrap_or(0);
+    let same = |field: &str| thread.get(field).unwrap_or(&Value::Null) == &expected[field];
+    let changed = project.is_none_or(|p| p["workspaceRoot"] != expected["workspaceRoot"])
+        || newer
+        || thread["projectId"] != command["projectId"]
+        || !same("branch")
+        || !same("worktreePath")
+        || !crate::pull_requests::linked_equal(
+            thread.get("linkedPullRequest"),
+            expected.get("linkedPullRequest"),
+        )
+        || !crate::pull_requests::linked_equal(
+            thread.get("branchPullRequest"),
+            expected.get("branchPullRequest"),
+        );
+    if changed {
+        return reject(format!(
+            "Thread {thread_id} changed before pull request discovery."
+        ));
+    }
+    let now = tx.now().to_owned();
+    let updated = crate::pull_requests::decide_branch_sync(&thread, &command, &now);
+    let cid = command["commandId"].as_str().map(str::to_owned);
+    tx.append(
+        Draft::new(&thread_id, "thread.pull-request-synced", updated).command(cid.as_deref()),
+    )?;
+    Ok(vec![])
 }
 
 fn is_settled_or_archived(thread: &Value) -> bool {

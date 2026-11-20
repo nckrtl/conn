@@ -6,7 +6,6 @@ import {
 import { useGT } from "gt-react";
 import type { MouseEvent } from "react";
 
-import { LucideIconScope } from "~/icons/connIcon";
 import { ProjectMonogram } from "~/components/ProjectMonogram";
 import { StatusDotBadge, type StatusDotState } from "~/components/StatusDotBadge";
 import { resolvePullRequestState } from "~/components/pullRequest/pullRequestPresentation";
@@ -97,53 +96,51 @@ export function TaskCardButton(props: {
   const detail = taskCardDetail(task);
   const badge = taskCardPullRequest(task)?.badge ?? null;
   return (
-    <LucideIconScope>
-      <button
-        type="button"
-        aria-label={props["aria-label"]}
-        onClick={props.onClick}
-        // Insets match a sidebar thread row: icon 10px in, last text line 9px above the bottom.
+    <button
+      type="button"
+      aria-label={props["aria-label"]}
+      onClick={props.onClick}
+      // Insets match a sidebar thread row: icon 10px in, last text line 9px above the bottom.
+      className={cn(
+        TASK_CARD_FACE_CLASS,
+        TASK_CARD_FACE_INTERACTIVE_CLASS,
+        "px-2.25 pt-2.5 pb-2",
+        props.className,
+      )}
+    >
+      <span className="flex items-center gap-1.5 text-ui leading-4">
+        <StatusDotBadge state={taskStatusDot(task)} ring={TASK_CARD_FILL}>
+          <TaskProjectIcon project={task.project} />
+        </StatusDotBadge>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground tabular-nums">
+          #{task.id}
+        </span>
+        <span className="shrink-0">
+          <TaskCardStatus task={task} />
+        </span>
+      </span>
+      <span
         className={cn(
-          TASK_CARD_FACE_CLASS,
-          TASK_CARD_FACE_INTERACTIVE_CLASS,
-          "px-2.25 pt-2.5 pb-2",
-          props.className,
+          "text-ui leading-5 text-foreground/90 [overflow-wrap:anywhere]",
+          // Background work recedes to regular weight, like a working thread.
+          working ? "font-normal" : "font-medium",
         )}
       >
-        <span className="flex items-center gap-1.5 text-ui leading-4">
-          <StatusDotBadge state={taskStatusDot(task)} ring={TASK_CARD_FILL}>
-            <TaskProjectIcon project={task.project} />
-          </StatusDotBadge>
-          <span className="min-w-0 flex-1 truncate text-muted-foreground tabular-nums">
-            #{task.id}
-          </span>
-          <span className="shrink-0">
-            <TaskCardStatus task={task} />
-          </span>
+        {task.title}
+      </span>
+      {/* With no subtask count, machine or PR the line goes. */}
+      {detail || badge ? (
+        <span className="flex items-center gap-2 text-ui leading-4 text-muted-foreground tabular-nums">
+          <span className="min-w-0 flex-1 truncate">{detail}</span>
+          {/* Holds the badge's place; the badge itself is its own button over the card. */}
+          {badge ? (
+            <span aria-hidden className="invisible flex shrink-0 items-center gap-1">
+              {badge}
+            </span>
+          ) : null}
         </span>
-        <span
-          className={cn(
-            "text-ui leading-5 text-foreground/90 [overflow-wrap:anywhere]",
-            // Background work recedes to regular weight, like a working thread.
-            working ? "font-normal" : "font-medium",
-          )}
-        >
-          {task.title}
-        </span>
-        {/* With no subtask count, machine or PR the line goes. */}
-        {detail || badge ? (
-          <span className="flex items-center gap-2 text-ui leading-4 text-muted-foreground tabular-nums">
-            <span className="min-w-0 flex-1 truncate">{detail}</span>
-            {/* Holds the badge's place; the badge itself is its own button over the card. */}
-            {badge ? (
-              <span aria-hidden className="invisible flex shrink-0 items-center gap-1">
-                {badge}
-              </span>
-            ) : null}
-          </span>
-        ) : null}
-      </button>
-    </LucideIconScope>
+      ) : null}
+    </button>
   );
 }
 
@@ -159,26 +156,24 @@ export function TaskCardPullRequestBadge(props: {
   const pullRequest = taskCardPullRequest(props.task);
   if (!pullRequest) return null;
   return (
-    <LucideIconScope>
-      <button
-        type="button"
-        onClick={(event) => props.onOpen(event, pullRequest.pr.url)}
-        aria-label={
-          pullRequest.state
-            ? gt("Pull request #{number} ({state}). Open it in Tasks", {
-                number: pullRequest.pr.number,
-                state: pullRequest.state.label,
-              })
-            : gt("Pull request #{number}. Open it in Tasks", { number: pullRequest.pr.number })
-        }
-        className={cn(
-          "absolute right-2.5 bottom-2.25 flex cursor-pointer items-center gap-1 rounded-sm text-ui leading-4 tabular-nums hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none",
-          pullRequest.state?.toneClassName ?? "text-muted-foreground",
-        )}
-      >
-        {pullRequest.badge}
-      </button>
-    </LucideIconScope>
+    <button
+      type="button"
+      onClick={(event) => props.onOpen(event, pullRequest.pr.url)}
+      aria-label={
+        pullRequest.state
+          ? gt("Pull request #{number} ({state}). Open it in Tasks", {
+              number: pullRequest.pr.number,
+              state: pullRequest.state.label,
+            })
+          : gt("Pull request #{number}. Open it in Tasks", { number: pullRequest.pr.number })
+      }
+      className={cn(
+        "absolute right-2.5 bottom-2.25 flex cursor-pointer items-center gap-1 rounded-sm text-ui leading-4 tabular-nums hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset focus-visible:outline-none",
+        pullRequest.state?.toneClassName ?? "text-muted-foreground",
+      )}
+    >
+      {pullRequest.badge}
+    </button>
   );
 }
 
@@ -201,69 +196,67 @@ export function TaskRow(props: {
   const node = task.workspace?.node?.name;
   const pullRequest = taskCardPullRequest(task);
   return (
-    <LucideIconScope>
-      <div
-        className={cn(
-          "group/task-row relative rounded-lg px-1 py-1.5 hover:bg-foreground/4 has-[button:focus-visible]:ring-2 has-[button:focus-visible]:ring-ring has-[button:focus-visible]:ring-inset",
-          props.className,
-        )}
-      >
-        <button
-          type="button"
-          aria-label={gt("Task #{id}: {title}. Open in Tasks", { id: task.id, title: task.title })}
-          onClick={props.onOpen}
-          className="absolute inset-0 cursor-pointer rounded-lg outline-none"
-        />
-        <div className="pointer-events-none relative flex min-w-0 flex-col gap-0.5">
-          <span className="flex items-center gap-1.5 text-ui leading-5">
-            <StatusDotBadge state={taskStatusDot(task)}>
-              <TaskProjectIcon project={task.project} />
-            </StatusDotBadge>
-            <span
-              className={cn(
-                "min-w-0 flex-1 truncate text-foreground",
-                working ? "font-normal" : "font-medium",
-              )}
-            >
-              {task.title}
-            </span>
+    <div
+      className={cn(
+        "group/task-row relative rounded-lg px-1 py-1.5 hover:bg-foreground/4 has-[button:focus-visible]:ring-2 has-[button:focus-visible]:ring-ring has-[button:focus-visible]:ring-inset",
+        props.className,
+      )}
+    >
+      <button
+        type="button"
+        aria-label={gt("Task #{id}: {title}. Open in Tasks", { id: task.id, title: task.title })}
+        onClick={props.onOpen}
+        className="absolute inset-0 cursor-pointer rounded-lg outline-none"
+      />
+      <div className="pointer-events-none relative flex min-w-0 flex-col gap-0.5">
+        <span className="flex items-center gap-1.5 text-ui leading-5">
+          <StatusDotBadge state={taskStatusDot(task)}>
+            <TaskProjectIcon project={task.project} />
+          </StatusDotBadge>
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate text-foreground",
+              working ? "font-normal" : "font-medium",
+            )}
+          >
+            {task.title}
           </span>
-          <span className="flex min-w-0 items-center ps-5.5 text-xs leading-4 text-muted-foreground tabular-nums">
-            <span className="min-w-0 truncate">
-              {task.project.slug} · #{task.id}
-              {total >= 2 ? ` · ${completed}/${total}` : ""} · <TaskCardStatus task={task} />
-              {node ? ` · ${node}` : ""}
-            </span>
-            {pullRequest ? (
-              <>
-                <span aria-hidden className="px-1">
-                  ·
-                </span>
-                <button
-                  type="button"
-                  onClick={() => props.onOpenPullRequest(pullRequest.pr.url)}
-                  aria-label={
-                    pullRequest.state
-                      ? gt("Pull request #{number} ({state}). Open it in Tasks", {
-                          number: pullRequest.pr.number,
-                          state: pullRequest.state.label,
-                        })
-                      : gt("Pull request #{number}. Open it in Tasks", {
-                          number: pullRequest.pr.number,
-                        })
-                  }
-                  className={cn(
-                    "pointer-events-auto flex shrink-0 cursor-pointer items-center gap-0.5 rounded-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none",
-                    pullRequest.state?.toneClassName ?? "text-muted-foreground",
-                  )}
-                >
-                  {pullRequest.badge}
-                </button>
-              </>
-            ) : null}
+        </span>
+        <span className="flex min-w-0 items-center ps-5.5 text-xs leading-4 text-muted-foreground tabular-nums">
+          <span className="min-w-0 truncate">
+            {task.project.slug} · #{task.id}
+            {total >= 2 ? ` · ${completed}/${total}` : ""} · <TaskCardStatus task={task} />
+            {node ? ` · ${node}` : ""}
           </span>
-        </div>
+          {pullRequest ? (
+            <>
+              <span aria-hidden className="px-1">
+                ·
+              </span>
+              <button
+                type="button"
+                onClick={() => props.onOpenPullRequest(pullRequest.pr.url)}
+                aria-label={
+                  pullRequest.state
+                    ? gt("Pull request #{number} ({state}). Open it in Tasks", {
+                        number: pullRequest.pr.number,
+                        state: pullRequest.state.label,
+                      })
+                    : gt("Pull request #{number}. Open it in Tasks", {
+                        number: pullRequest.pr.number,
+                      })
+                }
+                className={cn(
+                  "pointer-events-auto flex shrink-0 cursor-pointer items-center gap-0.5 rounded-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:outline-none",
+                  pullRequest.state?.toneClassName ?? "text-muted-foreground",
+                )}
+              >
+                {pullRequest.badge}
+              </button>
+            </>
+          ) : null}
+        </span>
       </div>
-    </LucideIconScope>
+    </div>
   );
 }

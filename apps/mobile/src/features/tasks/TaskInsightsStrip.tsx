@@ -186,9 +186,9 @@ function CloseGlyph(props: { readonly color: string }) {
 const CARD_WIDTH = 160;
 const CARD_GAP = 2;
 const CARD_HEIGHT = 104;
-const OUTER_RADIUS = 8;
+const OUTER_RADIUS = 12;
 /** The screen gutter, the same as the task rows below. */
-const GUTTER = 8;
+const GUTTER = 12;
 const FADE_WIDTH = 40;
 const CHART_HEIGHT = 126;
 const CHART_TOP = 18;

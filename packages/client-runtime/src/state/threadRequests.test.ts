@@ -339,6 +339,7 @@ describe("pending v2 questions", () => {
       ordinal,
       type: "assistant_message" as const,
       messageId: MessageId.make(id),
+      providerThreadId: null,
       text: "",
       streaming: false,
     });

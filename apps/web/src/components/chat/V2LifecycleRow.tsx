@@ -65,7 +65,6 @@ import {
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import { formatRelativeTimeLabel, formatShortTimestamp } from "../../timestampFormat";
-import { LucideIconScope } from "~/icons/connIcon";
 import { StatusDotBadge, type StatusDotState } from "../StatusDotBadge";
 import {
   TASK_CARD_FACE_CLASS,
@@ -588,7 +587,7 @@ function SubagentTimelineLink(props: {
   const shown = status ?? liveStatus;
   const working = isOrchestrationV2WorkActive(shown);
   const content = (
-    <LucideIconScope>
+    <>
       <span className="flex w-full min-w-0 items-center gap-1.5 text-ui leading-4">
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-muted-foreground">
           <StatusDotBadge state={subagentStatusDot(shown)} ring={TASK_CARD_FILL}>
@@ -651,7 +650,7 @@ function SubagentTimelineLink(props: {
           )}
         </span>
       ) : null}
-    </LucideIconScope>
+    </>
   );
   const className = cn("group/subagent min-w-0", TASK_CARD_FACE_CLASS);
   return (

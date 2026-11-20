@@ -12,6 +12,7 @@ use conn_source_control::{
     pull_requests::{
         Client, Error, Lookup, actions, listing,
         normalize::{array, text},
+        run_action,
     },
     registry,
     settings::Settings,
@@ -27,7 +28,10 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{OnceCell, mpsc, watch};
+mod guide_writer;
 mod guides;
+mod issues;
+mod links;
 mod watches;
 
 #[derive(Clone, Debug)]
@@ -37,6 +41,9 @@ struct Project {
     root: PathBuf,
     host: String,
     repository: String,
+    /// The remote the repository was read from (`repositoryIdentity.locator`).
+    remote_url: String,
+    remote_name: Option<String>,
 }
 fn operation_error(operation: &str, detail: &str) -> Failure {
     Failure::Fail(json!({"_tag":"PullRequestOperationError","operation":operation,"detail":detail}))
@@ -98,6 +105,13 @@ struct Panel {
     linked: watch::Sender<u64>,
     monitor: OnceCell<tokio::task::JoinHandle<()>>,
     reports: Mutex<VecDeque<(String, Value, tokio::time::Instant)>>,
+    /// The clients' activity leases (`BackgroundPolicy`), which gate the periodic branch
+    /// lookup.
+    activity: super::provider::ProviderStatus,
+    /// The agents and text generators a review guide can be written with.
+    providers: conn_provider::ProviderSet,
+    text_generators: Option<Arc<crate::text_generation::TextGenerators>>,
+    guide_runs: guide_writer::Runs,
 }
 struct MutationReads<'a> {
     panel: &'a Panel,
@@ -116,6 +130,15 @@ impl Drop for Panel {
     }
 }
 impl Panel {
+    /// `shouldRunOpportunisticWork`.
+    fn opportunistic(&self) -> bool {
+        let settings = self
+            .environment
+            .as_ref()
+            .map(|e| e.settings.raw())
+            .unwrap_or_default();
+        self.activity.opportunistic(&settings)
+    }
     fn settings(&self) -> Settings {
         Settings::new(
             self.environment
@@ -144,6 +167,10 @@ impl Panel {
             let stored = p
                 .pointer("/repositoryIdentity/locator/remoteUrl")
                 .and_then(Value::as_str);
+            let mut remote_name = p
+                .pointer("/repositoryIdentity/locator/remoteName")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let remote = if let Some(remote) = stored {
                 remote.to_owned()
             } else {
@@ -166,6 +193,7 @@ impl Panel {
                 if context.provider.kind != "github" {
                     continue;
                 }
+                remote_name = Some(context.remote_name);
                 context.remote_url
             };
             let Some(info) = registry::recognize_remote(&remote) else {
@@ -192,6 +220,8 @@ impl Panel {
                 root,
                 host,
                 repository,
+                remote_url: remote,
+                remote_name,
             });
         }
         Ok(result)
@@ -245,6 +275,8 @@ impl Panel {
                     root: PathBuf::from(text(p, "workspaceRoot")),
                     host,
                     repository: repository.into(),
+                    remote_url: String::new(),
+                    remote_name: None,
                 });
             }
         }
@@ -302,7 +334,7 @@ impl Panel {
             )
             .await
     }
-    async fn call(&self, method: &str, input: Value) -> Result<Value, Failure> {
+    async fn call(self: &Arc<Self>, method: &str, input: Value) -> Result<Value, Failure> {
         match method {
             "invalidate" => {
                 let viewed = input.get("filesViewedOnly") == Some(&Value::Bool(true));
@@ -329,7 +361,7 @@ impl Panel {
         }
     }
     /// What `/mcp` asks of the panel (`mcp_host`).
-    async fn mcp_call(&self, operation: &str, input: Value) -> Result<Value, Failure> {
+    async fn mcp_call(self: &Arc<Self>, operation: &str, input: Value) -> Result<Value, Failure> {
         match operation {
             // `summary` with `bypassCache`, as `PullRequestWatchService` reads it.
             "watchSummary" => {
@@ -354,32 +386,67 @@ impl Panel {
             }
             "reviewGuide" => self.review_guide(&input).await,
             "generateReviewGuide" => self.generate_review_guide(&input).await,
+            // `servesProject`: false only when the project is on no host the panel reads.
+            "servesProject" => Ok(json!(
+                self.projects(&json!({"projectId": input.get("projectId")}))
+                    .await
+                    .map_or(true, |projects| !projects.is_empty())
+            )),
+            // Reads `allowStale: false` / `bypassCache: true`: never from the panel's cache.
+            "fresh" => {
+                let method = text(&input, "method").to_owned();
+                if !matches!(method.as_str(), "detail" | "summary" | "stack") {
+                    return Err(Failure::die(format!("Unknown fresh read {method}")));
+                }
+                let (project, client, lookup) = self.reference_client(&method, &input).await?;
+                self.load_read(&method, &input, &project, &client, &lookup)
+                    .await
+            }
+            // The panel's own reads and writes, as the RPC methods run them.
+            "call" => {
+                let method = text(&input, "method").to_owned();
+                if !matches!(
+                    method.as_str(),
+                    "activity"
+                        | "diff"
+                        | "threadComments"
+                        | "list"
+                        | "update"
+                        | "setLabels"
+                        | "reviewerCandidates"
+                        | "requestReviewers"
+                        | "comment"
+                        | "replyToThread"
+                        | "setThreadResolution"
+                        | "submitReview"
+                        | "runAction"
+                ) {
+                    return Err(Failure::die(format!("Unknown panel call {method}")));
+                }
+                self.call(&method, input.get("input").cloned().unwrap_or(Value::Null))
+                    .await
+            }
+            "placeReviewComments" => self.place_review_comments(&input).await,
+            // `IssueService` for the issue tools: `{method, input}`.
+            "issues" => {
+                let method = text(&input, "method").to_owned();
+                self.issue_call(&method, input.get("input").unwrap_or(&Value::Null))
+                    .await
+            }
+            "checkLogs" => self.check_logs(&input).await,
+            "rerunChecks" => self.rerun_checks(&input).await,
             _ => Err(Failure::die(format!(
                 "Unknown pull request operation {operation}"
             ))),
         }
     }
-    fn guide_unavailable(&self) -> Failure {
-        let off = self.environment.as_ref().is_some_and(|environment| {
-            environment.settings.for_client().get("reviewGuidesEnabled")
-                == Some(&Value::Bool(false))
-        });
-        operation_error(
-            "generateReviewGuide",
-            if off {
-                "Review guides are off. Turn them on in Settings → Source control & issues."
-            } else {
-                "This server cannot generate review guides yet."
-            },
-        )
-    }
-    async fn generate_review_guide(&self, input: &Value) -> Result<Value, Failure> {
+    async fn generate_review_guide(self: &Arc<Self>, input: &Value) -> Result<Value, Failure> {
         if input.get("expectedAccountId").is_some() {
             self.reference_client("routeIdentity", input)
                 .await
                 .map_err(|_| routing_error())?;
         }
-        Err(self.guide_unavailable())
+        self.write_review_guide(input).await
     }
     async fn action(&self, method: &str, input: &Value) -> Result<Value, Failure> {
         let routed = input.get("expectedAccountId").is_some();
@@ -418,7 +485,9 @@ impl Panel {
             reads
         });
         if method == "runAction" {
-            return Err(action_unavailable(input));
+            let result = self.run_action(&project, client, &lookup, input).await;
+            drop(invalidation);
+            return result;
         }
         actions::validate(method, input).map_err(|error| host_error(&error, method))?;
         let client = match client {
@@ -435,6 +504,285 @@ impl Panel {
                 .send_modify(|value| *value = value.saturating_add(1));
         }
         result
+    }
+    /// `runAction` (`PullRequestService.runAction`): T3's refusals, the viewer's permission,
+    /// the head pin, then the host action.
+    async fn run_action(
+        &self,
+        project: &Project,
+        client: Option<Client>,
+        lookup: &Lookup,
+        input: &Value,
+    ) -> Result<Value, Failure> {
+        let action = text(input, "action");
+        if action == "delete-branch"
+            || input.get("stackNumber").is_some()
+            || !run_action::SERVED.contains(&action)
+        {
+            return Err(action_unavailable(input));
+        }
+        let merge_method = input.get("mergeMethod").and_then(Value::as_str);
+        if let Some(method) = merge_method.filter(|m| !run_action::MERGE_METHODS.contains(m)) {
+            return Err(operation_error(
+                "runAction",
+                &format!("This host cannot merge with the {method} strategy."),
+            ));
+        }
+        let update_method = input.get("updateMethod").and_then(Value::as_str);
+        if let Some(method) = update_method.filter(|m| !run_action::UPDATE_METHODS.contains(m)) {
+            return Err(operation_error(
+                "runAction",
+                &format!("This host cannot update a branch by {method}."),
+            ));
+        }
+        let client = match client {
+            Some(client) => client,
+            None => self.client(project, "runAction").await?,
+        };
+        let viewer = client
+            .viewer_permissions(lookup, action == "update-branch")
+            .await
+            .map_err(|error| host_error(&error, "runAction"))?;
+        if !array(viewer.get("actions")).iter().any(|a| a == action) {
+            return Err(operation_error(
+                "runAction",
+                run_action::access_refusal(action),
+            ));
+        }
+        if let Some(method) = update_method
+            && !array(viewer.get("updateMethods"))
+                .iter()
+                .any(|m| m == method)
+        {
+            return Err(operation_error(
+                "runAction",
+                run_action::access_refusal("update-branch"),
+            ));
+        }
+        let remove_credits = matches!(action, "merge" | "enable-auto-merge")
+            && crate::settings::remove_agent_credits_on_merge(
+                &self
+                    .environment
+                    .as_ref()
+                    .map(|e| e.settings.raw())
+                    .unwrap_or_default(),
+                &project.id,
+            );
+        // Hosts that cannot pin a merge to a commit still refuse a head that already moved.
+        if let Some(expected) = input.get("expectedHeadSha").and_then(Value::as_str) {
+            let current = client
+                .detail(lookup)
+                .await
+                .map_err(|error| host_error(&error, "runAction"))?;
+            let head = current.get("headSha").and_then(Value::as_str);
+            if head != Some(expected) {
+                return Err(operation_error(
+                    "runAction",
+                    &format!(
+                        "The head is now {}, not {expected}. Review the new commits first.",
+                        head.unwrap_or("unknown")
+                    ),
+                ));
+            }
+        }
+        let result = client
+            .run_action(lookup, input, remove_credits)
+            .await
+            .map_err(|error| host_error(&error, "runAction"));
+        self.invalidate_cached(
+            Some(&ReadKey {
+                host: project.host.clone(),
+                repo: project.repository.to_lowercase(),
+                number: Some(lookup.number),
+                ..ReadKey::default()
+            }),
+            false,
+        );
+        self.refreshes
+            .send_modify(|value| *value = value.saturating_add(1));
+        result?;
+        if input.get("replyWithSummary") == Some(&Value::Bool(true)) {
+            return self
+                .load_read("summary", input, project, &client, lookup)
+                .await;
+        }
+        Ok(Value::Null)
+    }
+    /// `selectChecks`: the named check (any case), else the failing and cancelled ones.
+    async fn select_checks(
+        &self,
+        client: &Client,
+        lookup: &Lookup,
+        input: &Value,
+        operation: &str,
+    ) -> Result<Vec<Value>, Failure> {
+        let detail = client
+            .detail(lookup)
+            .await
+            .map_err(|error| host_error(&error, operation))?;
+        let checks = array(detail.get("checks"));
+        let reference = |check: &Value| json!({"name": check.get("name"), "url": check.get("url")});
+        let Some(named) = input.get("check").and_then(Value::as_str) else {
+            return Ok(checks
+                .iter()
+                .filter(|check| matches!(text(check, "status"), "failure" | "cancelled"))
+                .map(reference)
+                .collect());
+        };
+        let wanted = named.trim().to_lowercase();
+        let matches: Vec<Value> = checks
+            .iter()
+            .filter(|check| text(check, "name").to_lowercase() == wanted)
+            .map(reference)
+            .collect();
+        if matches.is_empty() {
+            let names: Vec<&str> = checks.iter().map(|check| text(check, "name")).collect();
+            let listed = if names.is_empty() {
+                "none".to_owned()
+            } else {
+                names.join(", ")
+            };
+            return Err(operation_error(
+                operation,
+                &format!("No check is named {named}. Checks: {listed}."),
+            ));
+        }
+        Ok(matches)
+    }
+    /// `checkLogs`: up to five failing checks' log tails, or the named check's.
+    async fn check_logs(&self, input: &Value) -> Result<Value, Failure> {
+        const DEFAULT_CHECK_LOGS: usize = 5;
+        let (_, client, lookup) = self.reference_client("checkLogs", input).await?;
+        let checks = self
+            .select_checks(&client, &lookup, input, "checkLogs")
+            .await?;
+        if checks.is_empty() {
+            return Ok(json!([]));
+        }
+        // Many failing checks would flood the agent's context; the rest stay a name away.
+        let split = if input.get("check").is_some() {
+            checks.len()
+        } else {
+            checks.len().min(DEFAULT_CHECK_LOGS)
+        };
+        let (shown, rest) = checks.split_at(split);
+        let tail = input
+            .get("tailLines")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(200);
+        let mut logs = client
+            .check_logs(&lookup, shown, tail)
+            .await
+            .map_err(|error| host_error(&error, "checkLogs"))?;
+        for check in rest {
+            let mut entry = check.clone();
+            entry["log"] = Value::Null;
+            entry["truncated"] = json!(false);
+            entry["detail"] =
+                json!("Not read, to keep the reply short. Ask for this check by name.");
+            logs.push(entry);
+        }
+        Ok(Value::Array(logs))
+    }
+    /// `rerunChecks`: re-runs the failing checks, or the named one; readers refresh either way.
+    async fn rerun_checks(&self, input: &Value) -> Result<Value, Failure> {
+        let (project, client, lookup) = self.reference_client("rerunChecks", input).await?;
+        let checks = self
+            .select_checks(&client, &lookup, input, "rerunChecks")
+            .await?;
+        if checks.is_empty() {
+            return Ok(json!([]));
+        }
+        let result = client
+            .rerun_checks(&lookup, &checks)
+            .await
+            .map_err(|error| host_error(&error, "rerunChecks"));
+        self.invalidate_cached(
+            Some(&ReadKey {
+                host: project.host.clone(),
+                repo: project.repository.to_lowercase(),
+                number: Some(lookup.number),
+                ..ReadKey::default()
+            }),
+            false,
+        );
+        self.refreshes
+            .send_modify(|value| *value = value.saturating_add(1));
+        Ok(Value::Array(result?))
+    }
+    /// `reviewComments` (`pull_request_review`): each line comment placed by the PR's diff,
+    /// searched over at most ten diff pages.
+    async fn place_review_comments(&self, input: &Value) -> Result<Value, Failure> {
+        const REVIEW_DIFF_PAGES: usize = 10;
+        let comments = array(input.get("comments"));
+        let mut placed: Vec<Option<Value>> = vec![None; comments.len()];
+        let mut cursor: Option<String> = None;
+        for _ in 0..REVIEW_DIFF_PAGES {
+            if placed.iter().all(Option::is_some) {
+                break;
+            }
+            let mut read = input.clone();
+            if let Some(map) = read.as_object_mut() {
+                map.remove("comments");
+                if let Some(cursor) = &cursor {
+                    map.insert("cursor".into(), json!(cursor));
+                }
+            }
+            let diff = self.cached_read("diff", &read).await?;
+            let patch = text(&diff, "patch");
+            for (comment, slot) in comments.iter().zip(placed.iter_mut()) {
+                if slot.is_some() {
+                    continue;
+                }
+                let new_side = text(comment, "side") != "old";
+                let path = text(comment, "path");
+                let position = |line: i64| {
+                    crate::text_generation::review_guide::review_position_in_patch(
+                        patch, path, line, new_side,
+                    )
+                };
+                let Some(at) = comment
+                    .get("line")
+                    .and_then(Value::as_i64)
+                    .and_then(position)
+                else {
+                    continue;
+                };
+                let start = match comment.get("startLine").and_then(Value::as_i64) {
+                    Some(line) => match position(line) {
+                        Some(start) => Some(start),
+                        None => continue,
+                    },
+                    None => None,
+                };
+                let mut draft = json!({"path": path, "position": at});
+                if let Some(start) = start {
+                    draft["startPosition"] = start;
+                }
+                draft["body"] = comment.get("body").cloned().unwrap_or(Value::Null);
+                *slot = Some(draft);
+            }
+            match diff.get("nextCursor").and_then(Value::as_str) {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+        }
+        if let Some((comment, _)) = comments.iter().zip(&placed).find(|(_, p)| p.is_none()) {
+            let line = comment
+                .get("startLine")
+                .or_else(|| comment.get("line"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let side = comment.get("side").and_then(Value::as_str).unwrap_or("new");
+            return Err(Failure::Fail(
+                json!({"_tag": "PullRequestForgeError", "detail": format!(
+                    "{} line {line} ({side} side) is not in this PR's diff. Comment on a changed line or one shown around it.",
+                    text(comment, "path")
+                )}),
+            ));
+        }
+        Ok(Value::Array(placed.into_iter().flatten().collect()))
     }
     async fn review_guide(&self, input: &Value) -> Result<Value, Failure> {
         let unidentified = || {
@@ -465,9 +813,13 @@ impl Panel {
                     }
                 })?;
         let key = thread_key(input, &project.host).ok_or_else(unidentified)?;
+        let run = self.guide_runs.get(&key.text());
         let guide = if let Some(environment) = &self.environment {
             guides::load(
-                environment.state_dir.join("statev2.sqlite"),
+                vec![
+                    environment.state_dir.join(guides::OWN_FILE),
+                    environment.state_dir.join("statev2.sqlite"),
+                ],
                 key.host,
                 key.repository,
                 lookup.number,
@@ -480,7 +832,7 @@ impl Panel {
             .detail(&lookup)
             .await
             .map_err(|error| host_error(&error, "detail"))?;
-        Ok(json!({"guide":guide,"run":null,"currentHeadSha":detail.get("headSha")}))
+        Ok(json!({"guide":guide,"run":run,"currentHeadSha":detail.get("headSha")}))
     }
     async fn report_state(&self, input: &Value) -> Result<Value, Failure> {
         let reference = input.get("reference").unwrap_or(&Value::Null);
@@ -1262,7 +1614,7 @@ fn linked_thread(thread: &Value) -> Value {
     })
 }
 fn capabilities() -> Value {
-    json!({"diff":true,"comment":true,"actions":[],"mergeMethods":[],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#"],"viewedFiles":"host","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true},"stacks":true,"labels":true,"checksAlwaysReport":true})
+    json!({"diff":true,"comment":true,"actions":run_action::SERVED,"mergeMethods":run_action::MERGE_METHODS,"updateMethods":run_action::UPDATE_METHODS,"search":true,"reactions":true,"mentions":true,"referenceSigils":["#"],"viewedFiles":"host","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true},"stacks":true,"labels":true,"checksAlwaysReport":true})
 }
 
 /// Lazily initialized so HTTP and RPC share the same bounded cache and refresh state.
@@ -1295,6 +1647,10 @@ impl Shared {
                         linked: watch::channel(0).0,
                         monitor: OnceCell::new(),
                         reports: Mutex::new(VecDeque::new()),
+                        activity: deps.provider_status.clone(),
+                        providers: deps.providers.clone(),
+                        text_generators: deps.text_generators.clone(),
+                        guide_runs: guide_writer::Runs::default(),
                     })
                 })
                 .clone(),
@@ -1386,6 +1742,38 @@ fn register_panel(table: &mut MethodTable, panel: Arc<Panel>) {
     unary!("pullRequests.invalidate", invalidate);
     unary!("pullRequests.filesViewed", files_viewed);
     unary!("pullRequests.setFilesViewed", set_files_viewed);
+    macro_rules! issue {
+        ($name:literal,$area:ident) => {{
+            let panel = panel.clone();
+            table.unary(
+                $name,
+                move |_, input: conn_contract::rpc::issues::$area::Payload| {
+                    let panel = panel.clone();
+                    async move {
+                        let result = panel
+                            .issue_call(
+                                $name.strip_prefix("issues.").unwrap_or($name),
+                                &to_json(&input),
+                            )
+                            .await?;
+                        from_json::<conn_contract::rpc::issues::$area::Success>(result)
+                            .map_err(|e| Failure::die(format!("Invalid {} result: {e}", $name)))
+                    }
+                },
+            );
+        }};
+    }
+    issue!("issues.list", list);
+    issue!("issues.detail", detail);
+    issue!("issues.linkedThreads", linked_threads);
+    issue!("issues.comments", comments);
+    issue!("issues.templates", templates);
+    issue!("issues.candidates", candidates);
+    issue!("issues.create", create);
+    issue!("issues.comment", comment);
+    issue!("issues.update", update);
+    issue!("issues.setState", set_state);
+    issue!("issues.react", react);
     for (tag, linked) in [
         ("pullRequests.subscribeRefreshes", false),
         ("pullRequests.subscribeLinkedThreadRefreshes", true),

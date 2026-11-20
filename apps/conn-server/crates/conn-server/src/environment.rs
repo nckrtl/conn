@@ -274,6 +274,9 @@ pub fn capabilities(server_restart: bool) -> ExecutionEnvironmentCapabilities {
         max_upload_bytes: i64::try_from(conn_files::attachments::MAX_FILE_BYTES)
             .unwrap_or(i64::MAX),
     });
+    // `environmentThemesUpdated` on `subscribeServerConfig`, theme background assets and the
+    // theme tools (`conn_files::themes`).
+    capabilities.environment_themes = Some(true);
     capabilities.pull_requests = Some(true);
     capabilities.pull_request_checks = Some(true);
     capabilities.linked_thread_refreshes = Some(true);
@@ -283,6 +286,16 @@ pub fn capabilities(server_restart: bool) -> ExecutionEnvironmentCapabilities {
     // projects.listIgnoredFiles, with `query` (conn-files entries::list_ignored).
     capabilities.ignored_file_listing = Some(true);
     capabilities.ignored_file_search = Some(true);
+    // Links to other environments (`crate::peers`), `/mcp` narrowing an OAuth client by
+    // `T3-Mode-Limit`, the link fence (`linkOrigin`), and peer-link pairing codes.
+    capabilities.peer_links = Some(true);
+    capabilities.mcp_mode_limit_header = Some(true);
+    capabilities.link_fence = Some(true);
+    capabilities.peer_link_pairing_codes = Some(true);
+    // `preview.stopLocalServer` (`crate::local_servers`), off on Windows as in T3.
+    if !cfg!(windows) {
+        capabilities.local_server_stop = Some(true);
+    }
     capabilities
 }
 
@@ -356,10 +369,16 @@ mod tests {
             advertised,
             [
                 "attachmentUploads",
+                "environmentThemes",
                 "fileAttachments",
                 "ignoredFileListing",
                 "ignoredFileSearch",
+                "linkFence",
                 "linkedThreadRefreshes",
+                "localServerStop",
+                "mcpModeLimitHeader",
+                "peerLinkPairingCodes",
+                "peerLinks",
                 "pullRequestChecks",
                 "pullRequests",
                 "serverBrowser",

@@ -43,6 +43,7 @@ mod families;
 mod fork;
 mod fresh;
 mod html_cleanup;
+mod link_requests;
 mod output;
 mod projects;
 mod pull_requests;
@@ -139,6 +140,12 @@ pub trait EngineHost: Send + Sync {
     /// MCP servers for a provider session about to open, and the key that revokes them.
     fn agent_tools(&self, _session: AgentSession) -> Option<AgentTools> {
         None
+    }
+
+    /// Whether the tools issued under `key` are still valid and fit `session` (T3's
+    /// `prepareMcpSession` reuse check), so a shared process's next session may keep them.
+    fn agent_tools_fit(&self, _session: &AgentSession, _key: &str) -> bool {
+        false
     }
 
     /// A provider session closed: revoke what [`EngineHost::agent_tools`] issued under `key`.
@@ -427,6 +434,14 @@ pub trait Engine: Send + Sync {
         })
     }
 
+    /// Records a link card (`link_request.record`) without exposing an internal command
+    /// through client dispatch.
+    fn record_link_request(&self, _input: Value) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(std::future::ready(Err(
+            "Link requests are not supported.".into()
+        )))
+    }
+
     /// `thread.pull-request-watch.sync`: what the server's watch loop read, and its wake. Not a
     /// client command, so it never goes through [`Engine::dispatch`].
     fn sync_pull_request_watch(&self, _command: Value) -> BoxFuture<'_, Result<(), String>> {
@@ -636,3 +651,9 @@ mod tests {
 }
 
 mod workflows;
+
+/// The deciders of the host syncs, for the link sweep's check against T3
+/// (`examples/pr_link_sync_cases.rs`).
+pub mod pull_request_sync {
+    pub use crate::pull_requests::{decide as decide_link, decide_branch_sync, decide_link_sync};
+}

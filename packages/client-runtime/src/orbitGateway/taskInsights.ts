@@ -1,4 +1,5 @@
 import { PROVIDER_DISPLAY_NAMES, ProviderDriverKind } from "@t3tools/contracts";
+import { DateTime } from "effect";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
@@ -44,7 +45,7 @@ export const INSIGHTS: ReadonlyArray<InsightSpec> = [
   { id: "reviewRounds", label: msg("Review rounds"), unit: "", better: "lower" },
 ];
 
-export const INSIGHT_PERIODS: ReadonlyArray<OrbitTaskInsightsPeriod> = ["7d", "30d"];
+export const INSIGHT_PERIODS: ReadonlyArray<OrbitTaskInsightsPeriod> = ["24h", "7d", "30d"];
 
 /** The raw number behind an insight. Shares are 0–1, durations in milliseconds. */
 function rawValue(summary: OrbitTaskInsightsSummary, id: InsightId): number | null {
@@ -129,38 +130,101 @@ export function insightChangeTone(
 }
 
 export interface TrendPoint {
-  /** The last day the point covers, `YYYY-MM-DD`. */
+  /** The last day the point covers, `YYYY-MM-DD`, or the start of its last hour (ISO) in the 24-hour view. */
   readonly date: string;
-  readonly value: number | null;
+  readonly value: number;
+}
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+const NO_VALUES: OrbitTaskInsightsSummary = {
+  tasks: null,
+  merged: null,
+  tokens: null,
+  tokensPerMergedPr: null,
+  leadTimeMs: null,
+  deliveryTimeMs: null,
+  deployWaitMs: null,
+  prMergeWaitMs: null,
+  prFirstPass: null,
+  wastedShare: null,
+  reviewRounds: null,
+};
+
+interface Bucket {
+  readonly date: string;
+  readonly merged: number;
+  readonly values: OrbitTaskInsightsSummary;
 }
 
 /**
- * The insight over time, where Orbit reports a series: merges summed over a trailing window of
- * days (7 days in the 30-day view, 3 in the 7-day view), and tokens per task by week. Null for
- * every other number until Orbit reports its history.
+ * The period's buckets with every missing day or hour added as an empty one, up to the newest
+ * bucket and back over the whole period, so a chart runs as one line.
+ */
+function everyBucket(buckets: ReadonlyArray<Bucket>, period: OrbitTaskInsightsPeriod) {
+  const [slots, step] = period === "24h" ? [24, HOUR_MS] : [period === "7d" ? 7 : 30, DAY_MS];
+  const byTime = new Map(buckets.map((bucket) => [Date.parse(bucket.date), bucket]));
+  const times = [...byTime.keys()];
+  if (times.length === 0 || times.some(Number.isNaN)) return buckets;
+  const end = Math.max(...times);
+  const start = Math.min(...times, end - (slots - 1) * step);
+  const label = (time: number) =>
+    period === "24h"
+      ? `${DateTime.formatIso(DateTime.makeUnsafe(time)).slice(0, 13)}:00:00+00:00`
+      : DateTime.formatIso(DateTime.makeUnsafe(time)).slice(0, 10);
+  const filled: Bucket[] = [];
+  for (let time = start; time <= end; time += step) {
+    filled.push(byTime.get(time) ?? { date: label(time), merged: 0, values: NO_VALUES });
+  }
+  return filled;
+}
+
+/**
+ * The insight over time, one continuous line over the whole period: merges summed over a trailing
+ * window (7 days in 30d, 3 days or hours else); every other number per day, or per hour in 24h.
+ * A bucket without a value charts as 0. Tokens per task falls back to weeks when no bucket has it.
  */
 export function insightTrend(
   insights: OrbitTaskInsights | null,
   id: InsightId,
 ): ReadonlyArray<TrendPoint> | null {
   if (insights === null) return null;
-  if (id === "completed" && insights.daily.length > 1) {
+  const reported =
+    insights.period === "24h"
+      ? insights.hourly.map((hour) => ({
+          date: hour.hour,
+          merged: hour.merged,
+          values: hour.values,
+        }))
+      : insights.daily;
+  if (reported.length === 0) return null;
+  const buckets = everyBucket(reported, insights.period);
+  if (id === "completed") {
     const [step, window] = insights.period === "30d" ? [2, 7] : [1, 3];
-    const days = insights.daily;
-    const points: TrendPoint[] = [];
-    for (let end = days.length - 1; end >= 0; end -= step) {
-      const span = days.slice(Math.max(0, end - window + 1), end + 1);
-      points.unshift({ date: days[end]!.date, value: span.reduce((sum, d) => sum + d.merged, 0) });
-    }
-    return points;
+    return trailing(buckets, step, window);
   }
-  if (id === "tokens" && insights.weekly.length > 1) {
+  const values = buckets.map((bucket) => rawValue(bucket.values, id));
+  if (id === "tokens" && values.every((value) => value === null) && insights.weekly.length > 1) {
     return insights.weekly.map((week) => ({
       date: week.weekStart,
-      value: week.tokensPerMergedPr,
+      value: week.tokensPerMergedPr ?? 0,
     }));
   }
-  return null;
+  return buckets.map((bucket, index) => ({ date: bucket.date, value: values[index] ?? 0 }));
+}
+
+/** Merges summed over a trailing window of buckets, one point every `step` buckets, ending at the newest. */
+function trailing(
+  buckets: ReadonlyArray<{ readonly date: string; readonly merged: number }>,
+  step: number,
+  window: number,
+): ReadonlyArray<TrendPoint> {
+  const points: TrendPoint[] = [];
+  for (let end = buckets.length - 1; end >= 0; end -= step) {
+    const span = buckets.slice(Math.max(0, end - window + 1), end + 1);
+    points.unshift({ date: buckets[end]!.date, value: span.reduce((sum, b) => sum + b.merged, 0) });
+  }
+  return points;
 }
 
 /** Orbit's provider names, by CLI. */

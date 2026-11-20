@@ -1129,6 +1129,26 @@ async fn clients_add_rename_and_remove_projects() {
     .await
     .unwrap();
     assert_eq!(retry["id"], "project:new");
+    // Another spelling of the same folder is the same folder (`normalizeWorkspaceRoot`).
+    let dotted = call(
+        &engine,
+        "projects.mutate",
+        json!({"type": "project.create", "commandId": "p3", "projectId": "project:dotted",
+               "title": "Repo", "workspaceRoot": format!("{root}/./")}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(dotted["cause"]["_tag"], "ProjectConflictError");
+    // An update cannot point a project at a folder that is not there.
+    let missing = call(
+        &engine,
+        "projects.mutate",
+        json!({"type": "project.update", "commandId": "u-missing", "projectId": "project:new",
+               "workspaceRoot": format!("{root}-missing")}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing["cause"]["_tag"], "ProjectOperationError");
 
     let renamed = call(
         &engine,
@@ -1299,8 +1319,99 @@ fn every_contract_command_is_handled_or_refused_with_a_reason() {
             );
         }
     }
-    assert_eq!(handled, 45);
+    assert_eq!(handled, 49);
     assert_eq!(conn_contract::COMMAND_TYPES.len(), 58);
+}
+
+/// The link sweep's syncs, as T3's decider writes them: `thread.pull-request-link.sync`
+/// replaces a link's snapshot and stack and leaves `updatedAt`; `thread.pull-request.sync`
+/// sets the branch's pull request when the thread is still as the lookup saw it, and shows in
+/// the shell row, where the sidebar chip reads it.
+#[tokio::test(flavor = "current_thread")]
+async fn link_and_branch_syncs_write_what_the_host_read() {
+    let db = TempDb::new("pr-link-sync");
+    let (engine, _) = open(&db);
+    let mut thread = create("t1", "c1");
+    thread["branch"] = json!("fix");
+    dispatch(&engine, thread).await;
+    dispatch(
+        &engine,
+        json!({"type": "thread.pull-request.link", "commandId": "l1", "threadId": "t1",
+            "host": "github.com", "repository": "o/r", "number": 14,
+            "url": "https://github.com/o/r/pull/14", "source": "manual"}),
+    )
+    .await;
+    let before = projection(&engine, "t1").await["thread"].clone();
+    // Let the clock move, so a sync that counted as activity would show.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let snapshot = json!({"state": "open", "title": "Fix the chip", "headBranch": "fix",
+        "baseBranch": "main", "isDraft": false, "updatedAt": "2026-11-19T08:00:00Z",
+        "syncedAt": "2026-11-19T09:00:00.000Z", "closedAt": null, "mergedAt": null,
+        "checksState": "failing", "reviewDecision": "review-required"});
+    dispatch(
+        &engine,
+        json!({"type": "thread.pull-request-link.sync", "commandId": "s1", "threadId": "t1",
+            "host": "GitHub.com", "repository": "O/R", "number": 14, "snapshot": snapshot,
+            "stack": null}),
+    )
+    .await;
+    let after = projection(&engine, "t1").await["thread"].clone();
+    assert_eq!(after["pullRequests"][0]["snapshot"], snapshot, "{after}");
+    assert_eq!(
+        after["updatedAt"], before["updatedAt"],
+        "a host read is not activity"
+    );
+    // A sync for a pull request the thread does not link changes nothing.
+    dispatch(
+        &engine,
+        json!({"type": "thread.pull-request-link.sync", "commandId": "s2", "threadId": "t1",
+            "host": "github.com", "repository": "o/r", "number": 99, "snapshot": snapshot,
+            "stack": null}),
+    )
+    .await;
+    assert_eq!(projection(&engine, "t1").await["thread"], after);
+
+    let shell = engine.shell_snapshot().await.unwrap();
+    let branch_pr = json!({"projectId": project_id(), "repository": "o/r", "number": 14,
+        "url": "https://github.com/o/r/pull/14"});
+    let sync = |id: &str, branch: Value, expected_pr: Value| {
+        json!({"type": "thread.pull-request.sync", "commandId": id, "threadId": "t1",
+            "projectId": project_id(), "snapshotSequence": shell["snapshotSequence"],
+            "expected": {"workspaceRoot": ROOT, "branch": branch, "worktreePath": null,
+                "linkedPullRequest": null, "branchPullRequest": expected_pr},
+            "branchPullRequest": branch_pr})
+    };
+    // The lookup saw another branch: refused, as T3 refuses it.
+    let refused = engine
+        .dispatch(from_json(sync("b0", json!("other"), Value::Null)).unwrap())
+        .await;
+    match refused {
+        Err(EngineError::Rejected(e)) => assert!(
+            to_json(&e)
+                .to_string()
+                .contains("changed before pull request discovery"),
+            "{}",
+            to_json(&e)
+        ),
+        other => panic!("not refused: {other:?}"),
+    }
+    dispatch(&engine, sync("b1", json!("fix"), Value::Null)).await;
+    let thread = projection(&engine, "t1").await["thread"].clone();
+    assert_eq!(thread["branchPullRequest"], branch_pr);
+    assert_eq!(thread["updatedAt"], before["updatedAt"]);
+    let r = engine.shell_snapshot().await.unwrap()["threads"][0].clone();
+    assert_eq!(r["branchPullRequest"], branch_pr, "the shell carries it");
+    assert_eq!(
+        r["updatedAt"], before["updatedAt"],
+        "the sidebar does not move the thread"
+    );
+    // A second lookup that expected no pull request is stale now.
+    assert!(
+        engine
+            .dispatch(from_json(sync("b2", json!("fix"), Value::Null)).unwrap())
+            .await
+            .is_err()
+    );
 }
 
 /// A watch starts with a link, its sync from the watch loop records what the host showed and
@@ -2851,6 +2962,7 @@ impl crate::EngineHost for RecordingHost {
         self.sessions.lock().unwrap().push(session.clone());
         Some(crate::AgentTools {
             servers: vec![conn_provider::McpServer {
+                device_tools: false,
                 name: "t3-code".into(),
                 url: "http://127.0.0.1:1/mcp".into(),
                 headers: vec![(
@@ -2860,6 +2972,10 @@ impl crate::EngineHost for RecordingHost {
             }],
             key: format!("key:{}", session.thread_id),
         })
+    }
+    fn agent_tools_fit(&self, session: &crate::AgentSession, key: &str) -> bool {
+        key == format!("key:{}", session.thread_id)
+            && !self.revoked.lock().unwrap().iter().any(|k| k == key)
     }
     fn session_closed(&self, key: &str) {
         self.revoked.lock().unwrap().push(key.to_owned());
@@ -2967,6 +3083,110 @@ async fn the_host_grants_tools_claims_attachments_and_hears_closes() {
         )]
     );
     assert_eq!(*host.revoked.lock().unwrap(), ["key:t1"]);
+}
+
+/// A workspace handoff releases the per-thread provider process and revokes its MCP
+/// credential, as T3's `releaseEntry` does; the continuation's session gets a new one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_workspace_handoff_revokes_the_old_session_tools() {
+    let db = TempDb::new("handoff-revokes");
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    assert!(host.revoked.lock().unwrap().is_empty());
+
+    dispatch(
+        &engine,
+        json!({"type": "thread.metadata.update", "commandId": "c3", "threadId": "t1",
+               "worktreePath": "/tmp/handoff-worktree", "expectedWorktreePath": null,
+               "continuation": {"messageId": "m-next", "text": "hang"}}),
+    )
+    .await;
+    timeout(Duration::from_secs(10), async {
+        while host.revoked.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the handoff revokes the old session's tools");
+    assert_eq!(*host.revoked.lock().unwrap(), ["key:t1"]);
+}
+
+/// On a process shared by several threads (Codex's `app-server`), a handoff keeps the old
+/// session's credential and the continuation reuses it, as T3 does; it is revoked once the
+/// shared process ends.
+#[tokio::test(flavor = "current_thread")]
+async fn a_handoff_on_a_shared_process_keeps_and_reuses_the_tools() {
+    let db = TempDb::new("handoff-shared");
+    let provider = Arc::new(FakeProvider::new("claudeAgent").with_shared_runtime());
+    let host = Arc::new(RecordingHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    let mut first = Vec::new();
+    for (thread, command) in [("t1", "c1"), ("t2", "c2")] {
+        dispatch(&engine, create(thread, command)).await;
+        let mut events = engine
+            .subscribe_thread(from_json(json!({"threadId": thread})).unwrap())
+            .await
+            .unwrap();
+        next(&mut events).await;
+        dispatch(&engine, message(thread, &format!("{command}-m"), "hang")).await;
+        until_provider_turn(&mut events).await;
+        if thread == "t1" {
+            first = provider.mcp_servers.lock().unwrap().clone();
+        }
+    }
+    assert_eq!(host.sessions.lock().unwrap().len(), 2);
+
+    dispatch(
+        &engine,
+        json!({"type": "thread.metadata.update", "commandId": "c3", "threadId": "t1",
+               "worktreePath": "/tmp/handoff-worktree", "expectedWorktreePath": null,
+               "continuation": {"messageId": "m-next", "text": "go on"}}),
+    )
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    assert_eq!(p["runs"][1]["status"], "completed", "the continuation ran");
+    assert!(
+        host.revoked.lock().unwrap().is_empty(),
+        "the shared process keeps it"
+    );
+    assert_eq!(
+        host.sessions.lock().unwrap().len(),
+        2,
+        "the continuation reuses the credential"
+    );
+    assert_eq!(*provider.mcp_servers.lock().unwrap(), first);
+
+    // t1 closes while t2 keeps the process; then t2 closes and the process ends.
+    engine.inner().close_session("t1").await;
+    assert!(host.revoked.lock().unwrap().is_empty());
+    *provider.closes_as.lock().unwrap() = conn_provider::Closed::RuntimeStopped;
+    engine.inner().close_session("t2").await;
+    let mut revoked = host.revoked.lock().unwrap().clone();
+    revoked.sort();
+    assert_eq!(revoked, ["key:t1", "key:t2"]);
 }
 
 /// Two fake providers, `claudeAgent` and `codex`, as a server with both configured.

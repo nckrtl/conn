@@ -10,9 +10,8 @@
     "lib": ["ES2023", "ES2024.Promise", "ESNext.Disposable", "DOM", "DOM.Iterable"],
     "paths": {
       "~/*": ["./src/*"],
-      // Conn: Lucide imports render Conn's Phosphor icons (src/icons/lucide-react.ts).
-      "lucide-react": ["./src/icons/lucide-react.ts"],
-      "lucide": ["./src/icons/lucide.ts"]
+      // Conn: Lucide imports render Conn's Superheroicons glyphs (src/icons/lucide-react.ts).
+      "lucide-react": ["./src/icons/lucide-react.ts"]
     },
     "plugins": [
       {
@@ -40,5 +39,8 @@
     "../../scripts/lib/public-config.ts",
     "../../scripts/lib/tagged-source-version.ts",
     "../../scripts/lib/third-party-licenses.ts"
-  ]
+  ],
+  // The UI lab's driver reaches client-runtime's driver by relative path, because
+  // vite.lab.config.ts swaps that exact file; a composite project refuses sources outside it.
+  "exclude": ["src/lab/labDriver.ts"]
 }

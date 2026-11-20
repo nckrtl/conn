@@ -15,6 +15,12 @@ fn host(state: &'static str) -> crate::PullRequestHost {
                 "locateProject" => Ok(json!({"projectId": project_id()})),
                 "reviewGuide" => Ok(json!({"guide": guide(), "run": null,
                     "currentHeadSha": format!("new-{}", input["number"])})),
+                "generateReviewGuide" if input["number"] == 9 => Err(json!({
+                    "_tag": "PullRequestOperationError", "operation": "generateReviewGuide",
+                    "detail": "Review guides are off. Turn them on in Settings → Source control & issues."})),
+                "generateReviewGuide" => Ok(json!({"guide": null,
+                    "run": {"_tag": "Running", "headSha": "h", "startedAt": "2026-11-19T00:00:00.000Z"},
+                    "currentHeadSha": "h", "started": input["number"] == 7})),
                 _ => Err(json!({"_tag": "PullRequestOperationError",
                     "operation": operation, "detail": "unexpected"})),
             }
@@ -33,10 +39,14 @@ fn with_host(base: Fixture, state: &'static str) -> Fixture {
     let config = &base.service.config;
     let service = McpService::new(McpConfig {
         preview: None,
+        devices: None,
         refresh_provider: None,
         worktrees: None,
         panels: None,
+        peers: None,
+        settings: None,
         pull_requests: Some(host(state)),
+        clone_repository: None,
         secrets: None,
         test_logins: None,
         engine: config.engine.clone(),
@@ -117,6 +127,7 @@ async fn watches_start_link_and_stop_as_t3() {
         provider_instance_id: "claudeAgent".into(),
         subagent: true,
         preview: false,
+        device: false,
     });
     let token = entry.authorization.strip_prefix("Bearer ").unwrap();
     let child = Caller::Thread(f.service.resolve_thread_token(token).unwrap());
@@ -158,7 +169,7 @@ async fn merged_and_unreadable_pull_requests_are_refused() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn guides_read_the_store_and_the_write_is_not_offered() {
+async fn guides_read_the_store_and_writes_start_or_join_runs() {
     let f = with_host(fixture("pr-guides"), "open");
     let mut swamp = Client::open(&f.service, client(true)).await;
     let read = swamp
@@ -177,12 +188,28 @@ async fn guides_read_the_store_and_the_write_is_not_offered() {
         .await,
         "This is not a recognised pull request URL. Pass repository and number instead."
     );
-    // No review guide generator here, so the write tool is not offered (capability rule).
-    not_offered(
-        &mut swamp,
-        "write_pull_request_guides",
-        json!({"pullRequests": [{"url": URL}]}),
-    )
-    .await;
+    // Each target gets its own outcome; one that fails does not stop the others.
+    let written = swamp
+        .ok(
+            "write_pull_request_guides",
+            json!({"pullRequests": [
+                {"url": URL},
+                {"repository": "o/r", "number": 8, "host": "github.com"},
+                {"url": "https://github.com/o/r/pull/9"},
+                {"url": "https://example.com/x"},
+            ]}),
+        )
+        .await;
+    assert_eq!(
+        written["guides"],
+        json!([
+            {"host": "github.com", "repository": "o/r", "number": 7, "url": URL, "outcome": "started", "detail": null},
+            {"host": "github.com", "repository": "o/r", "number": 8, "url": "https://github.com/o/r/pull/8", "outcome": "running", "detail": null},
+            {"host": "github.com", "repository": "o/r", "number": 9, "url": "https://github.com/o/r/pull/9", "outcome": "failed",
+             "detail": "Review guides are off. Turn them on in Settings → Source control & issues."},
+            {"host": "", "repository": "", "number": 0, "url": "https://example.com/x", "outcome": "failed",
+             "detail": "This is not a recognised pull request URL. Pass repository and number instead."},
+        ])
+    );
     f.service.config.engine.shutdown().await;
 }

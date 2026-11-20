@@ -13,6 +13,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { previewParity } from "./preview-parity.mjs";
+import { desktopRelayParity } from "./desktop-relay-parity.mjs";
 import { htmlParity } from "./html-parity.mjs";
 import { toolOutputParity } from "./tool-output-parity.mjs";
 import { checkMcpApps } from "./mcp-apps-parity.mjs";
@@ -46,7 +47,11 @@ const root = NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(
 const children = [];
 process.once("exit", () => {
   for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
-  NodeFS.rmSync(root, { recursive: true, force: true });
+  try {
+    NodeFS.rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  } catch {
+    // A server still writing as it stops; the temp folder goes with the next cleanup.
+  }
 });
 
 function scratchProject(name) {
@@ -173,6 +178,8 @@ async function startRust() {
   const state = NodePath.join(root, "rust", "state");
   NodeFS.mkdirSync(state,{recursive:true});
   const capture = NodePath.join(state,"mcp-capture.json");
+  // The same settings file as the T3 server's, so the preferences both report agree.
+  NodeFS.writeFileSync(NodePath.join(state, "settings.json"), JSON.stringify({ enableProviderUpdateChecks: false }));
   const { origin, code } = await start(
     rustBinary,
     ["--listen", `127.0.0.1:${port}`, "--state-dir", state, "--project", project],
@@ -246,6 +253,7 @@ const htmlBinary = [
 if (htmlBinary === undefined) throw new Error("Build the conn-mcp html_cases example first.");
 await htmlParity(htmlBinary);
 await previewParity(htmlBinary);
+await desktopRelayParity(htmlBinary);
 await toolOutputParity(NodePath.join(NodePath.dirname(htmlBinary), "tool_output_cases"));
 
 const servers = await Promise.all([startTs(), startRust()]);
@@ -277,8 +285,19 @@ const outsideHidden = new Set(
     .split("\n")
     .filter((line) => line !== ""),
 );
+// Tools that only serve links are hidden while Linked environments is off (the default);
+// they are compared below with links on.
+const linksHidden = new Set(
+  NodeFS.readFileSync(new URL("../src/links-hidden.txt", import.meta.url), "utf8")
+    .split("\n")
+    .filter((line) => line !== ""),
+);
 for (const name of implemented) {
   const [ts, rust] = lists.map((list) => list.result.tools.find((tool) => tool.name === name));
+  if (linksHidden.has(name)) {
+    report(`tools/list ${name}: hidden while links are off`, ts === undefined && rust === undefined);
+    continue;
+  }
   if (outsideHidden.has(name)) {
     report(`tools/list ${name}: hidden from outside clients`, ts === undefined && rust === undefined);
     continue;
@@ -305,14 +324,14 @@ const searchOrder = (value) => value.matches.map((match) => [match.title, match.
 // With no `gh` on PATH, T3's credential lookup ends as "not signed in" (cli-unauthenticated);
 // conn-source-control reports the missing CLI (cli-missing). Both refuse the watch with their
 // GitHub requirement text. The PR panel answers the same way; it is not this slice's code.
+/** Without `gh`, T3 says cli-unauthenticated and Conn says cli-missing. */
+const NO_GH_TEXTS = [
+  "GitHub has no working credential for this host. Run `gh auth login`, or check the account and hosts in Settings → Source control & issues.",
+  "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`.",
+];
 const NO_GH = {
   why: "no gh: T3 says cli-unauthenticated, Conn says cli-missing",
-  match: (result) =>
-    result.kind === "failure" &&
-    [
-      "GitHub has no working credential for this host. Run `gh auth login`, or check the account and hosts in Settings → Source control & issues.",
-      "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`.",
-    ].includes(result.code),
+  match: (result) => result.kind === "failure" && NO_GH_TEXTS.includes(result.code),
 };
 
 // Per-server state the calls refer to: project and thread ids differ.
@@ -329,7 +348,23 @@ const steps = [
     () => ({}),
     (c, v) => (c.projectId = v.projects.find((p) => p.title === "parity")?.id ?? v.projects[0].id),
   ],
-  ["t3_project_read", (c) => ({ projectId: c.projectId })],
+  ["t3_project_read", (c) => ({ projectId: c.projectId }), (c, v) => (c.projectRoot = v.workspaceRoot)],
+  // Project writes: a registered folder, a new folder, an update, a delete, and refusals.
+  ["t3_project_create", (c) => ({ title: "Again", workspaceRoot: c.projectRoot })],
+  ["t3_project_create", () => ({ title: "From title", scripts: [] })],
+  ["t3_project_create", (c) => ({ title: "Missing", workspaceRoot: `${c.projectRoot}-missing` })],
+  [
+    "t3_project_create",
+    (c) => ({ title: "Made", workspaceRoot: `${c.projectRoot}-made`, createWorkspaceRootIfMissing: true }),
+    (c, v) => (c.madeId = v.id),
+    { same: (v) => [v.title, v.scripts, v.archivedAt, v.pinnedAt] },
+  ],
+  ["t3_project_update", (c) => ({ projectId: c.madeId, title: "Renamed" }), undefined, { same: (v) => [v.title] }],
+  ["t3_project_update", () => ({ projectId: "project:none", title: "x" })],
+  ["t3_project_delete", (c) => ({ projectId: c.madeId }), undefined, { same: (v) => [v.title, v.deletedAt === null] }],
+  ["t3_project_delete", () => ({ projectId: "project:none" })],
+  ["t3_project_clone", (c) => ({ remoteUrl: `${c.projectRoot}-no-such-repo`, destinationPath: `${c.projectRoot}-clone` })],
+  ["t3_project_clone", () => ({})],
   ["t3_environment_read", () => ({})],
   ["orchestrator_capabilities", () => ({}), undefined, { view: claudeOnly, same: claudeModels }],
   [
@@ -405,6 +440,16 @@ const steps = [
   ],
   ["t3_thread_organize", () => ({ action: "pin" })],
   ["t3_thread_organize", () => ({ threadId: "thread:none", action: "pin" })],
+  // Context transfers: status, a fork of the idle thread, and merge-back refusals before the
+  // engine (Conn cannot merge a fork back yet).
+  ["t3_thread_transfer", (c) => ({ threadId: c.idleThreadId, action: "status" }), undefined, { same: (v) => v.transfers.length }],
+  ["t3_thread_transfer", () => ({ threadId: "thread:none", action: "status" })],
+  ["t3_thread_transfer", (c) => ({ threadId: c.idleThreadId, action: "fork", title: "Parity fork" }), (c, v) => (c.forkThreadId = v.targetThreadId)],
+  ["t3_thread_transfer", (c) => ({ threadId: c.forkThreadId, action: "status" }), undefined, { same: (v) => v.transfers.map((t) => t.status) }],
+  ["t3_thread_transfer", (c) => ({ threadId: c.forkThreadId, action: "merge_back" })],
+  ["t3_thread_transfer", (c) => ({ threadId: c.forkThreadId, action: "merge_back", targetThreadId: "thread:none" })],
+  ["t3_thread_transfer", () => ({ threadId: "thread:none", action: "fork" })],
+  ["t3_thread_transfer", () => ({ action: "bogus" })],
   ["t3_thread_organize", (c) => ({ threadId: c.idleThreadId, action: "bogus" })],
   // t3_queue on the idle thread: an empty queue, then each write on a run that is not queued.
   ["t3_queue", (c) => ({ threadId: c.idleThreadId, action: "list" })],
@@ -533,6 +578,40 @@ const steps = [
     { repository: "o/r" },
     { repository: "o/r", number: 9 },
   ].map((input) => ["read_pull_request_guide", () => input, undefined, { same: (v) => v }]),
+  // Guide runs: each target fails alone, with T3's per-target outcome and detail.
+  ["write_pull_request_guides", () => ({ pullRequests: [
+    { url: "https://github.com/o/r/pull/9" },
+    { url: "https://example.com/team/x" },
+    { repository: "o/r" },
+    { repository: "zz/yy", number: 3, host: "github.com" },
+  ] }), undefined, { same: (v) => v.guides.map((g) => ({ ...g, detail: NO_GH_TEXTS.includes(g.detail) ? "<no gh>" : g.detail })) }],
+  ["write_pull_request_guides", () => ({ pullRequests: [] })],
+  ["write_pull_request_guides", () => ({ pullRequests: Array.from({ length: 21 }, (_, i) => ({ url: `https://github.com/o/r/pull/${i + 1}` })) })],
+  ["write_pull_request_guides", () => ({})],
+  // Forge tools from outside a thread: input checks, then T3's "pass threadId" refusal.
+  ["pull_request_read", () => ({})],
+  ["pull_request_read", () => ({ cursor: "%%" })],
+  ["pull_request_read", () => ({ cursor: Buffer.from(JSON.stringify({ diff: " 2" })).toString("base64url") })],
+  ["pull_request_read", () => ({ cursor: Buffer.from(JSON.stringify({ threads: 1, comments: 0, includeResolved: true })).toString("base64url") })],
+  ["pull_request_read", () => ({ sections: ["bogus"] })],
+  ["pull_request_list", () => ({})],
+  ["pull_request_list", () => ({ limit: 0 })],
+  ["pull_request_list", () => ({ cursor: "%%" })],
+  ["pull_request_update", () => ({})],
+  ["pull_request_update", () => ({ title: "x" })],
+  ["pull_request_update", () => ({ addLabels: [] })],
+  ["pull_request_respond", () => ({})],
+  ["pull_request_respond", () => ({ resolved: true })],
+  ["pull_request_respond", () => ({ reviewThreadId: "T1" })],
+  ["pull_request_respond", () => ({ body: "b", resolved: true })],
+  ["pull_request_respond", () => ({ body: "b" })],
+  ["pull_request_review", () => ({ verdict: "approve" })],
+  ["pull_request_review", () => ({ verdict: "bogus" })],
+  ["pull_request_merge", () => ({ expectedHeadSha: "abc" })],
+  ["pull_request_merge", () => ({})],
+  ["ci_logs", () => ({})],
+  ["ci_logs", () => ({ tailLines: 0 })],
+  ["ci_rerun", () => ({ check: "build" })],
   ["send_to_user", () => ({ message: 5 })],
   ["t3_thread_wait", () => ({ threadId: true })],
   ["t3_thread_list", () => ({ allProjects: "yes" })],
@@ -630,6 +709,37 @@ const steps = [
   ["panel_open", () => ({ panel: "browser", url: "https://example.com" })],
   ["save_test_login", () => ({url:"http://example.test",username:"tester",password:"fixture-only"})],
   ["request_credentials", () => ({domain:"example.test"})],
+  // Issue tools outside a thread: T3's refusals before any tracker read.
+  ["list_issues", () => ({})],
+  ["list_issues", () => ({ projectId: "project:none" })],
+  ["read_issue", () => ({})],
+  ["read_issue", () => ({ key: "7" })],
+  ["read_issue", () => ({ url: "https://example.com/not-an-issue" })],
+  ["create_issue", () => ({ title: "T" })],
+  ["comment_on_issue", () => ({ key: "7", body: "b" })],
+  ["set_issue_state", () => ({ key: "7", state: "Completed" })],
+  ["link_issue", () => ({ key: "7" })],
+  ["unlink_issue", () => ({ threadId: "thread:none", key: "7" })],
+  ["list_thread_issues", () => ({})],
+  ["list_thread_issues", () => ({ threadId: "thread:none" })],
+  ["fill_credential", () => ({itemId:"login:none",field:"password"})],
+  ["fill_credential", () => ({itemId:"x",field:"pin"})],
+  // Themes: each refusal, then a publish, a read of it, and a switch, in temp state on both.
+  ["t3_theme_read", () => ({})],
+  ["t3_theme_read", () => ({ themeId: "parity" })],
+  ["t3_theme_read", () => ({ themeId: "Bad" })],
+  ["t3_theme_set", () => ({})],
+  ["t3_theme_set", () => ({ theme: { name: "P", appearance: "dark", canvas: "#000", accent: "#fff" } })],
+  ["t3_theme_set", () => ({ themeId: "nope" })],
+  ["t3_theme_set", () => ({ themeId: "grove", theme: { name: "P", appearance: "dark", canvas: "#000", accent: "#fff" } })],
+  ["t3_theme_set", () => ({ themeId: "parity", theme: { name: "P", appearance: "dark", accent: "#fff" } })],
+  ["t3_theme_set", () => ({ themeId: "parity", theme: { name: "P", appearance: "dark", canvas: "#000", accent: "#fff", css: "a{background:url(https://x)}" } })],
+  ["t3_theme_set", () => ({ themeId: "parity", theme: { name: " Parity ", appearance: "dark", canvas: "#000", accent: "#fff", css: "a{}", extra: 1 } }), undefined, { same: (v) => v }],
+  ["t3_theme_read", () => ({ themeId: "parity" }), undefined, { same: (v) => ({ current: v.current, builtIn: v.builtIn, published: v.published, theme: v.theme, guide: v.guide }) }],
+  ["t3_theme_set", () => ({ themeId: "grove", appearance: "light" }), undefined, { same: (v) => v }],
+  ["t3_theme_set", () => ({ themeId: "t3-code" }), undefined, { same: (v) => v }],
+  ["t3_theme_set", () => ({ appearance: "system" }), undefined, { same: (v) => v }],
+  ["t3_theme_read", () => ({}), undefined, { same: (v) => ({ current: v.current, published: v.published }) }],
   ["database_query", () => ({sql:"select 1"})],
   ["request_secret", () => ({ label: "Fixture key", reason: "Parity check" })],
   ["request_secret", () => ({ label: "Fixture key", reason: "Parity check", delivery: "file", value: "test-only" })],
@@ -688,8 +798,8 @@ for (const [tool, input, after, options] of run) {
   }
   if (ts.kind === "failure") {
     report(
-      `${label}: both fail with ${ts.code}`,
-      tool !== "t3_workflow_stop" || ts.message === rust.message,
+      `${label}: both fail with ${ts.code}${ts.message === rust.message ? "" : `\n       T3:   ${ts.message}\n       Conn: ${rust.message}`}`,
+      !(tool === "t3_workflow_stop" || tool.startsWith("t3_theme_")) || ts.message === rust.message,
     );
     continue;
   }
@@ -803,7 +913,6 @@ if (noModel) {
     ["t3_thread_send_attachments", (c) => ({threadId:c.targetThreadId,attachments:[0,1].map((n) => ({type:"file",id:`pending-00000000-0000-4000-8000-${String(n).padStart(12,"0")}-png`,name:"large.png",mimeType:"image/png",sizeBytes:50*1024*1024}))})],
     ["t3_thread_send_attachments", (c) => ({threadId:c.targetThreadId,attachments:[c.attachment],message:"hang"}), (v) => ({status:v.status})],
     ["t3_worktree_handoff", () => ({branch:"parity/handoff",startFromOrigin:true,continuationPrompt:"hang"}), (v) => ({...v,worktreePath:"<worktree>"}), (c,v) => {c.worktreePath=v.worktreePath;}],
-    ["t3_worktree_status", () => ({}), (v) => ({...v,worktreePath:v.worktreePath === null ? null : "<worktree>",projectWorkspaceRoot:"<project>"})],
   ];
   for (const [tool,input,normalize = (v) => v,after] of agentSteps) {
     if (tool === "t3_worktree_handoff" && input({}).branch === "parity/handoff") {
@@ -840,6 +949,21 @@ if (noModel) {
     }));
     report(`calling thread ${tool}: ${canonical(values[0]) === canonical(values[1]) ? "same outcome" : JSON.stringify(values)}`, canonical(values[0]) === canonical(values[1]));
   }
+  // The handoff releases the caller's per-thread provider process, and its MCP credential goes
+  // with it (T3's releaseEntry), shortly after the call returns. A call in that window may
+  // still pass on either server, so wait until the old credential is refused on both, then
+  // compare the refusals. A server that never revokes it fails here.
+  const refusals = await Promise.all(agents.map(async (agent) => {
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const reply = await agent.raw({jsonrpc:"2.0",id:agent.nextId++,method:"tools/call",params:{name:"t3_worktree_status",arguments:{}}});
+      if (reply.status >= 400) return {status:reply.status,contentType:reply.contentType,reply:reply.reply};
+      if (Date.now() > deadline) return {status:reply.status,stillAccepted:outcome(reply.reply)};
+      await new Promise((resolve) => setTimeout(resolve,50));
+    }
+  }));
+  report(`calling thread handoff revokes the old credential: ${canonical(refusals[0]) === canonical(refusals[1]) ? `both HTTP ${refusals[0].status}` : JSON.stringify(refusals)}`,
+    refusals[0].status === 401 && canonical(refusals[0]) === canonical(refusals[1]));
   await Promise.all(servers.map((server) => updateSettings(server,{enableAgentBrowserAccess:false})));
   for (const name of NodeFS.readdirSync(servers[0].records).filter((name) => name.endsWith(".json"))) NodeFS.unlinkSync(NodePath.join(servers[0].records,name));
   NodeFS.rmSync(servers[1].capture,{force:true});
@@ -869,6 +993,44 @@ if (noModel) {
   report(`calling thread handoff ends old run: ${canonical(endedStates[0])}`,canonical(endedStates[0]) === canonical(endedStates[1]));
 
 
+}
+// Linked environments on: the link tools are listed and answer as T3's do. Linking itself and
+// forwarded calls between two servers are proven by crates/conn-server/tools/peer-links-diff.mjs.
+{
+  await Promise.all(servers.map((server) => updateSettings(server, { linkedEnvironmentsEnabled: true })));
+  const linkLists = await Promise.all(sessions.map((s) => s.request("tools/list", {})));
+  for (const name of linksHidden) {
+    const [ts, rust] = linkLists.map((list) => list.result.tools.find((tool) => tool.name === name));
+    report(`tools/list ${name} with links on`, ts !== undefined && JSON.stringify(ts) === JSON.stringify(rust));
+  }
+  const environmentIds = await Promise.all(
+    sessions.map(async (session) => outcome(await session.callTool("t3_environment_read", {})).value?.environmentId),
+  );
+  const linkSteps = [
+    ["t3_environment_links", {}],
+    ["t3_environment_unlink", { environmentId: "environment:none" }],
+    ["t3_environment_link", {}],
+    ["t3_environment_link", { hint: "the other box" }],
+    ["t3_thread_list", { environmentId: "environment:none" }],
+    ["t3_environment_read", { environmentId: "environment:none" }],
+    ["t3_environment_preferences_update", { newWorktreesStartFromOrigin: false, defaultThreadEnvMode: "worktree", backgroundActivity: { profile: "battery-saver" } }],
+    ["t3_environment_read", {}],
+    ["t3_environment_preferences_update", { defaultThreadEnvMode: null, newWorktreesStartFromOrigin: true, backgroundActivity: { profile: "balanced" } }],
+    ["t3_environment_preferences_update", { environmentId: "environment:none" }],
+  ];
+  for (const [tool, args] of linkSteps) {
+    const results = await Promise.all(sessions.map(async (session) => outcome(await session.callTool(tool, args))));
+    const values = results.map((result, i) => {
+      const text = canonical(result).split(environmentIds[i]).join("<this>");
+      // Descriptor fields this server does not detect (ACCEPTED above).
+      return text.replace(/"machine":"[^"]*",?/, "").replace(/,}/g, "}");
+    });
+    report(
+      `links on: ${tool} ${JSON.stringify(args)}${values[0] === values[1] ? "" : `\n       T3:   ${values[0]}\n       Conn: ${values[1]}`}`,
+      values[0] === values[1],
+    );
+  }
+  await Promise.all(servers.map((server) => updateSettings(server, { linkedEnvironmentsEnabled: false })));
 }
 console.log(failed === 0 ? "\nparity: no differences" : `\nparity: ${failed} differences`);
 process.exit(failed === 0 ? 0 : 1);

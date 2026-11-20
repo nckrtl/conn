@@ -19,10 +19,10 @@ use std::{
 
 use conn_contract::{ProviderSessionId, ProviderThread, from_json, to_json};
 use conn_provider::{
-    AwaitBackgroundTasksInput, BoxFuture, EnsureThreadInput, ForkThreadInput, InterruptInput,
-    McpServer, ProviderError, ProviderEvent, ProviderResult, ResumeThreadInput, RollbackTarget,
-    RollbackThreadInput, RuntimePolicy, RuntimeRequestResponse, Session, SteerInput, StopTaskInput,
-    ThreadSnapshot, TurnInput,
+    AwaitBackgroundTasksInput, BoxFuture, Closed, EnsureThreadInput, ForkThreadInput,
+    InterruptInput, McpServer, ProviderError, ProviderEvent, ProviderResult, ResumeThreadInput,
+    RollbackTarget, RollbackThreadInput, RuntimePolicy, RuntimeRequestResponse, Session,
+    SteerInput, StopTaskInput, ThreadSnapshot, TurnInput,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
@@ -159,6 +159,8 @@ struct Live {
     mcp_servers: Vec<McpServer>,
     /// `allowedTools` is a launch option: gaining or losing the T3 server needs a new query.
     t3_mcp: bool,
+    /// The device text is part of the system prompt: a change needs a new query.
+    device_tools: bool,
     restart_needed: bool,
     last_activity: Instant,
     /// Since when background work keeps this idle query alive.
@@ -1022,6 +1024,10 @@ impl ClaudeSession {
                 return Err(ProviderError::SessionStopped);
             }
             let t3_mcp = state.mcp_servers.iter().any(|s| s.name == T3_MCP_SERVER);
+            let device_tools = state
+                .mcp_servers
+                .iter()
+                .any(|s| s.name == T3_MCP_SERVER && s.device_tools);
             let reusable = state.live.as_ref().is_some_and(|l| {
                 l.query.is_open()
                     && !l.restart_needed
@@ -1029,6 +1035,7 @@ impl ClaudeSession {
                     && l.cwd == cwd
                     && l.policy == policy
                     && l.t3_mcp == t3_mcp
+                    && l.device_tools == device_tools
                     && (same_selection(l, &model, &effort, &selection_settings)
                         // canApplyClaudeSelectionLive, and a model change only when the CLI
                         // opened in the policy's mode (T3's openedPermissionMode check).
@@ -1073,6 +1080,7 @@ impl ClaudeSession {
                     resume_at: conversation_head(&thread),
                     title: title.clone(),
                     t3_mcp,
+                    device_tools,
                     prompt_suggestions: false,
                 };
                 (Plan::Launch(Box::new(query)), state.live.take())
@@ -1390,8 +1398,13 @@ impl ClaudeSession {
                 .map_err(|e| failed_err("start_turn", e.to_string()))?
                 .map_err(|e| failed_err("start_turn", e))?;
         let options = launch::query_options(&inner.config, &input, env, &applied);
-        // T3's `openQuery` gives every turn's query its `onStop` hook.
-        let mut query = inner.helper.open(options, json!({"stopHook": true}))?;
+        // T3's `openQuery` gives every turn's query its `onStop` hook, and a session with the
+        // device tools its SubagentStart hook.
+        let mut command = json!({"stopHook": true});
+        if let Some(device) = launch::device_text(&inner.config, &input) {
+            command["subagentStartContext"] = json!(device);
+        }
+        let mut query = inner.helper.open(options, command)?;
         let Some(rx) = query.take_events() else {
             return Err(failed_err("start_turn", "the query has no event stream"));
         };
@@ -1420,6 +1433,7 @@ impl ClaudeSession {
                 selection_settings: input.selection_settings.clone(),
                 mcp_servers: Vec::new(),
                 t3_mcp: input.t3_mcp,
+                device_tools: input.device_tools,
                 restart_needed: false,
                 last_activity: Instant::now(),
                 held_since: None,
@@ -2277,7 +2291,7 @@ impl Session for ClaudeSession {
         })
     }
 
-    fn close(&self) -> BoxFuture<'_, ()> {
+    fn close(&self) -> BoxFuture<'_, Closed> {
         Box::pin(async move {
             let live = {
                 let mut state = self.inner.lock();
@@ -2298,6 +2312,8 @@ impl Session for ClaudeSession {
             let mut state = self.inner.lock();
             state.events = None;
             state.tails.clear();
+            // Each session runs its own Claude query; the SDK host holds no MCP client.
+            Closed::RuntimeStopped
         })
     }
 }

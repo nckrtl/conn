@@ -161,15 +161,32 @@ dependencies = [
 
 [[package]]
 name = "conn-contract"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "conn-devices"
+version = "0.3.0"
+dependencies = [
+ "conn-support",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nix 0.31.3",
+ "regex-automata",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "conn-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-provider",
@@ -188,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "conn-features"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-engine",
@@ -199,13 +216,16 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "thiserror",
  "tokio",
+ "url",
 ]
 
 [[package]]
 name = "conn-files"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-support",
@@ -226,17 +246,21 @@ dependencies = [
 
 [[package]]
 name = "conn-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
+ "conn-devices",
  "conn-engine",
  "conn-features",
  "conn-files",
  "conn-preview",
+ "conn-provider",
+ "conn-provider-codex",
  "conn-source-control",
  "conn-support",
  "conn-terminal",
  "conn-vcs",
+ "futures-util",
  "getrandom 0.3.4",
  "http",
  "jiff",
@@ -250,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "conn-preview"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "command-fds",
  "conn-files",
@@ -274,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "serde",
@@ -285,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-acp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-provider",
@@ -301,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-claude"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-mcp",
@@ -317,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-codex"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-provider",
@@ -333,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-provider",
  "conn-support",
@@ -344,10 +368,11 @@ dependencies = [
 
 [[package]]
 name = "conn-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "conn-contract",
+ "conn-devices",
  "conn-engine",
  "conn-features",
  "conn-files",
@@ -386,11 +411,12 @@ dependencies = [
 
 [[package]]
 name = "conn-source-control"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-support",
  "conn-vcs",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -405,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "conn-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "getrandom 0.3.4",
  "regex-automata",
@@ -419,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "conn-terminal"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-support",
@@ -431,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "conn-vcs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "conn-contract",
  "conn-support",
@@ -445,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "conn-wire"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

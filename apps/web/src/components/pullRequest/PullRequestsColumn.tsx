@@ -31,7 +31,7 @@ export function PullRequestsColumn({
   searchInput,
   sortMenu,
   filtersMenu,
-  renderSavedViewsMenu,
+  savedViewsMenu,
   titlebarControls,
   rightPanelOpen,
   rightPanelPresent,
@@ -48,7 +48,7 @@ export function PullRequestsColumn({
   /** The three list menus render as ghost buttons in the toolbar pill; `collapsed` keeps their icons. */
   sortMenu: (toolbar: { collapsed: boolean }) => ReactNode;
   filtersMenu: (toolbar: { collapsed: boolean }) => ReactNode;
-  renderSavedViewsMenu: (toolbar: { collapsed: boolean }) => ReactNode;
+  savedViewsMenu: (toolbar: { collapsed: boolean }) => ReactNode;
   titlebarControls: ReactNode;
   rightPanelOpen: boolean;
   rightPanelPresent: boolean;
@@ -149,7 +149,7 @@ export function PullRequestsColumn({
           <ToolbarGroup role="group" aria-label={gt("List")} className="shrink-0">
             {sortMenu({ collapsed })}
             {filtersMenu({ collapsed })}
-            {renderSavedViewsMenu({ collapsed })}
+            {savedViewsMenu({ collapsed })}
           </ToolbarGroup>
           {/* Which provider's pull requests are read: a source, not a list setting. */}
           <ToolbarGroup role="group" aria-label={gt("Provider")} className="shrink-0">

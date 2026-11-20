@@ -162,11 +162,14 @@ fi
 # The checks against the monorepo: its contract, apps/server and the web client.
 run 2 120 "gen-contract --check" node crates/conn-contract/tools/gen-contract.mjs --check
 run 2 120 "gen-tools --check" node crates/conn-mcp/tools/gen-tools.mjs --check
+run 2 120 "gen-devices --check" node crates/conn-devices/tools/gen-devices.mjs --check
 run 2 120 "gen-keybindings --check" node crates/conn-server/tools/gen-keybindings.mjs --check
 run 2 120 "gen-upstream --check" node tools/gen-upstream.mjs --check
 # GitHub's GraphQL operation texts, printed from T3's generated modules by effect/graphql.
 run 2 120 "gen-graphql --check" node crates/conn-source-control/tools/gen-graphql.mjs --check
 run 2 120 "PR characterizations" node crates/conn-source-control/tools/gen-pr-cases.mjs --check
+run 2 60 "credential characterizations" node crates/conn-features/tools/gen-credential-cases.mjs --check
+run 2 60 "theme characterizations" node crates/conn-files/tools/gen-theme-cases.mjs --check
 run 2 120 "check-copies" node tools/check-copies.mjs
 decoded="$scratch/decoded-tags"
 : >"$decoded"
@@ -197,13 +200,25 @@ run 4 120 "registry-diff" \
 # Pull request watch evaluation and wake texts against T3's own pullRequestWatch.ts.
 run 4 120 "pr-watch-diff" \
   node crates/conn-source-control/tools/pr-watch-diff.mjs "$release/examples/pr_watch_cases"
+# The pull request link sweep and branch lookup against T3's own services on a test clock.
+run 4 120 "pr-link-sync-diff" \
+  node crates/conn-source-control/tools/pr-link-sync-diff.mjs "$release/examples/pr_link_sync_cases" \
+  "$release/examples/background_gate"
 # Webhook prompt templates, filters and signatures against T3's own functions.
 run 4 120 "webhook-diff" node crates/conn-features/tools/webhook-diff.mjs "$release/examples/webhook_functions"
 run 4 120 "limits-diff" node crates/conn-server/tools/limits-diff.mjs
 run 3 180 "parity" \
   node crates/conn-mcp/tools/parity.mjs "$release/examples/replay_server"
+# Peer links between two servers: T3 → T3 against Conn → Conn, Conn → T3 and T3 → Conn.
+run 3 180 "peer-links-diff" \
+  node crates/conn-server/tools/peer-links-diff.mjs "$release/examples/replay_server"
+# Devices: both servers on stand-in ssh and npm (a stand-in Mac, hub and daemon); no device.
+run 3 240 "device conformance" \
+  node crates/conn-devices/tools/conformance.mjs "$release/examples/replay_server"
 # Orbit's idle check: the shell route in 14 states on both servers, Codex on a stub (no model).
 run 4 180 "idle-diff" node crates/conn-server/tools/idle-diff.mjs "$release/conn-server"
+# Local servers for previews: both servers list and stop this check's own listeners.
+run 4 120 "local-servers-diff" node crates/conn-server/tools/local-servers-diff.mjs "$release/conn-server"
 # Provider sign-in: every provider.auth.* reply and the CLI runs on both servers (stub CLIs).
 run 4 180 "provider-auth-diff" node crates/conn-server/tools/provider-auth-diff.mjs "$release/conn-server"
 run 2 120 "codex instructions --check" \
@@ -234,6 +249,8 @@ run 2 480 "t3 fixture replay" node crates/conn-engine/tools/t3-fixture-replay/ch
 # The T3 Grok adapter and conn-provider-acp against one stub agent (no agent, no model).
 run 2 120 "acp instructions --check" node crates/conn-provider-acp/tools/gen-instructions.mjs --check
 run 3 480 "acp conformance" node crates/conn-provider-acp/tools/conformance.mjs
+# T3's Antigravity driver and adapter against ours on a recorded `agy acp` 1.5.4 (no agent, no model).
+run 3 240 "antigravity conformance" node crates/conn-provider-acp/tools/antigravity-conformance.mjs
 # T3's Grok status probe and ours against one stub CLI per scenario (no CLI, no model).
 run 2 180 "grok probe conformance" node crates/conn-provider-acp/tools/probe-conformance.mjs
 # Orbit's task-turn commands (`t3 thread`, `t3 auth session`) on the T3 server with its own

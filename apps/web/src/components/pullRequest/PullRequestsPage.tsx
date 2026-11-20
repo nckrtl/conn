@@ -1423,6 +1423,15 @@ export function PullRequestsPage() {
       }
     />
   );
+  const savedViewsMenu = ({ collapsed }: { collapsed: boolean }) => (
+    <SavedViewsMenu
+      grouped
+      collapsed={collapsed}
+      kind={PULL_REQUEST_SAVED_VIEWS}
+      preferences={search}
+      onApply={(preferences) => updateListScope(pullRequestSavedViewPatch(preferences))}
+    />
+  );
   const columnProps = {
     refreshing,
     onRefresh: () => void refreshFromHost(),
@@ -1432,15 +1441,7 @@ export function PullRequestsPage() {
     searchInput,
     sortMenu,
     filtersMenu,
-    renderSavedViewsMenu: ({ collapsed }: { collapsed: boolean }) => (
-      <SavedViewsMenu
-        grouped
-        collapsed={collapsed}
-        kind={PULL_REQUEST_SAVED_VIEWS}
-        preferences={search}
-        onApply={(preferences) => updateListScope(pullRequestSavedViewPatch(preferences))}
-      />
-    ),
+    savedViewsMenu,
     titlebarControls: !pullRequestsSupported ? null : rightPanelPresent ? (
       // Panel open: the controls live at the root; this keeps the header's drag region off them.
       isElectron ? (

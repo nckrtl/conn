@@ -125,6 +125,9 @@ pub struct TextGenerationRequest {
     /// The request's deadline when the caller sets one (`investigate.timeoutMs`); else the
     /// provider's own.
     pub timeout: Option<std::time::Duration>,
+    /// `investigate`: the model reads the checkout in `cwd` with read-only tools across turns
+    /// (review guides). A provider that cannot keep that read-only refuses the request.
+    pub investigate: bool,
 }
 
 /// `ProviderSelectionTransitionInput`.
@@ -164,6 +167,17 @@ impl std::fmt::Debug for OpenedSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenedSession").finish_non_exhaustive()
     }
+}
+
+/// What [`Session::close`] left running. T3 revokes a session's MCP credential when its
+/// process ends (`releaseEntry` in `ProviderSessionManager.ts`), and keeps it while a shared
+/// process still runs: that process's MCP client may still use it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closed {
+    /// The session's process ended with it.
+    RuntimeStopped,
+    /// The process keeps serving other sessions (Codex's shared `app-server`).
+    RuntimeShared,
 }
 
 /// One live native session. Methods return once the provider accepted the request; results
@@ -238,8 +252,9 @@ pub trait Session: Send + Sync {
         input: RuntimeRequestResponse,
     ) -> BoxFuture<'_, ProviderResult<()>>;
 
-    /// Ends the native process. The event channel closes after it.
-    fn close(&self) -> BoxFuture<'_, ()>;
+    /// Ends the session. The event channel closes after it. The answer says whether the
+    /// native process ended with it, or keeps serving other sessions.
+    fn close(&self) -> BoxFuture<'_, Closed>;
 
     /// Requests use the existing provider process; they never open a session or a turn.
     fn mcp_app_request(
@@ -338,6 +353,10 @@ pub struct McpServer {
     pub url: String,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
+    /// The session may use the device tools (T3's `device` MCP capability): the agent then
+    /// gets T3's device text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_tools: bool,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -1106,8 +1125,8 @@ mod tests {
         ) -> BoxFuture<'_, ProviderResult<()>> {
             Box::pin(async { Ok(()) })
         }
-        fn close(&self) -> BoxFuture<'_, ()> {
-            Box::pin(async {})
+        fn close(&self) -> BoxFuture<'_, Closed> {
+            Box::pin(async { Closed::RuntimeStopped })
         }
     }
 

@@ -13,7 +13,10 @@ fn main() {
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(conn_provider_acp::BROWSER_SUBCOMMAND))
     {
-        let args: Vec<String> = std::env::args().skip(2).collect();
+        let args: Vec<String> = std::env::args_os()
+            .skip(2)
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         std::process::exit(conn_provider_acp::browser_main(&args));
     }
     run_server();

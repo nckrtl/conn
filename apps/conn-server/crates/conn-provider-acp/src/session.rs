@@ -399,7 +399,13 @@ impl AcpSession {
                     "ACP driver did not negotiate image prompt support",
                 ));
             }
-            blocks.extend(image_blocks);
+            // Antigravity (`buildAntigravityPrompt`): without `promptCapabilities.image` an
+            // image goes as its path only, which the text already carries.
+            let images_as_paths = flavor.client_file_reads
+                && state.initialize["agentCapabilities"]["promptCapabilities"]["image"] != true;
+            if !images_as_paths {
+                blocks.extend(image_blocks);
+            }
             if blocks.is_empty() {
                 return Err(protocol_error(
                     "ACP turn requires non-empty text or attachments",

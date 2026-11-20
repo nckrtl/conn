@@ -121,6 +121,8 @@
         "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"],
         "src/annotations/**": ["exports"],
         "src/orbit/**": ["exports"],
+        // Generated: one export per glyph so single-glyph users tree-shake the set.
+        "src/icons/glyphs.generated.ts": ["exports"],
         "src/browser/ServerBrowserSurface.tsx": ["exports"],
         "src/components/AppRouteModal.tsx": ["exports"],
         "src/lib/sidebarTree.ts": ["exports"],

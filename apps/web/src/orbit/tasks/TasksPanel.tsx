@@ -245,7 +245,7 @@ function BoardToolbar() {
   const hidden = settings.hiddenLanes.length;
   return (
     // Sits under the tab bar like the file view's breadcrumb row.
-    <div className="flex shrink-0 items-center gap-2 border-b border-(--shell-divider)! px-2 py-toolbar">
+    <div className="flex shrink-0 items-center gap-2 px-2 py-toolbar">
       <InputGroup variant="soft" className="h-8 min-w-0 flex-1">
         <InputGroupAddon>
           <SearchIcon aria-hidden className="size-4 opacity-50" />

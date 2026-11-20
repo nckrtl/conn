@@ -386,7 +386,7 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
           ? gt("Task insights, last 24 hours")
           : gt("Task insights, last {days} days", { days })
       }
-      className="@container relative shrink-0 border-b border-(--shell-divider)! [--fade-end:0] [--fade-start:0]"
+      className="@container relative shrink-0 [--fade-end:0] [--fade-start:0]"
     >
       {/* No scrollbar: the edges fade out while there is more to scroll to. */}
       <div

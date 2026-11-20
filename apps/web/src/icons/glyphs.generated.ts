@@ -944,6 +944,16 @@ export const goUpParentGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const hashGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M7.487 2.89a.75.75 0 1 0-1.474-.28l-.455 2.388H3.61a.75.75 0 0 0 0 1.5h1.663l-.571 2.998H2.75a.75.75 0 0 0 0 1.5h1.666l-.403 2.114a.75.75 0 0 0 1.474.28l.456-2.394h2.973l-.403 2.114a.75.75 0 0 0 1.474.28l.456-2.394h1.947a.75.75 0 0 0 0-1.5h-1.661l.57-2.998h1.95a.75.75 0 0 0 0-1.5h-1.664l.402-2.108a.75.75 0 0 0-1.474-.28l-.455 2.388H7.085l.402-2.108ZM6.8 6.498l-.571 2.998h2.973l.57-2.998H6.8Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const heartGlyph = [
   [
     "path",
@@ -1170,6 +1180,16 @@ export const mailGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const mailOpenGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M1.756 4.568A1.5 1.5 0 0 0 1 5.871V12.5A1.5 1.5 0 0 0 2.5 14h11a1.5 1.5 0 0 0 1.5-1.5V5.87a1.5 1.5 0 0 0-.756-1.302l-5.5-3.143a1.5 1.5 0 0 0-1.488 0l-5.5 3.143Zm1.82 2.963a.75.75 0 0 0-.653 1.35l4.1 1.98a2.25 2.25 0 0 0 1.955 0l4.1-1.98a.75.75 0 1 0-.653-1.35L8.326 9.51a.75.75 0 0 1-.652 0L3.575 7.53Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
 export const maximizeGlyph = [
   [
     "path",
@@ -1324,6 +1344,22 @@ export const panelMenuGlyph = [
       fillRule: "evenodd",
       d: "M2.586 2.586A2 2 0 0 1 4 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 .586-1.414ZM4.75 10a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Zm0-5.5a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Zm0 2.75a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5Z",
       clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const pasteGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M11.986 3H12a2 2 0 0 1 2 2v6a2 2 0 0 1-1.5 1.937v-2.523a2.5 2.5 0 0 0-.732-1.768L8.354 5.232A2.5 2.5 0 0 0 6.586 4.5H4.063A2 2 0 0 1 6 3h.014A2.25 2.25 0 0 1 8.25 1h1.5a2.25 2.25 0 0 1 2.236 2ZM10.5 4v-.75a.75.75 0 0 0-.75-.75h-1.5a.75.75 0 0 0-.75.75V4h3Z",
+      clipRule: "evenodd",
+    },
+  ],
+  [
+    "path",
+    {
+      d: "M3 6a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-3.586a1 1 0 0 0-.293-.707L7.293 6.293A1 1 0 0 0 6.586 6H3Z",
     },
   ],
 ] as const satisfies IconNode;
@@ -2368,6 +2404,7 @@ export const GLYPHS = {
   fullscreen: fullscreenGlyph,
   globe: globeGlyph,
   goUpParent: goUpParentGlyph,
+  hash: hashGlyph,
   heart: heartGlyph,
   help: helpGlyph,
   hide: hideGlyph,
@@ -2389,6 +2426,7 @@ export const GLYPHS = {
   lock: lockGlyph,
   login: loginGlyph,
   mail: mailGlyph,
+  mailOpen: mailOpenGlyph,
   maximize: maximizeGlyph,
   memory: memoryGlyph,
   mention: mentionGlyph,
@@ -2407,6 +2445,7 @@ export const GLYPHS = {
   paint: paintGlyph,
   panelBottom: panelBottomGlyph,
   panelMenu: panelMenuGlyph,
+  paste: pasteGlyph,
   pause: pauseGlyph,
   phone: phoneGlyph,
   pickElement: pickElementGlyph,
@@ -2566,6 +2605,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "circle-slash": GLYPHS.blocked,
   "circle-stop": GLYPHS.stopCircle,
   "circle-x": GLYPHS.clearCircle,
+  "clipboard-paste": GLYPHS.paste,
   clock: GLYPHS.clock,
   clock3: GLYPHS.clock,
   cloud: GLYPHS.cloud,
@@ -2621,6 +2661,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "grip-vertical": GLYPHS.dragHandle,
   hammer: GLYPHS.build,
   "hard-drive": GLYPHS.disk,
+  hash: GLYPHS.hash,
   heart: GLYPHS.heart,
   history: GLYPHS.history,
   home: GLYPHS.home,
@@ -2650,6 +2691,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "lock-open": GLYPHS.unlock,
   "log-in": GLYPHS.login,
   mail: GLYPHS.mail,
+  "mail-open": GLYPHS.mailOpen,
   maximize: GLYPHS.fullscreen,
   maximize2: GLYPHS.maximize,
   "memory-stick": GLYPHS.memory,
@@ -2744,6 +2786,7 @@ export const GLYPH_BY_LUCIDE_NAME: Readonly<Record<string, IconNode>> = {
   "text-wrap": GLYPHS.wrapLines,
   ticket: GLYPHS.ticket,
   timer: GLYPHS.timer,
+  trash: GLYPHS.delete,
   trash2: GLYPHS.delete,
   "trending-down": GLYPHS.trendDown,
   "trending-up": GLYPHS.trendUp,

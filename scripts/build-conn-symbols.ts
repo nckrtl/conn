@@ -435,7 +435,42 @@ function readGlyph(concept: string): SymbolPath[] {
     }
   }
   if (paths.length === 0) throw new Error(`${file}: no paths`);
-  return paths;
+  return STEPPED_CONCEPTS.has(concept)
+    ? paths.map((p) => ({ ...p, d: scaleAboutCentre(p.d, STEP) }))
+    : paths;
+}
+
+// Bare ×, + and … fill less of the box than the SF Symbols they replace; they draw one size step
+// up (20 → 24) about the box centre, everywhere on mobile.
+const STEPPED_CONCEPTS = new Set(["close", "add", "more-horizontal"]);
+const STEP = 1.2;
+
+function scaleAboutCentre(d: string, factor: number): string {
+  const c = GLYPH_BOX / 2;
+  const at = (pt: Point): Point => [c + (pt[0] - c) * factor, c + (pt[1] - c) * factor];
+  return serialize(
+    parseSubpaths(d).map((sub) => ({
+      start: at(sub.start),
+      segments: sub.segments.map((s) =>
+        s.kind === "L"
+          ? { kind: "L", to: at(s.to) }
+          : s.kind === "C"
+            ? { kind: "C", c1: at(s.c1), c2: at(s.c2), to: at(s.to) }
+            : s.kind === "Q"
+              ? { kind: "Q", c: at(s.c), to: at(s.to) }
+              : { ...s, rx: s.rx * factor, ry: s.ry * factor, to: at(s.to) },
+      ),
+    })),
+  );
+}
+
+/** A glyph as a black-on-transparent SVG in its 24-unit box. */
+function glyphSvg(concept: string): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${GLYPH_BOX} ${GLYPH_BOX}" fill="#000">${readGlyph(
+    concept,
+  )
+    .map((p) => `<path${p.evenOdd ? ' fill-rule="evenodd"' : ""} d="${p.d}"/>`)
+    .join("")}</svg>`;
 }
 
 NodeFS.rmSync(catalog, { recursive: true, force: true });
@@ -509,10 +544,7 @@ NodeFS.rmSync(headerDir, { recursive: true, force: true });
 NodeFS.mkdirSync(headerDir, { recursive: true });
 const HEADER_POINTS = 24;
 for (const concept of concepts) {
-  const svg = NodeFS.readFileSync(
-    NodePath.join(setDir, `${GLYPH_BOX}/solid`, `${concept}.svg`),
-    "utf8",
-  ).replaceAll("currentColor", "#000");
+  const svg = glyphSvg(concept);
   for (const scale of [1, 2, 3]) {
     const pixels = HEADER_POINTS * scale;
     const png = await sharp(Buffer.from(svg), { density: (72 * pixels * 2) / GLYPH_BOX })

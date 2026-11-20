@@ -21,6 +21,93 @@ the run stays open. Waiting for terminal confirmation is deliberate. `idle-diff`
 split in `KNOWN` as `intermittent`; a gate either side misses still fails it. Whether to
 match T3 is open.
 
+## Environment themes (2026-11-20)
+
+Agents can restyle the clients with `t3_theme_read` and `t3_theme_set`, and clients that ask
+get the published themes on `subscribeServerConfig` (`environmentThemesUpdated`, capability
+`environmentThemes`). The service is `conn-files/src/themes.rs` (T3's
+`EnvironmentThemeService`); the tools are `conn-mcp/src/tools/themes.rs`.
+
+- **The folder:** `<state-dir>/themes`, as in T3. A theme is `<id>.json`, read without
+  following links or blocking on a FIFO, at most 32 files and 2 MiB in total; its background
+  is `<id>.webp|png|jpg|jpeg` beside it (16 MiB, no links), served by the asset route
+  (`environment-theme-background`). Publishing writes a staging file and renames it, checks
+  that the theme is served without pushing another out, and puts the old file back when the
+  settings write that selects it fails. Selecting sets `defaultTheme`/`defaultAppearance` and
+  their `SetAt` times; `t3-code` is stored as the empty stock default.
+- **Changes:** T3 watches the folder. Here each theme subscription looks at the folder once a
+  second and reads the files again only when the listing (names, inodes, sizes, times)
+  changed; a publish notifies at once.
+- **Proof:** `gen-theme-cases.mjs` (new check) records T3's `EnvironmentThemeFile` decode and
+  pretty encode, `environmentThemeFileHasColors`, the id pattern, the reserved ids and
+  `themeCssLoadsRemoteFiles` (123 cases), and the guide text and built-in ids the tool returns
+  (`themes/upstream.json`); `cargo test -p conn-files themes` matches them and covers publish,
+  revert and each refusal. `files.rs` covers the background route (no link, no bad id).
+  `parity.mjs`: each refusal, a publish, a read and three switches, values equal to T3.
+  `effect-client.mjs`: a theme file reaches a subscriber that asks, decoded by T3's client.
+- **Known differences:** key order in a published file is alphabetical (serde_json), not
+  T3's schema order; the content is the same. A theme file with a lone surrogate escape in a
+  string is skipped (T3's `JSON.parse` keeps it). The `/mcp` input rules check a colors
+  record's values before dropping keys that miss the key pattern; T3 drops those keys
+  unchecked. `t3_theme_set` does not take the caller thread's command lock (T3's
+  `executor.withLock`), as `t3_environment_preferences_update` here. T3's `t3 theme` CLI is
+  not built.
+## Issues (2026-11-20)
+
+GitHub issues are served: 11 `issues.*` methods (`list`, `detail`, `comments`, `templates`,
+`candidates`, `create`, `comment`, `update`, `setState`, `react`, `linkedThreads`) and 8 `/mcp`
+tools (`list_issues`, `read_issue`, `create_issue`, `comment_on_issue`, `set_issue_state`,
+`link_issue`, `unlink_issue`, `list_thread_issues`). Before, all were unregistered and the
+engine refused `thread.issue.link`.
+
+- **The tracker** (`conn-source-control/src/pull_requests/issues.rs`, T3's
+  `GitHubIssueTracker` and `gitHubIssueJson`): search with T3's query, the detail with its
+  labels, assignees and closing references paged to the end, comments, create, comment,
+  update (refused when GitHub silently drops labels or assignees), state with close reasons,
+  reactions on the issue or one of its comments, candidates, templates.
+- **The service** (`conn-server/src/methods/pull_requests/issues.rs`, T3's `IssueService`): a
+  project's issues live in its GitHub repository; another repository on the host is read
+  through it, read-only. Listing reads each scope once and pages per scope.
+- **Links** (`conn-engine`): `thread.issue.link` and `thread.issue.unlink` as T3's decider,
+  `thread.issue-synced` with the whole thread, `issues` in the shell row when present.
+- **Proof:** `gen-pr-cases.mjs` records T3's `GitHubIssueTracker` (22 cases: search queries,
+  paging, missing issues, every write and refusal) on an in-memory GitHub;
+  `issue_tracker_matches_t3s_recorded_http_requests` replays them: results, failures and every
+  request equal. `client-check`: links, a second spelling of one key, an unlink, through the
+  client's reducers. `parity.mjs`: the tools' refusals outside a thread. The Effect client
+  decodes all 11 methods.
+- **Not built:** standalone trackers (Linear) and `issueTrackers.list/connect/bindProject`;
+  YAML issue forms in `templates` (`blank_issues_enabled: false` in `config.yml` is read);
+  issue URLs are read only in GitHub's canonical `/<owner>/<repo>/issues/<n>` form.
+- **Known differences (review, 2026-11-20):** a project on a GitHub Enterprise host is
+  classified by its remote's host name, so its issue URLs are refused; `link_issue` checks the
+  caller's limits once, not again under the target's lock; `issues.linkedThreads` reads active
+  and archived threads in two snapshots, so a thread archived between them can show twice; a
+  missing `gh` reads as signed out.
+
+## `fill_credential` (2026-11-20)
+
+Agents can fill a saved test login into a sign-in form in their browser tab:
+`fill_credential` (`conn-mcp/src/tools/test_logins.rs`, T3's `CredentialAutofill.fill`).
+
+- **The rules:** the login must exist; the tab must have a page; the tab's origin must match
+  the login's saved URL (`test_logins/origin.rs`, `matchingOrigin`: same host without `www.`,
+  same port, https unless the saved URL says http or names a development host); the value is
+  the username, the password, or a one-time code (`test_logins/totp.rs`, `totpCode`: base32 or
+  `otpauth://totp`, SHA-1/256/512). Only a status and T3's message come back.
+- **The fill** (`conn-preview` `credentialFill`, `fillCredential`): the field expression,
+  T3's prepare and insert functions (generated into `spec.json` by `gen-spec.mjs`, which
+  fails if `credentialFieldExpression` stops taking its inputs as JSON), the origin checked
+  before and after the field is found. The value goes only to CDP; inserted inputs are
+  redacted from later snapshots by the existing sensitive-value read.
+- **Proof:** `gen-credential-cases.mjs` (new check): 223 cases of T3's `matchingOrigin`,
+  `parseSavedUrl`, `parseTotpSetup` and `totpCode`, equal in `cargo test -p conn-features`.
+  `parity.mjs`: the refusals outside a thread and bad input. `cargo test -p conn-mcp
+  fill_credential`: an unknown login, a saved login with no tab (status only, no value).
+- **Known differences:** `credentialAutofill.allowSubdomains` is not honoured (T3 uses the
+  public-suffix list; subdomains never match here); `credentials.listForSite` and
+  `fillForSite` (the browser's key menu) are not served; no live fill was run against a page.
+
 ## `t3_thread_transfer` (2026-11-20)
 
 `t3_thread_transfer` is served (`conn-mcp/src/tools/manage.rs`, T3's `thread/handlers.ts`):
@@ -450,6 +537,36 @@ the stubs on both sides. Not built: T3's managed Codex sign-in (`setupMode: mana
 `provider.chatgpt.*`. That flow is T3's own OAuth against `auth.openai.com`, with tokens in
 T3's secret store; AGENTS.md "Providers" forbids it here.
 
+## Provider install through the AI router (item 7, 2026-11-20)
+
+`provider.install.start`, `cancel` and `remove` are served, and `provider.install.subscribe`
+now matches T3. Nick decided on 2026-11-20 that providers authenticate through Orbit's AI
+router: this server holds no ChatGPT or managed-Codex token, and T3's token broker
+(`CodexManagedRuntime.ts`, `CodexChatGptAuth.ts`) is not ported.
+
+- T3 installs only for a Codex instance with `setupMode: "managed"` (and Antigravity, not
+  offered here). Every other instance gets `requireInstance`'s `ProviderSetupError`, on all
+  four methods; ours answers the same.
+- A managed Codex: T3 takes a supported `codex` on `PATH` before it downloads (`reuseLocal`).
+  In an Orbit container that is Orbit's agent bundle, and Orbit's `~/.codex/config.toml` sends
+  its model calls to the router (`base_url` on the Node forwarder, `env_key =
+  "ORBIT_MODEL_KEY"`). Claude reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from
+  `model.env`. The server only passes its environment on. So `start` and `remove` answer the
+  "succeeded, local" state for that runtime (`crates/conn-provider-codex/src/install.rs`,
+  T3's checks: `--version` is exactly `codex-cli X.Y.Z`, `app-server --help` exits 0, a script
+  or a binary with `codex-code-mode-host` beside it, 5 s). `cancel` answers T3's "no longer
+  current" error: no install ever runs.
+- **Deliberate differences:** no download. Without a `codex` on `PATH`, `start` fails with
+  our text instead of downloading. `version` (what T3 would download next) is always null, so
+  no client offers an update. No compatibility check against T3's download manifest: Orbit
+  pins the bundled version. The managed instance still runs the plain Codex provider with
+  `setup.canAuthenticate: false`; T3's `CodexManagedProvider` (ChatGPT sign-in, shadow home)
+  is not built.
+- **Proof:** `provider-auth-diff.mjs` now also calls the four install methods for
+  `claudeAgent`, `codex`, `grok` and an unknown id against both servers (16 more calls, all
+  equal). `effect-client.mjs` drives a managed instance against a stub `codex` on `PATH`; the
+  real client decodes each state. Unit tests in `install.rs`.
+
 ## Managed access, target side (item 4)
 
 `serve --managed-provision <file>` serves Orbit callers on a separate managed ingress and
@@ -656,8 +773,7 @@ Compat only, no new features (Nick, 2026-11-19):
 `tools/follow-conn.sh --capture`, then each red check followed as T3 does it:
 
 - Contract and generated tables regenerated (T3 server version 0.1.10).
-- Assets: `environment-theme-background` (#36680) is answered "not found": this server
-  publishes no environment themes, so no theme has a background.
+- Assets: `environment-theme-background` (#36680); served since "Environment themes".
 - Payload limits: T3's theme id pattern starts with a negative lookahead, which Rust's regex
   lacks; a leading `^(?!X)` now compiles to a deny regex beside the allow regex.
 - Thread titles: title instructions replace the 3-8 word length rule and go under "Title

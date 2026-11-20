@@ -64,6 +64,19 @@ NodeFS.writeFileSync(
   ].join("\n"),
   { mode: 0o755 },
 );
+// A stand-in `codex` on PATH: Orbit's bundled runtime for a managed Codex instance
+// (`provider.install.*`). It answers the two runtime checks and nothing else.
+NodeFS.writeFileSync(
+  NodePath.join(sshStub, "codex"),
+  [
+    "#!/bin/sh",
+    '[ "$1" = --version ] && { echo "codex-cli 0.166.0"; exit 0; }',
+    '[ "$1" = app-server ] && [ "$2" = --help ] && exit 0',
+    "exit 1",
+    "",
+  ].join("\n"),
+  { mode: 0o755 },
+);
 serverEnv.PATH = `${sshStub}:${serverEnv.PATH}`;
 const workflowScript = NodePath.join(serverEnv.HOME, ".claude", "projects", "effect-client.js");
 NodeFS.mkdirSync(NodePath.dirname(workflowScript), { recursive: true });
@@ -211,6 +224,22 @@ const program = Effect.gen(function* () {
       config.type === "snapshot" &&
         config.config.environment.environmentId === descriptor.environmentId,
       `${Object.keys(config.config.settings).length} settings keys`,
+    );
+    // A theme file dropped into the folder reaches a subscriber that asks, after the snapshot.
+    NodeFS.writeFileSync(
+      NodePath.join(stateDir, "themes", "fixture.json"),
+      JSON.stringify({ name: " Fixture ", appearance: "dark", canvas: "#101010", accent: "#ff8800" }),
+    );
+    const themed = yield* take(client.subscribeServerConfig({ environmentThemes: true }), 2);
+    check(
+      "subscribeServerConfig environmentThemesUpdated decodes",
+      themed[0].type === "snapshot" &&
+        themed[0].config.environment.capabilities.environmentThemes === true &&
+        themed[1].type === "environmentThemesUpdated" &&
+        themed[1].payload.themes.length === 1 &&
+        themed[1].payload.themes[0].id === "fixture" &&
+        themed[1].payload.themes[0].name === "Fixture",
+      JSON.stringify(themed[1]),
     );
     const lifecycle = yield* take(client.subscribeServerLifecycle({}), 2);
     check("subscribeServerLifecycle", lifecycle.map((e) => e.type).join(",") === "welcome,ready");
@@ -543,7 +572,43 @@ const decodeEach = (client) =>
     yield* call("provider.auth.cancel", { instanceId: "codex", flowId: "f" });
     yield* call("provider.auth.removeMethod", { instanceId: "codex", methodId: "chatgpt" });
     yield* call("provider.auth.logout", { instanceId: "codex" });
+    // Install: T3's ProviderSetupError outside managed Codex; a managed Codex is the runtime
+    // on PATH (Orbit's bundle, signed in through the AI router), never a download.
     yield* call("provider.install.subscribe", { instanceId: "codex" });
+    yield* call("provider.install.start", { instanceId: "codex" });
+    yield* call("provider.install.cancel", { instanceId: "codex", operationId: "op" });
+    yield* call("provider.install.remove", { instanceId: "codex" });
+    yield* call("server.updateSettings", {
+      patch: {},
+      providerInstanceMutation: {
+        operation: "create",
+        instanceId: "codexManaged",
+        instance: { driver: "codex", enabled: false, config: { setupMode: "managed" } },
+      },
+    });
+    const installed = yield* call("provider.install.start", { instanceId: "codexManaged" });
+    check(
+      "managed Codex reuses the runtime on PATH",
+      Exit.isSuccess(installed) &&
+        installed.value.phase === "succeeded" &&
+        installed.value.source === "local" &&
+        installed.value.installedVersion === "0.166.0" &&
+        installed.value.executablePath === NodePath.join(sshStub, "codex") &&
+        installed.value.version === null,
+      JSON.stringify(Exit.isSuccess(installed) ? installed.value : String(installed.cause)),
+    );
+    const watched = yield* call("provider.install.subscribe", { instanceId: "codexManaged" });
+    check(
+      "managed Codex install state",
+      Exit.isSuccess(watched) && Option.getOrUndefined(Option.flatten(watched.value))?.phase === "succeeded",
+    );
+    yield* call("provider.install.cancel", { instanceId: "codexManaged", operationId: "op" });
+    const removed = yield* call("provider.install.remove", { instanceId: "codexManaged" });
+    check("managed Codex remove keeps Orbit's runtime", Exit.isSuccess(removed) && removed.value.phase === "succeeded");
+    yield* call("server.updateSettings", {
+      patch: {},
+      providerInstanceMutation: { operation: "remove", instanceId: "codexManaged" },
+    });
     yield* call("server.getConfig", {});
     // Grok, switched on with a stub CLI (crates/conn-provider-acp/tools/grok-cli-stub.mjs; no
     // real CLI runs): the server probes it as T3 does, and the entry decodes as "ready".
@@ -668,6 +733,20 @@ const decodeEach = (client) =>
     yield* call("pullRequests.runAction", { ...prRef, action: "close" });
     yield* call("pullRequests.generateReviewGuide", prRef);
     yield* call("pullRequests.stack", prRef);
+    // Issues: no project is a GitHub checkout here, so each read and write answers with the
+    // contract's own error, which the client decodes.
+    const issueRef = { projectId: none, tracker: "github", host: "github.com", scope: "a/b", key: "7" };
+    yield* call("issues.list", { state: "open" });
+    yield* call("issues.detail", issueRef);
+    yield* call("issues.linkedThreads", { tracker: "github", host: "github.com", scope: "a/b", key: "7" });
+    yield* call("issues.comments", { ...issueRef, cursor: "older" });
+    yield* call("issues.templates", { projectId: none, tracker: "github", scope: "a/b" });
+    yield* call("issues.candidates", { projectId: none, tracker: "github", scope: "a/b" });
+    yield* call("issues.create", { projectId: none, tracker: "github", scope: "a/b", title: "T", body: "", labels: [], assignees: [] });
+    yield* call("issues.comment", { ...issueRef, body: "Comment" });
+    yield* call("issues.update", { ...issueRef, title: "T" });
+    yield* call("issues.setState", { ...issueRef, state: "Completed" });
+    yield* call("issues.react", { ...issueRef, content: "heart", reacted: true });
     yield* call("pullRequests.reviewGuide", prRef);
     yield* call("pullRequests.reportState", { reference: prRef, state: "open" });
     yield* call("pullRequests.invalidate", { reference: prRef });

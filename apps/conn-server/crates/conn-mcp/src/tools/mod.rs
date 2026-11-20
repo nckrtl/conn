@@ -22,6 +22,7 @@ mod background;
 mod create_threads;
 mod devices;
 mod html;
+mod issues;
 mod manage;
 mod message;
 mod panels;
@@ -33,6 +34,7 @@ mod scheduled;
 mod secrets;
 mod tasks;
 mod test_logins;
+mod themes;
 mod threads;
 mod workflows;
 pub(crate) mod worktree;
@@ -126,6 +128,9 @@ pub(crate) const HANDLED: &[&str] = &[
     "request_secret",
     "save_test_login",
     "request_credentials",
+    "fill_credential",
+    "t3_theme_read",
+    "t3_theme_set",
     "database_query",
     "t3_background_wait",
     "link_pull_request",
@@ -145,6 +150,14 @@ pub(crate) const HANDLED: &[&str] = &[
     "pull_request_merge",
     "ci_logs",
     "ci_rerun",
+    "list_issues",
+    "read_issue",
+    "create_issue",
+    "comment_on_issue",
+    "set_issue_state",
+    "link_issue",
+    "unlink_issue",
+    "list_thread_issues",
     "annotations_list",
     "annotations_claim",
     "annotations_complete",
@@ -319,6 +332,9 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "request_secret" => secrets::request(cx, &args).await,
         "save_test_login" => test_logins::save(cx, &args).await,
         "request_credentials" => test_logins::request(cx, &args).await,
+        "fill_credential" => test_logins::fill(cx, &args).await,
+        "t3_theme_read" => themes::read(cx, &args).await,
+        "t3_theme_set" => themes::set(cx, &args).await,
         "database_query" => panels::database_query(cx, &args).await,
         "send_to_user" => message::send_to_user(cx, &args).await,
         "t3_background_wait" => background::wait(cx, &args).await,
@@ -333,6 +349,14 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "list_scheduled_tasks" => scheduled::list(cx, &args).await,
         "delete_scheduled_task" => scheduled::delete(cx, &args).await,
         "run_scheduled_task_now" => scheduled::run_now(cx, &args).await,
+        "list_issues" => issues::list(cx, &args).await,
+        "read_issue" => issues::read(cx, &args).await,
+        "create_issue" => issues::create(cx, &args).await,
+        "comment_on_issue" => issues::comment(cx, &args).await,
+        "set_issue_state" => issues::set_state(cx, &args).await,
+        "link_issue" => issues::link(cx, &args).await,
+        "unlink_issue" => issues::unlink(cx, &args).await,
+        "list_thread_issues" => issues::list_thread(cx, &args).await,
         "link_pull_request" => pull_requests::link(cx, &args).await,
         "link_pull_requests" => pull_requests::link_many(cx, &args).await,
         "unlink_pull_request" => pull_requests::unlink(cx, &args).await,

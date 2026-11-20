@@ -39,7 +39,9 @@ for (const setup of [
   "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=%2030%20", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=3e1",
   "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=Infinity", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=",
   "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=0b110", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=inf",
-  "\u0085JBSWY3DPEHPK3PXP",
+  "\u0085JBSWY3DPEHPK3PXP", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=0x%2B6",
+  "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0x10000000000000000", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0x",
+  "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0X1E", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&period=0b2",
 ]) {
   const parsed = totp.parseTotpSetup(setup);
   cases.push({ kind: "totp", setup, now, expected: parsed === null ? null : totp.totpCode(parsed, now) });

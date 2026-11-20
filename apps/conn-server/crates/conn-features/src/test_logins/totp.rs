@@ -100,14 +100,18 @@ fn number(text: &str) -> Option<f64> {
     if text.is_empty() {
         return Some(0.0);
     }
+    // Every character after the prefix must be a digit of the radix; the value is built as a
+    // double, as JavaScript does, so a value past u64 stays finite.
     let radix = |prefix: &str, radix: u32| {
         let lower = text.get(..2)?.to_ascii_lowercase();
-        (lower == prefix)
-            .then(|| text.get(2..))
-            .flatten()
-            .filter(|digits| !digits.is_empty())
-            .and_then(|digits| u64::from_str_radix(digits, radix).ok())
-            .map(|n| n as f64)
+        if lower != prefix {
+            return None;
+        }
+        let digits = text.get(2..).filter(|d| !d.is_empty())?;
+        digits.chars().try_fold(0.0_f64, |value, c| {
+            c.to_digit(radix)
+                .map(|d| value * f64::from(radix) + f64::from(d))
+        })
     };
     if let Some(n) = radix("0x", 16)
         .or_else(|| radix("0o", 8))

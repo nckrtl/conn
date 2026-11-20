@@ -36,13 +36,13 @@ const ATTRIBUTES: Readonly<Record<string, string>> = {
 };
 
 /** Reads one glyph into elements. Anything beyond plain paths and rects fails loudly. */
-function readGlyph(concept: string): ReadonlyArray<Element> {
-  const file = NodePath.join(glyphDir, `${concept}.svg`);
+function readGlyph(concept: string, size: 16 | 24 = 16): ReadonlyArray<Element> {
+  const file = NodePath.join(setDir, `${size}/solid`, `${concept}.svg`);
   if (!NodeFS.existsSync(file)) throw new Error(`no glyph for concept "${concept}" (${file})`);
   const svg = NodeFS.readFileSync(file, "utf8");
   const root = /<svg\b([^>]*)>/.exec(svg)?.[1] ?? "";
-  if (!root.includes('viewBox="0 0 16 16"') || !root.includes('fill="currentColor"')) {
-    throw new Error(`${file}: expected viewBox 0 0 16 16 and fill currentColor`);
+  if (!root.includes(`viewBox="0 0 ${size} ${size}"`) || !root.includes('fill="currentColor"')) {
+    throw new Error(`${file}: expected viewBox 0 0 ${size} ${size} and fill currentColor`);
   }
   const body = svg.slice(svg.indexOf(">") + 1, svg.lastIndexOf("</svg>"));
   const elements: Element[] = [];
@@ -80,6 +80,16 @@ const glyphLines = allConcepts.map(
   (concept) =>
     `export const ${camel(concept)}Glyph = ${JSON.stringify(readGlyph(concept))} as const satisfies IconNode;`,
 );
+// The few glyphs Conn draws at 24px or more come from 24/solid (viewBox 0 0 24 24).
+const glyph24Dir = NodePath.join(setDir, "24/solid");
+const glyph24Lines = NodeFS.readdirSync(glyph24Dir)
+  .filter((file) => file.endsWith(".svg"))
+  .map((file) => file.slice(0, -4))
+  .sort()
+  .map(
+    (concept) =>
+      `export const ${camel(concept)}Glyph24 = ${JSON.stringify(readGlyph(concept, 24))} as const satisfies IconNode;`,
+  );
 const LINT_ALLOW: Readonly<Record<string, string>> = {
   Sparkles:
     "// oxlint-disable-next-line t3code/no-sparkles-icon -- the rule targets call sites, not this export\n",
@@ -99,6 +109,9 @@ import type { IconNode } from "./connIcon";
 
 /** Superheroicons 16px solid glyphs (viewBox 0 0 16 16), by concept. */
 ${glyphLines.join("\n")}
+
+/** 24px glyphs (viewBox 0 0 24 24) for icons drawn at 24px or more. */
+${glyph24Lines.join("\n")}
 
 export const GLYPHS = {
 ${concepts.map((concept) => `  ${camel(concept)}: ${camel(concept)}Glyph,`).join("\n")}

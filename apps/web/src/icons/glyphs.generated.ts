@@ -939,6 +939,50 @@ export const fitScanGlyph = [
     },
   ],
 ] as const satisfies IconNode;
+export const foldableBookGlyph = [
+  [
+    "path",
+    {
+      d: "M2 4.438a1.5 1.5 0 0 1 2.145-1.355l3.07 1.462a.5.5 0 0 1 .285.452v6.006a.5.5 0 0 1-.285.451l-3.07 1.462A1.5 1.5 0 0 1 2 11.562Zm9.855-1.355A1.5 1.5 0 0 1 14 4.438v7.124a1.5 1.5 0 0 1-2.145 1.354l-3.07-1.462a.5.5 0 0 1-.285-.451V4.997a.5.5 0 0 1 .285-.452Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableClosedGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M6 2h4a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm1.25 9h1.5a.75.75 0 0 1 0 1.5h-1.5a.75.75 0 0 1 0-1.5Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableLaptopGlyph = [
+  [
+    "path",
+    {
+      d: "M3.716 12.335 1.614 4.627A1.406 1.406 0 0 1 2.6 2.9l.905-.247a1.406 1.406 0 0 1 1.727.987l1.535 5.628-2.778 3.636a1.75 1.75 0 0 1-.273-.569Zm8.878 1.29h-7.19a1.75 1.75 0 0 1-.62-.114l2.777-3.636h5.033A1.406 1.406 0 0 1 14 11.281v.938a1.406 1.406 0 0 1-1.406 1.406Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableOpenGlyph = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M1 5a2 2 0 0 1 2-2h4a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H3a2 2 0 0 1-2-2Zm12-2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9a.5.5 0 0 1-.5-.5v-9A.5.5 0 0 1 9 3ZM3.75 9.5h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1 0-1.5Zm7.5 0h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1 0-1.5Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableTentGlyph = [
+  [
+    "path",
+    {
+      d: "M8.5 2.848a1.75 1.75 0 0 1 .956.706l4.74 7.11a1.406 1.406 0 0 1-.39 1.95l-.78.52a1.406 1.406 0 0 1-1.95-.39L8.5 8.88Zm-6.929 8.506a1.406 1.406 0 0 1 .233-.69l4.74-7.11a1.75 1.75 0 0 1 .956-.706V8.88l-2.576 3.864a1.406 1.406 0 0 1-1.95.39l-.78-.52a1.406 1.406 0 0 1-.623-1.26Z",
+    },
+  ],
+] as const satisfies IconNode;
 export const folderGlyph = [
   [
     "path",
@@ -2522,6 +2566,52 @@ export const writeGuideGlyph = [
       fillRule: "evenodd",
       d: "M4 2a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V6.621a1.5 1.5 0 0 0-.44-1.06L9.94 2.439A1.5 1.5 0 0 0 8.878 2H4Zm1 5.75A.75.75 0 0 1 5.75 7h4.5a.75.75 0 0 1 0 1.5h-4.5A.75.75 0 0 1 5 7.75Zm0 3a.75.75 0 0 1 .75-.75h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1-.75-.75Z",
       clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+
+/** 24px glyphs (viewBox 0 0 24 24) for icons drawn at 24px or more. */
+export const foldableBookGlyph24 = [
+  [
+    "path",
+    {
+      d: "M2.25 7.622a3 3 0 0 1 3.949-2.846l4.538 1.512A.75.75 0 0 1 11.25 7v10a.75.75 0 0 1-.513.712l-4.538 1.512a3 3 0 0 1-3.949-2.846Zm15.551-2.846a3 3 0 0 1 3.949 2.846v8.756a3 3 0 0 1-3.949 2.846l-4.538-1.512A.75.75 0 0 1 12.75 17V7a.75.75 0 0 1 .513-.712Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableClosedGlyph24 = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M8.25 2.25h7.5a3 3 0 0 1 3 3v13.5a3 3 0 0 1-3 3h-7.5a3 3 0 0 1-3-3V5.25a3 3 0 0 1 3-3Zm2.25 15h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1 0-1.5ZM16.125 6a1.125 1.125 0 1 1-2.25 0 1.125 1.125 0 1 1 2.25 0Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableLaptopGlyph24 = [
+  [
+    "path",
+    {
+      d: "M6.082 18.602 2.583 6.005a1.688 1.688 0 0 1 1.174-2.077l1.084-.301a1.688 1.688 0 0 1 2.078 1.174l2.789 10.042-3.339 4.392c-.127-.194-.224-.407-.287-.633Zm13.23 1.648H8.25c-.235 0-.466-.037-.687-.107l3.34-4.393h8.409A1.688 1.688 0 0 1 21 17.438v1.124a1.688 1.688 0 0 1-1.688 1.688Z",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableOpenGlyph24 = [
+  [
+    "path",
+    {
+      fillRule: "evenodd",
+      d: "M1.5 6.75a3 3 0 0 1 3-3h6a.75.75 0 0 1 .75.75v15a.75.75 0 0 1-.75.75h-6a3 3 0 0 1-3-3Zm18-3a3 3 0 0 1 3 3v10.5a3 3 0 0 1-3 3h-6a.75.75 0 0 1-.75-.75v-15a.75.75 0 0 1 .75-.75ZM6 15h2.25a.75.75 0 0 1 0 1.5H6A.75.75 0 0 1 6 15Zm9.75 0H18a.75.75 0 0 1 0 1.5h-2.25a.75.75 0 0 1 0-1.5Z",
+      clipRule: "evenodd",
+    },
+  ],
+] as const satisfies IconNode;
+export const foldableTentGlyph24 = [
+  [
+    "path",
+    {
+      d: "M12.75 4.629a2.25 2.25 0 0 1 1.158.929l7.003 11.204a1.688 1.688 0 0 1-.536 2.326l-.954.596a1.688 1.688 0 0 1-2.326-.536l-4.345-6.953ZM3.089 16.762l7.003-11.204a2.25 2.25 0 0 1 1.158-.929v7.566l-4.345 6.953a1.688 1.688 0 0 1-2.325.536l-.954-.596a1.688 1.688 0 0 1-.537-2.326Z",
     },
   ],
 ] as const satisfies IconNode;

@@ -396,13 +396,16 @@ pub(super) async fn transfer(cx: &Cx<'_>, args: &Args) -> ToolResult {
             .collect();
         return Ok(json!({ "transfers": transfers }));
     }
-    cx.writes_threads(&[str_arg(args, "threadId"), str_arg(args, "targetThreadId")])
+    let limits = cx
+        .writes_threads(&[str_arg(args, "threadId"), str_arg(args, "targetThreadId")])
         .await?;
     let source_point = args
         .get("sourcePoint")
         .cloned()
         .unwrap_or_else(|| json!({"type": "latest_stable"}));
-    let (id, _) = read_thread(cx, args).await?;
+    let (id, source) = read_thread(cx, args).await?;
+    // T3 checks the modes of the snapshot it copies; this is the latest read before dispatch.
+    cx.within_limits(&limits, &source["thread"])?;
     let command_id = new_command_id();
     if action == "merge_back" {
         let target = required(args, "targetThreadId")?.clone();

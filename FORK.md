@@ -113,6 +113,7 @@ from this tree.
 
   The Diagnostics panel, the Usage page and the key menu's test-login group may later be
   removed from Conn itself.
+
 - **Exclusions.** Root Vite+ format, lint and test configs ignore `apps/conn-server/**`,
   `.github/scripts/ci-changes.cjs` treats it and the `conn-server-*` workflows as inert for
   Conn's CI, and `.gitignore` re-includes `apps/conn-server/helpers/sdk-host/build/`. On a

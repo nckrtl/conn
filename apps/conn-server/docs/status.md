@@ -21,6 +21,138 @@ the run stays open. Waiting for terminal confirmation is deliberate. `idle-diff`
 split in `KNOWN` as `intermittent`; a gate either side misses still fails it. Whether to
 match T3 is open.
 
+## `pull_request_create` (2026-11-20)
+
+Agents can open a PR from their thread's pushed branch: `pull_request_create`
+(`conn-mcp/src/tools/pull_request_forge.rs`, T3's `pullRequests/handlers.ts`). The server runs
+T3's `GitManager.createPullRequest` (`conn-source-control/src/pull_requests/create.rs`):
+the upstream fetch and branch read of `statusDetails`, `resolveBranchHeadContext` (forks,
+foreign remotes, `gh`'s target), the open-PR lookup per head, the unpushed-commit refusal,
+`resolvePrBase` (`t3-merge-base-ref`, `t3-merge-base`, `gh-merge-base`, the upstream, GitHub's
+default branch, the remote's HEAD, `main`), `POST repos/{o}/{n}/pulls`, the lookup again, and a
+draft through the panel's own `summary` and `runAction`. The tool links the PR as `created`.
+RPC 202 of 251 (unchanged by this step); `/mcp` 104 tools.
+
+- **Repository choice:** `resolveRepository` now follows T3's `resolveGitHubRepository`
+  (`gh repo set-default` marks, then `upstream`, `github`, `origin`), not the first GitHub
+  remote. Repository lookup, clone and PR checkout use it too.
+- **Proof:** `gen-pr-cases.mjs` runs T3's real `GitManager` and GitHub provider on temporary
+  checkouts and an in-memory GitHub (`tools/pr-create-recordings.mjs`, 19 cases: created,
+  not listed yet, already open, another head's PR, explicit and recorded bases, an upstream
+  under another name, an unreadable repository, a fork remote, a refusal, unpushed, not
+  pushed, detached, four draft cases); `create_pull_request_matches_t3s_recorded_runs` replays
+  them: every request body, result, error text and draft call equal. 20 cases of T3's
+  `resolveGitHubRepository`. `parity.mjs`: 6 calls (input checks, refusal outside a thread). `/mcp` input decode now lists every missing required key, as T3 does.
+  `cargo test -p conn-mcp create_links`: the link as `created`, no second link, the "not
+  listed yet" refusal.
+- **Not built:** the client's stacked `create_pr` and `commit_push_pr` (`git.runStackedAction`
+  still answers that push and PR creation are Orbit's): they need push and T3's generated PR
+  text. Not run against live GitHub.
+- **Known differences:** T3 clears its VCS status cache after a create; here `pr` in VCS
+  status is not served, so the panel only refreshes. The background head lookups
+  (`pull_requests_by_heads`) still omit `operationName`.
+
+## Desktop tab relay (2026-11-20)
+
+Agents on this server can drive a browser tab that is open in a Conn desktop, as with the T3
+server. The desktop registers the tab (`preview.desktopRegister`), takes its request stream
+(`preview.desktopRequests`) and answers each request (`preview.desktopRespond`). RPC 202 of
+251. No capability names the relay in the contract; the desktop registers each tab it shows
+itself, so nothing new is advertised.
+
+- **Desktop tabs:** `preview.open` without `runtime: "server"` (T3's default, `desktop`) now
+  makes a record, as T3's `PreviewManager` does; it no longer fails. `reportStatus`, `resize`,
+  `adjust`, `close`, `list` and `subscribePreviewEvents` serve these records
+  (`conn-preview/src/tabs/desktop.rs`). A desktop that kept a tab across a server restart
+  restores it when it registers again.
+- **Routing (`conn-preview/src/relay.rs`, `conn-mcp/src/tools/preview.rs`):** a `preview_*`
+  call goes to the desktop when it names the desktop's tab, or when the agent's last call
+  made that tab current; `preview_open` without such a tab stays on the server's browser.
+  The request input is T3's (`pixelsRequired`, `fullScreenshot`, `reuseExistingTab`, `open`
+  and `show`, act inputs without `action`). The answer is encoded with the tool's output
+  schema; remote errors read as T3's typed errors. `preview_status` adds the thread's desktop
+  tabs; `t3_preview_close` closes a desktop tab's record. Recording on a desktop tab answers
+  T3's refusal. `preview_cdp_endpoint` on a desktop tab returns the desktop's endpoint.
+- **Proof:** `crates/conn-mcp/tools/desktop-relay-parity.mjs` (in `parity.mjs`): T3's own
+  `PreviewManager`, `PreviewAutomationBroker`, `DesktopTabRelay` and preview toolkits against
+  ours, with one stand-in desktop: 23 MCP cases equal (explicit and followed tabs, eleven
+  remote error kinds, a withheld screenshot, recording, open, status, list, close) and the
+  requests the desktop received equal. `effect-client.mjs`: open a desktop tab, a refused and an accepted
+  registration, the stream's `connected` event and an answer over the real socket. Unit
+  tests: conflict, session ownership, the 30 s registration expiry, timeouts that release a
+  silent desktop, pending requests failed when the desktop leaves.
+- **Known differences:** a call that names a server tab stays on the server's browser while
+  a desktop tab is current (T3 sends it to the desktop, which refuses it). A desktop cannot
+  restore an unknown tab id from this server's own allocator. `preview.list` gives no
+  `host`/`hostedHere` (as T3's `preview.list`); `fill_credential` reads the server browser
+  only. Bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
+  records, 256 pending requests, 256 agent assignments, 64 queued requests per desktop (a
+  full queue answers `RequestQueueClosedError`). `preview_status` reads the desktop tabs one
+  after another (T3: four at a time). `preview_act` input is not decoded per action before it
+  reaches the desktop (T3 answers `invalid_request` first).
+
+## Remote delegation and the Orbit Gateway link (2026-11-20)
+
+An agent here can delegate to, and message, threads in another linked environment, as in T3
+(`RemoteDelegation.ts`). This server can also link a server that Orbit lists
+(`OrbitEnvironmentLink.ts`).
+
+- **Delegation** (`conn-mcp/src/remote_tasks.rs`): `delegate_task` with `target.environmentId`
+  launches the child there with `t3_thread_launch` and `delegatedFrom`, then records the task
+  here without a child thread. Internal engine commands do the recording:
+  `delegated_task.remote.request`, `.complete` and `.stop` (`Engine::remote_task`). They
+  never reach client dispatch. Provider, model and modes inherit as in T3. The project there
+  is matched by repository or named. `isolation: worktree` is refused with T3's text.
+- **The follower**: one per open task, at most 1,024. It waits on the thread there in 45 s
+  steps (the forwarder's cap) and races each step against the task ending here. It reads the
+  last reply, paging and following truncated text. Then it completes the task, which wakes
+  the parent as a local child does. A final refusal (link revoked or forgotten, thread or run
+  gone) fails the task. Any other failure is retried with back-off up to 5 min. After three
+  engine failures in a row the task fails, naming its thread there. On start, the server
+  follows every open task again (`Engine::open_remote_tasks`).
+- **Stop and cancel**: a Stop of the parent ends an open remote task as interrupted, without a
+  wake. A task that already has its result then owes a stop there. The engine tells the host
+  (`EngineHost::remote_task_changed`), and the follower sends that stop at once.
+  `task_cancel` stops the thread there, then records the cancel. A machine that is down
+  still cancels here, and the follower sends the stop later.
+- **Follow-up record**: a forwarded `t3_thread_send` that started or queued a run on a
+  finished task's thread becomes a new task here. The send returns its `taskId`, and the task
+  is completed the same way.
+- **`delegatedFrom`**: a thread that a link launches keeps the parent named in the launch
+  (thread and shell row). Only stamped work gets it, as in T3.
+- **Orbit link** (`conn-server/src/orbit_link.rs`): `conn-server environment link-orbit <id>
+  [--access] [--gateway-url]`. As its own Node, the server asks the Gateway
+  (`/api/v1/conn/environments`, the pairing and its Operation) for a one-time pairing link
+  through the system `curl`, as T3 does. It takes the code and links with the expected
+  environment id. The code never reaches output, an error or storage. The codes and messages
+  are T3's (`node_access_required`, `session_expired`, `pairing_pending`, `pairing_failed`,
+  `environment_not_found`, `gateway_unreachable`, `links_off`, `target_links_off`,
+  `link_failed`).
+
+Proof:
+- `crates/conn-server/tools/remote-delegation-diff.mjs` (in `tools/check.sh`) runs 20 steps
+  T3 → T3, Conn → Conn, Conn → T3 and T3 → Conn. Steps: the refusals, a delegated task
+  that finishes there and wakes the agent here, a retry, the thread there naming its parent,
+  the parent's task row, a forwarded send that becomes a follow-up task and finishes, a
+  retried send, a send to a thread that is no task, and a cancel of a finished task. All
+  equal.
+- `crates/conn-server/tools/orbit-link-diff.mjs` (in `tools/check.sh`) runs 14 cases of both
+  command lines against a stand-in Gateway on loopback, in the same four pairings. All equal.
+- `parity.mjs` compares `delegate_task` and `t3_thread_send` with an `environmentId` from an
+  outside client, with links on.
+- `cargo test -p conn-engine remote_task` covers the record, the replay, the completion and
+  its single wake, a refused second report, the stop a Stop owes, stop counts, and a Stop of
+  an open task.
+- By hand on mini, the CLI linked a Conn and a T3 server on the WireGuard address 10.44.0.9
+  through a stand-in Gateway. It printed T3's line, and the link lists as reachable.
+
+Known differences: both servers refuse to send an Orbit code to a loopback address
+(`answeringAs`), so the checks prove a successful Orbit link only up to that refusal; the
+hand run proves it. A follower waits in 45 s steps where T3 asks for 10 min; the forwarder
+caps both at 45 s. A remote task's `task_status` acknowledges the result as T3's does; a
+local one still does not. `environment link`, `list` and `unlink` on the command line are not
+built.
+
 ## Antigravity (2026-11-20)
 
 Google Antigravity runs as an agent: the `agy` CLI over ACP (`agy acp`), as T3's Antigravity
@@ -152,7 +284,7 @@ Agents can read, list, update, answer, review and merge a thread's PR, and read 
 CI, through `/mcp`: `pull_request_read`, `pull_request_list`, `pull_request_update`,
 `pull_request_respond`, `pull_request_review`, `pull_request_merge`, `ci_logs`, `ci_rerun`
 (`conn-mcp/src/tools/pull_request_forge.rs`, T3's `pullRequests/handlers.ts`). Before, they
-were unregistered. `pull_request_create` is not served yet (it needs `GitManager`'s PR flow).
+were unregistered. `pull_request_create` is served since 2026-11-20 (next section).
 
 - **The panel acts now.** `pullRequests.runAction` ran nothing before ("This host cannot …").
   It now runs T3's GitHub flow for `merge`, `enable-auto-merge`, `disable-auto-merge`,
@@ -370,10 +502,9 @@ wake messages, unlink. All equal. `parity.mjs` compares the 4 tools with links o
 Known differences: no `cause` on `PeerLinkRequestError`; probe failures name fewer Node error
 codes and no certificate code; `T3-Sender-Thread` is read but not stored (the engine has no
 `linkedSender`); a bearer session that is not an MCP client still works on `/mcp` (as before).
-Not built: remote delegation (`delegate_task` with `target.environmentId`,
-`RemoteDelegation.ts`) and the follow-up record of a forwarded `t3_thread_send`; the browser
-OAuth approval page and the `.well-known` OAuth metadata (no browser sessions here); Orbit's
-Gateway link (`OrbitEnvironmentLink.ts`); MCP approval codes (`AUTO-…`).
+Not built: the browser OAuth approval page and the `.well-known` OAuth metadata (no browser
+sessions here); MCP approval codes (`AUTO-…`). Remote delegation and the Orbit Gateway link
+were built on 2026-11-20 (see that section).
 
 Review fixes (Codex, 6 findings, each with a test that fails without it): MCP client tokens
 are refused on native bearer, ticket and WebSocket paths, as T3's `rejectMcpClientAudience`;
@@ -730,9 +861,9 @@ builder with a test that fails without the fix.
   a missing or wrong-version configured browser fails without a runtime download.
   Generated `chrome.json` exports the release pin. Limits: 32 tabs, eight per agent, four
   browser hosts, two recordings and two HTML captures. Downloads, viewer HTTP
-  file transfer and clipboard are unserved; iframe snapshots fail closed; desktop relay,
-  local-server discovery and stop RPCs stay unregistered. `preview_cdp_endpoint` returns
-  T3's desktop-only error. Native GUI interaction and the Orbit image remain unproven.
+  file transfer and clipboard are unserved; iframe snapshots fail closed; local-server
+  discovery and stop RPCs stay unregistered (the desktop relay is served since 2026-11-20).
+  `preview_cdp_endpoint` on a server tab returns T3's desktop-only error. Native GUI interaction and the Orbit image remain unproven.
 - **Clients** (VMPal macOS VM, Conn `c969c3ebd1`): the web client (through a host T3 as a
   remote environment) and the iOS dev client in a simulator (paired straight to the Conn
   Server) each ran a Haiku turn against the Conn Server on macOS. Retested on the iOS client

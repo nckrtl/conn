@@ -13,6 +13,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { previewParity } from "./preview-parity.mjs";
+import { desktopRelayParity } from "./desktop-relay-parity.mjs";
 import { htmlParity } from "./html-parity.mjs";
 import { toolOutputParity } from "./tool-output-parity.mjs";
 import { checkMcpApps } from "./mcp-apps-parity.mjs";
@@ -252,6 +253,7 @@ const htmlBinary = [
 if (htmlBinary === undefined) throw new Error("Build the conn-mcp html_cases example first.");
 await htmlParity(htmlBinary);
 await previewParity(htmlBinary);
+await desktopRelayParity(htmlBinary);
 await toolOutputParity(NodePath.join(NodePath.dirname(htmlBinary), "tool_output_cases"));
 
 const servers = await Promise.all([startTs(), startRust()]);
@@ -595,6 +597,12 @@ const steps = [
   ["pull_request_list", () => ({})],
   ["pull_request_list", () => ({ limit: 0 })],
   ["pull_request_list", () => ({ cursor: "%%" })],
+  ["pull_request_create", () => ({})],
+  ["pull_request_create", () => ({ title: "t" })],
+  ["pull_request_create", () => ({ title: " ", body: "" })],
+  ["pull_request_create", () => ({ title: "t", body: "b", draft: "yes" })],
+  ["pull_request_create", () => ({ title: "t", body: "b", base: "" })],
+  ["pull_request_create", () => ({ title: "t", body: "b", base: "main", draft: true })],
   ["pull_request_update", () => ({})],
   ["pull_request_update", () => ({ title: "x" })],
   ["pull_request_update", () => ({ addLabels: [] })],
@@ -1015,6 +1023,9 @@ if (noModel) {
     ["t3_environment_read", {}],
     ["t3_environment_preferences_update", { defaultThreadEnvMode: null, newWorktreesStartFromOrigin: true, backgroundActivity: { profile: "balanced" } }],
     ["t3_environment_preferences_update", { environmentId: "environment:none" }],
+    // Remote delegation needs a calling thread; an outside client is refused before any link.
+    ["delegate_task", { task: "x", target: { environmentId: "environment:none", projectId: "p" } }],
+    ["t3_thread_send", { environmentId: "environment:none", threadId: "thread:none", message: "x" }],
   ];
   for (const [tool, args] of linkSteps) {
     const results = await Promise.all(sessions.map(async (session) => outcome(await session.callTool(tool, args))));

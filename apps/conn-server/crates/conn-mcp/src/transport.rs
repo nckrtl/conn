@@ -276,7 +276,11 @@ async fn call(
             let data = value
                 .get_mut("screenshot")
                 .and_then(Value::as_object_mut)
-                .and_then(|s| s.remove("data"))
+                .and_then(|s| {
+                    // T3 states the PNG type whatever the host sent (a desktop may omit it).
+                    s.insert("mimeType".into(), json!("image/png"));
+                    s.remove("data")
+                })
                 .unwrap_or(Value::Null);
             let url = value.get("url").cloned().unwrap_or(Value::Null);
             let (mut value, text, omitted) = crate::snapshot::bound_metadata(value);

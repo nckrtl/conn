@@ -38,6 +38,13 @@ function transformPath(d: string): string {
   let command = "";
   let i = 0;
   const next = () => Number(tokens[i++]);
+  // A path's leading `m` moves to an absolute point; its implicit pairs after that stay relative.
+  if (tokens[0] === "m") {
+    i = 1;
+    out.push("M", fmt(ax(next())), fmt(ay(next())));
+    command = "l";
+    if (i < tokens.length && !/[a-zA-Z]/.test(tokens[i]!)) out.push("l");
+  }
   while (i < tokens.length) {
     if (/[a-zA-Z]/.test(tokens[i]!)) {
       command = tokens[i++]!;

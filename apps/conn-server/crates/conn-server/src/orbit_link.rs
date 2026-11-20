@@ -89,7 +89,9 @@ fn curl(method: &str, url: &str) -> Result<(u16, String), String> {
         "curl"
     };
     let output = std::process::Command::new(binary)
+        // `-q` first: no `.curlrc`, so no configured trace file ever holds a pairing link.
         .args([
+            "-q",
             "-sS",
             "--max-time",
             &REQUEST_TIMEOUT_SECONDS.to_string(),
@@ -245,7 +247,9 @@ impl Gateway {
             let asked = operation["poll_after_seconds"]
                 .as_f64()
                 .filter(|s| s.is_finite() && *s > 0.0)
-                .map_or(Duration::ZERO, Duration::from_secs_f64);
+                .map_or(Duration::ZERO, |s| {
+                    Duration::from_secs_f64(s.min(MAX_POLL.as_secs_f64()))
+                });
             let wait = asked.clamp(MIN_POLL, MAX_POLL).min(deadline - now);
             tokio::time::sleep(wait).await;
             operation = self.call("GET", format!("/operations/{id}")).await?;
@@ -371,13 +375,18 @@ pub async fn link(
         .link(LinkInput {
             url: environment.url,
             alternate_urls: None,
-            pairing_code: code,
+            pairing_code: code.clone(),
             access: access.to_owned(),
             expected_environment_id: Some(environment.environment_id),
             expected_label: Some(environment.label),
         })
         .await
-        .map_err(peer_failure)
+        .map_err(|error| {
+            // A peer's refusal may quote what it was sent: the code never leaves this process.
+            let mut failure = peer_failure(error);
+            failure.message = failure.message.replace(&code, "<pairing code>");
+            failure
+        })
 }
 
 /// The engine of a CLI run: links live in files, so the command needs no engine. A link never

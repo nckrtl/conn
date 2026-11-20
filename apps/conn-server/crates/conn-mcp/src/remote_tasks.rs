@@ -46,6 +46,8 @@ const TERMINAL: [&str; 5] = [
     "interrupted",
     "rolled_back",
 ];
+/// The longest reply a follower keeps as a task's result.
+const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
 const NO_REPLY: &str = "(The thread in the linked environment ended without a reply.)";
 
 /// Which tasks have a follower, and whether one was asked to look again.
@@ -134,6 +136,10 @@ impl McpService {
     async fn scan_remote_tasks(self: &Arc<Self>) {
         match self.config.engine.open_remote_tasks(SCAN_LIMIT).await {
             Ok(open) => {
+                // A full scan may have left tasks out: scan again when a follower ends.
+                if open.len() >= SCAN_LIMIT {
+                    self.remote.rescan.store(true, Ordering::Relaxed);
+                }
                 for (parent, task) in open {
                     self.follow_remote_task(&parent, &task);
                 }
@@ -348,7 +354,13 @@ impl McpService {
         let mut offset = (reply["textTruncated"] == true)
             .then(|| reply["nextTextOffset"].clone())
             .filter(|o| !o.is_null());
+        // A peer that never ends a reply, or sends one past this, is cut off here.
         while let Some(text_offset) = offset {
+            if out.len() >= MAX_REPLY_BYTES {
+                out.push_str("\n\n(The reply was longer than this server keeps; read the thread there for the rest.)");
+                break;
+            }
+            let previous = text_offset.as_u64();
             let mut args = Map::new();
             args.insert("threadId".into(), json!(thread));
             args.insert("itemId".into(), reply["itemId"].clone());
@@ -363,7 +375,9 @@ impl McpService {
             out.push_str(part["text"].as_str().unwrap_or_default());
             offset = (part["textTruncated"] == true)
                 .then(|| part["nextTextOffset"].clone())
-                .filter(|o| !o.is_null());
+                .filter(|o| !o.is_null())
+                // An offset that does not move forward would read the same part forever.
+                .filter(|o| o.as_u64().zip(previous).is_some_and(|(next, at)| next > at));
         }
         let out = match &run {
             Some(run) => with_executed_model_note(&out, &run["model"], &run["executedModel"]),
@@ -374,7 +388,10 @@ impl McpService {
 
     /// Completes the task here (`delegated_task.remote.complete`). Each attempt is its own
     /// command; one refused because the task already has its result is done.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fields of one engine command"
+    )]
     async fn complete_remote(
         &self,
         parent: &str,

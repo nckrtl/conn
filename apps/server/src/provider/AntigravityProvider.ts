@@ -313,13 +313,8 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         draft: {
           ...draft,
           installed: !missingInstallation,
-          // A failed probe clears the version, so a replaced binary never keeps the old one.
-          version:
-            initialized === undefined
-              ? null
-              : version === "unknown"
-                ? draft.version
-                : version || draft.version,
+          // Only this probe's `agy --version` counts, so a replaced binary never keeps the old one.
+          version: version && version !== "unknown" ? version : null,
           status: errorMessage ? "error" : authenticated ? "ready" : "warning",
           checkedAt: updatedAt,
           usageLimits: missingInstallation ? undefined : draft.usageLimits,

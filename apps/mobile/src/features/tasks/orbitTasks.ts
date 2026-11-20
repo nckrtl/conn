@@ -134,7 +134,10 @@ export function useOrbitTask(taskId: number) {
   return { state, refreshing, refresh };
 }
 
-/** The lab's series for a number Orbit reports no history for; always null outside the lab. */
+/**
+ * The lab's own series for a number. The fixture Gateway reports no per-day history for it, and
+ * insightTrend would draw a flat line of zeros there. Always null outside the lab.
+ */
 export function labInsightTrend(id: string) {
   return USE_FIXTURES ? fixtureInsightTrend(id, Date.now()) : null;
 }

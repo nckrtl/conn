@@ -637,7 +637,7 @@ export function TaskInsightsStrip() {
   const state = useOrbitTaskInsights("30d");
   const insights = state.status === "ok" ? state.value : null;
   const results = insightResults(insights);
-  const trendOf = (id: InsightId) => insightTrend(insights, id) ?? labInsightTrend(id);
+  const trendOf = (id: InsightId) => labInsightTrend(id) ?? insightTrend(insights, id);
   const [expanded, setExpanded] = useState<InsightId | null>(null);
   const [gridHeight, setGridHeight] = useState(2 * CARD_HEIGHT + CARD_GAP);
   const columns = Math.ceil(INSIGHTS.length / 2);

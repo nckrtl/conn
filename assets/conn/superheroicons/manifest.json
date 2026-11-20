@@ -312,6 +312,8 @@
     "power": "power",
     "arrow.up.left.and.arrow.down.right": "maximize",
     "arrow.down.right.and.arrow.up.left": "minimize",
+    "pip.enter": "picture-in-picture",
+    "pip.exit": "picture-in-picture",
     "play": "play",
     "pause": "pause",
     "stop.fill": "stop",
@@ -360,6 +362,7 @@
     "eye.slash": "hide",
     "lock": "lock",
     "lock.fill": "lock",
+    "key": "key",
     "lock.shield": "shield",
     "checkmark.shield": "shield-check",
     "exclamationmark.shield": "needs-approval",
@@ -409,6 +412,7 @@
     "hammer": "build",
     "construction": "build",
     "wrench.and.screwdriver": "tool",
+    "wrench": "tool",
     "point.3.connected.trianglepath.dotted": "workflow",
     "flowchart": "workflow",
     "cable.connector": "plug",
@@ -2002,6 +2006,36 @@
       "name": "clipboard-document",
       "library": "clipboard-document",
       "meaning": "Paste from the clipboard"
+    },
+    "computer-mini": {
+      "source": "generated",
+      "name": "computer-mini",
+      "library": "computer-mini",
+      "meaning": "Mini PC environment machine (mac-mini)"
+    },
+    "computer-studio": {
+      "source": "generated",
+      "name": "computer-studio",
+      "library": "computer-studio",
+      "meaning": "Workstation environment machine (mac-studio)"
+    },
+    "window-viewfinder": {
+      "source": "generated",
+      "name": "window-viewfinder",
+      "library": "window-viewfinder",
+      "meaning": "App snapshots (Settings \u203a SnapShots)"
+    },
+    "device-rotate": {
+      "source": "generated",
+      "name": "device-rotate",
+      "library": "device-rotate",
+      "meaning": "Rotate the preview device (portrait/landscape)"
+    },
+    "device-phone-laptop": {
+      "source": "generated",
+      "name": "device-phone-laptop",
+      "library": "device-phone-laptop",
+      "meaning": "Pick the device to emulate in the preview"
     }
   }
 }

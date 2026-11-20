@@ -479,7 +479,7 @@ pub fn issue_candidates(repository: &Value) -> Value {
 }
 
 /// `toIssueTemplates`.
-pub fn issue_templates(repository: &Value) -> Value {
+pub fn issue_templates(repository: &Value) -> TrackerResult<Value> {
     let templates: Vec<Value> = array(repository.get("issueTemplates"))
         .iter()
         .filter(|t| !t.is_null() && !t["filename"].as_str().unwrap_or_default().trim().is_empty())
@@ -501,38 +501,57 @@ pub fn issue_templates(repository: &Value) -> Value {
                 "assignees": names("assignees", "login")})
         })
         .collect();
-    json!({"templates": templates, "blankIssuesEnabled": blank_issues_enabled(repository)})
+    Ok(json!({"templates": templates, "blankIssuesEnabled": blank_issues_enabled(repository)?}))
 }
 
 /// `blank_issues_enabled` from `.github/ISSUE_TEMPLATE/config.y(a)ml`, read as one top-level
 /// `key: false` line. YAML issue forms themselves are not read (T3 parses them with `yaml`).
-fn blank_issues_enabled(repository: &Value) -> bool {
+fn blank_issues_enabled(repository: &Value) -> TrackerResult<bool> {
     let directory = repository.get("templateDirectory");
     if directory
         .and_then(|d| d.get("__typename"))
         .and_then(Value::as_str)
         != Some("Tree")
     {
-        return true;
+        return Ok(true);
     }
-    let config = array(directory.and_then(|d| d.get("entries")))
-        .iter()
-        .find(|entry| {
-            entry["name"].as_str().is_some_and(|name| {
-                matches!(
-                    name.to_ascii_lowercase().as_str(),
-                    "config.yml" | "config.yaml"
-                )
-            })
-        })
-        .and_then(|entry| entry["object"]["text"].as_str().map(str::to_owned));
-    !config.is_some_and(|text| {
-        text.lines().any(|line| {
-            let line = line.split('#').next().unwrap_or_default().trim_end();
-            line.strip_prefix("blank_issues_enabled:")
-                .is_some_and(|value| value.trim() == "false")
-        })
-    })
+    let mut enabled = true;
+    for entry in array(directory.and_then(|d| d.get("entries"))) {
+        let name = entry["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !(name.ends_with(".yml") || name.ends_with(".yaml")) {
+            continue;
+        }
+        let blob = &entry["object"];
+        let text = blob["text"]
+            .as_str()
+            .filter(|_| blob["__typename"] == "Blob" && blob["isTruncated"] != Value::Bool(true));
+        let Some(text) = text else {
+            return Err(TrackerError::new(
+                "listTemplates",
+                "failed",
+                "GitHub returned incomplete issue template contents.",
+            ));
+        };
+        if matches!(name.as_str(), "config.yml" | "config.yaml") {
+            enabled = !text.lines().any(|line| {
+                let line = line.split(" #").next().unwrap_or_default().trim_end();
+                [
+                    "blank_issues_enabled:",
+                    "\"blank_issues_enabled\":",
+                    "'blank_issues_enabled':",
+                ]
+                .iter()
+                .any(|key| {
+                    line.strip_prefix(key)
+                        .is_some_and(|value| value.trim() == "false")
+                })
+            });
+        }
+    }
+    Ok(enabled)
 }
 
 /// `searchQuery`.
@@ -1032,7 +1051,7 @@ impl Client {
             .get("repository")
             .filter(|r| !r.is_null())
             .ok_or_else(|| TrackerError::not_found("listTemplates"))?;
-        Ok(issue_templates(repo))
+        issue_templates(repo)
     }
 
     /// `listCandidates`.

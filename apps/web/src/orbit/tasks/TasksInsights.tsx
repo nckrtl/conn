@@ -97,7 +97,7 @@ function insightGrid(count: number) {
 }
 
 /**
- * Card style: only the group's four outer corners are round (8px); a corner that faces another
+ * Card style: only the group's four outer corners are round (12px, like the lanes); a corner that faces another
  * block (beside or below) is square. Order: top-left, top-right, bottom-right, bottom-left.
  */
 function blockRadius(
@@ -108,7 +108,7 @@ function blockRadius(
   const row = Math.floor(index / grid.columns);
   const start = index % grid.columns;
   const end = start + (index === count - 1 ? grid.lastSpan : 1);
-  const full = "8px";
+  const full = "12px";
   const half = "0px";
   const top = row === 0;
   const bottom = row === grid.rows - 1;
@@ -299,7 +299,7 @@ function InsightDetail(props: {
   ));
   return (
     <div
-      className={cn("relative flex flex-col gap-1 rounded-lg", INSIGHT_BLOCK, INSIGHT_TOP_EDGE)}
+      className={cn("relative flex flex-col gap-1 rounded-xl", INSIGHT_BLOCK, INSIGHT_TOP_EDGE)}
       style={{ height: props.height }}
       onKeyDown={(event) => {
         if (event.key === "Escape") props.onBack();

@@ -531,6 +531,6 @@ const program = Effect.gen(function* () {
   console.log(
     JSON.stringify({ seeded: LAB_THREADS.length, primaryThreadId: threadId(LAB_PRIMARY_THREAD) }),
   );
-}).pipe(Effect.provide(layerSeed), Effect.provide(NodeServices.layer), Effect.scoped);
+}).pipe(Effect.provide(Layer.provideMerge(layerSeed, NodeServices.layer)), Effect.scoped);
 
 await Effect.runPromise(program);

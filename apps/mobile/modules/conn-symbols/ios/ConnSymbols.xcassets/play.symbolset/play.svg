@@ -12,11 +12,11 @@
   <line id="Baseline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1556" y2="1556"/>
   <line id="Capline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1485.54" y2="1485.54"/>
   <line id="left-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1500" x2="1500" y1="1026" y2="1146"/>
-  <line id="right-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1590" x2="1590" y1="1026" y2="1146"/>
+  <line id="right-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1598" x2="1598" y1="1026" y2="1146"/>
  </g>
  <g id="Symbols">
   <g id="Regular-M" transform="matrix(1 0 0 1 1500 1126)">
-   <path d="M 16.875 -59.238 a 8.438 8.438 0 0 1 12.966 -7.116 l 37.721 24.002 a 8.438 8.438 0 0 1 0 14.237 l -37.721 24.008 A 8.438 8.438 0 0 1 16.875 -11.228 V -59.238 Z"/>
+   <path style="fill-rule:evenodd;" d="M 18.375 -61.147 c 0 -5.827 6.243 -9.514 11.348 -6.709 l 47.122 25.917 c 5.288 2.907 5.288 10.506 0 13.418 L 29.727 -2.604 c -5.104 2.805 -11.348 -0.886 -11.348 -6.709 V -61.147 Z"/>
   </g>
  </g>
 </svg>

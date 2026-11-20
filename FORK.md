@@ -208,24 +208,30 @@ Sources:
 
 ### Mobile icons
 
-Mobile draws the same Superheroicons 16px solid set as web (`assets/conn/superheroicons/`).
-The manifest's `sf` map names a glyph for each SF Symbol name the app uses.
+Mobile draws the Superheroicons **24px** solid set (`assets/conn/superheroicons/24/solid/`;
+web and desktop stay on 16px). The manifest's `sf` map names a glyph for each SF Symbol name
+the app uses.
 
 - iOS: `node scripts/build-conn-symbols.ts` builds a custom symbol per mapped name
   (`ConnSymbols.xcassets`, `ConnSymbolNames.swift`). `ConnSymbols.swift` swaps
   `UIImage`'s `systemImageNamed` methods so every caller gets them: `AppSymbol.tsx`
-  (expo-symbols), native toolbars, tab bars and menus. Unmapped names stay SF Symbols.
+  (expo-symbols), tab bars and menus. Unmapped names stay SF Symbols.
+- Native header buttons take template images instead (`assets/header-icons/`,
+  `src/native/connHeaderIcons.generated.ts`), so they draw the glyph at 24pt; build header
+  icons with `connHeaderIcon(name)` (react-navigation items) or `connScreensHeaderIcon(name)`
+  (react-native-screens items). `V5StackHeader` converts SF names itself.
 - Android: the same script writes `src/components/ui/connGlyphs.generated.ts`;
-  `AppSymbol.android.tsx` draws it with react-native-svg (`ConnGlyph.tsx`). Tabler
-  stays only for names the set does not map yet.
+  `AppSymbol.android.tsx` draws it with react-native-svg (`ConnGlyph.tsx`).
+- Composer chips: `apps/mobile/scripts/sync-context-chip-icons.mjs` renders the
+  manifest's `chips` from the 24px set.
 
-Run the script after changing the set and commit its output.
+Run the scripts after changing the set and commit their output.
 
 Sources:
 
 - `assets/conn/superheroicons/`, `scripts/build-conn-symbols.ts`.
 - `apps/mobile/modules/conn-symbols/ios/`, `apps/mobile/src/components/ui/`
-  (`AppSymbol.tsx`, `AppSymbol.android.tsx`, `ConnGlyph.tsx`).
+  (`AppSymbol.tsx`, `AppSymbol.android.tsx`, `ConnGlyph.tsx`), `apps/mobile/src/native/connHeaderIcon.ts`.
 
 ### Workspaces
 

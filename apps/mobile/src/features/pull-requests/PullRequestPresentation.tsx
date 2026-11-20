@@ -45,7 +45,7 @@ export function PullRequestConflictBadge(props: { readonly surfaceClassName: str
         size={15}
         color={surface}
         stroke={surface}
-        strokeWidth={2.5}
+        strokeWidth={3.75}
       />
       <View className="absolute inset-0">
         <ConnGlyph

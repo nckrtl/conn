@@ -23,10 +23,10 @@ const iconManifest = JSON.parse(
 const chipIcons = iconManifest.chips;
 
 function glyphSvg(concept) {
-  return NodeFS.readFileSync(NodePath.join(iconSetDirectory, "16/solid", `${concept}.svg`), "utf8");
+  return NodeFS.readFileSync(NodePath.join(iconSetDirectory, "24/solid", `${concept}.svg`), "utf8");
 }
 
-// `boxSize` is the source's drawing box: 16 for glyphs, 24 for the provider logos.
+// `boxSize` is the source's drawing box: 24 for glyphs (mobile draws the 24px set) and logos.
 async function renderIcon(token, svg, boxSize = 24) {
   const sized = svg
     .replace(/^\s*<svg[^>]*?>/, (tag) =>
@@ -45,7 +45,7 @@ NodeFS.rmSync(outputDirectory, { recursive: true, force: true });
 NodeFS.mkdirSync(outputDirectory, { recursive: true });
 
 for (const [token, concept] of Object.entries(chipIcons)) {
-  await renderIcon(token, glyphSvg(concept), 16);
+  await renderIcon(token, glyphSvg(concept), 24);
 }
 
 // Provider logos, so a model chip can show what the model menu shows. Native chips take images,

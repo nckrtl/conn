@@ -1,7 +1,7 @@
 import type { ColorValue, StyleProp, ViewStyle } from "react-native";
 import Svg, { Path } from "react-native-svg";
 
-/** One Superheroicons 16px solid glyph: paths in a 16-unit box. */
+/** One Superheroicons 24px solid glyph: paths in a 24-unit box. */
 export type ConnGlyphData = ReadonlyArray<{ readonly d: string; readonly evenOdd: boolean }>;
 
 /**
@@ -23,7 +23,7 @@ export function ConnGlyph(props: {
     <Svg
       width={size}
       height={size}
-      viewBox="0 0 16 16"
+      viewBox="0 0 24 24"
       style={props.style}
       accessibilityLabel={props.accessibilityLabel}
       testID={props.testID}

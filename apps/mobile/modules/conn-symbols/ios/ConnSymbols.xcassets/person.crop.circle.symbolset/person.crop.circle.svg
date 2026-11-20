@@ -12,11 +12,11 @@
   <line id="Baseline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1556" y2="1556"/>
   <line id="Capline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1485.54" y2="1485.54"/>
   <line id="left-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1500" x2="1500" y1="1026" y2="1146"/>
-  <line id="right-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1590" x2="1590" y1="1026" y2="1146"/>
+  <line id="right-margin-Regular-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="1598" x2="1598" y1="1026" y2="1146"/>
  </g>
  <g id="Symbols">
   <g id="Regular-M" transform="matrix(1 0 0 1 1500 1126)">
-   <path style="fill-rule:evenodd;" d="M 84.375 -35.23 A 39.375 39.375 0 1 1 5.625 -35.23 a 39.375 39.375 0 0 1 78.75 0 Z m -28.125 -11.25 a 11.25 11.25 0 1 1 -22.5 0 11.25 11.25 0 0 1 22.5 0 Z M 45 -29.605 c -10.266 0 -19.249 5.496 -24.159 13.708 A 30.881 30.881 0 0 0 45 -4.293 a 30.881 30.881 0 0 0 24.154 -11.604 A 28.108 28.108 0 0 0 45 -29.605 Z"/>
+   <path style="fill-rule:evenodd;" d="M 76.297 -6.251 A 39.702 39.702 0 0 0 88.813 -35.23 c 0 -21.989 -17.824 -39.812 -39.812 -39.812 S 9.188 -57.219 9.188 -35.23 a 39.702 39.702 0 0 0 12.515 28.979 A 39.674 39.674 0 0 0 49 4.582 a 39.674 39.674 0 0 0 27.297 -10.833 Z m -51.205 -5.247 A 30.568 30.568 0 0 1 49 -22.98 a 30.568 30.568 0 0 1 23.908 11.482 A 33.581 33.581 0 0 1 49 -1.543 a 33.581 33.581 0 0 1 -23.908 -9.955 Z M 64.313 -47.48 a 15.312 15.312 0 1 1 -30.625 0 15.312 15.312 0 0 1 30.625 0 Z"/>
   </g>
  </g>
 </svg>

@@ -78,13 +78,15 @@ fn mutate(tx: &mut Tx<'_>, input: &Value) -> ProjectResult<(Value, Vec<Effect>)>
                     format!("Project {project_id} already exists."),
                 ));
             }
-            let root = input["workspaceRoot"].as_str().unwrap_or_default().trim();
-            if root.is_empty() {
+            let raw = input["workspaceRoot"].as_str().unwrap_or_default().trim();
+            if raw.is_empty() {
                 return Err(ProjectFailure::tagged(
                     "ProjectInvalidError",
                     "The project needs a folder.",
                 ));
             }
+            let normalized = normalize_workspace_root(raw);
+            let root = normalized.as_str();
             if tx
                 .project_by_root(root)?
                 .is_some_and(|p| p["deletedAt"].is_null())
@@ -137,7 +139,16 @@ fn mutate(tx: &mut Tx<'_>, input: &Value) -> ProjectResult<(Value, Vec<Effect>)>
                 project["title"] = json!(title);
                 project["hasCustomTitle"] = json!(true);
             }
-            if let Some(root) = input["workspaceRoot"].as_str().map(str::trim) {
+            if let Some(raw) = input["workspaceRoot"].as_str().map(str::trim) {
+                let normalized = normalize_workspace_root(raw);
+                let root = normalized.as_str();
+                // T3 normalizes the folder first and fails when it is not one.
+                if !Path::new(root).is_dir() {
+                    return Err(ProjectFailure::tagged(
+                        "ProjectOperationError",
+                        format!("{root} is not a folder."),
+                    ));
+                }
                 if tx
                     .project_by_root(root)?
                     .is_some_and(|p| p["id"] != project_id.as_str() && p["deletedAt"].is_null())
@@ -443,14 +454,17 @@ impl Inner {
         let written = root.clone();
         let created = self
             .project_write(None, move |tx| {
-                let id = project_id(&written);
+                // A fresh id, as T3's `createNamedProject`: a folder freed by a moved project
+                // must not bring that project's id back.
+                let id = conn_support::uuid_v4();
                 if tx
                     .project_by_root(&written)?
                     .is_some_and(|p| p["deletedAt"].is_null())
                 {
-                    return Err(ProjectFailure::rejected(format!(
-                        "Another project already uses {written}."
-                    )));
+                    return Err(ProjectFailure::tagged(
+                        "ProjectConflictError",
+                        format!("Another project already uses {written}."),
+                    ));
                 }
                 let project = new_project(&id, &name, &written, tx.now());
                 tx.put_project(&project)?;
@@ -460,7 +474,23 @@ impl Inner {
         let id = match created {
             Ok(id) => id,
             Err(e) => {
-                let _ = std::fs::remove_dir_all(&folder);
+                // T3 keeps the folder on a conflict and otherwise removes it only while no
+                // project owns it, so another caller's files are never deleted.
+                let conflict = e
+                    .cause
+                    .as_ref()
+                    .is_some_and(|c| c["_tag"] == "ProjectConflictError");
+                let owned = self
+                    .db({
+                        let root = root.clone();
+                        move |store| store.project_owns_root(&root)
+                    })
+                    .await
+                    .unwrap_or(true);
+                if !conflict && !owned {
+                    let _ =
+                        tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&folder)).await;
+                }
                 return Err(e);
             }
         };
@@ -538,6 +568,36 @@ impl Inner {
             .await?;
         Ok(json!({"projectId": id}))
     }
+}
+
+/// `normalizeWorkspaceRoot` without the disk: `~` expanded to `HOME`, a relative path taken
+/// from the working folder, `.` and `..` resolved by name (as Node's `path.resolve`).
+pub(crate) fn normalize_workspace_root(raw: &str) -> String {
+    let expanded = match raw.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(raw),
+    };
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir().unwrap_or_default().join(expanded)
+    };
+    let mut out = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

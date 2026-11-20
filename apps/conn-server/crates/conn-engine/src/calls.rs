@@ -202,8 +202,9 @@ pub(crate) async fn call(inner: Arc<Inner>, method: String, input: Value) -> Cal
             let root = input["workspaceRoot"].as_str().unwrap_or_default();
             let scratch = inner.home.join("scratch");
             // `path.resolve` on both: compared by components, without reading the disk.
+            let normalize = crate::projects::normalize_workspace_root;
             Ok(json!(
-                !root.is_empty() && std::path::Path::new(root) == scratch
+                !root.is_empty() && normalize(root) == normalize(&scratch.to_string_lossy())
             ))
         }
         other => Err(EngineError::Internal(format!(

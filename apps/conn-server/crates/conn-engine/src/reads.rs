@@ -248,6 +248,17 @@ impl Store {
     }
 
     /// Shell rows of every thread that is not deleted, archived ones included.
+    /// Whether a live project owns `workspace_root`.
+    pub(crate) fn project_owns_root(&self, workspace_root: &str) -> StoreResult<bool> {
+        Ok(self
+            .query_json(
+                "SELECT body FROM projects WHERE workspace_root = ?1",
+                [workspace_root],
+            )?
+            .iter()
+            .any(|p| p["deletedAt"].is_null()))
+    }
+
     pub(crate) fn shell_rows(&self) -> StoreResult<Vec<Value>> {
         self.query_json(
             "SELECT shell FROM threads WHERE deleted = 0 AND shell IS NOT NULL ORDER BY rowid",

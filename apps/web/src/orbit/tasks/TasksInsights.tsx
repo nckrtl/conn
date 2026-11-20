@@ -392,7 +392,7 @@ export function TasksInsightsStrip(props: { orbitProjectId: number | null; query
       <div
         ref={(scroller) => watchFades(scroller)}
         onScroll={(event) => updateFades(event.currentTarget)}
-        className="overflow-x-auto overflow-y-hidden p-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="overflow-x-auto overflow-y-hidden px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {open ? (
           <InsightDetail

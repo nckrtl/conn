@@ -25,9 +25,10 @@ function hasA11yProp(props: Record<string, unknown>): boolean {
 /**
  * A component with Lucide's props that draws a Conn glyph. `size` (default 24) and `color`
  * work as in Lucide; stroke props are ignored, since the glyphs are solid. The svg keeps
- * Lucide's `lucide lucide-<name>` classes for selectors.
+ * Lucide's `lucide lucide-<name>` classes for selectors. `viewBox` crops the 16-unit box for
+ * glyphs drawn one size step up.
  */
-export function connIcon(name: string, node: IconNode): LucideIcon {
+export function connIcon(name: string, node: IconNode, viewBox = "0 0 16 16"): LucideIcon {
   const ConnIcon = forwardRef<SVGSVGElement, Omit<LucideProps, "ref">>(
     function ConnIcon(props, ref) {
       const {
@@ -45,7 +46,7 @@ export function connIcon(name: string, node: IconNode): LucideIcon {
           xmlns="http://www.w3.org/2000/svg"
           width={size}
           height={size}
-          viewBox="0 0 16 16"
+          viewBox={viewBox}
           fill={color}
           className={className ? `lucide lucide-${name} ${className}` : `lucide lucide-${name}`}
           {...(!children && !hasA11yProp(rest) ? { "aria-hidden": true } : {})}

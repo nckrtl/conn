@@ -97,9 +97,13 @@ const LINT_ALLOW: Readonly<Record<string, string>> = {
   Sparkles:
     "// oxlint-disable-next-line t3code/no-sparkles-icon -- the rule targets call sites, not this export\n",
 };
+// Bare ×, + and … fill less of the box than the icons they replace; they draw one size step up
+// (14 → 16) by cropping the box, so they keep the visual weight of the design.
+const STEPPED_CONCEPTS = new Set(["close", "add", "more-horizontal"]);
+const STEPPED_VIEW_BOX = "1 1 14 14";
 const exportLines = lucideNames.map(
   (name) =>
-    `${LINT_ALLOW[name] ?? ""}export const ${name}Icon = connIcon(${JSON.stringify(kebab(name))}, G.${camel(manifest.lucide[name]!)}),\n  ${name} = ${name}Icon;`,
+    `${LINT_ALLOW[name] ?? ""}export const ${name}Icon = connIcon(${JSON.stringify(kebab(name))}, G.${camel(manifest.lucide[name]!)}${STEPPED_CONCEPTS.has(manifest.lucide[name]!) ? `, ${JSON.stringify(STEPPED_VIEW_BOX)}` : ""}),\n  ${name} = ${name}Icon;`,
 );
 
 const glyphsOut = NodePath.join(NodePath.dirname(webOut), "glyphs.generated.ts");

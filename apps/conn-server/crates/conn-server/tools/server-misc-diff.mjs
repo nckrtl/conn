@@ -212,7 +212,7 @@ function writeTraceFixture(state) {
       ];
     lines.push(span(i, fields));
   }
-  lines.push("not json", "[1,2]", JSON.stringify({ name: "missing.end", traceId: "t", spanId: "s", durationMs: 1 }), "   ", span(61, { name: "  padded  " }));
+  lines.push("not json", "[1,2]", JSON.stringify({ name: "missing.end", traceId: "t", spanId: "s", durationMs: 1 }), "   ", span(61, { name: "  padded  " }), span(62, { name: "\uFEFF" }), span(63, { name: "\u0085odd\u0085" }));
   NodeFS.writeFileSync(NodePath.join(logs, "server.trace.ndjson.3"), lines.slice(0, 20).join("\n") + "\n");
   NodeFS.mkdirSync(NodePath.join(logs, "server.trace.ndjson.2"));
   NodeFS.writeFileSync(NodePath.join(logs, "server.trace.ndjson.1"), lines.slice(20, 45).join("\r\n"));

@@ -64,14 +64,15 @@ Nothing here was skipped without asking. RPC **203 of 251** after this step; `/m
   the client's decode and equal to `getConfig`'s settings on each side; the trace answer on a
   fixture set of trace files (rotations, a folder in a file's place, parse errors, failures,
   interruptions, log events, more spans than the top lists hold, `\n`, `\r\n` and `\r`
-  line ends) equal to T3's own `readTraceDiagnostics` on the same folder; `getDatabaseStorage`
+  line ends, names of JavaScript-only whitespace) equal to T3's own `readTraceDiagnostics` on the same folder; `getDatabaseStorage`
   `null` here (T3 sends a status, its repair command targets its own database);
   `reclaimDatabaseSpace` and `uploadFeedback` for an unknown thread refused with T3's tags.
   `effect-client.mjs` decodes all five with the client's schemas. `cargo test -p conn-engine
   upload_feedback`: T3's texts for no session yet, an unsupported provider and a stopped
   session.
 - **Known differences:** a trace timestamp outside the years 0000 to 9999, or written in
-  hex, counts as unparsable (T3 accepts both); the reclaim refusal says "This server cannot reclaim database space." (T3 names
+  hex, counts as unparsable (T3 accepts both); so does a span whose name's total duration
+  would overflow to infinity (T3 sends `null` there, which its own client refuses); the reclaim refusal says "This server cannot reclaim database space." (T3 names
   its `t3 doctor` command); an unknown thread's upload cause is our own text; with no active provider thread, the
   upload falls back to the thread's own provider threads in T3's order, but T3's set also
   holds provider threads owned through nodes and subagents. **Not proven:**

@@ -62,7 +62,8 @@ pub fn read(state_dir: &Path, read_at: &str) -> Value {
 }
 
 /// `streamTraceFileLines`: `Ok(false)` when the file is absent, `Err` on any other failure.
-/// Lines read before a failure still count, as in T3's stream.
+/// Lines read before a failure still count, as in T3's stream. Effect's `splitLines` ends a
+/// line at `\n`, `\r\n` or a lone `\r`; only the unfinished line is held between reads.
 fn stream_lines(path: &str, on_line: &mut dyn FnMut(&str)) -> Result<bool, ()> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -70,39 +71,70 @@ fn stream_lines(path: &str, on_line: &mut dyn FnMut(&str)) -> Result<bool, ()> {
         Err(_) => return Err(()),
     };
     let mut reader = BufReader::new(file);
-    let mut buffer = Vec::new();
+    let mut line: Vec<u8> = Vec::new();
+    let mut after_cr = false;
     loop {
-        buffer.clear();
-        match reader.read_until(b'\n', &mut buffer) {
-            Ok(0) => return Ok(true),
-            Ok(_) => {
-                let mut line = buffer.as_slice();
-                if let [rest @ .., b'\n'] = line {
-                    line = rest;
+        let chunk = match reader.fill_buf() {
+            Ok(chunk) => chunk,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(()),
+        };
+        if chunk.is_empty() {
+            if !line.is_empty() {
+                on_line(&String::from_utf8_lossy(&line));
+            }
+            return Ok(true);
+        }
+        for &byte in chunk {
+            match byte {
+                b'\n' if after_cr => after_cr = false,
+                b'\n' | b'\r' => {
+                    on_line(&String::from_utf8_lossy(&line));
+                    line.clear();
+                    after_cr = byte == b'\r';
                 }
-                if let [rest @ .., b'\r'] = line {
-                    line = rest;
-                }
-                // Effect's `splitLines` also ends a line at a lone `\r`.
-                for part in line.split(|byte| *byte == b'\r') {
-                    on_line(&String::from_utf8_lossy(part));
+                _ => {
+                    line.push(byte);
+                    after_cr = false;
                 }
             }
-            Err(_) => return Err(()),
         }
+        let read = chunk.len();
+        reader.consume(read);
     }
+}
+
+/// JavaScript's `String.prototype.trim`: its whitespace and line terminators, which differ from
+/// Rust's (`U+FEFF` is one, `U+0085` is not).
+fn js_trim(text: &str) -> &str {
+    text.trim_matches(|c: char| {
+        matches!(
+            c,
+            '\u{9}'..='\u{D}'
+                | ' '
+                | '\u{A0}'
+                | '\u{1680}'
+                | '\u{2000}'..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+        )
+    })
 }
 
 /// `toStringValue`: a string with something besides whitespace, as it is (not trimmed).
 fn string(value: Option<&Value>) -> Option<&str> {
     value
         .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
+        .filter(|text| !js_trim(text).is_empty())
 }
 
 /// `unixNanoToDateTime`: decimal nanoseconds to whole milliseconds, toward zero.
 fn time(value: Option<&Value>) -> Option<i64> {
-    let text = string(value)?.trim();
+    let text = js_trim(string(value)?);
     let nanos: i128 = text.parse().ok()?;
     let millis = i64::try_from(nanos / 1_000_000).ok()?;
     (MIN_MS..=MAX_MS).contains(&millis).then_some(millis)
@@ -124,11 +156,11 @@ struct Occurrence {
 impl Occurrence {
     fn to_json(&self) -> Map<String, Value> {
         let mut map = Map::new();
-        map.insert("name".into(), json!(self.name.trim()));
+        map.insert("name".into(), json!(js_trim(&self.name)));
         map.insert("durationMs".into(), json!(self.duration_ms));
         map.insert("endedAt".into(), json!(iso(self.ended_at)));
-        map.insert("traceId".into(), json!(self.trace_id.trim()));
-        map.insert("spanId".into(), json!(self.span_id.trim()));
+        map.insert("traceId".into(), json!(js_trim(&self.trace_id)));
+        map.insert("spanId".into(), json!(js_trim(&self.span_id)));
         map
     }
 }
@@ -209,7 +241,7 @@ struct Aggregator {
 
 impl Aggregator {
     fn add_line(&mut self, line: &str) {
-        if line.trim().is_empty() {
+        if js_trim(line).is_empty() {
             return;
         }
         let Ok(Value::Object(parsed)) = serde_json::from_str::<Value>(line) else {
@@ -228,6 +260,19 @@ impl Aggregator {
             self.parse_error_count += 1;
             return;
         };
+
+        // A span name's total must stay a finite number: an infinite total encodes as `null`,
+        // which the client's schema refuses for the whole answer. T3 would send that; here
+        // the record counts as unparsable instead (a known difference).
+        let prior_total = self
+            .span_index
+            .get(name)
+            .and_then(|i| self.spans.get(*i))
+            .map_or(0.0, |(_, summary)| summary.total_duration_ms);
+        if !(prior_total + duration_ms).is_finite() {
+            self.parse_error_count += 1;
+            return;
+        }
 
         self.record_count += 1;
         if let Some(started) = started_at
@@ -297,9 +342,9 @@ impl Aggregator {
             // `readExitCause`, or the status message.
             let cause = if exit_tag == Some("Failure") {
                 exit.and_then(|exit| string(exit.get("cause")))
-                    .map_or("Failure", str::trim)
+                    .map_or("Failure", js_trim)
             } else {
-                string(status.get("message")).map_or("Failure", str::trim)
+                string(status.get("message")).map_or("Failure", js_trim)
             }
             .to_owned();
             insert_bounded(
@@ -365,7 +410,7 @@ impl Aggregator {
                     continue;
                 }
                 let seen_at = time(event.get("timeUnixNano")).unwrap_or(ended_at);
-                let message = string(event.get("name")).map_or("Log event", str::trim);
+                let message = string(event.get("name")).map_or("Log event", js_trim);
                 insert_bounded(
                     &mut self.latest_logs,
                     LogEvent {
@@ -408,7 +453,7 @@ impl Aggregator {
                 // `count` is at least 1 for every stored span.
                 let average = s.total_duration_ms / s.count.max(1) as f64;
                 json!({
-                    "name": name.trim(),
+                    "name": js_trim(name),
                     "count": s.count,
                     "failureCount": s.failure_count,
                     "totalDurationMs": s.total_duration_ms,
@@ -428,9 +473,9 @@ impl Aggregator {
             .take(TOP_LIMIT)
             .map(|f| {
                 json!({
-                    "name": f.name.trim(), "cause": f.cause.trim(), "count": f.count,
+                    "name": js_trim(&f.name), "cause": js_trim(&f.cause), "count": f.count,
                     "lastSeenAt": iso(f.last_seen_at),
-                    "traceId": f.trace_id.trim(), "spanId": f.span_id.trim(),
+                    "traceId": js_trim(&f.trace_id), "spanId": js_trim(&f.span_id),
                 })
             })
             .collect();
@@ -439,7 +484,7 @@ impl Aggregator {
             .iter()
             .map(|(span, cause)| {
                 let mut map = span.to_json();
-                map.insert("cause".into(), json!(cause.trim()));
+                map.insert("cause".into(), json!(js_trim(cause)));
                 Value::Object(map)
             })
             .collect();
@@ -453,15 +498,15 @@ impl Aggregator {
             .iter()
             .map(|e| {
                 json!({
-                    "spanName": e.span_name.trim(), "level": e.level.trim(),
-                    "message": e.message.trim(), "seenAt": iso(e.seen_at),
-                    "traceId": e.trace_id.trim(), "spanId": e.span_id.trim(),
+                    "spanName": js_trim(&e.span_name), "level": js_trim(&e.level),
+                    "message": js_trim(&e.message), "seenAt": iso(e.seen_at),
+                    "traceId": js_trim(&e.trace_id), "spanId": js_trim(&e.span_id),
                 })
             })
             .collect();
         let mut level_counts = Map::new();
         for (level, count) in &self.log_level_counts {
-            level_counts.insert(level.trim().to_owned(), json!(count));
+            level_counts.insert(js_trim(level).to_owned(), json!(count));
         }
         json!({
             "traceFilePath": trace,
@@ -553,6 +598,56 @@ mod tests {
         assert_eq!(result["latestWarningAndErrorLogs"][0]["message"], "careful");
         assert_eq!(result["logLevelCounts"], json!({"Warning": 1, "Info": 1}));
         assert_eq!(result["error"], json!({"_tag": "None"}));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Review findings: JavaScript's trim (a name of only U+FEFF is empty, as in T3), and a
+    /// total that would overflow to infinity (encoded `null`, refused by the client).
+    #[test]
+    fn js_whitespace_and_overflowing_totals_count_as_unparsable() {
+        let dir = temp();
+        let line = |name: &str, ms: &str| {
+            format!(
+                r#"{{"name":"{name}","traceId":"t","spanId":"s","durationMs":{ms},"endTimeUnixNano":"5000000"}}"#
+            )
+        };
+        let lines = [
+            line("\u{feff}", "1"),
+            line("\\u0085x\\u0085", "1"),
+            line("big", "1e308"),
+            line("big", "1e308"),
+        ];
+        std::fs::write(dir.join("logs/server.trace.ndjson"), lines.join("\n")).unwrap();
+        let result = read(&dir, "2026-11-21T00:00:00.000Z");
+        assert_eq!(result["recordCount"], 2);
+        assert_eq!(result["parseErrorCount"], 2);
+        let names: Vec<&str> = result["topSpansByCount"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"\u{85}x\u{85}"), "{names:?}");
+        assert!(
+            result["topSpansByCount"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["totalDurationMs"].is_number())
+        );
+        assert_eq!(js_trim("\u{feff} a \u{3000}"), "a");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lines_end_at_lf_crlf_and_lone_cr() {
+        let dir = temp();
+        let path = dir.join("logs/server.trace.ndjson");
+        std::fs::write(&path, b"a\r\nb\rc\n\rd").unwrap();
+        let mut seen = vec![];
+        let found = stream_lines(&path.to_string_lossy(), &mut |l| seen.push(l.to_owned()));
+        assert_eq!(found, Ok(true));
+        assert_eq!(seen, ["a", "b", "c", "", "d"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

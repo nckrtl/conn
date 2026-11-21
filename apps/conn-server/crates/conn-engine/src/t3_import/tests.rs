@@ -62,6 +62,39 @@ fn t3_state(dir: &Path) -> PathBuf {
         [run.to_string()],
     )
     .unwrap();
+    // A gap in the run ordinals: T3 moves a queued run past newer ones when it starts it.
+    let late = json!({"id": "r3", "threadId": "t1", "ordinal": 3, "status": "completed",
+        "requestedAt": "2026-01-01T00:00:06.000Z"});
+    conn.execute(
+        "INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal, provider,
+           status, requested_at, payload_json)
+         VALUES ('r3', 't1', 3, 'codex', 'completed', '2026-01-01T00:00:06.000Z', ?1)",
+        [late.to_string()],
+    )
+    .unwrap();
+    // A provider thread with no thread of its own, owned by a node of t1.
+    conn.execute(
+        "INSERT INTO orchestration_v2_projection_nodes (node_id, thread_id, run_id, root_node_id,
+           kind, status, payload_json)
+         VALUES ('n1', 't1', 'r1', 'n1', 'root_turn', 'completed', '{\"id\":\"n1\"}')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO orchestration_v2_projection_provider_threads (provider_thread_id, thread_id,
+           owner_node_id, provider, status, updated_at, payload_json)
+         VALUES ('pt-owned', NULL, 'n1', 'codex', 'active', '2026-01-01T00:00:05.000Z',
+           '{\"id\":\"pt-owned\"}')",
+        [],
+    )
+    .unwrap();
+    // T3 gave out sequences far above the row count.
+    conn.execute(
+        "INSERT INTO orchestration_v2_projection_metadata (projection_name, schema_version,
+           last_sequence, updated_at) VALUES ('thread-projections', 1, 900000, 'x')",
+        [],
+    )
+    .unwrap();
     // Inserted out of order: T3 reads messages by `created_at`, turn items by `ordinal`.
     for (id, role, text, at, item, ordinal) in [
         (
@@ -146,7 +179,7 @@ fn imports_threads_projects_and_rows_once_and_leaves_t3_untouched() {
             .find(|(k, _)| *k == kind)
             .map(|(_, n)| *n)
     };
-    assert_eq!(count("runs"), Some(1));
+    assert_eq!(count("runs"), Some(2));
     assert_eq!(count("messages"), Some(2));
     assert_eq!(count("turnItems"), Some(2));
     assert_eq!(count("contextTransfers"), Some(1));
@@ -193,6 +226,13 @@ fn imports_threads_projects_and_rows_once_and_leaves_t3_untouched() {
         .collect();
     assert_eq!(ordinals, [3, 7]);
     assert_eq!(projection["runs"][0]["status"], "completed");
+    let provider_threads: Vec<&str> = projection["providerThreads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(provider_threads, ["pt-owned"], "owned through its node");
     assert!(store.thread_projection("t2").unwrap().is_none());
     let fork = store.thread_projection("t3").unwrap().unwrap();
     assert_eq!(fork["contextTransfers"][0]["id"], "x1");
@@ -215,8 +255,14 @@ fn imports_threads_projects_and_rows_once_and_leaves_t3_untouched() {
         "a session shows in each thread bound to it"
     );
 
-    // New writes go after the imported rows.
-    assert!(store.high_water() >= 6);
+    // New writes go after the imported rows and after every sequence T3 gave out, so a T3
+    // cursor gets a snapshot; a new run takes the ordinal after the highest.
+    assert_eq!(store.imported_through(), 900_000);
+    assert!(store.high_water() > 900_000);
+    let mut store = store;
+    let tx = store.tx().unwrap();
+    assert_eq!(tx.next_run_ordinal("t1").unwrap(), 4);
+    drop(tx);
     drop(store);
 
     // Once: a second call leaves the engine's file alone.
@@ -282,5 +328,76 @@ fn a_cleanly_closed_wal_file_in_a_read_only_folder_is_read() {
     attached.unwrap();
     assert_eq!(threads.unwrap(), 3);
     assert!(!dir.join("statev2.sqlite-wal").exists());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A T3 file from before later migrations: no `has_custom_title` and other project columns,
+/// no session bindings, no MCP app context, no metadata. The import still runs.
+#[test]
+fn an_older_t3_schema_imports_with_defaults() {
+    let dir = temp_dir("older");
+    let path = dir.join(T3_STATE_FILE);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(T3_SCHEMA).unwrap();
+    conn.execute_batch(
+        "DROP TABLE projection_projects;
+         CREATE TABLE projection_projects (project_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+           workspace_root TEXT NOT NULL, scripts_json TEXT NOT NULL, created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL, deleted_at TEXT);
+         INSERT INTO projection_projects VALUES ('p1', 'Repo', '/work/repo', '[]',
+           '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL);
+         DROP TABLE orchestration_v2_projection_provider_session_bindings;
+         DROP TABLE orchestration_v2_projection_context_transfers;
+         DROP TABLE mcp_app_model_context;
+         DROP TABLE orchestration_v2_projection_metadata;
+         INSERT INTO orchestration_v2_projection_threads (thread_id, project_id, title,
+           default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
+         VALUES ('t1', 'p1', 'T', 'codex', 'full-access', 'default', '2026-01-01T00:00:00.000Z',
+           '2026-01-01T00:00:00.000Z', '{\"id\":\"t1\",\"projectId\":\"p1\",\"title\":\"T\"}');",
+    )
+    .unwrap();
+    drop(conn);
+    let report = import_t3_state(&dir).unwrap().unwrap();
+    assert_eq!((report.projects, report.threads), (1, 1));
+    let store = Store::open(&dir.join(ENGINE_FILE)).unwrap();
+    let shell = store.shell_snapshot().unwrap();
+    assert_eq!(shell["projects"][0]["hasCustomTitle"], false);
+    assert_eq!(shell["projects"][0]["pinnedAt"], serde_json::Value::Null);
+    assert_eq!(shell["threads"][0]["id"], "t1");
+    drop(store);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A client that kept a cursor from the T3 server reconnects: the imported rows have no
+/// events here, so the thread stream and the shell answer with a snapshot, never an empty
+/// replay.
+#[test]
+fn a_t3_cursor_gets_a_snapshot() {
+    let dir = temp_dir("cursor");
+    t3_state(&dir);
+    import_t3_state(&dir).unwrap().unwrap();
+    let store = Store::open(&dir.join(ENGINE_FILE)).unwrap();
+    let (imported, high) = (store.imported_through(), store.high_water());
+    for t3_cursor in [0, 5, 899_999, 900_000] {
+        assert!(
+            !crate::streams::can_replay(t3_cursor, high, imported),
+            "{t3_cursor}"
+        );
+    }
+    for t3_cursor in [0, 5, 899_999] {
+        assert_eq!(
+            store.shell_changes_since(t3_cursor).unwrap(),
+            None,
+            "{t3_cursor}"
+        );
+    }
+    // At T3's last sequence the shell resumes with every thread's row, rebuilt at import.
+    let rows = store.shell_changes_since(900_000).unwrap().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(crate::streams::can_replay(high, high, imported));
+    assert!(store.shell_changes_since(high).unwrap().is_some());
+    // A store that was never imported resumes any cursor up to its high water.
+    assert!(crate::streams::can_replay(0, 10, 0));
+    drop(store);
     let _ = fs::remove_dir_all(&dir);
 }

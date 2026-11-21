@@ -253,6 +253,8 @@ fn keyed_rows(
 pub(crate) struct Store {
     conn: Connection,
     next_seq: u64,
+    /// See [`Store::imported_through`].
+    imported_through: u64,
     /// Every transaction's `now` (`EngineConfig::clock`).
     clock: std::sync::Arc<dyn crate::clock::Clock>,
     /// A title generator is configured, so commands may ask for titles.
@@ -303,8 +305,16 @@ impl Store {
                 |row| row.get(0),
             )
             .map_err(err)?;
+        let imported_through: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT value FROM meta WHERE key = 'imported_through'), 0)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(err)?;
         Ok(Self {
             conn,
+            imported_through: imported_through.max(0) as u64,
             next_seq: high as u64 + 1,
             clock: std::sync::Arc::new(crate::clock::SystemClock),
             generates_titles: false,
@@ -336,6 +346,12 @@ impl Store {
     /// The sequence of the last committed change.
     pub(crate) fn high_water(&self) -> u64 {
         self.next_seq - 1
+    }
+
+    /// The T3 import boundary (`t3_import.rs`), 0 when this store was never imported. A cursor
+    /// at or below it may come from the T3 server, whose rows have no events here.
+    pub(crate) fn imported_through(&self) -> u64 {
+        self.imported_through
     }
 
     pub(crate) fn tx(&mut self) -> StoreResult<Tx<'_>> {
@@ -1238,6 +1254,20 @@ impl Tx<'_> {
             }
         }
         Ok(seq)
+    }
+
+    /// The ordinal of a thread's next run: one above its highest. A thread imported from T3
+    /// can have gaps (T3 moves a queued run past newer ones when it starts it), so the count
+    /// of runs would give an ordinal already taken.
+    pub(crate) fn next_run_ordinal(&self, thread_id: &str) -> StoreResult<u64> {
+        self.tx
+            .query_row(
+                "SELECT COALESCE(MAX(ordinal), 0) FROM entities WHERE thread_id = ?1 AND kind = 'runs'",
+                [thread_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|max| max.max(0) as u64 + 1)
+            .map_err(err)
     }
 
     /// Marks a thread's shell row for the commit to recompute, at a new sequence.

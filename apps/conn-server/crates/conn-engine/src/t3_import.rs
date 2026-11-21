@@ -79,7 +79,7 @@ struct Collection {
 const COLLECTIONS: [Collection; 15] = [
     Collection {
         kind: "runs",
-        table: "t3.orchestration_v2_projection_runs",
+        table: "orchestration_v2_projection_runs",
         id: "run_id",
         thread: "thread_id",
         order: "ordinal, run_id",
@@ -87,7 +87,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "attempts",
-        table: "t3.orchestration_v2_projection_run_attempts",
+        table: "orchestration_v2_projection_run_attempts",
         id: "attempt_id",
         thread: "thread_id",
         order: "run_id, attempt_ordinal",
@@ -95,7 +95,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "nodes",
-        table: "t3.orchestration_v2_projection_nodes",
+        table: "orchestration_v2_projection_nodes",
         id: "node_id",
         thread: "thread_id",
         order: "COALESCE(started_at, ''), node_id",
@@ -103,7 +103,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "subagents",
-        table: "t3.orchestration_v2_projection_subagents",
+        table: "orchestration_v2_projection_subagents",
         id: "subagent_id",
         thread: "thread_id",
         order: "COALESCE(started_at, ''), subagent_id",
@@ -111,18 +111,15 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "providerSessions",
-        table: "(SELECT bindings.thread_id AS bound_thread_id, sessions.*
-          FROM t3.orchestration_v2_projection_provider_session_bindings AS bindings
-          JOIN t3.orchestration_v2_projection_provider_sessions AS sessions
-            ON sessions.provider_session_id = bindings.provider_session_id)",
+        table: "orchestration_v2_projection_provider_sessions",
         id: "provider_session_id",
-        thread: "bound_thread_id",
+        thread: "thread_id",
         order: "updated_at, provider_session_id",
         ordinal: "NULL",
     },
     Collection {
         kind: "providerThreads",
-        table: "t3.orchestration_v2_projection_provider_threads",
+        table: "orchestration_v2_projection_provider_threads",
         id: "provider_thread_id",
         thread: "thread_id",
         order: "COALESCE(first_run_ordinal, 0), provider_thread_id",
@@ -130,7 +127,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "providerTurns",
-        table: "t3.orchestration_v2_projection_provider_turns",
+        table: "orchestration_v2_projection_provider_turns",
         id: "provider_turn_id",
         thread: "thread_id",
         order: "provider_thread_id, ordinal",
@@ -138,7 +135,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "runtimeRequests",
-        table: "t3.orchestration_v2_projection_runtime_requests",
+        table: "orchestration_v2_projection_runtime_requests",
         id: "runtime_request_id",
         thread: "thread_id",
         order: "created_at, runtime_request_id",
@@ -146,7 +143,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "messages",
-        table: "t3.orchestration_v2_projection_messages",
+        table: "orchestration_v2_projection_messages",
         id: "message_id",
         thread: "thread_id",
         order: "created_at, message_id",
@@ -154,7 +151,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "plans",
-        table: "t3.orchestration_v2_projection_plans",
+        table: "orchestration_v2_projection_plans",
         id: "plan_id",
         thread: "thread_id",
         order: "plan_id",
@@ -162,7 +159,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "turnItems",
-        table: "t3.orchestration_v2_projection_turn_items",
+        table: "orchestration_v2_projection_turn_items",
         id: "turn_item_id",
         thread: "thread_id",
         order: "ordinal, turn_item_id",
@@ -170,7 +167,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "checkpointScopes",
-        table: "t3.orchestration_v2_projection_checkpoint_scopes",
+        table: "orchestration_v2_projection_checkpoint_scopes",
         id: "scope_id",
         thread: "thread_id",
         order: "ordinal_within_parent, scope_id",
@@ -178,7 +175,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "checkpoints",
-        table: "t3.orchestration_v2_projection_checkpoints",
+        table: "orchestration_v2_projection_checkpoints",
         id: "checkpoint_id",
         thread: "thread_id",
         order: "scope_id, ordinal_within_scope",
@@ -186,7 +183,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "contextHandoffs",
-        table: "t3.orchestration_v2_projection_context_handoffs",
+        table: "orchestration_v2_projection_context_handoffs",
         id: "context_handoff_id",
         thread: "thread_id",
         order: "rowid",
@@ -194,7 +191,7 @@ const COLLECTIONS: [Collection; 15] = [
     },
     Collection {
         kind: "contextTransfers",
-        table: "t3.orchestration_v2_projection_context_transfers",
+        table: "orchestration_v2_projection_context_transfers",
         id: "context_transfer_id",
         thread: "target_thread_id",
         order: "rowid",
@@ -203,30 +200,60 @@ const COLLECTIONS: [Collection; 15] = [
 ];
 
 /// Projects as T3's `ProjectStore` reads them (`ProjectDbRow`), as the engine's project body:
-/// T3's `OrchestrationProjectShell` fields plus `deletedAt`.
+/// T3's `OrchestrationProjectShell` fields plus `deletedAt`. A column an older T3 lacks reads
+/// as its default (`{name}` is the column, or the default, see [`projects_sql`]).
 const PROJECTS_SQL: &str = "INSERT OR IGNORE INTO projects (id, workspace_root, body)
   SELECT project_id, workspace_root, json_object(
     'id', project_id,
     'title', title,
-    'hasCustomTitle', json(CASE WHEN has_custom_title THEN 'true' ELSE 'false' END),
+    'hasCustomTitle', json(CASE WHEN {has_custom_title} THEN 'true' ELSE 'false' END),
     'workspaceRoot', workspace_root,
-    'defaultModelSelection', json(COALESCE(default_model_selection_json, 'null')),
-    'defaultThreadEnvMode', default_thread_env_mode,
-    'autoPull', json(CASE WHEN auto_pull THEN 'true' ELSE 'false' END),
-    'faviconPath', favicon_path,
-    'projectIcon', json(COALESCE(project_icon_json, 'null')),
-    'scripts', json(scripts_json),
-    'pinnedAt', pinned_at,
-    'archivedAt', archived_at,
+    'defaultModelSelection', json(COALESCE({default_model_selection_json}, 'null')),
+    'defaultThreadEnvMode', {default_thread_env_mode},
+    'autoPull', json(CASE WHEN {auto_pull} THEN 'true' ELSE 'false' END),
+    'faviconPath', {favicon_path},
+    'projectIcon', json(COALESCE({project_icon_json}, 'null')),
+    'scripts', json(COALESCE({scripts_json}, '[]')),
+    'pinnedAt', {pinned_at},
+    'archivedAt', {archived_at},
     'createdAt', created_at,
     'updatedAt', updated_at,
-    'deletedAt', deleted_at)
+    'deletedAt', {deleted_at})
   FROM t3.projection_projects
   -- A folder has one live project; a deleted row gives way, as in `put_project`.
-  WHERE deleted_at IS NULL OR NOT EXISTS (SELECT 1 FROM t3.projection_projects AS live
+  WHERE {deleted_at} IS NULL OR NOT EXISTS (SELECT 1 FROM t3.projection_projects AS live
     WHERE live.workspace_root = projection_projects.workspace_root
-      AND (live.deleted_at IS NULL OR live.rowid > projection_projects.rowid))
+      AND ({live_deleted_at} IS NULL OR live.rowid > projection_projects.rowid))
   ORDER BY created_at, project_id";
+
+/// The project columns T3 added over time, with the value a row without them has.
+const PROJECT_COLUMNS: [(&str, &str); 10] = [
+    ("has_custom_title", "0"),
+    ("default_model_selection_json", "NULL"),
+    ("default_thread_env_mode", "NULL"),
+    ("auto_pull", "0"),
+    ("favicon_path", "NULL"),
+    ("project_icon_json", "NULL"),
+    ("scripts_json", "NULL"),
+    ("pinned_at", "NULL"),
+    ("archived_at", "NULL"),
+    ("deleted_at", "NULL"),
+];
+
+fn projects_sql(columns: &[String]) -> String {
+    let has = |name: &str| columns.iter().any(|c| c == name);
+    let mut sql = PROJECTS_SQL.to_owned();
+    for (name, default) in PROJECT_COLUMNS {
+        let value = if has(name) { name } else { default };
+        sql = sql.replace(&format!("{{{name}}}"), value);
+    }
+    let live = if has("deleted_at") {
+        "live.deleted_at"
+    } else {
+        "NULL"
+    };
+    sql.replace("{live_deleted_at}", live)
+}
 
 /// Threads: T3's payload is the `OrchestrationV2Thread` this engine stores. The projection's
 /// `updatedAt` is the thread's (`ProjectionStore.ts`), which `activity_at` gives here.
@@ -271,20 +298,34 @@ fn build(partial: &Path, source: &Path) -> Result<ImportReport, String> {
     attach_t3(&conn, source)?;
     let mut report = ImportReport::default();
     let tx = conn.unchecked_transaction().map_err(err)?;
-    report.projects = tx.execute(PROJECTS_SQL, []).map_err(err)? as u64;
+    if columns(&tx, "orchestration_v2_projection_threads")?.is_empty() {
+        return Err(format!(
+            "t3 import: {} has no orchestration_v2_projection_threads table; start the T3 server \
+             on it once so it migrates, or move the file away to start empty",
+            source.display()
+        ));
+    }
+    let project_columns = columns(&tx, "projection_projects")?;
+    if !project_columns.is_empty() {
+        report.projects = tx
+            .execute(&projects_sql(&project_columns), [])
+            .map_err(err)? as u64;
+    }
     report.threads = tx.execute(THREADS_SQL, []).map_err(err)? as u64;
     let mut next_seq: i64 = 1;
     for c in &COLLECTIONS {
+        let Some((from, thread)) = source_rows(&tx, c)? else {
+            report.collections.push((c.kind, 0));
+            continue;
+        };
         let sql = format!(
             "INSERT OR REPLACE INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
              SELECT {thread}, ?1, {id}, ?2 + n, ?2 + n, {ordinal}, payload_json FROM (
-               SELECT *, row_number() OVER (ORDER BY {thread}, {order}) - 1 AS n FROM {table}
+               SELECT *, row_number() OVER (ORDER BY {thread}, {order}) - 1 AS n FROM {from}
                WHERE {thread} IS NOT NULL)",
-            thread = c.thread,
             id = c.id,
             ordinal = c.ordinal,
             order = c.order,
-            table = c.table,
         );
         let rows = tx.execute(&sql, params![c.kind, next_seq]).map_err(err)? as i64;
         next_seq += rows;
@@ -298,15 +339,25 @@ fn build(partial: &Path, source: &Path) -> Result<ImportReport, String> {
            ORDER BY first_seq;
          INSERT INTO message_search (rowid, text)
            SELECT k.id, COALESCE(json_extract(e.body, '$.text'), '') FROM message_keys k
-           JOIN entities e ON e.thread_id = k.thread_id AND e.kind = 'messages' AND e.id = k.message_id;
-         INSERT OR REPLACE INTO mcp_app_model_context (thread_id, item_id, server, tool, text, updated_at)
-           SELECT thread_id, item_id, server, tool, text, updated_at FROM t3.mcp_app_model_context;",
+           JOIN entities e ON e.thread_id = k.thread_id AND e.kind = 'messages' AND e.id = k.message_id;",
     )
     .map_err(err)?;
-    // Sequences this engine takes next start above the imported rows (`Store::open`).
+    if !columns(&tx, "mcp_app_model_context")?.is_empty() {
+        tx.execute_batch(
+            "INSERT OR REPLACE INTO mcp_app_model_context (thread_id, item_id, server, tool, text, updated_at)
+               SELECT thread_id, item_id, server, tool, text, updated_at FROM t3.mcp_app_model_context;",
+        )
+        .map_err(err)?;
+    }
+    // The import boundary: above the imported rows and above every sequence T3 gave out. New
+    // sequences start above it (`Store::open`). A client that kept a T3 cursor holds a number
+    // at or below it and gets a fresh snapshot, never an empty replay (`streams.rs`, and the
+    // shell's pruned mark).
+    let boundary = (next_seq - 1).max(t3_last_sequence(&tx)?);
     tx.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('imported_through', ?1)",
-        [next_seq - 1],
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('imported_through', ?1),
+           ('shell_pruned_through', ?1)",
+        [boundary],
     )
     .map_err(err)?;
     tx.commit().map_err(err)?;
@@ -326,6 +377,106 @@ fn build(partial: &Path, source: &Path) -> Result<ImportReport, String> {
     store.checkpoint()?;
     drop(store);
     Ok(report)
+}
+
+/// The columns of a table in T3's file; empty when the table is missing (an older T3).
+fn columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA t3.table_info(\"{table}\")"))
+        .map_err(err)?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(err)?;
+    Ok(names)
+}
+
+/// The rows a collection reads, as a `FROM` source and the expression that names each row's
+/// thread; `None` when an older T3 has no such table.
+/// - A provider session shows in each thread bound to it (`provider_session_bindings`), as
+///   T3 reads it; without that table, in its own thread.
+/// - A provider thread without a thread of its own belongs to the thread of its owner node,
+///   as T3's projection read (`owner_node_id IN` the thread's nodes) finds it.
+fn source_rows(conn: &Connection, c: &Collection) -> Result<Option<(String, String)>, String> {
+    let own = columns(conn, c.table)?;
+    if own.is_empty() {
+        return Ok(None);
+    }
+    let plain = || Some((format!("t3.{}", c.table), c.thread.to_owned()));
+    Ok(match c.kind {
+        "providerSessions"
+            if !columns(
+                conn,
+                "orchestration_v2_projection_provider_session_bindings",
+            )?
+            .is_empty() =>
+        {
+            Some((
+                "(SELECT bindings.thread_id AS bound_thread_id, sessions.*
+                  FROM t3.orchestration_v2_projection_provider_session_bindings AS bindings
+                  JOIN t3.orchestration_v2_projection_provider_sessions AS sessions
+                    ON sessions.provider_session_id = bindings.provider_session_id)"
+                    .to_owned(),
+                "bound_thread_id".to_owned(),
+            ))
+        }
+        "providerThreads"
+            if own.iter().any(|name| name == "owner_node_id")
+                && !columns(conn, "orchestration_v2_projection_nodes")?.is_empty() =>
+        {
+            Some((
+                "(SELECT COALESCE(provider_threads.thread_id, owner.thread_id) AS owning_thread_id,
+                    provider_threads.*
+                  FROM t3.orchestration_v2_projection_provider_threads AS provider_threads
+                  LEFT JOIN t3.orchestration_v2_projection_nodes AS owner
+                    ON owner.node_id = provider_threads.owner_node_id)"
+                    .to_owned(),
+                "owning_thread_id".to_owned(),
+            ))
+        }
+        _ => plain(),
+    })
+}
+
+/// The last sequence T3 gave out: its projection mark or its event table's counter, whichever
+/// this T3 has.
+fn t3_last_sequence(conn: &Connection) -> Result<i64, String> {
+    let mut last = 0;
+    if !columns(conn, "orchestration_v2_projection_metadata")?.is_empty() {
+        last = last.max(
+            conn.query_row(
+                "SELECT COALESCE(MAX(last_sequence), 0) FROM t3.orchestration_v2_projection_metadata",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(err)?,
+        );
+    }
+    if !columns(conn, "sqlite_sequence")?.is_empty() {
+        last = last.max(
+            conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM t3.sqlite_sequence
+                 WHERE name IN ('orchestration_v2_events', 'orchestration_events')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(err)?,
+        );
+    }
+    for table in ["orchestration_v2_events", "orchestration_events"] {
+        if columns(conn, table)?.iter().any(|name| name == "sequence") {
+            last = last.max(
+                conn.query_row(
+                    &format!("SELECT COALESCE(MAX(sequence), 0) FROM t3.{table}"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(err)?,
+            );
+        }
+    }
+    Ok(last)
 }
 
 /// Attaches T3's file as `t3`, read-only. A T3 server that stopped cleanly leaves no `-wal`

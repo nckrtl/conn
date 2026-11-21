@@ -216,3 +216,9 @@ CREATE TABLE orchestration_v2_projection_provider_session_bindings (
       thread_id TEXT NOT NULL,
       PRIMARY KEY (provider_session_id, thread_id)
     );
+CREATE TABLE orchestration_v2_projection_metadata (
+      projection_name TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      last_sequence INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );

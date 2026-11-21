@@ -36,9 +36,17 @@ A Conn Server that starts in a T3 server's state folder has the same threads (Ni
   requests, messages, plans, turn items, checkpoint scopes, checkpoints, context handoffs and
   transfers, MCP app model context) with its id and its JSON body, unchanged. `first_seq`
   follows the order T3's `ProjectionStore` reads each collection in; turn items and runs keep
-  their ordinals; final message texts go into search. New sequences start above the imported
-  rows (`meta.imported_through`). The engine then computes each shell row. The store is built
-  as `engine.sqlite.t3-import` and renamed into place only when complete.
+  their ordinals; final message texts go into search. A provider thread without a thread of
+  its own goes to its owner node's thread, as T3 reads it. The engine then computes each shell
+  row. The store is built as `engine.sqlite.t3-import` and renamed into place only when
+  complete. A table or project column an older T3 lacks reads as empty or as its default.
+- **Boundary.** `meta.imported_through` is above the imported rows and above the last sequence
+  T3 gave out (`orchestration_v2_projection_metadata`, the event counter). New sequences start
+  above it. A client cursor at or below it may be T3's, and the imported rows have no events
+  here, so a thread stream answers it with a snapshot (`streams::can_replay`) and the shell
+  with a snapshot (the pruned mark is set to it). A new run takes the ordinal after the
+  thread's highest, not its run count + 1: T3 leaves gaps when it moves a queued run forward
+  (6 threads on mini).
 - **Why this way.** Reading T3's tables in place would put a second schema under every engine
   read and write. The engine already stores T3's encoded `OrchestrationV2*` bodies, so a
   one-time copy keeps its code as it is. T3's file is never written: the T3 server can take
@@ -52,7 +60,8 @@ A Conn Server that starts in a T3 server's state folder has the same threads (Ni
   `~/.t3` untouched): `crates/conn-server/tools/t3-import-diff.mjs` starts the T3 server and the
   Conn Server on APFS clones of the copy and compares what a client reads. Import: 6 projects,
   1,531 threads, 18,960 runs, 230,292 nodes, 68,170 messages, 318,032 turn items, 19,788
-  checkpoints, 3,654 context transfers, 761 session bindings; 183 s on mini, once.
+  checkpoints, 3,654 context transfers, 761 session bindings; 183 s to 259 s on mini, once.
+  The boundary became 1,862,638, T3's last sequence.
   - Byte for byte, every T3 row against the engine row: none missing; every row identical
     except rows of threads that each server's restart recovery changed (runs live at the copy).
   - Shell: 5 projects and 1,529 threads on both. Every thread's projection, through T3's wire
@@ -72,7 +81,7 @@ A Conn Server that starts in a T3 server's state folder has the same threads (Ni
   `float_roundtrip` (last digit of `opens.score`) and keeps object keys sorted (the order of a
   dynamic tool's wire summary). The HTTP thread route serves outputs that T3's wire projection
   omits; the check applies T3's own projection to both sides.
-- **First start takes minutes** on a large T3 home (mini: about 3 minutes and as much free
+- **First start takes minutes** on a large T3 home (mini: 3 to 5 minutes and as much free
   disk as `statev2.sqlite`). An interrupted import starts over at the next start and loses
   nothing.
 

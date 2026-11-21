@@ -277,29 +277,32 @@ function checkRows() {
   const engine = NodePath.join(root, "conn", ".t3", "userdata", "engine.sqlite");
   const t3 = NodePath.resolve(source, "statev2.sqlite");
   const tables = [
-    ["runs", "orchestration_v2_projection_runs", "run_id", "thread_id"],
-    ["attempts", "orchestration_v2_projection_run_attempts", "attempt_id", "thread_id"],
-    ["nodes", "orchestration_v2_projection_nodes", "node_id", "thread_id"],
-    ["subagents", "orchestration_v2_projection_subagents", "subagent_id", "thread_id"],
-    ["providerThreads", "orchestration_v2_projection_provider_threads", "provider_thread_id", "thread_id"],
-    ["providerTurns", "orchestration_v2_projection_provider_turns", "provider_turn_id", "thread_id"],
-    ["runtimeRequests", "orchestration_v2_projection_runtime_requests", "runtime_request_id", "thread_id"],
-    ["messages", "orchestration_v2_projection_messages", "message_id", "thread_id"],
-    ["plans", "orchestration_v2_projection_plans", "plan_id", "thread_id"],
-    ["turnItems", "orchestration_v2_projection_turn_items", "turn_item_id", "thread_id"],
-    ["checkpointScopes", "orchestration_v2_projection_checkpoint_scopes", "scope_id", "thread_id"],
-    ["checkpoints", "orchestration_v2_projection_checkpoints", "checkpoint_id", "thread_id"],
-    ["contextHandoffs", "orchestration_v2_projection_context_handoffs", "context_handoff_id", "thread_id"],
-    ["contextTransfers", "orchestration_v2_projection_context_transfers", "context_transfer_id", "target_thread_id"],
+    ["runs", "orchestration_v2_projection_runs", "run_id", "t.thread_id"],
+    ["attempts", "orchestration_v2_projection_run_attempts", "attempt_id", "t.thread_id"],
+    ["nodes", "orchestration_v2_projection_nodes", "node_id", "t.thread_id"],
+    ["subagents", "orchestration_v2_projection_subagents", "subagent_id", "t.thread_id"],
+    ["providerThreads", "orchestration_v2_projection_provider_threads", "provider_thread_id",
+      "COALESCE(t.thread_id, (SELECT n.thread_id FROM t3.orchestration_v2_projection_nodes n WHERE n.node_id = t.owner_node_id))"],
+    ["providerTurns", "orchestration_v2_projection_provider_turns", "provider_turn_id", "t.thread_id"],
+    ["runtimeRequests", "orchestration_v2_projection_runtime_requests", "runtime_request_id", "t.thread_id"],
+    ["messages", "orchestration_v2_projection_messages", "message_id", "t.thread_id"],
+    ["plans", "orchestration_v2_projection_plans", "plan_id", "t.thread_id"],
+    ["turnItems", "orchestration_v2_projection_turn_items", "turn_item_id", "t.thread_id"],
+    ["checkpointScopes", "orchestration_v2_projection_checkpoint_scopes", "scope_id", "t.thread_id"],
+    ["checkpoints", "orchestration_v2_projection_checkpoints", "checkpoint_id", "t.thread_id"],
+    ["contextHandoffs", "orchestration_v2_projection_context_handoffs", "context_handoff_id", "t.thread_id"],
+    ["contextTransfers", "orchestration_v2_projection_context_transfers", "context_transfer_id", "t.target_thread_id"],
   ];
-  // A thread is "changed" when its engine rows hold a time after the copy.
+  // A thread is "changed" only on evidence that the running server wrote to it: an event in
+  // this engine's log (the import writes none) or a row stored above the import boundary.
+  // The difference under test never counts as that evidence.
   const sql = [
     `ATTACH 'file:${t3}?mode=ro&immutable=1' AS t3;`,
-    `CREATE TEMP TABLE changed AS SELECT DISTINCT thread_id FROM entities WHERE seq > (SELECT value FROM meta WHERE key = 'imported_through');`,
-    `INSERT INTO changed SELECT id FROM threads WHERE thread != (SELECT payload_json FROM t3.orchestration_v2_projection_threads WHERE thread_id = id) AND id NOT IN (SELECT thread_id FROM changed);`,
+    `CREATE TEMP TABLE changed AS SELECT DISTINCT thread_id FROM events
+       UNION SELECT DISTINCT thread_id FROM entities WHERE seq > (SELECT value FROM meta WHERE key = 'imported_through');`,
     `SELECT 'threads', count(*), sum(t.payload_json = e.thread), sum(e.id IS NULL), sum(t.payload_json != e.thread AND t.thread_id IN (SELECT thread_id FROM changed)) FROM t3.orchestration_v2_projection_threads t LEFT JOIN threads e ON e.id = t.thread_id;`,
     ...tables.map(([kind, table, id, thread]) =>
-      `SELECT '${kind}', count(*), sum(t.payload_json = e.body), sum(e.id IS NULL), sum(t.payload_json != e.body AND t.${thread} IN (SELECT thread_id FROM changed)) FROM t3.${table} t LEFT JOIN entities e ON e.thread_id = t.${thread} AND e.kind = '${kind}' AND e.id = t.${id} WHERE t.${thread} IS NOT NULL;`),
+      `SELECT '${kind}', count(*), sum(t.payload_json = e.body), sum(e.id IS NULL), sum(t.payload_json != e.body AND ${thread} IN (SELECT thread_id FROM changed)) FROM t3.${table} t LEFT JOIN entities e ON e.thread_id = ${thread} AND e.kind = '${kind}' AND e.id = t.${id};`),
     `SELECT 'providerSessions', count(*), sum(s.payload_json = e.body), sum(e.id IS NULL), sum(s.payload_json != e.body AND b.thread_id IN (SELECT thread_id FROM changed)) FROM t3.orchestration_v2_projection_provider_session_bindings b JOIN t3.orchestration_v2_projection_provider_sessions s USING (provider_session_id) LEFT JOIN entities e ON e.thread_id = b.thread_id AND e.kind = 'providerSessions' AND e.id = b.provider_session_id;`,
   ].join("\n");
   const out = NodeChildProcess.execFileSync("sqlite3", ["-separator", " ", `file:${engine}?mode=ro`], {

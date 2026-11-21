@@ -1,5 +1,6 @@
 import { getFontEmbedCSS, toJpeg } from "html-to-image";
 import { hostCapture } from "./hooks";
+import { ANNOTATION_HOST_ID } from "./host";
 import type { AnnotationDraft, AnnotationRect } from "./types";
 import { screenshotCrop } from "./viewport";
 
@@ -52,12 +53,47 @@ async function captureWithHost(rect: AnnotationRect): Promise<string | undefined
     return undefined;
   }
 
+  const reveal = hideOverlayFromScreen();
   try {
+    await nextPaint();
     const image = await capture(rect);
     return typeof image === "string" ? image : await blobToDataUrl(image);
   } catch {
     return undefined;
+  } finally {
+    reveal();
   }
+}
+
+let overlayHides = 0;
+const OVERLAY_HIDE_LIMIT_MS = 1000;
+
+/**
+ * A host copies the screen, so the open popup and other overlay boxes would show in it.
+ * Opacity, not visibility, so the popup's textarea keeps focus. `paintHighlight` redraws the outline.
+ */
+function hideOverlayFromScreen(): () => void {
+  const host = document.getElementById(ANNOTATION_HOST_ID);
+  if (!host) return () => undefined;
+  overlayHides++;
+  host.style.opacity = "0";
+  let revealed = false;
+  const reveal = () => {
+    if (revealed) return;
+    revealed = true;
+    window.clearTimeout(limit);
+    overlayHides--;
+    if (overlayHides === 0) host.style.removeProperty("opacity");
+  };
+  const limit = window.setTimeout(reveal, OVERLAY_HIDE_LIMIT_MS);
+  return reveal;
+}
+
+/** Resolves once a frame with the latest DOM state has been composited. */
+function nextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+  });
 }
 
 async function renderDom(

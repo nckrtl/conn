@@ -2128,6 +2128,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     yield* attempt({ operation: "registerWebview.sendTheme", tabId, webContentsId }, () => {
       wc.send(ANNOTATION_THEME_CHANNEL, annotationTheme);
       wc.send(ANNOTATION_SEND_ENABLED_CHANNEL, annotationSendEnabled.get(tabId) === true);
+      // The renderer often stores the tab's dictation URLs before its first guest registers.
+      dictation.setUrls(webContentsId, annotatorDictation.get(tabId) ?? null);
     });
     const latestNavStatus = (yield* SynchronizedRef.get(tabsRef)).get(tabId)?.navStatus;
     if (

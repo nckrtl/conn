@@ -36,6 +36,27 @@ export function* enabledEnvironmentIds(
   }
 }
 
+/**
+ * Conn: the catalog without the given environments, for lists. Reserved Orbit clones stay
+ * connected but no list shows them until they are finalized.
+ */
+export function catalogWithoutEnvironments(
+  catalogAtom: Atom.Atom<EnvironmentCatalogState>,
+  hiddenAtom: Atom.Atom<ReadonlyArray<string>>,
+): Atom.Atom<EnvironmentCatalogState> {
+  return Atom.make((get) => {
+    const catalog = get(catalogAtom);
+    const hidden = new Set(get(hiddenAtom));
+    if (hidden.size === 0 || ![...catalog.entries.keys()].some((id) => hidden.has(id))) {
+      return catalog;
+    }
+    return {
+      isReady: catalog.isReady,
+      entries: new Map([...catalog.entries].filter(([id]) => !hidden.has(id))),
+    };
+  }).pipe(Atom.withLabel("environment-catalog-visible"));
+}
+
 const EMPTY_ENVIRONMENT_CATALOG_STATE: EnvironmentCatalogState = Object.freeze({
   isReady: false,
   entries: new Map(),

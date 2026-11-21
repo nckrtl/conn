@@ -13,6 +13,7 @@ import {
   type OrbitCompletionPorts,
   type OrbitGatewayProject,
   type OrbitThreadStart,
+  type TakenOrbitReservation,
 } from "@t3tools/client-runtime/orbit-gateway";
 
 import { isDraftThreadRoute } from "../threads/thread-route-state";
@@ -67,6 +68,8 @@ export function beginOrbitThreadStart(
     readonly workspaceId: string | null;
     readonly uuid: () => string;
     readonly now: number;
+    /** The clone reserved while the screen was open; the start finalizes it. */
+    readonly reservation?: TakenOrbitReservation | null;
   },
 ): OrbitThreadStart {
   const start = {
@@ -80,6 +83,7 @@ export function beginOrbitThreadStart(
       commandId: input.uuid(),
       now: input.now,
       instanceDomainSuffix: input.project.instanceDomainSuffix ?? null,
+      reservation: input.reservation ?? null,
     }),
     workspaceId: input.workspaceId,
   };
@@ -104,6 +108,8 @@ function afterSave(store: OrbitThreadStartStore, gateway: OrbitGatewayClient): O
   return {
     ...gateway,
     createThreadInstance: saved(gateway.createThreadInstance),
+    reservation: saved(gateway.reservation),
+    finalizeReservation: saved(gateway.finalizeReservation),
     operation: saved(gateway.operation),
     environments: saved(gateway.environments),
     startPairing: saved(gateway.startPairing),

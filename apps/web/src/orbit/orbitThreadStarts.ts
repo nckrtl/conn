@@ -42,6 +42,7 @@ import {
   updateStarts,
 } from "./orbitThreadStartStore";
 import { rememberOrbitComposerControls } from "./orbitComposerControls";
+import { takeOrbitReservation } from "./orbitReservations";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
 
@@ -70,6 +71,8 @@ function saveOrbitDraftStart(input: OrbitDraftStartInput): OrbitThreadStart {
     instanceDomainSuffix: input.instanceDomainSuffix ?? null,
     branch: input.branch,
     defaultBranch: input.defaultBranch,
+    // Conn: the clone reserved while the prompt box was open; the start finalizes it.
+    reservation: input.instanceKind === "new" ? takeOrbitReservation(input.project.id) : null,
   });
   const start = { ...fresh, workspaceId: useWorkspaceStore.getState().activeWorkspaceId };
   updateStarts((starts) => [...starts, start]);
@@ -171,13 +174,14 @@ function completionStillRuns(start: OrbitThreadStart): boolean {
 const cancelRequested = (id: string) =>
   readStored().find((entry) => entry.id === id)?.cancelRequested === true;
 
-function isSaved(environmentId: string): boolean {
+export function isOrbitServerSaved(environmentId: string): boolean {
   return appAtomRegistry
     .get(environmentCatalog.catalogValueAtom)
     .entries.has(environmentId as EnvironmentId);
 }
 
-async function connect(environmentId: string, pairingUrl: string): Promise<void> {
+/** Opens a clone's one-time pairing link and saves its server. */
+export async function connectOrbitClone(environmentId: string, pairingUrl: string): Promise<void> {
   const result = await runAtomCommand(
     appAtomRegistry,
     connectPairing,
@@ -299,8 +303,8 @@ export async function runSavedOrbitThreadStart(
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
       stopped,
-      isSaved,
-      connect,
+      isSaved: isOrbitServerSaved,
+      connect: connectOrbitClone,
       wake: (instanceId) => wakeOrbitInstanceForStart(client, instanceId),
       onCreateOperation: (operation) => recordCreateOperation(id, operation),
       send: async (ready) => {

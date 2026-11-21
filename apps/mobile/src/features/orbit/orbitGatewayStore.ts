@@ -23,6 +23,7 @@ import {
   type OrbitGatewayProfile,
   type OrbitGatewayWorkspace,
   type ProfileBinding,
+  visibleOrbitEnvironments,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AuthAccessWriteScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
@@ -33,6 +34,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
 
 import { environmentCatalog } from "../../connection/catalog";
+import { noteOrbitReservedEnvironments } from "./orbitReservedRows";
 import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentSession, readEnvironmentLacksScope } from "../../state/session";
@@ -530,8 +532,10 @@ export function refreshOrbitGateway(): Promise<void> {
         phase: profileReadError === null ? "ready" : "error",
         error: profileReadError,
         profiles,
-        environments,
+        // Conn: reserved clones stay out of every list; the reconcile still sees them.
+        environments: visibleOrbitEnvironments(environments),
       });
+      noteOrbitReservedEnvironments(environments);
       await reconcileEnvironments(environments);
     } catch (error) {
       listError = message(error);

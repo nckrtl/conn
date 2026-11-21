@@ -305,11 +305,16 @@ vi.mock("./ProviderReplayHarness.ts", async (importOriginal) => {
           .filter((line: string) => line !== "").map((line: string) => JSON.parse(line))
           .filter((entry: any) => entry.kind === "inject");
         if (injected.length !== 2) throw new Error("conn: expected 2 history injections, got " + injected.length + " [" + dir + "]");
-        for (const entry of injected) {
+        // In merge order, all into the source's one native thread.
+        if (new Set(injected.map((entry: any) => entry.frame.params.threadId)).size !== 1) {
+          throw new Error("conn: the injections went to different native threads");
+        }
+        for (const [index, entry] of injected.entries()) {
           const items = entry.frame.params.items.slice(1);
           const texts = (role: string) => items.filter((i: any) => i.role === role).map((i: any) => i.content[0].text.split("\n").slice(1).join("\n"));
           const users = texts("user");
-          if (users.length !== 1 || !/^Remember the fork-local marker merge-sibling-(first|second)-/.test(users[0])) {
+          const marker = index === 0 ? "first" : "second";
+          if (users.length !== 1 || !users[0].startsWith("Remember the fork-local marker merge-sibling-" + marker + "-")) {
             throw new Error("conn: injected user history is not one fork prompt: " + JSON.stringify(users));
           }
           if (!texts("assistant").some((text: string) => text.includes("stored"))) {

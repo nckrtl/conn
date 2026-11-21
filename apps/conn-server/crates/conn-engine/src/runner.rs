@@ -146,8 +146,10 @@ struct TurnContext {
     provider_thread: Option<Value>,
     /// The source to fork natively, on a fork's first turn.
     fork: Option<crate::fork::NativeFork>,
-    /// The thread's context handoffs (`contextHandoffs`).
+    /// The thread's delivered context handoffs, for what the native thread already holds.
     handoffs: Vec<Value>,
+    /// The handoffs this run's turn delivers (`isPendingForRun`).
+    ready: Vec<Value>,
     /// The run starts a new provider conversation (`freshContext`).
     fresh: bool,
     /// The run goes back to the thread's own conversation past a scheduled fresh run's, so
@@ -628,7 +630,20 @@ impl Inner {
                         None if fresh => None,
                         None => crate::fork::native_fork_input(&tx, &tid)?,
                     };
-                    let handoffs = tx.entities(&tid, "contextHandoffs")?;
+                    let all_handoffs = tx.entities(&tid, "contextHandoffs")?;
+                    let mut handoffs = all_handoffs.clone();
+                    // The run's turn delivers these; a compaction or goal turn none.
+                    let ready = if crate::merge_back::defers_history(&message) {
+                        vec![]
+                    } else {
+                        crate::merge_back::pending_for_run(
+                            &all_handoffs,
+                            &tx.entities(&tid, "runs")?,
+                            &tx.entities(&tid, "messages")?,
+                            &run,
+                        )
+                    };
+                    handoffs.retain(|h| h.get("delivery").is_some_and(|d| !d.is_null()));
                     Ok(Some(TurnContext {
                         thread,
                         run,
@@ -637,6 +652,7 @@ impl Inner {
                         provider_thread,
                         fork,
                         handoffs,
+                        ready,
                         fresh,
                         leaves_side_conversation,
                     }))
@@ -944,6 +960,7 @@ impl Inner {
         let delivery = self
             .deliver_handoffs(
                 &live,
+                &context.ready,
                 &context.handoffs,
                 &context.message,
                 &provider_thread,
@@ -1020,7 +1037,10 @@ impl Inner {
             } else {
                 plan.handoffs.clone()
             };
-            self.persist_handoffs(thread_id, run_id, records).await;
+            // After the provider took the prompt, a failed record must not stop the turn.
+            if let Err(error) = self.persist_handoffs(thread_id, run_id, records).await {
+                eprintln!("conn-engine: could not record a context handoff delivery: {error}");
+            }
         }
         started
     }
@@ -1034,6 +1054,7 @@ impl Inner {
     async fn deliver_handoffs(
         &self,
         live: &Arc<LiveThread>,
+        ready: &[Value],
         handoffs: &[Value],
         message: &Value,
         provider_thread: &ProviderThread,
@@ -1042,19 +1063,20 @@ impl Inner {
         run_id: &str,
         user_text: &str,
     ) -> Result<Option<crate::handoff::Delivery>, StartError> {
-        // Side chat context goes with the prompt on its own; it is not history.
-        let ready: Vec<Value> = handoffs
-            .iter()
-            .filter(|h| {
-                h["status"] == "ready"
-                    && h["targetRunId"] == run_id
-                    && !(h["strategy"] == "manual_context" && h["transferId"].is_string())
-            })
-            .cloned()
-            .collect();
         if ready.is_empty() {
             return Ok(None);
         }
+        // A handoff made before its run had a provider thread now names the run's.
+        let ready: Vec<Value> = ready
+            .iter()
+            .cloned()
+            .map(|mut h| {
+                if crate::merge_back::is_provisional(&h["toProviderThreadId"]) {
+                    h["toProviderThreadId"] = provider_thread_json["id"].clone();
+                }
+                h
+            })
+            .collect();
         let native = native_thread_id(provider_thread_json);
         let delivered: Vec<String> = handoffs
             .iter()
@@ -1091,12 +1113,14 @@ impl Inner {
         let Some(plan) = plan else {
             return Ok(None);
         };
+        // Before the provider hears of it; a record that cannot be written stops the turn.
         self.persist_handoffs(
             thread_id,
             run_id,
             plan.recorded(native.as_deref(), "pending"),
         )
-        .await;
+        .await
+        .map_err(|e| StartError::Failed(format!("Could not record the context handoff: {e}")))?;
         if injects && native.is_some() {
             let injected = live
                 .session
@@ -1112,31 +1136,33 @@ impl Inner {
                     run_id,
                     plan.recorded(native.as_deref(), "injected"),
                 )
-                .await;
+                .await
+                .map_err(|e| {
+                    StartError::Failed(format!("Could not record the context handoff: {e}"))
+                })?;
                 return Ok(None);
             }
         }
         Ok(Some(plan))
     }
 
-    /// Writes handoff records (`context-handoff.updated`); a failed write is logged.
-    async fn persist_handoffs(&self, thread_id: &str, run_id: &str, handoffs: Vec<Value>) {
+    /// Writes handoff records (`context-handoff.updated`).
+    async fn persist_handoffs(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        handoffs: Vec<Value>,
+    ) -> crate::store::StoreResult<()> {
         let (tid, rid) = (thread_id.to_owned(), run_id.to_owned());
-        let written = self
-            .write(move |tx| {
-                let now = tx.now().to_owned();
-                for mut handoff in handoffs {
-                    handoff["updatedAt"] = json!(now);
-                    tx.append(
-                        Draft::new(&tid, "context-handoff.updated", handoff).run(Some(&rid)),
-                    )?;
-                }
-                Ok(())
-            })
-            .await;
-        if let Err(error) = written {
-            eprintln!("conn-engine: could not record a context handoff delivery: {error}");
-        }
+        self.write(move |tx| {
+            let now = tx.now().to_owned();
+            for mut handoff in handoffs {
+                handoff["updatedAt"] = json!(now);
+                tx.append(Draft::new(&tid, "context-handoff.updated", handoff).run(Some(&rid)))?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Reads one session's events until it closes. Ends a run the session leaves open.

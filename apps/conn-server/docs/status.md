@@ -55,13 +55,15 @@ back" work. Before, the engine refused it ("Conn Server cannot merge a fork back
   itself, an unknown run) with equal texts. `cargo test -p conn-mcp thread_transfer`: a
   refused, then an accepted merge-back, pending on the source. RPC 202 of 251, `/mcp` 104
   tools (unchanged).
+- **As T3:** a run that fails, is stopped, or is a `/compact` or `/goal` turn leaves its
+  handoff to the next run (`isPendingForRun`); the `pending` and `injected` records must be
+  written before the turn goes on. A handoff made before its run has a provider thread (a
+  first run, or after a provider switch) names a provisional one until delivery.
 - **Known differences:** the budget does not estimate native context without provider usage
-  (T3 counts the delivered history) and knows no model window; a merge-back into a thread whose
-  provider conversation never started is refused (this server names the provider thread at
-  turn start); `/compact` and goal commands do not defer the history to the next turn; the
-  provider capabilities still say `canConsumeHandoffSummaries: false` (nothing reads them
-  here); a fork's first user message has no `providerThreadId`, so its history line says
-  `provider-thread=none`.
+  (T3 counts the delivered history) and knows no model window; `/goal` is matched by its
+  prefix, not T3's parser; the provider capabilities still say
+  `canConsumeHandoffSummaries: false` (nothing reads them here); a fork's first user message
+  has no `providerThreadId`, so its history line says `provider-thread=none`.
 
 ## `pull_request_create` (2026-11-20)
 

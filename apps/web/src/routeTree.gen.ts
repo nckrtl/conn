@@ -59,6 +59,7 @@ import { Route as ThreadsEnvironmentIdThreadIdRouteImport } from './routes/threa
 import { Route as ChatOrbitPanelOrbitConnectionRouteImport } from './routes/_chat._orbitPanel.orbit.connection'
 import { Route as ChatOrbitPanelOrbitInstancesRouteImport } from './routes/_chat._orbitPanel.orbit.instances'
 import { Route as ChatOrbitPanelOrbitProfileRouteImport } from './routes/_chat._orbitPanel.orbit.profile'
+import { Route as ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRouteImport } from './routes/_chat.linked.$viaEnvironmentId.$linkedEnvironmentId.$linkedThreadId'
 
 const ChatRoute = ChatRouteImport.update({
   id: '/_chat',
@@ -317,6 +318,14 @@ const ChatOrbitPanelOrbitProfileRoute =
     path: '/orbit/profile',
     getParentRoute: () => ChatOrbitPanelRoute,
   } as any)
+const ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute =
+  ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRouteImport.update(
+    {
+      id: '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId',
+      path: '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId',
+      getParentRoute: () => ChatRoute,
+    } as any,
+  )
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
@@ -367,6 +376,7 @@ export interface FileRoutesByFullPath {
   '/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
   '/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
   '/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
+  '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
 }
 export interface FileRoutesByTo {
   '/approve-agent': typeof ApproveAgentRoute
@@ -417,6 +427,7 @@ export interface FileRoutesByTo {
   '/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
   '/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
   '/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
+  '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -470,6 +481,7 @@ export interface FileRoutesById {
   '/_chat/_orbitPanel/orbit/connection': typeof ChatOrbitPanelOrbitConnectionRoute
   '/_chat/_orbitPanel/orbit/instances': typeof ChatOrbitPanelOrbitInstancesRoute
   '/_chat/_orbitPanel/orbit/profile': typeof ChatOrbitPanelOrbitProfileRoute
+  '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -522,6 +534,7 @@ export interface FileRouteTypes {
     | '/orbit/connection'
     | '/orbit/instances'
     | '/orbit/profile'
+    | '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/approve-agent'
@@ -572,6 +585,7 @@ export interface FileRouteTypes {
     | '/orbit/connection'
     | '/orbit/instances'
     | '/orbit/profile'
+    | '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
   id:
     | '__root__'
     | '/_chat'
@@ -624,6 +638,7 @@ export interface FileRouteTypes {
     | '/_chat/_orbitPanel/orbit/connection'
     | '/_chat/_orbitPanel/orbit/instances'
     | '/_chat/_orbitPanel/orbit/profile'
+    | '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -990,6 +1005,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatOrbitPanelOrbitProfileRouteImport
       parentRoute: typeof ChatOrbitPanelRoute
     }
+    '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId': {
+      id: '/_chat/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
+      path: '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
+      fullPath: '/linked/$viaEnvironmentId/$linkedEnvironmentId/$linkedThreadId'
+      preLoaderRoute: typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRouteImport
+      parentRoute: typeof ChatRoute
+    }
   }
 }
 
@@ -1086,6 +1108,7 @@ interface ChatRouteChildren {
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
   ChatOrbitStartIdRoute: typeof ChatOrbitStartIdRoute
+  ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute: typeof ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
@@ -1099,6 +1122,8 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
   ChatOrbitStartIdRoute: ChatOrbitStartIdRoute,
+  ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute:
+    ChatLinkedViaEnvironmentIdLinkedEnvironmentIdLinkedThreadIdRoute,
 }
 
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)

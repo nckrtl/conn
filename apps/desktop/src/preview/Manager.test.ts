@@ -2691,7 +2691,7 @@ describe("PreviewManager", () => {
         ) as unknown as typeof contents.debugger.sendCommand;
         fromId.mockReturnValue(contents);
         const manager = yield* PreviewManager.PreviewManager;
-        yield* manager.setMainWindow({
+        yield* manager.addWindow({
           isDestroyed: () => false,
           once: vi.fn(),
           webContents: mainWebContents,

@@ -1,5 +1,7 @@
 import {
   BearerConnectionCredential,
+  BearerConnectionProfile,
+  DpopConnectionCredential,
   BearerConnectionTarget,
 } from "@t3tools/client-runtime/connection";
 import {
@@ -79,10 +81,24 @@ describe("mobile connection catalog storage", () => {
     connectionId: "bearer:orbit-reservation:install",
     provisionalPairingId: "install",
   });
+  const profile = new BearerConnectionProfile({
+    environmentId,
+    label: target.label,
+    connectionId: target.connectionId,
+    httpBaseUrl: "https://clone.example.test",
+    wsBaseUrl: "wss://clone.example.test",
+  });
   const credential = {
     connectionId: target.connectionId,
     credential: new BearerConnectionCredential({ token: "stored-session" }),
     provisionalPairingId: "install",
+  };
+  const dpopCredential = {
+    ...credential,
+    credential: new DpopConnectionCredential({
+      accessToken: "stored-renewable-session",
+      expiresAtEpochMs: 1_000,
+    }),
   };
 
   it.effect(
@@ -111,27 +127,62 @@ describe("mobile connection catalog storage", () => {
   );
 
   it.effect.each([
-    { scenario: "credential-only", targets: [], credentials: [credential], promote: false },
-    { scenario: "route-only", targets: [target], credentials: [], promote: false },
+    {
+      scenario: "credential-only",
+      targets: [],
+      profiles: [],
+      credentials: [credential],
+      promote: false,
+    },
+    { scenario: "route-only", targets: [target], profiles: [], credentials: [], promote: false },
     {
       scenario: "different connection ids",
       targets: [target],
+      profiles: [profile],
       credentials: [{ ...credential, connectionId: "other-route" }],
       promote: false,
     },
     {
-      scenario: "matching route and credential",
+      scenario: "missing endpoint profile",
       targets: [target],
+      profiles: [],
       credentials: [credential],
+      promote: false,
+    },
+    {
+      scenario: "wrong endpoint environment",
+      targets: [target],
+      profiles: [
+        new BearerConnectionProfile({
+          ...profile,
+          environmentId: EnvironmentId.make("other-environment"),
+        }),
+      ],
+      credentials: [credential],
+      promote: false,
+    },
+    {
+      scenario: "complete bearer",
+      targets: [target],
+      profiles: [profile],
+      credentials: [credential],
+      promote: true,
+    },
+    {
+      scenario: "complete renewable DPoP",
+      targets: [target],
+      profiles: [profile],
+      credentials: [dpopCredential],
       promote: true,
     },
   ] as const)(
     "settles a $scenario install without losing ownership on failure",
-    ({ targets, credentials, promote }) =>
+    ({ targets, profiles, credentials, promote }) =>
       Effect.gen(function* () {
         const pending = encodeCatalog({
           ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
           targets,
+          profiles,
           credentials,
         });
         const memory = makeStorage({ [CONNECTION_CATALOG_KEY]: pending });
@@ -158,9 +209,8 @@ describe("mobile connection catalog storage", () => {
                   connectionId: target.connectionId,
                 }),
               ],
-              credentials: [
-                { connectionId: target.connectionId, credential: credential.credential },
-              ],
+              profiles,
+              credentials: credentials.map(({ provisionalPairingId: _owner, ...entry }) => entry),
             }
           : EMPTY_CONNECTION_CATALOG_DOCUMENT;
         expect(result.promoted).toBe(promote);
@@ -244,14 +294,6 @@ describe("mobile connection catalog storage", () => {
     "keeps a promoted pairing across restart and ignores replay of the old install id",
     () =>
       Effect.gen(function* () {
-        const environmentId = EnvironmentId.make("clone");
-        const target = new BearerConnectionTarget({
-          environmentId,
-          label: "clone",
-          connectionId: "route",
-          provisionalPairingId: "install",
-        });
-        const credential = new BearerConnectionCredential({ token: "stored-session" });
         const memory = makeStorage({});
         const open = () =>
           make().pipe(
@@ -261,7 +303,8 @@ describe("mobile connection catalog storage", () => {
         yield* store.update((doc) => ({
           ...doc,
           targets: [target],
-          credentials: [{ connectionId: "route", credential, provisionalPairingId: "install" }],
+          profiles: [profile],
+          credentials: [credential],
         }));
         yield* store.update((doc) => settleProvisionalPairingInCatalog(doc, "install", true));
 
@@ -272,11 +315,14 @@ describe("mobile connection catalog storage", () => {
         expect(saved.targets).toEqual([
           new BearerConnectionTarget({
             environmentId,
-            label: "clone",
-            connectionId: "route",
+            label: target.label,
+            connectionId: target.connectionId,
           }),
         ]);
-        expect(saved.credentials).toEqual([{ connectionId: "route", credential }]);
+        expect(saved.profiles).toEqual([profile]);
+        expect(saved.credentials).toEqual([
+          { connectionId: target.connectionId, credential: credential.credential },
+        ]);
       }),
   );
 

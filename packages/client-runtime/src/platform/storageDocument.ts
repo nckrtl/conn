@@ -15,6 +15,7 @@ import {
   PersistedConnectionTarget,
 } from "../connection/model.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
+import { credentialConnectionId } from "../connection/routes.ts";
 import { withTargetLabel } from "../connection/serverLabel.ts";
 import { StoredPullRequestRoutingPermission } from "../connection/pullRequestRoutingPermissions.ts";
 
@@ -209,8 +210,8 @@ export function registerConnectionInCatalog(
 }
 
 /**
- * The markers are the recovery journal. Promotion requires a matching route and credential.
- * Cleanup matches each part independently, preserving records from a subsequent replacement.
+ * The markers are the recovery journal. Promotion requires the saved endpoint profile and
+ * an owned credential. Cleanup matches each marked part independently to preserve replacements.
  */
 export function settleProvisionalPairingInCatalog(
   document: ConnectionCatalogDocument,
@@ -226,13 +227,18 @@ export function settleProvisionalPairingInCatalog(
         (environmentId === undefined || target.environmentId === environmentId),
     );
     if (target === undefined) return document;
-    const credential = document.credentials.find(
-      (entry) =>
-        entry.connectionId === target.connectionId &&
-        entry.provisionalPairingId === installId &&
-        entry.credential._tag === "BearerConnectionCredential",
-    );
-    if (credential === undefined) return document;
+    const profile = document.profiles.find((entry) => entry.connectionId === target.connectionId);
+    if (
+      profile?._tag !== "BearerConnectionProfile" ||
+      profile.environmentId !== target.environmentId ||
+      profile.authorization === "t3-connect"
+    ) {
+      return document;
+    }
+    // Direct bearer routes resolve either a bearer session or a renewable DPoP credential.
+    const credentialId = credentialConnectionId(target.connectionId);
+    const credential = document.credentials.find((entry) => entry.connectionId === credentialId);
+    if (credential?.provisionalPairingId !== installId) return document;
     const { provisionalPairingId: _targetOwner, ...committedTarget } = target;
     const { provisionalPairingId: _credentialOwner, ...committedCredential } = credential;
     return {

@@ -49,6 +49,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { m } from "../i18n/messages";
@@ -789,8 +790,9 @@ export const layer = Layer.effectContext(
       makeDatabaseHandle(),
       (owned) => owned.close,
     );
-    const catalog = yield* makeCatalogStore(makeCatalogBackend(database));
-    if (window.desktopBridge !== undefined && !isAdditionalDesktopWindow()) {
+    const backend = makeCatalogBackend(database);
+    const catalog = yield* makeCatalogStore(backend);
+    if (backend.sharedAcrossWindows && !isAdditionalDesktopWindow()) {
       yield* recoverProvisionalPairings(catalog);
     }
     const pullRequestRoutingPermissions = makeBrowserPullRequestRoutingPermissions();
@@ -804,14 +806,19 @@ export const layer = Layer.effectContext(
     });
     const threadWriteOrder = makeThreadCacheWriteOrder();
 
+    // Keep registry startup pending while desktop secure storage is inaccessible so its
+    // layer stays alive for recovery. A successful read is cached for subsequent lists.
+    const readTargets = backend.sharedAcrossWindows
+      ? catalog.read.pipe(Effect.retry({ schedule: Schedule.spaced("2 seconds") }))
+      : catalog.read;
     const targetStore = Persistence.ConnectionTargetStore.of({
-      list: catalog.read.pipe(
+      list: readTargets.pipe(
         Effect.map((document) =>
           document.targets.filter((target) => provisionalPairingId(target) === undefined),
         ),
         Effect.mapError((cause) => persistenceError("list-targets", cause)),
       ),
-      listDisabled: catalog.read.pipe(
+      listDisabled: readTargets.pipe(
         Effect.map((document) => document.disabledEnvironmentIds),
         Effect.mapError((cause) => persistenceError("list-disabled-targets", cause)),
       ),

@@ -17,6 +17,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
 import * as Option from "effect/Option";
@@ -133,31 +134,37 @@ describe("desktop connection catalog recovery", () => {
       }),
   );
 
-  it.effect(
-    "retries a failed startup read and durably removes the abandoned route and credential",
-    () =>
-      Effect.gen(function* () {
-        const pending = cloneRegistration("bearer:orbit-reservation:install", "Prewarm", "install");
-        const desktop = desktopCatalog(
-          encodeCatalog({
-            ...emptyCatalog,
-            targets: [pending.target],
-            profiles: [pending.profile],
-            credentials: [
-              {
-                connectionId: pending.target.connectionId,
-                credential: pending.credential,
-                provisionalPairingId: "install",
-              },
-            ],
-          }),
-        );
-        desktop.bridge.getConnectionCatalog.mockRejectedValueOnce(new Error("Read interrupted"));
-        const services = yield* Layer.build(ConnectionStorage.layer);
-        expect(yield* Context.get(services, Persistence.ConnectionTargetStore).list).toEqual([]);
-        yield* TestClock.adjust("10 seconds");
-        expect(desktop.read()).toEqual(emptyCatalog);
-      }),
+  it.effect("retries startup recovery when desktop encryption becomes available", () =>
+    Effect.gen(function* () {
+      const pending = cloneRegistration("bearer:orbit-reservation:install", "Prewarm", "install");
+      const catalog = registerConnectionInCatalog(emptyCatalog, pending);
+      const desktop = desktopCatalog(encodeCatalog(catalog));
+      let available = false;
+      const readCatalog = desktop.bridge.getConnectionCatalog.getMockImplementation()!;
+      desktop.bridge.getConnectionCatalog.mockImplementation(async () => {
+        if (!available) throw new Error("Desktop connection catalog protection failed");
+        return readCatalog();
+      });
+      // The registry reads both lists during layer construction, while recovery is still pending.
+      const registryStartup = Layer.effectDiscard(
+        Effect.gen(function* () {
+          const targets = yield* Persistence.ConnectionTargetStore;
+          expect(yield* targets.list).toEqual([]);
+          expect(yield* targets.listDisabled).toEqual([]);
+        }),
+      ).pipe(Layer.provide(ConnectionStorage.layer));
+      const startup = yield* Layer.build(registryStartup).pipe(Effect.forkScoped);
+
+      yield* TestClock.adjust("4 seconds");
+      expect(desktop.bridge.getConnectionCatalog.mock.calls.length).toBeGreaterThan(1);
+      expect(desktop.bridge.setConnectionCatalog).not.toHaveBeenCalled();
+      expect(desktop.read()).toEqual(catalog);
+
+      available = true;
+      yield* TestClock.adjust("10 seconds");
+      yield* Fiber.join(startup);
+      expect(desktop.read()).toEqual(emptyCatalog);
+    }),
   );
   it.effect("keeps a new install created while the startup recovery read retries", () =>
     Effect.gen(function* () {

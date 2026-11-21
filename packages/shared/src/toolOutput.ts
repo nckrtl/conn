@@ -61,6 +61,24 @@ interface CompactToolOutput {
   orbitTask?: Record<string, unknown>;
 }
 
+/**
+ * The task row fields the card reads (client-runtime's `ListRow`). The rest, such as a long
+ * `brief`, would push the compact output over its size cap and drop the card.
+ */
+const ORBIT_TASK_CARD_FIELDS = [
+  "id",
+  "title",
+  "status",
+  "attention",
+  "project",
+  "workspace",
+  "pull_request",
+  "subtask_counts",
+  "created_at",
+  "updated_at",
+  "last_activity_at",
+] as const;
+
 /** The task row of an Orbit task-create result, `{ data: <task> }`; null for any other result. */
 function readOrbitTaskRow(data: Record<PropertyKey, unknown>): Record<string, unknown> | null {
   const row = data.data;
@@ -72,7 +90,9 @@ function readOrbitTaskRow(data: Record<PropertyKey, unknown>): Record<string, un
     Predicate.isObject(project) &&
     typeof project.slug === "string" &&
     Predicate.isObject(counts)
-    ? (row as Record<string, unknown>)
+    ? Object.fromEntries(
+        ORBIT_TASK_CARD_FIELDS.filter((key) => key in row).map((key) => [key, row[key]]),
+      )
     : null;
 }
 

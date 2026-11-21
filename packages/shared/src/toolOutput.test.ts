@@ -161,8 +161,9 @@ describe("compactDynamicToolOutput for Orbit task-create", () => {
     status: "todo",
     project: { id: 12, slug: "conn", name: "Conn", code: null },
     subtask_counts: { total: 4, todo: 4, running: 0, completed: 0, failed: 0, cancelled: 0 },
-    brief: "ignored by readers, still small",
+    brief: "ignored by readers",
   };
+  const { brief: _brief, ...card } = row;
   it("keeps the created task's row through every MCP envelope", () => {
     const json = JSON.stringify({ data: row });
     for (const value of [
@@ -172,8 +173,13 @@ describe("compactDynamicToolOutput for Orbit task-create", () => {
       { structuredContent: { data: row } },
       { content: [{ type: "text", text: json }] },
     ]) {
-      expect(compactDynamicToolOutput(value)).toEqual({ orbitTask: row });
+      expect(compactDynamicToolOutput(value)).toEqual({ orbitTask: card });
     }
+  });
+
+  it("keeps the card when the task carries a long brief", () => {
+    const long = { ...row, brief: "x".repeat(9_000) };
+    expect(compactDynamicToolOutput({ data: long })).toEqual({ orbitTask: card });
   });
 
   it("ignores a result that is not a task row", () => {

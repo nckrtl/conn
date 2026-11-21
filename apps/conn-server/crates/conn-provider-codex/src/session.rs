@@ -1095,8 +1095,12 @@ impl Session for CodexSession {
                 .request("feedback/upload", params)
                 .await
                 .map_err(call_failed("upload_feedback"))?;
+            // The client's `feedbackId` is a `TrimmedNonEmptyString`: a blank id is a failure,
+            // not an answer the client cannot decode.
             response["threadId"]
                 .as_str()
+                .map(|id| id.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}'))
+                .filter(|id| !id.is_empty())
                 .map(str::to_owned)
                 .ok_or_else(|| failed("upload_feedback", "feedback/upload answered no threadId"))
         })

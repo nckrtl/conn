@@ -471,8 +471,6 @@
   "51b0133f1ed3cf5c": "Environment label cannot be empty.",
   "f82d215f41af6401": "Update {appName} on {host} manually; it cannot update itself.",
   "6fd310d23099f107": "{host} did not come back on a compatible {appName} version.",
-  "3aa15bfbe1920376": "Update T3 Code on {host} manually; it cannot update itself.",
-  "71907f57b7ec64d5": "{host} did not come back on a compatible T3 Code version.",
   "e77ac580a4ddcd3b": "Available",
   "a980c44b06fc7b26": "Offline",
   "fef710ef9d9e365d": "Connecting...",
@@ -1375,17 +1373,17 @@
   "19f953915a468edd": "Open attachment",
   "13559139cab80bd6": [
     "Lines ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "–",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "ec9cf2df4d5f01da": "Context unavailable. The reference was copied without its payload. Copy it again from the original message or remove it.",
   "e5033e74847fcc0b": "This context type is not supported by this version of the app. Its payload will be preserved when sent.",
@@ -1570,11 +1568,11 @@
   "7e606ac41a4e0289": "Opens the diagram full screen",
   "e68fd3dac926848b": [
     "Unable to render diagram: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "ede9a884a11b7972": "Assistant quote",
   "f563a55ee229090e": "Open quote",
@@ -1876,40 +1874,28 @@
   "c2f0e285ba21bf0f": "Close floating preview",
   "2f38f2e60ed18790": "{count, plural, =1 {View browser} other {View {count} browser tabs}}",
   "50abaf3c0482c1fb": "Watch and control browser tabs open in this thread",
-  "a210f8081a5d0e42": [
-    ["t", "Plural"],
-    ["i", 1],
-    [
-      "d",
-      [
-        [
-          "b",
-          [
-            ["singular", "One tab open"],
-            [
-              "other",
-              [
-                ["t", "C2"],
-                ["i", 2],
-                [
-                  "c",
-                  [
-                    [
-                      ["i", 3],
-                      ["k", "_gt_value_3"],
-                      ["v", "v"]
-                    ],
-                    " tabs open"
-                  ]
-                ]
-              ]
-            ]
+  "a210f8081a5d0e42": {
+    "t": "Plural",
+    "i": 1,
+    "d": {
+      "b": {
+        "singular": "One tab open",
+        "other": {
+          "t": "C2",
+          "i": 2,
+          "c": [
+            {
+              "i": 3,
+              "k": "_gt_value_3",
+              "v": "v"
+            },
+            " tabs open"
           ]
-        ],
-        ["t", "p"]
-      ]
-    ]
-  ],
+        }
+      },
+      "t": "p"
+    }
+  },
   "4d1f68ef069c7a0b": "New tab",
   "9c149c8c50e58e4c": "Refresh environments",
   "d81626aad3a95cb2": "Sign in to your T3 account to set up {product}.",
@@ -2060,11 +2046,11 @@
   "4c6b2d924da2c94d": "No environments connected yet.",
   "28494052dfb4647a": [
     "Tap ",
-    [
-      ["t", "Text"],
-      ["i", 1],
-      ["c", "+"]
-    ],
+    {
+      "t": "Text",
+      "i": 1,
+      "c": "+"
+    },
     " to add one."
   ],
   "9d7fb2ec72ce9693": "Off",
@@ -2117,40 +2103,28 @@
   "2301668017451371": "Connecting to device...",
   "763b01de7b957db6": "{count, plural, =1 {View device} other {View {count} devices}}",
   "1fce83f5af71f632": "Watch and control devices open in this thread",
-  "459a156e0efc23f2": [
-    ["t", "Plural"],
-    ["i", 1],
-    [
-      "d",
-      [
-        [
-          "b",
-          [
-            ["singular", "One device open"],
-            [
-              "other",
-              [
-                ["t", "C2"],
-                ["i", 2],
-                [
-                  "c",
-                  [
-                    [
-                      ["i", 3],
-                      ["k", "_gt_value_3"],
-                      ["v", "v"]
-                    ],
-                    " devices open"
-                  ]
-                ]
-              ]
-            ]
+  "459a156e0efc23f2": {
+    "t": "Plural",
+    "i": 1,
+    "d": {
+      "b": {
+        "singular": "One device open",
+        "other": {
+          "t": "C2",
+          "i": 2,
+          "c": [
+            {
+              "i": 3,
+              "k": "_gt_value_3",
+              "v": "v"
+            },
+            " devices open"
           ]
-        ],
-        ["t", "p"]
-      ]
-    ]
-  ],
+        }
+      },
+      "t": "p"
+    }
+  },
   "9ecbf9cadd5bbf7f": "Startup crashes",
   "0bab38399ee6746c": "Crash log unavailable",
   "be735b872d5ac200": "Startup crash records are only kept in store and TestFlight builds.",
@@ -2165,11 +2139,11 @@
   "4429ccae147b2b2f": "Paste the report into a GitHub issue. It contains the app version, the JavaScript error message, and the component stack. Error messages can quote values from the app, so read it over before sharing.",
   "63481e424c402565": [
     "When the app crashes or hits an error, it sends the error message, the stack trace, the app version, and the device model and OS version to the ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " team. Each launch also sends startup timings. Reports carry a random ID for this install."
   ],
   "9544305f2964486f": "Could not display diff",
@@ -2277,27 +2251,24 @@
   "1d8d5a660fb48e97": "Previews stop at {size}. Save the file to open it in another app.",
   "e5108dc9a578df26": "Open it in the file viewer, save it, or add it to chat.",
   "3024138965fc2e06": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "Text"],
-      ["i", 2],
-      [
-        "c",
-        [
-          " ",
-          "of ",
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    {
+      "t": "Text",
+      "i": 2,
+      "c": [
+        " ",
+        "of ",
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ]
+    }
   ],
   "17d363d5ff1f038f": "{seconds, plural, one {About {seconds} second left} other {About {seconds} seconds left}}",
   "bc86d0e75a37411b": "{minutes, plural, other {About {minutes} minutes left}}",
@@ -2463,22 +2434,22 @@
   "b0795a1ac34a9445": [
     "Closed",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
     "ago"
   ],
   "22fad1d55e34f022": [
     "Opened",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
     "ago"
   ],
@@ -2681,11 +2652,11 @@
   "15e7f06da8c101c9": "Allow this {term, select, mr {merge request} cr {change request} other {pull request}}''s workflows to run? Review the workflow changes first.",
   "ffba07f29cf515cb": "Open checks on provider",
   "5bf4ff621a4697e6": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
     "ago"
   ],
@@ -2738,11 +2709,11 @@
   "b334a5ade7664e8b": "Repository root",
   "212be8e6539f9039": [
     "Renamed from ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "bfa2f673593efc5c": "No text changes available.",
   "ff6b088c383bf910": "Search authors",
@@ -2942,11 +2913,11 @@
   "ff928b4b3974e38b": "Current",
   "665ec594d379b30f": [
     "Base: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Open a layer to review it or merge the stack through that layer."
   ],
   "698b57490dcff9b2": "Conflicts with {branch}",
@@ -2963,69 +2934,69 @@
   "4ba95157a7b83427": "Open resolved discussion in {path}",
   "9c5dd9f1862f207f": "Open unresolved discussion in {path}",
   "d437117fac8284f1": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "approved"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "approved"
+    }
   ],
   "472120eecb01657e": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "requested changes"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "requested changes"
+    }
   ],
   "29c437faf22ab4c8": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "opened this pull request"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "opened this pull request"
+    }
   ],
   "083b181a3c59575a": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "merged this pull request"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "merged this pull request"
+    }
   ],
   "89a0bf24401a77a7": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "closed this pull request"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "closed this pull request"
+    }
   ],
   "62c3b9089374dccf": "More activity is available on the provider.",
   "9a8fd03416860d24": "PRs Requesting My Review",
@@ -3039,26 +3010,26 @@
   "dab20a3e6f78e0aa": "Pull requests from the selected environments' projects appear here.",
   "80b14b2f19a8af68": "Add an environment in Settings to browse its pull requests.",
   "9dd78a7f8c484706": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " isn't installed on ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     ", so requests here use your own GitHub login and its lower rate limit."
   ],
   "ece21b01a395e62c": [
     "Install on ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "088bf6e16e4b2021": "Squash and merge",
   "fc7e7a925d0d60e7": "Combine the commits into one commit.",
@@ -3367,19 +3338,19 @@
   "7489306a36fff015": "Connect this environment to manage it.",
   "d127f26d5bae862d": [
     "Version ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "114af8e45c69e28a": [
     "Managed by ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "9e6fea22be042adc": "Refresh cloud environments",
   "a76020f46d881eee": "Queue",
@@ -3390,11 +3361,11 @@
   "afda415d2d75a5d3": "Chat",
   "85163bc64c8c56a1": [
     "Long-press the send button to use the other option for a single message. With a hardware keyboard, hold ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " while sending."
   ],
   "95ee62a0d6968b89": "Send message",
@@ -3530,11 +3501,11 @@
   "7cc151a4ae532ee7": "Configure a provider with in-app sign-in in web or desktop Settings.",
   "e91a8efa0de1b737": [
     "Enter code ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " on the sign-in page."
   ],
   "ca25ea921af556a1": "Unavailable on this platform",
@@ -3651,11 +3622,11 @@
   "34fb848f079bdf69": "Actions for {title}",
   "f7bccd9a1f5179ec": [
     "Filter ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "1abe7fdace9bed26": "Add filter",
   "3c5185df378edef9": "Runs only when every filter matches. Other requests are logged as filtered. Separate “is one of” values with commas; a value can't contain a comma.",
@@ -3671,11 +3642,11 @@
   "adae883fd7189da7": "Loading tasks…",
   "6ad38baa7c6fc96e": [
     "Last run failed: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "d89557569020d809": "Threads",
   "325cd53e2033dde3": "Inherit",
@@ -3728,11 +3699,11 @@
   "3c65f5fcf5915911": "Mixed",
   "5a20a0be0657dec6": [
     "Some settings are managed by ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " and cannot be changed here."
   ],
   "32568cf8de392361": "Sign in",
@@ -3753,11 +3724,11 @@
   "d229043f10d28e45": "{environment} has no models to list.",
   "5109ab4ac691857f": [
     "This connection can’t change settings on ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "."
   ],
   "5448de595ebea865": "Wired",
@@ -3837,31 +3808,28 @@
   "6f264ac32e19ba55": "No model installed · Choose one to download",
   "daf814b14b8f779b": "No model installed · Add one using {product} on {environment}",
   "7657374ffb043ca6": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      [
-        "c",
-        [
-          ["i", 3],
-          ["k", "_gt_value_3"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "Text",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
     " ",
     "(",
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ],
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    },
     "% error)"
   ],
   "01f6fcf72d5b4b28": "Enter a name for this account.",
@@ -4174,11 +4142,11 @@
   "8d9617edf6eee5b9": "Failed to submit approval decision.",
   "97d6946415db6c16": [
     "Approval from ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "43c5fbd02c6f330a": "Show less",
   "918cd5477d0c0e9b": "Show full message",
@@ -4219,11 +4187,11 @@
   "cfc423d0d58aca94": "Choose environment, {label}, Connected",
   "0bc72950072ee1aa": [
     "on ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "445f39cb8938d2a8": "Available after the first message",
   "8245b10a0b796312": "This action needs a saved thread.",
@@ -4257,30 +4225,30 @@
   "03ce9bea5f88ddbd": "This app cannot confirm it is one of your machines. The pairing code you paste is sent there.",
   "71a4002c45077fe2": [
     "This app has no address for ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " that another machine can reach. Enter its https or Tailscale address."
   ],
   "c205277bd4ab61d2": [
     "This environment is already linked to ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". The agent can use that link as it is; change its access in Settings → Environments."
   ],
   "e8235ebb43ad7228": "Create a link on a machine: Settings → Sharing & access → Authorized clients → Create link, then paste its code here.",
   "a974e6c3c613e452": [
     "Create a link on ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ": Settings → Sharing & access → Authorized clients → Create link, then paste its code here."
   ],
   "f4df93b2da86737f": "An agent here never gets more there than its own mode here either. Threads it starts there cannot change that environment's own threads, projects or settings.",
@@ -4322,38 +4290,38 @@
   "efd6c11387619a64": "{server} app",
   "af84976f700979bd": [
     "The ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " app is open full screen"
   ],
   "cda76d56e346d417": [
     "The ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " app was closed"
   ],
   "705cf2b2ee4e0e42": [
     "The ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " app left its page and was stopped"
   ],
   "5ef18e4d39b398bf": [
     "Unable to load the ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " app"
   ],
   "15f32e12fd49533f": "The sign-in couldn't continue. Try again.",
@@ -4383,11 +4351,11 @@
   "1f39846dc7b5bd36": "No branches available",
   "157aaccad29d0d5a": [
     "Next reconnect at ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "bfa67bf6b0dd1bdf": "Switching branch...",
   "bfb226487ee3e3da": "Attached thread unavailable",
@@ -4413,11 +4381,11 @@
   "c5b11890aa7f406f": "What should we work on?",
   "39a92e68dd2bf6cc": [
     "Your draft is saved on this device. ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " has no model available. Install or sign in to a provider there to choose one."
   ],
   "3a3930717d8d73b4": "Your draft is saved on this device. Connect to an environment to choose its first model.",
@@ -4464,11 +4432,11 @@
   "3c38548cbd950933": "Failed to clone {name}",
   "c941a659fc35dc4c": [
     "Cloning ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "d201af23193100b9": "Enter a workspace path",
   "042c9c88de8cd95c": "Plan saved to workspace",
@@ -4482,11 +4450,11 @@
   "ee803c266b85aada": "Work",
   "e918897e4a19585a": "Open parent",
   "639128685ed19f0f": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " · Runs on its own"
   ],
   "802a10810a7f044e": "Open {host}",
@@ -5040,11 +5008,11 @@
   "9d3fd34ff062c44b": "Install Now",
   "6753deea17e91bf5": "ChatGPT shared usage",
   "207a400af41d5310": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Open ChatGPT with the account you connected."
   ],
   "a3d040c4ef4fc6e9": "Ahead of pace",
@@ -5065,66 +5033,63 @@
   "9217e0c91cee3cf8": "Signed in",
   "5f12a194d158f9b1": "Source",
   "65a7507ffde6d3f8": [
-    [
-      ["t", "Text"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["i", 2],
-            ["k", "_gt_value_2"],
-            ["v", "v"]
-          ],
-          "%"
-        ]
+    {
+      "t": "Text",
+      "i": 1,
+      "c": [
+        {
+          "i": 2,
+          "k": "_gt_value_2",
+          "v": "v"
+        },
+        "%"
       ]
-    ],
+    },
     " ",
     "left"
   ],
   "6af5e3cf03861f55": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " could not refresh limits. Showing the last known values."
   ],
   "726ece0c7139ce8a": "This account is no longer reporting limits on the selected environments.",
   "412e3b93454812aa": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "% left"
   ],
   "82d204e1a9e7da17": [
     "Resets",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "23d0be01844d163c": [
     "Even pace: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "% left by now"
   ],
   "a6ae2f414eb6349a": [
     "Restores ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "% of the pool"
   ],
   "427c46cf712e8cb6": "Reset credits",
@@ -5209,11 +5174,11 @@
   "ab4208cfa3aa2c7c": [
     "Counted once across environments sharing a transcript directory:",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "d1c32e217a2344a5": "Scanning provider transcripts…",
   "49c4cd88ca4d260a": "No activity in this window.",
@@ -5278,11 +5243,11 @@
   "969be78e142d48d8": [
     "Started",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "ffd7529d1f50e0a6": "{count, plural, one {{count} stops} other {{count} stops}}",
   "9830004326e7d8c0": "{count, plural, one {through {count} file} other {through {count} files}}",
@@ -5427,29 +5392,29 @@
   "9370fdce25dca815": "Leave empty to generate a message automatically.",
   "e2fb20ffcf133b45": "Changed files",
   "038a39e5c34e979a": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " of ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " selected · +",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     " −",
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ]
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    }
   ],
   "3cfe94b56a7f1e0a": "No changed files to commit.",
   "7af7f00b85cc2930": "Confirm action",

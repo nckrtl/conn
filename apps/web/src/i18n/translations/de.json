@@ -471,8 +471,6 @@
   "51b0133f1ed3cf5c": "Die Bezeichnung der Umgebung darf nicht leer sein.",
   "f82d215f41af6401": "Aktualisiere {appName} auf {host} manuell; es kann sich nicht selbst aktualisieren.",
   "6fd310d23099f107": "{host} ist nicht mit einer kompatiblen {appName}-Version zurückgekommen.",
-  "3aa15bfbe1920376": "Aktualisiere T3 Code auf {host} manuell; es kann sich nicht selbst aktualisieren.",
-  "71907f57b7ec64d5": "{host} ist nicht mit einer kompatiblen T3-Code-Version zurückgekommen.",
   "e77ac580a4ddcd3b": "Verfügbar",
   "a980c44b06fc7b26": "Offline",
   "fef710ef9d9e365d": "Verbinde...",
@@ -1600,11 +1598,11 @@
   "efa8a676b22fb847": "Über 1 MB",
   "dbb08d8033f0a1a8": "Zu einem anderen Rechner hinzufügen",
   "a679fa27ddfabfd5": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " klonen und die lokalen Dateien mitnehmen, die git nicht verfolgt."
   ],
   "77494a56d6315a2e": "Klonen über",
@@ -1663,11 +1661,11 @@
   "bc81dfd7ade60791": "Branch: {branch}",
   "459e639b9a89964f": [
     "Neue Ref „",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“ erstellen"
   ],
   "b77a2b4d9abda043": "Arbeitsbereich",
@@ -1868,18 +1866,15 @@
   "cd33738b793eb8a6": [
     "Neuer Thread in",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "dbc0288da29ce1d4": "Nachrichten werden durchsucht…",
   "360702bf29668cf7": "Ordner werden geladen...",
@@ -1960,11 +1955,11 @@
   "07ec9dca9507f98f": "Eine aufgezeichnete Runde abspielen",
   "5226427a0a03f324": [
     "Abspielen in ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "de57709b5c104ab0": "Braucht ein Projekt und den Anbieter Replay (dev), den Dev-Server starten.",
   "b9906c1e0a3e49ee": "Dateipfad kopieren",
@@ -2031,11 +2026,11 @@
   "c35ff689e28afdcf": "Runde",
   "b736ae3cc48c6809": [
     "Runde ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "cb6401c0e520f909": "Commits",
   "edde0b7e8a04b15b": "Commits werden geladen...",
@@ -2132,21 +2127,21 @@
   "3309a41a16389eaa": "Protokoll",
   "00b90fd91fba54d4": [
     "Repository wird auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " veröffentlicht..."
   ],
   "1f1233e893f475ff": "Veröffentlichen fehlgeschlagen",
   "629b9179d2883b0c": [
     "Auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " öffnen"
   ],
   "029dbda77aea8039": "Ergebnis der Veröffentlichung nicht verfügbar.",
@@ -2184,11 +2179,11 @@
   "1fa714c0c7855545": "Deine Agenten laufen auf deinem Computer.",
   "3163b4d1243aa409": [
     "Deine Agenten laufen auf deinem Computer. Starte dort zuerst ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "."
   ],
   "0e2f68b7c6915c72": "Umgebungen öffnen",
@@ -2202,28 +2197,28 @@
   "0e79b7a6508a6286": "Dann",
   "363b9991fa23d36b": [
     "Überspringe die Installation, wenn du ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      ["c", "t3"]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": "t3"
+    },
     " bereits hast. Wenn",
     " ",
-    [
-      ["t", "code"],
-      ["i", 2],
-      ["c", "t3"]
-    ],
+    {
+      "t": "code",
+      "i": 2,
+      "c": "t3"
+    },
     " nach der Installation nicht gefunden wird, füge den Ordner, den das Installationsprogramm nennt, zu deinem PATH hinzu."
   ],
   "87b24d00c08f54bb": "Tastenkürzel-Datei kann nicht geöffnet werden",
   "0ee16208cbfcdbf4": "Unbekannter Fehler beim Öffnen der Datei.",
   "9e20856550715c74": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " öffnen"
   ],
   "8fffd1cf07b7fbc6": "Ungültige Tastenkürzel-Konfiguration",
@@ -2231,11 +2226,11 @@
   "5579a5d039c6962c": "{count, plural, one {{total} Thread wird aus der vorherigen Version migriert. Du kannst weiterarbeiten, während das läuft.} other {{total} Threads werden aus der vorherigen Version migriert. Du kannst weiterarbeiten, während das läuft.}}",
   "8117d2b1eaef9f82": [
     "Diese Umgebung wird von ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " verwaltet."
   ],
   "d71a78d5a0b8045d": "Hilfe erhalten",
@@ -2282,18 +2277,18 @@
   "8b4c89c1e1343190": "Projektaktion wählen",
   "4d1b505668527740": [
     "Aus ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "572b504c2a4fb41c": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ausführen"
   ],
   "93fa9502d3486944": "Projektaktionen",
@@ -2315,25 +2310,25 @@
   "52c10a39cde79c44": "Worktree",
   "2f2234c55b186b68": [
     "#",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ·",
     " ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " nach",
     " ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ]
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    }
   ],
   "aece11422a97a057": "Halte {shortcut} gedrückt oder drücke zweimal zum Beenden",
   "404941d325a2755b": "Drücke {shortcut} erneut zum Beenden",
@@ -2516,41 +2511,38 @@
   "2ce2d13c03c0b396": "Einige Anfragen sind langsam",
   "28493cea4aebe7c3": [
     "Gestartet ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "7f8ed52b364cd3bd": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ist auf",
     " ",
-    [
-      ["t", "span"],
-      ["i", 2],
-      [
-        "c",
-        [
-          ["i", 3],
-          ["k", "_gt_value_3"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
     " nicht installiert, daher verwenden Anfragen hier dein eigenes GitHub-Login und dessen niedrigeres Rate-Limit."
   ],
   "ece21b01a395e62c": [
     "Auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " installieren"
   ],
   "5bbac0e5afeec779": "Aktueller Thread",
@@ -2694,11 +2686,11 @@
   "3f400d1470c76ff8": "Tastenkürzel drücken",
   "3bf42e08dad6483f": [
     "Aktion „",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“ löschen?"
   ],
   "fc55702435f9adce": "Diese Aktion kann nicht rückgängig gemacht werden.",
@@ -2710,11 +2702,11 @@
   "d3502e7db0cdb998": "Tastenkürzel",
   "86f71ac04d41f95e": [
     "Drücke ein Tastenkürzel. Mit ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      ["c", "Backspace"]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": "Backspace"
+    },
     " löschen. Tastenkürzel gelten für die ganze Umgebung. Projekte mit derselben Aktion teilen sich ihr Tastenkürzel."
   ],
   "ac049cf1be6726fc": "Befehl",
@@ -2966,11 +2958,11 @@
   "f08afb1daf7281d0": "Seite nicht gefunden",
   "361299a34f2139c5": [
     "Dieser Link führt zu keiner Seite in ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Gehe zur Startseite, um ein Projekt zu wählen oder einen Thread zu starten."
   ],
   "a76e3ae104cb075e": "Zur Startseite",
@@ -2989,11 +2981,11 @@
   "dc06ede61ff5d1cc": "Gerätestandards wiederherstellen",
   "c4b395da633cf4d3": [
     "Verbinde ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " neu, um die Einstellungen zu ändern."
   ],
   "247e01cc01583645": "Vorschau nur auf dem Desktop",
@@ -3083,98 +3075,92 @@
   "724b26759d3c7e93": [
     "Dieser Agent möchte die Threads in allen Projekten auf",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "(",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     ") verwenden."
   ],
   "2d3d4fb05ed5ea44": [
     "Dieser Agent möchte die Threads in allen Projekten auf",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " verwenden."
   ],
   "06c894eff8be1d35": "App",
   "4fbde10ab07d40dd": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "span"],
-      ["i", 2],
-      ["c", "· von der App festgelegter Name"]
-    ]
+    {
+      "t": "span",
+      "i": 2,
+      "c": "· von der App festgelegter Name"
+    }
   ],
   "47d3ba1a39016131": "Zugriff erhält",
   "d121a97a3e275036": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "span"],
-      ["i", 2],
-      ["c", [" ", "auf dem Computer, der diese Seite geöffnet hat"]]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    {
+      "t": "span",
+      "i": 2,
+      "c": [" ", "auf dem Computer, der diese Seite geöffnet hat"]
+    }
   ],
   "b2d53b4d1d48fbef": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "span"],
-      ["i", 2],
-      ["c", [" ", "· wer es ausführt, erhält diesen Zugriff"]]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    {
+      "t": "span",
+      "i": 2,
+      "c": [" ", "· wer es ausführt, erhält diesen Zugriff"]
+    }
   ],
   "c54cc9c75db9dc58": "Genehmige nur eine Anmeldung, die du gerade selbst gestartet hast.",
   "e9f4b93c4ec30453": "Anmeldecode",
   "de680c7875580f35": [
     "Hol dir einen über „",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " in einer anderen App verwenden (MCP)“, Einstellungen → Freigabe & Zugriff oder ",
-    [
-      ["t", "code"],
-      ["i", 2],
-      ["c", "t3 auth pairing create"]
-    ],
+    {
+      "t": "code",
+      "i": 2,
+      "c": "t3 auth pairing create"
+    },
     " auf diesem Rechner."
   ],
   "49e3cf16b3ac3e5f": "Zugriff",
@@ -3204,18 +3190,15 @@
   "0528294df7656322": [
     "Host:",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "ff5f1c260e87ecde": "Prüfe, ob das Backend von diesem Browser aus erreichbar ist, CORS für gehostete Clients unterstützt und über HTTPS ausgeliefert wird, wenn du diese Seite über HTTPS öffnest.",
   "08570ee0982df89d": "Wird gekoppelt...",
@@ -3238,11 +3221,11 @@
   "8cd59ff5c8cc17f9": [
     "Kommentare können bis zu",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " Zeichen enthalten."
   ],
   "c86597c99c507722": "Die zitierte Antwort konnte nicht geöffnet werden",
@@ -3317,11 +3300,11 @@
   "412187d16dc11adf": [
     "Wechseln zu",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "3dbc42464b2bfb20": "Fast und Ultrafast sind mit dieser ChatGPT-Verbindung nicht verfügbar. Verwende ein vorhandenes Codex-CLI-Login für die Geschwindigkeitsoptionen, die dein Konto unterstützt.",
   "5c0eb4217bb673bd": "ChatGPT-Abo wird verwendet",
@@ -3331,19 +3314,19 @@
   "ab42a6d2ab6073d9": "Thread-Aktionen für {title}",
   "cd8fd5a47060164b": [
     "Neuer Thread in ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "1c983a010570cdbb": [
     "Von einem Agenten auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " über eine verknüpfte Umgebung gestartet."
   ],
   "601807baf4e25b94": "Vorschau von {name}",
@@ -3356,18 +3339,15 @@
   "13d83e7c0e44494c": [
     "Zu",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " wechseln?"
   ],
   "2ce5b965862599cc": "Du hast nicht committete Änderungen. Sie werden in den anderen Branch übernommen oder blockieren den Wechsel, wenn sie kollidieren.",
@@ -3380,20 +3360,20 @@
   "8d9617edf6eee5b9": "Die Genehmigungsentscheidung konnte nicht übermittelt werden.",
   "160ead9e70889628": [
     "Genehmigung nötig für ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "1b1131295f62c44c": "Der Anbieterprozess ist beendet. Unterbrich den untergeordneten Thread oder starte ihn neu, um zu antworten.",
   "da66023072c473d1": [
     "Ausgabe konnte nicht geladen werden: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "5b56b7c5d024d2f2": "Ausgabe wird geladen…",
   "890b662798f00182": "Keine Ausgabe.",
@@ -3529,11 +3509,11 @@
   "ce0cbeabf2f6e711": "Noch nichts abgelegt.",
   "bc471379e3bcdf40": [
     "Drücke ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " mit einem Prompt im Eingabefeld, um ihn abzulegen."
   ],
   "cde2a4fd18e27557": "{count, plural, one {{count} Konto} other {{count} Konten}}",
@@ -3553,11 +3533,11 @@
   "074db680e148e829": "Projekt hinzufügen",
   "1bbfd30a652f7e0f": "oder ohne Projekt starten",
   "b8e0e89c83a639fa": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " zum Starten"
   ],
   "99c183d2407cd36d": "Füge ein Projekt hinzu, um zu starten",
@@ -3606,11 +3586,11 @@
   "b45bd7726f36df8f": "Seite nicht verfügbar",
   "f66c9318201502e0": "Vollbild öffnen",
   "dc0b188b0761f98a": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " kann nicht geladen werden"
   ],
   "63fd02d55f0e4417": "Einen Rechner mit dieser Umgebung verknüpfen",
@@ -3633,31 +3613,31 @@
   "89a68ae66d9266dc": "Diese App hat keine Adresse für einen Rechner, die ein anderer Rechner erreichen kann. Gib seine HTTPS- oder Tailscale-Adresse ein.",
   "71a4002c45077fe2": [
     "Diese App hat keine Adresse für ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ", die ein anderer Rechner erreichen kann. Gib die https- oder Tailscale-Adresse ein."
   ],
   "7ebb23e6bf9b19e8": "Kopplungscode",
   "c1244cdfaf295b5d": "Create a link on a machine: Settings → Connections → Create link, then paste its code here.",
   "5fd75732c718cdf1": [
     "Create a link on ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ": Settings → Connections → Create link, then paste its code here."
   ],
   "c205277bd4ab61d2": [
     "Diese Umgebung ist bereits mit ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " verknüpft. Der Agent kann diese Verknüpfung so verwenden; ändere den Zugriff unter Einstellungen → Umgebungen."
   ],
   "000b0df227182d39": "Andere Adresse…",
@@ -3680,11 +3660,11 @@
   "a446e3bda256c2b3": "Verbinden, um zu interagieren",
   "d0bda35aeec66684": [
     "Wird von ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " gelesen …"
   ],
   "c3e8cd9bf44e2f43": "Angezeigt wird, was zuvor gelesen wurde.",
@@ -3723,30 +3703,30 @@
   "efd6c11387619a64": "{server}-App",
   "cda76d56e346d417": [
     "Die App ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " wurde geschlossen"
   ],
   "dff97202cbdaec5b": "App anzeigen",
   "705cf2b2ee4e0e42": [
     "Die App ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " hat ihre Seite verlassen und wurde gestoppt"
   ],
   "5ef18e4d39b398bf": [
     "Die App ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " kann nicht geladen werden"
   ],
   "0fd6b38d7839f885": "Bei {server} angemeldet",
@@ -3760,11 +3740,11 @@
   "d694484d6fea351e": "Diagramm vergrößern",
   "e68fd3dac926848b": [
     "Diagramm kann nicht gerendert werden: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "9bbecec926c3b695": "Wiederholen",
   "4fd8927b7afc2a92": "Nachricht kopieren",
@@ -3796,44 +3776,44 @@
   "2e5c8e3a72fe169b": "Arbeitsverlauf wird geladen",
   "70267e0b78c1df51": "Sende eine Nachricht, um die Unterhaltung zu beginnen.",
   "fcb06624d70ce0f1": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "ArrowRightIcon"],
-      ["i", 3]
-    ],
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    {
+      "t": "ArrowRightIcon",
+      "i": 3
+    },
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    },
     " Tokens"
   ],
   "2f41c67ef702413b": [
     "Kontext komprimiert: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "ArrowRightIcon"],
-      ["i", 2]
-    ],
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    {
+      "t": "ArrowRightIcon",
+      "i": 2
+    },
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     " Tokens"
   ],
   "5e304d3afa0b58f1": "Durch Umlenken abgebrochen",
@@ -3887,11 +3867,11 @@
   "a034c6eed75c3256": "Keine installierten Editoren gefunden",
   "dafffd8aabbe22d2": [
     "In ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " öffnen"
   ],
   "d951cb8c12ccd52e": "Öffnen in…",
@@ -3932,27 +3912,24 @@
   "730433ae490bb9ae": [
     "Gib einen Pfad relativ zu",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ein."
   ],
   "dcd203d82cc65b22": [
     "Gib einen Pfad relativ zum ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      ["c", "Arbeitsbereich"]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": "Arbeitsbereich"
+    },
     " ein."
   ],
   "fc3b6bf340ccc47b": "Arbeitsbereichspfad",
@@ -4004,11 +3981,11 @@
   "49414ffb9aed57ab": "Aus der Warteschlange entfernen",
   "38f2601f7424e07e": [
     "Von ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " gesendet"
   ],
   "ded43a280aed9f20": "Thread öffnen",
@@ -4017,7 +3994,6 @@
   "4e566103beadd678": "Aktualisiere den {appName}-Server dieser Umgebung, um Pull Requests zu durchsuchen.",
   "5e7157db126f1641": "Issues nicht verfügbar",
   "cb8fca9ae0aff892": "Aktualisiere den {appName}-Server dieser Umgebung, um Issues zu durchsuchen.",
-  "42ade0e14ff6af94": "Aktualisiere den T3-Code-Server dieser Umgebung, um Issues zu durchsuchen.",
   "6435447ce7656f13": "{label} anzeigen",
   "993dcd04611f9571": "Sicher speichern",
   "ccbe48efc8e30c52": "Nebenchat „{title}“ löschen?",
@@ -4072,49 +4048,49 @@
   "b9a547b1936fb658": "Stopp erzwingen",
   "7100c70090280026": [
     "Wartet · ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "797b0ad147bdfe1f": [
     "Läuft · ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "58ac05b9fbce58ce": "Wird gestoppt...",
   "4bf9327818b58241": "Stoppen",
   "8fe132a05b04a8dc": [
     "Dieser Thread lief zuletzt auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Beim Senden geht es auf",
     " ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " weiter."
   ],
   "4698c3007479de8c": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "Branch geändert von"]
-    ],
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Branch geändert von"
+    },
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "67571d84e5950239": "Wird wiederhergestellt...",
   "8dc01c69f37e07bb": "Branch wiederherstellen",
@@ -4128,10 +4104,10 @@
   "336eece883d0643d": "{title} fortsetzen",
   "4a98174d589dc462": [
     "nächste ",
-    [
-      ["t", "ScheduledRelativeLabel"],
-      ["i", 1]
-    ]
+    {
+      "t": "ScheduledRelativeLabel",
+      "i": 1
+    }
   ],
   "768f1e16f55ea307": "pausiert",
   "ac242b57dbfa5259": "Geplante Aufgaben verwalten",
@@ -4139,20 +4115,20 @@
   "3fe420ed9b5bdb75": "Jetzt ausführen",
   "0c433351a8606e50": [
     "Automatisierungen konnten nicht geladen werden: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "e58a1d884fa1d8f2": "Thread-Details",
   "43c5fbd02c6f330a": "Weniger anzeigen",
   "de45b075b016cb14": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " weitere anzeigen"
   ],
   "02d9667ff2c8e0b8": "Issue {key}: {title}",
@@ -4186,11 +4162,11 @@
   "1567df8ab4aaac42": "Dadurch wird #{number} per {method, select, merge {Merge} squash {Squash} rebase {Rebase} fastForward {Fast-Forward} other {Merge}} zusammengeführt.",
   "636eb97a97862aef": [
     "Merge-Konflikte mit ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "159ddd0d146a0f22": "Beobachtet: Der Agent wird geweckt, wenn Checks fertig sind, jemand kommentiert oder der Branch Konflikte hat. Klicke zum Beenden.",
   "1cbc8b5db51b4c77": "Mergen",
@@ -4288,20 +4264,20 @@
   "a65861ad58565591": "Nebenchats · {runningSideChats} laufen",
   "dc28386e0a961d4d": "Nebenchats",
   "05c120510a9b85d8": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " fehlgeschlagen"
   ],
   "0bc72950072ee1aa": [
     "auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "3237699bd13dd4bb": "Subagent stoppen",
   "075398ac562d74b0": "Agentensitzung trennen",
@@ -4319,20 +4295,20 @@
   "95b263aa683271cc": "localhost:{port} stoppen",
   "f94866e17faddc05": [
     "Im Browser-Panel öffnen. ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " für deinen Browser."
   ],
   "781fba367a220012": [
     "An localhost:",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf diesem Rechner weitergeleitet. Klicke zum Beenden."
   ],
   "92347683e33e9f02": "An diesen Rechner weiterleiten, für jede App hier",
@@ -4380,11 +4356,11 @@
   "d201a2c11fc08817": "Ab hier bearbeiten",
   "5b30ae788fdc4fd0": "Wird gesendet…",
   "b8e1cd0265566143": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " herunterladen"
   ],
   "31c5a7eb89641aba": "Ab hier bearbeiten",
@@ -4399,89 +4375,89 @@
   "6fb5edb3f496ba7f": "Erstellten Thread öffnen",
   "c0f9321d0e5b50b6": "Subagenten-Thread öffnen",
   "436773daf874e62f": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "Thread „"]
-    ],
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "span"],
-      ["i", 3],
-      ["c", "“ gelesen"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Thread „"
+    },
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    {
+      "t": "span",
+      "i": 3,
+      "c": "“ gelesen"
+    }
   ],
   "20e8c0c6d9f710cc": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "Thread „"]
-    ],
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "span"],
-      ["i", 3],
-      ["c", "“ konnte nicht gelesen werden"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Thread „"
+    },
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    {
+      "t": "span",
+      "i": 3,
+      "c": "“ konnte nicht gelesen werden"
+    }
   ],
   "d3e39673276735f7": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "Lesen von Thread „"]
-    ],
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "span"],
-      ["i", 3],
-      ["c", "“ abgelehnt"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Lesen von Thread „"
+    },
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    {
+      "t": "span",
+      "i": 3,
+      "c": "“ abgelehnt"
+    }
   ],
   "1142cc8cc93ad54b": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "Lesen von Thread „"]
-    ],
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "span"],
-      ["i", 3],
-      ["c", "“ abgebrochen"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Lesen von Thread „"
+    },
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    {
+      "t": "span",
+      "i": 3,
+      "c": "“ abgebrochen"
+    }
   ],
   "7f1ddce0d74afeb3": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "Thread „"]
-    ],
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "span"],
-      ["i", 3],
-      ["c", "“ wird gelesen"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "Thread „"
+    },
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    {
+      "t": "span",
+      "i": 3,
+      "c": "“ wird gelesen"
+    }
   ],
   "a2aaca7ff8310186": "Chat öffnen",
   "a3048aaa541b7744": "Aktivität",
@@ -4492,19 +4468,19 @@
   "ff6edf13509031be": "Worktree wird eingerichtet…",
   "eb06160a98c4dd18": [
     "Arbeitet seit ",
-    [
-      ["t", "WorkingTimer"],
-      ["i", 1]
-    ]
+    {
+      "t": "WorkingTimer",
+      "i": 1
+    }
   ],
   "90e4f528f3f30fc2": "Arbeitet...",
   "6f4b0e797341e214": "Einrichtung im Hintergrund",
   "e81927b01b8b505c": [
     "Komprimiert seit ",
-    [
-      ["t", "WorkingTimer"],
-      ["i", 1]
-    ]
+    {
+      "t": "WorkingTimer",
+      "i": 1
+    }
   ],
   "e9b38212eb281365": "Wird komprimiert…",
   "e49d80b76b38931e": "Agent",
@@ -4523,28 +4499,25 @@
   "b29e1856c4aab31f": "Dieser Rechner",
   "c722bc4d833dc79c": [
     "Der Agent liest hier die Logs und den Quellcode von ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " und fragt nach, bevor er eine Korrektur anwendet oder etwas veröffentlicht."
   ],
   "e7588632064e0364": "Kopiert",
   "996f7752fa033da6": [
     "oder führe aus:",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "275a97b4af3c6482": "Befehl für ein Terminal kopieren",
   "2b07985d23563374": "Wird {time} fortgesetzt",
@@ -4573,11 +4546,11 @@
   "e8c80b6d40c0944c": "Suchergebnis",
   "8d1906900b5c95c7": [
     "Exit ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "83c29850641c8935": "Eingereiht",
   "8402f099f88fd0e0": "Läuft",
@@ -4601,11 +4574,11 @@
   "4d765811334b8edf": "Kontextübergabe",
   "54915723f9384a19": [
     "Thread erstellt · ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "0832a03c4dc5eac4": "Thread erstellt",
   "50581b0c78ba5b66": "Mikrofon blockiert",
@@ -4649,11 +4622,11 @@
   "c89e52c7e756475e": "Download erfordert einen Admin",
   "0ce52f02e2622a13": [
     "Empfohlen für ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Enthält einen 1,2 MB großen Stilleerkenner."
   ],
   "8f66127ac7b35a99": "Enthält einen 1,2 MB großen Stilleerkenner.",
@@ -4961,11 +4934,11 @@
   "fe4e834cd36123fe": "Keine mobilen Clients",
   "096cd971e11827dc": [
     "Installiere ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf deinem Smartphone und melde dich bei T3 Connect an, um Push-Benachrichtigungen und Live-Aktivitäten zu erhalten."
   ],
   "de111af2fe5653a6": "Mobile Clients konnten nicht geladen werden",
@@ -4973,32 +4946,32 @@
   "ff2d5256c7b57d7f": "Es ist nicht mehr in deinem T3-Connect-Konto.",
   "fba00de8e861f8c1": "T3-Connect-Einstellungen",
   "83a0e763474f61be": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " von diesem Gerät entfernen?"
   ],
   "e4881cc289fa945c": "Dadurch werden Kopplung, Anmeldedaten und zwischengespeicherte Threads hier vergessen.",
   "c6e67d2a213f4e8d": [
     "Es bleibt in deinem T3-Connect-Konto und belegt weiter seinen Host-Platz. Melde es unter",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ab, um ihn freizugeben."
   ],
   "221ad7ff2e9f5452": [
     "Dein T3-Connect-Konto bleibt unverändert. Um es dort abzumelden, verwende",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "."
   ],
   "3bd17825c03a079e": "Von diesem Gerät entfernen",
@@ -5011,42 +4984,42 @@
   "059a4cf9769039b8": "T3 Chat verknüpfen",
   "7a61689a0b789db0": [
     "Premier · bis zu ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " Tunnel"
   ],
   "eadafc8408e122aa": [
     "Pro · bis zu ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " Tunnel.",
     " ",
-    [
-      ["t", "a"],
-      ["i", 2],
-      ["c", "Auf T3 Chat upgraden"]
-    ],
+    {
+      "t": "a",
+      "i": 2,
+      "c": "Auf T3 Chat upgraden"
+    },
     " ",
     "auf Premier für ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     "."
   ],
   "b50f44cd6c5c9bfa": [
-    [
-      ["t", "a"],
-      ["i", 1],
-      ["c", "Auf T3 Chat upgraden"]
-    ],
+    {
+      "t": "a",
+      "i": 1,
+      "c": "Auf T3 Chat upgraden"
+    },
     " ",
     "für mehr Tunnel"
   ],
@@ -5055,11 +5028,11 @@
   "ac298836b1483a1a": [
     "Bestätige auf",
     " ",
-    [
-      ["t", "a"],
-      ["i", 1],
-      ["c", "t3.chat"]
-    ],
+    {
+      "t": "a",
+      "i": 1,
+      "c": "t3.chat"
+    },
     " und wähle dann „Aktualisieren“."
   ],
   "cf09d31e268af127": "T3 Connect erneut versuchen",
@@ -5080,11 +5053,11 @@
   "f46ef5a6005bb954": "Server abmelden",
   "5f7f976fec024153": [
     "„",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“ wird aus diesem Konto entfernt."
   ],
   "f5dfd8cd69fc27fd": "Der T3-Connect-Zugriff wird widerrufen, ein verwalteter Tunnel wird entfernt, und ein Host-Platz wird frei. Lokale Verbindungen auf deinen Geräten bleiben unverändert.",
@@ -5156,26 +5129,26 @@
   "752bb0ea8b33e33e": "Installationsfortschritt des Relay-Clients",
   "735d71759e25f797": [
     "Lass ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " geöffnet, während der Relay-Client installiert wird."
   ],
   "0932e0330e2f409d": "Verwalteter Relay-Client",
   "41ace79912ff09a3": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " lädt Version ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " herunter und installiert sie lokal."
   ],
   "f042fc0f38af7e57": "Herunterladen und installieren",
@@ -5212,30 +5185,27 @@
   "f76ea65218a25f9f": "SSH-Verifizierung erforderlich",
   "633b8b107de280c7": [
     "Gib das Passwort oder den Verifizierungscode ein, den ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " verlangt. ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     " gibt deine Antwort an den lokalen SSH-Prozess weiter und hält sie im Arbeitsspeicher, um sie für diesen Host wiederzuverwenden. ",
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ],
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    },
     " schreibt sie nicht auf die Festplatte."
   ],
   "1c26f62937f27d39": "SSH-Schlüssel können ein Passwort ersetzen, aber dein Server kann trotzdem einen Verifizierungscode verlangen.",
@@ -5315,11 +5285,11 @@
   "6e531f6633f59884": "Details zu {host}",
   "4fe2c8b0597366cc": "Gerätewarnung für {host} schließen",
   "df1f7df93a1dcee4": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " wird gestartet… Das kann eine Minute dauern."
   ],
   "e902f208c4e6146f": "Keine virtuellen Android-Geräte gefunden. Erstelle eines im Geräte-Manager von Android Studio und aktualisiere dann.",
@@ -5356,17 +5326,17 @@
   "34e1bfdda3a65b18": "Agentenzugriff wird aktualisiert…",
   "1a12cadd7a5d03d6": "Bereit",
   "ac9e85e35d103d39": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ": ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "09a9981e86938b4b": "Geräte-Hub aktivieren",
   "65c8a5ecb362f4c0": "Simulator-Unterstützung prüfen",
@@ -5520,11 +5490,11 @@
   "b6b07d6a9d9ac3d8": "Keine Vorschau für diese Datei",
   "8fd3002cbb2d0528": [
     "Speichere sie, um sie in einer App zu öffnen, die ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Dateien unterstützt."
   ],
   "774654575f014b55": "Speichere sie, um sie in einer App zu öffnen, die dieses Dateiformat unterstützt.",
@@ -5568,11 +5538,11 @@
   "26b8986d63cba0e4": "Dateipfad",
   "4fae76516685c0a0": [
     "Zurück zu ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "e5612e9fec20f0c9": "Ordner wird geladen…",
   "44bbb4a5e6fbd4bb": "Laden des Ordners wiederholen",
@@ -5611,34 +5581,28 @@
   "94e68b57b9d38925": "Schreibgeschützte Verbindung. Nicht gespeicherte Änderungen bleiben erhalten, bis Schreibzugriff zurückkehrt.",
   "944f4dc367eea775": [
     "Versuchter Pfad",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "a27abcd7b5a4b539": [
     "Arbeitsbereichsordner:",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     ". Prüfe den Pfad des Links oder suche die Datei unter Dateien."
   ],
   "b9b6bbd1e1ea189f": "Ganze Datei",
@@ -5878,19 +5842,19 @@
   "80bb66fe1c536e09": "Auf {provider} öffnen",
   "6899d17239a4b04e": [
     "eröffnet ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "aaa1e21cddb497b2": [
     "geschlossen ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "166e4903e8ae7b37": "Labels",
   "cdac45c7efe1cfcc": "keine",
@@ -5984,11 +5948,11 @@
   "2ccf231996dc89c2": "Keine Tracker zum Lesen",
   "ffdb63a22901a1fa": "Füge ein Projekt hinzu, dessen Remote bei einem unterstützten Tracker liegt.",
   "403e9debff81d7df": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " Die geladenen Issues werden angezeigt."
   ],
   "952ef13679903db1": "Nichts passt dazu.",
@@ -6045,17 +6009,17 @@
   "5492129175e04f8d": "Dein T3-Connect-Konto hat keine Tunnel mehr.",
   "5a302c2d18f5e917": [
     "Starte ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " neu."
   ],
   "82b53d699f86a160": "Welche App?",
@@ -6065,18 +6029,15 @@
   "24192b7587ed724f": [
     "Zu genehmigender Code",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "bf753d700be48474": "Der Code ist abgelaufen.",
   "9d35f9835027f16f": "Öffne poke.com/integrations/new.",
@@ -6203,91 +6164,88 @@
   "efc48b9736a534bc": "jetzt",
   "ee8d164144fc4b9d": [
     "Willkommen bei ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "3cc77f9daa7eeafd": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " wird eingerichtet."
   ],
   "216ab7514aea1d61": "Ohne Agenten starten",
   "501ce2d99da8bfd1": "Richte einen Agenten ein, um zu starten.",
   "7da791b649c8a9e2": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " erfasst anonyme Nutzungsdaten, um die App zu verbessern. Wie du widersprichst, steht in der ",
-    [
-      ["t", "a"],
-      ["i", 2],
-      ["c", "Datenschutzerklärung"]
-    ],
+    {
+      "t": "a",
+      "i": 2,
+      "c": "Datenschutzerklärung"
+    },
     "."
   ],
   "b33f35083757b42c": [
     "Siehe",
     " ",
-    [
-      ["t", "a"],
-      ["i", 1],
-      ["c", "Datenschutzerklärung"]
-    ],
+    {
+      "t": "a",
+      "i": 1,
+      "c": "Datenschutzerklärung"
+    },
     "."
   ],
   "f77d000c0710f066": "Aktivieren",
   "4ed27bf946e504db": "Einrichten",
   "7a26eaacff0607f7": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " wird geprüft…"
   ],
   "41c978af6006ea19": "Weitere Agenten in der ACP Registry",
   "2e2db5059c528f47": "Durchsuchen",
   "479c0cfec556167f": [
     "Suche nach Projekten in deinem ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Verlauf…"
   ],
   "45194b35dc6d858a": [
     "Aus deinem ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Verlauf"
   ],
   "5c6a6009aedbf1d0": "Alles auswählen",
   "24c98c5086b8e76e": "Keine auswählen",
   "fd3885544ce693bb": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf dem Smartphone nutzen"
   ],
   "37c66042ce1906da": "Scanne mit deinem Smartphone, um die App zu holen.",
@@ -6300,52 +6258,49 @@
   "cade8b9f59f4b690": [
     "Führe",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "in diesem Terminal aus."
   ],
   "9d9b9624c7bd95df": "Andere Ordner",
   "1eb8f3d4695033fb": [
     "Zu ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " hinzugefügt. Öffne ein neues Terminal, um",
     " ",
-    [
-      ["t", "code"],
-      ["i", 2],
-      ["c", "t3"]
-    ],
+    {
+      "t": "code",
+      "i": 2,
+      "c": "t3"
+    },
     " zu verwenden."
   ],
   "ad72bb102aa39c31": [
     "Verwende ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      ["c", "t3"]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": "t3"
+    },
     " in jedem Terminal. Fügt eine Zeile zu",
     " ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " hinzu."
   ],
   "f5d986fad54b4670": "Zu PATH hinzufügen",
@@ -6389,11 +6344,11 @@
   "b9bc0e4256a4f6a5": "Zoom",
   "f63dd7b268afcf8d": [
     "Profil: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "ea8745cfdf25286d": "Cookies löschen",
   "2f7b5572591cd41e": "Cache leeren",
@@ -6403,49 +6358,43 @@
   "189cb97125af21c1": "Details ausblenden",
   "8321ff20c739dafb": "Diese Datei kann hier nicht angezeigt werden",
   "a43f940915211a99": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "von ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     " wurde stattdessen heruntergeladen."
   ],
   "ac2b8c939e6cb51b": "Im Browser öffnen",
   "193d5c0bdab38589": "Herunterladen",
   "b1343b62b1b140cc": "Diese Website ist nicht erreichbar",
   "a7daf7102601242d": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     ": ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     "."
   ],
   "f9048e2ce643daba": "Versuche:",
@@ -6477,11 +6426,11 @@
   "4616fb6552fd8875": "Die Seite wurde nicht geladen. Auswählen ist erst möglich, wenn die Seite gerendert ist",
   "345dd7a051e55098": [
     "Dieser Tab ist in der ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Desktop-App geöffnet."
   ],
   "b252602c8f71d6af": "Vorschau kann nicht ausgelagert werden",
@@ -6525,11 +6474,11 @@
   "74da45ffb53c3ab1": "Dieser Prompt enthielt versteckte Zeichen und ist möglicherweise bösartig",
   "2053d7c11214c657": "Hier fortfahren",
   "631867ac7aa347c6": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " holen"
   ],
   "d2e48075c05360e5": "Meine Auswahl merken",
@@ -6608,70 +6557,52 @@
   "23ffc2d4097c7026": "Auto-Merge deaktivieren",
   "2d951e0612bc14d6": "Link kopieren",
   "25f5b6b352b36e7c": [
-    [
-      ["t", "Branch"],
-      ["i", 1],
-      [
-        "d",
-        [
-          [
-            "b",
-            [
-              ["mr", "MR"],
-              ["cr", "Änderungsanfrage"]
-            ]
-          ],
-          ["t", "b"]
-        ]
-      ],
-      ["c", "PR"]
-    ],
+    {
+      "t": "Branch",
+      "i": 1,
+      "d": {
+        "b": {
+          "mr": "MR",
+          "cr": "Änderungsanfrage"
+        },
+        "t": "b"
+      },
+      "c": "PR"
+    },
     "-Nummer kopieren"
   ],
   "832a8920f622de9b": "Checkout-Befehl kopieren",
   "98035bebbcecd0bf": [
-    [
-      ["t", "Branch"],
-      ["i", 1],
-      [
-        "d",
-        [
-          [
-            "b",
-            [
-              ["mr", "Merge Request"],
-              ["cr", "Änderungsanfrage"]
-            ]
-          ],
-          ["t", "b"]
-        ]
-      ],
-      ["c", "Pull Request"]
-    ],
+    {
+      "t": "Branch",
+      "i": 1,
+      "d": {
+        "b": {
+          "mr": "Merge Request",
+          "cr": "Änderungsanfrage"
+        },
+        "t": "b"
+      },
+      "c": "Pull Request"
+    },
     " ",
     "wieder öffnen"
   ],
   "605261b246f7f98e": [
     "Aktivität für",
     " ",
-    [
-      ["t", "Branch"],
-      ["i", 1],
-      [
-        "d",
-        [
-          [
-            "b",
-            [
-              ["mr", "Merge Request"],
-              ["cr", "Änderungsanfrage"]
-            ]
-          ],
-          ["t", "b"]
-        ]
-      ],
-      ["c", "Pull Request"]
-    ],
+    {
+      "t": "Branch",
+      "i": 1,
+      "d": {
+        "b": {
+          "mr": "Merge Request",
+          "cr": "Änderungsanfrage"
+        },
+        "t": "b"
+      },
+      "c": "Pull Request"
+    },
     " ",
     "konnte nicht geladen werden"
   ],
@@ -6691,26 +6622,23 @@
   "425e4a3d6c5c2867": "{count, plural, one {{count} fehlgeschlagen} other {{count} fehlgeschlagen}}",
   "cb116c139cdace98": "Keine Checks gemeldet",
   "d84d09b4818c50b7": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["i", 2],
-            ["k", "_gt_value_2"],
-            ["v", "v"]
-          ],
-          "/",
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": [
+        {
+          "i": 2,
+          "k": "_gt_value_2",
+          "v": "v"
+        },
+        "/",
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ],
+    },
     " ",
     "Checks"
   ],
@@ -6766,11 +6694,11 @@
   "d27b1db7f856ec3a": "Dieser Host speichert nicht zentral, welche Dateien du gelesen hast, daher werden diese Häkchen von dieser Umgebung gespeichert. Sie folgen dir zwischen den damit verbundenen Apps, aber die eigene Weboberfläche des Hosts zeigt sie nicht an.",
   "b990fa781293a64e": [
     "Die Kästchen unten zeigen den zuletzt gelesenen Stand und sind leer, wenn noch nichts gelesen wurde. ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "1c70364624c9ff9d": "Diese Änderung hat mehr Dateien, als der Host in einer Abfrage mit Häkchen meldet, daher ist die Zahl zu niedrig und einige Kästchen unten beginnen leer.",
   "d01be46a5dda7091": "Der Host hat einen Teil dieses Diffs zurückgehalten: eine Binärdatei oder eine Änderung, die zu groß zum Einbetten ist.",
@@ -6801,24 +6729,18 @@
   "649ff6efdc17d547": "Genehmigung bestätigen?",
   "bca5f4eb8dc0ccdb": "Ausführung der Workflows genehmigen",
   "98455a5ec0567bcb": [
-    [
-      ["t", "Branch"],
-      ["i", 1],
-      [
-        "d",
-        [
-          [
-            "b",
-            [
-              ["mr", "Diesen Merge Request"],
-              ["cr", "Diese Änderungsanfrage"]
-            ]
-          ],
-          ["t", "b"]
-        ]
-      ],
-      ["c", "Diesen Pull Request"]
-    ],
+    {
+      "t": "Branch",
+      "i": 1,
+      "d": {
+        "b": {
+          "mr": "Diesen Merge Request",
+          "cr": "Diese Änderungsanfrage"
+        },
+        "t": "b"
+      },
+      "c": "Diesen Pull Request"
+    },
     " ",
     "auschecken"
   ],
@@ -6840,23 +6762,23 @@
   "8e8e8db34c0a14c3": "Änderungen",
   "26c22a87e8064697": "Pull-Request-Tabs",
   "a1cb30fd3681f967": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "span"],
-      ["i", 2],
-      ["c", "nach"]
-    ],
+    {
+      "t": "span",
+      "i": 2,
+      "c": "nach"
+    },
     " ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ]
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    }
   ],
   "ccb3210828c51d7a": "{term, select, mr {Dieser Merge Request konnte nicht gemergt werden} cr {Diese Änderungsanfrage konnte nicht gemergt werden} other {Dieser Pull Request konnte nicht gemergt werden}}",
   "c62dad153b80c083": "Konnte nicht als bereit für Review markiert werden",
@@ -6971,11 +6893,11 @@
   "12caa5f714eef2d1": "Füge ein Projekt hinzu, dann erscheinen hier die Pull Requests aus seinem Repository.",
   "eed696a7905d305e": [
     "Nichts passt zu „",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“"
   ],
   "335f16c766b675f9": "Die Hosts wurden danach durchsucht. Versuche weniger Wörter oder suche nach Nummer, Autor oder Branch.",
@@ -7012,11 +6934,11 @@
   "36690ee5d989e07e": [
     "Anhang auf",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " öffnen"
   ],
   "a42a2e72023007f3": "Modus des Markdown-Editors",
@@ -7100,11 +7022,11 @@
   "bb0614eb361e525d": "Möglicherweise veraltet",
   "f1152662c2b89b0d": [
     "Stack #",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "ce703d4ba40dc9b4": "Stack wird gemergt...",
   "ac7feb9c583b02a0": "Stack wird rebased...",
@@ -7125,33 +7047,33 @@
   "140dc384c58b74f3": "Stack rebasen",
   "2ae374dd9a808904": [
     "Stack #",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " anzeigen, Ebene ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " von",
     " ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ]
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    }
   ],
   "bed78531c2555646": "Aktualisierung des Stacks wiederholen",
   "eaa50802c08e9734": [
     "Stack mergen (",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ")"
   ],
   "30440f98e929440a": "Stack rebasen",
@@ -7172,24 +7094,18 @@
   "d37dbc4847107d90": "Verknüpfung mit diesem Thread lösen",
   "141d12d6b7f3c002": "Mit diesem Thread verknüpfen",
   "beb920ffd1cac72b": [
-    [
-      ["t", "Branch"],
-      ["i", 1],
-      [
-        "d",
-        [
-          [
-            "b",
-            [
-              ["mr", "Merge Request"],
-              ["cr", "Änderungsanfrage"]
-            ]
-          ],
-          ["t", "b"]
-        ]
-      ],
-      ["c", "Pull Request"]
-    ],
+    {
+      "t": "Branch",
+      "i": 1,
+      "d": {
+        "b": {
+          "mr": "Merge Request",
+          "cr": "Änderungsanfrage"
+        },
+        "t": "b"
+      },
+      "c": "Pull Request"
+    },
     " ",
     "mit einem Thread verknüpfen"
   ],
@@ -7206,30 +7122,30 @@
   "042d9dd81dd9fef3": "Änderungen angefordert, vor den neuesten Commits",
   "5f7a8589a5b15102": "Review verworfen, vor den neuesten Commits",
   "7db600825bfa2c73": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "span"],
-      ["i", 2],
-      ["c", "hat ein Review abgegeben"]
-    ]
+    {
+      "t": "span",
+      "i": 2,
+      "c": "hat ein Review abgegeben"
+    }
   ],
   "4affc3da49f673c2": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "span"],
-      ["i", 2],
-      ["c", "hat kommentiert"]
-    ]
+    {
+      "t": "span",
+      "i": 2,
+      "c": "hat kommentiert"
+    }
   ],
   "04ea50285b00dcdd": "Übersicht",
   "37819cf9b549b56b": "Aufgelöst",
@@ -7289,11 +7205,11 @@
   "f034c05267f161ce": [
     "synchronisiert",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "7d160729d1afcd58": "Pull Request verknüpfen",
   "2b82c15cd4dc73c6": "Angesehene Dateien konnten nicht aktualisiert werden",
@@ -7425,11 +7341,11 @@
   "5c143e386f171670": "Versuche eine breitere Suche.",
   "9852e524f053c372": [
     "Über ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "1e0eb5e0c7c7f4f2": "Der ACP-Vorgang ist fehlgeschlagen.",
   "3a64c5360f09982f": "Header müssen gültiges JSON sein.",
@@ -7508,11 +7424,11 @@
   "41f365a84e96f8ec": "Hosts werden geladen…",
   "dc77ab3506d3cf5d": [
     "Keine Hosts passen zu „",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“."
   ],
   "6498bf7f6fb1554a": "Benutzername",
@@ -7552,11 +7468,11 @@
   "3cfe596e1f02e49f": "Instanz hinzufügen",
   "764aae21fbbf37aa": [
     "Füge ein Konto hinzu oder konfiguriere einen Anbieter auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "."
   ],
   "87885e38700e366f": "Oder aus der ACP Registry wählen",
@@ -7573,11 +7489,11 @@
   "432e85a50e2e7964": [
     "Zeige das Kontingent jedes Kontos, das der Hub bündelt, neben den Anbietern auf",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Der Schlüssel bleibt auf diesem Server."
   ],
   "556a695b117565ac": "Hub-URL",
@@ -7638,17 +7554,17 @@
   "89d08a5be3347890": "Archivierte Threads erscheinen hier.",
   "5d3ed45f43611ff4": [
     "Archiviert ",
-    [
-      ["i", 1],
-      ["k", "_gt_time_1"],
-      ["v", "rt"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_time_1",
+      "v": "rt"
+    },
     " · Erstellt ",
-    [
-      ["i", 2],
-      ["k", "_gt_time_2"],
-      ["v", "rt"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_time_2",
+      "v": "rt"
+    }
   ],
   "ae85d885630b0e51": "{count, plural, one {{count} Berechtigung} other {{count} Berechtigungen}}",
   "129431563dc043bc": "{label}: {scopes} anzeigen",
@@ -7794,87 +7710,87 @@
   "7bfd99f6645384c9": "Für {environment} gab es keine Cookies zum Importieren.",
   "4daea52e5c94a9f2": "Übersprungen",
   "fb5ddb28ee4b2efc": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " zum Importieren beenden"
   ],
   "f0f1c5c4cb4cafdf": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ist geöffnet, daher können seine Cookies noch nicht gelesen werden. Beende es und fahre dann fort."
   ],
   "33e46d95a6e43975": "Ich habe es beendet",
   "c99e38ae75b3f5d3": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " die Cookies von ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " lesen lassen"
   ],
   "8dcf4cae5c1238f2": [
     "Um Cookies aus ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " zu importieren, braucht ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " Festplattenvollzugriff. Aktiviere ihn in den Systemeinstellungen und kehre dann zurück, um den Import abzuschließen. Nach dem Import kannst du ihn wieder entziehen."
   ],
   "6418483c2e2b1e27": [
     "Aus ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " importieren"
   ],
   "23523f286a272f4d": [
     "Wähle, welche Cookies für ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " importiert werden."
   ],
   "2860d54cde04d33f": "Cookies werden importiert",
   "81149d282e60295a": "Das kann einen Moment dauern.",
   "f207560eef7a6e83": "Wird importiert…",
   "d0147a73f61ae8b5": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " wird geprüft"
   ],
   "c6f6eec2b07cd625": [
     "Import aus ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " fehlgeschlagen"
   ],
   "a2fc467e1a6e2e29": "Die Änderungen konnten nicht vorbereitet werden. Hilfe findest du unter „Erweitert“.",
@@ -7906,30 +7822,30 @@
   "8ab8ef3dc5c9ccbe": "Nur diese Änderungen werden gespeichert. Wir behalten eine Sicherung.",
   "5a00ecfbf6d79823": [
     "Erlaube ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ", deine Desktop-Einstellungen zu lesen. Du prüfst alle Änderungen hier, bevor sie gespeichert werden."
   ],
   "0f3ce8b38a3b806f": "Fehlerbehebung",
   "b472a7b2482b54bf": "Einstellungsdatei",
   "4bdcc6c44ad4ea20": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " liest auch alle Dateien, die diese Datei einbindet."
   ],
   "3790c926a39864b6": [
     "Verknüpft mit ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Die Verknüpfung bleibt erhalten."
   ],
   "d13378ea75992f68": "Andere Datei wählen…",
@@ -7938,17 +7854,17 @@
   "3e02b74615e20d82": "Manuelle Einrichtung",
   "957213d003612ea8": [
     "Deaktiviere die Aufnahme in ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ", um sie zu beenden. Entferne das Tastenkürzel aus ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     ", um die Tasten freizugeben."
   ],
   "4bf700ad94c0c486": "Ich habe das Tastenkürzel hinzugefügt",
@@ -7961,25 +7877,25 @@
   "6b9b6ebc5d641bc1": "Dein ChatGPT-Abo ist verbunden",
   "7658fdd43abdbd60": [
     "Berechtigte Nutzung in ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " läuft über dein ChatGPT-Abo. Verwalte deine geteilte Nutzung und Guthabeneinstellungen in ChatGPT."
   ],
   "a07fd9e52e88a7b1": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "d0e747ae0c4f68a5": "t3 konnte nicht installiert werden",
   "ba3ac338f36cba74": "t3 konnte nicht entfernt werden",
@@ -8015,61 +7931,61 @@
   "a2f4d7c36423bbe5": "Kein Transkriptionsmodell passt.",
   "cfbf2641f6fbc99b": [
     "OpenRouter führt ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " nicht mehr. Das Diktat bleibt aus, bis du ein anderes Modell wählst."
   ],
   "3e91d66852dfc3fe": [
     "Verbinde dich mit Diktat-Zugriff mit ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ", um fortzufahren."
   ],
   "1d33877ef8ea3559": "Laden des API-Schlüssels wiederholen",
   "be805c1729dc0726": [
     "Aktualisiere ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ", um OpenRouter-Diktat zu nutzen."
   ],
   "d7acad5dde4c1d1b": "Es wird nach einem API-Schlüssel gesucht…",
   "8257030da7a4ad4e": "Modell",
   "418d9b293a8983a9": [
     "Bitte einen Administrator auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ", einen API-Schlüssel hinzuzufügen."
   ],
   "914772dfae40881e": [
     "Verwendet den auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " gespeicherten API-Schlüssel. Diese Auswahl gilt nur für dieses Gerät."
   ],
   "04d1b655740efd75": "Diese Auswahl gilt nur für dieses Gerät. Wähle „Aus“, um die Freigabe zu beenden.",
   "7c34683f9c12650d": "Schlüssel entfernen…",
   "0e8b39933f68ff59": "Schlüssel entfernen",
   "f483c3f170663a6e": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " verwenden"
   ],
   "cd67d110c09bfdf4": "Sichtbarkeit der Konto-E-Mail umschalten",
@@ -8116,10 +8032,10 @@
   "2c2643bd8741ad26": [
     "Angemeldet als",
     " ",
-    [
-      ["t", "RedactedSensitiveText"],
-      ["i", 1]
-    ],
+    {
+      "t": "RedactedSensitiveText",
+      "i": 1
+    },
     "."
   ],
   "a697d09d9d25dd04": "Bereit",
@@ -8129,11 +8045,11 @@
   "f91296e641fed934": "Anmeldeseite öffnen",
   "a4bf940e2844d4d4": [
     "Wenn die Anmeldung nicht zu ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " zurückkehrt, füge die URL der letzten localhost-Seite ein."
   ],
   "90f46dbf8782cfde": "Verbinden",
@@ -8148,36 +8064,33 @@
   "c9ae6751db0ea9cb": [
     "Wartet auf Genehmigung ·",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "d823dc6bc2f0b59f": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Genehmige nur, wenn das Gerät vor dir diesen Code anzeigt."
   ],
   "7c5eb60743d53f71": "Ablehnen",
   "0ecf3435b0434d1b": [
     "Vertrauenswürdig seit",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "220872060b083701": "Noch kein Gerät hat sich über T3 Connect verbunden.",
   "0d644095a2e1392c": "Fehlgeschlagen",
@@ -8189,11 +8102,11 @@
   "8c8c2b1fdea8815e": "Diagnosedaten konnten nicht kopiert werden",
   "d3b1ed5b53b653ad": [
     "Versuch ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "30da3cd3e5597bc9": "Was du versuchen kannst",
   "988aa861f1b7241d": "Mehr Infos",
@@ -8311,11 +8224,11 @@
   "03f150efa96ec728": "Zu Windows wechseln",
   "664cbd37e00858eb": [
     "Das WSL-Backend konnte nicht starten: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "2b382086196fdd96": "Standard-Distribution",
   "dd2ebe5b11195240": "Änderungen an der Netzwerkfreigabe starten das Backend neu und müssen dort gesteuert werden, wo der Serverprozess gestartet wird.",
@@ -8323,21 +8236,21 @@
   "40335d08877bc746": "Wird angewendet…",
   "84fc63fcbcce915e": "Tailscale HTTPS deaktivieren?",
   "fb36d16d84bd4bf1": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " startet das lokale Backend ohne Tailscale Serve neu."
   ],
   "336b538d6e55ed78": "Wird neu gestartet…",
   "cd7ad8d91a063d09": "Tailscale HTTPS einrichten?",
   "eb599d6440c3565d": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " startet das lokale Backend mit aktiviertem Tailscale Serve neu und bittet Tailscale, HTTPS-Verkehr an dieses Backend weiterzuleiten."
   ],
   "2a0148ea9068a814": "HTTPS-Port",
@@ -8377,37 +8290,37 @@
   "974953ec2f4fd3e4": "Zurückgewinnen",
   "32441d85d8403ba4": "Befehl kopieren",
   "8ed537ee14e5afe9": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " zurückgewinnen?"
   ],
   "55c43a67d4dbc4ee": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " wird beendet, baut seine Datenbank neu auf und startet erneut. Es ist etwa ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     " Min. offline. Laufende Agenten werden beim Neustart beendet."
   ],
   "c56b618d212bf018": "Neu starten und zurückgewinnen",
@@ -8565,18 +8478,15 @@
   "5db22d69327dcf35": [
     "Vor",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "geprüft"
   ],
@@ -8816,18 +8726,18 @@
   "862a3e2e99dfadb6": [
     "Simulatoren und Emulatoren im Gerätebereich öffnen. Hub:",
     " ",
-    [
-      ["t", "DeviceToolVersions"],
-      ["i", 1]
-    ]
+    {
+      "t": "DeviceToolVersions",
+      "i": 1
+    }
   ],
   "151f86b6dcd56244": [
     "Neue Agentensitzungen können diese Geräte öffnen und steuern. agent-device:",
     " ",
-    [
-      ["t", "DeviceToolVersions"],
-      ["i", 1]
-    ]
+    {
+      "t": "DeviceToolVersions",
+      "i": 1
+    }
   ],
   "093c68324c1b1280": "Profil hinzufügen",
   "1f404c456e5b2a0b": "Leeres Profil",
@@ -8840,22 +8750,22 @@
   "78dd698804a59bd5": "Profil und Daten entfernen",
   "2d434a1071ccac9f": [
     "„",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“ entfernen?"
   ],
   "a3de7be51efc0bf0": "Seine Cookies und Anmeldungen werden gelöscht. Bereits geöffnete Desktop-Tabs in diesem Profil bleiben offen, bis du sie schließt; Server-Browser-Tabs werden sofort geschlossen.",
   "9685712e18e4d104": "Verbinde dich mit einer Umgebung, um dieses Profil und seine Daten zu entfernen.",
   "a3cc262be03ff420": [
     "Cookies und Cache von „",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“ löschen?"
   ],
   "e913ae62f3907911": "Du wirst von den zugehörigen Websites abgemeldet. Server-Browser-Tabs in diesem Profil werden sofort geschlossen.",
@@ -8992,11 +8902,11 @@
   "38aae3d3373b7e6e": "Verbinde eine Umgebung, um Tastenkürzel zu ändern.",
   "523dd4a75f84834c": "Diese Verbindung kann Tastenkürzel anzeigen, aber nicht ändern.",
   "6e9aec982adb14d3": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " erkennt diese Bedingung noch nicht. Sie kann trotzdem gespeichert werden, greift aber möglicherweise nicht, sofern die Laufzeit sie nicht bereitstellt."
   ],
   "be1f3ea0fa490562": "Wenn beide Bedingungen zutreffen können, gewinnt die zuletzt passende Zuweisung.",
@@ -9022,42 +8932,42 @@
   "ec7623deed751c05": [
     "Teile einen Thread mit einem Gast, der ihn live im Browser verfolgt und Nachrichten sendet, die du genehmigst. Erfordert T3 Connect: Melde dich an und verknüpfe diesen Rechner unter",
     " ",
-    [
-      ["t", "Link"],
-      ["i", 1],
-      ["c", "Freigabe & Zugriff"]
-    ],
+    {
+      "t": "Link",
+      "i": 1,
+      "c": "Freigabe & Zugriff"
+    },
     ". Beim Ausschalten werden alle Gastlinks beendet."
   ],
   "bff0033ea41eb38e": [
     "Lass Agenten hier auf deinen anderen Rechnern arbeiten und deren Agenten hier. Schalte es für jeden Rechner ein und verknüpfe sie dann unter",
     " ",
-    [
-      ["t", "Link"],
-      ["i", 1],
-      ["c", "Verbindungen"]
-    ],
+    {
+      "t": "Link",
+      "i": 1,
+      "c": "Verbindungen"
+    },
     ". Solange es aus ist, startet nichts Neues über eine Verknüpfung; laufende Aufgaben werden beendet."
   ],
   "aea6614a5a6684ee": [
     "Lass den Gerätebereich Simulatoren und Emulatoren aus deinem eigenen ",
-    [
-      ["t", "a"],
-      ["i", 1],
-      ["c", "Simlock"]
-    ],
+    {
+      "t": "a",
+      "i": 1,
+      "c": "Simlock"
+    },
     "-Pool leihen, hinzugefügt unter ",
-    [
-      ["t", "Link"],
-      ["i", 2],
-      ["c", "Geräte"]
-    ],
+    {
+      "t": "Link",
+      "i": 2,
+      "c": "Geräte"
+    },
     ". Eine Alpha-Version, die sich ändern oder kaputtgehen kann. ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     " installiert Simlock nie."
   ],
   "3836976622328d61": "Was Agenten von hier dort tun dürfen",
@@ -9095,7 +9005,6 @@
   "25b74062dc03079e": "Keine verknüpften Umgebungen",
   "8e0df75f6865d05b": "Verknüpfe einen anderen Rechner mit {appName}, etwa einen VPS, damit Agenten hier dort Threads starten und steuern können.",
   "924b297fd8bbb913": "{label} vergessen? Agenten von hier arbeiten dort nicht mehr. Widerrufe „{appName} · …“ unter „Freigabe & Zugriff“ auf {label}, um die Sitzung auch dort zu beenden.",
-  "6698127fcc912f23": "Verknüpfe einen anderen Rechner mit T3 Code, etwa einen VPS, damit Agenten hier dort Threads starten und steuern können.",
   "e1789f863205ad5a": "Umgebung konnte nicht verknüpft werden",
   "836dde1b729e6f0a": "{source} und {target} in beide Richtungen verknüpft",
   "40cde51afa218290": "{label} verknüpft",
@@ -9104,7 +9013,6 @@
   "fb71127e5746a6bc": "Unter „Freigabe & Zugriff“ dort oder mit t3 pair",
   "1e3fee7084791773": "Auch {target} zurück mit {source} verknüpfen",
   "ea34a190b0bd804c": "Agenten auf {target} können dann auch auf {source} arbeiten.",
-  "ad5ed0ce61b966eb": "{label} vergessen? Agenten von hier arbeiten dort nicht mehr. Widerrufe „T3 Code · …“ unter „Freigabe & Zugriff“ auf {label}, um die Sitzung auch dort zu beenden.",
   "81c9796bf61b306a": "Verknüpfung konnte nicht vergessen werden",
   "130e51beb6cf5aad": "Umgebung verknüpfen",
   "122c3e355699e69d": "Agenten hier können dort dann Threads starten, ihnen Nachrichten senden und auf sie warten. Sie erscheint unter „Autorisierte Clients“ in „Freigabe & Zugriff“ dieser Umgebung und kann dort widerrufen werden.",
@@ -9160,23 +9068,23 @@
   "cdcdc54a444a3636": "Mit der Kamera deines Smartphones scannen.",
   "243e8d40c3cf428d": [
     "Wir raten davon ab, mehrere ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Konten in ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " zu verwalten. ",
-    [
-      ["t", "a"],
-      ["i", 3],
-      ["c", "Mehr Infos"]
-    ]
+    {
+      "t": "a",
+      "i": 3,
+      "c": "Mehr Infos"
+    }
   ],
   "bd87779b86bb96bd": "Systembenachrichtigungen, wenn ein Thread fertig ist, fehlschlägt oder auf Eingabe oder Genehmigung wartet. Gilt für dieses Gerät, solange {appName} geöffnet ist.",
   "24a0ac9e7e55975c": "Benachrichtigungen erfordern einen unterstützten Browser über HTTPS oder die Desktop-App. Nur Ton ist weiterhin verfügbar.",
@@ -9200,11 +9108,11 @@
   "9268a10862868fe5": "Vorschau der Panel-Animation erneut abspielen",
   "1c16849175c9fdd3": "{signal} senden",
   "3e2c2cacab23110c": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " senden"
   ],
   "f905637a69a1f15c": "Setup",
@@ -9381,10 +9289,10 @@
   "3dc5298b137a9434": [
     "Angemeldet als",
     " ",
-    [
-      ["t", "RedactedSensitiveText"],
-      ["i", 1]
-    ]
+    {
+      "t": "RedactedSensitiveText",
+      "i": 1
+    }
   ],
   "f507d41f66760d83": "Anbieterstandard",
   "366e370da9d8b04c": "Browser öffnen",
@@ -9394,18 +9302,15 @@
   "e53ca6f665197e44": [
     "Gib den Code",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "in deinem Browser ein."
   ],
@@ -9445,29 +9350,26 @@
   "ab4e8ccc69c28a8c": [
     "Angemeldet als",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "2d1d0e566712a2b2": "Von Orbit verwaltet",
   "8e728d2eab98cf3d": "Authentifizierung fortsetzen",
   "7138ee745e248c17": [
     "Diese Instanz verwendet",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     ", das in diesem Build nicht verfügbar ist. Die Konfiguration bleibt erhalten."
   ],
   "b534d4cd528ede39": "Modelleinstellungen und benutzerdefinierte Modelle werden in der ausgewählten Umgebung gespeichert und mit verbundenen Geräten geteilt.",
@@ -9695,36 +9597,30 @@
   "ac524d626057ee8b": [
     "Vor",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "aktualisiert"
   ],
   "f717a7cb4715dd3d": [
     "Aktualisiert",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "33822b085993c953": "CPU-Durchschnitt",
   "0e7c0560ff9ac6b8": "I/O-Lesevorgänge",
@@ -9758,11 +9654,11 @@
   "a18608b4e604c90f": "Warte auf den Zustand des Collectors.",
   "ebd63e7a302c5790": [
     "Identität: ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "PID + Startzeit"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "PID + Startzeit"
+    }
   ],
   "e3f32bcf2e8f7f4e": "Logische Bytes nach Vorgang",
   "1f9cf5bf4b81c465": "Native Zähler zeigen, welcher Prozess liest oder schreibt. Diese Zähler auf Anwendungsebene identifizieren bekannte T3-Vorgänge, sodass sich Prozessspitzen bestimmten Persistenz- und Logging-Pfaden zuordnen lassen.",
@@ -9951,19 +9847,19 @@
   "5a8eb023f363e0d8": "Verbinde eine Umgebung, um geplante Aufgaben zu verwalten.",
   "8273d53bd6a6f665": [
     "Nächste Ausführung ",
-    [
-      ["t", "ScheduledRelativeLabel"],
-      ["i", 1]
-    ]
+    {
+      "t": "ScheduledRelativeLabel",
+      "i": 1
+    }
   ],
   "f2a687289f3b3c81": "Zustellungen",
   "b07d394fdeed8b92": [
     "Zustellungen · ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "9bb9879a90bfb76d": "Neueste Anfragen an die Webhook-URL dieser Aufgabe.",
   "53f3f42caf314bb9": "Zustellung wird geladen…",
@@ -10007,11 +9903,11 @@
   "bc714daca44e1826": "Änderungen speichern",
   "787b3fff435313e4": [
     "Anbietervariablen auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " können Werte daraus per Name lesen. Die Werte werden beim Start eines Anbieters mit der op-CLI auf diesem Server gelesen."
   ],
   "daf8daec701f0863": "Konto",
@@ -10034,47 +9930,47 @@
   "40426afd511710f8": "Nicht unterstützter Anbieter ({kind})",
   "fa551327f599487c": [
     "Aktualisiere ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " auf ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     ", um seine Geheimnisanbieter zu verwalten."
   ],
   "13d4f258e93f1dc1": "Verbinde eine Umgebung, um die Geheimnisanbieter zu verwalten, aus denen ihre Anbietervariablen lesen.",
   "88466f5a03be2419": "Umgebungsweite Einstellung. Wähle eine Umgebung, um sie zu ändern.",
   "111a44209dc6e701": "Entfernen",
   "a3538ba5ca802bd7": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " entfernen?"
   ],
   "0d5b3b39f92c04e4": "Anbieter entfernen",
   "c52bdbe39649742c": [
     "Nichts liest aus ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Die Geheimnisse selbst bleiben unberührt."
   ],
   "59c40978bc7c05ad": [
     "Diese lesen aus ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " und werden geleert. Die Geheimnisse selbst bleiben unberührt."
   ],
   "910a79263d640e22": "Erlaubt",
@@ -10349,202 +10245,172 @@
   "7e2dfdd9f97fc027": "Projektbereich",
   "1cf216566c1ee064": "Projekt nicht verfügbar",
   "c1b8c351aa90f319": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 2],
-            ["c", "Einstellungen gelten für"]
-          ],
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": [
+        {
+          "t": "span",
+          "i": 2,
+          "c": "Einstellungen gelten für"
+        },
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ],
-    [
-      ["t", "span"],
-      ["i", 4],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 5],
-            ["c", "auf"]
-          ],
-          [
-            ["i", 6],
-            ["k", "_gt_value_6"],
-            ["v", "v"]
-          ]
-        ]
+    },
+    {
+      "t": "span",
+      "i": 4,
+      "c": [
+        {
+          "t": "span",
+          "i": 5,
+          "c": "auf"
+        },
+        {
+          "i": 6,
+          "k": "_gt_value_6",
+          "v": "v"
+        }
       ]
-    ],
-    [
-      ["t", "span"],
-      ["i", 7],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 8],
-            ["c", "in"]
-          ],
-          [
-            ["i", 9],
-            ["k", "_gt_value_9"],
-            ["v", "v"]
-          ]
-        ]
+    },
+    {
+      "t": "span",
+      "i": 7,
+      "c": [
+        {
+          "t": "span",
+          "i": 8,
+          "c": "in"
+        },
+        {
+          "i": 9,
+          "k": "_gt_value_9",
+          "v": "v"
+        }
       ]
-    ]
+    }
   ],
   "6de8a5700498d20f": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 2],
-            ["c", "Einstellungen gelten für"]
-          ],
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": [
+        {
+          "t": "span",
+          "i": 2,
+          "c": "Einstellungen gelten für"
+        },
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ],
-    [
-      ["t", "span"],
-      ["i", 4],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 5],
-            ["c", "auf"]
-          ],
-          [
-            ["i", 6],
-            ["k", "_gt_value_6"],
-            ["v", "v"]
-          ]
-        ]
+    },
+    {
+      "t": "span",
+      "i": 4,
+      "c": [
+        {
+          "t": "span",
+          "i": 5,
+          "c": "auf"
+        },
+        {
+          "i": 6,
+          "k": "_gt_value_6",
+          "v": "v"
+        }
       ]
-    ]
+    }
   ],
   "fc2262bcc4a2e4f0": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 2],
-            ["c", "Einstellungen gelten für"]
-          ],
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": [
+        {
+          "t": "span",
+          "i": 2,
+          "c": "Einstellungen gelten für"
+        },
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ],
-    [
-      ["t", "span"],
-      ["i", 4],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 5],
-            ["c", "auf"]
-          ],
-          [
-            ["i", 6],
-            ["k", "_gt_value_6"],
-            ["v", "v"]
-          ]
-        ]
+    },
+    {
+      "t": "span",
+      "i": 4,
+      "c": [
+        {
+          "t": "span",
+          "i": 5,
+          "c": "auf"
+        },
+        {
+          "i": 6,
+          "k": "_gt_value_6",
+          "v": "v"
+        }
       ]
-    ],
-    [
-      ["t", "span"],
-      ["i", 7],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 8],
-            ["c", "in"]
-          ],
-          [
-            ["i", 9],
-            ["k", "_gt_value_9"],
-            ["v", "v"]
-          ]
-        ]
+    },
+    {
+      "t": "span",
+      "i": 7,
+      "c": [
+        {
+          "t": "span",
+          "i": 8,
+          "c": "in"
+        },
+        {
+          "i": 9,
+          "k": "_gt_value_9",
+          "v": "v"
+        }
       ]
-    ]
+    }
   ],
   "86d52b318b1a3e7a": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 2],
-            ["c", "Einstellungen gelten für"]
-          ],
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": [
+        {
+          "t": "span",
+          "i": 2,
+          "c": "Einstellungen gelten für"
+        },
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ],
-    [
-      ["t", "span"],
-      ["i", 4],
-      [
-        "c",
-        [
-          [
-            ["t", "span"],
-            ["i", 5],
-            ["c", "auf"]
-          ],
-          [
-            ["i", 6],
-            ["k", "_gt_value_6"],
-            ["v", "v"]
-          ]
-        ]
+    },
+    {
+      "t": "span",
+      "i": 4,
+      "c": [
+        {
+          "t": "span",
+          "i": 5,
+          "c": "auf"
+        },
+        {
+          "i": 6,
+          "k": "_gt_value_6",
+          "v": "v"
+        }
       ]
-    ]
+    }
   ],
   "a8c2b705bbb43a80": "Keine Treffer gefunden.",
   "425f7ce2f24cb248": "Einstellungsbereiche",
@@ -10570,49 +10436,49 @@
   "421783b2de6419f4": [
     "Leiht, steuert und streamt Geräte. Erstelle eines pro Umgebung mit",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      ["c", "simlock --gateway token create --role agent"]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": "simlock --gateway token create --role agent"
+    },
     " oder lass es leer, um es später hinzuzufügen. Ein leeres Token verwendet das",
     " ",
-    [
-      ["t", "code"],
-      ["i", 2],
-      ["c", "AGENT_DEVICE_DAEMON_AUTH_TOKEN"]
-    ],
+    {
+      "t": "code",
+      "i": 2,
+      "c": "AGENT_DEVICE_DAEMON_AUTH_TOKEN"
+    },
     " des Rechners, wenn dessen",
     " ",
-    [
-      ["t", "code"],
-      ["i", 3],
-      ["c", "AGENT_DEVICE_DAEMON_BASE_URL"]
-    ],
+    {
+      "t": "code",
+      "i": 3,
+      "c": "AGENT_DEVICE_DAEMON_BASE_URL"
+    },
     " dieses Gateway ist."
   ],
   "74f3dd9df612bf6b": [
     "Leiht, steuert und streamt Geräte. Erstelle eines mit",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      ["c", "simlock --gateway token create --role agent"]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": "simlock --gateway token create --role agent"
+    },
     " oder lass es leer, um es später hinzuzufügen. Ein leeres Token verwendet das",
     " ",
-    [
-      ["t", "code"],
-      ["i", 2],
-      ["c", "AGENT_DEVICE_DAEMON_AUTH_TOKEN"]
-    ],
+    {
+      "t": "code",
+      "i": 2,
+      "c": "AGENT_DEVICE_DAEMON_AUTH_TOKEN"
+    },
     " des Rechners, wenn dessen",
     " ",
-    [
-      ["t", "code"],
-      ["i", 3],
-      ["c", "AGENT_DEVICE_DAEMON_BASE_URL"]
-    ],
+    {
+      "t": "code",
+      "i": 3,
+      "c": "AGENT_DEVICE_DAEMON_BASE_URL"
+    },
     " dieses Gateway ist."
   ],
   "d6152c288ef31ce7": "Snapshots werden geprüft…",
@@ -10677,11 +10543,11 @@
   "b5f3ce16ca9e62f8": "Berechtigungen für Tastenkürzel",
   "b8366d1d16d38d54": [
     "Whoosh ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      ["c", "(Standard)"]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": "(Standard)"
+    }
   ],
   "53a960b81e52d6d6": "Zugriff kann weiterhin nicht geprüft werden. Unter „Erweitert“ findest du Hilfe.",
   "0049f99dadc28047": "Bereit. Du wählst jedes Mal ein Fenster.",
@@ -10747,11 +10613,11 @@
   "435b1ca4e061c17d": "Dieser Schritt konnte nicht abgeschlossen werden. Versuch es erneut oder sieh unter „Erweitert“ nach Hilfe.",
   "0596114a5b979419": [
     "In ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " enthalten. Kein Download nötig."
   ],
   "e67452f247cc5272": "Erweiterung deaktivieren",
@@ -10780,11 +10646,11 @@
   "61c679fe5bf0e3ee": "Option hinzufügen",
   "2dcb34eb2856dca0": [
     "Bis zu ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " Optionen"
   ],
   "5a15598cf35f21d5": "Ausgeblendetes Konto",
@@ -10796,131 +10662,119 @@
   "01bc6ecd8046472b": [
     "Melde dich mit",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "auf dem Server-Host an und scanne dann erneut, um hier Konten auszuwählen."
   ],
   "e16fcb963aa57134": [
     "Wähle, welche",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     "-",
     "Anmeldung jeder ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     "-Host verwendet, oder schalte einen Host aus."
   ],
   "9e8b725de0072098": "Angemeldet als",
   "25d2d58cd2a8f103": [
     "Aktives ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Konto (",
-    [
-      ["t", "RedactedLogin"],
-      ["i", 2]
-    ],
+    {
+      "t": "RedactedLogin",
+      "i": 2
+    },
     ")"
   ],
   "5047a415b9380805": [
     "Aktives ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Konto"
   ],
   "5274057e57269312": [
     "Die gewählte Anmeldung ist nicht mehr angemeldet, daher wird die aktive ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-",
     "Anmeldung verwendet."
   ],
   "6e72b298ef439944": "Aktive Anmeldung verwenden",
   "720ad3bcd44f1740": [
-    [
-      ["t", "RedactedLogin"],
-      ["i", 1]
-    ],
+    {
+      "t": "RedactedLogin",
+      "i": 1
+    },
     " ",
-    [
-      ["t", "span"],
-      ["i", 2],
-      [
-        "c",
-        [
-          "kann nicht verwendet werden: ",
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "t": "span",
+      "i": 2,
+      "c": [
+        "kann nicht verwendet werden: ",
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ]
+    }
   ],
   "4a95a2620a1e282c": [
-    [
-      ["t", "RedactedLogin"],
-      ["i", 1]
-    ],
+    {
+      "t": "RedactedLogin",
+      "i": 1
+    },
     " ",
-    [
-      ["t", "span"],
-      ["i", 2],
-      [
-        "c",
-        [
-          "kann nicht verwendet werden: ",
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ],
-          " meldet dieses Login als ungültig."
-        ]
+    {
+      "t": "span",
+      "i": 2,
+      "c": [
+        "kann nicht verwendet werden: ",
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        },
+        " meldet dieses Login als ungültig."
       ]
-    ]
+    }
   ],
   "216ea20c7b110871": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ist auf dem Server gesetzt und überschreibt daher das hier gewählte Konto, bis es entfernt wird."
   ],
   "b53527a02b031077": "Die Zwischenablage-API ist beim Kopieren des Anmeldecodes nicht verfügbar.",
@@ -10935,19 +10789,19 @@
   "e860c536bb9cad2d": "Mit GitHub anmelden",
   "c97e21dd6897fa79": [
     "Angemeldet als",
-    [
-      ["t", "RedactedSensitiveText"],
-      ["i", 1]
-    ]
+    {
+      "t": "RedactedSensitiveText",
+      "i": 1
+    }
   ],
   "a9d6996c73500a5c": "Code kopieren & GitHub öffnen",
   "4b4a237faa5c3ded": [
     "Warte auf Genehmigung · Code läuft um ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ab"
   ],
   "795283fe03fcfac4": "Erreicht Repositorys in Konten und Organisationen, die die App installiert haben.",
@@ -10967,76 +10821,73 @@
   "3bd42b40bd62ca11": "Versionskontrollanbieter",
   "d6738114d4de6d92": [
     "Unterstützung für ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " kommt bald."
   ],
   "babdf7cafe2344e4": [
     "Auf diesem Server nicht verfügbar: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "3d084099adaeed61": "Authentifiziert",
   "3dbd16ab0f7ba2b3": [
     "Verfügbar. ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "1bbe294e31d1e6e8": [
     "Jeder ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "-Host ist ausgeschaltet."
   ],
   "856bf9625cba9748": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ist auf diesem Server nicht authentifiziert. Melde dich an oder konfiguriere Anmeldedaten mit dem Tool",
     " ",
-    [
-      ["t", "code"],
-      ["i", 2],
-      [
-        "c",
-        [
-          ["i", 3],
-          ["k", "_gt_value_3"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
     " ",
     "auf dem Server-Host, um Funktionen für Änderungsanfragen zu aktivieren."
   ],
   "5d1b37511b9e6b18": [
     "Could not verify ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ".",
     " ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "64481e76ed30c67f": "Verfügbar",
   "59045f37c3c67266": "Demnächst",
@@ -11052,53 +10903,47 @@
   "36c33a32cfe8dc68": [
     "Ein hier gespeichertes Token wird vor",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "und der",
     " ",
-    [
-      ["t", "code"],
-      ["i", 3],
-      [
-        "c",
-        [
-          ["i", 4],
-          ["k", "_gt_value_4"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "code",
+      "i": 3,
+      "c": {
+        "i": 4,
+        "k": "_gt_value_4",
+        "v": "v"
+      }
+    },
     "-",
     "Anmeldung verwendet, sodass ",
-    [
-      ["i", 5],
-      ["k", "_gt_value_5"],
-      ["v", "v"]
-    ],
+    {
+      "i": 5,
+      "k": "_gt_value_5",
+      "v": "v"
+    },
     " ohne",
     " ",
-    [
-      ["i", 6],
-      ["k", "_gt_value_6"],
-      ["v", "v"]
-    ],
+    {
+      "i": 6,
+      "k": "_gt_value_6",
+      "v": "v"
+    },
     " funktioniert. Gib ihm ",
-    [
-      ["i", 7],
-      ["k", "_gt_value_7"],
-      ["v", "v"]
-    ],
+    {
+      "i": 7,
+      "k": "_gt_value_7",
+      "v": "v"
+    },
     "."
   ],
   "c3b322e041dd88da": "Token erstellen",
@@ -11141,40 +10986,37 @@
   "2a1b110f3ff0e966": "Transkriptionssprache",
   "431f261556bd1db8": "Automatisch",
   "acfbe083349fe87a": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ":",
     " ",
-    [
-      ["t", "strong"],
-      ["i", 2],
-      [
-        "c",
-        [
-          ["i", 3],
-          ["k", "_gt_value_3"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "strong",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
     " ",
     "(",
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ],
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    },
     " % Fehler)"
   ],
   "5abc5b5c6a125b61": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ": kein Benchmark"
   ],
   "a9d4380a5bd24f74": "Geschwindigkeit: Server für diesen Benchmark aktualisieren",
@@ -11182,21 +11024,18 @@
   "66155c4050c90867": [
     "Geschwindigkeit:",
     " ",
-    [
-      ["t", "strong"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["i", 2],
-            ["k", "_gt_value_2"],
-            ["v", "v"]
-          ],
-          " s"
-        ]
+    {
+      "t": "strong",
+      "i": 1,
+      "c": [
+        {
+          "i": 2,
+          "k": "_gt_value_2",
+          "v": "v"
+        },
+        " s"
       ]
-    ],
+    },
     " ",
     "/ 30 s"
   ],
@@ -11262,11 +11101,11 @@
   "de770505be25f1ff": "Ordner",
   "ada7b9a4d96959d2": "Thread",
   "ceab58aa6cb191f3": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ": Nichts musste bereinigt werden."
   ],
   "9e2be427e443b069": "Übernehmen",
@@ -11294,41 +11133,35 @@
   "f7c3ae7a79ede728": "Testen",
   "b93d2ec53e944576": [
     "Aktiv: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " aus",
     " ",
-    [
-      ["t", "code"],
-      ["i", 2],
-      [
-        "c",
-        [
-          ["i", 3],
-          ["k", "_gt_value_3"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "code",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    }
   ],
   "ae9958ee0d8ed8e8": [
     "Laufend: Deaktiviert über",
     " ",
-    [
-      ["t", "code"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "code",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "97585565390197f6": "Verwerfen",
   "c0fce4a3555c5c17": "Verbinden",
@@ -11357,32 +11190,32 @@
   "6ea933f0a2f54eea": "Generator hinzufügen",
   "c38a2b82dbc18e94": "Modelle anzeigen",
   "64ef6f9ef3517980": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
     "entfernen?"
   ],
   "25cda5585875c18a": [
     "Dadurch wird der auf ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " gespeicherte API-Schlüssel gelöscht. Alles, was diesen Generator verwendet, greift auf das Modell für Textgenerierung zurück."
   ],
   "2e487089c231536b": "Dienst",
   "c732b08a5fa8c3d7": "Basis-URL",
   "3953d1cccd71ab7e": "Name (optional)",
   "304d6712ac5d3a89": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " hat geantwortet. Es funktioniert."
   ],
   "74718b8533319acb": "Folgt dem Modell für Textgenerierung",
@@ -11415,17 +11248,17 @@
   "d598fbc869d6c293": "Tab springt zum nächsten Bedienelement.",
   "3a4e3ff836d14019": [
     "Z. ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ", Sp. ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "5f5669d347691db4": "CSS leeren",
   "ceaab5ad13352a6f": "Dein Design konnte nicht gespeichert werden",
@@ -11544,11 +11377,11 @@
   "527534aec969c018": "Keine unterstützten Open-Source-Designs gefunden",
   "32e9e3ecd209aad2": [
     "„",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "“ aktualisieren?"
   ],
   "85aedcd69539b7b2": "Dadurch werden die installierten Varianten ersetzt, einschließlich lokaler Änderungen. Varianten, die nicht mehr in der Erweiterung enthalten sind, werden entfernt.",
@@ -11599,17 +11432,17 @@
   "662288b90e19635f": "Thread-Details auf Standard zurücksetzen",
   "871d059d88548434": "Thread-Details: {enabled} von {total} an",
   "cec1fbb8b4c9180d": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " von ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " an"
   ],
   "42d843f45e1de53b": "Wird an den Prompt für neue und neu generierte Thread-Titel angehängt.",
@@ -11652,11 +11485,11 @@
   "13ac42dfcb138399": "Zu {label} wechseln",
   "8260b80501b07b13": [
     "Zu ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " wechseln"
   ],
   "f54364b854a07918": "Keine Hubs konfiguriert.",
@@ -11785,11 +11618,11 @@
   "4f6141a8af8dc570": "Die Phrase, die du sagst, um einen Fehler zu korrigieren, etwa „streich das“.",
   "f7158c1af1da3afb": [
     "Deine Datei unter ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " wird verwendet"
   ],
   "bff944189ba9c100": "Herunterladen",
@@ -11811,11 +11644,11 @@
   "23196cabaa71f1da": "In einer Umgebung",
   "3ba49a214600d0ac": [
     "Cloud über ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "625f25278bc683ba": "Gewählte Umgebung (nicht verfügbar)",
   "e69e34d4f44d4136": "Integriert",
@@ -12032,7 +11865,6 @@
   "34d74827c2a8b009": "enter return befehl strg ctrl mehrzeilig prompt neue zeile eingabefeld",
   "9d1013084c46ecce": "warteschlange einreihen umlenken laufende runde senden standardverhalten eingabefeld",
   "e5e7f5e1fb1f2e4c": "subagent nebenchat verknüpfter thread klick rechte leiste seitenleiste hauptansicht befehl strg mittelklick",
-  "5b8b854de7ee6f4d": "installierte cli versionen neuer verfügbar codex claude cursor grok fx kiro opencode",
   "64f12530d55d2ad1": "fortsetzen laufende aktive unterbrochene arbeit neustart rechner absturz desktop update automatisch",
   "214a98497c4ed05d": "caffeinate ruhezustand verhindern wach bleiben energie laptop deckel inhibit",
   "00469926c7027e2d": "ausgewogen leistung akku sparen erweitert git fetch anbieter zustand aktualisieren host energie überwachen inaktiv richtlinie",
@@ -12208,11 +12040,11 @@
   "aca5896600bf173e": "Du hast gerade einen anderen Branch ausgecheckt.",
   "f665b5be60d8c144": [
     "Übergeben von ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "4b53176b7af3d87a": "Thread zurückstellen",
   "9f20632581a1de90": "Anheften",
@@ -12256,11 +12088,11 @@
   "bf9b64067962d8fa": "Was ist neu",
   "f2558154d4c241ee": [
     "Änderungen in ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "e7f35f60e6229cf5": "Desktop-App",
   "77be1b7e2a1d3d31": "{count, plural, one {{count} Rechner aktualisieren?} other {{count} Rechner aktualisieren?}}",
@@ -12386,18 +12218,15 @@
   "8b7b761c81db9e5c": [
     "Premium",
     " ",
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ]
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
   ],
   "b93dc3faeb8d9b2e": "{label} ({shortcut})",
   "71efdf870da332e8": "{start} bis {end}",
@@ -12442,11 +12271,11 @@
   "26f2732fd6317056": [
     "Die API-Schätzung schließt",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " Einträge ohne Preis aus."
   ],
   "6753deea17e91bf5": "Geteilte ChatGPT-Nutzung",
@@ -12503,11 +12332,11 @@
   "cb4c62402fe1409a": "Automatische Preise nach dem Speichern",
   "8157cac6d08126b7": [
     "Gezählt als ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "435dd01dc4455e95": "Verarbeitete Tokens pro Stunde nach Anbieter",
   "37069a5ef57ee9fa": "Kosten pro Stunde nach Anbieter",
@@ -12618,39 +12447,36 @@
   "c55ca84447d16b92": "Frag den Agenten zu diesen Zeilen…",
   "dd4d954561a97a95": "Agenten fragen",
   "150a57dcd79b7ff4": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " wird geladen..."
   ],
   "e2e683ba0b4fa1a6": [
-    [
-      ["t", "span"],
-      ["i", 1],
-      [
-        "c",
-        [
-          ["i", 2],
-          ["k", "_gt_value_2"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
     " ",
     "Zeilen ",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     "-",
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ],
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    },
     " sind nicht im geladenen Diff."
   ],
   "400e883fd0e1a9b6": "In Code öffnen",
@@ -12674,36 +12500,36 @@
   "7f374cd57f92706d": "Agenten fragen: ",
   "0a94b4b3f28dc66f": [
     "Halt ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " von ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "8a79c29136eccfc5": "Fragen zum Nachdenken",
   "ece7c08d198323df": "Zu diesem Halt fragen",
   "f73ebbb67abc9f7b": [
     "Weiter: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "dc51df37e4ab575c": "Review abschließen",
   "15672ff2f044d23a": [
     "Der Diff konnte nicht geladen werden, daher fehlen Auszüge: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "b30e4bab74bac872": "Diese Änderung hat keine Dateien für eine Tour.",
   "27d76249d09eb69f": "Review-Leitfaden bereit",

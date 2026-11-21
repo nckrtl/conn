@@ -265,7 +265,9 @@
     "AudioLines": "audio-lines",
     "MailOpen": "mail-open",
     "Hash": "hash",
-    "ClipboardPaste": "paste"
+    "ClipboardPaste": "paste",
+    "ClipboardCopy": "copy",
+    "Cable": "plug"
   },
   "sf": {
     "xmark": "close",

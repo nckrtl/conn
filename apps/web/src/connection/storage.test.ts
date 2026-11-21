@@ -1,9 +1,16 @@
 import {
+  BearerConnectionTarget,
+  BearerConnectionCredential,
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { ConnectionCatalogDocument, Persistence } from "@t3tools/client-runtime/platform";
+import {
+  ConnectionCatalogDocument,
+  Persistence,
+  recoverProvisionalPairings,
+  settleProvisionalPairingInCatalog,
+} from "@t3tools/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -45,6 +52,57 @@ describe("ConnectionStorage.makeCatalogStore", () => {
       expect(quarantined).toEqual(["{not-json"]);
       expect(writes).toHaveLength(1);
       expect(decodeCatalog(writes[0]!)).toEqual(emptyCatalog);
+    }),
+  );
+
+  it.effect("replays a failed desktop cleanup against the latest catalog from another window", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("clone");
+      const provisional = new BearerConnectionTarget({
+        environmentId,
+        label: "provisional",
+        connectionId: "route",
+        provisionalPairingId: "install",
+      });
+      const replacement = new BearerConnectionTarget({
+        environmentId,
+        label: "independent",
+        connectionId: "route",
+      });
+      const credential = new BearerConnectionCredential({ token: "stored-session" });
+      let raw = encodeCatalog({
+        ...emptyCatalog,
+        targets: [provisional],
+        credentials: [{ connectionId: "route", credential, provisionalPairingId: "install" }],
+      });
+      let fail = true;
+      const backend: ConnectionStorage.CatalogBackend = {
+        sharedAcrossWindows: true,
+        read: Effect.sync(() => raw),
+        write: (next) =>
+          Effect.suspend(() =>
+            fail
+              ? Effect.fail(
+                  new ConnectionTransientError({ reason: "remote-unavailable", detail: "disk" }),
+                )
+              : Effect.sync(() => {
+                  raw = next;
+                }),
+          ),
+      };
+      const old = yield* ConnectionStorage.makeCatalogStore(backend);
+      const restarted = yield* ConnectionStorage.makeCatalogStore(backend);
+      expect((yield* restarted.read).targets).toEqual([provisional]);
+      yield* old
+        .update((doc) => settleProvisionalPairingInCatalog(doc, "install", false))
+        .pipe(Effect.flip);
+      fail = false;
+      const otherWindow = yield* ConnectionStorage.makeCatalogStore(backend);
+      // A new route was saved independently. The orphan credential is still tagged by the old write.
+      yield* otherWindow.update((doc) => ({ ...doc, targets: [replacement] }));
+      yield* recoverProvisionalPairings(restarted);
+      expect(decodeCatalog(raw).targets).toEqual([replacement]);
+      expect(decodeCatalog(raw).credentials).toEqual([]);
     }),
   );
 

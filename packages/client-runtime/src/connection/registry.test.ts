@@ -221,7 +221,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         );
         switch (registration._tag) {
           case "RelayConnectionRegistration":
-            return;
+            return true;
           case "BearerConnectionRegistration":
           case "SshConnectionRegistration":
             yield* Ref.update(storedProfiles, (current) => {
@@ -234,9 +234,10 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
               next.set(registration.target.connectionId, registration.credential);
               return next;
             });
-            return;
+            return true;
         }
       }),
+    settleProvisionalPairing: () => Effect.die("Unexpected provisional pairing"),
     setRoutes: (environmentId, routes) =>
       Ref.update(storedTargets, (current) => replaceRoutes(current, environmentId, routes)),
     remove: (environmentId) =>

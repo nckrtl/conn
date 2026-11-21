@@ -6,6 +6,8 @@ import { AsyncResult, Atom } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
+import { connectionRoutes, entryWithRoutes } from "../connection/routes.ts";
+import { provisionalPairingId } from "../platform/storageDocument.ts";
 import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
 import type { ParkReason } from "../connection/parking.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
@@ -36,24 +38,21 @@ export function* enabledEnvironmentIds(
   }
 }
 
-/**
- * Conn: the catalog without the given environments, for lists. Reserved Orbit clones stay
- * connected but no list shows them until they are finalized.
- */
-export function catalogWithoutEnvironments(
-  catalogAtom: Atom.Atom<EnvironmentCatalogState>,
-  hiddenAtom: Atom.Atom<ReadonlyArray<string>>,
-): Atom.Atom<EnvironmentCatalogState> {
+/** A provisional route can connect in the background but is not shown until it is promoted. */
+export function visibleConnectionCatalog(catalogAtom: Atom.Atom<EnvironmentCatalogState>) {
   return Atom.make((get) => {
     const catalog = get(catalogAtom);
-    const hidden = new Set(get(hiddenAtom));
-    if (hidden.size === 0 || ![...catalog.entries.keys()].some((id) => hidden.has(id))) {
-      return catalog;
+    const entries = new Map(catalog.entries);
+    let changed = false;
+    for (const [id, entry] of catalog.entries) {
+      const routes = connectionRoutes(entry);
+      const visible = routes.filter(({ target }) => provisionalPairingId(target) === undefined);
+      if (visible.length === routes.length) continue;
+      changed = true;
+      if (visible.length === 0) entries.delete(id);
+      else entries.set(id, entryWithRoutes(entry, visible));
     }
-    return {
-      isReady: catalog.isReady,
-      entries: new Map([...catalog.entries].filter(([id]) => !hidden.has(id))),
-    };
+    return changed ? { ...catalog, entries } : catalog;
   }).pipe(Atom.withLabel("environment-catalog-visible"));
 }
 
@@ -165,6 +164,21 @@ export function createEnvironmentCatalogAtoms<R, E>(
         Effect.flatMap((registry) => registry.remove(environmentId)),
       ),
   });
+  const settleProvisionalPairing = createRuntimeCommand(runtime, {
+    label: "environment-catalog:settle-provisional-pairing",
+    scheduler: commandScheduler,
+    concurrency: serial,
+    execute: (input: {
+      readonly environmentId: EnvironmentIdType;
+      readonly installId: string;
+      readonly keep: boolean;
+    }) =>
+      EnvironmentRegistry.EnvironmentRegistry.pipe(
+        Effect.flatMap((registry) =>
+          registry.settleProvisionalPairing(input.environmentId, input.installId, input.keep),
+        ),
+      ),
+  });
   const removeRelayEnvironments = createRuntimeCommand(runtime, {
     label: "environment-catalog:remove-relay-environments",
     scheduler: commandScheduler,
@@ -264,6 +278,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
     sessionGenerationAtom,
     register,
     remove,
+    settleProvisionalPairing,
     removeRoute,
     reorderRoutes,
     removeRelayEnvironments,

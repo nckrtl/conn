@@ -77,11 +77,15 @@ const ports: MobileOrbitThreadStartPorts = {
       .entries.has(EnvironmentId.make(environmentId)),
   reservationPairing: orbitReservations,
   waitForReservationPairing: orbitReservations.waitForPairing,
-  connect: async (environmentId, pairingUrl) => {
+  connect: async (environmentId, pairingUrl, installId) => {
     const result = await runAtomCommand(
       appAtomRegistry,
       connectPairingUrl,
-      { pairingUrl, expectedEnvironmentId: EnvironmentId.make(environmentId) },
+      {
+        pairingUrl,
+        expectedEnvironmentId: EnvironmentId.make(environmentId),
+        ...(installId === undefined ? {} : { provisionalPairingId: installId }),
+      },
       { reportFailure: false, reportDefect: false },
     );
     if (result._tag !== "Success") {
@@ -90,7 +94,7 @@ const ports: MobileOrbitThreadStartPorts = {
         `Could not pair with the clone: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    await recordOrbitThreadStartPaired(environmentId);
+    if (installId === undefined) await recordOrbitThreadStartPaired(environmentId);
   },
   firstMessage: {
     waitForClone: async (environmentId) => {

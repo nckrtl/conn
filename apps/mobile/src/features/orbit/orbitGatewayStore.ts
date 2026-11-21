@@ -34,7 +34,6 @@ import { useEffect, useSyncExternalStore } from "react";
 import { AppState } from "react-native";
 
 import { environmentCatalog } from "../../connection/catalog";
-import { noteOrbitReservedEnvironments } from "./orbitReservedRows";
 import { connectPairingUrl } from "../../connection/onboarding";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentSession, readEnvironmentLacksScope } from "../../state/session";
@@ -254,10 +253,6 @@ const refusalWatch = createCredentialRefusalWatch({
 export async function recordOrbitThreadStartPaired(environmentId: string): Promise<void> {
   // The server is saved already; a lost record only means a later sync re-checks it.
   await updateEnvironmentState((current) => recordPaired(current, environmentId)).catch(() => {});
-}
-
-export async function forgetOrbitThreadStartPaired(environmentId: string): Promise<void> {
-  await updateEnvironmentState((current) => forgetOrbitEnvironment(current, environmentId));
 }
 
 /**
@@ -539,7 +534,6 @@ export function refreshOrbitGateway(): Promise<void> {
         // Conn: reserved clones stay out of every list; the reconcile still sees them.
         environments: visibleOrbitEnvironments(environments),
       });
-      noteOrbitReservedEnvironments(environments);
       await reconcileEnvironments(environments);
     } catch (error) {
       listError = message(error);

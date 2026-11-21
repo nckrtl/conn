@@ -119,7 +119,9 @@ export const make = Effect.fn("mobile.connectionStorage.makeCatalogStore")(funct
     function* (transform) {
       yield* lock.withPermits(1)(
         Effect.gen(function* () {
-          const next = transform(yield* loadUnlocked());
+          const current = yield* loadUnlocked();
+          const next = transform(current);
+          if (next === current) return;
           const encoded = yield* encodeCatalog(next);
           yield* setItem(CONNECTION_CATALOG_KEY, encoded);
           yield* Ref.set(state, Option.some(next));

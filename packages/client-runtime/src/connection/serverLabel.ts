@@ -29,7 +29,13 @@ export function withTargetLabel(
         wsBaseUrl: target.wsBaseUrl,
       });
     case "BearerConnectionTarget":
-      return new BearerConnectionTarget({ ...named, connectionId: target.connectionId });
+      return new BearerConnectionTarget({
+        ...named,
+        connectionId: target.connectionId,
+        ...(target.provisionalPairingId === undefined
+          ? {}
+          : { provisionalPairingId: target.provisionalPairingId }),
+      });
     case "RelayConnectionTarget":
       return new RelayConnectionTarget(named);
     case "SshConnectionTarget":

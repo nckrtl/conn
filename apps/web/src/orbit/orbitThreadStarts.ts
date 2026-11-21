@@ -181,11 +181,19 @@ export function isOrbitServerSaved(environmentId: string): boolean {
 }
 
 /** Opens a clone's one-time pairing link and saves its server. */
-export async function connectOrbitClone(environmentId: string, pairingUrl: string): Promise<void> {
+export async function connectOrbitClone(
+  environmentId: string,
+  pairingUrl: string,
+  installId?: string,
+): Promise<void> {
   const result = await runAtomCommand(
     appAtomRegistry,
     connectPairing,
-    { pairingUrl, expectedEnvironmentId: EnvironmentId.make(environmentId) },
+    {
+      pairingUrl,
+      expectedEnvironmentId: EnvironmentId.make(environmentId),
+      ...(installId === undefined ? {} : { provisionalPairingId: installId }),
+    },
     { reportFailure: false, reportDefect: false },
   );
   if (result._tag === "Failure") {
@@ -194,7 +202,7 @@ export async function connectOrbitClone(environmentId: string, pairingUrl: strin
       `Could not pair with the clone: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  recordOrbitPaired(environmentId);
+  if (installId === undefined) recordOrbitPaired(environmentId);
 }
 
 /** The clone's workspace project and its server's default model, once both loaded. */

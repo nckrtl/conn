@@ -1,4 +1,21 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
+
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import { EnvironmentId } from "@t3tools/contracts";
+import { BearerConnectionTarget } from "../connection/model.ts";
+import {
+  BearerConnectionCredential,
+  BearerConnectionProfile,
+  BearerConnectionRegistration,
+} from "../connection/catalog.ts";
+import {
+  ConnectionCatalogDocument,
+  EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  recoverProvisionalPairings,
+  registerConnectionInCatalog,
+  settleProvisionalPairingInCatalog,
+} from "../platform/storageDocument.ts";
 
 import {
   OrbitGatewayError,
@@ -78,8 +95,8 @@ function harness(
     reads?: Array<OrbitGatewayReservation | Error>;
     read?: (id: string) => Promise<OrbitGatewayReservation>;
     connect?: (environmentId: string, pairingUrl: string) => Promise<void>;
-    forget?: (environmentId: string) => Promise<void> | void;
-    hideForTakenStart?: (reservationId: string, environmentId: string) => boolean;
+    forget?: (environmentId: string, installId: string) => Promise<void> | void;
+    hasTakenStart?: (reservationId: string, environmentId: string) => boolean;
     reserve?: (projectId: number) => Promise<OrbitGatewayReservation>;
     saved?: (environmentId: string) => boolean;
     stored?: string[];
@@ -123,11 +140,12 @@ function harness(
       calls.push(`connect ${environmentId}`);
       await options.connect?.(environmentId, pairingUrl);
     },
-    ...(options.hideForTakenStart ? { hideForTakenStart: options.hideForTakenStart } : {}),
-    forget: (environmentId) => {
+    ...(options.hasTakenStart ? { hasTakenStart: options.hasTakenStart } : {}),
+    forget: (environmentId, installId) => {
       calls.push(`forget ${environmentId}`);
-      return options.forget?.(environmentId);
+      return options.forget?.(environmentId, installId);
     },
+    promote: () => {},
     load: () => stored,
     store: (ids) => {
       stored = ids;
@@ -313,6 +331,118 @@ describe("createOrbitReservations", () => {
     expect(calls).toEqual(["reserve 78", "read r78", "release r78"]);
   });
 
+  function pairingCatalog() {
+    const environmentId = EnvironmentId.make("env-r1");
+    const json = Schema.fromJsonString(ConnectionCatalogDocument);
+    const decode = Schema.decodeUnknownSync(json);
+    const encode = Schema.encodeSync(json);
+    let durable = encode(EMPTY_CONNECTION_CATALOG_DOCUMENT);
+    const read = () => decode(durable);
+    const update = (transform: (doc: ConnectionCatalogDocument) => ConnectionCatalogDocument) => {
+      durable = encode(transform(read()));
+    };
+    return {
+      read,
+      update,
+      save(label: string, installId?: string) {
+        const connectionId = installId ? `bearer:orbit-reservation:${installId}` : "independent";
+        update((doc) =>
+          registerConnectionInCatalog(
+            doc,
+            new BearerConnectionRegistration({
+              target: new BearerConnectionTarget({
+                connectionId,
+                environmentId,
+                label,
+                ...(installId === undefined ? {} : { provisionalPairingId: installId }),
+              }),
+              profile: new BearerConnectionProfile({
+                connectionId,
+                environmentId,
+                label,
+                httpBaseUrl: "https://clone.test",
+                wsBaseUrl: "wss://clone.test",
+              }),
+              credential: new BearerConnectionCredential({ token: label }),
+            }),
+          ),
+        );
+      },
+      forget(installId: string) {
+        update((doc) => settleProvisionalPairingInCatalog(doc, installId, false));
+      },
+      saved: (id: string) => read().targets.some((target) => target.environmentId === id),
+    };
+  }
+
+  it("preserves an independent save while a dismissed install fails before writing", async () => {
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const catalog = pairingCatalog();
+    const { reservations } = harness({
+      saved: catalog.saved,
+      forget: (_id, installId) => catalog.forget(installId),
+    });
+    const installing = reservations.installPairing("r1", "env-r1", async () => {
+      started.resolve();
+      await finish.promise;
+      throw new Error("Onboarding failed before saving");
+    });
+    await started.promise;
+    catalog.save("independent");
+    const independent = catalog.read();
+    const dismissing = reservations.abandon("r1");
+    finish.resolve();
+    await Promise.allSettled([installing, dismissing]);
+    expect(catalog.read()).toEqual(independent);
+  });
+
+  it("preserves an independent replacement written before a cleanup retry", async () => {
+    const catalog = pairingCatalog();
+    let fail = true;
+    const { reservations, clock } = harness({
+      saved: catalog.saved,
+      forget: (_id, installId) => {
+        if (fail) throw new Error("Catalog storage unavailable");
+        catalog.forget(installId);
+      },
+    });
+    await reservations.installPairing("r1", "env-r1", async (installId) => {
+      catalog.save("provisional", installId);
+    });
+    await reservations.abandon("r1");
+    catalog.save("replacement");
+    const replacement = catalog.read();
+    fail = false;
+    await clock.tick();
+    expect(catalog.read()).toEqual(replacement);
+    expect(reservations.hiddenEnvironmentIds().size).toBe(0);
+  });
+
+  it.effect("replays pending pairing removal after restart", () =>
+    Effect.gen(function* () {
+      const catalog = pairingCatalog();
+      const old = harness({
+        saved: catalog.saved,
+        forget: () => {
+          throw new Error("Catalog storage unavailable");
+        },
+      });
+      yield* Effect.promise(() =>
+        old.reservations.installPairing("r1", "env-r1", async (installId) => {
+          catalog.save("provisional", installId);
+        }),
+      );
+      yield* Effect.promise(() => old.reservations.abandon("r1"));
+      expect(catalog.read().credentials).toHaveLength(1);
+      yield* recoverProvisionalPairings({
+        read: Effect.sync(catalog.read),
+        update: (transform) => Effect.sync(() => catalog.update(transform)),
+      });
+      expect(catalog.read()).toEqual(EMPTY_CONNECTION_CATALOG_DOCUMENT);
+    }),
+  );
+
   it("keeps failed cleanup hidden and shares a retry between repeat requests", async () => {
     const removal = Promise.withResolvers<void>();
     let attempts = 0;
@@ -358,6 +488,7 @@ describe("createOrbitReservations", () => {
       forget: (environmentId) => {
         calls.push(`forget ${environmentId}`);
       },
+      promote: () => {},
       load: () => [],
       store: () => {},
       newKey: () => "key",
@@ -688,7 +819,7 @@ describe("runOrbitThreadStart with a reservation", () => {
     const draft = harness({
       reserve: async () => reservation("r1", "preparing"),
       read: () => read.promise,
-      hideForTakenStart: (_id, environmentId) => {
+      hasTakenStart: (_id, environmentId) => {
         hidden = environmentId;
         return true;
       },
@@ -799,7 +930,7 @@ describe("runOrbitThreadStart with a reservation", () => {
           sample();
         },
         saved: (id) => saved.has(id),
-        hideForTakenStart: (_id, env) => {
+        hasTakenStart: (_id, env) => {
           if (dismissed) return false;
           hiddenByStart = env;
           sample();

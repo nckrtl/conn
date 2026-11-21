@@ -46,7 +46,6 @@ import { environmentSession, readEnvironmentLacksScope } from "../state/session"
 import { observeOrbitInstancePower } from "./orbitInstanceSleep";
 import { rememberedCloneEnvironmentIds } from "./cloneWorkspaceRefs";
 import { dropOrbitInstanceStarts, heldOrbitInstanceIds } from "./orbitThreadStartStore";
-import { noteOrbitReservedEnvironments } from "./orbitReservedEnvironments";
 
 const PROVIDER_STORAGE_KEY = "t3code:environment-provider:v1";
 const STATE_STORAGE_KEY = "t3code:orbit-environments:v1";
@@ -389,7 +388,6 @@ export async function reconcileEnvironmentProvider(
   const { provider, state } = useEnvironmentProvider.getState();
   const orbit = provider === "orbit" ? await client.environments() : null;
   // Conn: reserved clones stay out of every list until finalized; the plan below still sees them.
-  noteOrbitReservedEnvironments(orbit);
   saveOrbitInstances(
     orbit === null
       ? {}

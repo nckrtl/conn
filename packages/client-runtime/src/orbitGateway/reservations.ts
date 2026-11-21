@@ -32,11 +32,12 @@ export interface OrbitReservationPorts {
   /** Whether the device saved this server already. */
   readonly isSaved: (environmentId: string) => boolean;
   /** Opens a one-time pairing link and saves the server, as for any clone. */
-  readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
-  /** Keeps a server hidden for its saved start. False if the start was dismissed. */
-  readonly hideForTakenStart?: (reservationId: string, environmentId: string) => boolean;
+  readonly connect: (environmentId: string, pairingUrl: string, installId: string) => Promise<void>;
+  /** False if the start that took the reservation was dismissed. */
+  readonly hasTakenStart?: (reservationId: string, environmentId: string) => boolean;
   /** Removes a released clone's saved server from the device. */
-  readonly forget: (environmentId: string) => Promise<void> | void;
+  readonly forget: (environmentId: string, installId: string) => Promise<void> | void;
+  readonly promote: (environmentId: string, installId: string) => Promise<void> | void;
   /** The ids of reservations this device holds, kept across an app restart so the next start releases them. */
   readonly load: () => readonly string[] | Promise<readonly string[]>;
   readonly store: (reservationIds: readonly string[]) => void;
@@ -66,6 +67,7 @@ interface Entry {
 
 interface OwnedPairing {
   readonly environmentId: string;
+  readonly installId: string;
   installing: Promise<void> | null;
   removing: Promise<void> | null;
   attempted: boolean;
@@ -77,10 +79,10 @@ export interface OrbitReservationPairing {
   readonly installPairing: (
     reservationId: string,
     environmentId: string,
-    connect: () => Promise<void>,
+    connect: (installId: string) => Promise<void>,
   ) => Promise<void>;
   readonly abandon: (reservationId: string) => Promise<void>;
-  readonly commitPairing: (reservationId: string) => void;
+  readonly commitPairing: (reservationId: string) => Promise<void>;
 }
 
 export interface OrbitReservations extends OrbitReservationPairing {
@@ -160,6 +162,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     if (ports.isSaved(environmentId)) return;
     pairing ??= {
       environmentId,
+      installId: ports.newKey(),
       installing: null,
       removing: null,
       attempted: false,
@@ -170,7 +173,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     const installing = Promise.resolve().then(async () => {
       if (owned.abandoned || ports.isSaved(environmentId)) return;
       owned.attempted = true;
-      await connect();
+      await connect(owned.installId);
     });
     owned.installing = installing;
     ownedPairings.set(reservationId, owned);
@@ -189,7 +192,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     pairing.removing ??= Promise.resolve().then(async () => {
       await pairing.installing?.catch(() => {});
       try {
-        if (pairing.attempted) await ports.forget(pairing.environmentId);
+        if (pairing.attempted) await ports.forget(pairing.environmentId, pairing.installId);
       } catch {
         pairing.removing = null;
         if (!pairing.retryScheduled) {
@@ -216,9 +219,10 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     return discardPairing(reservationId);
   };
 
-  const commitPairing = (reservationId: string) => {
+  const commitPairing = async (reservationId: string) => {
     const pairing = ownedPairings.get(reservationId);
     if (pairing && !pairing.abandoned) {
+      await ports.promote(pairing.environmentId, pairing.installId);
       ownedPairings.delete(reservationId);
       changed();
     }
@@ -246,12 +250,12 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
       if (closed()) return;
       if (
         entry.ended === "taken" &&
-        ports.hideForTakenStart?.(reservationId, environmentId) === false
+        ports.hasTakenStart?.(reservationId, environmentId) === false
       ) {
         return;
       }
-      await installPairing(reservationId, environmentId, () =>
-        ports.connect(environmentId, pairing.pairingUrl),
+      await installPairing(reservationId, environmentId, (installId) =>
+        ports.connect(environmentId, pairing.pairingUrl, installId),
       );
       entry.paired = true;
     } catch {
@@ -284,7 +288,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
       if (details.state === "expired" || details.state === "released") {
         void discardPairing(current.id);
       }
-      if (details.state === "finalized") commitPairing(current.id);
+      if (details.state === "finalized") await commitPairing(current.id);
       drop(entry);
       return;
     }

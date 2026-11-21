@@ -32,7 +32,7 @@ export interface MobileOrbitThreadStartPorts {
   readonly isSaved: (environmentId: string) => boolean;
   readonly reservationPairing?: OrbitThreadStartPorts["reservationPairing"];
   readonly waitForReservationPairing?: OrbitThreadStartPorts["waitForReservationPairing"];
-  readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
+  readonly connect: OrbitThreadStartPorts["connect"];
   readonly firstMessage: Omit<OrbitFirstMessagePorts, "stopped">;
   /** Adds the clone's project ref to the workspace selected at Start; never throws. */
   readonly keepInWorkspace: (workspaceId: string | null, projectRef: string) => Promise<void>;
@@ -157,9 +157,9 @@ export async function runSavedOrbitThreadStart(
       isSaved: ports.isSaved,
       reservationPairing: ports.reservationPairing,
       waitForReservationPairing: ports.waitForReservationPairing,
-      connect: async (environmentId, pairingUrl) => {
+      connect: async (environmentId, pairingUrl, installId) => {
         await store.flush();
-        await ports.connect(environmentId, pairingUrl);
+        await ports.connect(environmentId, pairingUrl, installId);
       },
       send: async (ready) => {
         await store.flush();

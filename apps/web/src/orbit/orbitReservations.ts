@@ -5,10 +5,8 @@ import {
   type OrbitReservations,
   type TakenOrbitReservation,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { EnvironmentNotRegisteredError } from "@t3tools/client-runtime/connection";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import { useEffect } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
@@ -16,21 +14,43 @@ import { isAdditionalDesktopWindow } from "../lib/desktopWindowContext";
 import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { desktopOrbitGatewayTransport } from "./desktopOrbitGateway";
-import { forgetOrbitInstanceEnvironment, useEnvironmentProvider } from "./environmentProvider";
-import { readStored, saveStart, useOrbitThreadStarts } from "./orbitThreadStartStore";
+import { recordOrbitPaired, useEnvironmentProvider } from "./environmentProvider";
+import { readStored, useOrbitThreadStarts } from "./orbitThreadStartStore";
 import { connectOrbitClone, isOrbitServerSaved } from "./orbitThreadStarts";
-import {
-  readStoredIds,
-  setHeldReservedEnvironments,
-  writeStoredIds,
-} from "./orbitReservedEnvironments";
 
 /**
  * Conn: the main window reserves a clone while the prompt box of a new Instance is open
  * (`createOrbitReservations`); other windows start as before.
  */
-const isEnvironmentNotRegistered = Schema.is(EnvironmentNotRegisteredError);
 const OPEN_KEY = "conn:orbit-reservations:v1";
+
+function readStoredIds(key: string): string[] {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(key) ?? "[]");
+    return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredIds(key: string, ids: readonly string[]): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(ids));
+  } catch {
+    // Storage off: the reservations stay held in memory; Orbit expires them after 10 minutes.
+  }
+}
+
+async function settlePairing(environmentId: string, installId: string, keep: boolean) {
+  const result = await runAtomCommand(
+    appAtomRegistry,
+    environmentCatalog.settleProvisionalPairing,
+    { environmentId: environmentId as EnvironmentId, installId, keep },
+    { reportFailure: false },
+  );
+  if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+  return result.value;
+}
 
 let manager: OrbitReservations | null = null;
 
@@ -44,35 +64,19 @@ export function getOrbitReservations(): OrbitReservations | null {
     now: Date.now,
     isSaved: isOrbitServerSaved,
     connect: connectOrbitClone,
-    hideForTakenStart: (reservationId, reservedEnvironmentId) => {
-      const start = readStored().find(
-        (row) => row.reservationId === reservationId && row.environmentId === null,
-      );
-      if (!start) return false;
-      saveStart({ ...start, reservedEnvironmentId });
-      return true;
+    hasTakenStart: (reservationId) =>
+      readStored().some((row) => row.reservationId === reservationId && row.environmentId === null),
+    forget: async (environmentId, installId) => {
+      await settlePairing(environmentId, installId, false);
     },
-    forget: async (environmentId) => {
-      const result = await runAtomCommand(
-        appAtomRegistry,
-        environmentCatalog.remove,
-        environmentId as EnvironmentId,
-        { reportFailure: false },
-      );
-      if (result._tag === "Failure") {
-        const error = squashAtomCommandFailure(result);
-        if (!isEnvironmentNotRegistered(error)) throw error;
-      }
-      if (isOrbitServerSaved(environmentId))
-        throw new Error("Reserved server is still in the catalog.");
-      forgetOrbitInstanceEnvironment(environmentId);
+    promote: async (environmentId, installId) => {
+      if (await settlePairing(environmentId, installId, true)) recordOrbitPaired(environmentId);
     },
     load: () => readStoredIds(OPEN_KEY),
     store: (ids) => writeStoredIds(OPEN_KEY, ids),
     newKey: () => `conn-reservation:${randomUUID()}`,
   });
   manager = created;
-  created.subscribe(() => setHeldReservedEnvironments(created.hiddenEnvironmentIds()));
   useOrbitThreadStarts.subscribe(({ starts }, previous) => {
     for (const id of dismissedOrbitReservationIds(previous.starts, starts)) {
       void created.abandon(id);

@@ -382,7 +382,11 @@ export interface OrbitThreadStartPorts {
    */
   readonly wake?: (instanceId: number) => Promise<OrbitInstanceWakeOutcome>;
   /** Opens a one-time pairing link and saves the server. */
-  readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
+  readonly connect: (
+    environmentId: string,
+    pairingUrl: string,
+    installId?: string,
+  ) => Promise<void>;
   /**
    * Starts the thread with the first message in the clone's workspace project. It may resolve facts
    * to save with the sent start, such as a model fallback.
@@ -907,7 +911,8 @@ export async function runOrbitThreadStart(
             ) {
               // GET hands out the link once. Install it in memory before continuing the start.
               try {
-                const connect = () => ports.connect(environmentId, pairing.pairingUrl);
+                const connect = (installId?: string) =>
+                  ports.connect(environmentId, pairing.pairingUrl, installId);
                 if (ports.reservationPairing) {
                   await ports.reservationPairing.installPairing(
                     reservationId,
@@ -1016,7 +1021,7 @@ export async function runOrbitThreadStart(
           // The create gets its full time, whatever the reservation took.
           createDeadline = ports.now() + CREATE_TIMEOUT_MS;
         } else {
-          ports.reservationPairing?.commitPairing(current.reservationId);
+          await ports.reservationPairing?.commitPairing(current.reservationId);
         }
       }
       if (finalized === null && current.createOperationId === null) {

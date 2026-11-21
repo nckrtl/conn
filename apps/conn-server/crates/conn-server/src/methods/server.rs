@@ -234,7 +234,7 @@ pub fn server_config(environment: &Environment, providers: Vec<Value>) -> Result
     let state_dir = environment.state_dir.display();
     let keybindings = environment.keybindings.snapshot();
     let mut config: ServerConfig = conn_contract::from_json(json!({
-        "environment": environment.descriptor,
+        "environment": environment.descriptor(),
         "auth": environment.auth.descriptor(),
         "cwd": environment.cwd,
         "keybindingsConfigPath": environment.keybindings.path(),
@@ -273,7 +273,9 @@ fn themes_event(snapshot: &conn_files::themes::Snapshot) -> Value {
 const PROVIDER_STATUS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The config snapshot, then `settingsUpdated` after each settings write and
-/// `keybindingsUpdated` after each keybinding write, until the client unsubscribes.
+/// `keybindingsUpdated` after each keybinding write, until the client unsubscribes. A new
+/// descriptor (`crate::reload`) sends a whole new `snapshot`: the contract has no event for
+/// the environment alone, and clients replace their config with each snapshot.
 fn config_stream(
     env: Arc<Environment>,
     deps: Deps,
@@ -287,6 +289,8 @@ fn config_stream(
     let mut settings = env.settings.subscribe();
     let mut keybindings = env.keybindings.subscribe();
     let mut providers = deps.provider_status.subscribe();
+    let mut descriptor = env.subscribe_descriptor();
+    descriptor.mark_unchanged();
     settings.mark_unchanged();
     keybindings.mark_unchanged();
     providers.mark_unchanged();
@@ -332,6 +336,13 @@ fn config_stream(
                         let _ = tokio::task::spawn_blocking(move || themes.refresh()).await;
                     }
                     continue;
+                }
+                changed = descriptor.changed() => {
+                    if changed.is_err() { break; }
+                    let Ok(config) = server_config(&env, current_providers(&deps)) else { continue };
+                    seen_providers = config["providers"].clone();
+                    pending_providers = None;
+                    json!({ "version": 1, "type": "snapshot", "config": config })
                 }
                 changed = settings.changed() => {
                     if changed.is_err() { break; }
@@ -437,7 +448,7 @@ fn lifecycle_events(environment: &Environment) -> Vec<Value> {
             "sequence": 0,
             "type": "welcome",
             "payload": {
-                "environment": environment.descriptor,
+                "environment": environment.descriptor(),
                 "cwd": environment.cwd,
                 "projectName": project_name,
                 "bootstrapStatus": "complete",
@@ -447,7 +458,7 @@ fn lifecycle_events(environment: &Environment) -> Vec<Value> {
             "version": 1,
             "sequence": 1,
             "type": "ready",
-            "payload": { "at": conn_support::time::iso_from_ms(conn_support::time::now_ms()), "environment": environment.descriptor },
+            "payload": { "at": conn_support::time::iso_from_ms(conn_support::time::now_ms()), "environment": environment.descriptor() },
         }),
     ]
 }

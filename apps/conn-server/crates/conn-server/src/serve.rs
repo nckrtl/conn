@@ -218,6 +218,8 @@ pub async fn serve_with_instances(
         "cannot load the state directory",
     );
     let environment = Arc::new(environment);
+    // The label and Orbit Instance facts follow the file, the hostname and SIGHUP.
+    crate::reload::start(environment.clone());
     let restart = environment.restart.clone();
     let auth = environment.auth.clone();
     if inert {
@@ -384,7 +386,7 @@ pub async fn serve_with_instances(
     let state = AppState {
         table: Arc::new(method_table(&deps)),
         auth: auth.clone(),
-        descriptor: Arc::new(environment.descriptor.clone()),
+        descriptor: environment.subscribe_descriptor(),
         engine: Some(engine.clone()),
         deps,
     };

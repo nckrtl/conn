@@ -43,8 +43,8 @@ A Conn Server that starts in a T3 server's state folder has the same threads (Ni
 - **Boundary.** `meta.imported_through` is above the imported rows and above the last sequence
   T3 gave out (`orchestration_v2_projection_metadata`, the event counter). New sequences start
   above it. A client cursor at or below it may be T3's, and the imported rows have no events
-  here, so a thread stream answers it with a snapshot (`streams::can_replay`) and the shell
-  with a snapshot (the pruned mark is set to it). A new run takes the ordinal after the
+  here, so the thread and shell streams answer it with a snapshot (`streams::can_replay`; the
+  shell's pruned mark is set to it too). A new run takes the ordinal after the
   thread's highest, not its run count + 1: T3 leaves gaps when it moves a queued run forward
   (6 threads on mini).
 - **Why this way.** Reading T3's tables in place would put a second schema under every engine

@@ -384,6 +384,7 @@ fn a_t3_cursor_gets_a_snapshot() {
             "{t3_cursor}"
         );
     }
+    // The shell's own resume check refuses them too: the import wrote no project changes.
     for t3_cursor in [0, 5, 899_999] {
         assert_eq!(
             store.shell_changes_since(t3_cursor).unwrap(),
@@ -391,13 +392,35 @@ fn a_t3_cursor_gets_a_snapshot() {
             "{t3_cursor}"
         );
     }
-    // At T3's last sequence the shell resumes with every thread's row, rebuilt at import.
-    let rows = store.shell_changes_since(900_000).unwrap().unwrap();
-    assert_eq!(rows.len(), 2);
     assert!(crate::streams::can_replay(high, high, imported));
     assert!(store.shell_changes_since(high).unwrap().is_some());
     // A store that was never imported resumes any cursor up to its high water.
     assert!(crate::streams::can_replay(0, 10, 0));
     drop(store);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The shell stream at T3's last cursor answers with a snapshot (projects included), not a
+/// replay of the rebuilt thread rows alone.
+#[tokio::test(flavor = "current_thread")]
+async fn the_shell_at_the_boundary_is_a_snapshot() {
+    use crate::{Engine, EngineConfig, SqliteEngine};
+    use conn_contract::{from_json, to_json};
+
+    let dir = temp_dir("shell-boundary");
+    t3_state(&dir);
+    import_t3_state(&dir).unwrap().unwrap();
+    let engine = SqliteEngine::open(EngineConfig::new(dir.join(ENGINE_FILE))).unwrap();
+    for cursor in [5, 900_000] {
+        let mut shell = engine
+            .subscribe_shell(
+                from_json(json!({"afterSequence": cursor, "httpSnapshotFallback": true})).unwrap(),
+            )
+            .await
+            .unwrap();
+        let first = to_json(&shell.recv().await.unwrap().unwrap());
+        assert_eq!(first, json!({"kind": "snapshot-required"}), "{cursor}");
+    }
+    drop(engine);
     let _ = fs::remove_dir_all(&dir);
 }

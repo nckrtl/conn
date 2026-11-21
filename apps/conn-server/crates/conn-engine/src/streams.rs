@@ -78,7 +78,8 @@ pub(crate) async fn subscribe_shell(
     let (first, mut cursor) = inner
         .db(move |store| -> Result<(Vec<Value>, u64), String> {
             let high = store.high_water();
-            let resumed = match after.filter(|after| *after <= high) {
+            let imported = store.imported_through();
+            let resumed = match after.filter(|after| can_replay(*after, high, imported)) {
                 Some(after) => store.shell_changes_since(after)?,
                 None => None,
             };
@@ -144,7 +145,7 @@ pub(crate) async fn subscribe_shell(
     Ok(rx)
 }
 
-/// Whether a thread stream can resume from `after` by replaying events. A cursor above the
+/// Whether a thread or shell stream can resume from `after` by replaying. A cursor above the
 /// high water is from another database. A cursor at or below the T3 import boundary
 /// (`imported`, 0 when never imported) may be the T3 server's: the rows it imported have no
 /// events here, so only a snapshot is complete.

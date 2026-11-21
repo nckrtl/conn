@@ -6,7 +6,6 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { useOpenLink } from "~/browser/useOpenLink";
 import { cn } from "~/lib/utils";
-import { readLocalApi } from "~/localApi";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { openOnHostLabel, showPullRequestLinkContextMenu } from "./pullRequestLinkContextMenu";
@@ -106,11 +105,14 @@ export function PullRequestNumberLink({
 export function PullRequestRepositoryLink({
   repository,
   repositoryUrl,
+  threadRef,
 }: {
   repository: string;
   repositoryUrl: string | null;
+  threadRef: ScopedThreadRef | null;
 }) {
   const gt = useGT();
+  const openLink = useOpenLink(threadRef);
   if (repositoryUrl === null) return <span className="min-w-0 truncate">{repository}</span>;
   return (
     <Tooltip>
@@ -118,7 +120,10 @@ export function PullRequestRepositoryLink({
         render={
           <button
             type="button"
-            onClick={() => void readLocalApi()?.shell.openExternal(repositoryUrl)}
+            onClick={(event) => void openLink(repositoryUrl, { event }).catch(console.error)}
+            onAuxClick={(event) => {
+              if (event.button === 1) void openLink(repositoryUrl, { event }).catch(console.error);
+            }}
             className="min-w-0 cursor-pointer truncate text-left underline-offset-2 hover:underline"
           >
             {repository}

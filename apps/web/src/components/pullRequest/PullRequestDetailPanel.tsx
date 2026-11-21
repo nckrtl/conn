@@ -1561,6 +1561,7 @@ export function PullRequestDetailPanel({
         threadRef={threadRef}
         tabs={visibleTabs}
         activeTab={tab}
+        threadRef={threadRef}
         {...(onBack ? { onBack } : {})}
         {...(onClose ? { onClose } : {})}
         actions={
@@ -1800,6 +1801,7 @@ export function PullRequestDetailPanel({
                 <PullRequestRepositoryLink
                   repository={detail.repository}
                   repositoryUrl={repositoryUrl}
+                  threadRef={threadRef}
                 />
               }
               link={

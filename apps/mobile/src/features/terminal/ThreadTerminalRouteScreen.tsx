@@ -103,6 +103,7 @@ function TerminalHeader(props: {
   readonly sessions: ReadonlyArray<TerminalMenuSession>;
   readonly status: Parameters<typeof getTerminalStatusLabel>[0];
   readonly workspaceRoot: string;
+  readonly onBack: () => void;
   readonly onCloseTerminal: () => void;
   readonly onDecreaseFontSize: () => void;
   readonly onIncreaseFontSize: () => void;
@@ -115,7 +116,22 @@ function TerminalHeader(props: {
     <AppBar
       title={gt("Terminal", { $context: "screen title" })}
       subtitle={props.subtitle}
-      onClose={props.onCloseTerminal}
+      onClose={props.onBack}
+      actions={
+        Platform.OS === "android" && props.isEnvironmentReady
+          ? [
+              {
+                accessibilityLabel: gt("Close terminal"),
+                icon: "trash",
+                // Tabler's trash is 18 units tall; the terminal glyph beside it is 16.
+                iconScale: 16 / 18,
+                destructive: true,
+                disabled: !props.canOperateTerminal,
+                onPress: props.onCloseTerminal,
+              },
+            ]
+          : undefined
+      }
       menus={
         props.isEnvironmentReady
           ? [
@@ -402,6 +418,7 @@ function ThreadTerminal(props: {
   const navigation = useNavigation();
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const clearTerminal = useAtomCommand(terminalEnvironment.clear, "terminal clear");
+  const closeTerminal = useAtomCommand(terminalEnvironment.close, "terminal close");
   const retryEnvironment = useRetryEnvironment();
   const selectedThreadDetail = useSelectedThreadProjection();
   const selectedThreadDetailWorktreePath =
@@ -713,7 +730,7 @@ function ThreadTerminal(props: {
     );
   };
 
-  const handleCloseTerminal = () => {
+  const handleBack = () => {
     if (navigation.canGoBack()) {
       navigation.goBack();
       return;
@@ -724,6 +741,26 @@ function ThreadTerminal(props: {
         threadId: params.threadId,
       }),
     );
+  };
+
+  const handleCloseTerminal = () => {
+    Dialog.confirm({
+      title: gt('Close terminal "{label}"?', {
+        label: resolveTerminalSessionLabel(terminalId, terminal.summary),
+      }),
+      message: gt("This stops the running process and clears its history."),
+      confirmText: gt("Confirm"),
+      destructive: true,
+      onConfirm: async () => {
+        if (!readEnvironmentScope(selectedThread.environmentId, AuthTerminalOperateScope)) return;
+        const result = await closeTerminal({
+          environmentId: selectedThread.environmentId,
+          input: { threadId: selectedThread.id, terminalId, deleteHistory: true },
+        });
+        if (AsyncResult.isSuccess(result)) exitNavigation.exited();
+        else Dialog.alert(gt("Couldn't close terminal"), gt("Check the connection and try again."));
+      },
+    });
   };
 
   const handleOpenNewTerminal = () => {
@@ -856,6 +893,7 @@ function ThreadTerminal(props: {
           hasRunningSubprocess: terminal.hasRunningSubprocess,
         }}
         workspaceRoot={selectedThreadProject.workspaceRoot}
+        onBack={handleBack}
         onCloseTerminal={handleCloseTerminal}
         onDecreaseFontSize={handleDecreaseFontSize}
         onIncreaseFontSize={handleIncreaseFontSize}

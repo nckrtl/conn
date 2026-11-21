@@ -1,3 +1,7 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - The dictation relay needs a real HTTP listener.
+import * as NodeHttp from "node:http";
+import type * as NodeNet from "node:net";
+
 import { it as effectIt } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
@@ -35,6 +39,7 @@ import * as BrowserSession from "./BrowserSession.ts";
 import * as DesktopBrowserHost from "./DesktopBrowserHost.ts";
 import { DesktopTabRunner } from "./DesktopTabRunner.ts";
 import * as PreviewManager from "./Manager.ts";
+import { ANNOTATOR_DICTATION_CHANNEL } from "./GuestProtocol.ts";
 import * as PreviewPasskeys from "./Passkeys.ts";
 
 describe("fitPictureInPictureContentSize", () => {
@@ -1825,6 +1830,46 @@ describe("PreviewManager", () => {
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
         expect(guest.attach).toHaveBeenCalledTimes(2);
+      }),
+    ),
+  );
+
+  effectIt.live("relays dictation for a tab whose URLs were set before its first guest", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const requests: string[] = [];
+        const server = yield* Effect.acquireRelease(
+          Effect.promise(
+            () =>
+              new Promise<NodeHttp.Server>((resolve) => {
+                const listening = NodeHttp.createServer((request, response) => {
+                  requests.push(request.url ?? "");
+                  response.end();
+                }).listen(0, "127.0.0.1", () => resolve(listening));
+              }),
+          ),
+          (listening) => Effect.sync(() => listening.close()),
+        );
+        const { port } = server.address() as NodeNet.AddressInfo;
+        const guest = makeAttachingGuest(49);
+        fromId.mockReturnValue(guest.wc);
+        yield* manager.createTab("tab_first_dictation");
+        yield* manager.setAnnotationDictation("tab_first_dictation", {
+          startUrl: `http://127.0.0.1:${port}/dictate`,
+          stopUrl: null,
+        });
+        yield* manager.prepareWebview(guest.wc);
+        yield* manager.registerWebview("tab_first_dictation", 49);
+
+        const handle = (guest.wc.ipc.handle as ReturnType<typeof vi.fn>).mock.calls.find(
+          ([channel]) => channel === ANNOTATOR_DICTATION_CHANNEL,
+        )?.[1] as (event: unknown, action: string, session: string) => Promise<unknown>;
+        const result = yield* Effect.promise(() =>
+          handle({ senderFrame: { url: "http://localhost:5173/" } }, "start", "draft_1"),
+        );
+
+        expect(result).toBe(true);
+        expect(requests).toEqual(["/dictate/start"]);
       }),
     ),
   );

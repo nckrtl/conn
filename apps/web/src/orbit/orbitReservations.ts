@@ -1,11 +1,14 @@
 import {
   createOrbitGatewayClient,
   createOrbitReservations,
+  dismissedOrbitReservationIds,
   type OrbitReservations,
   type TakenOrbitReservation,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import { EnvironmentNotRegisteredError } from "@t3tools/client-runtime/connection";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { useEffect } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
@@ -14,7 +17,7 @@ import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { desktopOrbitGatewayTransport } from "./desktopOrbitGateway";
 import { forgetOrbitInstanceEnvironment, useEnvironmentProvider } from "./environmentProvider";
-import { readStored, saveStart } from "./orbitThreadStartStore";
+import { readStored, saveStart, useOrbitThreadStarts } from "./orbitThreadStartStore";
 import { connectOrbitClone, isOrbitServerSaved } from "./orbitThreadStarts";
 import {
   readStoredIds,
@@ -26,11 +29,12 @@ import {
  * Conn: the main window reserves a clone while the prompt box of a new Instance is open
  * (`createOrbitReservations`); other windows start as before.
  */
+const isEnvironmentNotRegistered = Schema.is(EnvironmentNotRegisteredError);
 const OPEN_KEY = "conn:orbit-reservations:v1";
 
 let manager: OrbitReservations | null = null;
 
-function reservations(): OrbitReservations | null {
+export function getOrbitReservations(): OrbitReservations | null {
   if (manager !== null) return manager;
   const transport = isAdditionalDesktopWindow() ? null : desktopOrbitGatewayTransport();
   if (transport === null) return null;
@@ -41,18 +45,26 @@ function reservations(): OrbitReservations | null {
     isSaved: isOrbitServerSaved,
     connect: connectOrbitClone,
     hideForTakenStart: (reservationId, reservedEnvironmentId) => {
-      const start = readStored().find((row) => row.reservationId === reservationId);
+      const start = readStored().find(
+        (row) => row.reservationId === reservationId && row.environmentId === null,
+      );
       if (!start) return false;
       saveStart({ ...start, reservedEnvironmentId });
       return true;
     },
     forget: async (environmentId) => {
-      await runAtomCommand(
+      const result = await runAtomCommand(
         appAtomRegistry,
         environmentCatalog.remove,
         environmentId as EnvironmentId,
         { reportFailure: false },
       );
+      if (result._tag === "Failure") {
+        const error = squashAtomCommandFailure(result);
+        if (!isEnvironmentNotRegistered(error)) throw error;
+      }
+      if (isOrbitServerSaved(environmentId))
+        throw new Error("Reserved server is still in the catalog.");
       forgetOrbitInstanceEnvironment(environmentId);
     },
     load: () => readStoredIds(OPEN_KEY),
@@ -61,6 +73,11 @@ function reservations(): OrbitReservations | null {
   });
   manager = created;
   created.subscribe(() => setHeldReservedEnvironments(created.hiddenEnvironmentIds()));
+  useOrbitThreadStarts.subscribe(({ starts }, previous) => {
+    for (const id of dismissedOrbitReservationIds(previous.starts, starts)) {
+      void created.abandon(id);
+    }
+  });
   // A restart leaves no prompt box open: release what the last run held.
   void created.releaseLeftovers();
   window.addEventListener("pagehide", () => created.closeAll());
@@ -72,10 +89,6 @@ export function takeOrbitReservation(projectId: number): TakenOrbitReservation |
   return manager?.take(projectId) ?? null;
 }
 
-export function waitForOrbitReservationPairing(reservationId: string): Promise<void> | undefined {
-  return manager?.waitForPairing(reservationId);
-}
-
 /**
  * Holds a reservation while the prompt box of a new Instance in the Project shows; null holds
  * none. Leaving the prompt box without a send releases it.
@@ -85,7 +98,7 @@ export function useOrbitReservation(projectId: number | null): void {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds a Gateway reservation while the prompt box shows
   useEffect(() => {
     if (projectId === null || !orbit) return;
-    const current = reservations();
+    const current = getOrbitReservations();
     if (current === null) return;
     current.open(projectId);
     return () => current.close(projectId);

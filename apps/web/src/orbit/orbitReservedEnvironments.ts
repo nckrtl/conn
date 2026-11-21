@@ -41,7 +41,7 @@ function store(): void {
 }
 
 function applyHidden(): void {
-  const next = new Set(readStoredIds(HIDDEN_KEY));
+  const next = new Set([...readStoredIds(HIDDEN_KEY), ...held, ...listed]);
   for (const start of useOrbitThreadStarts.getState().starts) {
     const environmentId = orbitThreadStartHiddenEnvironmentId(start);
     if (environmentId) next.add(environmentId);

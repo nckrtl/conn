@@ -256,6 +256,10 @@ export async function recordOrbitThreadStartPaired(environmentId: string): Promi
   await updateEnvironmentState((current) => recordPaired(current, environmentId)).catch(() => {});
 }
 
+export async function forgetOrbitThreadStartPaired(environmentId: string): Promise<void> {
+  await updateEnvironmentState((current) => forgetOrbitEnvironment(current, environmentId));
+}
+
 /**
  * Conn: the Connect button for a clone in Settings › Orbit › Servers. Pairs it now, and lets a
  * later refresh retry it if this attempt fails.

@@ -448,8 +448,9 @@ it finish before reading the reservation again. The runner finalizes it
 (`POST /conn/reservations/{id}/finalize` with the name and branch), follows that Operation with
 the same create rows, and skips pairing if the device already saved the server. Conn waits up
 to two minutes for readiness. If the wait expires, the reservation is gone or failed, or the
-finalize fails, Conn releases it and starts an ordinary create with a fresh deadline. Closing
-the prompt releases it (`DELETE`, the desktop's only allowed DELETE). A restart releases
+finalize fails, Conn releases it and starts an ordinary create with a fresh deadline. An
+abandoned reservation stays hidden until its pairing install settles and Conn removes the
+connection and credential it installed. Closing the prompt releases it (`DELETE`, the desktop's only allowed DELETE). A restart releases
 what the last run held. At most 3 are held: a fourth Project releases
 the oldest. Reserved clones (Gateway rows with `reservation_id`, and the ones a start finalizes)
 stay out of every list: the lists read `visibleCatalogValueAtom`, and the Gateway-fed lists drop

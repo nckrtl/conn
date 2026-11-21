@@ -23,8 +23,8 @@ import {
 import { orbitGatewayClient } from "./orbitGatewayClient";
 import {
   installOrbitReservations,
+  orbitReservations,
   takeOrbitReservation,
-  waitForOrbitReservationPairing,
 } from "./orbitReservations";
 import { orbitThreadStartStore } from "./orbitThreadStartStore";
 import {
@@ -75,7 +75,8 @@ const ports: MobileOrbitThreadStartPorts = {
     appAtomRegistry
       .get(environmentCatalog.catalogValueAtom)
       .entries.has(EnvironmentId.make(environmentId)),
-  waitForReservationPairing: waitForOrbitReservationPairing,
+  reservationPairing: orbitReservations,
+  waitForReservationPairing: orbitReservations.waitForPairing,
   connect: async (environmentId, pairingUrl) => {
     const result = await runAtomCommand(
       appAtomRegistry,

@@ -78,6 +78,7 @@ function harness(
     reads?: Array<OrbitGatewayReservation | Error>;
     read?: (id: string) => Promise<OrbitGatewayReservation>;
     connect?: (environmentId: string, pairingUrl: string) => Promise<void>;
+    forget?: (environmentId: string) => Promise<void> | void;
     hideForTakenStart?: (reservationId: string, environmentId: string) => boolean;
     reserve?: (projectId: number) => Promise<OrbitGatewayReservation>;
     saved?: (environmentId: string) => boolean;
@@ -125,6 +126,7 @@ function harness(
     ...(options.hideForTakenStart ? { hideForTakenStart: options.hideForTakenStart } : {}),
     forget: (environmentId) => {
       calls.push(`forget ${environmentId}`);
+      return options.forget?.(environmentId);
     },
     load: () => stored,
     store: (ids) => {
@@ -298,7 +300,7 @@ describe("createOrbitReservations", () => {
     expect(calls).toEqual(["reserve 1", "reserve 2", "reserve 3", "release r1", "reserve 4"]);
   });
 
-  it("does not pair a server the device saved already", async () => {
+  it("does not pair or forget a server the device saved already", async () => {
     const { calls, clock, reservations } = harness({
       reads: [reservation("r78", "ready")],
       saved: () => true,
@@ -306,7 +308,33 @@ describe("createOrbitReservations", () => {
     reservations.open(78);
     await flush();
     await clock.tick();
-    expect(calls.some((call) => call.startsWith("pair"))).toBe(false);
+    reservations.close(78);
+    await flush();
+    expect(calls).toEqual(["reserve 78", "read r78", "release r78"]);
+  });
+
+  it("keeps failed cleanup hidden and shares a retry between repeat requests", async () => {
+    const removal = Promise.withResolvers<void>();
+    let attempts = 0;
+    const { calls, clock, reservations } = harness({
+      forget: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("Credential storage unavailable");
+        await removal.promise;
+      },
+    });
+    await reservations.installPairing("r1", "env-r1", async () => {});
+    await reservations.abandon("r1");
+    expect(reservations.hiddenEnvironmentIds()).toEqual(new Set(["env-r1"]));
+
+    await clock.tick();
+    const repeated = reservations.abandon("r1");
+    expect(attempts).toBe(2);
+    expect(reservations.hiddenEnvironmentIds()).toEqual(new Set(["env-r1"]));
+    removal.resolve();
+    await repeated;
+    expect(reservations.hiddenEnvironmentIds().size).toBe(0);
+    expect(calls).toEqual(["release r1", "forget env-r1", "forget env-r1"]);
   });
 
   it("keeps a server hidden that is being saved at close, then forgets it", async () => {
@@ -494,6 +522,9 @@ function startHarness(script: {
   createReadyAfterMs?: number;
   nameLimit?: number;
   waitForPairing?: (reservationId: string) => Promise<void> | undefined;
+  reservationPairing?: ReturnType<typeof createOrbitReservations>;
+  dismissed?: () => boolean;
+  save?: (start: OrbitThreadStart) => void;
   connect?: (environmentId: string, pairingUrl: string) => Promise<void>;
 }) {
   const calls: string[] = [];
@@ -577,14 +608,19 @@ function startHarness(script: {
     run: (start: OrbitThreadStart, saved: (environmentId: string) => boolean = () => false) =>
       runOrbitThreadStart(start, {
         client: client as never,
-        save: (next) => saves.push(next),
+        save: (next) => {
+          saves.push(next);
+          script.save?.(next);
+        },
         sleep: async (ms) => {
           if (calls.at(-1) === "operation 100") createWaits.push(ms);
           clock += ms;
         },
         now: () => clock,
-        stopped: () => false,
+        stopped: () => script.dismissed?.() ?? false,
+        dismissed: script.dismissed,
         isSaved: saved,
+        reservationPairing: script.reservationPairing,
         waitForReservationPairing: script.waitForPairing,
         connect: async (environmentId, pairingUrl) => {
           calls.push(`connect ${environmentId}`);
@@ -719,6 +755,158 @@ describe("runOrbitThreadStart with a reservation", () => {
       expect(JSON.stringify(harness.saves)).not.toContain(pairing.pairingUrl);
     },
   );
+
+  describe("abandoned pairing during a delayed install", () => {
+    const old = "env-501";
+    const replacement = "env-41";
+
+    function fixture(handoff: boolean) {
+      const installStarted = Promise.withResolvers<void>();
+      const finishInstall = Promise.withResolvers<void>();
+      const pendingRead = Promise.withResolvers<OrbitGatewayReservation>();
+      const saved = new Set(["unrelated"]);
+      const credentials = new Set(saved);
+      const reveals: string[] = [];
+      let dismissed = false;
+      let hiddenByStart: string | null = handoff ? null : old;
+      let installed = false;
+      const sample = () => {
+        if (
+          saved.has(old) &&
+          hiddenByStart !== old &&
+          !draft.reservations.hiddenEnvironmentIds().has(old)
+        ) {
+          reveals.push(old);
+        }
+      };
+      const connect = async (id: string) => {
+        if (id === old) {
+          installStarted.resolve();
+          await finishInstall.promise;
+          installed = true;
+        }
+        saved.add(id);
+        credentials.add(id);
+        sample();
+      };
+      const draft = harness({
+        reserve: async () => reservation("r1", "preparing"),
+        read: () => pendingRead.promise,
+        connect,
+        forget: (id) => {
+          saved.delete(id);
+          credentials.delete(id);
+          sample();
+        },
+        saved: (id) => saved.has(id),
+        hideForTakenStart: (_id, env) => {
+          if (dismissed) return false;
+          hiddenByStart = env;
+          sample();
+          return true;
+        },
+      });
+      draft.reservations.subscribe(sample);
+      const ready = reservation("r1", "ready", { environmentId: old, pairing: issued(old) });
+
+      return {
+        draft,
+        saved,
+        credentials,
+        reveals,
+        ready,
+        installed: () => installed,
+        async start(options: Pick<Parameters<typeof startHarness>[0], "reads" | "finalize">) {
+          if (handoff) {
+            draft.reservations.open(78);
+            await flush();
+            await draft.clock.tick();
+            expect(draft.reservations.take(78)?.reservationId).toBe("r1");
+          }
+          const start = startHarness({
+            ...options,
+            reservationPairing: draft.reservations,
+            waitForPairing: draft.reservations.waitForPairing,
+            dismissed: () => dismissed,
+            save: (row) => {
+              if (!dismissed) hiddenByStart = orbitThreadStartHiddenEnvironmentId(row);
+              sample();
+            },
+            connect,
+          });
+          const sending = start.run(
+            { ...reservedStart(), reservedEnvironmentId: hiddenByStart },
+            (id) => saved.has(id),
+          );
+          if (handoff) pendingRead.resolve(ready);
+          await installStarted.promise;
+          return { start, sending };
+        },
+        dismiss: () => {
+          dismissed = true;
+          hiddenByStart = null;
+          sample();
+        },
+        finishInstall: finishInstall.resolve,
+      };
+    }
+
+    it.each(["start finalize 410", "handoff expired read", "handoff released read"] as const)(
+      "keeps the old server hidden and removes its credential on %s",
+      async (failure) => {
+        const handoff = failure !== "start finalize 410";
+        const flow = fixture(handoff);
+        let expired = false;
+        const { start, sending } = await flow.start({
+          reads: handoff
+            ? [reservation("r1", failure === "handoff expired read" ? "expired" : "released")]
+            : [flow.ready],
+          finalize: async () => {
+            expect(expired).toBe(true);
+            throw new OrbitGatewayError({
+              code: "reservation.expired",
+              message: "",
+              status: 410,
+              details: {},
+            });
+          },
+        });
+        expect(flow.saved.has(old)).toBe(false);
+        expired = true;
+        flow.finishInstall();
+        expect(await sending).toBe(true);
+        expect(start.sent).toEqual([replacement]);
+        expect(flow.installed()).toBe(true);
+        expect({
+          revealed: flow.reveals,
+          catalog: [...flow.saved],
+          credentials: [...flow.credentials],
+        }).toEqual({
+          revealed: [],
+          catalog: ["unrelated", replacement],
+          credentials: ["unrelated", replacement],
+        });
+      },
+    );
+
+    it.each([false, true])(
+      "keeps a dismissed start hidden until the late install is removed (handoff: %s)",
+      async (handoff) => {
+        const flow = fixture(handoff);
+        const { start, sending } = await flow.start({ reads: [flow.ready] });
+        flow.dismiss();
+        flow.finishInstall();
+        expect(await sending).toBe(false);
+        expect(start.sent).toEqual([]);
+        expect(flow.installed()).toBe(true);
+        expect({
+          revealed: flow.reveals,
+          catalog: [...flow.saved],
+          credentials: [...flow.credentials],
+        }).toEqual({ revealed: [], catalog: ["unrelated"], credentials: ["unrelated"] });
+      },
+    );
+  });
 
   it("uses ordinary pairing when the finalized server was not saved", async () => {
     const harness = startHarness({});

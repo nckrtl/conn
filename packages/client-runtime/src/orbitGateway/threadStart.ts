@@ -27,7 +27,7 @@ import {
   type OrbitGatewayOperation,
   type OrbitGatewayProject,
 } from "./client.ts";
-import type { TakenOrbitReservation } from "./reservations.ts";
+import type { OrbitReservationPairing, TakenOrbitReservation } from "./reservations.ts";
 import {
   observeOrbitCreateRows,
   readSavedOrbitCreateRows,
@@ -361,6 +361,9 @@ export interface OrbitThreadStartPorts {
   readonly now: () => number;
   /** True once the user dismissed the start, or Orbit no longer provides the environments. */
   readonly stopped: () => boolean;
+  /** A dismissal abandons provisional pairing; a pause keeps it for the next run. */
+  readonly dismissed?: (() => boolean) | undefined;
+  readonly reservationPairing?: OrbitReservationPairing | undefined;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
   /** Lets the draft finish its last reservation read and install before the start reads it. */
@@ -531,6 +534,19 @@ export function orbitThreadStartHiddenEnvironmentId(start: OrbitThreadStart): st
   return start.reservationId && start.environmentId === null
     ? (start.reservedEnvironmentId ?? null)
     : null;
+}
+
+/** Reservations whose pending start was removed. A finalized server belongs to the catalog. */
+export function dismissedOrbitReservationIds(
+  previous: readonly OrbitThreadStart[],
+  current: readonly OrbitThreadStart[],
+): string[] {
+  const remaining = new Set(current.map((start) => start.id));
+  return previous.flatMap((start) =>
+    start.reservationId && start.environmentId === null && !remaining.has(start.id)
+      ? [start.reservationId]
+      : [],
+  );
 }
 
 /** The step a start is at, for display. */
@@ -831,8 +847,15 @@ export async function runOrbitThreadStart(
    * Conn: a start with a reservation, before the create. It no longer holds one: the create runs as
    * before, with nothing on screen. Orbit removes the clone of a released reservation.
    */
-  const fallBackToCreate = () => {
+  const abandonReservation = (reservationId: string) => {
+    if (ports.reservationPairing) return ports.reservationPairing.abandon(reservationId);
+    void ports.client.releaseReservation(reservationId).catch(() => null);
+  };
+
+  const fallBackToCreate = async () => {
     const reservationId = current.reservationId;
+    if (reservationId) await abandonReservation(reservationId);
+    checkStopped();
     update({
       reservationId: null,
       reservedEnvironmentId: null,
@@ -842,7 +865,6 @@ export async function runOrbitThreadStart(
       createRows: null,
       instanceId: null,
     });
-    if (reservationId) void ports.client.releaseReservation(reservationId).catch(() => null);
   };
 
   /**
@@ -876,6 +898,7 @@ export async function runOrbitThreadStart(
             checkStopped();
             const { environmentId, pairing } = reservation;
             if (environmentId !== null) update({ reservedEnvironmentId: environmentId });
+            checkStopped();
             if (
               reservation.state === "ready" &&
               pairing !== null &&
@@ -884,7 +907,16 @@ export async function runOrbitThreadStart(
             ) {
               // GET hands out the link once. Install it in memory before continuing the start.
               try {
-                await ports.connect(environmentId, pairing.pairingUrl);
+                const connect = () => ports.connect(environmentId, pairing.pairingUrl);
+                if (ports.reservationPairing) {
+                  await ports.reservationPairing.installPairing(
+                    reservationId,
+                    environmentId,
+                    connect,
+                  );
+                } else {
+                  await connect();
+                }
               } catch {
                 // Pair explicitly after finalize if the server was not saved.
               }
@@ -980,9 +1012,11 @@ export async function runOrbitThreadStart(
       if (current.reservationId && current.orbitInstanceKind !== "existing") {
         finalized = await finalizeReservation(createDeadline);
         if (finalized === null) {
-          fallBackToCreate();
+          await fallBackToCreate();
           // The create gets its full time, whatever the reservation took.
           createDeadline = ports.now() + CREATE_TIMEOUT_MS;
+        } else {
+          ports.reservationPairing?.commitPairing(current.reservationId);
         }
       }
       if (finalized === null && current.createOperationId === null) {
@@ -1150,7 +1184,12 @@ export async function runOrbitThreadStart(
     return true;
   } catch (error) {
     // A start stopped mid-step ends without an error, so it resumes if it comes back.
-    if (isStopped(error) || ports.stopped()) return false;
+    if (isStopped(error) || ports.stopped()) {
+      if (current.reservationId && current.environmentId === null && ports.dismissed?.()) {
+        await abandonReservation(current.reservationId);
+      }
+      return false;
+    }
     // A create that timed out, or lost the Gateway, stops the row that ran at this time.
     const stoppedRows =
       current.environmentId === null && (!isStepFailed(error) || error.code === "operation.timeout")

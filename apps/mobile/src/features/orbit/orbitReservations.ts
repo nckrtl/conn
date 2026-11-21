@@ -1,11 +1,14 @@
 import {
   createOrbitReservations,
+  dismissedOrbitReservationIds,
   orbitThreadStartHiddenEnvironmentId,
   type OrbitReservations,
   type TakenOrbitReservation,
 } from "@t3tools/client-runtime/orbit-gateway";
-import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import { EnvironmentNotRegisteredError } from "@t3tools/client-runtime/connection";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { EnvironmentId } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { useEffect } from "react";
 
 import { environmentCatalog } from "../../connection/catalog";
@@ -14,6 +17,7 @@ import { writeFileAtomically } from "../../lib/atomic-file";
 import { uuidv4 } from "../../lib/uuid";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { orbitGatewayClient } from "./orbitGatewayClient";
+import { forgetOrbitThreadStartPaired } from "./orbitGatewayStore";
 import {
   listedOrbitReservedEnvironments,
   subscribeOrbitReservedEnvironments,
@@ -24,6 +28,7 @@ import { orbitThreadStartStore } from "./orbitThreadStartStore";
  * Conn: the phone reserves a clone while the Orbit project screen is open (`createOrbitReservations`)
  * and hides the servers of reserved clones in every list until they are finalized.
  */
+const isEnvironmentNotRegistered = Schema.is(EnvironmentNotRegisteredError);
 const RESERVATIONS_FILE = "orbit-reservations.json";
 
 async function reservationsFile() {
@@ -36,7 +41,7 @@ let writing: Promise<void> = Promise.resolve();
 
 function applyHidden(): void {
   const next = new Set([
-    ...reservations.hiddenEnvironmentIds(),
+    ...orbitReservations.hiddenEnvironmentIds(),
     ...listedOrbitReservedEnvironments(),
   ]);
   for (const start of orbitThreadStartStore.starts()) {
@@ -55,31 +60,41 @@ function applyHidden(): void {
 /** Set by `connect` in the start runtime, which owns pairing on the phone. */
 let connectClone: ((environmentId: string, pairingUrl: string) => Promise<void>) | null = null;
 
-const reservations: OrbitReservations = createOrbitReservations({
+const isSaved = (environmentId: string) =>
+  appAtomRegistry
+    .get(environmentCatalog.catalogValueAtom)
+    .entries.has(EnvironmentId.make(environmentId));
+
+export const orbitReservations: OrbitReservations = createOrbitReservations({
   client: orbitGatewayClient,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: Date.now,
-  isSaved: (environmentId) =>
-    appAtomRegistry
-      .get(environmentCatalog.catalogValueAtom)
-      .entries.has(EnvironmentId.make(environmentId)),
+  isSaved,
   connect: async (environmentId, pairingUrl) => {
     if (connectClone === null) throw new Error("Pairing is not ready.");
     await connectClone(environmentId, pairingUrl);
   },
   hideForTakenStart: (reservationId, reservedEnvironmentId) => {
-    const start = orbitThreadStartStore.starts().find((row) => row.reservationId === reservationId);
+    const start = orbitThreadStartStore
+      .starts()
+      .find((row) => row.reservationId === reservationId && row.environmentId === null);
     if (!start) return false;
     orbitThreadStartStore.save({ ...start, reservedEnvironmentId });
     return true;
   },
   forget: async (environmentId) => {
-    await runAtomCommand(
+    const result = await runAtomCommand(
       appAtomRegistry,
       environmentCatalog.remove,
       EnvironmentId.make(environmentId),
       { reportFailure: false },
     );
+    if (result._tag === "Failure") {
+      const error = squashAtomCommandFailure(result);
+      if (!isEnvironmentNotRegistered(error)) throw error;
+    }
+    if (isSaved(environmentId)) throw new Error("Reserved server is still in the catalog.");
+    await forgetOrbitThreadStartPaired(environmentId);
   },
   load: async () => {
     try {
@@ -104,27 +119,30 @@ export function installOrbitReservations(
   connect: (environmentId: string, pairingUrl: string) => Promise<void>,
 ): () => void {
   connectClone = connect;
+  let previous = orbitThreadStartStore.starts();
   const disposers = [
-    reservations.subscribe(applyHidden),
+    orbitReservations.subscribe(applyHidden),
     subscribeOrbitReservedEnvironments(applyHidden),
-    orbitThreadStartStore.subscribe(applyHidden),
+    orbitThreadStartStore.subscribe(() => {
+      const starts = orbitThreadStartStore.starts();
+      const dismissed = dismissedOrbitReservationIds(previous, starts);
+      previous = starts;
+      for (const id of dismissed) void orbitReservations.abandon(id);
+      applyHidden();
+    }),
   ];
   // A restart leaves no prompt open: release what the last run held.
-  void reservations.releaseLeftovers();
+  void orbitReservations.releaseLeftovers();
   applyHidden();
   return () => {
     for (const dispose of disposers) dispose();
-    reservations.closeAll();
+    orbitReservations.closeAll();
   };
 }
 
 /** Start: the Project's reservation, or null to create as before. */
 export function takeOrbitReservation(projectId: number): TakenOrbitReservation | null {
-  return reservations.take(projectId);
-}
-
-export function waitForOrbitReservationPairing(reservationId: string): Promise<void> | undefined {
-  return reservations.waitForPairing(reservationId);
+  return orbitReservations.take(projectId);
 }
 
 /** Holds a reservation while the screen shows the Project; null holds none. */
@@ -132,7 +150,7 @@ export function useOrbitReservation(projectId: number | null, enabled: boolean):
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- holds a Gateway reservation while the screen shows the Project
   useEffect(() => {
     if (projectId === null || !enabled) return;
-    reservations.open(projectId);
-    return () => reservations.close(projectId);
+    orbitReservations.open(projectId);
+    return () => orbitReservations.close(projectId);
   }, [enabled, projectId]);
 }

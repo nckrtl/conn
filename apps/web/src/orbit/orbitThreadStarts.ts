@@ -42,7 +42,7 @@ import {
   updateStarts,
 } from "./orbitThreadStartStore";
 import { rememberOrbitComposerControls } from "./orbitComposerControls";
-import { takeOrbitReservation, waitForOrbitReservationPairing } from "./orbitReservations";
+import { getOrbitReservations, takeOrbitReservation } from "./orbitReservations";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
 
@@ -275,9 +275,8 @@ export async function runSavedOrbitThreadStart(
   }
   running.add(id);
   // Dismiss removes the start; a switch to Default pauses it until Orbit mode is back.
-  const stopped = () =>
-    !readStored().some((entry) => entry.id === id) ||
-    useEnvironmentProvider.getState().provider !== "orbit";
+  const dismissed = () => !readStored().some((entry) => entry.id === id);
+  const stopped = () => dismissed() || useEnvironmentProvider.getState().provider !== "orbit";
   try {
     // Whether the device saved the clone's server is known only once the catalog loaded.
     const catalogReady = await waitForAtomValue({
@@ -291,6 +290,8 @@ export async function runSavedOrbitThreadStart(
       return null;
     }
     let environmentId: string | null = null;
+    const reservations =
+      start.reservationId && start.environmentId === null ? getOrbitReservations() : null;
     const sent = await runOrbitThreadStart(start, {
       client,
       // Only the UI sets a Cancel request, so a save of the runner's copy keeps it.
@@ -303,8 +304,10 @@ export async function runSavedOrbitThreadStart(
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       now: Date.now,
       stopped,
+      dismissed,
       isSaved: isOrbitServerSaved,
-      waitForReservationPairing: waitForOrbitReservationPairing,
+      reservationPairing: reservations ?? undefined,
+      waitForReservationPairing: reservations?.waitForPairing,
       connect: connectOrbitClone,
       wake: (instanceId) => wakeOrbitInstanceForStart(client, instanceId),
       onCreateOperation: (operation) => recordCreateOperation(id, operation),

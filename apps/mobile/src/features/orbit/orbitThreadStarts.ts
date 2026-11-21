@@ -30,6 +30,7 @@ export interface MobileOrbitThreadStartPorts {
   /** Resolves false when the saved environments did not load in time. */
   readonly catalogReady: () => Promise<boolean>;
   readonly isSaved: (environmentId: string) => boolean;
+  readonly reservationPairing?: OrbitThreadStartPorts["reservationPairing"];
   readonly waitForReservationPairing?: OrbitThreadStartPorts["waitForReservationPairing"];
   readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
   readonly firstMessage: Omit<OrbitFirstMessagePorts, "stopped">;
@@ -134,7 +135,8 @@ export async function runSavedOrbitThreadStart(
   const start = store.starts().find((entry) => entry.id === id);
   if (start === undefined || start.error !== null || running.has(id)) return null;
   running.add(id);
-  const stopped = () => !store.starts().some((entry) => entry.id === id) || !ports.orbitMode();
+  const dismissed = () => !store.starts().some((entry) => entry.id === id);
+  const stopped = () => dismissed() || !ports.orbitMode();
   try {
     if (!(await ports.catalogReady())) {
       store.save({
@@ -151,7 +153,9 @@ export async function runSavedOrbitThreadStart(
       sleep: ports.sleep,
       now: ports.now,
       stopped,
+      dismissed,
       isSaved: ports.isSaved,
+      reservationPairing: ports.reservationPairing,
       waitForReservationPairing: ports.waitForReservationPairing,
       connect: async (environmentId, pairingUrl) => {
         await store.flush();

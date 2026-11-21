@@ -1159,8 +1159,8 @@ describe("runOrbitThreadStart", () => {
       pairingOperationId: null,
       error: expect.stringContaining("operation.timeout"),
     });
-    // One 2 s poll of the create, then the pairing's 60 s.
-    expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(62_000);
+    // One 0.5 s poll of the create, then the pairing's 60 s.
+    expect(run.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(60_500);
 
     const create = gateway({ create: ["running"] });
     const read = create.client.operation;
@@ -1190,6 +1190,35 @@ describe("runOrbitThreadStart", () => {
 
     expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
     expect(run.sleeps.every((ms) => ms >= 500)).toBe(true);
+  });
+
+  it("reads the create and the pairing every 0.5 s for their first minute, then by Orbit's hint", async () => {
+    const { client } = gateway({
+      create: [...Array<"running">(125).fill("running"), "succeeded"],
+      pairing: ["queued", "running", "succeeded"],
+    });
+    const run = ports(client);
+
+    expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
+    expect(run.sleeps).toEqual([
+      ...Array<number>(120).fill(500),
+      ...Array<number>(5).fill(2000),
+      500,
+      500,
+    ]);
+  });
+
+  it("pairs with the server the create names when it saw the create run, and lists servers otherwise", async () => {
+    const createResult = { t3: { environment_id: "env-41" } };
+    const seen = gateway({ createResult });
+    expect(await runOrbitThreadStart(fresh(), ports(seen.client).ports)).toBe(true);
+    expect(seen.calls).not.toContain("environments");
+    expect(seen.calls).toContain("pair env-41");
+
+    // A resume after the create ended: the clone may have gone to sleep since.
+    const resumed = gateway({ create: ["succeeded"], createResult });
+    expect(await runOrbitThreadStart(fresh(), ports(resumed.client).ports)).toBe(true);
+    expect(resumed.calls.slice(1, 4)).toEqual(["operation 100", "environments", "pair env-41"]);
   });
 
   it("ends a dismissed start at the next step without saving it", async () => {

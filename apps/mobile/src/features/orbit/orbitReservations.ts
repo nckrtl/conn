@@ -67,6 +67,12 @@ const reservations: OrbitReservations = createOrbitReservations({
     if (connectClone === null) throw new Error("Pairing is not ready.");
     await connectClone(environmentId, pairingUrl);
   },
+  hideForTakenStart: (reservationId, reservedEnvironmentId) => {
+    const start = orbitThreadStartStore.starts().find((row) => row.reservationId === reservationId);
+    if (!start) return false;
+    orbitThreadStartStore.save({ ...start, reservedEnvironmentId });
+    return true;
+  },
   forget: async (environmentId) => {
     await runAtomCommand(
       appAtomRegistry,
@@ -115,6 +121,10 @@ export function installOrbitReservations(
 /** Start: the Project's reservation, or null to create as before. */
 export function takeOrbitReservation(projectId: number): TakenOrbitReservation | null {
   return reservations.take(projectId);
+}
+
+export function waitForOrbitReservationPairing(reservationId: string): Promise<void> | undefined {
+  return reservations.waitForPairing(reservationId);
 }
 
 /** Holds a reservation while the screen shows the Project; null holds none. */

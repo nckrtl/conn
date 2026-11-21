@@ -21,7 +21,11 @@ import {
   subscribeOrbitGateway,
 } from "./orbitGatewayStore";
 import { orbitGatewayClient } from "./orbitGatewayClient";
-import { installOrbitReservations, takeOrbitReservation } from "./orbitReservations";
+import {
+  installOrbitReservations,
+  takeOrbitReservation,
+  waitForOrbitReservationPairing,
+} from "./orbitReservations";
 import { orbitThreadStartStore } from "./orbitThreadStartStore";
 import {
   beginOrbitThreadStart,
@@ -71,12 +75,13 @@ const ports: MobileOrbitThreadStartPorts = {
     appAtomRegistry
       .get(environmentCatalog.catalogValueAtom)
       .entries.has(EnvironmentId.make(environmentId)),
+  waitForReservationPairing: waitForOrbitReservationPairing,
   connect: async (environmentId, pairingUrl) => {
     const result = await runAtomCommand(
       appAtomRegistry,
       connectPairingUrl,
-      { pairingUrl },
-      { reportFailure: false },
+      { pairingUrl, expectedEnvironmentId: EnvironmentId.make(environmentId) },
+      { reportFailure: false, reportDefect: false },
     );
     if (result._tag !== "Success") {
       const error = squashAtomCommandFailure(result);

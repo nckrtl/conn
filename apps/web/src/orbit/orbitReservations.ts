@@ -14,6 +14,7 @@ import { randomUUID } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { desktopOrbitGatewayTransport } from "./desktopOrbitGateway";
 import { forgetOrbitInstanceEnvironment, useEnvironmentProvider } from "./environmentProvider";
+import { readStored, saveStart } from "./orbitThreadStartStore";
 import { connectOrbitClone, isOrbitServerSaved } from "./orbitThreadStarts";
 import {
   readStoredIds,
@@ -39,6 +40,12 @@ function reservations(): OrbitReservations | null {
     now: Date.now,
     isSaved: isOrbitServerSaved,
     connect: connectOrbitClone,
+    hideForTakenStart: (reservationId, reservedEnvironmentId) => {
+      const start = readStored().find((row) => row.reservationId === reservationId);
+      if (!start) return false;
+      saveStart({ ...start, reservedEnvironmentId });
+      return true;
+    },
     forget: async (environmentId) => {
       await runAtomCommand(
         appAtomRegistry,
@@ -63,6 +70,10 @@ function reservations(): OrbitReservations | null {
 /** The send of a new Instance: the Project's reservation, or null to create as before. */
 export function takeOrbitReservation(projectId: number): TakenOrbitReservation | null {
   return manager?.take(projectId) ?? null;
+}
+
+export function waitForOrbitReservationPairing(reservationId: string): Promise<void> | undefined {
+  return manager?.waitForPairing(reservationId);
 }
 
 /**

@@ -17,7 +17,7 @@ import {
   type OrbitThreadStart,
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { type EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectPairing } from "../connection/onboarding";
@@ -42,7 +42,7 @@ import {
   updateStarts,
 } from "./orbitThreadStartStore";
 import { rememberOrbitComposerControls } from "./orbitComposerControls";
-import { takeOrbitReservation } from "./orbitReservations";
+import { takeOrbitReservation, waitForOrbitReservationPairing } from "./orbitReservations";
 
 /** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
 
@@ -185,8 +185,8 @@ export async function connectOrbitClone(environmentId: string, pairingUrl: strin
   const result = await runAtomCommand(
     appAtomRegistry,
     connectPairing,
-    { pairingUrl },
-    { reportFailure: false },
+    { pairingUrl, expectedEnvironmentId: EnvironmentId.make(environmentId) },
+    { reportFailure: false, reportDefect: false },
   );
   if (result._tag === "Failure") {
     const error = squashAtomCommandFailure(result);
@@ -304,6 +304,7 @@ export async function runSavedOrbitThreadStart(
       now: Date.now,
       stopped,
       isSaved: isOrbitServerSaved,
+      waitForReservationPairing: waitForOrbitReservationPairing,
       connect: connectOrbitClone,
       wake: (instanceId) => wakeOrbitInstanceForStart(client, instanceId),
       onCreateOperation: (operation) => recordCreateOperation(id, operation),

@@ -172,6 +172,8 @@ export interface OrbitGatewayReservation {
   readonly environmentId: string | null;
   readonly finalizeOperationId: number | null;
   readonly errorCode: string | null;
+  /** Delivered once by a ready reservation GET. Redeem in memory. */
+  readonly pairing: OrbitGatewayPairing | null;
 }
 
 export type OrbitGatewayReservationState =
@@ -180,7 +182,8 @@ export type OrbitGatewayReservationState =
   | "finalizing"
   | "finalized"
   | "failed"
-  | "expired";
+  | "expired"
+  | "released";
 
 const RESERVATION_STATES: ReadonlySet<string> = new Set([
   "preparing",
@@ -189,6 +192,7 @@ const RESERVATION_STATES: ReadonlySet<string> = new Set([
   "finalized",
   "failed",
   "expired",
+  "released",
 ]);
 
 /** A finalize of a reservation that another key finalized already. */
@@ -855,18 +859,20 @@ export function createOrbitGatewayClient(
     },
     reservation: async (reservationId) => {
       const path = reservationPath(reservationId);
-      return reservation(await call({ method: "GET", path }), path);
+      return reservation(await call({ method: "GET", path }), path, reservationId);
     },
     releaseReservation: async (reservationId) => {
       const path = reservationPath(reservationId);
       // 204 carries no body: no create had started.
       const response = await transportCall({ method: "DELETE", path });
       if (response.status === 204) return null;
-      // The contract names only "the destroy Operation id": read the Operation, its id, or a field.
       const data = record(parseEnvelope({ method: "DELETE", path }, response).data);
-      const operationId = [data?.id, record(data?.operation)?.id, data?.operation_id].find(
-        (value) => typeof value === "number",
-      );
+      const operationId = [
+        data?.destroy_operation_id,
+        data?.id,
+        record(data?.operation)?.id,
+        data?.operation_id,
+      ].find((value) => typeof value === "number");
       return typeof operationId === "number" ? operationId : null;
     },
     finalizeReservation: async (reservationId, name, idempotencyKey, branch) => {
@@ -889,10 +895,11 @@ function reservationPath(reservationId: string): string {
   return `/reservations/${encodeURIComponent(reservationId)}`;
 }
 
-function reservation(value: unknown, path: string): OrbitGatewayReservation {
+function reservation(value: unknown, path: string, requestedId?: string): OrbitGatewayReservation {
   const data = record(value);
   if (
     typeof data?.id !== "string" ||
+    (requestedId !== undefined && data.id !== requestedId) ||
     typeof data.project_id !== "number" ||
     typeof data.state !== "string" ||
     !RESERVATION_STATES.has(data.state)
@@ -900,6 +907,9 @@ function reservation(value: unknown, path: string): OrbitGatewayReservation {
     throw invalid(path);
   }
   const number = (field: unknown) => (typeof field === "number" ? field : null);
+  const environmentId = optionalText(data.environment_id);
+  const pairing =
+    requestedId !== undefined && data.state === "ready" ? parseIssuedPairing(data.pairing) : null;
   return {
     id: data.id,
     projectId: data.project_id,
@@ -907,9 +917,10 @@ function reservation(value: unknown, path: string): OrbitGatewayReservation {
     state: data.state as OrbitGatewayReservationState,
     expiresAt: optionalText(data.expires_at),
     createOperationId: number(data.create_operation_id),
-    environmentId: optionalText(data.environment_id),
+    environmentId,
     finalizeOperationId: number(data.finalize_operation_id),
     errorCode: optionalText(data.error_code),
+    pairing: pairing?.environmentId === environmentId ? pairing : null,
   };
 }
 
@@ -925,6 +936,12 @@ function wakeOperation(value: unknown, path: string): OrbitGatewayWakeOperation 
 }
 
 function issuedPairing(value: unknown, path: string): OrbitGatewayPairing {
+  const pairing = parseIssuedPairing(value);
+  if (pairing === null) throw invalid(path);
+  return pairing;
+}
+
+function parseIssuedPairing(value: unknown): OrbitGatewayPairing | null {
   const data = record(value);
   const pairing = record(data?.pairing);
   if (
@@ -932,7 +949,7 @@ function issuedPairing(value: unknown, path: string): OrbitGatewayPairing {
     typeof pairing?.environment_id !== "string" ||
     typeof pairing.expires_at !== "string"
   ) {
-    throw invalid(path);
+    return null;
   }
   return {
     environmentId: pairing.environment_id,

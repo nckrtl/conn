@@ -13,6 +13,7 @@ import {
   type OrbitCompletionPorts,
   type OrbitGatewayProject,
   type OrbitThreadStart,
+  type OrbitThreadStartPorts,
   type TakenOrbitReservation,
 } from "@t3tools/client-runtime/orbit-gateway";
 
@@ -29,6 +30,7 @@ export interface MobileOrbitThreadStartPorts {
   /** Resolves false when the saved environments did not load in time. */
   readonly catalogReady: () => Promise<boolean>;
   readonly isSaved: (environmentId: string) => boolean;
+  readonly waitForReservationPairing?: OrbitThreadStartPorts["waitForReservationPairing"];
   readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
   readonly firstMessage: Omit<OrbitFirstMessagePorts, "stopped">;
   /** Adds the clone's project ref to the workspace selected at Start; never throws. */
@@ -150,6 +152,7 @@ export async function runSavedOrbitThreadStart(
       now: ports.now,
       stopped,
       isSaved: ports.isSaved,
+      waitForReservationPairing: ports.waitForReservationPairing,
       connect: async (environmentId, pairingUrl) => {
         await store.flush();
         await ports.connect(environmentId, pairingUrl);

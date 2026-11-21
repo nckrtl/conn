@@ -441,14 +441,16 @@ pending threads, so they resume or can be dismissed; one whose send finished is 
 **Pre-warm (reservations).** While the prompt box of a new Instance shows (the desktop draft in
 the main window, the phone's Orbit project screen), Conn reserves a clone of the Project
 (`POST /conn/projects/{id}/reservations`, `reservations.ts`), polls it every 2 s while it
-prepares, pairs with its server once ready (no thread), then reads it every 60 s so Orbit keeps
-it. The send takes the reservation; the runner finalizes it (`POST /conn/reservations/{id}/finalize`
-with the name and branch) instead of creating, follows that Operation with the same create rows,
-and skips pairing if the device already saved the server. Pairing uses the existing pairing
-endpoints and does not depend on a pairing field in the provisional reservation response. Conn
-waits up to two minutes for readiness. If the wait expires, the reservation is gone or failed,
-or the finalize fails, Conn releases it and starts an ordinary create with a fresh deadline. Closing the prompt releases it (`DELETE`, the desktop's only allowed
-DELETE); a restart releases what the last run held. At most 3 are held: a fourth Project releases
+prepares, and installs a one-time link as soon as a ready GET delivers it. With no link it
+uses the existing pairing endpoints. The link is used in memory before any further read. Conn reads
+the reservation every 60 s once ready to keep it held. A send during that read or install lets
+it finish before reading the reservation again. The runner finalizes it
+(`POST /conn/reservations/{id}/finalize` with the name and branch), follows that Operation with
+the same create rows, and skips pairing if the device already saved the server. Conn waits up
+to two minutes for readiness. If the wait expires, the reservation is gone or failed, or the
+finalize fails, Conn releases it and starts an ordinary create with a fresh deadline. Closing
+the prompt releases it (`DELETE`, the desktop's only allowed DELETE). A restart releases
+what the last run held. At most 3 are held: a fourth Project releases
 the oldest. Reserved clones (Gateway rows with `reservation_id`, and the ones a start finalizes)
 stay out of every list: the lists read `visibleCatalogValueAtom`, and the Gateway-fed lists drop
 reserved rows. Nothing about it shows on screen.

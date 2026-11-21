@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import {
   OrbitGatewayError,
   type OrbitGatewayClient,
+  type OrbitGatewayPairing,
   type OrbitGatewayReservation,
 } from "./client.ts";
 
@@ -31,6 +32,8 @@ export interface OrbitReservationPorts {
   readonly isSaved: (environmentId: string) => boolean;
   /** Opens a one-time pairing link and saves the server, as for any clone. */
   readonly connect: (environmentId: string, pairingUrl: string) => Promise<void>;
+  /** Keeps a server hidden for its saved start. False if the start was dismissed. */
+  readonly hideForTakenStart?: (reservationId: string, environmentId: string) => boolean;
   /** Removes a released clone's saved server from the device. */
   readonly forget: (environmentId: string) => Promise<void> | void;
   /** The ids of reservations this device holds, kept across an app restart so the next start releases them. */
@@ -47,13 +50,13 @@ export interface TakenOrbitReservation {
   readonly environmentId: string | null;
 }
 
-type Phase = "reserving" | "preparing" | "ready" | "gone";
+type ReservationDetails = Omit<OrbitGatewayReservation, "pairing">;
 
 interface Entry {
   readonly projectId: number;
   readonly openedAt: number;
-  phase: Phase;
-  reservation: OrbitGatewayReservation | null;
+  reservation: ReservationDetails | null;
+  pending: Promise<void> | null;
   /** The device saved the clone's server for this reservation. */
   paired: boolean;
   /** A pairing runs: a close keeps the server hidden, and the pairing forgets it once saved. */
@@ -72,6 +75,8 @@ export interface OrbitReservations {
    * yet, failed, expired, released by Orbit). The start then creates as before.
    */
   readonly take: (projectId: number) => TakenOrbitReservation | null;
+  /** Finishes a read or install already in flight when the start took the reservation. */
+  readonly waitForPairing: (reservationId: string) => Promise<void> | undefined;
   /** Releases what an earlier run of the app left open. */
   readonly releaseLeftovers: () => Promise<void>;
   /** The servers of reserved clones, which no list shows. */
@@ -99,6 +104,7 @@ const USABLE_STATES: ReadonlySet<OrbitGatewayReservation["state"]> = new Set([
 
 export function createOrbitReservations(ports: OrbitReservationPorts): OrbitReservations {
   const entries = new Map<number, Entry>();
+  const handedOff = new Map<string, Promise<void>>();
   /** Released clones whose saved server is still being removed. */
   const releasing = new Set<string>();
   const listeners = new Set<() => void>();
@@ -119,7 +125,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     for (const listener of listeners) listener();
   };
 
-  const release = (reservation: OrbitGatewayReservation | null, paired: boolean) => {
+  const release = (reservation: ReservationDetails | null, paired: boolean) => {
     if (reservation === null) return;
     const environmentId = paired ? reservation.environmentId : null;
     if (environmentId) releasing.add(environmentId);
@@ -140,9 +146,14 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     changed();
   };
 
-  /** Pairs with a ready clone. A failure is left to the start, which pairs as before. */
-  const pairOnce = async (entry: Entry, environmentId: string) => {
-    if (entry.paired) return;
+  const pairOnce = async (
+    entry: Entry,
+    reservationId: string,
+    environmentId: string,
+    issued: OrbitGatewayPairing | null,
+  ) => {
+    const closed = () => entry.ended === "closed";
+    if (entry.paired || closed() || (entry.ended === "taken" && issued === null)) return;
     if (ports.isSaved(environmentId)) {
       entry.paired = true;
       return;
@@ -150,84 +161,115 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     entry.connecting = true;
     let saved = false;
     try {
-      const pairing = await ports.client.pair(environmentId);
-      // Closed while pairing: the link stays unused and the release removes the clone.
-      if (entry.ended === null) {
+      if (
+        entry.ended === "taken" &&
+        ports.hideForTakenStart?.(reservationId, environmentId) === false
+      ) {
+        return;
+      }
+      const pairing = issued ?? (await ports.client.pair(environmentId));
+      if (!closed()) {
         await ports.connect(environmentId, pairing.pairingUrl);
         saved = true;
       }
     } catch {
-      // Nothing on screen: the send pairs in the start's own step.
+      // The start can pair explicitly if this install fails.
     } finally {
       entry.connecting = false;
     }
-    if (entry.ended === "closed") {
-      // Released while the server was being saved: remove it, hidden until then.
-      if (saved) await Promise.resolve(ports.forget(environmentId)).catch(() => {});
+    if (closed()) {
+      if (saved || ports.isSaved(environmentId)) {
+        await Promise.resolve(ports.forget(environmentId)).catch(() => {});
+      }
       if (releasing.delete(environmentId)) changed();
       return;
     }
     if (saved) entry.paired = true;
   };
 
+  const forgetReleased = (environmentId: string) => {
+    releasing.add(environmentId);
+    void Promise.resolve(ports.forget(environmentId))
+      .catch(() => {})
+      .finally(() => {
+        releasing.delete(environmentId);
+        changed();
+      });
+  };
+
+  const refresh = async (entry: Entry, current: ReservationDetails) => {
+    let response: OrbitGatewayReservation;
+    try {
+      response = await ports.client.reservation(current.id);
+    } catch (error) {
+      if (entry.ended === null && isGone(error)) {
+        if (entry.paired && current.environmentId) forgetReleased(current.environmentId);
+        drop(entry);
+      }
+      return;
+    }
+    if (
+      entry.ended === "closed" ||
+      response.id !== current.id ||
+      response.projectId !== entry.projectId
+    ) {
+      return;
+    }
+    const { pairing, ...details } = response;
+    if (!USABLE_STATES.has(details.state)) {
+      if (entry.ended !== null) return;
+      if (details.state === "failed") release(current, entry.paired);
+      if ((details.state === "expired" || details.state === "released") && entry.paired) {
+        if (current.environmentId) forgetReleased(current.environmentId);
+      }
+      drop(entry);
+      return;
+    }
+    entry.reservation = details;
+    if (entry.ended === null) changed();
+    if (details.state === "ready" && details.environmentId !== null) {
+      await pairOnce(entry, details.id, details.environmentId, pairing);
+    }
+  };
+
   const run = async (entry: Entry) => {
-    let reservation: OrbitGatewayReservation;
+    let reservation: ReservationDetails;
     try {
       reservation = await ports.client.reserve(entry.projectId, ports.newKey());
     } catch {
-      entry.phase = "gone";
+      drop(entry);
+      return;
+    }
+    if (reservation.projectId !== entry.projectId) {
       drop(entry);
       return;
     }
     if (entry.ended !== null) {
-      // Closed, or the send went on without it, while Orbit admitted it.
       release(reservation, false);
+      drop(entry);
+      return;
+    }
+    if (!USABLE_STATES.has(reservation.state)) {
+      if (reservation.state === "failed") release(reservation, false);
       drop(entry);
       return;
     }
     entry.reservation = reservation;
     changed();
-    for (;;) {
-      const current = entry.reservation!;
-      if (!USABLE_STATES.has(current.state)) {
-        entry.phase = "gone";
-        // A failed one may hold a clone; an expired one Orbit removes itself.
-        if (current.state === "failed") release(current, entry.paired);
-        drop(entry);
-        return;
+    // An already-ready POST still needs its first GET before pairing.
+    let readNow = reservation.state === "ready";
+    while (entries.get(entry.projectId) === entry) {
+      const current = entry.reservation;
+      if (!readNow) {
+        const ready = current.state === "ready" && current.environmentId !== null;
+        await ports.sleep(ready ? RESERVATION_KEEPALIVE_MS : RESERVATION_PREPARING_POLL_MS);
       }
-      if (current.state === "ready" && current.environmentId !== null) {
-        entry.phase = "ready";
-        await pairOnce(entry, current.environmentId);
-        if (entry.ended !== null) return;
-      } else {
-        entry.phase = "preparing";
-      }
-      await ports.sleep(
-        entry.phase === "ready" ? RESERVATION_KEEPALIVE_MS : RESERVATION_PREPARING_POLL_MS,
-      );
       if (entry.ended !== null) return;
-      try {
-        entry.reservation = await ports.client.reservation(current.id);
-        changed();
-      } catch (error) {
-        if (isGone(error)) {
-          entry.phase = "gone";
-          if (entry.paired && current.environmentId) {
-            // Orbit released it (a fourth reservation elsewhere): forget the saved server.
-            releasing.add(current.environmentId);
-            void Promise.resolve(ports.forget(current.environmentId))
-              .catch(() => {})
-              .finally(() => {
-                releasing.delete(current.environmentId!);
-                changed();
-              });
-          }
-          drop(entry);
-          return;
-        }
-        // A short Gateway outage: keep the last state and read again.
-      }
+      readNow = false;
+      const pending = refresh(entry, current);
+      entry.pending = pending;
+      await pending;
+      entry.pending = null;
     }
   };
 
@@ -251,8 +293,8 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
       const entry: Entry = {
         projectId,
         openedAt: ports.now(),
-        phase: "reserving",
         reservation: null,
+        pending: null,
         paired: false,
         connecting: false,
         ended: null,
@@ -273,6 +315,14 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
         return null;
       }
       entry.ended = "taken";
+      if (entry.pending !== null) {
+        const pending = entry.pending;
+        handedOff.set(reservation.id, pending);
+        const clear = () => {
+          if (handedOff.get(reservation.id) === pending) handedOff.delete(reservation.id);
+        };
+        void pending.then(clear, clear);
+      }
       // The start holds the id now and hides the clone's server until it is finalized
       // (`orbitThreadStartHiddenEnvironmentId`).
       if (entries.get(projectId) === entry) entries.delete(projectId);
@@ -283,6 +333,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
         environmentId: reservation.environmentId,
       };
     },
+    waitForPairing: (reservationId) => handedOff.get(reservationId),
     releaseLeftovers: async () => {
       const open = new Set(
         [...entries.values()].flatMap((entry) => (entry.reservation ? [entry.reservation.id] : [])),

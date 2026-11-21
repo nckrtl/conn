@@ -4,6 +4,7 @@ import {
   OrbitGatewayError,
   createOrbitGatewayClient,
   type OrbitGatewayOperation,
+  type OrbitGatewayPairing,
   type OrbitGatewayRequest,
   type OrbitGatewayReservation,
 } from "./client.ts";
@@ -35,7 +36,14 @@ const reservation = (
   environmentId: state === "preparing" ? null : `env-${id}`,
   finalizeOperationId: null,
   errorCode: null,
+  pairing: null,
   ...extra,
+});
+
+const issued = (environmentId: string): OrbitGatewayPairing => ({
+  environmentId,
+  pairingUrl: "http://clone.test/pair#token=issued-once",
+  expiresAt: "2026-11-21T12:05:00Z",
 });
 
 const gone = () =>
@@ -68,6 +76,9 @@ const flush = async () => {
 function harness(
   options: {
     reads?: Array<OrbitGatewayReservation | Error>;
+    read?: (id: string) => Promise<OrbitGatewayReservation>;
+    connect?: (environmentId: string, pairingUrl: string) => Promise<void>;
+    hideForTakenStart?: (reservationId: string, environmentId: string) => boolean;
     reserve?: (projectId: number) => Promise<OrbitGatewayReservation>;
     saved?: (environmentId: string) => boolean;
     stored?: string[];
@@ -86,6 +97,7 @@ function harness(
     },
     reservation: async (id) => {
       calls.push(`read ${id}`);
+      if (options.read) return options.read(id);
       const next = reads.shift();
       if (next === undefined) return reservation(id, "ready");
       if (next instanceof Error) throw next;
@@ -106,9 +118,11 @@ function harness(
     sleep: clock.sleep,
     now: () => now++,
     isSaved: options.saved ?? (() => false),
-    connect: async (environmentId) => {
+    connect: async (environmentId, pairingUrl) => {
       calls.push(`connect ${environmentId}`);
+      await options.connect?.(environmentId, pairingUrl);
     },
+    ...(options.hideForTakenStart ? { hideForTakenStart: options.hideForTakenStart } : {}),
     forget: (environmentId) => {
       calls.push(`forget ${environmentId}`);
     },
@@ -145,6 +159,44 @@ describe("createOrbitReservations", () => {
     await clock.tick();
     // Paired once; the keep-alive read only.
     expect(calls.slice(5)).toEqual(["read r78"]);
+  });
+
+  it("installs the issued link from the first GET even if reserve already returned ready", async () => {
+    const pairing = issued("env-r78");
+    const install = Promise.withResolvers<void>();
+    const urls: string[] = [];
+    const { calls, clock, reservations, stored } = harness({
+      reserve: async () => reservation("r78", "ready"),
+      reads: [reservation("r78", "ready", { pairing }), reservation("r78", "ready")],
+      connect: async (_id, url) => {
+        urls.push(url);
+        await install.promise;
+      },
+    });
+    reservations.open(78);
+    await flush();
+    expect(calls).toEqual(["reserve 78", "read r78", "connect env-r78"]);
+    expect(urls).toEqual([pairing.pairingUrl]);
+    expect(clock.sleeps).toHaveLength(0);
+    expect(stored()).toEqual(["r78"]);
+    install.resolve();
+    await flush();
+    expect(await clock.tick()).toBe(RESERVATION_KEEPALIVE_MS);
+    expect(calls).toEqual(["reserve 78", "read r78", "connect env-r78", "read r78"]);
+  });
+
+  it("ignores a link delivered by a read that finishes after close", async () => {
+    const read = Promise.withResolvers<OrbitGatewayReservation>();
+    const { calls, clock, reservations, stored } = harness({ read: () => read.promise });
+    reservations.open(78);
+    await flush();
+    await clock.tick();
+    reservations.close(78);
+    read.resolve(reservation("r78", "ready", { pairing: issued("env-r78") }));
+    await flush();
+    expect(calls).toEqual(["reserve 78", "read r78", "release r78"]);
+    expect(reservations.hiddenEnvironmentIds().size).toBe(0);
+    expect(stored()).toEqual([]);
   });
 
   it("releases on close and forgets the paired server", async () => {
@@ -322,6 +374,11 @@ describe("reservation calls", () => {
     environment_id: "env-1",
     finalize_operation_id: null,
     error_code: null,
+    pairing: null,
+  };
+  const wirePairing = {
+    pairing: { environment_id: "env-1", expires_at: "2026-11-21T12:05:00Z" },
+    pairing_url: issued("env-1").pairingUrl,
   };
 
   it("reserves, reads, finalizes and releases with the contract's paths", async () => {
@@ -334,7 +391,7 @@ describe("reservation calls", () => {
       },
       {
         status: 202,
-        body: { data: { id: 901, kind: "instance.destroy", status: "queued", target_id: 501 } },
+        body: { data: { ...wire, state: "released", destroy_operation_id: 901 } },
       },
       { status: 204, body: "" },
     ]);
@@ -349,6 +406,7 @@ describe("reservation calls", () => {
       environmentId: "env-1",
       finalizeOperationId: null,
       errorCode: null,
+      pairing: null,
     });
     const finalize = await gatewayClient.finalizeReservation(wire.id, "fix-login", "k2", {
       mode: "new",
@@ -368,6 +426,38 @@ describe("reservation calls", () => {
     expect(requests[2]).toMatchObject({
       body: { name: "fix-login", branch: { mode: "new", from: "main" } },
       idempotencyKey: "k2",
+    });
+  });
+
+  it("accepts a pairing only from a matching ready GET and handles later null or missing values", async () => {
+    const { gatewayClient } = client([
+      { status: 202, body: { data: { ...wire, pairing: wirePairing } } },
+      { status: 200, body: { data: { ...wire, pairing: wirePairing } } },
+      { status: 200, body: { data: wire } },
+      { status: 200, body: { data: { ...wire, pairing: undefined } } },
+      { status: 200, body: { data: { ...wire, state: "preparing", pairing: wirePairing } } },
+      {
+        status: 200,
+        body: {
+          data: {
+            ...wire,
+            pairing: {
+              ...wirePairing,
+              pairing: { ...wirePairing.pairing, environment_id: "other" },
+            },
+          },
+        },
+      },
+      { status: 200, body: { data: { ...wire, id: "other", pairing: wirePairing } } },
+    ]);
+
+    expect((await gatewayClient.reserve(78)).pairing).toBeNull();
+    expect((await gatewayClient.reservation(wire.id)).pairing).toEqual(issued("env-1"));
+    for (const _ of [null, undefined, "preparing", "different environment"]) {
+      expect((await gatewayClient.reservation(wire.id)).pairing).toBeNull();
+    }
+    await expect(gatewayClient.reservation(wire.id)).rejects.toMatchObject({
+      code: "gateway.response_invalid",
     });
   });
 
@@ -403,6 +493,8 @@ function startHarness(script: {
   finalizeStatus?: OrbitGatewayOperation["status"];
   createReadyAfterMs?: number;
   nameLimit?: number;
+  waitForPairing?: (reservationId: string) => Promise<void> | undefined;
+  connect?: (environmentId: string, pairingUrl: string) => Promise<void>;
 }) {
   const calls: string[] = [];
   const reads = [...(script.reads ?? [])];
@@ -493,7 +585,11 @@ function startHarness(script: {
         now: () => clock,
         stopped: () => false,
         isSaved: saved,
-        connect: async () => {},
+        waitForReservationPairing: script.waitForPairing,
+        connect: async (environmentId, pairingUrl) => {
+          calls.push(`connect ${environmentId}`);
+          await script.connect?.(environmentId, pairingUrl);
+        },
         send: async (ready) => {
           sent.push(ready.environmentId);
         },
@@ -546,6 +642,83 @@ describe("runOrbitThreadStart with a reservation", () => {
     expect(await harness.run(reservedStart(), () => true)).toBe(true);
     expect(harness.calls.slice(0, 3)).toEqual(["read r1", "read r1", "finalize r1 fix-login"]);
   });
+
+  it("waits for a draft's in-flight GET and link install before reading the reservation", async () => {
+    const read = Promise.withResolvers<OrbitGatewayReservation>();
+    const install = Promise.withResolvers<void>();
+    const pairing = issued("env-501");
+    let saved = false;
+    let hidden: string | null = null;
+    const draft = harness({
+      reserve: async () => reservation("r1", "preparing"),
+      read: () => read.promise,
+      hideForTakenStart: (_id, environmentId) => {
+        hidden = environmentId;
+        return true;
+      },
+      connect: async (id, url) => {
+        expect([id, url, hidden]).toEqual(["env-501", pairing.pairingUrl, "env-501"]);
+        await install.promise;
+        saved = true;
+      },
+    });
+    draft.reservations.open(78);
+    await flush();
+    await draft.clock.tick();
+    expect(draft.reservations.take(78)).toMatchObject({ reservationId: "r1" });
+
+    const start = startHarness({
+      reads: [reservation("r1", "ready", { environmentId: "env-501" })],
+      waitForPairing: draft.reservations.waitForPairing,
+    });
+    const sending = start.run(reservedStart(), (id) => saved && id === "env-501");
+    await flush();
+    expect(start.calls).toEqual([]);
+    read.resolve(reservation("r1", "ready", { environmentId: "env-501", pairing }));
+    await flush();
+    expect(draft.calls).toEqual(["reserve 78", "read r1", "connect env-501"]);
+    expect(start.calls).toEqual([]);
+    install.resolve();
+    expect(await sending).toBe(true);
+    expect(start.calls).toEqual([
+      "read r1",
+      "finalize r1 fix-login",
+      "operation 900",
+      "environments",
+    ]);
+    expect(draft.reservations.waitForPairing("r1")).toBeUndefined();
+    expect(draft.stored()).toEqual([]);
+  });
+
+  it.each([false, true])(
+    "installs a link the start reads before finalize (install fails: %s)",
+    async (fails) => {
+      const pairing = issued("env-501");
+      let saved = false;
+      const urls: string[] = [];
+      const harness = startHarness({
+        reads: [
+          reservation("r1", "preparing"),
+          reservation("r1", "ready", { environmentId: "env-501", pairing }),
+        ],
+        connect: async (_id, url) => {
+          urls.push(url);
+          if (fails && url === pairing.pairingUrl) throw new Error(url);
+          saved = true;
+        },
+      });
+      expect(await harness.run(reservedStart(), () => saved)).toBe(true);
+      expect(harness.calls.slice(0, 4)).toEqual([
+        "read r1",
+        "read r1",
+        "connect env-501",
+        "finalize r1 fix-login",
+      ]);
+      expect(urls).toEqual(fails ? [pairing.pairingUrl, "u"] : [pairing.pairingUrl]);
+      expect(harness.calls.includes("pair env-501")).toBe(fails);
+      expect(JSON.stringify(harness.saves)).not.toContain(pairing.pairingUrl);
+    },
+  );
 
   it("uses ordinary pairing when the finalized server was not saved", async () => {
     const harness = startHarness({});

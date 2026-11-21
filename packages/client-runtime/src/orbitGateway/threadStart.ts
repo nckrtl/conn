@@ -363,6 +363,10 @@ export interface OrbitThreadStartPorts {
   readonly stopped: () => boolean;
   /** Whether the device has saved the server already. */
   readonly isSaved: (environmentId: string) => boolean;
+  /** Lets the draft finish its last reservation read and install before the start reads it. */
+  readonly waitForReservationPairing?:
+    | ((reservationId: string) => Promise<void> | undefined)
+    | undefined;
   /** Whether the user pressed Cancel while the create was being admitted. */
   readonly cancelRequested?: () => boolean;
   /** The runner cancelled the create Orbit admitted for a Cancel; the start is to be dropped. */
@@ -849,6 +853,7 @@ export async function runOrbitThreadStart(
   const finalizeReservation = async (deadline: number): Promise<OrbitGatewayOperation | null> => {
     const reservationId = current.reservationId!;
     if (current.createOperationId === null) {
+      await ports.waitForReservationPairing?.(reservationId);
       // Wait until the clone is ready; a reservation that cannot become ready soon falls back.
       const readyBy = Math.min(deadline, ports.now() + RESERVATION_WAIT_MS);
       let instanceId: number | null = null;
@@ -862,11 +867,28 @@ export async function runOrbitThreadStart(
           reservation = null;
         }
         if (reservation !== null) {
+          if (reservation.id !== reservationId || reservation.projectId !== current.projectId) {
+            return null;
+          }
           const replay = reservation.state === "finalized" && current.createKey != null;
           if (reservation.state === "ready" || reservation.state === "finalizing" || replay) {
             instanceId = reservation.instanceId;
-            if (reservation.environmentId)
-              update({ reservedEnvironmentId: reservation.environmentId });
+            checkStopped();
+            const { environmentId, pairing } = reservation;
+            if (environmentId !== null) update({ reservedEnvironmentId: environmentId });
+            if (
+              reservation.state === "ready" &&
+              pairing !== null &&
+              environmentId === pairing.environmentId &&
+              !ports.isSaved(environmentId)
+            ) {
+              // GET hands out the link once. Install it in memory before continuing the start.
+              try {
+                await ports.connect(environmentId, pairing.pairingUrl);
+              } catch {
+                // Pair explicitly after finalize if the server was not saved.
+              }
+            }
             break;
           }
           if (reservation.state !== "preparing") return null;
@@ -874,6 +896,7 @@ export async function runOrbitThreadStart(
         if (ports.now() >= readyBy) return null;
         await ports.sleep(Math.max(Math.min(RESERVATION_POLL_MS, readyBy - ports.now()), 0));
       }
+      checkStopped();
       // A name made from the message fits Orbit's address limits, as for a create.
       if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
       const begin = current.createKey

@@ -401,9 +401,14 @@ function startHarness(script: {
   reads?: Array<OrbitGatewayReservation | Error>;
   finalize?: () => Promise<OrbitGatewayOperation>;
   finalizeStatus?: OrbitGatewayOperation["status"];
+  createReadyAfterMs?: number;
+  nameLimit?: number;
 }) {
   const calls: string[] = [];
   const reads = [...(script.reads ?? [])];
+  let clock = 0;
+  let createStartedAt = 0;
+  const createWaits: number[] = [];
   const client = {
     reservation: async (id: string) => {
       calls.push(`read ${id}`);
@@ -421,17 +426,23 @@ function startHarness(script: {
     },
     createThreadInstance: async (_projectId: number, name: string) => {
       calls.push(`create ${name}`);
+      createStartedAt = clock;
       return op(100, "queued", 41);
     },
-    checkInstanceName: async (_projectId: number, name: string) => ({
-      name,
-      available: true,
-      reason: null,
-      domain: null,
-    }),
+    checkInstanceName: async (_projectId: number, name: string) => {
+      const fits = script.nameLimit === undefined || name.length <= script.nameLimit;
+      return { name, available: fits, reason: fits ? null : "domain_invalid", domain: null };
+    },
     operation: async (id: number) => {
       calls.push(`operation ${id}`);
-      return id === 900 ? op(900, script.finalizeStatus ?? "succeeded") : op(id, "succeeded", 41);
+      if (id === 900) return op(900, script.finalizeStatus ?? "succeeded");
+      if (id === 100 && script.createReadyAfterMs !== undefined) {
+        if (clock - createStartedAt < script.createReadyAfterMs) {
+          return op(id, "running", 41);
+        }
+        return { ...op(id, "succeeded", 41), result: { t3: { environment_id: "env-41" } } };
+      }
+      return op(id, "succeeded", 41);
     },
     environments: async () => {
       calls.push("environments");
@@ -465,10 +476,10 @@ function startHarness(script: {
     }),
   };
   const saves: OrbitThreadStart[] = [];
-  let clock = 0;
   const sent: string[] = [];
   return {
     calls,
+    createWaits,
     saves,
     sent,
     run: (start: OrbitThreadStart, saved: (environmentId: string) => boolean = () => false) =>
@@ -476,6 +487,7 @@ function startHarness(script: {
         client: client as never,
         save: (next) => saves.push(next),
         sleep: async (ms) => {
+          if (calls.at(-1) === "operation 100") createWaits.push(ms);
           clock += ms;
         },
         now: () => clock,
@@ -535,6 +547,26 @@ describe("runOrbitThreadStart with a reservation", () => {
     expect(harness.calls.slice(0, 3)).toEqual(["read r1", "read r1", "finalize r1 fix-login"]);
   });
 
+  it("uses ordinary pairing when the finalized server was not saved", async () => {
+    const harness = startHarness({});
+    expect(await harness.run(reservedStart())).toBe(true);
+    expect(harness.calls).toContain("pair env-501");
+    expect(harness.calls).not.toContain("create fix-login");
+    expect(harness.sent).toEqual(["env-501"]);
+  });
+
+  it("fits the name derived from the prompt before finalizing", async () => {
+    const harness = startHarness({ nameLimit: 20 });
+    const start = {
+      ...reservedStart(),
+      message: "Please refactor the checkout payment flow handlers",
+      nameSuffix: "k3j9",
+    };
+    expect(await harness.run(start)).toBe(true);
+    expect(harness.calls).toContain("finalize r1 please-refac-k3j9");
+    expect(harness.saves.at(-1)?.instanceName).toBe("please-refac-k3j9");
+  });
+
   const fallbacks: ReadonlyArray<readonly [string, Parameters<typeof startHarness>[0]]> = [
     ["expired", { reads: [reservation("r1", "expired")] }],
     ["failed", { reads: [reservation("r1", "failed")] }],
@@ -571,11 +603,14 @@ describe("runOrbitThreadStart with a reservation", () => {
   it("creates with its full time when the reservation stays preparing", async () => {
     const harness = startHarness({
       reads: Array.from({ length: 200 }, () => reservation("r1", "preparing")),
+      createReadyAfterMs: 29 * 60_000,
     });
     expect(await harness.run(reservedStart())).toBe(true);
-    // About 2 minutes of reads at 2 s, then the create.
-    expect(harness.calls.filter((call) => call === "read r1").length).toBeLessThanOrEqual(62);
+    expect(harness.calls.filter((call) => call === "read r1")).toHaveLength(61);
     expect(harness.calls).toContain("create fix-login");
+    expect(harness.createWaits[0]).toBe(500);
+    expect(harness.calls).not.toContain("environments");
+    expect(harness.calls).toContain("pair env-41");
     expect(harness.saves.every((save) => save.error === null)).toBe(true);
   });
 

@@ -794,7 +794,13 @@ export function createOrbitGatewayClient(
     },
     operation: async (operationId) => {
       const path = `/operations/${operationId}`;
-      return operation(await call({ method: "GET", path }), path);
+      try {
+        return operation(await call({ method: "GET", path }), path);
+      } catch (error) {
+        // The Conn read serves no `instance.finalize` (release 2201); Orbit's own read does.
+        if (!(error instanceof OrbitGatewayError) || error.status !== 404) throw error;
+        return operation(await call({ method: "GET", path, root: true }), path);
+      }
     },
     cancelOperation: async (operationId) => {
       const path = `/operations/${operationId}/cancel`;

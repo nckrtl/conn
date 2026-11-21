@@ -297,7 +297,8 @@ impl Store {
             .query_row(
                 "SELECT MAX(COALESCE((SELECT MAX(seq) FROM events), 0),
                             COALESCE((SELECT MAX(seq) FROM shell_changes), 0),
-                            COALESCE((SELECT MAX(sequence) FROM receipts), 0))",
+                            COALESCE((SELECT MAX(sequence) FROM receipts), 0),
+                            COALESCE((SELECT value FROM meta WHERE key = 'imported_through'), 0))",
                 [],
                 |row| row.get(0),
             )
@@ -879,6 +880,24 @@ impl Store {
         Ok(rows)
     }
 
+    /// One text column per row.
+    pub(crate) fn query_rows_text(&self, sql: &str) -> StoreResult<Vec<String>> {
+        let mut stmt = self.conn.prepare(sql).map_err(err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(err)?;
+        Ok(rows)
+    }
+
+    /// Moves the write-ahead log into the file and empties it.
+    pub(crate) fn checkpoint(&self) -> StoreResult<()> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(err)
+    }
+
     /// A text column and a JSON column per row.
     pub(crate) fn query_rows(
         &self,
@@ -1219,6 +1238,15 @@ impl Tx<'_> {
             }
         }
         Ok(seq)
+    }
+
+    /// Marks a thread's shell row for the commit to recompute, at a new sequence.
+    pub(crate) fn touch(&mut self, thread_id: &str) {
+        let seq = self.alloc();
+        match self.touched.iter_mut().find(|(id, _)| id == thread_id) {
+            Some(entry) => entry.1 = seq,
+            None => self.touched.push((thread_id.to_owned(), seq)),
+        }
     }
 
     /// Takes the next turn item position for an item whose text is held and not stored yet

@@ -289,7 +289,7 @@ export const AntigravityDriver: ProviderDriver<
       return {
         executable,
         spawn: buildAntigravityAcpSpawnInput({
-          installation: { executablePath: executable.executablePath, harnessPath: null },
+          installation: { executablePath: executable.executablePath },
           profile,
           cwd,
           baseEnv,

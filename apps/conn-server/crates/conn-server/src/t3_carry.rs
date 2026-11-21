@@ -81,39 +81,49 @@ pub fn carry_t3_state(state_dir: &Path) -> Result<Option<CarryReport>, String> {
     // server may have run since (a revoked session, a spent code), so they are read again.
     let marker = state_dir.join(PENDING_FILE);
     let pending = std::fs::read_to_string(&marker).unwrap_or_default();
-    let writable =
-        |name: &str| !state_dir.join(name).exists() || pending.lines().any(|line| line == name);
-    let mut written: Vec<&str> = Vec::new();
+    let is_pending = |name: &str| pending.lines().any(|line| line == name);
+    let mut carry: Vec<&str> = [AUTH_FILE, PEERS_FILE, TASKS_FILE]
+        .into_iter()
+        .filter(|name| !state_dir.join(name).exists() || is_pending(name))
+        .collect();
+    // The marker goes first, so a start that stops between two writes reads them again.
+    let save_marker = |names: &[&str]| {
+        conn_support::fs::write_private(&marker, names.join("\n").as_bytes())
+            .map_err(|e| format!("t3 carry: cannot write {PENDING_FILE}: {e}"))
+    };
+    if !carry.is_empty() {
+        save_marker(&carry)?;
+    }
 
-    let auth = state_dir.join(AUTH_FILE);
-    if writable(AUTH_FILE) {
+    if carry.contains(&AUTH_FILE) {
+        let auth = state_dir.join(AUTH_FILE);
         let (sessions, skipped) = read_sessions(&conn, now)?;
         let links = read_pairing_links(&conn, now)?;
-        report.sessions = Some(sessions.len());
-        report.sessions_skipped = skipped;
-        report.pairing_links = Some(links.len());
-        crate::auth::write_t3_import(&auth, sessions, links, pending.contains(AUTH_FILE))
+        let (count, link_count) = (sessions.len(), links.len());
+        let written = crate::auth::write_t3_import(&auth, sessions, links, is_pending(AUTH_FILE))
             .map_err(|e| format!("t3 carry: cannot write {}: {e}", auth.display()))?;
-        written.push(AUTH_FILE);
+        if written {
+            report.sessions = Some(count);
+            report.sessions_skipped = skipped;
+            report.pairing_links = Some(link_count);
+        } else {
+            // The CLI made it first: it is this server's file.
+            carry.retain(|name| *name != AUTH_FILE);
+            save_marker(&carry)?;
+        }
     }
-    if writable(PEERS_FILE) && has_table(&conn, "peer_environment_links")? {
+    if carry.contains(&PEERS_FILE) && has_table(&conn, "peer_environment_links")? {
         let links = read_peer_links(&conn)?;
         report.peer_links = Some(links.len());
         crate::peers::write_t3_import(state_dir, links)
             .map_err(|e| format!("t3 carry: cannot write {PEERS_FILE}: {e}"))?;
-        written.push(PEERS_FILE);
     }
-    if writable(TASKS_FILE) && has_table(&conn, "scheduled_tasks")? {
+    if carry.contains(&TASKS_FILE) && has_table(&conn, "scheduled_tasks")? {
         let tasks = read_scheduled_tasks(&conn)?;
         report.scheduled_tasks = Some(
             conn_features::scheduled::write_t3_import(state_dir, tasks)
                 .map_err(|e| format!("t3 carry: cannot write {TASKS_FILE}: {e}"))?,
         );
-        written.push(TASKS_FILE);
-    }
-    if !written.is_empty() {
-        conn_support::fs::write_private(&marker, written.join("\n").as_bytes())
-            .map_err(|e| format!("t3 carry: cannot write {PENDING_FILE}: {e}"))?;
     }
     Ok(Some(report))
 }

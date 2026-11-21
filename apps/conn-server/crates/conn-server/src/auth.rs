@@ -512,6 +512,9 @@ struct StoredPairing {
     label: Option<String>,
     created_at_ms: u64,
     expires_at_ms: u64,
+    /// Carried over from a T3 server (`t3_carry.rs`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    t3: bool,
 }
 
 impl StoredPairing {
@@ -707,6 +710,7 @@ impl AuthStore {
             label: request.label,
             created_at_ms: now,
             expires_at_ms: expires_at(now, request.ttl_ms),
+            t3: false,
         };
         let issued = IssuedPairingCode {
             id: link.id.clone(),
@@ -867,6 +871,7 @@ impl AuthStore {
             label,
             created_at_ms: now,
             expires_at_ms: expires_at(now, PAIRING_CODE_TTL_MS),
+            t3: false,
         };
         let issued = IssuedPairingCode {
             id: link.id.clone(),
@@ -1535,19 +1540,34 @@ pub(crate) struct T3PairingLink {
 /// Writes `auth.json` from a T3 server's live sessions and pairing links. Pairing codes are
 /// kept as their hash, as every code here is; the T3 sessions keep their tokens valid
 /// ([`AuthStore::resolve`]).
-/// Under the auth file's lock, so a CLI write cannot be lost; an `auth.json` that appeared
-/// meanwhile is kept unless `replace` (an earlier carry-over's own file).
+/// Under the auth file's lock, so a CLI write cannot be lost. An `auth.json` that appeared
+/// meanwhile is kept (`false`). With `replace` (an earlier carry-over's file, read again from
+/// T3), sessions and pairing links issued here since are kept; T3's are read afresh.
 pub(crate) fn write_t3_import(
     path: &Path,
     sessions: Vec<T3Session>,
     links: Vec<T3PairingLink>,
     replace: bool,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let _lock = lock_file(path)?;
     if !replace && path.exists() {
-        return Ok(());
+        return Ok(false);
     }
-    let file = AuthFile {
+    let earlier: AuthFile = match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => AuthFile::default(),
+    };
+    let own_sessions: Vec<StoredSession> = earlier
+        .sessions
+        .into_iter()
+        .filter(|s| !s.t3_signed)
+        .collect();
+    let own_links: Vec<StoredPairing> = earlier
+        .pairing_links
+        .into_iter()
+        .filter(|l| !l.t3)
+        .collect();
+    let mut file = AuthFile {
         version: 1,
         sessions: sessions
             .into_iter()
@@ -1576,11 +1596,15 @@ pub(crate) fn write_t3_import(
                 label: l.label,
                 created_at_ms: l.created_at_ms,
                 expires_at_ms: l.expires_at_ms,
+                t3: true,
             })
             .collect(),
     };
+    file.sessions.extend(own_sessions);
+    file.pairing_links.extend(own_links);
     let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
-    write_private(path, &bytes)
+    write_private(path, &bytes)?;
+    Ok(true)
 }
 
 fn principal_of(session: &StoredSession) -> Principal {
@@ -2450,6 +2474,64 @@ mod tests {
             expires_at_ms,
             last_connected_at_ms: None,
         }
+    }
+
+    #[test]
+    fn a_repeated_carry_keeps_what_was_issued_here() {
+        let dir = temp_dir("auth-t3-recarry");
+        let file = dir.join("auth.json");
+        let later = now_ms() + 60 * MINUTE_MS;
+        let link = |id: &str, code: &str| T3PairingLink {
+            id: id.into(),
+            credential: code.into(),
+            scopes: vec![],
+            subject: "one-time-token".into(),
+            label: None,
+            created_at_ms: now_ms(),
+            expires_at_ms: later,
+        };
+        let session = |id: &str| T3Session {
+            id: id.into(),
+            subject: "one-time-token".into(),
+            scopes: vec![],
+            client: ClientInfo::default(),
+            issued_at_ms: now_ms(),
+            expires_at_ms: later,
+            last_connected_at_ms: None,
+        };
+        assert!(
+            write_t3_import(
+                &file,
+                vec![session("a"), session("b")],
+                vec![link("p1", "AAAA")],
+                false
+            )
+            .unwrap()
+        );
+        // Without `replace`, an existing file is kept.
+        assert!(!write_t3_import(&file, vec![], vec![], false).unwrap());
+        let store = AuthStore::open(file.clone()).unwrap();
+        let own = store
+            .issue_session(SessionRequest {
+                scopes: vec!["orchestration:read".into()],
+                label: Some("cli".into()),
+                subject: None,
+                ttl_ms: 60 * MINUTE_MS,
+            })
+            .unwrap();
+        drop(store);
+        // T3 revoked "b" and spent "p1" in between: the re-read drops them, keeps the CLI one.
+        assert!(write_t3_import(&file, vec![session("a")], vec![], true).unwrap());
+        let store = AuthStore::open(file).unwrap();
+        let ids: Vec<String> = store
+            .client_sessions(None)
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        assert!(ids.contains(&"a".to_owned()) && !ids.contains(&"b".to_owned()));
+        assert!(store.authenticate_bearer(&own.token).is_some());
+        assert!(store.pairing_links().is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

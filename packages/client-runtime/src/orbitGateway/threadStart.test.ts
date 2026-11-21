@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   ORBIT_CONTAINER_PROCESS_INACTIVE,
@@ -1219,6 +1219,21 @@ describe("runOrbitThreadStart", () => {
     const resumed = gateway({ create: ["succeeded"], createResult });
     expect(await runOrbitThreadStart(fresh(), ports(resumed.client).ports)).toBe(true);
     expect(resumed.calls.slice(1, 4)).toEqual(["operation 100", "environments", "pair env-41"]);
+
+    // The laptop slept between a running read and the succeeded one: the clone may sleep too.
+    const slept = gateway({ createResult, servers: [server(41, "stopped")] });
+    const run = ports(slept.client);
+    const sleep = run.ports.sleep;
+    run.ports.sleep = async () => sleep(120_000);
+    const wake = vi.fn(async () => ({ kind: "awake" as const }));
+    expect(await runOrbitThreadStart(fresh(), { ...run.ports, wake })).toBe(true);
+    expect(slept.calls.slice(1, 5)).toEqual([
+      "operation 100",
+      "operation 100",
+      "environments",
+      "pair env-41",
+    ]);
+    expect(wake).toHaveBeenCalledWith(41);
   });
 
   it("ends a dismissed start at the next step without saving it", async () => {
@@ -1300,11 +1315,12 @@ describe("runOrbitThreadStart", () => {
   it("rides out a short Gateway outage while it follows the create", async () => {
     const { client, calls } = gateway({});
     const operation = client.operation;
-    let failures = 2;
+    let reads = 0;
     const flaky = {
       ...client,
       operation: async (id: number) => {
-        if (id === 100 && failures-- > 0) {
+        // The second and third reads fail, after a read that gave Orbit's 2 s hint.
+        if (id === 100 && [2, 3].includes(++reads)) {
           throw new OrbitGatewayError({
             code: "gateway.unreachable",
             message: "down",
@@ -1319,6 +1335,8 @@ describe("runOrbitThreadStart", () => {
 
     expect(await runOrbitThreadStart(fresh(), run.ports)).toBe(true);
     expect(calls.filter((call) => call.startsWith("create"))).toHaveLength(1);
+    // Failed reads keep Orbit's hint: a failing Gateway is not read faster.
+    expect(run.sleeps.slice(0, 3)).toEqual([500, 2000, 2000]);
   });
 
   it("keeps the pairing when the send fails, so a retry only sends", async () => {

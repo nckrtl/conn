@@ -390,6 +390,11 @@ const PAIRING_TIMEOUT_MS = OPERATION_TIMEOUT_MS;
  */
 const WAITED_POLL_MS = 500;
 const WAITED_POLL_WINDOW_MS = 60_000;
+/**
+ * A create seen running this recently ended moments ago, so its clone is awake. After a longer
+ * gap (a sleeping laptop) the clone may sleep too: Conn lists it and wakes it.
+ */
+const CREATED_SERVER_FRESH_MS = 60_000;
 /** How long a pairing admission may keep losing its answer; each try may take up to 60 s. */
 const PAIRING_ADMISSION_MS = 5 * 60_000;
 
@@ -683,6 +688,7 @@ export async function runOrbitThreadStart(
     const deadline = ports.now() + timeoutMs;
     const fastUntil = ports.now() + WAITED_POLL_WINDOW_MS;
     let outageSince: number | null = null;
+    let lastHint: number | null = null;
     for (;;) {
       checkStopped();
       await beforeRead?.();
@@ -706,8 +712,9 @@ export async function runOrbitThreadStart(
         );
       }
       if (ports.now() >= deadline) throw failed("operation.timeout", null, null);
-      const hinted = operationPollDelayMs(operation?.pollAfterSeconds ?? null);
-      // An outage keeps the hint, so a failing Gateway is not read faster.
+      if (operation !== null) lastHint = operation.pollAfterSeconds ?? lastHint;
+      // A failed read keeps the last hint, so a failing Gateway is not read faster.
+      const hinted = operationPollDelayMs(lastHint);
       const wait =
         operation !== null && ports.now() < fastUntil ? Math.min(hinted, WAITED_POLL_MS) : hinted;
       await ports.sleep(Math.max(Math.min(wait, deadline - ports.now()), 0));
@@ -831,7 +838,7 @@ export async function runOrbitThreadStart(
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
-      let sawRunning = false;
+      let runningSeenAt: number | null = null;
       const created = await follow(
         current.createOperationId!,
         createDeadline - ports.now(),
@@ -847,7 +854,7 @@ export async function runOrbitThreadStart(
             detail,
           ),
         (operation) => {
-          if (!OPERATION_TERMINAL_STATUSES.has(operation.status)) sawRunning = true;
+          if (!OPERATION_TERMINAL_STATUSES.has(operation.status)) runningSeenAt = ports.now();
           const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
           if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
           ports.onCreateOperation?.(operation);
@@ -859,8 +866,12 @@ export async function runOrbitThreadStart(
       const createdServer =
         typeof t3 === "object" && t3 !== null && "environment_id" in t3 ? t3.environment_id : null;
       let environmentId: string;
-      if (sawRunning && typeof createdServer === "string") {
-        // This run saw the create end: its server was registered and started just now.
+      if (
+        runningSeenAt !== null &&
+        ports.now() - runningSeenAt < CREATED_SERVER_FRESH_MS &&
+        typeof createdServer === "string"
+      ) {
+        // The create ended moments ago: its server was registered and started just now.
         environmentId = createdServer;
       } else {
         const server = (await ports.client.environments()).find(

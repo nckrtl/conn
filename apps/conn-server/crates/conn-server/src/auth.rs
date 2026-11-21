@@ -1553,9 +1553,12 @@ pub(crate) fn write_t3_import(
     if !replace && path.exists() {
         return Ok(false);
     }
+    // A file that cannot be read stops the start: it may hold sessions issued here.
     let earlier: AuthFile = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => AuthFile::default(),
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => AuthFile::default(),
+        Err(error) => return Err(error),
     };
     let own_sessions: Vec<StoredSession> = earlier
         .sessions

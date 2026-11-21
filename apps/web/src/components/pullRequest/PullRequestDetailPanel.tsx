@@ -1561,7 +1561,6 @@ export function PullRequestDetailPanel({
         threadRef={threadRef}
         tabs={visibleTabs}
         activeTab={tab}
-        threadRef={threadRef}
         {...(onBack ? { onBack } : {})}
         {...(onClose ? { onClose } : {})}
         actions={

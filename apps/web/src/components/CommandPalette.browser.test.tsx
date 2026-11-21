@@ -18,6 +18,7 @@ import type { OrbitGatewayEnvironment } from "@t3tools/client-runtime/orbit-gate
 const entities = vi.hoisted(() => ({
   projects: [] as ReadonlyArray<Project>,
   threads: [] as ReadonlyArray<Thread>,
+  activeThread: undefined as Thread | undefined,
   delegatedUnderParent: new Set<string>() as ReadonlySet<string>,
   handleNewThread: vi.fn(async () => undefined),
 }));
@@ -41,6 +42,7 @@ vi.mock("../hooks/useHandleNewThread", async (original) => {
     ...actual,
     useHandleNewThread: () => ({
       ...actual.useHandleNewThread(),
+      activeThread: entities.activeThread,
       handleNewThread: entities.handleNewThread,
     }),
   };
@@ -105,6 +107,7 @@ function setup(state: Partial<typeof entities> & { orbit?: OrbitPaletteProjectsS
   orbit.retry.mockReset();
   orbit.checkInstanceName.mockReset();
   orbit.openOrbitDraft.mockReset();
+  entities.activeThread = state.activeThread;
   entities.delegatedUnderParent = state.delegatedUnderParent ?? new Set();
   entities.handleNewThread.mockClear();
 }
@@ -496,6 +499,45 @@ describe("CommandPalette open intents", () => {
     await userEvent.keyboard("{Enter}");
     await vi.waitFor(() => expect(orbit.retry).toHaveBeenCalledOnce());
     expect(orbit.openOrbitDraft).not.toHaveBeenCalled();
+  });
+
+  it("starts a thread in an open copy when the current project's copy is archived", async () => {
+    const repositoryIdentity = {
+      canonicalKey: "github.com/example/acme",
+      locator: {
+        source: "git-remote" as const,
+        remoteName: "origin",
+        remoteUrl: "https://github.com/example/acme.git",
+      },
+    };
+    const archived = {
+      ...makeProject("acme"),
+      repositoryIdentity,
+      archivedAt: "2026-03-02T00:00:00.000Z",
+    };
+    const open = {
+      ...makeProject("acme"),
+      environmentId: EnvironmentId.make("remote"),
+      repositoryIdentity,
+    };
+    setup({
+      projects: [archived, open],
+      activeThread: makeThreadFixture({
+        environmentId: archived.environmentId,
+        projectId: archived.id,
+      }),
+    });
+    await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
+
+    openCommandPalette({ open: "new-thread-in" });
+    await page.getByRole("option", { name: /acme/i }).click();
+
+    await vi.waitFor(() =>
+      expect(entities.handleNewThread).toHaveBeenCalledWith({
+        environmentId: open.environmentId,
+        projectId: open.id,
+      }),
+    );
   });
 
   it("numbers filtered New thread in... rows from 1 and jumps to them", async () => {

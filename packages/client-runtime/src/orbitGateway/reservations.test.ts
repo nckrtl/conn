@@ -159,7 +159,11 @@ function harness(
 describe("createOrbitReservations", () => {
   it("reserves on open, polls every 2 s while preparing, pairs once ready, then reads every 60 s", async () => {
     const { calls, clock, reservations, stored } = harness({
-      reads: [reservation("r78", "preparing"), reservation("r78", "ready")],
+      reads: [
+        reservation("r78", "preparing"),
+        reservation("r78", "ready"),
+        reservation("r78", "ready", { pairing: issued("env-r78") }),
+      ],
     });
     reservations.open(78);
     reservations.open(78);
@@ -168,18 +172,35 @@ describe("createOrbitReservations", () => {
     expect(stored()).toEqual(["r78"]);
     expect(await clock.tick()).toBe(RESERVATION_PREPARING_POLL_MS);
     expect(await clock.tick()).toBe(RESERVATION_PREPARING_POLL_MS);
-    expect(calls).toEqual([
-      "reserve 78",
-      "read r78",
-      "read r78",
-      "pair env-r78",
-      "connect env-r78",
-    ]);
+    // Ready before the Gateway minted its link: read again soon instead of pairing explicitly.
+    expect(calls).toEqual(["reserve 78", "read r78", "read r78"]);
+    expect(await clock.tick()).toBe(RESERVATION_PREPARING_POLL_MS);
+    expect(calls).toEqual(["reserve 78", "read r78", "read r78", "read r78", "connect env-r78"]);
     expect(reservations.hiddenEnvironmentIds()).toEqual(new Set(["env-r78"]));
     expect(clock.sleeps.map((entry) => entry.ms)).toEqual([RESERVATION_KEEPALIVE_MS]);
     await clock.tick();
     // Paired once; the keep-alive read only.
     expect(calls.slice(5)).toEqual(["read r78"]);
+  });
+
+  it("pairs explicitly when the Gateway delivers no link after a few ready reads", async () => {
+    const { calls, clock, reservations } = harness({
+      reserve: async () => reservation("r78", "ready"),
+    });
+    reservations.open(78);
+    await flush();
+    expect(calls).toEqual(["reserve 78", "read r78"]);
+    expect(await clock.tick()).toBe(RESERVATION_PREPARING_POLL_MS);
+    expect(await clock.tick()).toBe(RESERVATION_PREPARING_POLL_MS);
+    expect(calls).toEqual([
+      "reserve 78",
+      "read r78",
+      "read r78",
+      "read r78",
+      "pair env-r78",
+      "connect env-r78",
+    ]);
+    expect(clock.sleeps.map((entry) => entry.ms)).toEqual([RESERVATION_KEEPALIVE_MS]);
   });
 
   it("installs the issued link from the first GET even if reserve already returned ready", async () => {
@@ -222,7 +243,7 @@ describe("createOrbitReservations", () => {
 
   it("releases on close and forgets the paired server", async () => {
     const { calls, clock, reservations, stored } = harness({
-      reads: [reservation("r78", "ready")],
+      reads: [reservation("r78", "ready", { pairing: issued("env-r78") })],
     });
     reservations.open(78);
     await flush();
@@ -286,7 +307,9 @@ describe("createOrbitReservations", () => {
     expect(failed.calls).toContain("release r78");
     expect(failed.reservations.take(78)).toBeNull();
 
-    const released = harness({ reads: [reservation("r78", "ready"), gone()] });
+    const released = harness({
+      reads: [reservation("r78", "ready", { pairing: issued("env-r78") }), gone()],
+    });
     released.reservations.open(78);
     await flush();
     await released.clock.tick();
@@ -475,7 +498,8 @@ describe("createOrbitReservations", () => {
     const reservations = createOrbitReservations({
       client: {
         reserve: async () => reservation("r78", "ready"),
-        reservation: async (id) => reservation(id, "ready"),
+        reservation: async (id) =>
+          reservation(id, "ready", { pairing: issued(id.replace("r", "env-r")) }),
         releaseReservation: async (id) => {
           calls.push(`release ${id}`);
           return null;

@@ -17,6 +17,8 @@ import {
 export const RESERVATION_PREPARING_POLL_MS = 2_000;
 export const RESERVATION_KEEPALIVE_MS = 60_000;
 const PAIRING_CLEANUP_RETRY_MS = 2_000;
+/** Ready reads without a link, the last one pairing explicitly; the Gateway mints the link after `ready`. */
+const ISSUED_PAIRING_READS = 3;
 /** Orbit holds at most 3 per caller and releases the oldest for a fourth; Conn does it first. */
 export const MAX_OPEN_RESERVATIONS = 3;
 
@@ -61,6 +63,8 @@ interface Entry {
   pending: Promise<void> | null;
   /** The device saved the clone's server for this reservation. */
   paired: boolean;
+  /** Ready reads that came without the Gateway's pairing link (it is minted after `ready`). */
+  readsWithoutPairing: number;
   /** Closed or taken: the loop stops; a reservation still being admitted is released when it arrives. */
   ended: "closed" | "taken" | null;
 }
@@ -295,6 +299,15 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     entry.reservation = details;
     if (entry.ended === null) changed();
     if (details.state === "ready" && details.environmentId !== null) {
+      if (
+        pairing === null &&
+        !entry.paired &&
+        entry.readsWithoutPairing < ISSUED_PAIRING_READS &&
+        ++entry.readsWithoutPairing < ISSUED_PAIRING_READS &&
+        !ports.isSaved(details.environmentId)
+      ) {
+        return;
+      }
       await pairOnce(entry, details.id, details.environmentId, pairing);
     }
   };
@@ -328,7 +341,10 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     while (entries.get(entry.projectId) === entry) {
       const current = entry.reservation;
       if (!readNow) {
-        const ready = current.state === "ready" && current.environmentId !== null;
+        const ready =
+          current.state === "ready" &&
+          current.environmentId !== null &&
+          (entry.paired || entry.readsWithoutPairing >= ISSUED_PAIRING_READS);
         await ports.sleep(ready ? RESERVATION_KEEPALIVE_MS : RESERVATION_PREPARING_POLL_MS);
       }
       if (entry.ended !== null) return;
@@ -360,6 +376,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
         reservation: null,
         pending: null,
         paired: false,
+        readsWithoutPairing: 0,
         ended: null,
       };
       entries.set(projectId, entry);

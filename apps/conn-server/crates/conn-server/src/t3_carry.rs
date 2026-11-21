@@ -100,8 +100,9 @@ pub fn carry_t3_state(state_dir: &Path) -> Result<Option<CarryReport>, String> {
         let (sessions, skipped) = read_sessions(&conn, now)?;
         let links = read_pairing_links(&conn, now)?;
         let (count, link_count) = (sessions.len(), links.len());
-        let written = crate::auth::write_t3_import(&auth, sessions, links, is_pending(AUTH_FILE))
-            .map_err(|e| format!("t3 carry: cannot write {}: {e}", auth.display()))?;
+        let written =
+            crate::auth::write_t3_import(&auth, sessions, links, is_pending(AUTH_FILE), now)
+                .map_err(|e| format!("t3 carry: cannot write {}: {e}", auth.display()))?;
         if written {
             report.sessions = Some(count);
             report.sessions_skipped = skipped;

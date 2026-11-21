@@ -1214,6 +1214,19 @@ impl AuthStore {
             .map(|(_, s)| session_to_contract(s, &state, current))
     }
 
+    /// Drops every session carried over from T3. An inert rehearsal copy calls it, so the
+    /// original's clients cannot drive the copy; sessions issued here stay.
+    pub fn drop_t3_sessions(&self) -> io::Result<usize> {
+        let mut dropped = 0;
+        self.write(|state| {
+            let before = state.sessions.len();
+            state.sessions.retain(|_, s| !s.t3_signed);
+            dropped = before - state.sessions.len();
+            Vec::new()
+        })?;
+        Ok(dropped)
+    }
+
     pub fn revoke_pairing_link(&self, id: &str) -> io::Result<bool> {
         let mut revoked = false;
         self.write(|state| {
@@ -1662,23 +1675,41 @@ pub(crate) struct T3PairingLink {
 /// Under the auth file's lock, so a CLI write cannot be lost. An `auth.json` that appeared
 /// meanwhile is kept (`false`). With `replace` (an earlier carry-over's file, read again from
 /// T3), sessions and pairing links issued here since are kept; T3's are read afresh.
+///
+/// `read_at` is when T3's table was read: a code T3 makes after it is the fallback's
+/// (`t3CarriedAtMs`). On `replace` over an existing file, T3's sessions and codes come back
+/// only when this file still holds them or T3 made them after the file's carry: one revoked
+/// or spent here never returns, even from a file an older version wrote.
 pub(crate) fn write_t3_import(
     path: &Path,
-    sessions: Vec<T3Session>,
-    links: Vec<T3PairingLink>,
+    mut sessions: Vec<T3Session>,
+    mut links: Vec<T3PairingLink>,
     replace: bool,
+    read_at: u64,
 ) -> io::Result<bool> {
     let _lock = lock_file(path)?;
     if !replace && path.exists() {
         return Ok(false);
     }
     // A file that cannot be read stops the start: it may hold sessions issued here.
-    let earlier: AuthFile = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => AuthFile::default(),
+    let (earlier, existed): (AuthFile, bool) = match fs::read(path) {
+        Ok(bytes) => (
+            serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            true,
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (AuthFile::default(), false),
         Err(error) => return Err(error),
     };
+    if existed {
+        let after = |at: u64| earlier.t3_carried_at_ms.is_some_and(|cut| at >= cut);
+        sessions.retain(|s| {
+            after(s.issued_at_ms) || earlier.sessions.iter().any(|e| e.t3_signed && e.id == s.id)
+        });
+        links.retain(|l| {
+            after(l.created_at_ms) || earlier.pairing_links.iter().any(|e| e.t3 && e.id == l.id)
+        });
+    }
     let own_sessions: Vec<StoredSession> = earlier
         .sessions
         .into_iter()
@@ -1724,7 +1755,7 @@ pub(crate) fn write_t3_import(
             })
             .collect(),
         spent_t3_pairing: spent,
-        t3_carried_at_ms: Some(now_ms()),
+        t3_carried_at_ms: Some(read_at),
     };
     file.sessions.extend(own_sessions);
     file.pairing_links.extend(own_links);
@@ -2630,12 +2661,13 @@ mod tests {
                 &file,
                 vec![session("a"), session("b")],
                 vec![link("p1", "AAAA")],
-                false
+                false,
+                now_ms(),
             )
             .unwrap()
         );
         // Without `replace`, an existing file is kept.
-        assert!(!write_t3_import(&file, vec![], vec![], false).unwrap());
+        assert!(!write_t3_import(&file, vec![], vec![], false, now_ms()).unwrap());
         let store = AuthStore::open(file.clone()).unwrap();
         let own = store
             .issue_session(SessionRequest {
@@ -2647,8 +2679,8 @@ mod tests {
             .unwrap();
         drop(store);
         // T3 revoked "b" and spent "p1" in between: the re-read drops them, keeps the CLI one.
-        assert!(write_t3_import(&file, vec![session("a")], vec![], true).unwrap());
-        let store = AuthStore::open(file).unwrap();
+        assert!(write_t3_import(&file, vec![session("a")], vec![], true, now_ms()).unwrap());
+        let store = AuthStore::open(file.clone()).unwrap();
         let ids: Vec<String> = store
             .client_sessions(None)
             .into_iter()
@@ -2657,6 +2689,29 @@ mod tests {
         assert!(ids.contains(&"a".to_owned()) && !ids.contains(&"b".to_owned()));
         assert!(store.authenticate_bearer(&own.token).is_some());
         assert!(store.pairing_links().is_empty());
+        drop(store);
+        // A re-read never brings back what this file dropped (revoked or spent here), even
+        // from a file without a carry time; what T3 made after the carry comes in.
+        let mut bare: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        bare.as_object_mut().unwrap().remove("t3CarriedAtMs");
+        fs::write(&file, serde_json::to_vec(&bare).unwrap()).unwrap();
+        assert!(
+            write_t3_import(&file, vec![session("b")], vec![link("p1", "AAAA")], true, 0).unwrap()
+        );
+        let store = AuthStore::open(file.clone()).unwrap();
+        assert!(
+            store
+                .client_sessions(None)
+                .iter()
+                .all(|s| s.session_id != "b")
+        );
+        assert!(store.pairing_links().is_empty());
+        drop(store);
+        let mut late = link("p2", "BBBB");
+        late.created_at_ms = u64::MAX / 2;
+        assert!(write_t3_import(&file, vec![], vec![late], true, 0).unwrap());
+        assert_eq!(AuthStore::open(file).unwrap().pairing_links().len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2683,6 +2738,7 @@ mod tests {
                 expires_at_ms: later,
             }],
             false,
+            now_ms(),
         )
         .unwrap();
         let store = AuthStore::open(dir.join("auth.json")).unwrap();

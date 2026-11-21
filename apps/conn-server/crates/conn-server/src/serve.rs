@@ -220,6 +220,14 @@ pub async fn serve_with_instances(
     let environment = Arc::new(environment);
     let restart = environment.restart.clone();
     let auth = environment.auth.clone();
+    if inert {
+        // The original's clients hold these sessions: they must not reach the copy.
+        let auth = auth.clone();
+        match tokio::task::spawn_blocking(move || auth.drop_t3_sessions()).await {
+            Ok(Ok(n)) => eprintln!("conn-server: inert: dropped {n} sessions carried from T3"),
+            _ => or_exit(Err("cannot drop the carried sessions"), "inert copy"),
+        }
+    }
     let providers = conn_provider::ProviderSet::from(providers);
     if let Some(instances) = &instances {
         instances

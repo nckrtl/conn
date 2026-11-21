@@ -467,8 +467,6 @@
   "51b0133f1ed3cf5c": "La etiqueta del entorno no puede estar vacía.",
   "f82d215f41af6401": "Actualiza {appName} en {host} manualmente; no puede actualizarse solo.",
   "6fd310d23099f107": "{host} no volvió con una versión compatible de {appName}.",
-  "3aa15bfbe1920376": "Actualiza T3 Code en {host} manualmente; no puede actualizarse solo.",
-  "71907f57b7ec64d5": "{host} no volvió con una versión compatible de T3 Code.",
   "e77ac580a4ddcd3b": "Disponible",
   "a980c44b06fc7b26": "Sin conexión",
   "fef710ef9d9e365d": "Conectando...",
@@ -1368,17 +1366,17 @@
   "19f953915a468edd": "Abrir adjunto",
   "13559139cab80bd6": [
     "Líneas ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "–",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ]
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    }
   ],
   "ec9cf2df4d5f01da": "Contexto no disponible. La referencia se copió sin su contenido. Vuelve a copiarla desde el mensaje original o quítala.",
   "e5033e74847fcc0b": "Esta versión de la app no admite este tipo de contexto. Su contenido se conservará al enviarlo.",
@@ -1563,11 +1561,11 @@
   "7e606ac41a4e0289": "Abre el diagrama a pantalla completa",
   "e68fd3dac926848b": [
     "No se puede renderizar el diagrama: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "ede9a884a11b7972": "Cita del asistente",
   "f563a55ee229090e": "Abrir cita",
@@ -1869,40 +1867,28 @@
   "c2f0e285ba21bf0f": "Cerrar la vista previa flotante",
   "2f38f2e60ed18790": "{count, plural, =1 {Ver navegador} one {Ver {count} pestaña del navegador} other {Ver {count} pestañas del navegador}}",
   "50abaf3c0482c1fb": "Mira y controla las pestañas del navegador abiertas en este hilo",
-  "a210f8081a5d0e42": [
-    ["t", "Plural"],
-    ["i", 1],
-    [
-      "d",
-      [
-        [
-          "b",
-          [
-            ["singular", "Una pestaña abierta"],
-            [
-              "other",
-              [
-                ["t", "C2"],
-                ["i", 2],
-                [
-                  "c",
-                  [
-                    [
-                      ["i", 3],
-                      ["k", "_gt_value_3"],
-                      ["v", "v"]
-                    ],
-                    " pestañas abiertas"
-                  ]
-                ]
-              ]
-            ]
+  "a210f8081a5d0e42": {
+    "t": "Plural",
+    "i": 1,
+    "d": {
+      "b": {
+        "singular": "Una pestaña abierta",
+        "other": {
+          "t": "C2",
+          "i": 2,
+          "c": [
+            {
+              "i": 3,
+              "k": "_gt_value_3",
+              "v": "v"
+            },
+            " pestañas abiertas"
           ]
-        ],
-        ["t", "p"]
-      ]
-    ]
-  ],
+        }
+      },
+      "t": "p"
+    }
+  },
   "4d1f68ef069c7a0b": "Nueva pestaña",
   "9c149c8c50e58e4c": "Actualizar entornos",
   "d81626aad3a95cb2": "Inicia sesión en tu cuenta de T3 para configurar {product}.",
@@ -2053,11 +2039,11 @@
   "4c6b2d924da2c94d": "Aún no hay entornos conectados.",
   "28494052dfb4647a": [
     "Toca ",
-    [
-      ["t", "Text"],
-      ["i", 1],
-      ["c", "+"]
-    ],
+    {
+      "t": "Text",
+      "i": 1,
+      "c": "+"
+    },
     " para añadir uno."
   ],
   "9d7fb2ec72ce9693": "Desactivado",
@@ -2110,40 +2096,28 @@
   "2301668017451371": "Conectando con el dispositivo...",
   "763b01de7b957db6": "{count, plural, =1 {Ver dispositivo} one {Ver {count} dispositivo} other {Ver {count} dispositivos}}",
   "1fce83f5af71f632": "Mira y controla los dispositivos abiertos en este hilo",
-  "459a156e0efc23f2": [
-    ["t", "Plural"],
-    ["i", 1],
-    [
-      "d",
-      [
-        [
-          "b",
-          [
-            ["singular", "Un dispositivo abierto"],
-            [
-              "other",
-              [
-                ["t", "C2"],
-                ["i", 2],
-                [
-                  "c",
-                  [
-                    [
-                      ["i", 3],
-                      ["k", "_gt_value_3"],
-                      ["v", "v"]
-                    ],
-                    " dispositivos abiertos"
-                  ]
-                ]
-              ]
-            ]
+  "459a156e0efc23f2": {
+    "t": "Plural",
+    "i": 1,
+    "d": {
+      "b": {
+        "singular": "Un dispositivo abierto",
+        "other": {
+          "t": "C2",
+          "i": 2,
+          "c": [
+            {
+              "i": 3,
+              "k": "_gt_value_3",
+              "v": "v"
+            },
+            " dispositivos abiertos"
           ]
-        ],
-        ["t", "p"]
-      ]
-    ]
-  ],
+        }
+      },
+      "t": "p"
+    }
+  },
   "9ecbf9cadd5bbf7f": "Fallos al iniciar",
   "0bab38399ee6746c": "Registro de fallos no disponible",
   "be735b872d5ac200": "Los registros de fallos al iniciar solo se guardan en las compilaciones de la tienda y de TestFlight.",
@@ -2158,11 +2132,11 @@
   "4429ccae147b2b2f": "Pega el informe en una incidencia de GitHub. Contiene la versión de la app, el mensaje de error de JavaScript y la pila de componentes. Los mensajes de error pueden citar valores de la app, así que revísalo antes de compartirlo.",
   "63481e424c402565": [
     "Cuando la app falla o encuentra un error, envía al equipo de ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " el mensaje de error, la traza de la pila, la versión de la app y el modelo y la versión del sistema del dispositivo. Cada inicio también envía tiempos de arranque. Los informes llevan un ID aleatorio para esta instalación."
   ],
   "9544305f2964486f": "No se pudo mostrar el diff",
@@ -2270,27 +2244,24 @@
   "1d8d5a660fb48e97": "Las vistas previas llegan hasta {size}. Guarda el archivo para abrirlo en otra app.",
   "e5108dc9a578df26": "Ábrelo en el visor de archivos, guárdalo o añádelo al chat.",
   "3024138965fc2e06": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
-    [
-      ["t", "Text"],
-      ["i", 2],
-      [
-        "c",
-        [
-          " ",
-          "de ",
-          [
-            ["i", 3],
-            ["k", "_gt_value_3"],
-            ["v", "v"]
-          ]
-        ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    {
+      "t": "Text",
+      "i": 2,
+      "c": [
+        " ",
+        "de ",
+        {
+          "i": 3,
+          "k": "_gt_value_3",
+          "v": "v"
+        }
       ]
-    ]
+    }
   ],
   "17d363d5ff1f038f": "{seconds, plural, one {Queda {seconds} segundo aproximadamente} other {Quedan unos {seconds} segundos}}",
   "bc86d0e75a37411b": "{minutes, plural, one {Queda {minutes} minuto aproximadamente} other {Quedan unos {minutes} minutos}}",
@@ -2456,20 +2427,20 @@
   "b0795a1ac34a9445": [
     "Cerrada hace",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "22fad1d55e34f022": [
     "Abierta hace",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "115e0df4e8da2704": "Asignados",
   "7dd58ad67a6de5ba": "nadie",
@@ -2672,11 +2643,11 @@
   "5bf4ff621a4697e6": [
     "hace",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "406bfbc6b51dda02": "No se informó de ninguna comprobación.",
   "46fe3e345947866f": "El proveedor no pudo completar esta acción.",
@@ -2727,11 +2698,11 @@
   "b334a5ade7664e8b": "Raíz del repositorio",
   "212be8e6539f9039": [
     "Renombrado desde ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "bfa2f673593efc5c": "No hay cambios de texto disponibles.",
   "ff6b088c383bf910": "Buscar autores",
@@ -2931,11 +2902,11 @@
   "ff928b4b3974e38b": "Actual",
   "665ec594d379b30f": [
     "Base: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Abre una capa para revisarla o fusionar la pila hasta esa capa."
   ],
   "698b57490dcff9b2": "Conflictos con {branch}",
@@ -2952,69 +2923,69 @@
   "4ba95157a7b83427": "Abrir la conversación resuelta en {path}",
   "9c5dd9f1862f207f": "Abrir la conversación sin resolver en {path}",
   "d437117fac8284f1": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "aprobó"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "aprobó"
+    }
   ],
   "472120eecb01657e": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "pidió cambios"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "pidió cambios"
+    }
   ],
   "29c437faf22ab4c8": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "abrió esta pull request"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "abrió esta pull request"
+    }
   ],
   "083b181a3c59575a": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "fusionó esta pull request"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "fusionó esta pull request"
+    }
   ],
   "89a0bf24401a77a7": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      ["c", "cerró esta pull request"]
-    ]
+    {
+      "t": "Text",
+      "i": 2,
+      "c": "cerró esta pull request"
+    }
   ],
   "62c3b9089374dccf": "Hay más actividad disponible en el proveedor.",
   "9a8fd03416860d24": "PR que solicitan mi revisión",
@@ -3028,26 +2999,26 @@
   "dab20a3e6f78e0aa": "Aquí aparecen las pull requests de los proyectos de los entornos seleccionados.",
   "80b14b2f19a8af68": "Añade un entorno en Ajustes para explorar sus pull requests.",
   "9dd78a7f8c484706": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " no está instalado en ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     ", así que las solicitudes de aquí usan tu propio inicio de sesión de GitHub y su límite de solicitudes, que es menor."
   ],
   "ece21b01a395e62c": [
     "Instalar en ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "088bf6e16e4b2021": "Squash y fusionar",
   "fc7e7a925d0d60e7": "Combina los commits en un solo commit.",
@@ -3356,19 +3327,19 @@
   "7489306a36fff015": "Conecta este entorno para gestionarlo.",
   "d127f26d5bae862d": [
     "Versión ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "114af8e45c69e28a": [
     "Gestionado por ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "9e6fea22be042adc": "Actualizar entornos en la nube",
   "a76020f46d881eee": "Poner en cola",
@@ -3379,11 +3350,11 @@
   "afda415d2d75a5d3": "Chat",
   "85163bc64c8c56a1": [
     "Mantén pulsado el botón de enviar para usar la otra opción con un solo mensaje. Con un teclado físico, mantén ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " al enviar."
   ],
   "95ee62a0d6968b89": "Enviar mensaje",
@@ -3519,11 +3490,11 @@
   "7cc151a4ae532ee7": "Configura un proveedor con inicio de sesión en la app en los ajustes de la web o el escritorio.",
   "e91a8efa0de1b737": [
     "Introduce el código ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " en la página de inicio de sesión."
   ],
   "ca25ea921af556a1": "No disponible en esta plataforma",
@@ -3640,11 +3611,11 @@
   "34fb848f079bdf69": "Acciones de {title}",
   "f7bccd9a1f5179ec": [
     "Filtro ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "1abe7fdace9bed26": "Añadir filtro",
   "3c5185df378edef9": "Se ejecuta solo cuando coinciden todos los filtros. Las demás solicitudes se registran como filtradas. Separa los valores de «es uno de» con comas; un valor no puede contener una coma.",
@@ -3660,11 +3631,11 @@
   "adae883fd7189da7": "Cargando tareas…",
   "6ad38baa7c6fc96e": [
     "La última ejecución falló: ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "d89557569020d809": "Hilos",
   "325cd53e2033dde3": "Heredar",
@@ -3717,11 +3688,11 @@
   "3c65f5fcf5915911": "Mixto",
   "5a20a0be0657dec6": [
     "Algunos ajustes los gestiona ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " y no se pueden cambiar aquí."
   ],
   "32568cf8de392361": "Iniciar sesión",
@@ -3742,11 +3713,11 @@
   "d229043f10d28e45": "{environment} no tiene modelos que listar.",
   "5109ab4ac691857f": [
     "Esta conexión no puede cambiar los ajustes de ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "."
   ],
   "5448de595ebea865": "Con cable",
@@ -3826,31 +3797,28 @@
   "6f264ac32e19ba55": "No hay ningún modelo instalado · Elige uno para descargar",
   "daf814b14b8f779b": "No hay ningún modelo instalado · Añade uno con {product} en {environment}",
   "7657374ffb043ca6": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " ",
-    [
-      ["t", "Text"],
-      ["i", 2],
-      [
-        "c",
-        [
-          ["i", 3],
-          ["k", "_gt_value_3"],
-          ["v", "v"]
-        ]
-      ]
-    ],
+    {
+      "t": "Text",
+      "i": 2,
+      "c": {
+        "i": 3,
+        "k": "_gt_value_3",
+        "v": "v"
+      }
+    },
     " ",
     "(",
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ],
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    },
     "% de error)"
   ],
   "01f6fcf72d5b4b28": "Introduce un nombre para esta cuenta.",
@@ -4157,11 +4125,11 @@
   "8d9617edf6eee5b9": "No se pudo enviar la decisión de aprobación.",
   "97d6946415db6c16": [
     "Aprobación de ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "43c5fbd02c6f330a": "Mostrar menos",
   "918cd5477d0c0e9b": "Mostrar el mensaje completo",
@@ -4202,11 +4170,11 @@
   "cfc423d0d58aca94": "Elegir entorno, {label}, conectado",
   "0bc72950072ee1aa": [
     "en ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "445f39cb8938d2a8": "Disponible tras el primer mensaje",
   "8245b10a0b796312": "Esta acción necesita un hilo guardado.",
@@ -4240,30 +4208,30 @@
   "03ce9bea5f88ddbd": "Esta app no puede confirmar que sea una de tus máquinas. El código de emparejamiento que pegues se envía allí.",
   "71a4002c45077fe2": [
     "Esta app no tiene ninguna dirección de ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " a la que pueda acceder otra máquina. Introduce su dirección https o de Tailscale."
   ],
   "c205277bd4ab61d2": [
     "Este entorno ya está vinculado a ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". El agente puede usar ese vínculo tal cual; cambia su acceso en Ajustes → Entornos."
   ],
   "e8235ebb43ad7228": "Crea un enlace en una máquina: Ajustes → Compartir y acceso → Clientes autorizados → Crear enlace, y pega aquí su código.",
   "a974e6c3c613e452": [
     "Crea un enlace en ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ": Ajustes → Compartir y acceso → Clientes autorizados → Crear enlace, y pega aquí su código."
   ],
   "f4df93b2da86737f": "Un agente de aquí tampoco tiene allí nunca más acceso que su propio modo aquí. Los hilos que inicia allí no pueden cambiar los hilos, proyectos ni ajustes propios de ese entorno.",
@@ -4305,37 +4273,37 @@
   "efd6c11387619a64": "App {server}",
   "af84976f700979bd": [
     "La app ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " está abierta a pantalla completa"
   ],
   "cda76d56e346d417": [
     "Se cerró la app ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "705cf2b2ee4e0e42": [
     "La app ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " salió de su página y se detuvo"
   ],
   "5ef18e4d39b398bf": [
     "No se puede cargar la app ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "12ba9fa1445f92a2": "Trabajo del subagente",
   "eaa6c91a05d95ce7": "Actualizar",
@@ -4356,11 +4324,11 @@
   "1f39846dc7b5bd36": "No hay ramas disponibles",
   "157aaccad29d0d5a": [
     "Próxima reconexión a las ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "bfa67bf6b0dd1bdf": "Cambiando de rama...",
   "bfb226487ee3e3da": "Hilo adjunto no disponible",
@@ -4386,11 +4354,11 @@
   "c5b11890aa7f406f": "¿En qué trabajamos?",
   "39a92e68dd2bf6cc": [
     "Tu borrador está guardado en este dispositivo. ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " no tiene ningún modelo disponible. Instala un proveedor o inicia sesión en uno allí para elegir uno."
   ],
   "3a3930717d8d73b4": "Tu borrador está guardado en este dispositivo. Conéctate a un entorno para elegir su primer modelo.",
@@ -4437,11 +4405,11 @@
   "3c38548cbd950933": "No se pudo clonar {name}",
   "c941a659fc35dc4c": [
     "Clonando ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "d201af23193100b9": "Introduce una ruta del espacio de trabajo",
   "042c9c88de8cd95c": "Plan guardado en el espacio de trabajo",
@@ -4455,11 +4423,11 @@
   "ee803c266b85aada": "Trabajo",
   "e918897e4a19585a": "Abrir el principal",
   "639128685ed19f0f": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " · Funciona por su cuenta"
   ],
   "802a10810a7f044e": "Abrir {host}",
@@ -5009,11 +4977,11 @@
   "9d3fd34ff062c44b": "Instalar ahora",
   "6753deea17e91bf5": "Uso compartido de ChatGPT",
   "207a400af41d5310": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     ". Abre ChatGPT con la cuenta que conectaste."
   ],
   "a3d040c4ef4fc6e9": "Por encima del ritmo",
@@ -5036,65 +5004,62 @@
   "65a7507ffde6d3f8": [
     "Queda un",
     " ",
-    [
-      ["t", "Text"],
-      ["i", 1],
-      [
-        "c",
-        [
-          [
-            ["i", 2],
-            ["k", "_gt_value_2"],
-            ["v", "v"]
-          ],
-          " %"
-        ]
+    {
+      "t": "Text",
+      "i": 1,
+      "c": [
+        {
+          "i": 2,
+          "k": "_gt_value_2",
+          "v": "v"
+        },
+        " %"
       ]
-    ]
+    }
   ],
   "6af5e3cf03861f55": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " no pudo actualizar los límites. Se muestran los últimos valores conocidos."
   ],
   "726ece0c7139ce8a": "Esta cuenta ya no informa de límites en los entornos seleccionados.",
   "412e3b93454812aa": [
     "Queda un ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "%"
   ],
   "82d204e1a9e7da17": [
     "Se restablece",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "23d0be01844d163c": [
     "Ritmo uniforme: debería quedar un ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "% a estas alturas"
   ],
   "a6ae2f414eb6349a": [
     "Restaura un ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     "% del total"
   ],
   "427c46cf712e8cb6": "Créditos de restablecimiento",
@@ -5179,11 +5144,11 @@
   "ab4208cfa3aa2c7c": [
     "Contado una sola vez entre los entornos que comparten un directorio de transcripciones:",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "d1c32e217a2344a5": "Escaneando las transcripciones de los proveedores…",
   "49c4cd88ca4d260a": "No hay actividad en esta ventana.",
@@ -5248,11 +5213,11 @@
   "969be78e142d48d8": [
     "Iniciada",
     " ",
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ]
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
   ],
   "ffd7529d1f50e0a6": "{count, plural, one {{count} parada} other {{count} paradas}}",
   "9830004326e7d8c0": "{count, plural, one {por {count} archivo} other {por {count} archivos}}",
@@ -5397,29 +5362,29 @@
   "9370fdce25dca815": "Déjalo vacío para generar un mensaje automáticamente.",
   "e2fb20ffcf133b45": "Archivos modificados",
   "038a39e5c34e979a": [
-    [
-      ["i", 1],
-      ["k", "_gt_value_1"],
-      ["v", "v"]
-    ],
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
     " de ",
-    [
-      ["i", 2],
-      ["k", "_gt_value_2"],
-      ["v", "v"]
-    ],
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
     " seleccionados · +",
-    [
-      ["i", 3],
-      ["k", "_gt_value_3"],
-      ["v", "v"]
-    ],
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
     " −",
-    [
-      ["i", 4],
-      ["k", "_gt_value_4"],
-      ["v", "v"]
-    ]
+    {
+      "i": 4,
+      "k": "_gt_value_4",
+      "v": "v"
+    }
   ],
   "3cfe94b56a7f1e0a": "No hay archivos modificados para hacer commit.",
   "7af7f00b85cc2930": "Confirmar acción",

@@ -267,7 +267,11 @@
     "Hash": "hash",
     "ClipboardPaste": "paste",
     "ClipboardCopy": "copy",
-    "Cable": "plug"
+    "Cable": "plug",
+    "FoldVertical": "chevrons-down-up",
+    "UnfoldVertical": "chevrons-up-down",
+    "AppWindow": "desktop",
+    "ClockAlert": "clock"
   },
   "sf": {
     "xmark": "close",

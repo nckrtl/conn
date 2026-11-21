@@ -53,7 +53,7 @@ back" work. Before, the engine refused it ("Conn Server cannot merge a fork back
   handoff`. `client-check`: a fork merged back, then the source's next run, through the
   client's reducers. `parity.mjs`: merge-backs that reach both engines (not a fork, into
   itself, an unknown run) with equal texts. `cargo test -p conn-mcp thread_transfer`: a
-  refused, then an accepted merge-back, pending on the source. RPC 202 of 251, `/mcp` 104
+  refused, then an accepted merge-back, pending on the source. RPC 198 of 251, `/mcp` 104
   tools (unchanged).
 - **As T3:** a run that fails, is stopped, or is a `/compact` or `/goal` turn leaves its
   handoff to the next run (`isPendingForRun`); the `pending` and `injected` records must be

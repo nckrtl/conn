@@ -23,8 +23,6 @@ fn main() {
 }
 
 fn run_server() {
-    // Runs and exits for every command but `serve`.
-    let options = ServeOptions::from_args();
     // One thread: a container serves a handful of clients, and each worker thread costs
     // stack and allocator arenas.
     let runtime = conn_server::serve::or_exit(
@@ -33,13 +31,14 @@ fn run_server() {
             .build(),
         "cannot start the runtime",
     );
-    // SIGHUP asks for a reload (`reload.rs`); its default action stops the process. A handler
-    // stays for the life of the process, so registering it here covers the slow startup below.
-    {
+    // Runs and exits for every command but `serve`. For `serve`: SIGHUP asks for a reload
+    // (`reload.rs`), and its default action stops the process. A handler stays for the life
+    // of the process, so registering it before the bootstrap read covers all of startup.
+    let options = ServeOptions::from_args_with(|| {
         let _runtime = runtime.enter();
         let _handler =
             conn_server::serve::or_exit(conn_server::reload::hangup(), "cannot handle SIGHUP");
-    }
+    });
     // `fixPath`: the login shell's PATH for every child and every program lookup, read before
     // the providers are detected (Codex looks for its binary on that PATH). Blocking is fine:
     // the runtime runs nothing yet.

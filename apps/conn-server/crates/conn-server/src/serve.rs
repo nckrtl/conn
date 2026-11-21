@@ -57,9 +57,18 @@ impl ServeOptions {
     /// Reads the `serve` command line, including a desktop bootstrap envelope. Exits on any
     /// other command, after running it.
     pub fn from_args() -> Self {
+        Self::from_args_with(|| {})
+    }
+
+    /// [`Self::from_args`], calling `on_serve` once the command is `serve`, before the
+    /// bootstrap envelope is read (it can wait up to a second).
+    pub fn from_args_with(on_serve: impl FnOnce()) -> Self {
         let raw: Vec<String> = std::env::args().skip(1).collect();
         match cli::parse(raw.clone()) {
-            Ok(Command::Serve(args)) => Self::from_serve_args(args, &raw),
+            Ok(Command::Serve(args)) => {
+                on_serve();
+                Self::from_serve_args(args, &raw)
+            }
             Ok(other) => std::process::exit(cli::run(other)),
             Err(message) => {
                 eprintln!("{message}\n\n{}", cli::USAGE);

@@ -392,7 +392,8 @@ it("keeps a linked test file expanded when a refresh changes the rest of the dif
 
   mocks.refreshed = true;
   await screen.rerender(tab(1));
-  await expect.element(screen.getByText("4 files", { exact: true })).toBeVisible();
+  // Conn's Code tab has no file count line; the refresh has landed once its new file shows.
+  await expect.element(screen.getByText("early-3.ts", { exact: true })).toBeInTheDocument();
   await expect.element(testLine).toBeVisible();
 });
 
@@ -445,7 +446,8 @@ it("keeps a later test file folded by hand through a refresh and bulk toggles wh
   const { screen, loadNextPage, diffToggle, filter } = await renderShortPages(stack);
   await loadNextPage();
   const lateTest = await diffToggle("late.test.ts");
-  await lateTest.click();
+  // Conn's header lays the diff stat over this screen-reader toggle, so press it directly.
+  (lateTest.element() as HTMLElement).click();
   await expect.element(lateTest).toHaveAttribute("aria-expanded", "false");
   await filter.click();
 
@@ -457,7 +459,10 @@ it("keeps a later test file folded by hand through a refresh and bulk toggles wh
   await loadNextPage();
   await filter.click();
 
-  await expect.element(screen.getByText("4 files", { exact: true })).toBeVisible();
+  // Conn's Code tab has no file count line; all four files are back once the hidden note goes.
+  await expect
+    .element(screen.getByText("1 test file hidden", { exact: true }))
+    .not.toBeInTheDocument();
   await expect.element(await diffToggle("late.test.ts")).toHaveAttribute("aria-expanded", "false");
 });
 

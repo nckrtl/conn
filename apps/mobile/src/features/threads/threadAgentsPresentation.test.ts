@@ -79,7 +79,7 @@ describe("resolveSubagentRowPresentation", () => {
     );
   });
 
-  it("opens a task in a linked environment there, only when this app knows it", () => {
+  it("opens a task in a linked environment there, or reads it through the link", () => {
     const remote = {
       ...base,
       childThreadId: null,
@@ -93,12 +93,38 @@ describe("resolveSubagentRowPresentation", () => {
     expect(resolveSubagentRowPresentation(remote, false).canOpenThread).toBe(false);
     expect(resolveSubagentRowPresentation(remote, true).canOpenThread).toBe(true);
     const here = "environment-here" as never;
-    expect(subagentThreadTarget(remote, here, () => false)).toBeNull();
-    expect(subagentThreadTarget(remote, here, (id) => id === "environment-box")).toEqual({
+    // Without a connection of its own, the app reads the task through the link.
+    expect(
+      subagentThreadTarget(
+        remote,
+        here,
+        () => undefined,
+        () => true,
+      ),
+    ).toEqual({
+      environmentId: "environment-box",
+      threadId: "thread-on-box",
+      linked: { viaEnvironmentId: here, label: "Box" },
+    });
+    expect(
+      subagentThreadTarget(
+        remote,
+        here,
+        (id) => (id === "environment-box" ? { connected: true } : undefined),
+        () => true,
+      ),
+    ).toEqual({
       environmentId: "environment-box",
       threadId: "thread-on-box",
     });
-    expect(subagentThreadTarget(base, here, () => false)).toEqual({
+    expect(
+      subagentThreadTarget(
+        base,
+        here,
+        () => undefined,
+        () => false,
+      ),
+    ).toEqual({
       environmentId: here,
       threadId: "thread-child",
     });

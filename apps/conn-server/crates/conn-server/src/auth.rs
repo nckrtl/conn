@@ -575,6 +575,10 @@ struct AuthFile {
     t3_carried_at_ms: Option<u64>,
 }
 
+/// See `exchange_t3_code`: how long before the carry a T3 code may have been stamped and
+/// still missed it.
+const T3_CARRY_MARGIN_MS: u64 = 5 * 60 * 1000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SpentT3Pairing {
@@ -884,9 +888,12 @@ impl AuthStore {
             // Spent, revoked or carried over here: this server's record decides. Only a code
             // made after the carry-over is T3's table's to give, and only while it is valid
             // (checked again under the lock: the spent record goes at the code's expiry).
+            // T3 stamps `createdAt` before it inserts the row, so a code stamped shortly
+            // before the read may still miss the carry: a margin takes it here. A carried
+            // code inside the margin is in `state.pairing` or `spent_t3`, checked below.
             let made_after_carry = state
                 .t3_carried_at
-                .is_some_and(|at| link.created_at_ms >= at);
+                .is_some_and(|at| link.created_at_ms >= at.saturating_sub(T3_CARRY_MARGIN_MS));
             if !made_after_carry
                 || link.expires_at_ms <= now_ms()
                 || state.spent_t3.contains_key(&link.id)

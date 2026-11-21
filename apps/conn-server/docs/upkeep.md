@@ -170,6 +170,8 @@ four hours, most of it reading upstream changes and finishing the tools.
 A Conn Server started on a copy of a T3 home imports the threads that were running there and,
 like the T3 server after a restart, continues them. On a copy that repeats the original's work
 (git pushes, PRs) while the original still runs. Start every copy with `CONN_SERVER_INERT=1`:
-no providers, no run recovery, no scheduled-task timer, no task followers and no pull request
-sweeps. Imports, auth, pairing and every read still work. The real switch runs without it, so
+no providers, no run recovery, no checkpoints, no scheduled-task timer or webhooks, no task
+followers, peer links, pull request sweeps or actions, and the sessions carried from T3 are
+dropped, so the original's clients cannot reach the copy. Imports, pairing and every read
+still work for a client paired with the copy itself. The real switch runs without it, so
 in-flight runs continue as after a T3 restart (`crates/conn-engine/src/restart.rs`).

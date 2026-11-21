@@ -1,8 +1,10 @@
+import type { ScopedThreadRef } from "@t3tools/contracts";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { T, useGT } from "gt-react";
 import { ArrowLeftIcon, ExternalLinkIcon } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
+import { useOpenLink } from "~/browser/useOpenLink";
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "~/localApi";
 import { Button } from "../ui/button";
@@ -55,23 +57,26 @@ export function PullRequestBackButton({ onBack }: { onBack: () => void }) {
 /** The number and an arrow in the pull request's state colour; opens it on the host. */
 export function PullRequestNumberLink({
   detail,
+  threadRef,
   toneClassName,
   openOnHostText,
 }: {
   detail: LinkedPullRequest;
+  threadRef: ScopedThreadRef | null;
   toneClassName: string | null;
   openOnHostText: string;
 }) {
   const gt = useGT();
+  const openLink = useOpenLink(threadRef);
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <button
             type="button"
-            onClick={() => void readLocalApi()?.shell.openExternal(detail.url)}
+            onClick={(event) => void openLink(detail.url, { event }).catch(console.error)}
             onAuxClick={(event) => {
-              if (event.button === 1) void readLocalApi()?.shell.openExternal(detail.url);
+              if (event.button === 1) void openLink(detail.url, { event }).catch(console.error);
             }}
             onContextMenu={(event) => openNumberContextMenu(event, detail)}
             className={cn(

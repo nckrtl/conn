@@ -363,7 +363,7 @@ function ConversationCard({
       >
         <div className="flex min-h-7 min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-baseline gap-x-1.5 text-sm leading-5">
+            <h2 className="flex min-w-0 items-baseline gap-x-1.5 text-sm leading-5">
               {event.kind === "review" ? (
                 <T>
                   <Var>
@@ -389,7 +389,7 @@ function ConversationCard({
               <span className="shrink-0 text-muted-foreground">
                 · <RelativeTime timestamp={event.at} />
               </span>
-            </div>
+            </h2>
             <PullRequestMetaLine className="mt-0.5 flex-wrap text-sm text-muted-foreground empty:hidden">
               {showPath && event.path ? (
                 <span className="inline-flex min-w-0 items-center gap-1">
@@ -983,7 +983,7 @@ function ReviewVerdictEvent({
       />
       <div className="flex min-w-0 flex-wrap items-start gap-2 [--control-radius:9999px]">
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-sm leading-5">
+          <h2 className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-sm leading-5">
             <ActorName actor={event.actor} />
             <Tooltip disabled={!stale}>
               <TooltipTrigger
@@ -1009,7 +1009,7 @@ function ReviewVerdictEvent({
               </TooltipTrigger>
               <TooltipPopup>{pullRequestReviewOutcomeStaleLabel(outcome, resolve)}</TooltipPopup>
             </Tooltip>
-          </div>
+          </h2>
           <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <PullRequestMetaLine className="flex-wrap text-sm text-muted-foreground">
               <span>

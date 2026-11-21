@@ -34,6 +34,7 @@ import {
 } from "../../textGeneration/AntigravityTextGeneration.ts";
 import { makeAntigravityAuth, type AntigravityAuth } from "../AntigravityAuth.ts";
 import { resolveProviderCliOnPath, type ProviderCliOnPath } from "../providerCliOnPath.ts";
+import { brokenRuntimeError } from "../providerCompatibility.ts";
 import * as AntigravityUsage from "./AntigravityUsage.ts";
 import {
   antigravityAuthConfigIssue,
@@ -46,8 +47,8 @@ import {
   type AntigravityAuthConfig,
 } from "../antigravityAuthSupport.ts";
 import {
-  antigravityCliSessionMode,
   antigravityModelOptions,
+  antigravitySessionMode,
   antigravityThinkingConfig,
   makeAntigravityAcpRuntime,
   type AntigravityAcpRuntimeInput,
@@ -83,6 +84,7 @@ const DRIVER = ProviderDriverKind.make("antigravity");
 const decodeSettings = Schema.decodeSync(AntigravitySettings);
 const isNodeRuntimeUnavailableError = Schema.is(NodeRuntimeUnavailableError);
 const isAcpRequestError = Schema.is(AcpErrors.AcpRequestError);
+const isProviderSetupError = Schema.is(ProviderSetupError);
 const isAcpErrorDetails = Schema.is(Schema.Struct({ details: Schema.String }));
 const REFRESH_FAILED =
   "Could not refresh Antigravity models. The previous model list is unchanged.";
@@ -320,20 +322,44 @@ export const AntigravityDriver: ProviderDriver<
         childProcessSpawner: spawner,
         spawn,
       }).pipe(Effect.provideService(SecureRandom.SecureRandom, random));
+      // A custom or PATH executable has no version until it answers initialize.
+      const startCompatible = Effect.fn("AntigravityDriver.startCompatible")(function* () {
+        const version = (yield* runtime.initialize()).agentInfo?.version;
+        const advisory = version ? yield* host.compatibility(DRIVER, version) : undefined;
+        // Conn: Orbit installs and updates agy on PATH; a custom binary path is updated by hand.
+        const refused =
+          version &&
+          brokenRuntimeError({
+            instanceId,
+            name: "Antigravity",
+            version,
+            advisory,
+            action: settings.binaryPath
+              ? `Update the Antigravity executable at ${executable.executablePath}`
+              : "Have Orbit update agy on this environment",
+          });
+        if (refused) {
+          return yield* new AcpErrors.AcpTransportError({ detail: refused.detail, cause: refused });
+        }
+        return yield* runtime.start();
+      });
       return {
         ...runtime,
-        setMode: (modeId: string) => runtime.setMode(antigravityCliSessionMode(modeId)),
-        start: () =>
-          runtime
-            .start()
-            .pipe(
-              Effect.tapError((cause): Effect.Effect<void> =>
-                runtimeInput.onAuthorizationUrl === undefined &&
-                isAntigravitySignInRequiredError(cause)
-                  ? provider.onAuthRequired
-                  : Effect.void,
-              ),
+        setMode: (modeId: string) =>
+          runtime.getModeState.pipe(
+            Effect.flatMap((modeState) =>
+              runtime.setMode(antigravitySessionMode(modeId, modeState)),
             ),
+          ),
+        start: () =>
+          startCompatible().pipe(
+            Effect.tapError((cause): Effect.Effect<void> =>
+              runtimeInput.onAuthorizationUrl === undefined &&
+              isAntigravitySignInRequiredError(cause)
+                ? provider.onAuthRequired
+                : Effect.void,
+            ),
+          ),
       };
     });
 
@@ -387,7 +413,6 @@ export const AntigravityDriver: ProviderDriver<
       readonly onAuthorizationUrl: (url: string) => Effect.Effect<void, AcpErrors.AcpError>;
     }) {
       if (auth.authMethod !== "oauth-personal") return undefined;
-      // Conn runs only the native agy CLI from PATH (Orbit installs it), never the harness.
       const cwd = yield* fileSystem
         .makeTempDirectoryScoped({ prefix: "t3-antigravity-login-" })
         .pipe(
@@ -464,6 +489,7 @@ export const AntigravityDriver: ProviderDriver<
       >,
     ) {
       yield* provider.onSessionStarted(started);
+      yield* authFlow.onSignedInElsewhere;
       yield* Stream.runForEach(runtime.getEvents(), (event) => {
         if (event._tag === "EventStreamBarrier") {
           return Deferred.succeed(event.acknowledge, undefined).pipe(Effect.asVoid);
@@ -571,7 +597,8 @@ export const AntigravityDriver: ProviderDriver<
         ),
       ),
       profileDirectory,
-      onSessionStarted: provider.onSessionStarted,
+      onSessionStarted: (started, cwd) =>
+        provider.onSessionStarted(started, cwd).pipe(Effect.andThen(authFlow.onSignedInElsewhere)),
       onSessionEvent: (event, cwd) => {
         if (event._tag === "ConfigOptionsUpdated") {
           return provider.onConfigOptionsUpdated(event.configOptions);
@@ -640,7 +667,11 @@ export const AntigravityDriver: ProviderDriver<
                 : cause._tag === "ProviderSetupError" &&
                     (cause.operation === "configure" || cause.operation === "start")
                   ? cause.detail
-                  : refreshFailureDetail(cause),
+                  : cause._tag === "AcpTransportError" &&
+                      isProviderSetupError(cause.cause) &&
+                      cause.cause.operation === "runtime"
+                    ? cause.cause.detail
+                    : refreshFailureDetail(cause),
               cause,
             }),
       ),

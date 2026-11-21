@@ -1558,6 +1558,7 @@ export function PullRequestDetailPanel({
         seed={matchingListEntry}
         summary={sharedSummary}
         number={reference.number}
+        threadRef={threadRef}
         tabs={visibleTabs}
         activeTab={tab}
         {...(onBack ? { onBack } : {})}
@@ -1693,6 +1694,7 @@ export function PullRequestDetailPanel({
                 pullRequestKey={pullRequestKey}
                 detail={detail}
                 terminology={terminology}
+                threadRef={threadRef}
                 linkThreadRef={
                   threadRef ??
                   (typeof composerDraftTarget === "object" ? composerDraftTarget : null)
@@ -1803,6 +1805,7 @@ export function PullRequestDetailPanel({
               link={
                 <PullRequestNumberLink
                   detail={detail}
+                  threadRef={threadRef}
                   toneClassName={statePresentation?.toneClassName ?? null}
                   openOnHostText={openOnHostText}
                 />

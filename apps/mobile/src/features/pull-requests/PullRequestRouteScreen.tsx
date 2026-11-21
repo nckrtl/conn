@@ -59,7 +59,8 @@ import { pullRequestReviewKey } from "./pullRequestReviewDrafts";
 import { pullRequestConversationThreads, type PullRequestDetail } from "@t3tools/contracts";
 import { copyPullRequestLink, sharePullRequestLink } from "./pullRequestLink";
 import { use, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { Linking, Platform, StyleSheet, View } from "react-native";
+import { Platform, StyleSheet, View } from "react-native";
+import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { RefreshControl } from "../../components/ui/RefreshControl";
 import { NativeScrollView } from "../../native/NativeScrollViewMarker";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -495,7 +496,7 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
               id: "open-on-provider",
               title: openOnProviderLabel(identity.provider, messages),
               icon: "arrow.up.right",
-              onPress: () => void Linking.openURL(identity.url),
+              onPress: () => void tryOpenExternalUrl(identity.url, "pull-request"),
             },
             {
               id: "copy-link",

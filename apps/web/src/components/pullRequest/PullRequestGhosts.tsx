@@ -1,4 +1,4 @@
-import type { PullRequestListEntry, PullRequestSummary } from "@t3tools/contracts";
+import type { PullRequestListEntry, PullRequestSummary, ScopedThreadRef } from "@t3tools/contracts";
 import { EllipsisIcon, PanelRightIcon, TagIcon, UserPlusIcon, UsersIcon } from "lucide-react";
 import { msg, T, useGT, useMessages } from "gt-react";
 import type { ReactNode } from "react";
@@ -79,6 +79,7 @@ export function PullRequestDetailGhost({
   tabs: requestedTabs,
   activeTab,
   number,
+  threadRef = null,
   onBack,
   onClose,
 }: {
@@ -88,6 +89,7 @@ export function PullRequestDetailGhost({
   tabs?: ReadonlyArray<{ value: string; label: string }>;
   activeTab?: string;
   number?: number;
+  threadRef?: ScopedThreadRef | null;
   onBack?: (() => void) | undefined;
   onClose?: (() => void) | undefined;
 }) {
@@ -179,6 +181,7 @@ export function PullRequestDetailGhost({
             seed ? (
               <PullRequestNumberLink
                 detail={seed}
+                threadRef={threadRef}
                 toneClassName={statePresentation?.toneClassName ?? null}
                 openOnHostText={openOnHostLabel(sourceControlClients.get(seed.provider), resolve)}
               />

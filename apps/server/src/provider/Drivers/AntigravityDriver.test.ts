@@ -32,6 +32,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as ModelManifest from "../ModelManifest.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { knownProviderFailureMessage } from "@t3tools/provider-core/server/failure";
 import { AntigravityDriver } from "./AntigravityDriver.ts";
 import * as ProviderHostLive from "../ProviderHostLive.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
@@ -94,6 +95,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
       /** `data` of the agent's "Internal error" response to `session/new`. */
       readonly newSessionErrorData?: unknown;
       readonly initialMode?: string;
+      readonly agentVersion?: string;
     } = {},
   ) {
     const directory = path.join(root, name);
@@ -119,6 +121,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
         ...(options.initialMode === undefined
           ? []
           : [`export T3_ACP_INITIAL_MODE=${shellQuote(options.initialMode)}`]),
+        `export T3_ACP_AGENT_VERSION=${shellQuote(options.agentVersion ?? "1.5.12")}`,
         `exec ${shellQuote(nodePath)} ${shellQuote(mockAgentPath)} "$@"`,
         "",
       ].join("\n"),
@@ -145,7 +148,6 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     extendEnv: boolean | undefined;
     environment: Record<string, string | undefined>;
     profileDirectory: string | undefined;
-    harnessPath: string | undefined;
     forceFileStorage: string | undefined;
     credentialKeys: ReadonlyArray<string>;
     tempDirectory: string | undefined;
@@ -170,7 +172,6 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
         extendEnv: command.options.extendEnv,
         environment: Object.fromEntries(Object.keys(environment).map((name) => [name, env(name)])),
         profileDirectory: env("GEMINI_HOME"),
-        harnessPath: env("ANTIGRAVITY_HARNESS_PATH"),
         forceFileStorage: env("AGY_ACP_FORCE_FILE_STORAGE"),
         credentialKeys: Object.keys(environment).filter((key) =>
           blockedCredentialKeys.has(key.toUpperCase()),
@@ -195,7 +196,6 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
       { name: "GOOGLE_APPLICATION_CREDENTIALS", value: "/must-not-be-used.json" },
       { name: "GOOGLE_GENAI_USE_VERTEXAI", value: "true" },
       { name: "GEMINI_HOME", value: "/must-not-be-used" },
-      { name: "ANTIGRAVITY_HARNESS_PATH", value: "/must-not-be-used" },
       { name: "BROWSER", value: "must-not-run" },
       ...(options.environment ?? []),
     ].map((variable) => ({ ...variable, sensitive: false })),
@@ -496,6 +496,43 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
           T3_ACP_MCP_NODE: "/ambient/node",
           T3_ACP_MCP_ENTRYPOINT: "/ambient/entrypoint.mjs",
         });
+        yield* h.assertClosed;
+      }),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "refuses to open a session on a PATH executable older than 1.5",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const old = yield* h.makeExecutable("runtime old", { agentVersion: "1.4.5" });
+        yield* h.use(old);
+        const threadId = ThreadId.make("thread-antigravity-old-runtime");
+        const modelSelection = { instanceId: h.instance.instanceId, model: "gemini-test-low" };
+        const error = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const workspace = yield* h.fs.makeTempDirectoryScoped({ prefix: "t3-ag-old-runtime-" });
+            const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              cwd: workspace,
+            });
+            const session = yield* h.instance.orchestrationAdapter.openSession({
+              threadId,
+              providerSessionId: ProviderSessionId.make("provider-session-antigravity-old-runtime"),
+              modelSelection,
+              runtimePolicy,
+            });
+            yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
+          }),
+        ).pipe(Effect.flip);
+        const message =
+          "Antigravity 1.4.5 does not work with this T3 Code release. Have Orbit update agy on this environment to >=1.5.12 <2, then retry.";
+        expect(knownProviderFailureMessage(error)).toBe(message);
+        expect((yield* h.refresh().pipe(Effect.flip)).detail).toBe(message);
+        const methods = (yield* h.readRequests).map((request) => request.method);
+        expect(methods).toContain("initialize");
+        expect(methods).not.toContain("session/new");
         yield* h.assertClosed;
       }),
   );

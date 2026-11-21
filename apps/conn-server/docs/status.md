@@ -21,6 +21,173 @@ the run stays open. Waiting for terminal confirmation is deliberate. `idle-diff`
 split in `KNOWN` as `intermittent`; a gate either side misses still fails it. Whether to
 match T3 is open.
 
+## Unserved methods: triage (2026-11-21)
+
+Of 251 contract methods, 198 were served and 21 are skipped by decision (FORK.md, "Not
+served, by decision"). This triage covers the other 32. **Build** means the UI needs it;
+**trivial** means match T3's answer; **ask Nick** means it looks unneeded for this fork.
+Nothing here was skipped without asking. RPC **203 of 251** after this step; `/mcp` 104 tools.
+
+| Method | Verdict | Why |
+| --- | --- | --- |
+| `server.getSettings` | trivial, built | No client calls it; T3 answers the client view of the settings. |
+| `server.getTraceDiagnostics` | build, built | Settings › Diagnostics. This server writes no trace, but a home a T3 server used holds its trace files; they are read as T3 reads them. |
+| `server.getDatabaseStorage` (stream) | trivial, built | Settings › Storage. T3 sends `null` when its offline `t3 doctor` does not repair this database; this server has no such command, so `null`. |
+| `server.reclaimDatabaseSpace` | trivial, built | Only reachable from a non-null status; refuses with `DatabaseReclaimError`. |
+| `provider.uploadFeedback` | build, built | The composer's `/feedback` (Codex). Codex `feedback/upload` through the running app-server, as T3. |
+| `server.getNpmRelease` | ask Nick | The update-track dialog asks npm for the `t3` package; Orbit ships the Conn Server. |
+| `server.updateServer`, `server.updateServerWithProgress`, `server.commitDesktopUpdate` | ask Nick | Download a T3 release from GitHub and swap the server; Orbit releases the Conn Server. |
+| `server.checkOtlpEndpoint` | ask Nick | Tests a user's OTLP URL, but this server exports no OTLP, so the setting does nothing here. |
+| `server.checkSecretSource` | ask Nick | Reads a secret through a secret provider (1Password `op read`); this server keeps references but resolves none. |
+| `server.getStorageCleanupReport` (stream), `server.runStorageCleanup` | ask Nick | A large port that deletes worktrees, logs and browser artifacts (engine, VCS, terminals). Every rule is off by default, and Orbit Instances are disposable. |
+| `server.prepareTriage` | ask Nick | Clones `pingdotgg/t3code` and writes a bug-report context for T3 itself. |
+| `cloud.getRelayClientStatus`, `cloud.installRelayClient` (stream) | ask Nick | T3's cloud relay client (download and install a binary); Conn links through the Orbit Gateway. |
+| `guestShare.create` | ask Nick | Needs T3 cloud's managed endpoint (connector hostname); a beta, off by default. |
+| `provider.chatgpt.handoff.subscribe` (stream), `provider.chatgpt.import-profile`, `provider.chatgpt.reconnect-profile` | ask Nick | T3's own ChatGPT OAuth with tokens in its store; Nick's 2026-11-20 decision: no ChatGPT token here, providers sign in through Orbit's AI router. Proposal: add to FORK.md's skips. |
+| `provider.consumeResetCredit` | ask Nick | Spends an account's rate-limit reset credit. Codex goes through the app-server, Claude calls Anthropic's API with the login (forbidden here); with Orbit's AI router there is no account credit. |
+| `server.searchAcpRegistry`, `server.prepareAcpRegistryAgent`, `server.uninstallAcpRegistryManagedBinary`, `server.acceptAcpRegistryUrlAuth`, `server.listAcpRegistrySessions`, `server.importAcpRegistrySession`, `server.deleteAcpRegistrySession`, `server.listAcpRegistryProviders`, `server.setAcpRegistryProvider`, `server.disableAcpRegistryProvider`, `server.logoutAcpRegistry` | ask Nick | The ACP registry provider is not built. Nick decided on 2026-11-14: no index download and no install; Orbit installs CLIs. Search and prepare need the index; the other nine act on a registry provider instance that does not exist here. |
+
+**What changed:**
+
+- `server.getSettings`, `server.getDatabaseStorage`, `server.reclaimDatabaseSpace`
+  (`methods/server.rs`); `server.getTraceDiagnostics` (`trace_diagnostics.rs`, T3's
+  `TraceDiagnostics.read` and its aggregator: rotations oldest first, line by line on a
+  blocking thread, bounded top lists, strings trimmed as T3's schema encodes them);
+  `provider.uploadFeedback`
+  (`methods/provider.rs`, `conn-engine/src/feedback.rs`, `Session::upload_feedback`, the
+  Codex session's `feedback/upload`).
+- **Fix:** clients now get `idleCompaction` and `compactIdleThreads` before the first settings
+  write, as T3 adds them on load (`withIdleCompaction`). Before, a fresh server sent neither,
+  so clients took it for a server from before idle compaction modes and showed the old switch.
+  This also changes `server.getConfig` and `settingsUpdated`.
+- **Proof:** `server-misc-diff.mjs` (new check) starts both servers: `getSettings` equal after
+  the client's decode and equal to `getConfig`'s settings on each side; the trace answer on a
+  fixture set of trace files (rotations, a folder in a file's place, parse errors, failures,
+  interruptions, log events, more spans than the top lists hold, `\n`, `\r\n` and `\r`
+  line ends, names of JavaScript-only whitespace) equal to T3's own `readTraceDiagnostics` on the same folder; `getDatabaseStorage`
+  `null` here (T3 sends a status, its repair command targets its own database);
+  `reclaimDatabaseSpace` and `uploadFeedback` for an unknown thread refused with T3's tags.
+  `effect-client.mjs` decodes all five with the client's schemas. `cargo test -p conn-engine
+  upload_feedback`: T3's texts for no session yet, an unsupported provider and a stopped
+  session.
+- **Known differences:** a trace timestamp outside the years 0000 to 9999, or written in
+  hex, counts as unparsable (T3 accepts both); so does a span whose name's total duration
+  would overflow to infinity (T3 sends `null` there, which its own client refuses); the reclaim refusal says "This server cannot reclaim database space." (T3 names
+  its `t3 doctor` command); an unknown thread's upload cause is our own text; with no active provider thread, the
+  upload falls back to the thread's own provider threads in T3's order, but T3's set also
+  holds provider threads owned through nodes and subagents. **Not proven:**
+  Codex's `feedback/upload` frame against T3's on a stub `codex`. T3 has no replay fixture for
+  it, so the conformance tool cannot drive it yet; the parameters follow
+  `CodexAdapterV2.uploadFeedback` (`classification: "bug"`, `includeLogs: true`, `reason`,
+  `threadId`).
+
+## T3 state import (2026-11-21)
+
+A Conn Server that starts in a T3 server's state folder has the same threads (Nick,
+2026-11-21: "we need to have the same threads"). Before, it started empty there.
+
+- **What runs.** `serve`, before it listens, calls `conn_engine::import_t3_state`
+  (`conn-engine/src/t3_import.rs`) when the folder holds `statev2.sqlite` and no
+  `engine.sqlite`. It attaches T3's file read-only (`mode=ro`; `immutable=1` when a cleanly
+  stopped T3 left no `-wal` and none can be made), copies in one transaction the projects
+  (`projection_projects`, as T3's `OrchestrationProjectShell` plus `deletedAt`), the threads
+  (archived and deleted ones too) and every projection row (runs, attempts, nodes, subagents,
+  provider sessions per `provider_session_bindings`, provider threads and turns, runtime
+  requests, messages, plans, turn items, checkpoint scopes, checkpoints, context handoffs and
+  transfers, MCP app model context) with its id and its JSON body, unchanged. `first_seq`
+  follows the order T3's `ProjectionStore` reads each collection in; turn items and runs keep
+  their ordinals; final message texts go into search. A provider thread without a thread of
+  its own goes to its owner node's thread, as T3 reads it. The engine then computes each shell
+  row. The store is built as `engine.sqlite.t3-import` and renamed into place only when
+  complete. A table or project column an older T3 lacks reads as empty or as its default.
+- **Boundary.** `meta.imported_through` is above the imported rows and above the last sequence
+  T3 gave out (`orchestration_v2_projection_metadata`, the event counter). New sequences start
+  above it. A client cursor at or below it may be T3's, and the imported rows have no events
+  here, so the thread and shell streams answer it with a snapshot (`streams::can_replay`; the
+  shell's pruned mark is set to it too). A new run takes the ordinal after the
+  thread's highest, not its run count + 1: T3 leaves gaps when it moves a queued run forward
+  (6 threads on mini).
+- **Why this way.** Reading T3's tables in place would put a second schema under every engine
+  read and write. The engine already stores T3's encoded `OrchestrationV2*` bodies, so a
+  one-time copy keeps its code as it is. T3's file is never written: the T3 server can take
+  over again (rollback) with every thread it had; threads made on the Conn Server do not go
+  back. An existing `engine.sqlite` is never touched; a partial import is removed and redone.
+- **Sessions, pairing codes, peer links and scheduled tasks** (2026-11-21, `t3_carry.rs`):
+  at the same first start, before the stores open, T3's live rows go to the server's own
+  files; a file this server wrote itself is never replaced. Until the thread import of that
+  start is in place (`t3-carry.pending`), a later start reads the carried files again from
+  T3, which may have run in between (a revoked session, a spent code). Paired devices keep
+  their tokens: a
+  carried-over session (`auth.json`, `t3Signed`) accepts the token T3 signed, checked as T3's
+  `SessionStore.verify` does (HMAC with T3's `server-signing-key` from the shared secret
+  store, claims version, kind, subject (it picks the native or MCP audience, as in T3),
+  expiry, the session not revoked; the claims' `rtc`/`plk` apply on `/mcp`).
+  Revoking it here works as for any session. Unspent one-time pairing codes stay usable,
+  peer-link codes (`mcp-approval:peer-link:*`) included.
+  Peer links keep their rows (T3's order; a link made before fencing shows as expired, as
+  T3 shows it) and their tokens under the same secret names. Scheduled tasks keep schedule,
+  state, counters, next run and webhook credentials, as T3's `decodeRow` builds them.
+- **Not carried over:** T3's event log (compacted; clients read projections), command
+  receipts, browser cookie and DPoP-bound sessions (this server checks neither; none on
+  mini), pairing codes bound to an MCP sign-in in progress or waiting for T3 Connect
+  approval; for webhook tasks (none on mini) the delivery log, replay keys and deliveries
+  waiting for dispatch, and coalescing, which this server lacks (an imported coalescing task
+  runs once per delivery); tasks over 500 (mini: 8); the grouped `XXXX-XXXX-XXXX` spelling
+  of a pairing code (the compact one works). Session import
+  (`agentSessions.*`) stays unserved; it is a different thing.
+- **Proof on a copy of mini's T3 home** (12.3 GB `statev2.sqlite` taken with sqlite `.backup`;
+  `~/.t3` untouched): `crates/conn-server/tools/t3-import-diff.mjs` starts the T3 server and the
+  Conn Server on APFS clones of the copy and compares what a client reads. Import: 6 projects,
+  1,531 threads, 18,960 runs, 230,292 nodes, 68,170 messages, 318,032 turn items, 19,788
+  checkpoints, 3,654 context transfers, 761 session bindings; 183 s to 259 s on mini, once.
+  The boundary became 1,862,638, T3's last sequence.
+  - Byte for byte, every T3 row against the engine row: none missing; every row identical
+    except rows of threads that each server's restart recovery changed (runs live at the copy).
+  - Shell: 5 projects and 1,529 threads on both. Every thread's projection, through T3's wire
+    projection and the contract decode: no difference outside the known list below. Settings
+    (decoded) and the 88 keybindings: equal. The environment id: equal.
+  - Continued: in a one-thread copy, the Conn Server imported the thread (a Haiku thread from
+    2026-11-13, 10 messages), served its old messages, and ran two new Claude Haiku turns in
+    it (runs 6 and 7) on the same provider thread and Claude session; asked how many
+    subagents "we agreed on earlier", it answered "Four." from the old conversation.
+- **Known, not from the import** (each holds for every thread this server serves, and the
+  import keeps the rows it is computed from): T3 also lists a context transfer on its source
+  thread, this engine on its target only (2,806 such listings on mini); the shell row has
+  `tags: []`, `latestRunStopRequested: false`, `latestRunBackgroundWake: false` and `null` for
+  absent fields where T3 omits or reads them; it shows no waiting link card; its
+  `latestUserAuthoredMessageAt` reads only the newest user message; a run fork's shell counts
+  only its own items; projects have no `repositoryIdentity`; serde_json re-reads floats without
+  `float_roundtrip` (last digit of `opens.score`) and keeps object keys sorted (the order of a
+  dynamic tool's wire summary). The HTTP thread route serves outputs that T3's wire projection
+  omits; the check applies T3's own projection to both sides.
+- **First start takes minutes** on a large T3 home (mini: 3 to 5 minutes and as much free
+  disk as `statev2.sqlite`). An interrupted import starts over at the next start and loses
+  nothing. The server listens only after it, as the T3 server listens only after its
+  migrations: a client gets "connection refused" meanwhile, as during a T3 upgrade, and
+  reconnects. The log carries T3's migration messages ("Running database migrations",
+  "Upgrading database: T3 import step 12 of 18 (turnItems), 63 s", thread counts in the last
+  step, "Migrations ran successfully"), so the desktop's readiness check keeps waiting past
+  its 3 minutes instead of reporting a failed start (`isRunningDatabaseMigrations`).
+- **Proof of the carry-over** (2026-11-21, a fresh `.backup` copy of mini's 12.4 GB
+  `statev2.sqlite`, an APFS clone of it per run; `~/.t3` and the running servers untouched;
+  copies deleted afterwards). Carried: 13 sessions (12 live on mini, plus one issued on the
+  clone by T3's own CLI, `t3 auth session issue`), 1 pairing code (issued the same way),
+  6 peer links, 8 scheduled tasks; import 309 s.
+  - Sessions: the token T3's CLI issued reads `authenticated: true` on `/api/auth/session`,
+    gets the shell (5 projects, 1,536 threads) and a WebSocket ticket; a changed signature
+    gets 401. beast's real peer-link token for mini (an MCP client session, 15 days left)
+    initializes `/mcp` and lists 62 tools, and gets 401 on the native API, as on T3. The T3
+    pairing code exchanged once for a token; a second exchange got 401.
+  - Peer links: `t3_environment_links` lists all 6 with T3's labels, access, expiry and last
+    errors; `t3_thread_list` through the nick link answered (2 threads). beast answers with
+    the error T3 itself has recorded for that link ("did not match this version").
+  - Schedules: the 8 tasks came over with their run counts. One task, changed on the clone
+    to a harmless prompt on Claude Haiku in a new thread, fired on its own timer three times
+    (runs 22 to 24, from T3's 21). Runs 22 and 23 failed for proof-setup reasons (the
+    worktree had no SDK helper installed; a model slug this account lacks); run 24 started
+    its thread and got the answer "pong".
+  - Client meanwhile: `/.well-known/t3/environment` refused connections for 5 min, then 200.
+
 ## Merge-back (2026-11-21)
 
 `thread.merge_back` is served, so `t3_thread_transfer` `merge_back` and the client's "Merge

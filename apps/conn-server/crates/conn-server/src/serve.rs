@@ -109,6 +109,21 @@ impl ServeOptions {
 ///
 /// Runs until SIGTERM or SIGINT, then stops cleanly: no new connections, open sockets close,
 /// and the runtime drops every task, which kills provider children (`kill_on_drop`).
+/// T3's migration log messages (`packages/shared/src/databaseMigrationLog.ts`). The desktop's
+/// readiness check keeps waiting while the last one in the output is not the finished one.
+const T3_MIGRATIONS_STARTED: &str = "Running database migrations";
+const T3_MIGRATION_PROGRESS: &str = "Upgrading database";
+const T3_MIGRATIONS_FINISHED: &str = "Migrations ran successfully";
+
+/// `CONN_SERVER_INERT=1`: a rehearsal copy of a state folder. The server imports, recovers and
+/// answers as usual, but no agent can run: it has no providers, the scheduled-task timer is
+/// off, it has no peer links, refuses pull request actions, and neither follows tasks in
+/// linked environments nor sweeps pull request watches.
+/// Runs it imported or recovers fail on the copy instead of doing the original's work twice.
+pub fn inert() -> bool {
+    std::env::var_os("CONN_SERVER_INERT").is_some_and(|v| v == "1")
+}
+
 pub async fn serve(options: ServeOptions, providers: Vec<Arc<dyn Provider>>) {
     serve_with_instances(options, providers, None).await;
 }
@@ -143,6 +158,15 @@ pub async fn serve_with_instances(
         )),
         None => None,
     };
+    let inert = inert();
+    let (providers, instances) = if inert {
+        eprintln!(
+            "conn-server: inert (CONN_SERVER_INERT=1): no providers, no timers, no agent runs"
+        );
+        (Vec::new(), None)
+    } else {
+        (providers, instances)
+    };
     let _ownership = match home::acquire_ownership(&state_dir) {
         Ok(lock) => lock,
         Err(OwnershipError::Owned) => {
@@ -173,6 +197,15 @@ pub async fn serve_with_instances(
         })
         .collect();
     let restart = crate::restart::Restart::detect(desktop.is_some()).await;
+    // A state folder the T3 server used: its sessions, pairing links, peer links and
+    // scheduled tasks, once, before the stores that read them open (`t3_carry.rs`).
+    let carry_dir = state_dir.clone();
+    match tokio::task::spawn_blocking(move || crate::t3_carry::carry_t3_state(&carry_dir)).await {
+        Ok(Ok(Some(report))) => eprintln!("conn-server: {}", report.summary()),
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => or_exit(Err(error), "cannot carry over the T3 server's state"),
+        Err(error) => or_exit(Err(error), "cannot carry over the T3 server's state"),
+    }
     let load_environment = {
         let state_dir = state_dir.clone();
         tokio::task::spawn_blocking(move || Environment::load(&state_dir, label, cwd, restart))
@@ -187,6 +220,14 @@ pub async fn serve_with_instances(
     let environment = Arc::new(environment);
     let restart = environment.restart.clone();
     let auth = environment.auth.clone();
+    if inert {
+        // The original's clients hold these sessions: they must not reach the copy.
+        let auth = auth.clone();
+        match tokio::task::spawn_blocking(move || auth.drop_t3_sessions()).await {
+            Ok(Ok(n)) => eprintln!("conn-server: inert: dropped {n} sessions carried from T3"),
+            _ => or_exit(Err("cannot drop the carried sessions"), "inert copy"),
+        }
+    }
     let providers = conn_provider::ProviderSet::from(providers);
     if let Some(instances) = &instances {
         instances
@@ -220,13 +261,64 @@ pub async fn serve_with_instances(
         devices: OnceLock::new(),
     });
 
+    // A state folder the T3 server used: its threads and projects, once (`t3_import.rs`).
+    // It takes minutes on a large T3 home and the server listens only after it, as the T3
+    // server listens only after its migrations. The lines carry T3's migration messages
+    // (`databaseMigrationLog.ts`): a desktop that waits for readiness reads them in the output
+    // and keeps waiting instead of reporting a failed start.
+    let import_dir = state_dir.clone();
+    let imported = tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let mut announced = false;
+        let result = conn_engine::import_t3_state_with_progress(&import_dir, &mut |p| {
+            if !announced {
+                announced = true;
+                eprintln!(
+                    "conn-server: {} to import the T3 server's threads (once; a large T3 home \
+                     takes minutes, and the server answers when it is done)",
+                    T3_MIGRATIONS_STARTED
+                );
+            }
+            let threads = p
+                .threads
+                .map(|(done, all)| format!(", {done} of {all} threads"))
+                .unwrap_or_default();
+            eprintln!(
+                "conn-server: {}: T3 import step {} of {} ({}{threads}), {} s",
+                T3_MIGRATION_PROGRESS,
+                p.step,
+                p.steps,
+                p.name,
+                started.elapsed().as_secs()
+            );
+        });
+        if announced && result.as_ref().is_ok_and(Option::is_some) {
+            eprintln!(
+                "conn-server: {} (T3 import done in {} s)",
+                T3_MIGRATIONS_FINISHED,
+                started.elapsed().as_secs()
+            );
+        }
+        result
+    })
+    .await;
+    if matches!(imported, Ok(Ok(_))) {
+        crate::t3_carry::finish_carry(&state_dir);
+    }
+    match imported {
+        Ok(Ok(Some(report))) => eprintln!("conn-server: {}", report.summary()),
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => or_exit(Err(error), "cannot import the T3 server's state"),
+        Err(error) => or_exit(Err(error), "cannot import the T3 server's state"),
+    }
     let mut config = EngineConfig::new(state_dir.join("engine.sqlite"));
     config.projects = projects;
     config.provider_set = Some(providers.clone());
     config.idle_session = session_idle;
     config.host = Some(host.clone());
     config.turn_observer = Some(host.clone());
-    config.checkpoints = true;
+    config.checkpoints = !inert;
+    config.recover_runs = !inert;
     let text_generators = Arc::new(crate::text_generation::TextGenerators::for_environment(
         environment.clone(),
     ));
@@ -250,7 +342,7 @@ pub async fn serve_with_instances(
             zone: jiff::tz::TimeZone::system(),
             runner: Arc::new(conn_features::scheduled::EngineRunner::new(engine.clone())),
             secret_requests: Some(secrets.clone()),
-            start_timer: true,
+            start_timer: !inert,
         })
         .await;
     let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
@@ -277,10 +369,8 @@ pub async fn serve_with_instances(
         oauth: Some(Arc::new(crate::oauth::McpOAuth::new(
             &state_dir.join("secrets"),
         ))),
-        peers: Some(crate::peers::PeerLinks::new(
-            environment.clone(),
-            engine.clone(),
-        )),
+        // An inert copy holds the original's peer links: it must not use them.
+        peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
         devices: Some(crate::methods::devices::start(environment.clone())),
         ..Deps::default()
     };
@@ -330,13 +420,16 @@ pub async fn serve_with_instances(
     println!("methods: {}", state.table.coverage());
     println!("providers: {provider_names}");
     // Probes spawn provider CLIs; T3 starts them once the server is ready, too.
-    crate::methods::provider::start_status_refresh(&state.deps);
-    // Tasks in linked environments: their followers, again after a restart.
-    if let Some(mcp) = &state.deps.mcp {
-        mcp.start_remote_tasks();
+    // An inert copy starts none of these: each can start a turn or act on another host.
+    if !inert {
+        crate::methods::provider::start_status_refresh(&state.deps);
+        // Tasks in linked environments: their followers, again after a restart.
+        if let Some(mcp) = &state.deps.mcp {
+            mcp.start_remote_tasks();
+        }
+        // Pull request watches: a sweep every two minutes, as T3's `PullRequestWatchReactor`.
+        crate::methods::pull_requests::start_watches(&state.deps);
     }
-    // Pull request watches: a sweep every two minutes, as T3's `PullRequestWatchReactor`.
-    crate::methods::pull_requests::start_watches(&state.deps);
     // `model-manifest.json`, fetched and cached as the T3 server's provider checks do.
     crate::model_manifest::start(state_dir.clone(), environment.clone());
     let managed_server = match provision {

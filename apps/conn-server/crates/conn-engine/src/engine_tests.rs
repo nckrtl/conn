@@ -626,6 +626,38 @@ async fn a_restart_sends_an_undelivered_message_again() {
     assert_eq!(p["messages"][1]["text"], "echo: late");
 }
 
+/// An inert rehearsal copy (`recover_runs` off) leaves a run it found active as it was: no
+/// provider turn starts, so the copy never repeats the original's work.
+#[tokio::test(flavor = "current_thread")]
+async fn without_recovery_an_active_run_stays_as_found() {
+    let db = TempDb::new("restart-inert");
+    {
+        let (engine, _) = open(&db);
+        dispatch(&engine, create("t1", "c1")).await;
+        let inner = engine.inner().clone();
+        let command = message("t1", "c2", "late");
+        inner
+            .write(move |tx| {
+                let handler = crate::commands::handler("message.dispatch").unwrap();
+                handler(tx, command)
+                    .map(|_| ())
+                    .map_err(|_| "rejected".to_owned())
+            })
+            .await
+            .unwrap();
+    }
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let mut config = EngineConfig::new(db.path());
+    config.providers = vec![provider.clone()];
+    config.recover_runs = false;
+    let engine = SqliteEngine::open(config).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let p = projection(&engine, "t1").await;
+    assert_ne!(p["runs"][0]["status"], "completed");
+    assert_ne!(p["runs"][0]["status"], "cancelled");
+    assert_eq!(p["messages"].as_array().map(Vec::len), Some(1));
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn launch_thread_creates_and_starts_in_one_call() {
     let db = TempDb::new("launch");
@@ -2245,6 +2277,22 @@ async fn a_delegated_task_runs_as_a_child_thread_and_wakes_its_parent() {
     assert_eq!(row["status"], "completed");
     assert_eq!(row["result"], "echo: look around");
     assert_eq!(row["completionDelivery"]["state"], "pending");
+    // The shell counts the parent's subagents, as T3's `subagentCount`; a child has none.
+    let shells = engine
+        .inner()
+        .db(move |store| {
+            let tx = store.tx()?;
+            let rows = (
+                crate::shell::thread_shell(&tx, "t1")?,
+                crate::shell::thread_shell(&tx, child)?,
+            );
+            tx.rollback();
+            Ok::<_, String>(rows)
+        })
+        .await
+        .unwrap();
+    assert_eq!(shells.0["subagentCount"], 1);
+    assert!(shells.1.get("subagentCount").is_none());
     let item = parent["turnItems"]
         .as_array()
         .unwrap()
@@ -5665,4 +5713,62 @@ async fn a_parent_stop_interrupts_an_open_remote_task() {
     assert_eq!(row["completionDelivery"]["state"], "disposed");
     // Its follower still owes the stop there.
     assert_eq!(engine.open_remote_tasks(10).await.unwrap().len(), 1);
+}
+
+/// `provider.uploadFeedback` (T3's `ws.ts` handler): an unknown thread, a thread before its
+/// first session, a running session whose provider has no upload (T3: only Codex), and a
+/// session that stopped, each with T3's text.
+#[tokio::test(flavor = "current_thread")]
+async fn upload_feedback_needs_a_running_session_that_supports_it() {
+    let db = TempDb::new("upload-feedback");
+    let (engine, _) = open(&db);
+    let refusal = |result: Result<Value, EngineError<Value>>| match result {
+        Err(EngineError::Rejected(error)) => {
+            assert_eq!(error["_tag"], "ProviderUploadFeedbackError");
+            error
+        }
+        other => panic!("expected a refusal: {other:?}"),
+    };
+    let missing = refusal(
+        engine
+            .call("provider.uploadFeedback", json!({"threadId": "nope"}))
+            .await,
+    );
+    assert_eq!(missing["threadId"], "nope");
+
+    dispatch(&engine, create("t1", "c1")).await;
+    let feedback = json!({"threadId": "t1", "reason": "broken"});
+    let fresh = refusal(
+        engine
+            .call("provider.uploadFeedback", feedback.clone())
+            .await,
+    );
+    assert_eq!(
+        fresh["cause"],
+        "No provider session has run in this thread yet."
+    );
+
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hello")).await;
+    until_run_ends(&mut thread).await;
+    let unsupported = refusal(
+        engine
+            .call("provider.uploadFeedback", feedback.clone())
+            .await,
+    );
+    assert_eq!(
+        unsupported["cause"],
+        "Provider 'claudeAgent' does not support feedback uploads."
+    );
+
+    engine.shutdown().await;
+    let stopped = refusal(engine.call("provider.uploadFeedback", feedback).await);
+    assert_eq!(
+        stopped["cause"],
+        "The provider session is no longer running. Send a message first."
+    );
 }

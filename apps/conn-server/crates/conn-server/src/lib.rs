@@ -25,8 +25,10 @@ pub mod scopes;
 pub mod serve;
 pub mod session;
 pub mod settings;
+pub mod t3_carry;
 pub mod table;
 pub mod text_generation;
+pub mod trace_diagnostics;
 mod workflow_script;
 
 pub use http::{AppState, router};

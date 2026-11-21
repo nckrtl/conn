@@ -104,8 +104,10 @@ from this tree.
   - Resource telemetry: `subscribeResourceTelemetry`, the resource and process history and
     its retry (the Settings › Diagnostics CPU and memory panel). Orbit tracks resources.
   - The Usage page: `server.getUsageSummary` and `server.refreshUsageRates`.
-  - Session import: `agentSessions.scan` and `agentSessions.import`. No threads are
-    imported, including old T3 server threads when a container switches servers.
+  - Session import: `agentSessions.scan` and `agentSessions.import` (provider transcripts
+    turned into threads). This is not the T3 state import: a Conn Server that starts in a
+    T3 server's state folder carries that server's threads over once
+    (`apps/conn-server/docs/status.md`, "T3 state import").
   - Clone from the client: `projectClone.*`. The `/mcp` clone tool stays.
   - The test-login group of the browser's key menu: `credentials.listForSite` and
     `credentials.fillForSite`. Vault logins in that menu stay; the desktop fills them itself.
@@ -113,6 +115,20 @@ from this tree.
   - Provider install and update: `provider.install.*` and `server.updateProvider`. Orbit
     installs and updates provider CLIs; see [Provider CLIs](#provider-clis). The T3 server
     does not mount them either.
+  - Server self-update (Nick, 2026-11-21): `server.getNpmRelease`, `server.updateServer`,
+    `server.updateServerWithProgress` and `server.commitDesktopUpdate`. They fetch T3's own
+    releases. Orbit releases the Conn Server in containers; on Macs the Conn desktop build
+    carries it.
+  - The ACP registry: its 11 `server.*AcpRegistry*` methods. Orbit tools install agent CLIs,
+    and the Conn Server runs ACP agents such as Antigravity without the registry.
+  - ChatGPT profile and handoff (`provider.chatgpt.*`) and `provider.consumeResetCredit`.
+    They need provider account tokens, which the server never holds.
+  - T3 cloud: `cloud.getRelayClientStatus`, `cloud.installRelayClient` and
+    `guestShare.create`. Conn links through the Orbit Gateway.
+  - `server.prepareTriage` (a bug report about T3 itself), `server.checkOtlpEndpoint` (the
+    server sends no telemetry), `server.checkSecretSource` (the server never reads secret
+    references), and storage cleanup (`server.getStorageCleanupReport`,
+    `server.runStorageCleanup`).
 
   The Diagnostics panel, the Usage page and the key menu's test-login group may later be
   removed from Conn itself.

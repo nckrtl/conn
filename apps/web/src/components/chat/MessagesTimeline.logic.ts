@@ -1780,6 +1780,8 @@ export function deriveMessagesTimelineRows(
         entry.entry.itemType === "notification" ||
         entry.entry.itemType === "todo_list" ||
         entry.entry.questionAnswer !== undefined ||
+        // A task card stands on its own, also while the turn is still running.
+        orbitTaskCreateReceipt(entry.entry) !== null ||
         isPendingApproval(entry.entry) ||
         !runIdIsActiveResponse(entry.entry.runId) ||
         entry.entry.sourceActivityKind === "context-compaction" ||

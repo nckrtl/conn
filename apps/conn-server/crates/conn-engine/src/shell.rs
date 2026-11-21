@@ -217,6 +217,8 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         _ => None,
     };
     let item_count = tx.count(thread_id, "turnItems")?;
+    // `subagent_count`: native and delegated alike, one `subagents` row per child.
+    let subagent_count = tx.count(thread_id, "subagents")?;
     let provider_threads = tx.entities(thread_id, "providerThreads")?;
     let mut history: Vec<Value> = Vec::new();
     for provider_thread in &provider_threads {
@@ -316,10 +318,18 @@ pub(crate) fn thread_shell(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Value> {
         "deletedAt": field("deletedAt"),
     });
     // As T3's shell: present only when the thread has them.
-    for key in ["linkedPullRequest", "branchPullRequest", "issues"] {
+    for key in [
+        "linkedPullRequest",
+        "branchPullRequest",
+        "issues",
+        "historyOrigin",
+    ] {
         if let (Some(value), Some(map)) = (thread.get(key), row.as_object_mut()) {
             map.insert(key.into(), value.clone());
         }
+    }
+    if subagent_count > 0 {
+        row["subagentCount"] = json!(subagent_count);
     }
     // The link that started it, when one did (`linkOrigin`): the fence reads it.
     if let Some(from) = thread.get("delegatedFrom").filter(|d| d.is_object()) {

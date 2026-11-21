@@ -246,11 +246,13 @@ import {
   isContextHandoffActivityGroup,
   isLinkRequestActivityGroup,
   isSecretRequestActivityGroup,
+  taskReceiptOfActivityGroup,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
   messageFoldRunId,
 } from "../../lib/threadActivity";
 import { ThreadCardButton, ThreadCardFace } from "./ThreadCardFace";
+import { ThreadTaskReceiptCard } from "./ThreadTaskReceiptCard";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { type ThreadWorkGroupScrollPosition } from "./thread-feed-scroll-position";
 import {
@@ -2231,6 +2233,9 @@ function renderFeedEntry(
       />
     );
   }
+
+  const taskReceipt = entry.type === "activity-group" ? taskReceiptOfActivityGroup(entry) : null;
+  if (taskReceipt) return <ThreadTaskReceiptCard task={taskReceipt} />;
 
   if (entry.type === "activity-group" && isContextCompactionActivityGroup(entry)) {
     const label = entry.activities[0]!.summary;

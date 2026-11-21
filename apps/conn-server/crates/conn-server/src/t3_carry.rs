@@ -4,8 +4,9 @@
 //!
 //! - **When.** The folder holds T3's `statev2.sqlite` and no `engine.sqlite`: the same first
 //!   start that imports the threads. Each file is written only when it is missing, so nothing
-//!   this server already keeps is replaced, and a start interrupted after this step does not
-//!   redo it.
+//!   this server already keeps is replaced. Until the thread import of the same start is in
+//!   place (`t3-carry.pending` lists what was carried), a later start reads them again from
+//!   T3, which may have run in between.
 //! - **Read-only.** T3's file is attached read-only, as the thread import attaches it.
 //! - **Sessions** (`auth_sessions`, T3's `SessionStore`): every live bearer session (not
 //!   revoked, not expired) goes to `auth.json`, marked as T3-signed. Its client keeps the
@@ -13,14 +14,16 @@
 //!   shared secret store. Not carried: browser cookie sessions and DPoP-bound sessions (this
 //!   server issues and checks neither).
 //! - **Pairing links** (`auth_pairing_links`, `PairingGrantStore`): unspent, unrevoked,
-//!   unexpired one-time codes, kept by their hash. Not carried: codes bound to an MCP sign-in
-//!   in progress, codes waiting for T3 Connect approval or bound to a device key.
+//!   unexpired one-time codes, kept by their hash, peer-link codes included. Not carried:
+//!   codes bound to an MCP sign-in in progress, codes waiting for T3 Connect approval or bound
+//!   to a device key.
 //! - **Peer links** (`peer_environment_links`, `PeerLinks`): every row, in T3's order. Their
 //!   tokens stay in the secret store under the same names. A link T3 would show as expired
 //!   (made before link fencing, `fenced = 0`) gets its `linkedAt` as expiry, as T3 shows it.
 //! - **Scheduled tasks** (`scheduled_tasks`, `ScheduledTaskService.decodeRow`): every task
-//!   with its schedule, state, counters and webhook credentials. The delivery log of webhook
-//!   tasks is not carried.
+//!   with its schedule, state, counters and webhook credentials. Not carried: webhook replay
+//!   keys and deliveries waiting for dispatch, and webhook coalescing (this server has none);
+//!   tasks over [`conn_features::scheduled::MAX_TASKS`].
 
 use std::path::Path;
 
@@ -36,6 +39,8 @@ const ENGINE_FILE: &str = "engine.sqlite";
 const AUTH_FILE: &str = "auth.json";
 const PEERS_FILE: &str = "peer-links.json";
 const TASKS_FILE: &str = "scheduled-tasks.json";
+/// The files a carry-over wrote, until the thread import of the same start is in place.
+const PENDING_FILE: &str = "t3-carry.pending";
 
 /// What was carried over; `None` for a file that already existed or a table T3 lacks.
 #[derive(Debug, Default)]
@@ -72,31 +77,57 @@ pub fn carry_t3_state(state_dir: &Path) -> Result<Option<CarryReport>, String> {
     let conn = conn_engine::open_t3_read_only(&source)?;
     let now = conn_support::time::now_ms();
     let mut report = CarryReport::default();
+    // Files an earlier start carried over while the thread import did not finish: the T3
+    // server may have run since (a revoked session, a spent code), so they are read again.
+    let marker = state_dir.join(PENDING_FILE);
+    let pending = std::fs::read_to_string(&marker).unwrap_or_default();
+    let writable =
+        |name: &str| !state_dir.join(name).exists() || pending.lines().any(|line| line == name);
+    let mut written: Vec<&str> = Vec::new();
 
     let auth = state_dir.join(AUTH_FILE);
-    if !auth.exists() {
+    if writable(AUTH_FILE) {
         let (sessions, skipped) = read_sessions(&conn, now)?;
         let links = read_pairing_links(&conn, now)?;
         report.sessions = Some(sessions.len());
         report.sessions_skipped = skipped;
         report.pairing_links = Some(links.len());
-        crate::auth::write_t3_import(&auth, sessions, links)
+        crate::auth::write_t3_import(&auth, sessions, links, pending.contains(AUTH_FILE))
             .map_err(|e| format!("t3 carry: cannot write {}: {e}", auth.display()))?;
+        written.push(AUTH_FILE);
     }
-    if !state_dir.join(PEERS_FILE).exists() && has_table(&conn, "peer_environment_links")? {
+    if writable(PEERS_FILE) && has_table(&conn, "peer_environment_links")? {
         let links = read_peer_links(&conn)?;
         report.peer_links = Some(links.len());
         crate::peers::write_t3_import(state_dir, links)
             .map_err(|e| format!("t3 carry: cannot write {PEERS_FILE}: {e}"))?;
+        written.push(PEERS_FILE);
     }
-    if !state_dir.join(TASKS_FILE).exists() && has_table(&conn, "scheduled_tasks")? {
+    if writable(TASKS_FILE) && has_table(&conn, "scheduled_tasks")? {
         let tasks = read_scheduled_tasks(&conn)?;
         report.scheduled_tasks = Some(
             conn_features::scheduled::write_t3_import(state_dir, tasks)
                 .map_err(|e| format!("t3 carry: cannot write {TASKS_FILE}: {e}"))?,
         );
+        written.push(TASKS_FILE);
+    }
+    if !written.is_empty() {
+        conn_support::fs::write_private(&marker, written.join("\n").as_bytes())
+            .map_err(|e| format!("t3 carry: cannot write {PENDING_FILE}: {e}"))?;
     }
     Ok(Some(report))
+}
+
+/// Called once the thread import is in place (or was already): the carried files are this
+/// server's from now on and are never read from T3 again.
+pub fn finish_carry(state_dir: &Path) {
+    let marker = state_dir.join(PENDING_FILE);
+    if state_dir.join(ENGINE_FILE).exists()
+        && let Err(error) = std::fs::remove_file(&marker)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("conn-server: cannot remove {}: {error}", marker.display());
+    }
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -193,7 +224,7 @@ fn read_pairing_links(conn: &Connection, now: u64) -> Result<Vec<T3PairingLink>,
         "SELECT id, credential, scopes, subject, label, created_at, expires_at
          FROM t3.auth_pairing_links
          WHERE revoked_at IS NULL AND consumed_at IS NULL AND method = 'one-time-token'
-           AND subject NOT LIKE 'mcp-approval:%'
+           AND (subject NOT LIKE 'mcp-approval:%' OR subject LIKE 'mcp-approval:peer-link:%')
            AND {proof} IS NULL AND {approval} = 0 AND {denied} = 0
          ORDER BY created_at, id",
         proof = if cols.iter().any(|c| c == "proof_key_thumbprint") {
@@ -302,7 +333,12 @@ fn read_scheduled_tasks(conn: &Connection) -> Result<Vec<TaskRow>, String> {
                 next_run_at, last_run_at, last_run_status, last_run_error, run_count,
                 {token}, {secret}
          FROM t3.scheduled_tasks ORDER BY created_at, task_id",
-        thread_mode = column_or(&cols, "thread_mode", "'new_thread'"),
+        // T3's migration 080 gave a bound task `continue` and the others `new_thread`.
+        thread_mode = column_or(
+            &cols,
+            "thread_mode",
+            "CASE WHEN thread_id IS NULL THEN 'new_thread' ELSE 'continue' END",
+        ),
         token = column_or(&cols, "webhook_token", "NULL"),
         secret = column_or(&cols, "webhook_secret", "NULL"),
     );
@@ -399,7 +435,11 @@ mod tests {
         ('open', 'ABCDEFGHJKMN', 'one-time-token', '[]', 'one-time-token',
           '2026-11-01T00:00:00.000Z', '2999-01-01T00:00:00.000Z', NULL),
         ('spent', 'BCDEFGHJKMNP', 'one-time-token', '[]', 'one-time-token',
-          '2026-11-01T00:00:00.000Z', '2999-01-01T00:00:00.000Z', '2026-11-02T00:00:00.000Z');
+          '2026-11-01T00:00:00.000Z', '2999-01-01T00:00:00.000Z', '2026-11-02T00:00:00.000Z'),
+        ('peer', 'CDEFGHJKMNPQ', 'one-time-token', '[]', 'mcp-approval:peer-link:full-access',
+          '2026-11-01T00:00:00.000Z', '2999-01-01T00:00:00.000Z', NULL),
+        ('signin', 'DEFGHJKMNPQR', 'one-time-token', '[]', 'mcp-approval:client-1',
+          '2026-11-01T00:00:00.000Z', '2999-01-01T00:00:00.000Z', NULL);
       INSERT INTO peer_environment_links VALUES
         ('env-b', 'peer-link-b', 'beast', '[\"http://10.44.0.7:3773\"]', 'full-access',
           '2026-11-01T00:00:00.000Z', '2026-12-01T00:00:00.000Z', NULL, NULL, 1),
@@ -431,7 +471,11 @@ mod tests {
             .expect("a T3 folder at its first start");
         assert_eq!(report.sessions, Some(1), "only the live bearer session");
         assert_eq!(report.sessions_skipped, 2, "cookie and DPoP");
-        assert_eq!(report.pairing_links, Some(1));
+        assert_eq!(
+            report.pairing_links,
+            Some(2),
+            "the open code and the peer-link code"
+        );
         assert_eq!(report.peer_links, Some(2));
         assert_eq!(report.scheduled_tasks, Some(1));
 
@@ -460,15 +504,29 @@ mod tests {
         assert_eq!(task["runCount"], 12);
         assert_eq!(task["nextRunAt"], "2026-11-21T12:00:00.000Z");
 
-        // Existing files are never replaced.
-        std::fs::write(dir.join(PEERS_FILE), b"{\"version\":1,\"links\":[]}").unwrap();
+        // While the thread import has not finished, the carried files are read again (the
+        // T3 server may have revoked a session since).
+        let again = carry_t3_state(&dir).unwrap().unwrap();
+        assert_eq!(
+            (again.sessions, again.peer_links, again.scheduled_tasks),
+            (Some(1), Some(2), Some(1))
+        );
+
+        // Files this server wrote itself are never replaced.
+        std::fs::remove_file(dir.join(PENDING_FILE)).unwrap();
         std::fs::remove_file(dir.join(TASKS_FILE)).unwrap();
         let again = carry_t3_state(&dir).unwrap().unwrap();
         assert_eq!((again.sessions, again.peer_links), (None, None));
         assert_eq!(again.scheduled_tasks, Some(1));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(PENDING_FILE)).unwrap(),
+            TASKS_FILE
+        );
 
         // After the first start (the engine store exists) nothing runs.
         std::fs::write(dir.join(ENGINE_FILE), b"").unwrap();
+        finish_carry(&dir);
+        assert!(!dir.join(PENDING_FILE).exists());
         assert!(carry_t3_state(&dir).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }

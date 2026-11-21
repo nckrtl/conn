@@ -276,6 +276,9 @@ pub async fn serve_with_instances(
         result
     })
     .await;
+    if matches!(imported, Ok(Ok(_))) {
+        crate::t3_carry::finish_carry(&state_dir);
+    }
     match imported {
         Ok(Ok(Some(report))) => eprintln!("conn-server: {}", report.summary()),
         Ok(Ok(None)) => {}

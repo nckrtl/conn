@@ -54,18 +54,26 @@ A Conn Server that starts in a T3 server's state folder has the same threads (Ni
   back. An existing `engine.sqlite` is never touched; a partial import is removed and redone.
 - **Sessions, pairing codes, peer links and scheduled tasks** (2026-11-21, `t3_carry.rs`):
   at the same first start, before the stores open, T3's live rows go to the server's own
-  files; a file that exists is never replaced. Paired devices keep their tokens: a
+  files; a file this server wrote itself is never replaced. Until the thread import of that
+  start is in place (`t3-carry.pending`), a later start reads the carried files again from
+  T3, which may have run in between (a revoked session, a spent code). Paired devices keep
+  their tokens: a
   carried-over session (`auth.json`, `t3Signed`) accepts the token T3 signed, checked as T3's
   `SessionStore.verify` does (HMAC with T3's `server-signing-key` from the shared secret
-  store, claims, expiry, the session not revoked; the claims' `rtc`/`plk` apply on `/mcp`).
-  Revoking it here works as for any session. Unspent one-time pairing codes stay usable.
+  store, claims version, kind, subject (it picks the native or MCP audience, as in T3),
+  expiry, the session not revoked; the claims' `rtc`/`plk` apply on `/mcp`).
+  Revoking it here works as for any session. Unspent one-time pairing codes stay usable,
+  peer-link codes (`mcp-approval:peer-link:*`) included.
   Peer links keep their rows (T3's order; a link made before fencing shows as expired, as
   T3 shows it) and their tokens under the same secret names. Scheduled tasks keep schedule,
   state, counters, next run and webhook credentials, as T3's `decodeRow` builds them.
 - **Not carried over:** T3's event log (compacted; clients read projections), command
   receipts, browser cookie and DPoP-bound sessions (this server checks neither; none on
   mini), pairing codes bound to an MCP sign-in in progress or waiting for T3 Connect
-  approval, and the delivery log of webhook tasks (none on mini). Session import
+  approval; for webhook tasks (none on mini) the delivery log, replay keys and deliveries
+  waiting for dispatch, and coalescing, which this server lacks (an imported coalescing task
+  runs once per delivery); tasks over 500 (mini: 8); the grouped `XXXX-XXXX-XXXX` spelling
+  of a pairing code (the compact one works). Session import
   (`agentSessions.*`) stays unserved; it is a different thing.
 - **Proof on a copy of mini's T3 home** (12.3 GB `statev2.sqlite` taken with sqlite `.backup`;
   `~/.t3` untouched): `crates/conn-server/tools/t3-import-diff.mjs` starts the T3 server and the

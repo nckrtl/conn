@@ -1225,6 +1225,10 @@ impl AuthStore {
             .sessions
             .get(&key)
             .filter(|s| s.t3_signed && s.id == claims.sid && s.expires_at_ms > now)?;
+        // T3 picks the audience (native or MCP) by the signed subject; the row's must match.
+        if session.subject != claims.sub {
+            return None;
+        }
         let mut session = session.clone();
         session.expires_at_ms = session.expires_at_ms.min(claims.exp);
         session.runtime_mode_ceiling = claims.rtc;
@@ -1245,7 +1249,8 @@ impl AuthStore {
         }
         let claims: T3SessionClaims =
             serde_json::from_slice(&conn_support::base64::url_decode(payload)?).ok()?;
-        (claims.kind == "session"
+        (matches!(claims.v, 1 | 2)
+            && claims.kind == "session"
             && claims.jkt.is_none()
             && claims.method == METHOD_BEARER
             && claims.exp > now)
@@ -1485,8 +1490,10 @@ const T3_SIGNING_SECRET_NAME: &str = "server-signing-key";
 /// `SessionClaims` in T3's `SessionStore.ts`, the fields this server reads.
 #[derive(Deserialize)]
 struct T3SessionClaims {
+    v: u8,
     kind: String,
     sid: String,
+    sub: String,
     method: String,
     #[serde(default)]
     jkt: Option<String>,
@@ -1528,11 +1535,18 @@ pub(crate) struct T3PairingLink {
 /// Writes `auth.json` from a T3 server's live sessions and pairing links. Pairing codes are
 /// kept as their hash, as every code here is; the T3 sessions keep their tokens valid
 /// ([`AuthStore::resolve`]).
+/// Under the auth file's lock, so a CLI write cannot be lost; an `auth.json` that appeared
+/// meanwhile is kept unless `replace` (an earlier carry-over's own file).
 pub(crate) fn write_t3_import(
     path: &Path,
     sessions: Vec<T3Session>,
     links: Vec<T3PairingLink>,
+    replace: bool,
 ) -> io::Result<()> {
+    let _lock = lock_file(path)?;
+    if !replace && path.exists() {
+        return Ok(());
+    }
     let file = AuthFile {
         version: 1,
         sessions: sessions
@@ -2460,6 +2474,7 @@ mod tests {
                 created_at_ms: now_ms(),
                 expires_at_ms: later,
             }],
+            false,
         )
         .unwrap();
         let store = AuthStore::open(dir.join("auth.json")).unwrap();
@@ -2497,6 +2512,21 @@ mod tests {
         assert!(
             store
                 .authenticate_bearer(&t3_token(&key, claims("s-other", later)))
+                .is_none()
+        );
+        // A version T3 does not know, or a subject other than the session's: refused.
+        let mut unknown = claims("s-native", later);
+        unknown["v"] = 9.into();
+        assert!(
+            store
+                .authenticate_bearer(&t3_token(&key, unknown))
+                .is_none()
+        );
+        let mut other_sub = claims("s-native", later);
+        other_sub["sub"] = SUBJECT_MCP_CLIENT.into();
+        assert!(
+            store
+                .authenticate_mcp_client(&t3_token(&key, other_sub))
                 .is_none()
         );
         // The map key is no token.

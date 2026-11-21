@@ -14,6 +14,7 @@ use conn_provider::{
     BoxFuture, Closed, EnsureThreadInput, ForkThreadInput, InjectHistoryInput, InterruptInput,
     McpServer, ProviderError, ProviderEvent, ProviderResult, ResumeThreadInput, RollbackTarget,
     RollbackThreadInput, RuntimeRequestResponse, Session, SteerInput, ThreadSnapshot, TurnInput,
+    UploadFeedbackInput,
 };
 use conn_provider_support::ids::{self, Env, SystemEnv, iso_from_ms};
 use serde_json::{Value, json};
@@ -1073,6 +1074,31 @@ impl Session for CodexSession {
                 Err(CallError::Rpc(error)) if error.code == -32601 => Ok(false),
                 Err(error) => Err(call_failed("inject_history")(error)),
             }
+        })
+    }
+
+    /// `uploadFeedback`: `feedback/upload` as a bug with logs, on the thread's native id; the
+    /// answer's `threadId` is the feedback id (T3's `CodexAdapterV2.uploadFeedback`).
+    fn upload_feedback(&self, input: UploadFeedbackInput) -> BoxFuture<'_, ProviderResult<String>> {
+        Box::pin(async move {
+            let Some(native) = native_thread_id(&input.provider_thread) else {
+                return Err(failed("upload_feedback", "the thread has no native id"));
+            };
+            let mut params = json!({"classification": "bug", "includeLogs": true});
+            if let Some(reason) = input.reason {
+                params["reason"] = json!(reason);
+            }
+            params["threadId"] = json!(native);
+            let response = self
+                .inner
+                .server
+                .request("feedback/upload", params)
+                .await
+                .map_err(call_failed("upload_feedback"))?;
+            response["threadId"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| failed("upload_feedback", "feedback/upload answered no threadId"))
         })
     }
 

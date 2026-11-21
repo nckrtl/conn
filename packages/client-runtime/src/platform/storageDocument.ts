@@ -1,5 +1,6 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
@@ -14,6 +15,7 @@ import {
   PersistedConnectionTarget,
 } from "../connection/model.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
+import { withTargetLabel } from "../connection/serverLabel.ts";
 import { StoredPullRequestRoutingPermission } from "../connection/pullRequestRoutingPermissions.ts";
 
 export const StoredConnectionCredential = Schema.Struct({
@@ -114,6 +116,35 @@ export function catalogRoutes(
   return document.targets.filter((target) => target.environmentId === environmentId);
 }
 
+/** Apply a learned label only to persisted routes that still match the supervisor's snapshot. */
+export function learnConnectionLabelInCatalog(
+  document: ConnectionCatalogDocument,
+  environmentId: EnvironmentId,
+  expected: ReadonlyArray<PersistedConnectionTarget>,
+  label: string,
+): {
+  readonly document: ConnectionCatalogDocument;
+  readonly updated: ReadonlyArray<PersistedConnectionTarget>;
+} {
+  if (catalogRoutes(document, environmentId).some((target) => target.labelSetByUser === true)) {
+    return { document, updated: [] };
+  }
+  const updated: Array<PersistedConnectionTarget> = [];
+  const targets = document.targets.map((target) => {
+    if (
+      target.environmentId !== environmentId ||
+      target.label === label ||
+      !expected.some((previous) => Equal.equals(previous, target))
+    ) {
+      return target;
+    }
+    const named = withTargetLabel(target, label);
+    updated.push(named);
+    return named;
+  });
+  return { document: updated.length === 0 ? document : { ...document, targets }, updated };
+}
+
 /**
  * Records owned by a dropped route go with it; the environment keeps its
  * position in the catalog. An empty list leaves the environment's other records
@@ -178,37 +209,48 @@ export function registerConnectionInCatalog(
 }
 
 /**
- * The markers are the recovery journal. Each part is matched independently so a partial write or
- * a subsequent replacement cannot turn conditional cleanup into an environment-wide deletion.
+ * The markers are the recovery journal. Promotion requires a matching route and credential.
+ * Cleanup matches each part independently, preserving records from a subsequent replacement.
  */
 export function settleProvisionalPairingInCatalog(
   document: ConnectionCatalogDocument,
   installId: string,
   keep: boolean,
+  environmentId?: EnvironmentId,
 ): ConnectionCatalogDocument {
+  if (keep) {
+    const target = document.targets.find(
+      (target): target is BearerConnectionTarget =>
+        target._tag === "BearerConnectionTarget" &&
+        target.provisionalPairingId === installId &&
+        (environmentId === undefined || target.environmentId === environmentId),
+    );
+    if (target === undefined) return document;
+    const credential = document.credentials.find(
+      (entry) =>
+        entry.connectionId === target.connectionId &&
+        entry.provisionalPairingId === installId &&
+        entry.credential._tag === "BearerConnectionCredential",
+    );
+    if (credential === undefined) return document;
+    const { provisionalPairingId: _targetOwner, ...committedTarget } = target;
+    const { provisionalPairingId: _credentialOwner, ...committedCredential } = credential;
+    return {
+      ...document,
+      targets: document.targets.map((entry) =>
+        entry === target ? new BearerConnectionTarget(committedTarget) : entry,
+      ),
+      credentials: document.credentials.map((entry) =>
+        entry === credential ? committedCredential : entry,
+      ),
+    };
+  }
+
   const owned = document.targets.filter((target) => provisionalPairingId(target) === installId);
   const ownedCredentials = document.credentials.some(
     (entry) => entry.provisionalPairingId === installId,
   );
   if (owned.length === 0 && !ownedCredentials) return document;
-
-  if (keep) {
-    return {
-      ...document,
-      targets: document.targets.map((target) => {
-        if (target._tag !== "BearerConnectionTarget" || target.provisionalPairingId !== installId) {
-          return target;
-        }
-        const { provisionalPairingId: _pending, ...committed } = target;
-        return new BearerConnectionTarget(committed);
-      }),
-      credentials: document.credentials.map((entry) => {
-        if (entry.provisionalPairingId !== installId) return entry;
-        const { provisionalPairingId: _pending, ...committed } = entry;
-        return committed;
-      }),
-    };
-  }
 
   const targets = document.targets.filter((target) => provisionalPairingId(target) !== installId);
   const removedRoutes = new Set(owned.map(connectionIdOf));
@@ -246,7 +288,9 @@ export function putConnectionCredentialInCatalog(
   };
 }
 
-function provisionalPairingsInCatalog(document: ConnectionCatalogDocument): ReadonlySet<string> {
+export function provisionalPairingsInCatalog(
+  document: ConnectionCatalogDocument,
+): ReadonlySet<string> {
   const ids = new Set<string>();
   for (const target of document.targets) {
     const id = provisionalPairingId(target);
@@ -258,25 +302,30 @@ function provisionalPairingsInCatalog(document: ConnectionCatalogDocument): Read
   return ids;
 }
 
-/** Replay only installs observed on startup, so a later retry cannot sweep a new install. */
+/** Replay only installs present on the first successful catalog load. */
 export const recoverProvisionalPairings = Effect.fn("ConnectionCatalog.recoverProvisionalPairings")(
   function* <E>(store: {
-    readonly read: Effect.Effect<ConnectionCatalogDocument, E>;
+    readonly readStartupPairings: Effect.Effect<ReadonlySet<string>, E>;
     readonly update: (
       transform: (document: ConnectionCatalogDocument) => ConnectionCatalogDocument,
     ) => Effect.Effect<void, E>;
   }) {
-    const ids = provisionalPairingsInCatalog(yield* store.read);
-    if (ids.size === 0) return;
-    const remove = store.update((document) => {
-      let next = document;
-      for (const id of ids) next = settleProvisionalPairingInCatalog(next, id, false);
-      return next;
+    const recover = Effect.gen(function* () {
+      const ids = yield* store.readStartupPairings;
+      if (ids.size === 0) return;
+      yield* store.update((document) => {
+        let next = document;
+        for (const id of ids) next = settleProvisionalPairingInCatalog(next, id, false);
+        return next;
+      });
     });
-    yield* remove.pipe(
+    yield* recover.pipe(
       Effect.catch(() =>
         Effect.forkScoped(
-          remove.pipe(Effect.retry({ schedule: Schedule.spaced("2 seconds") })),
+          recover.pipe(
+            Effect.retry({ schedule: Schedule.spaced("2 seconds") }),
+            Effect.delay("2 seconds"),
+          ),
         ).pipe(Effect.asVoid),
       ),
     );

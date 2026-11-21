@@ -78,6 +78,11 @@ export class ConnectionRegistrationStore extends Context.Service<
       },
       ConnectionPersistenceError
     >;
+    readonly learnLabel: (
+      environmentId: EnvironmentId,
+      expected: ReadonlyArray<PersistedConnectionTarget>,
+      label: string,
+    ) => Effect.Effect<ReadonlyArray<PersistedConnectionTarget>, ConnectionPersistenceError>;
     /**
      * `routes` must not be empty.
      */

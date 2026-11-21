@@ -3,6 +3,7 @@ import {
   putConnectionCredentialInCatalog,
   registerConnectionInCatalog,
   catalogRoutes,
+  learnConnectionLabelInCatalog,
   provisionalPairingId,
   recoverProvisionalPairings,
   settleProvisionalPairingInCatalog,
@@ -47,7 +48,7 @@ function targetPersistenceError(
 export const layer = Layer.effectContext(
   Effect.gen(function* () {
     const catalog = yield* CatalogStore.make();
-    yield* recoverProvisionalPairings(catalog).pipe(Effect.ignore);
+    yield* recoverProvisionalPairings(catalog);
     const githubRoutingPermissions = yield* makePullRequestRoutingPermissions({
       read: catalog.read.pipe(Effect.map((document) => document.githubRoutingPermissions ?? [])),
       write: (githubRoutingPermissions) =>
@@ -87,15 +88,39 @@ export const layer = Layer.effectContext(
         let promoted = false;
         yield* catalog
           .update((document) => {
-            promoted =
-              keep && document.targets.some((target) => provisionalPairingId(target) === installId);
-            const next = settleProvisionalPairingInCatalog(document, installId, keep);
+            const next = settleProvisionalPairingInCatalog(
+              document,
+              installId,
+              keep,
+              environmentId,
+            );
+            promoted = keep && next !== document;
             routes = catalogRoutes(next, environmentId);
             return next;
           })
           .pipe(Effect.mapError((error) => targetPersistenceError("remove-connection", error)));
         return { routes, promoted };
       }),
+      learnLabel: Effect.fn("Persistence.ConnectionRegistrationStore.learnLabel")(
+        function* (environmentId, expected, label) {
+          let updated: ReturnType<typeof catalogRoutes> = [];
+          yield* catalog
+            .update((document) => {
+              const result = learnConnectionLabelInCatalog(
+                document,
+                environmentId,
+                expected,
+                label,
+              );
+              updated = result.updated;
+              return result.document;
+            })
+            .pipe(
+              Effect.mapError((error) => targetPersistenceError("set-connection-routes", error)),
+            );
+          return updated;
+        },
+      ),
       setRoutes: Effect.fn("Persistence.ConnectionRegistrationStore.setRoutes")(
         (environmentId, routes) =>
           catalog

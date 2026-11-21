@@ -1,6 +1,8 @@
 import {
   BearerConnectionTarget,
   BearerConnectionCredential,
+  BearerConnectionProfile,
+  BearerConnectionRegistration,
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
@@ -9,14 +11,18 @@ import {
   ConnectionCatalogDocument,
   Persistence,
   recoverProvisionalPairings,
+  registerConnectionInCatalog,
   settleProvisionalPairingInCatalog,
 } from "@t3tools/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Deferred from "effect/Deferred";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { afterEach, vi } from "vite-plus/test";
 
 import * as ConnectionStorage from "./storage";
@@ -35,6 +41,145 @@ const encodeCatalog = Schema.encodeSync(Schema.fromJsonString(ConnectionCatalogD
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+const cloneEnvironmentId = EnvironmentId.make("clone");
+
+function cloneRegistration(
+  connectionId: string,
+  label: string,
+  provisionalPairingId?: string,
+  environmentId = cloneEnvironmentId,
+) {
+  return new BearerConnectionRegistration({
+    target: new BearerConnectionTarget({
+      environmentId,
+      connectionId,
+      label,
+      ...(provisionalPairingId === undefined ? {} : { provisionalPairingId }),
+    }),
+    profile: new BearerConnectionProfile({
+      environmentId,
+      connectionId,
+      label,
+      httpBaseUrl: "https://clone.example.test",
+      wsBaseUrl: "wss://clone.example.test",
+    }),
+    credential: new BearerConnectionCredential({ token: label }),
+  });
+}
+
+function desktopCatalog(raw: string) {
+  const bridge = {
+    windowContext: { additional: false, workspace: null },
+    getConnectionCatalog: vi.fn(async () => raw),
+    setConnectionCatalog: vi.fn(async (next: string) => {
+      raw = next;
+      return true;
+    }),
+  };
+  vi.stubGlobal("window", Object.assign(new EventTarget(), { desktopBridge: bridge }));
+  let tail = Promise.resolve<unknown>(undefined);
+  vi.stubGlobal("navigator", {
+    locks: {
+      request: (_name: string, _options: unknown, write: () => Promise<unknown>) => {
+        const next = tail.then(write);
+        tail = next.catch(() => undefined);
+        return next;
+      },
+    },
+  });
+  return { bridge, read: () => decodeCatalog(raw) };
+}
+
+describe("desktop connection catalog recovery", () => {
+  it.effect.each(["bearer:clone:https://clone.example.test", "bearer:orbit-reservation:install"])(
+    "preserves another window’s replacement %s across a stale label write and cleanup retry",
+    (replacementId) =>
+      Effect.gen(function* () {
+        const desktop = desktopCatalog(encodeCatalog(emptyCatalog));
+        const main = yield* Layer.build(ConnectionStorage.layer);
+        desktop.bridge.windowContext.additional = true;
+        const extra = yield* Layer.build(ConnectionStorage.layer);
+        const oldStore = Context.get(main, Persistence.ConnectionRegistrationStore);
+        const newStore = Context.get(extra, Persistence.ConnectionRegistrationStore);
+        const pending = cloneRegistration("bearer:orbit-reservation:install", "Prewarm", "install");
+        const replacement = cloneRegistration(replacementId, "Independent");
+        yield* oldStore.register(pending, [pending.target]);
+        desktop.bridge.setConnectionCatalog.mockResolvedValueOnce(false);
+        yield* oldStore
+          .settleProvisionalPairing(cloneEnvironmentId, "install", false)
+          .pipe(Effect.flip);
+        yield* newStore.register(replacement, [replacement.target]);
+
+        expect(
+          yield* oldStore.learnLabel(cloneEnvironmentId, [pending.target], "New server label"),
+        ).toEqual([]);
+        yield* oldStore.settleProvisionalPairing(cloneEnvironmentId, "install", false);
+
+        expect(desktop.read()).toEqual(registerConnectionInCatalog(emptyCatalog, replacement));
+
+        const renamed = new BearerConnectionTarget({
+          ...replacement.target,
+          label: "Current label",
+        });
+        expect(
+          yield* newStore.learnLabel(cloneEnvironmentId, [replacement.target], renamed.label),
+        ).toEqual([renamed]);
+        expect(desktop.read()).toEqual({
+          ...registerConnectionInCatalog(emptyCatalog, replacement),
+          targets: [renamed],
+        });
+      }),
+  );
+
+  it.effect(
+    "retries a failed startup read and durably removes the abandoned route and credential",
+    () =>
+      Effect.gen(function* () {
+        const pending = cloneRegistration("bearer:orbit-reservation:install", "Prewarm", "install");
+        const desktop = desktopCatalog(
+          encodeCatalog({
+            ...emptyCatalog,
+            targets: [pending.target],
+            profiles: [pending.profile],
+            credentials: [
+              {
+                connectionId: pending.target.connectionId,
+                credential: pending.credential,
+                provisionalPairingId: "install",
+              },
+            ],
+          }),
+        );
+        desktop.bridge.getConnectionCatalog.mockRejectedValueOnce(new Error("Read interrupted"));
+        const services = yield* Layer.build(ConnectionStorage.layer);
+        expect(yield* Context.get(services, Persistence.ConnectionTargetStore).list).toEqual([]);
+        yield* TestClock.adjust("10 seconds");
+        expect(desktop.read()).toEqual(emptyCatalog);
+      }),
+  );
+  it.effect("keeps a new install created while the startup recovery read retries", () =>
+    Effect.gen(function* () {
+      const abandoned = cloneRegistration("bearer:orbit-reservation:install", "Prewarm", "install");
+      const current = cloneRegistration(
+        "bearer:orbit-reservation:active",
+        "Active",
+        "active",
+        EnvironmentId.make("new-clone"),
+      );
+      const desktop = desktopCatalog(
+        encodeCatalog(registerConnectionInCatalog(emptyCatalog, abandoned)),
+      );
+      desktop.bridge.getConnectionCatalog.mockRejectedValueOnce(new Error("Read interrupted"));
+      const services = yield* Layer.build(ConnectionStorage.layer);
+      const registrations = Context.get(services, Persistence.ConnectionRegistrationStore);
+      // The live install itself triggers the first successful catalog load.
+      expect(yield* registrations.register(current, [current.target])).toBe(true);
+      yield* TestClock.adjust("10 seconds");
+      expect(desktop.read()).toEqual(registerConnectionInCatalog(emptyCatalog, current));
+    }),
+  );
 });
 
 describe("ConnectionStorage.makeCatalogStore", () => {

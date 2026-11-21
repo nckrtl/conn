@@ -293,17 +293,21 @@ describe("ConnectionCatalogDocument", () => {
       connectionId: provisionalRegistration.target.connectionId,
       credential: new BearerConnectionCredential({ token: "independent" }),
     };
-    const routeReplaced = settleProvisionalPairingInCatalog(
-      { ...pending, targets: [target] },
-      reservationId,
-      false,
+    const independentRoute = { ...pending, targets: [target] };
+    expect(settleProvisionalPairingInCatalog(independentRoute, reservationId, true)).toBe(
+      independentRoute,
     );
+    const routeReplaced = settleProvisionalPairingInCatalog(independentRoute, reservationId, false);
     expect(routeReplaced.targets).toEqual([target]);
     expect(routeReplaced.profiles).toEqual(pending.profiles);
     expect(routeReplaced.credentials).toEqual([]);
 
+    const independentSession = { ...pending, credentials: [independentCredential] };
+    expect(settleProvisionalPairingInCatalog(independentSession, reservationId, true)).toBe(
+      independentSession,
+    );
     const credentialReplaced = settleProvisionalPairingInCatalog(
-      { ...pending, credentials: [independentCredential] },
+      independentSession,
       reservationId,
       false,
     );

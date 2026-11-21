@@ -1056,9 +1056,22 @@ export const make = Effect.gen(function* () {
         }
         const entry = (yield* SubscriptionRef.get(entries)).get(input.environmentId);
         if (entry === undefined) return Option.none<ConnectionCatalogEntry>();
-        const next = entryWithServerLabel(entry, input.environmentId, input.descriptor);
-        if (next === null) return Option.none<ConnectionCatalogEntry>();
-        yield* registrations.setRoutes(input.environmentId, persistedRoutes(next));
+        const named = entryWithServerLabel(entry, input.environmentId, input.descriptor);
+        if (named === null) return Option.none<ConnectionCatalogEntry>();
+        const saved = yield* registrations.learnLabel(
+          input.environmentId,
+          persistedRoutes(entry),
+          named.target.label,
+        );
+        if (saved.length === 0) return Option.none<ConnectionCatalogEntry>();
+        const savedById = new Map(saved.map((target) => [connectionRouteId(target), target]));
+        const next = entryWithRoutes(
+          entry,
+          connectionRoutes(entry).map((route) => ({
+            ...route,
+            target: savedById.get(connectionRouteId(route.target)) ?? route.target,
+          })),
+        );
         const lease = (yield* SubscriptionRef.get(serviceScopes)).get(input.environmentId);
         if (lease !== undefined) {
           yield* SubscriptionRef.update(serviceScopes, (current) =>

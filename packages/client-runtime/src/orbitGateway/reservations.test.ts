@@ -12,6 +12,7 @@ import {
 import {
   ConnectionCatalogDocument,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  provisionalPairingsInCatalog,
   recoverProvisionalPairings,
   registerConnectionInCatalog,
   settleProvisionalPairingInCatalog,
@@ -436,7 +437,7 @@ describe("createOrbitReservations", () => {
       yield* Effect.promise(() => old.reservations.abandon("r1"));
       expect(catalog.read().credentials).toHaveLength(1);
       yield* recoverProvisionalPairings({
-        read: Effect.sync(catalog.read),
+        readStartupPairings: Effect.sync(() => provisionalPairingsInCatalog(catalog.read())),
         update: (transform) => Effect.sync(() => catalog.update(transform)),
       });
       expect(catalog.read()).toEqual(EMPTY_CONNECTION_CATALOG_DOCUMENT);

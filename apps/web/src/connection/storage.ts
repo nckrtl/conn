@@ -2,6 +2,7 @@ import {
   ConnectionCatalogDocument,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  provisionalPairingsInCatalog,
   ORCHESTRATION_CACHE_SCHEMA_VERSION,
   StoredOrchestrationShellSnapshot,
   StoredOrchestrationThreadSnapshot,
@@ -10,6 +11,7 @@ import {
   putConnectionCredentialInCatalog,
   registerConnectionInCatalog,
   catalogRoutes,
+  learnConnectionLabelInCatalog,
   provisionalPairingId,
   recoverProvisionalPairings,
   settleProvisionalPairingInCatalog,
@@ -40,6 +42,7 @@ import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3too
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -562,6 +565,7 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
 
 interface CatalogStore {
   readonly read: Effect.Effect<ConnectionCatalogDocumentType, ConnectionTransientError>;
+  readonly readStartupPairings: Effect.Effect<ReadonlySet<string>, ConnectionTransientError>;
   readonly update: (
     transform: (catalog: ConnectionCatalogDocumentType) => ConnectionCatalogDocumentType,
   ) => Effect.Effect<void, ConnectionTransientError>;
@@ -572,6 +576,7 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
 ) {
   const state = yield* Ref.make<Option.Option<ConnectionCatalogDocumentType>>(Option.none());
   const lock = yield* Semaphore.make(1);
+  const startupPairings = yield* Deferred.make<ReadonlySet<string>>();
 
   const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* (fresh = false) {
     const cached = yield* Ref.get(state);
@@ -609,6 +614,10 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
         ),
       );
     }
+    // A write can load the catalog before startup recovery retries. Capture the IDs first.
+    if (!(yield* Deferred.isDone(startupPairings))) {
+      yield* Deferred.succeed(startupPairings, provisionalPairingsInCatalog(catalog));
+    }
     yield* Ref.set(state, Option.some(catalog));
     return catalog;
   });
@@ -633,6 +642,7 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
         );
   };
   const read = lock.withPermits(1)(withCatalogLock(loadUnlocked()));
+  const readStartupPairings = read.pipe(Effect.andThen(Deferred.await(startupPairings)));
   const update: CatalogStore["update"] = Effect.fn("web.connectionStorage.updateCatalog")(
     function* (transform) {
       yield* lock.withPermits(1)(
@@ -649,7 +659,7 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
     },
   );
 
-  return { read, update } satisfies CatalogStore;
+  return { read, readStartupPairings, update } satisfies CatalogStore;
 });
 
 // The stored names predate the rename and stay, so a tab still on an older version and an
@@ -781,7 +791,7 @@ export const layer = Layer.effectContext(
     );
     const catalog = yield* makeCatalogStore(makeCatalogBackend(database));
     if (window.desktopBridge !== undefined && !isAdditionalDesktopWindow()) {
-      yield* recoverProvisionalPairings(catalog).pipe(Effect.ignore);
+      yield* recoverProvisionalPairings(catalog);
     }
     const pullRequestRoutingPermissions = makeBrowserPullRequestRoutingPermissions();
     // Remembers each thread row's encoding, so a save only encodes rows that changed.
@@ -827,15 +837,37 @@ export const layer = Layer.effectContext(
         let promoted = false;
         yield* catalog
           .update((document) => {
-            promoted =
-              keep && document.targets.some((target) => provisionalPairingId(target) === installId);
-            const next = settleProvisionalPairingInCatalog(document, installId, keep);
+            const next = settleProvisionalPairingInCatalog(
+              document,
+              installId,
+              keep,
+              environmentId,
+            );
+            promoted = keep && next !== document;
             routes = catalogRoutes(next, environmentId);
             return next;
           })
           .pipe(Effect.mapError((error) => persistenceError("remove-connection", error)));
         return { routes, promoted };
       }),
+      learnLabel: Effect.fn("Persistence.ConnectionRegistrationStore.learnLabel")(
+        function* (environmentId, expected, label) {
+          let updated: ReturnType<typeof catalogRoutes> = [];
+          yield* catalog
+            .update((document) => {
+              const result = learnConnectionLabelInCatalog(
+                document,
+                environmentId,
+                expected,
+                label,
+              );
+              updated = result.updated;
+              return result.document;
+            })
+            .pipe(Effect.mapError((error) => persistenceError("set-connection-routes", error)));
+          return updated;
+        },
+      ),
       setRoutes: Effect.fn("Persistence.ConnectionRegistrationStore.setRoutes")(
         function (environmentId, routes) {
           return catalog

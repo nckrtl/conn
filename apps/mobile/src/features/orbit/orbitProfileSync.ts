@@ -8,6 +8,7 @@ import {
   type ProfileSyncChannel,
   type ProfileSyncState,
 } from "@t3tools/client-runtime/orbit-gateway";
+import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { AsyncResult } from "effect/reactivity";
 
 import {
@@ -20,7 +21,7 @@ import {
 import { collectPublishedMobileThemes } from "../../lib/publishedThemes";
 import type { Preferences } from "../../persistence/mobile-preferences";
 import { appAtomRegistry } from "../../state/atom-registry";
-import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
+import { mobilePreferencesAtom, saveMobilePreferences } from "../../state/preferences";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { orbitGatewayClient } from "./orbitGatewayClient";
 
@@ -30,16 +31,25 @@ import { orbitGatewayClient } from "./orbitGatewayClient";
  * The engine's state lives in the preferences, so the profile's themes survive a restart.
  */
 
+// Written values not yet staged by the save command. The command may start after this run, so
+// reads overlay them until it settles.
+let unsettled: Partial<Preferences> = {};
+
 function readPreferences(): Preferences | null {
   const result = appAtomRegistry.get(mobilePreferencesAtom);
-  return AsyncResult.isSuccess(result) ? result.value : null;
+  return AsyncResult.isSuccess(result) ? { ...result.value, ...unsettled } : null;
 }
 
 /** Applies the patch optimistically at once, so the engine reads it back in the same run. */
 function writePreferences(patch: Partial<Preferences>): void {
-  appAtomRegistry.set(updateMobilePreferencesAtom, patch);
-  // A command atom runs when read; reading it here runs it even when nothing has mounted it.
-  appAtomRegistry.get(updateMobilePreferencesAtom);
+  unsettled = { ...unsettled, ...patch };
+  void runAtomCommand(appAtomRegistry, saveMobilePreferences, patch).then(() => {
+    const next: Record<string, unknown> = { ...unsettled };
+    for (const key of Object.keys(patch) as Array<keyof Preferences>) {
+      if (next[key] === patch[key]) delete next[key];
+    }
+    unsettled = next as Partial<Preferences>;
+  });
 }
 
 /** Set while a run applies the profile, before the engine saves it, so the readback finds its themes. */

@@ -18,7 +18,7 @@ import { OrbitSetupCard } from "./OrbitSetupCard";
  */
 const finalize = (
   status: OrbitGatewayOperation["status"],
-  steps: OrbitGatewayOperation["steps"],
+  steps: NonNullable<OrbitGatewayOperation["steps"]>,
 ): OrbitGatewayOperation => ({
   id: 900,
   kind: "instance.finalize",

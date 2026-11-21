@@ -257,6 +257,43 @@ describe("createOrbitReservations", () => {
     expect(calls.some((call) => call.startsWith("pair"))).toBe(false);
   });
 
+  it("keeps a server hidden that is being saved at close, then forgets it", async () => {
+    let finishConnect!: () => void;
+    const calls: string[] = [];
+    const clock = scheduler();
+    const reservations = createOrbitReservations({
+      client: {
+        reserve: async () => reservation("r78", "ready"),
+        reservation: async (id) => reservation(id, "ready"),
+        releaseReservation: async (id) => {
+          calls.push(`release ${id}`);
+          return null;
+        },
+        pair: async (environmentId) => ({ environmentId, pairingUrl: "u", expiresAt: "" }),
+      },
+      sleep: clock.sleep,
+      now: () => 0,
+      isSaved: () => false,
+      connect: () => new Promise<void>((resolve) => (finishConnect = resolve)),
+      forget: (environmentId) => {
+        calls.push(`forget ${environmentId}`);
+      },
+      load: () => [],
+      store: () => {},
+      newKey: () => "key",
+    });
+    reservations.open(78);
+    await flush();
+    reservations.close(78);
+    await flush();
+    expect(reservations.hiddenEnvironmentIds()).toEqual(new Set(["env-r78"]));
+    expect(calls).toEqual(["release r78"]);
+    finishConnect();
+    await flush();
+    expect(calls).toEqual(["release r78", "forget env-r78"]);
+    expect(reservations.hiddenEnvironmentIds().size).toBe(0);
+  });
+
   it("releases what an earlier run of the app left open", async () => {
     const { calls, reservations, stored } = harness({ stored: ["old-1", "old-2"] });
     await reservations.releaseLeftovers();
@@ -530,6 +567,17 @@ describe("runOrbitThreadStart with a reservation", () => {
       expect(harness.saves.at(-1)).toMatchObject({ reservationId: null, instanceId: 41 });
     },
   );
+
+  it("creates with its full time when the reservation stays preparing", async () => {
+    const harness = startHarness({
+      reads: Array.from({ length: 200 }, () => reservation("r1", "preparing")),
+    });
+    expect(await harness.run(reservedStart())).toBe(true);
+    // About 2 minutes of reads at 2 s, then the create.
+    expect(harness.calls.filter((call) => call === "read r1").length).toBeLessThanOrEqual(62);
+    expect(harness.calls).toContain("create fix-login");
+    expect(harness.saves.every((save) => save.error === null)).toBe(true);
+  });
 
   it("stops on a taken name as a create would, keeping the reservation for Retry", async () => {
     const harness = startHarness({

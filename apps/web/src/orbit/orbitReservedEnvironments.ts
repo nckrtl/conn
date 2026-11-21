@@ -46,6 +46,10 @@ function applyHidden(): void {
     const environmentId = orbitThreadStartHiddenEnvironmentId(start);
     if (environmentId) next.add(environmentId);
   }
+  // A finalized clone shows at once, before the next Gateway list drops its reservation.
+  for (const start of useOrbitThreadStarts.getState().starts) {
+    if (start.reservationId && start.environmentId !== null) next.delete(start.environmentId);
+  }
   const current = appAtomRegistry.get(reservedEnvironmentIdsAtom);
   if (next.size === current.length && current.every((id) => next.has(id))) return;
   appAtomRegistry.set(reservedEnvironmentIdsAtom, [...next].toSorted());

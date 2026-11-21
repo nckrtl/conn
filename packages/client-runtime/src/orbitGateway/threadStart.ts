@@ -672,6 +672,8 @@ function isReservationGone(error: unknown): boolean {
 
 /** How often a start waits on a reservation that is still preparing. */
 const RESERVATION_POLL_MS = 2_000;
+/** How long a start waits for a reservation to become ready before it creates instead. */
+const RESERVATION_WAIT_MS = 2 * 60_000;
 
 /**
  * Runs a start from its last saved step to the sent message. Resolves `true` once the message is
@@ -830,7 +832,8 @@ export async function runOrbitThreadStart(
   const finalizeReservation = async (deadline: number): Promise<OrbitGatewayOperation | null> => {
     const reservationId = current.reservationId!;
     if (current.createOperationId === null) {
-      // Wait until the clone is ready; a reservation that cannot become ready falls back.
+      // Wait until the clone is ready; a reservation that cannot become ready soon falls back.
+      const readyBy = Math.min(deadline, ports.now() + RESERVATION_WAIT_MS);
       let instanceId: number | null = null;
       for (;;) {
         checkStopped();
@@ -851,9 +854,11 @@ export async function runOrbitThreadStart(
           }
           if (reservation.state !== "preparing") return null;
         }
-        if (ports.now() >= deadline) return null;
-        await ports.sleep(Math.max(Math.min(RESERVATION_POLL_MS, deadline - ports.now()), 0));
+        if (ports.now() >= readyBy) return null;
+        await ports.sleep(Math.max(Math.min(RESERVATION_POLL_MS, readyBy - ports.now()), 0));
       }
+      // A name made from the message fits Orbit's address limits, as for a create.
+      if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
       const begin = current.createKey
         ? stamp("createStartedAt")
         : {
@@ -927,11 +932,15 @@ export async function runOrbitThreadStart(
   try {
     checkStopped();
     if (current.environmentId === null) {
-      const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
+      let createDeadline = ports.now() + CREATE_TIMEOUT_MS;
       let finalized: OrbitGatewayOperation | null = null;
       if (current.reservationId && current.orbitInstanceKind !== "existing") {
         finalized = await finalizeReservation(createDeadline);
-        if (finalized === null) fallBackToCreate();
+        if (finalized === null) {
+          fallBackToCreate();
+          // The create gets its full time, whatever the reservation took.
+          createDeadline = ports.now() + CREATE_TIMEOUT_MS;
+        }
       }
       if (finalized === null && current.createOperationId === null) {
         if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);

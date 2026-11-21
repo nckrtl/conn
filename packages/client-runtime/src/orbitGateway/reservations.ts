@@ -56,6 +56,8 @@ interface Entry {
   reservation: OrbitGatewayReservation | null;
   /** The device saved the clone's server for this reservation. */
   paired: boolean;
+  /** A pairing runs: a close keeps the server hidden, and the pairing forgets it once saved. */
+  connecting: boolean;
   /** Closed or taken: the loop stops; a reservation still being admitted is released when it arrives. */
   ended: "closed" | "taken" | null;
 }
@@ -145,17 +147,27 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
       entry.paired = true;
       return;
     }
+    entry.connecting = true;
+    let saved = false;
     try {
       const pairing = await ports.client.pair(environmentId);
-      if (entry.ended !== null) {
-        // Closed while pairing: the link stays unused and the release removes the clone.
-        return;
+      // Closed while pairing: the link stays unused and the release removes the clone.
+      if (entry.ended === null) {
+        await ports.connect(environmentId, pairing.pairingUrl);
+        saved = true;
       }
-      await ports.connect(environmentId, pairing.pairingUrl);
-      entry.paired = true;
     } catch {
       // Nothing on screen: the send pairs in the start's own step.
+    } finally {
+      entry.connecting = false;
     }
+    if (entry.ended === "closed") {
+      // Released while the server was being saved: remove it, hidden until then.
+      if (saved) await Promise.resolve(ports.forget(environmentId)).catch(() => {});
+      if (releasing.delete(environmentId)) changed();
+      return;
+    }
+    if (saved) entry.paired = true;
   };
 
   const run = async (entry: Entry) => {
@@ -223,7 +235,10 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
     const entry = entries.get(projectId);
     if (entry === undefined || entry.ended !== null) return;
     entry.ended = "closed";
-    release(entry.reservation, entry.paired);
+    const environmentId = entry.reservation?.environmentId;
+    // The pairing that runs forgets the server itself once it is saved.
+    if (entry.connecting && environmentId) releasing.add(environmentId);
+    release(entry.reservation, entry.paired && !entry.connecting);
     drop(entry);
   };
 
@@ -239,6 +254,7 @@ export function createOrbitReservations(ports: OrbitReservationPorts): OrbitRese
         phase: "reserving",
         reservation: null,
         paired: false,
+        connecting: false,
         ended: null,
       };
       entries.set(projectId, entry);

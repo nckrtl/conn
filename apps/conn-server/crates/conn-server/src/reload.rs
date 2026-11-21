@@ -63,46 +63,29 @@ async fn run(environment: Arc<Environment>, mut folder: Option<FolderWatch>, pol
     }
 }
 
+/// Signals from the inotify thread; one queued signal stands for any burst of events.
 #[cfg(target_os = "linux")]
-struct FolderWatch(tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>);
+struct FolderWatch(tokio::sync::mpsc::Receiver<()>);
 
 #[cfg(target_os = "linux")]
 impl FolderWatch {
     /// Resolves after the next event in the folder; `None` when the watch broke.
     async fn changed(&mut self) -> Option<()> {
-        use std::mem::MaybeUninit;
-        let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
-        loop {
-            let mut guard = self.0.readable().await.ok()?;
-            let mut reader = rustix::fs::inotify::Reader::new(self.0.get_ref(), &mut buf);
-            let mut seen = false;
-            // Drains every queued event: a burst (write, rename) is one reload.
-            loop {
-                match reader.next() {
-                    Ok(_) => seen = true,
-                    Err(rustix::io::Errno::WOULDBLOCK) => break,
-                    Err(rustix::io::Errno::INTR) => continue,
-                    Err(error) => {
-                        eprintln!("conn-server: the Orbit Instance watch stopped: {error}");
-                        return None;
-                    }
-                }
-            }
-            guard.clear_ready();
-            if seen {
-                return Some(());
-            }
-        }
+        self.0.recv().await
     }
 }
 
 /// An inotify watch on the Orbit Instance file's folder. Without the folder (not an Orbit
 /// Instance, or not yet), the poll and `SIGHUP` still reload.
+///
+/// A blocking thread reads the inotify descriptor: tokio's safe `AsyncFd::new` is
+/// deprecated and the workspace forbids `unsafe`. The thread ends at the first event after
+/// the receiver is gone, or when the watch fails.
 #[cfg(target_os = "linux")]
 fn folder_watch(environment: &Environment) -> Option<FolderWatch> {
     use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
     let folder = environment.orbit_instance_file().parent()?;
-    let fd = inotify::init(CreateFlags::CLOEXEC | CreateFlags::NONBLOCK).ok()?;
+    let fd = inotify::init(CreateFlags::CLOEXEC).ok()?;
     let flags = WatchFlags::CLOSE_WRITE
         | WatchFlags::MOVED_TO
         | WatchFlags::MOVED_FROM
@@ -110,7 +93,33 @@ fn folder_watch(environment: &Environment) -> Option<FolderWatch> {
         | WatchFlags::DELETE
         | WatchFlags::ATTRIB;
     inotify::add_watch(&fd, folder, flags).ok()?;
-    tokio::io::unix::AsyncFd::new(fd).ok().map(FolderWatch)
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    std::thread::Builder::new()
+        .name("conn-orbit-watch".into())
+        .spawn(move || {
+            use std::mem::MaybeUninit;
+            let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+            let mut reader = inotify::Reader::new(&fd, &mut buf);
+            loop {
+                match reader.next() {
+                    // A full channel already holds a pending reload: the burst is one reload.
+                    Ok(_) => {
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Closed(())) =
+                            sender.try_send(())
+                        {
+                            return;
+                        }
+                    }
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(error) => {
+                        eprintln!("conn-server: the Orbit Instance watch stopped: {error}");
+                        return;
+                    }
+                }
+            }
+        })
+        .ok()?;
+    Some(FolderWatch(receiver))
 }
 
 #[cfg(not(target_os = "linux"))]

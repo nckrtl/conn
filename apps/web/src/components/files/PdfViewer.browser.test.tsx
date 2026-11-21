@@ -239,6 +239,9 @@ it("restores page, within-page offset and zoom after a remount", async () => {
     await vi.waitFor(() => {
       const canvas = region().querySelector("canvas")!;
       expect(canvas.getBoundingClientRect().width).toBe(region().clientWidth - 32);
+      // The page repaints after the width settles; until then the old zoom's layers keep the
+      // scroll extent, so a position read now can sit past the fitted document's end.
+      expect(canvas.width).toBe(Math.ceil(canvas.getBoundingClientRect().width * devicePixelRatio));
     });
     const fitTop = region().scrollTop;
     await screen.rerender(viewer(3, "restore:a"));

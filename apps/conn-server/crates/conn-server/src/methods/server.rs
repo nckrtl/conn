@@ -179,6 +179,8 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
     let (env, providers) = (environment.clone(), deps.clone());
     let themes = deps.files.as_ref().map(|files| files.themes.clone());
     table.stream("subscribeServerConfig", move |_, input: Value| {
+        // Subscribed before the snapshot is built: a reload in between sends a new one.
+        let descriptor = env.subscribe_descriptor();
         let config = server_config(&env, current_providers(&providers));
         let env = env.clone();
         let deps = providers.clone();
@@ -186,7 +188,7 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
         let themes = themes
             .clone()
             .filter(|_| input["environmentThemes"] == Value::Bool(true));
-        async move { Ok(config_stream(env, deps, config?, themes)) }
+        async move { Ok(config_stream(env, deps, config?, descriptor, themes)) }
     });
     let env = environment.clone();
     table.stream("subscribeAuthAccess", move |ctx, _: Value| {
@@ -280,6 +282,7 @@ fn config_stream(
     env: Arc<Environment>,
     deps: Deps,
     config: Value,
+    mut descriptor: tokio::sync::watch::Receiver<Value>,
     themes: Option<conn_files::themes::Themes>,
 ) -> ItemStream {
     let (tx, rx) = mpsc::channel::<Result<Value, Failure>>(4);
@@ -289,8 +292,6 @@ fn config_stream(
     let mut settings = env.settings.subscribe();
     let mut keybindings = env.keybindings.subscribe();
     let mut providers = deps.provider_status.subscribe();
-    let mut descriptor = env.subscribe_descriptor();
-    descriptor.mark_unchanged();
     settings.mark_unchanged();
     keybindings.mark_unchanged();
     providers.mark_unchanged();
@@ -511,7 +512,13 @@ mod tests {
             .into(),
             ..Deps::default()
         };
-        let mut stream = config_stream(env.clone(), deps.clone(), config, None);
+        let mut stream = config_stream(
+            env.clone(),
+            deps.clone(),
+            config,
+            env.subscribe_descriptor(),
+            None,
+        );
         assert_eq!(stream.recv().await.unwrap().unwrap()["type"], "snapshot");
         env.settings
             .update(json!({ "enableAgentBrowserAccess": false }), None)

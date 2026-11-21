@@ -25,9 +25,24 @@ fn main() {
 fn run_server() {
     // Runs and exits for every command but `serve`.
     let options = ServeOptions::from_args();
+    // One thread: a container serves a handful of clients, and each worker thread costs
+    // stack and allocator arenas.
+    let runtime = conn_server::serve::or_exit(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+        "cannot start the runtime",
+    );
+    // SIGHUP asks for a reload (`reload.rs`); its default action stops the process. A handler
+    // stays for the life of the process, so registering it here covers the slow startup below.
+    {
+        let _runtime = runtime.enter();
+        let _handler =
+            conn_server::serve::or_exit(conn_server::reload::hangup(), "cannot handle SIGHUP");
+    }
     // `fixPath`: the login shell's PATH for every child and every program lookup, read before
     // the providers are detected (Codex looks for its binary on that PATH). Blocking is fine:
-    // the runtime does not exist yet.
+    // the runtime runs nothing yet.
     conn_support::login_env::hydrate();
     let mut claude = ClaudeConfig {
         // `conn-files` stores attachments here; the CLI may read them.
@@ -118,14 +133,6 @@ fn run_server() {
         },
         conn_server::serve::stored_grok_settings(&options.state_dir),
     ));
-    // One thread: a container serves a handful of clients, and each worker thread costs
-    // stack and allocator arenas.
-    let runtime = conn_server::serve::or_exit(
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
-        "cannot start the runtime",
-    );
     runtime.block_on(serve_with_instances(options, vec![grok], Some(instances)));
     // Dropping the tasks drops provider children, which kills them (`kill_on_drop`).
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));

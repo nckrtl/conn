@@ -18,21 +18,33 @@ use crate::environment::Environment;
 /// How often the label and the file are read without a trigger.
 pub const POLL: Duration = Duration::from_secs(2);
 
-/// Starts the reload task on the current runtime.
-pub fn start(environment: Arc<Environment>) {
-    start_with(environment, POLL);
+/// Replaces SIGHUP's default action (stop the process) with a reload request. Call it
+/// before startup work: a SIGHUP that arrives earlier would stop the server.
+pub fn hangup() -> std::io::Result<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
 }
 
-pub(crate) fn start_with(environment: Arc<Environment>, poll: Duration) {
+/// Starts the reload task on the current runtime, with the handler from [`hangup`].
+pub fn start(environment: Arc<Environment>, hangup: tokio::signal::unix::Signal) {
+    start_with(environment, POLL, hangup);
+}
+
+pub(crate) fn start_with(
+    environment: Arc<Environment>,
+    poll: Duration,
+    hangup: tokio::signal::unix::Signal,
+) {
     let folder = folder_watch(&environment);
-    tokio::spawn(run(environment, folder, poll));
+    tokio::spawn(run(environment, folder, poll, hangup));
 }
 
-async fn run(environment: Arc<Environment>, mut folder: Option<FolderWatch>, poll: Duration) {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut hangup = signal(SignalKind::hangup())
-        .map_err(|error| eprintln!("conn-server: cannot handle SIGHUP: {error}"))
-        .ok();
+async fn run(
+    environment: Arc<Environment>,
+    mut folder: Option<FolderWatch>,
+    poll: Duration,
+    hangup: tokio::signal::unix::Signal,
+) {
+    let mut hangup = Some(hangup);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + poll, poll);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -199,7 +211,12 @@ mod tests {
         let folder = folder_watch(&env);
         assert_eq!(folder.is_some(), cfg!(target_os = "linux"));
         let mut seen = env.subscribe_descriptor();
-        tokio::spawn(run(env.clone(), folder, Duration::from_secs(3600)));
+        tokio::spawn(run(
+            env.clone(),
+            folder,
+            Duration::from_secs(3600),
+            hangup().unwrap(),
+        ));
         tokio::task::yield_now().await;
         write_atomically(
             env.orbit_instance_file(),
@@ -252,7 +269,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, crate::router(state)).await });
-        start_with(env.clone(), Duration::from_secs(3600));
+        start_with(env.clone(), Duration::from_secs(3600), hangup().unwrap());
 
         let session = auth
             .exchange(

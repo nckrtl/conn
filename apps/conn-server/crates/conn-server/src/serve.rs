@@ -147,6 +147,9 @@ pub async fn serve_with_instances(
         sdk_host: _,
         managed_provision,
     } = options;
+    // SIGHUP asks for a reload (`reload.rs`). Its default action stops the process, so the
+    // handler goes in before any startup work an Orbit finalize could overlap.
+    let hangup = or_exit(crate::reload::hangup(), "cannot handle SIGHUP");
     // A managed target never starts on partial input.
     let provision = match managed_provision {
         Some(path) => Some(or_exit(
@@ -219,7 +222,7 @@ pub async fn serve_with_instances(
     );
     let environment = Arc::new(environment);
     // The label and Orbit Instance facts follow the file, the hostname and SIGHUP.
-    crate::reload::start(environment.clone());
+    crate::reload::start(environment.clone(), hangup);
     let restart = environment.restart.clone();
     let auth = environment.auth.clone();
     if inert {

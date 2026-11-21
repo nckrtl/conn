@@ -16,8 +16,11 @@ socket, their pairing and their sessions. Code: `crates/conn-server/src/reload.r
 Each trigger reads the label and the file again. A reload with no change sends nothing.
 
 **Before this change, `SIGHUP` stopped the server** (the default action). Send it only to a
-Conn Server that has this feature (`conn-server` 0.3.0 builds after this change, or check
-for the `environment reloaded` line in its log after a test signal on a copy).
+Conn Server that has this feature: the first `conn-server` release after 0.3.0 (0.3.0 and
+older stop on it), or check for the `environment reloaded` line in its log after a test
+signal on a copy. The handler is registered first thing in `main`, before the login-shell
+PATH read and the state load, so a `SIGHUP` during startup no longer stops the server; only
+one sent before the process reaches `main` (its first few milliseconds) still does.
 
 ## What is re-read
 

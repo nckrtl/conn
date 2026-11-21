@@ -21,6 +21,7 @@ import {
   subscribeOrbitGateway,
 } from "./orbitGatewayStore";
 import { orbitGatewayClient } from "./orbitGatewayClient";
+import { installOrbitReservations, takeOrbitReservation } from "./orbitReservations";
 import { orbitThreadStartStore } from "./orbitThreadStartStore";
 import {
   beginOrbitThreadStart,
@@ -136,6 +137,7 @@ export function startOrbitThread(
     workspaceId: orbitGatewayState().selectedWorkspaceId,
     uuid: uuidv4,
     now: Date.now(),
+    reservation: takeOrbitReservation(project.id),
   });
   if (returnRouteKey !== undefined) openOnSend.set(start.id, returnRouteKey);
 }
@@ -193,6 +195,7 @@ export function installOrbitThreadStarts(): () => void {
   const disposers = [
     orbitThreadStartStore.subscribe(runReadyStarts),
     subscribeOrbitGateway(runReadyStarts),
+    installOrbitReservations(ports.connect),
   ];
   void orbitThreadStartStore.load();
   return () => {

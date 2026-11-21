@@ -438,6 +438,20 @@ skips a clone a start is pairing with (`heldOrbitInstanceIds`), and an asleep on
 pending thread, a toast reports the result. Starts saved by the removed sidebar dialog load as
 pending threads, so they resume or can be dismissed; one whose send finished is dropped.
 
+**Pre-warm (reservations).** While the prompt box of a new Instance shows (the desktop draft in
+the main window, the phone's Orbit project screen), Conn reserves a clone of the Project
+(`POST /conn/projects/{id}/reservations`, `reservations.ts`), polls it every 2 s while it
+prepares, pairs with its server once ready (no thread), then reads it every 60 s so Orbit keeps
+it. The send takes the reservation; the runner finalizes it (`POST /conn/reservations/{id}/finalize`
+with the name and branch) instead of creating, follows that Operation with the same create rows,
+and skips the pairing the device already has. A reservation that is not ready yet is waited for;
+one that expired, failed or is gone, or whose finalize failed, is released and the start creates
+as before, with no error. Closing the prompt releases it (`DELETE`, the desktop's only allowed
+DELETE); a restart releases what the last run held. At most 3 are held: a fourth Project releases
+the oldest. Reserved clones (Gateway rows with `reservation_id`, and the ones a start finalizes)
+stay out of every list: the lists read `visibleCatalogValueAtom`, and the Gateway-fed lists drop
+reserved rows. Nothing about it shows on screen.
+
 **Workspaces.** A start saves the workspace selected at Start (null for all). Once the first
 message is sent, that workspace gets the clone's `<environmentId>:<projectId>` ref unless it
 already lists the project or no longer exists, so the sidebar shows the thread (a clone is a new

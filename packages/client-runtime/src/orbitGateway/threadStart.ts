@@ -20,12 +20,14 @@ import {
   ORBIT_ROUTE_DOMAIN_INVALID,
   ORBIT_SOURCE_HEAD_UNAVAILABLE,
   OrbitGatewayError,
+  ORBIT_RESERVATION_FINALIZED,
   operationPollDelayMs,
   type OrbitGatewayBranchSelection,
   type OrbitGatewayClient,
   type OrbitGatewayOperation,
   type OrbitGatewayProject,
 } from "./client.ts";
+import type { TakenOrbitReservation } from "./reservations.ts";
 import {
   observeOrbitCreateRows,
   readSavedOrbitCreateRows,
@@ -140,6 +142,13 @@ export interface OrbitThreadStart {
    * Its outcome is saved here, never in `error`, so `connected` and the composer stay as they are.
    */
   readonly completionOperationId?: number | null;
+  /**
+   * Conn: the pre-warmed clone (`OrbitReservations.take`) this start finalizes instead of creating
+   * one; null or missing creates as before. Cleared when the start falls back to a create.
+   */
+  readonly reservationId?: string | null;
+  /** The reserved clone's server, hidden in every list until the finalize succeeded. */
+  readonly reservedEnvironmentId?: string | null;
   /** The key of the last Retry of the completion, saved before the call. */
   readonly completionKey?: string | null;
   readonly completionStatus?: OrbitGatewayOperation["status"] | null;
@@ -252,6 +261,8 @@ export function readOrbitThreadStarts(value: unknown): OrbitThreadStart[] {
         completionProcessUnit: optionalString(row.completionProcessUnit),
         completionRequires: optionalString(row.completionRequires),
         completionRetryable: row.completionRetryable === true,
+        reservationId: optionalString(row.reservationId),
+        reservedEnvironmentId: optionalString(row.reservedEnvironmentId),
       },
     ];
   });
@@ -440,6 +451,8 @@ export function newOrbitThreadStart(input: {
   /** A new Instance only; ignored for an existing one. */
   readonly branch?: OrbitGatewayBranchSelection | null;
   readonly defaultBranch?: string | null;
+  /** A new Instance only: the reservation the send took, finalized instead of a create. */
+  readonly reservation?: TakenOrbitReservation | null;
 }): OrbitThreadStart {
   const existing = input.existing;
   return {
@@ -490,7 +503,19 @@ export function newOrbitThreadStart(input: {
     nameSuffix: existing || input.instanceName !== undefined ? null : input.suffix,
     createRows: null,
     completionOperationId: null,
+    reservationId: existing ? null : (input.reservation?.reservationId ?? null),
+    reservedEnvironmentId: existing ? null : (input.reservation?.environmentId ?? null),
   };
+}
+
+/**
+ * The reserved clone's server while the start finalizes it, or null. Lists hide it until then, as
+ * they hide every reserved clone.
+ */
+export function orbitThreadStartHiddenEnvironmentId(start: OrbitThreadStart): string | null {
+  return start.reservationId && start.environmentId === null
+    ? (start.reservedEnvironmentId ?? null)
+    : null;
 }
 
 /** The step a start is at, for display. */
@@ -635,6 +660,21 @@ function isAdmissionRefusal(error: unknown): error is OrbitGatewayError {
   return isOrbitGatewayError(error) && ADMISSION_REFUSALS.has(error.code);
 }
 
+/** The reservation is gone for this caller: released, expired, or another's. */
+function isReservationGone(error: unknown): boolean {
+  return (
+    isOrbitGatewayError(error) &&
+    (error.status === 404 ||
+      error.status === 410 ||
+      (error.code.startsWith("reservation.") && error.code !== ORBIT_RESERVATION_FINALIZED))
+  );
+}
+
+/** How often a start waits on a reservation that is still preparing. */
+const RESERVATION_POLL_MS = 2_000;
+/** How long a start waits for a reservation to become ready before it creates instead. */
+const RESERVATION_WAIT_MS = 2 * 60_000;
+
 /**
  * Runs a start from its last saved step to the sent message. Resolves `true` once the message is
  * sent; otherwise it saves the start with `error` set and resolves `false`.
@@ -766,11 +806,143 @@ export async function runOrbitThreadStart(
     throw stepFailed(ORBIT_NAME_DOMAIN_INVALID_TEXT, {}, ORBIT_ROUTE_DOMAIN_INVALID);
   };
 
+  /**
+   * Conn: a start with a reservation, before the create. It no longer holds one: the create runs as
+   * before, with nothing on screen. Orbit removes the clone of a released reservation.
+   */
+  const fallBackToCreate = () => {
+    const reservationId = current.reservationId;
+    update({
+      reservationId: null,
+      reservedEnvironmentId: null,
+      createOperationId: null,
+      createKey: null,
+      createStartedAt: null,
+      createRows: null,
+      instanceId: null,
+    });
+    if (reservationId) void ports.client.releaseReservation(reservationId).catch(() => null);
+  };
+
+  /**
+   * Conn: finalizes the start's reservation with the typed name and branch. Returns the succeeded
+   * Operation, or null when the start must create instead (reservation expired, failed, gone, or
+   * its finalize failed). Refusals of the name or branch stop the start as a create's would.
+   */
+  const finalizeReservation = async (deadline: number): Promise<OrbitGatewayOperation | null> => {
+    const reservationId = current.reservationId!;
+    if (current.createOperationId === null) {
+      // Wait until the clone is ready; a reservation that cannot become ready soon falls back.
+      const readyBy = Math.min(deadline, ports.now() + RESERVATION_WAIT_MS);
+      let instanceId: number | null = null;
+      for (;;) {
+        checkStopped();
+        let reservation;
+        try {
+          reservation = await ports.client.reservation(reservationId);
+        } catch (error) {
+          if (isReservationGone(error) || !isTransient(error)) return null;
+          reservation = null;
+        }
+        if (reservation !== null) {
+          const replay = reservation.state === "finalized" && current.createKey != null;
+          if (reservation.state === "ready" || reservation.state === "finalizing" || replay) {
+            instanceId = reservation.instanceId;
+            if (reservation.environmentId)
+              update({ reservedEnvironmentId: reservation.environmentId });
+            break;
+          }
+          if (reservation.state !== "preparing") return null;
+        }
+        if (ports.now() >= readyBy) return null;
+        await ports.sleep(Math.max(Math.min(RESERVATION_POLL_MS, readyBy - ports.now()), 0));
+      }
+      // A name made from the message fits Orbit's address limits, as for a create.
+      if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
+      const begin = current.createKey
+        ? stamp("createStartedAt")
+        : {
+            createKey: newKey("finalize"),
+            createStartedAt: ports.now(),
+            createFinishedAt: null,
+            createRows: null,
+          };
+      if (Object.keys(begin).length > 0) update(begin);
+      let operation;
+      try {
+        operation = await admit(deadline, () =>
+          ports.client.finalizeReservation(
+            reservationId,
+            current.instanceName,
+            current.createKey!,
+            current.branch ?? null,
+          ),
+        );
+      } catch (error) {
+        if (isAdmissionRefusal(error)) {
+          throw new StepFailed({
+            message:
+              error.code === ORBIT_ROUTE_DOMAIN_INVALID
+                ? ORBIT_NAME_DOMAIN_INVALID_TEXT
+                : error.message,
+            code: error.code,
+            reset: { createKey: null },
+            details: error.details,
+          });
+        }
+        if (isOrbitGatewayError(error) && !isLostAdmission(error)) return null;
+        throw error;
+      }
+      update({ createOperationId: operation.id, instanceId: instanceId ?? operation.targetId });
+      await cancelIfRequested(operation.id);
+    }
+    try {
+      return await followCreate(deadline);
+    } catch (error) {
+      // A finalize that failed leaves the send to a create; a timeout stops as a create's would.
+      if (isStepFailed(error) && error.code !== "operation.timeout") return null;
+      throw error;
+    }
+  };
+
+  /** Follows the create (or the finalize) and saves the rows under "Create Instance". */
+  const followCreate = (deadline: number) =>
+    follow(
+      current.createOperationId!,
+      deadline - ports.now(),
+      (code, detail, operation) =>
+        stepFailed(
+          `Orbit could not create the clone (${code}).`,
+          {
+            ...(code === "operation.timeout" ? {} : { createOperationId: null, createKey: null }),
+            errorProcessUnit: operation?.processFailureUnit ?? null,
+            errorRecoveryRequires: operation?.recoveryRequires ?? null,
+          },
+          code,
+          detail,
+        ),
+      (operation) => {
+        const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
+        if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
+        ports.onCreateOperation?.(operation);
+      },
+      () => cancelIfRequested(current.createOperationId!),
+    );
+
   try {
     checkStopped();
     if (current.environmentId === null) {
-      const createDeadline = ports.now() + CREATE_TIMEOUT_MS;
-      if (current.createOperationId === null) {
+      let createDeadline = ports.now() + CREATE_TIMEOUT_MS;
+      let finalized: OrbitGatewayOperation | null = null;
+      if (current.reservationId && current.orbitInstanceKind !== "existing") {
+        finalized = await finalizeReservation(createDeadline);
+        if (finalized === null) {
+          fallBackToCreate();
+          // The create gets its full time, whatever the reservation took.
+          createDeadline = ports.now() + CREATE_TIMEOUT_MS;
+        }
+      }
+      if (finalized === null && current.createOperationId === null) {
         if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
         // A new key is a new attempt (first try, a new name, or after a failed create): its time
         // counts from now. A repeat under the saved key keeps the first time.
@@ -821,27 +993,7 @@ export async function runOrbitThreadStart(
       }
       // A failed clone resumes when the same name is created again, so a retry admits it anew
       // under a new key. A create still running past the deadline keeps its Operation.
-      const created = await follow(
-        current.createOperationId!,
-        createDeadline - ports.now(),
-        (code, detail, operation) =>
-          stepFailed(
-            `Orbit could not create the clone (${code}).`,
-            {
-              ...(code === "operation.timeout" ? {} : { createOperationId: null, createKey: null }),
-              errorProcessUnit: operation?.processFailureUnit ?? null,
-              errorRecoveryRequires: operation?.recoveryRequires ?? null,
-            },
-            code,
-            detail,
-          ),
-        (operation) => {
-          const rows = observeOrbitCreateRows(current.createRows ?? null, operation, ports.now());
-          if (!sameOrbitCreateRows(rows, current.createRows)) update({ createRows: rows });
-          ports.onCreateOperation?.(operation);
-        },
-        () => cancelIfRequested(current.createOperationId!),
-      );
+      const created = finalized ?? (await followCreate(createDeadline));
       const server = (await ports.client.environments()).find(
         (environment) => environment.instanceId === current.instanceId,
       );
@@ -855,6 +1007,7 @@ export async function runOrbitThreadStart(
       const result = created.result ?? null;
       update({
         environmentId: server.environmentId,
+        reservedEnvironmentId: null,
         resultBranch: typeof result?.branch === "string" ? result.branch : null,
         resultBaseBranch: typeof result?.base_branch === "string" ? result.base_branch : null,
         // The completion runs on; the thread opens without waiting for it.

@@ -115,11 +115,14 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
         async move { Ok(settings) }
     });
     // T3 reads `<state>/logs/server.trace.ndjson` and its rotations. This server writes no
-    // trace, so it answers T3's result for a home without trace files.
+    // trace, but its state folder may hold an earlier T3 server's: read them as T3 does.
     let env = environment.clone();
     table.unary("server.getTraceDiagnostics", move |_, _: Value| {
-        let result = trace_diagnostics(&env.state_dir, &conn_support::time::now_iso());
-        async move { Ok(result) }
+        let state_dir = env.state_dir.clone();
+        async move {
+            let read_at = conn_support::time::now_iso();
+            blocking(move || crate::trace_diagnostics::read(&state_dir, &read_at)).await
+        }
     });
     // T3 publishes a status only when its offline `t3 doctor` repairs this database, and
     // `null` otherwise. This server has no such command, so the status stays `null` and the
@@ -447,44 +450,6 @@ fn lifecycle_events(environment: &Environment) -> Vec<Value> {
             "payload": { "at": conn_support::time::iso_from_ms(conn_support::time::now_ms()), "environment": environment.descriptor },
         }),
     ]
-}
-
-/// T3's trace rotation: at most 10 files, the oldest backup first.
-const TRACE_MAX_FILES: usize = 10;
-
-/// T3's `makeEmptyDiagnostics` with `trace-file-not-found`, for `<state>/logs`.
-fn trace_diagnostics(state_dir: &std::path::Path, read_at: &str) -> Value {
-    let trace = state_dir.join("logs").join("server.trace.ndjson");
-    let trace = trace.to_string_lossy().into_owned();
-    let mut scanned: Vec<String> = (1..=TRACE_MAX_FILES)
-        .rev()
-        .map(|n| format!("{trace}.{n}"))
-        .collect();
-    scanned.push(trace.clone());
-    json!({
-        "traceFilePath": trace,
-        "scannedFilePaths": scanned,
-        "readAt": read_at,
-        "recordCount": 0,
-        "parseErrorCount": 0,
-        "firstSpanAt": {"_tag": "None"},
-        "lastSpanAt": {"_tag": "None"},
-        "failureCount": 0,
-        "interruptionCount": 0,
-        "slowSpanThresholdMs": 1000,
-        "slowSpanCount": 0,
-        "logLevelCounts": {},
-        "topSpansByCount": [],
-        "slowestSpans": [],
-        "commonFailures": [],
-        "latestFailures": [],
-        "latestWarningAndErrorLogs": [],
-        "partialFailure": {"_tag": "None"},
-        "error": {"_tag": "Some", "value": {
-            "kind": "trace-file-not-found",
-            "message": "No local trace files were found.",
-        }},
-    })
 }
 
 /// A stream that sends `first` and then stays open until the client unsubscribes.

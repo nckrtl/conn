@@ -40,6 +40,15 @@ impl Inner {
                 json!({"name": "Error", "message": format!("Thread '{thread}' was not found.")}),
             ));
         };
+        // T3's `getThreadRecords` order: `COALESCE(first_run_ordinal, 0)`, then the id.
+        // Its set also holds provider threads owned through nodes and subagents; this one
+        // holds the thread's own (a difference only when no active provider thread is set).
+        let mut provider_threads = provider_threads;
+        provider_threads.sort_by(|l, r| {
+            let ordinal = |p: &Value| p["firstRunOrdinal"].as_i64().unwrap_or(0);
+            let id = |p: &Value| p["id"].as_str().unwrap_or_default().to_owned();
+            ordinal(l).cmp(&ordinal(r)).then_with(|| id(l).cmp(&id(r)))
+        });
         let active = row["activeProviderThreadId"].as_str();
         let chosen = provider_threads
             .iter()

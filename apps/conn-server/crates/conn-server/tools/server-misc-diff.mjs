@@ -8,10 +8,12 @@
 // sealed environments) answer over `/ws`:
 // - `server.getSettings`: equal on both sides, and equal to each side's `server.getConfig`
 //   settings (T3's `redactServerSettingsForClient`).
-// - `server.getTraceDiagnostics`: the Conn Server writes no trace, so its answer must equal
-//   T3's own `TraceDiagnostics.readTraceDiagnostics` on a log folder without trace files
-//   (paths and `readAt` normalized). The T3 server itself always writes traces, so its answer
-//   is only checked for the same keys.
+// - `server.getTraceDiagnostics`: the Conn Server's state folder gets a fixture set of trace
+//   files (as an earlier T3 server could leave them: rotations, a folder where a file should be,
+//   parse errors, failures, interruptions, log events, more spans than the top lists hold).
+//   Its answer must equal T3's own `TraceDiagnostics.readTraceDiagnostics` on that folder
+//   (paths and `readAt` normalized). The T3 server writes its own traces, so its answer is
+//   only checked for the same keys.
 // - `server.getDatabaseStorage`: the Conn Server has no offline repair command, so it sends
 //   T3's `null` (T3 sends `null` when `t3 doctor` does not target its database).
 // - `server.reclaimDatabaseSpace`: both refuse with `DatabaseReclaimError`.
@@ -147,16 +149,20 @@ const canonical = (value) =>
       : value;
 const same = (label, a, b) => {
   const [x, y] = [JSON.stringify(canonical(a)), JSON.stringify(canonical(b))];
-  if (x === y) console.log(`ok   ${label}`);
-  else failures.push(`${label}\n  T3:   ${x.slice(0, 1500)}\n  Conn: ${y.slice(0, 1500)}`);
+  if (x === y) return console.log(`ok   ${label}`);
+  // Name the first differing top-level field, then show both values from there.
+  const fields = a && b && typeof a === "object" ? Object.keys({ ...a, ...b }).toSorted() : [];
+  const key = fields.find((k) => JSON.stringify(canonical(a[k])) !== JSON.stringify(canonical(b[k])));
+  const [p, q] = key === undefined ? [x, y] : [JSON.stringify(canonical(a[key])), JSON.stringify(canonical(b[key]))];
+  failures.push(`${label}${key === undefined ? "" : ` (field ${key})`}\n  T3:   ${p.slice(0, 1500)}\n  Conn: ${q.slice(0, 1500)}`);
 };
 const truth = (label, ok, detail) => {
   if (ok) console.log(`ok   ${label}`);
   else failures.push(`${label}: ${detail}`);
 };
 
-/** T3's own trace read on a log folder without trace files, as the server would answer. */
-async function t3EmptyTrace(state) {
+/** T3's own trace read on a state folder's logs, as its server would answer. */
+async function t3Trace(state) {
   const fromServer = packageImporter("apps/server");
   const Effect = await fromServer("effect/Effect");
   const Schema = await fromServer("effect/Schema");
@@ -172,8 +178,50 @@ async function t3EmptyTrace(state) {
   return Schema.encodeSync(ServerTraceDiagnosticsResult)(result);
 }
 
+/** Trace files in `<state>/logs`, covering the reader's rules and the top-list bounds. */
+function writeTraceFixture(state) {
+  const logs = NodePath.join(state, "logs");
+  NodeFS.mkdirSync(logs, { recursive: true });
+  const nano = (ms) => `${BigInt(ms) * 1_000_000n + 123n}`;
+  const base = 1_763_700_000_000;
+  const span = (i, fields = {}) =>
+    JSON.stringify({
+      name: `span.${i % 13}`,
+      traceId: `trace-${i}`,
+      spanId: `span-${i}`,
+      durationMs: (i * 37) % 2_400 + (i % 3) * 0.25,
+      startTimeUnixNano: nano(base + i * 1_000),
+      endTimeUnixNano: nano(base + i * 1_000 + (i % 5) * 7),
+      ...fields,
+    });
+  const lines = [];
+  for (let i = 0; i < 60; i++) {
+    const fields = {};
+    if (i % 4 === 0) fields.exit = { _tag: "Failure", cause: i % 8 === 0 ? `  cause ${i % 3}  ` : "" };
+    if (i % 7 === 0) fields.status = { code: "2", message: i % 14 === 0 ? "Interrupted" : " status failed " };
+    if (i % 9 === 0) fields.attributes = { "effect.fiber.interrupted": true };
+    if (i % 11 === 0) fields.exit = { _tag: "Interrupted" };
+    if (i % 3 === 0)
+      fields.events = [
+        { name: `event ${i}`, timeUnixNano: nano(base + i * 997), attributes: { "effect.logLevel": ["Warning", "Error", "Info", "WARN", "Fatal", "Debug"][i % 6] } },
+        { attributes: { "effect.logLevel": "Error" } },
+        { name: "  padded warning  ", attributes: { "effect.logLevel": i % 2 ? " Warning " : "Warning" } },
+        [1, 2],
+        null,
+        { attributes: [] },
+      ];
+    lines.push(span(i, fields));
+  }
+  lines.push("not json", "[1,2]", JSON.stringify({ name: "missing.end", traceId: "t", spanId: "s", durationMs: 1 }), "   ", span(61, { name: "  padded  " }));
+  NodeFS.writeFileSync(NodePath.join(logs, "server.trace.ndjson.3"), lines.slice(0, 20).join("\n") + "\n");
+  NodeFS.mkdirSync(NodePath.join(logs, "server.trace.ndjson.2"));
+  NodeFS.writeFileSync(NodePath.join(logs, "server.trace.ndjson.1"), lines.slice(20, 45).join("\r\n"));
+  NodeFS.writeFileSync(NodePath.join(logs, "server.trace.ndjson"), lines.slice(45).join("\r"));
+}
+
 const sides = [new Side("ts"), new Side("rust")];
 try {
+  writeTraceFixture(sides[1].state);
   await Promise.all(sides.map((s) => s.start()));
   const [ts, rust] = sides;
   const answers = {};
@@ -204,8 +252,7 @@ try {
     JSON.parse(
       JSON.stringify({ ...value, readAt: "<readAt>" }, (key, v) => (key === "_id" ? undefined : v)).replaceAll(side.state, "<state>"),
     );
-  const empty = { state: NodePath.join(root, "no-traces") };
-  same("server.getTraceDiagnostics without trace files (T3's readTraceDiagnostics)", normal(empty, await t3EmptyTrace(empty.state)), normal(rust, b.trace.ok));
+  same("server.getTraceDiagnostics on an earlier server's trace files (T3's readTraceDiagnostics)", normal(rust, await t3Trace(rust.state)), normal(rust, b.trace.ok));
   same("server.getTraceDiagnostics keys", Object.keys(a.trace.ok ?? {}).toSorted(), Object.keys(b.trace.ok ?? {}).toSorted());
 
   truth("server.getDatabaseStorage: T3 targets its own database and sends a status", a.storage.item !== undefined && a.storage.item !== null && typeof a.storage.item.compactCommand === "string", JSON.stringify(a.storage));

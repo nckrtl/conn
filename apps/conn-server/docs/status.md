@@ -31,7 +31,7 @@ Nothing here was skipped without asking. RPC **203 of 251** after this step; `/m
 | Method | Verdict | Why |
 | --- | --- | --- |
 | `server.getSettings` | trivial, built | No client calls it; T3 answers the client view of the settings. |
-| `server.getTraceDiagnostics` | trivial, built | Settings › Diagnostics. This server writes no trace, so it answers T3's result for a home without trace files. |
+| `server.getTraceDiagnostics` | build, built | Settings › Diagnostics. This server writes no trace, but a home a T3 server used holds its trace files; they are read as T3 reads them. |
 | `server.getDatabaseStorage` (stream) | trivial, built | Settings › Storage. T3 sends `null` when its offline `t3 doctor` does not repair this database; this server has no such command, so `null`. |
 | `server.reclaimDatabaseSpace` | trivial, built | Only reachable from a non-null status; refuses with `DatabaseReclaimError`. |
 | `provider.uploadFeedback` | build, built | The composer's `/feedback` (Codex). Codex `feedback/upload` through the running app-server, as T3. |
@@ -49,8 +49,11 @@ Nothing here was skipped without asking. RPC **203 of 251** after this step; `/m
 
 **What changed:**
 
-- `server.getSettings`, `server.getTraceDiagnostics`, `server.getDatabaseStorage`,
-  `server.reclaimDatabaseSpace` (`methods/server.rs`), `provider.uploadFeedback`
+- `server.getSettings`, `server.getDatabaseStorage`, `server.reclaimDatabaseSpace`
+  (`methods/server.rs`); `server.getTraceDiagnostics` (`trace_diagnostics.rs`, T3's
+  `TraceDiagnostics.read` and its aggregator: rotations oldest first, line by line on a
+  blocking thread, bounded top lists, strings trimmed as T3's schema encodes them);
+  `provider.uploadFeedback`
   (`methods/provider.rs`, `conn-engine/src/feedback.rs`, `Session::upload_feedback`, the
   Codex session's `feedback/upload`).
 - **Fix:** clients now get `idleCompaction` and `compactIdleThreads` before the first settings
@@ -58,16 +61,20 @@ Nothing here was skipped without asking. RPC **203 of 251** after this step; `/m
   so clients took it for a server from before idle compaction modes and showed the old switch.
   This also changes `server.getConfig` and `settingsUpdated`.
 - **Proof:** `server-misc-diff.mjs` (new check) starts both servers: `getSettings` equal after
-  the client's decode and equal to `getConfig`'s settings on each side; the trace answer equal
-  to T3's own `readTraceDiagnostics` on a folder without trace files; `getDatabaseStorage`
+  the client's decode and equal to `getConfig`'s settings on each side; the trace answer on a
+  fixture set of trace files (rotations, a folder in a file's place, parse errors, failures,
+  interruptions, log events, more spans than the top lists hold, `\n`, `\r\n` and `\r`
+  line ends) equal to T3's own `readTraceDiagnostics` on the same folder; `getDatabaseStorage`
   `null` here (T3 sends a status, its repair command targets its own database);
   `reclaimDatabaseSpace` and `uploadFeedback` for an unknown thread refused with T3's tags.
   `effect-client.mjs` decodes all five with the client's schemas. `cargo test -p conn-engine
   upload_feedback`: T3's texts for no session yet, an unsupported provider and a stopped
   session.
-- **Known differences:** the trace answer ignores trace files an earlier T3 server left in a
-  shared home; the reclaim refusal says "This server cannot reclaim database space." (T3 names
-  its `t3 doctor` command); an unknown thread's upload cause is our own text. **Not proven:**
+- **Known differences:** a trace timestamp outside the years 0000 to 9999, or written in
+  hex, counts as unparsable (T3 accepts both); the reclaim refusal says "This server cannot reclaim database space." (T3 names
+  its `t3 doctor` command); an unknown thread's upload cause is our own text; with no active provider thread, the
+  upload falls back to the thread's own provider threads in T3's order, but T3's set also
+  holds provider threads owned through nodes and subagents. **Not proven:**
   Codex's `feedback/upload` frame against T3's on a stub `codex`. T3 has no replay fixture for
   it, so the conformance tool cannot drive it yet; the parameters follow
   `CodexAdapterV2.uploadFeedback` (`classification: "bug"`, `includeLogs: true`, `reason`,

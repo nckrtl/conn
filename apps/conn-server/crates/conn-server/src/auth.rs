@@ -567,6 +567,12 @@ struct AuthFile {
     /// them again. Each goes when its code would have expired.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     spent_t3_pairing: Vec<SpentT3Pairing>,
+    /// When T3's state was last carried over into this file. A code T3's CLI wrote after it
+    /// may be exchanged from T3's table; one from before was carried (or deliberately left
+    /// out) and is decided by this file alone. A file without it (carried by an older
+    /// version, whose spent codes left no record) takes no code from T3's table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    t3_carried_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,6 +604,8 @@ struct State {
     last_connected: HashMap<String, u64>,
     /// `AuthFile::spent_t3_pairing`: id to the code's expiry.
     spent_t3: HashMap<String, u64>,
+    /// `AuthFile::t3_carried_at_ms`.
+    t3_carried_at: Option<u64>,
     stamp: Option<Stamp>,
 }
 
@@ -873,8 +881,15 @@ impl AuthStore {
         };
         let mut outcome = Err(ExchangeError::InvalidCredential);
         let written = self.write(|state| {
-            // Spent, revoked or carried over here: this server's record decides.
-            if state.spent_t3.contains_key(&link.id)
+            // Spent, revoked or carried over here: this server's record decides. Only a code
+            // made after the carry-over is T3's table's to give, and only while it is valid
+            // (checked again under the lock: the spent record goes at the code's expiry).
+            let made_after_carry = state
+                .t3_carried_at
+                .is_some_and(|at| link.created_at_ms >= at);
+            if !made_after_carry
+                || link.expires_at_ms <= now_ms()
+                || state.spent_t3.contains_key(&link.id)
                 || state.pairing.values().any(|l| l.id == link.id)
             {
                 return Vec::new();
@@ -1003,6 +1018,9 @@ impl AuthStore {
             let Some(grant) = state.pairing.remove(&key) else {
                 return Vec::new();
             };
+            if grant.t3 {
+                state.spent_t3.insert(grant.id.clone(), grant.expires_at_ms);
+            }
             let level = grant
                 .subject
                 .strip_prefix(MCP_APPROVAL_SUBJECT_PREFIX)
@@ -1437,6 +1455,7 @@ impl AuthStore {
             .into_iter()
             .map(|s| (s.id, s.expires_at_ms))
             .collect();
+        state.t3_carried_at = file.t3_carried_at_ms;
         for session in file.sessions {
             if let Some(hash) = decode_hex(&session.token_hash) {
                 state.sessions.insert(hash, session);
@@ -1492,6 +1511,7 @@ impl AuthStore {
                         expires_at_ms: *expires_at_ms,
                     })
                     .collect(),
+                t3_carried_at_ms: next.t3_carried_at,
             };
             let bytes = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
             write_private(path, &bytes)?;
@@ -1704,6 +1724,7 @@ pub(crate) fn write_t3_import(
             })
             .collect(),
         spent_t3_pairing: spent,
+        t3_carried_at_ms: Some(now_ms()),
     };
     file.sessions.extend(own_sessions);
     file.pairing_links.extend(own_links);

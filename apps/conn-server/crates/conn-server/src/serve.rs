@@ -117,7 +117,8 @@ const T3_MIGRATIONS_FINISHED: &str = "Migrations ran successfully";
 
 /// `CONN_SERVER_INERT=1`: a rehearsal copy of a state folder. The server imports, recovers and
 /// answers as usual, but no agent can run: it has no providers, the scheduled-task timer is
-/// off, and it neither follows tasks in linked environments nor sweeps pull request watches.
+/// off, it has no peer links, refuses pull request actions, and neither follows tasks in
+/// linked environments nor sweeps pull request watches.
 /// Runs it imported or recovers fail on the copy instead of doing the original's work twice.
 pub fn inert() -> bool {
     std::env::var_os("CONN_SERVER_INERT").is_some_and(|v| v == "1")
@@ -360,10 +361,8 @@ pub async fn serve_with_instances(
         oauth: Some(Arc::new(crate::oauth::McpOAuth::new(
             &state_dir.join("secrets"),
         ))),
-        peers: Some(crate::peers::PeerLinks::new(
-            environment.clone(),
-            engine.clone(),
-        )),
+        // An inert copy holds the original's peer links: it must not use them.
+        peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
         devices: Some(crate::methods::devices::start(environment.clone())),
         ..Deps::default()
     };

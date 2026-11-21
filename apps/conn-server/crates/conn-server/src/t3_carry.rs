@@ -515,17 +515,25 @@ mod tests {
         let dir = temp_dir("t3-late-code");
         let t3 = Connection::open(dir.join(T3_STATE_FILE)).unwrap();
         t3.execute_batch(T3_TABLES).unwrap();
-        let add = |id: &str, code: &str, subject: &str| {
+        let add_at = |id: &str, code: &str, subject: &str, created: &str| {
             t3.execute(
                 "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject,
                    label, created_at, expires_at) VALUES (?1, ?2, 'one-time-token',
-                   '[\"orchestration:read\"]', ?3, 'ssh', '2026-11-21T00:00:00.000Z',
-                   '2999-01-01T00:00:00.000Z')",
-                [id, code, subject],
+                   '[\"orchestration:read\"]', ?3, 'ssh', ?4, '2999-01-01T00:00:00.000Z')",
+                [id, code, subject, created],
             )
             .unwrap();
         };
-        add("carried-2", "FGHJKMNPQRST", "one-time-token");
+        // Made after the carry-over below.
+        let add = |id: &str, code: &str, subject: &str| {
+            add_at(id, code, subject, "2998-01-01T00:00:00.000Z");
+        };
+        add_at(
+            "carried-2",
+            "FGHJKMNPQRST",
+            "one-time-token",
+            "2026-11-21T00:00:00.000Z",
+        );
         carry_t3_state(&dir).unwrap().expect("first start");
         let exchange = |store: &AuthStore, code: &str| {
             store
@@ -593,6 +601,56 @@ mod tests {
                 "{code}"
             );
         }
+        drop(store);
+        drop(t3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A code from before the carry-over is this file's to decide, even when the file lost
+    /// track of it; and a file written before carry times were kept takes none from T3.
+    #[test]
+    fn codes_from_before_the_carry_never_come_from_t3s_table() {
+        use crate::auth::{AuthStore, ClientInfo};
+        let dir = temp_dir("t3-early-code");
+        let t3 = Connection::open(dir.join(T3_STATE_FILE)).unwrap();
+        t3.execute_batch(T3_TABLES).unwrap();
+        carry_t3_state(&dir).unwrap().expect("first start");
+        // As if the carried code had been spent here by a version without spent records.
+        t3.execute(
+            "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, label,
+               created_at, expires_at) VALUES ('early', 'KMNPQRSTVWXY', 'one-time-token',
+               '[\"orchestration:read\"]', 'one-time-token', 'ssh', '2000-01-01T00:00:00.000Z',
+               '2999-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let store = AuthStore::open(dir.join(AUTH_FILE)).unwrap();
+        assert!(
+            store
+                .exchange("KMNPQRSTVWXY", None, ClientInfo::default())
+                .is_err()
+        );
+        // An auth file without a carry time (an older version's): no code from T3's table.
+        drop(store);
+        let path = dir.join(AUTH_FILE);
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file.as_object_mut().unwrap().remove("t3CarriedAtMs");
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        t3.execute(
+            "INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, label,
+               created_at, expires_at) VALUES ('late', 'MNPQRSTVWXYZ', 'one-time-token',
+               '[\"orchestration:read\"]', 'one-time-token', 'ssh', '2998-01-01T00:00:00.000Z',
+               '2999-01-01T00:00:00.000Z')",
+            [],
+        )
+        .unwrap();
+        let store = AuthStore::open(path).unwrap();
+        assert!(
+            store
+                .exchange("MNPQRSTVWXYZ", None, ClientInfo::default())
+                .is_err()
+        );
         drop(t3);
         let _ = std::fs::remove_dir_all(&dir);
     }

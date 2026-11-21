@@ -45,6 +45,7 @@ import * as fs from "node:fs";
 import { describe } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
 import { materializeReplayTranscriptWorkspace } from "@t3tools/provider-testing/replayTranscript";
 import { CodexOrchestratorReplayHarness } from "../Adapters/CodexAdapterV2.testkit.ts";
@@ -52,6 +53,20 @@ import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import { itRunsReplayFixtures, runReplayFixture } from "./ProviderReplayFixtures.ts";
 
 const OUT = __OUT__;
+// As CodexReplayFixtures.integration.test.ts (upstream #37442): a transcript borrowed from
+// another scenario names the thread after that scenario's title.
+const renameRecordedThread = (recordedScenario: string, scenario: string) => (transcript: any) => ({
+  ...transcript,
+  entries: transcript.entries.map((entry: any) =>
+    entry.type === "expect_outbound" &&
+    Predicate.isObject(entry.frame) &&
+    entry.frame.method === "thread/name/set" &&
+    Predicate.isObject(entry.frame.params) &&
+    entry.frame.params.name === \`Replay fixture: \${recordedScenario}\`
+      ? { ...entry, frame: { ...entry.frame, params: { ...entry.frame.params, name: \`Replay fixture: \${scenario}\` } } }
+      : entry,
+  ),
+});
 const tapped = (log: Array<unknown>) => ({
   ...CodexOrchestratorReplayHarness,
   makeProviderAdapterRegistryLayer: (transcript: any, options?: any) =>
@@ -100,6 +115,9 @@ describe("conn codex capture", () => {
       harness: tapped(log) as any,
       materializeWorkspace: (transcript, workspace) =>
         Effect.succeed(materializeReplayTranscriptWorkspace(transcript, workspace)),
+      ...(input.driver.recordedScenario === undefined
+        ? {}
+        : { transformTranscript: renameRecordedThread(input.driver.recordedScenario, input.fixtureName) }),
     }).pipe(
       Effect.ensuring(
         Effect.sync(() => fs.writeFileSync(\`\${OUT}/\${input.fixtureName}.json\`, JSON.stringify(log))),

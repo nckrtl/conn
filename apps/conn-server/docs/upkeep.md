@@ -164,3 +164,12 @@ four hours, most of it reading upstream changes and finishing the tools.
   `/api/auth/connect-devices/approve` and `/revoke` (T3 Connect device approval); the `/mcp`
   tools `send_to_user`, `t3_theme_read`, `t3_theme_set`; environment themes.
 - **Tools changed:** see the table above; the report starts with "What to do".
+
+## Rehearsing on a copy of a state folder
+
+A Conn Server started on a copy of a T3 home imports the threads that were running there and,
+like the T3 server after a restart, continues them. On a copy that repeats the original's work
+(git pushes, PRs) while the original still runs. Start every copy with `CONN_SERVER_INERT=1`:
+no providers, no run recovery, no scheduled-task timer, no task followers and no pull request
+sweeps. Imports, auth, pairing and every read still work. The real switch runs without it, so
+in-flight runs continue as after a T3 restart (`crates/conn-engine/src/restart.rs`).

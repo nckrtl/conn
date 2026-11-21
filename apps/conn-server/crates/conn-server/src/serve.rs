@@ -115,6 +115,14 @@ const T3_MIGRATIONS_STARTED: &str = "Running database migrations";
 const T3_MIGRATION_PROGRESS: &str = "Upgrading database";
 const T3_MIGRATIONS_FINISHED: &str = "Migrations ran successfully";
 
+/// `CONN_SERVER_INERT=1`: a rehearsal copy of a state folder. The server imports, recovers and
+/// answers as usual, but no agent can run: it has no providers, the scheduled-task timer is
+/// off, and it neither follows tasks in linked environments nor sweeps pull request watches.
+/// Runs it imported or recovers fail on the copy instead of doing the original's work twice.
+pub fn inert() -> bool {
+    std::env::var_os("CONN_SERVER_INERT").is_some_and(|v| v == "1")
+}
+
 pub async fn serve(options: ServeOptions, providers: Vec<Arc<dyn Provider>>) {
     serve_with_instances(options, providers, None).await;
 }
@@ -148,6 +156,15 @@ pub async fn serve_with_instances(
             "managed provisioning refused",
         )),
         None => None,
+    };
+    let inert = inert();
+    let (providers, instances) = if inert {
+        eprintln!(
+            "conn-server: inert (CONN_SERVER_INERT=1): no providers, no timers, no agent runs"
+        );
+        (Vec::new(), None)
+    } else {
+        (providers, instances)
     };
     let _ownership = match home::acquire_ownership(&state_dir) {
         Ok(lock) => lock,
@@ -291,7 +308,8 @@ pub async fn serve_with_instances(
     config.idle_session = session_idle;
     config.host = Some(host.clone());
     config.turn_observer = Some(host.clone());
-    config.checkpoints = true;
+    config.checkpoints = !inert;
+    config.recover_runs = !inert;
     let text_generators = Arc::new(crate::text_generation::TextGenerators::for_environment(
         environment.clone(),
     ));
@@ -315,7 +333,7 @@ pub async fn serve_with_instances(
             zone: jiff::tz::TimeZone::system(),
             runner: Arc::new(conn_features::scheduled::EngineRunner::new(engine.clone())),
             secret_requests: Some(secrets.clone()),
-            start_timer: true,
+            start_timer: !inert,
         })
         .await;
     let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
@@ -395,13 +413,16 @@ pub async fn serve_with_instances(
     println!("methods: {}", state.table.coverage());
     println!("providers: {provider_names}");
     // Probes spawn provider CLIs; T3 starts them once the server is ready, too.
-    crate::methods::provider::start_status_refresh(&state.deps);
-    // Tasks in linked environments: their followers, again after a restart.
-    if let Some(mcp) = &state.deps.mcp {
-        mcp.start_remote_tasks();
+    // An inert copy starts none of these: each can start a turn or act on another host.
+    if !inert {
+        crate::methods::provider::start_status_refresh(&state.deps);
+        // Tasks in linked environments: their followers, again after a restart.
+        if let Some(mcp) = &state.deps.mcp {
+            mcp.start_remote_tasks();
+        }
+        // Pull request watches: a sweep every two minutes, as T3's `PullRequestWatchReactor`.
+        crate::methods::pull_requests::start_watches(&state.deps);
     }
-    // Pull request watches: a sweep every two minutes, as T3's `PullRequestWatchReactor`.
-    crate::methods::pull_requests::start_watches(&state.deps);
     // `model-manifest.json`, fetched and cached as the T3 server's provider checks do.
     crate::model_manifest::start(state_dir.clone(), environment.clone());
     let managed_server = match provision {

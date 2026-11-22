@@ -1,6 +1,7 @@
 import { msg } from "gt-i18n";
 import { translatableDetail } from "../errors/translatable.ts";
 import { EnvironmentId, type ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -35,7 +36,7 @@ import type {
   PersistedConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
-import { ConnectionBlockedError } from "./model.ts";
+import { BearerConnectionTarget, ConnectionBlockedError } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
@@ -228,6 +229,33 @@ export class EnvironmentRegistry extends Context.Service<
   }
 >()("@t3tools/client-runtime/connection/registry/EnvironmentRegistry") {}
 
+/** Conn: how long after a pairing's promotion its server may still be reloading. */
+const EXPECTED_RESTART_WINDOW_MS = 10_000;
+
+function withoutProvisionalTarget(target: ConnectionTarget): ConnectionTarget {
+  if (target._tag !== "BearerConnectionTarget" || target.provisionalPairingId === undefined) {
+    return target;
+  }
+  const { provisionalPairingId: _owner, ...committed } = target;
+  return new BearerConnectionTarget(committed);
+}
+
+/** The entry as it is once its provisional pairing is promoted. */
+function withoutProvisionalPairing(entry: ConnectionCatalogEntry): ConnectionCatalogEntry {
+  return {
+    ...entry,
+    target: withoutProvisionalTarget(entry.target),
+    ...(entry.alternateRoutes === undefined
+      ? {}
+      : {
+          alternateRoutes: entry.alternateRoutes.map((route) => ({
+            ...route,
+            target: withoutProvisionalTarget(route.target),
+          })),
+        }),
+  };
+}
+
 interface EnvironmentServiceScope {
   readonly entry: ConnectionCatalogEntry;
   readonly supervisor: EnvironmentSupervisor.EnvironmentSupervisor["Service"];
@@ -310,6 +338,8 @@ export const make = Effect.gen(function* () {
   }
 
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
+  /** Conn: until when (epoch ms) each server is expected to restart; see `settleProvisionalPairing`. */
+  const expectedRestarts = yield* Ref.make<ReadonlyMap<EnvironmentId, number>>(new Map());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
   // Conn: seeded before any supervisor exists, so a held-off server never opens a socket at start.
@@ -409,6 +439,9 @@ export const make = Effect.gen(function* () {
             learnLabel: (descriptor) => learnLabel({ environmentId, descriptor }),
             latestEntry: SubscriptionRef.get(entries).pipe(
               Effect.map((current) => Option.fromUndefinedOr(current.get(environmentId))),
+            ),
+            restartExpectedUntil: Ref.get(expectedRestarts).pipe(
+              Effect.map((current) => current.get(environmentId) ?? 0),
             ),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
@@ -543,6 +576,21 @@ export const make = Effect.gen(function* () {
     ) {
       return;
     }
+    // Conn: promoting a provisional pairing changes no address or credential. Its live session
+    // stays; the supervisor takes the saved route at its next attempt (`latestEntry`).
+    if (
+      options?.retainEquivalentRuntime === true &&
+      existingScope !== undefined &&
+      Equal.equals(withoutProvisionalPairing(existingScope.entry), withoutProvisionalPairing(entry))
+    ) {
+      yield* SubscriptionRef.update(entries, (current) =>
+        new Map(current).set(target.environmentId, entry),
+      );
+      yield* SubscriptionRef.update(serviceScopes, (current) =>
+        new Map(current).set(target.environmentId, { ...existingScope, entry }),
+      );
+      return;
+    }
 
     yield* closeServiceScope(target.environmentId);
     yield* SubscriptionRef.update(entries, (current) => {
@@ -656,6 +704,22 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * Conn: a pairing is promoted when its Orbit reservation is finalized, and the finalize reloads
+   * the clone's server at that moment. A failure there retries soon instead of blocking, and a
+   * connection that already failed tries again now.
+   */
+  const expectRestart = Effect.fn("EnvironmentRegistry.expectRestart")(function* (
+    environmentId: EnvironmentId,
+  ) {
+    const until = (yield* Clock.currentTimeMillis) + EXPECTED_RESTART_WINDOW_MS;
+    yield* Ref.update(expectedRestarts, (current) => new Map(current).set(environmentId, until));
+    const scope = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
+    if (scope === undefined) return;
+    const phase = (yield* SubscriptionRef.get(scope.supervisor.state)).phase;
+    if (phase === "blocked" || phase === "backoff") yield* scope.supervisor.retryNow;
+  });
+
   const settleProvisionalPairing = Effect.fn("EnvironmentRegistry.settleProvisionalPairing")(
     function* (environmentId: EnvironmentId, installId: string, keep: boolean) {
       return yield* withLeaseLock(
@@ -698,6 +762,7 @@ export const make = Effect.gen(function* () {
               entryWithRoutes(previous ?? { ...first, enabled: true }, routes),
               { retainEquivalentRuntime: true },
             );
+            if (keep && settled.promoted) yield* expectRestart(environmentId);
           } else if (
             previous !== undefined &&
             connectionRoutes(previous).some(

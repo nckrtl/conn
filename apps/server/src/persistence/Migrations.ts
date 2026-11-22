@@ -372,9 +372,46 @@ const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigrati
   );
 });
 
+/**
+ * Conn recorded TurnItemOrbitTaskInline at 100, an id upstream main uses, so the
+ * migrator would skip upstream's migrations from there. Its update is idempotent: drop that
+ * record and let the migrator run upstream's migrations at their ids and Conn's again at its own.
+ */
+const CONN_ORBIT_TASK_INLINE_MIGRATION_ID = 103;
+const CONN_ORBIT_TASK_INLINE_MIGRATION_NAME = "TurnItemOrbitTaskInline";
+const reconcileConnOrbitTaskInlineMigration = Effect.fn("reconcileConnOrbitTaskInlineMigration")(
+  function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const tables = yield* sql`
+          SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+        `;
+        if (tables.length === 0) return;
+        const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+          SELECT migration_id, name FROM effect_sql_migrations
+        `;
+        const legacy = history.find(
+          (row) =>
+            row.migration_id < CONN_ORBIT_TASK_INLINE_MIGRATION_ID &&
+            row.name === CONN_ORBIT_TASK_INLINE_MIGRATION_NAME,
+        );
+        if (!legacy) return;
+        if (history.some((row) => row.migration_id > legacy.migration_id)) {
+          return yield* new Migrator.MigrationError({
+            kind: "BadState",
+            message: `Cannot move ${CONN_ORBIT_TASK_INLINE_MIGRATION_NAME} to ${CONN_ORBIT_TASK_INLINE_MIGRATION_ID} with unexpected later migrations.`,
+          });
+        }
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = ${legacy.migration_id} AND name = ${CONN_ORBIT_TASK_INLINE_MIGRATION_NAME}`;
+      }),
+    );
+  },
+);
+
 const latestMigrationId = Math.max(...migrationEntries.map(([id]) => id));
 
-// Mirrors the Migrator, which runs only ids above the highest recorded, plus the V2-preview and Conn PeerLinks reconciliations.
+// Mirrors the Migrator, which runs only ids above the highest recorded, plus the V2-preview and Conn PeerLinks and Orbit task reconciliations.
 export const hasPendingMigrations = Effect.fn("hasPendingMigrations")(function* () {
   const sql = yield* SqlClient.SqlClient;
   const tables = yield* sql`
@@ -385,11 +422,13 @@ export const hasPendingMigrations = Effect.fn("hasPendingMigrations")(function* 
     readonly latestId: number | null;
     readonly previewRows: number;
     readonly legacyPeerLinkRows: number;
+    readonly legacyOrbitTaskInlineRows: number;
   }>`
     SELECT
       MAX(migration_id) AS latestId,
       SUM(name = 'OrchestrationV2' AND migration_id IN (53, 54)) AS previewRows,
-      SUM(name = 'PeerLinks' AND migration_id < ${CONN_PEER_LINKS_MIGRATION_ID}) AS legacyPeerLinkRows
+      SUM(name = 'PeerLinks' AND migration_id < ${CONN_PEER_LINKS_MIGRATION_ID}) AS legacyPeerLinkRows,
+      SUM(name = ${CONN_ORBIT_TASK_INLINE_MIGRATION_NAME} AND migration_id < ${CONN_ORBIT_TASK_INLINE_MIGRATION_ID}) AS legacyOrbitTaskInlineRows
     FROM effect_sql_migrations
   `;
   const row = rows[0];
@@ -397,7 +436,9 @@ export const hasPendingMigrations = Effect.fn("hasPendingMigrations")(function* 
     (row?.latestId ?? 0) < latestMigrationId ||
     (row?.previewRows ?? 0) > 0 ||
     // Conn recorded PeerLinks at an id upstream uses; reconcileConnPeerLinksMigration moves it.
-    (row?.legacyPeerLinkRows ?? 0) > 0
+    (row?.legacyPeerLinkRows ?? 0) > 0 ||
+    // Conn recorded TurnItemOrbitTaskInline at 100; reconcileConnOrbitTaskInlineMigration drops it.
+    (row?.legacyOrbitTaskInlineRows ?? 0) > 0
   );
 });
 
@@ -432,6 +473,14 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     (toMigrationInclusive === undefined || toMigrationInclusive >= CONN_PEER_LINKS_MIGRATION_ID)
       ? yield* reconcileConnPeerLinksMigration()
       : [];
+  // Drop a Conn TurnItemOrbitTaskInline record at 100 so upstream's 100 onward run.
+  if (
+    hasPending &&
+    (toMigrationInclusive === undefined ||
+      toMigrationInclusive >= CONN_ORBIT_TASK_INLINE_MIGRATION_ID)
+  ) {
+    yield* reconcileConnOrbitTaskInlineMigration();
+  }
   if (includesV2) {
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }

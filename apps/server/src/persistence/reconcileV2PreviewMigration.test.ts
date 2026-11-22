@@ -10,6 +10,7 @@ import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
 import PeerLinks from "./Migrations/070_PeerLinks.ts";
+import TurnItemOrbitTaskInline from "./Migrations/103_TurnItemOrbitTaskInline.ts";
 
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -401,6 +402,58 @@ describe("Conn PeerLinks upgrade", () => {
         ...releasedAfter(70),
       ]);
       yield* assertReconciled;
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+});
+
+// Conn recorded TurnItemOrbitTaskInline at 100, an id upstream main uses; Conn keeps
+// it after upstream's ids (see Migrations.ts).
+describe("Conn TurnItemOrbitTaskInline upgrade", () => {
+  const seedOrbitTask = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_turn_items (
+        turn_item_id, thread_id, ordinal, type, status, updated_at, payload_json
+      ) VALUES (
+        'orbit-task', 'thread-1', 0, 'dynamic_tool', 'completed', '2026-11-21T00:00:00.000Z',
+        ${JSON.stringify({ type: "dynamic_tool", toolName: "mcp__orbit__task-create", output: "{}" })}
+      )
+    `;
+  });
+  it.effect("drops the record at 100 and runs upstream's migrations from 100", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 99 });
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord({ "100_TurnItemOrbitTaskInline": TurnItemOrbitTaskInline }),
+      });
+      yield* seedOrbitTask;
+      assert.deepStrictEqual(yield* runMigrations(), releasedAfter(99));
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+        SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
+      `;
+      assert.deepStrictEqual(
+        history.map((row) => [row.migration_id, row.name] as const),
+        migrationManifest,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT inline_work_output AS inline FROM orchestration_v2_projection_turn_items`,
+        [{ inline: 1 }],
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+  it.effect("refuses to move it past later recorded migrations", () =>
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: 99 });
+      yield* Migrator.make({})({
+        loader: Migrator.fromRecord({
+          "100_TurnItemOrbitTaskInline": TurnItemOrbitTaskInline,
+          "101_Unexpected": Effect.void,
+        }),
+      });
+      const exit = yield* Effect.exit(runMigrations());
+      assert.isTrue(Exit.isFailure(exit));
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });

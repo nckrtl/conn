@@ -293,7 +293,11 @@ fn render_popover_body(
             .child(
                 div()
                     .id("composer-context-meter-title")
-                    .a11y(Role::Label, "composer.context-meter.title", "Context Window")
+                    .a11y(
+                        Role::Label,
+                        "composer.context-meter.title",
+                        "Context Window",
+                    )
                     .text_size(px(12.0))
                     .line_height(px(16.0))
                     .font_weight(FontWeight::MEDIUM)

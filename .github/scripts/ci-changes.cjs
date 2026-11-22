@@ -13,6 +13,7 @@ const INERT = [
   // The Conn Server (Rust) has its own workflows (conn-server-*.yml); no Conn job reads it.
   /^apps\/conn-server\//,
   /^\.github\/workflows\/conn-server-/,
+  /^\.github\/scripts\/conn-server-checks-paths\.(cjs|d\.cts)$/,
   // The GPUI desktop client (Rust) checks itself with apps/conn-gpui/scripts/check.sh.
   /^apps\/conn-gpui\//,
 ];
@@ -65,9 +66,9 @@ const TEST_ONLY_DEPS = {
 };
 // Tests that read files outside every package; they do not change what the packages ship.
 const TEST_ONLY_FILES = [
-  // scripts/conn-server-checks-paths.test.ts reads the checks' tools and the workflow's paths.
+  // scripts/conn-server-checks-paths.test.ts reads the checks' tools and their path list.
   [
-    /^apps\/conn-server\/.*\.(mjs|cjs|js|ts|sh|py)$|^\.github\/workflows\/conn-server-checks\.yml$/,
+    /^apps\/conn-server\/.*\.(mjs|cjs|js|ts|sh|py)$|^\.github\/(workflows\/conn-server-checks\.yml|scripts\/conn-server-checks-paths\.(cjs|d\.cts))$/,
     "@t3tools/scripts",
   ],
 ];

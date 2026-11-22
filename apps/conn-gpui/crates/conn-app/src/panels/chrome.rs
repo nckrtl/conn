@@ -253,12 +253,12 @@ pub(crate) const SECTION_TABS_HEIGHT_PX: f32 = 36.0;
 /// Row inset used by panel lists (`ps-4`, `px-4`).
 pub(crate) const ROW_PAD_START_PX: f32 = 16.0;
 /// Conn `StatusDotBadge` (`apps/web/src/components/StatusDotBadge.tsx`) geometry:
-/// `6px` solid status dot (`size-1.5`) centered at `(100% - 2px, 2px)` with a `2px` opaque cutout
-/// ring (`10px` outer disc at `top: -3px, right: -3px`).
+/// `6px` solid status dot (`size-1.5`) with a `2px` opaque cutout ring (`10px` outer disc)
+/// centered right on the icon's corner (`top: -5px, right: -5px`, half-width / half-height).
 pub(crate) const STATUS_DOT_INNER_PX: f32 = 6.0;
 pub(crate) const STATUS_DOT_RING_PX: f32 = 2.0;
 pub(crate) const STATUS_DOT_OUTER_PX: f32 = STATUS_DOT_INNER_PX + 2.0 * STATUS_DOT_RING_PX;
-pub(crate) const STATUS_DOT_OFFSET_PX: f32 = -(STATUS_DOT_RING_PX + 1.0);
+pub(crate) const STATUS_DOT_OFFSET_PX: f32 = -(STATUS_DOT_OUTER_PX / 2.0);
 const PILL_RADIUS_PX: f32 = 9999.0;
 
 /// Alpha-composites a translucent `overlay` over an opaque `backdrop` (`a = 1.0`).

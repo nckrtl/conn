@@ -961,11 +961,11 @@ fn sidebar_status_dot_renders_10px_cutout_around_6px_dot(cx: &mut TestAppContext
             );
             let center_x = f32::from(cutout.center().x);
             let center_y = f32::from(cutout.center().y);
-            let expected_x = f32::from(favicon.right()) - 2.0;
-            let expected_y = f32::from(favicon.top()) + 2.0;
+            let expected_x = f32::from(favicon.right());
+            let expected_y = f32::from(favicon.top());
             assert!(
                 (center_x - expected_x).abs() <= 0.75 && (center_y - expected_y).abs() <= 0.75,
-                "{thread_id} cutout center must sit at (favicon.right - 2, favicon.top + 2) = ({expected_x:.1}, {expected_y:.1}), got ({center_x:.1}, {center_y:.1})"
+                "{thread_id} cutout center must sit on the icon corner (half-width/half-height) = ({expected_x:.1}, {expected_y:.1}), got ({center_x:.1}, {center_y:.1})"
             );
         }
     });

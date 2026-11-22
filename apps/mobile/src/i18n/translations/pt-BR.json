@@ -5527,8 +5527,6 @@
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Chamadas de ferramentas no chat",
   "8d545d54c0a9e950": "Oculta os comandos, edições e pesquisas que os agentes executam. \"Ocultar bem-sucedidas\" mantém as falhas. Zen mostra só as respostas finais. Aprovações, perguntas e erros sempre aparecem.",
-  "cf3ad61859b09910": "Aprovado antes do último commit",
-  "3e562db94c685f71": "Desatualizado",
   "c1968621dc365115": "Não foi possível sincronizar as mensagens",
   "439737cb6de2a5b3": "Copiar URL da imagem",
   "d3d24474c922eef2": "Copiar {count} URLs de imagens",

@@ -71,6 +71,7 @@ import {
   waitForDesktopUpdateTarget,
   runDesktopCommitWithReconnectObserver,
 } from "./server.ts";
+import { runAtomCommand } from "./runtime.ts";
 import { applyServerConfigProjection } from "./serverConfigProjection.ts";
 
 const CONFIG = {
@@ -413,10 +414,14 @@ describe("accepted server update recovery", () => {
       const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (value) =>
         Effect.sync(() => value.dispose()),
       );
-      const pending = atoms.updateServer.run(registry, {
-        environmentId: TARGET.environmentId,
-        input: { targetVersion: "0.0.31" },
-      });
+      // The registry drops an unmounted atom's value while the update is still running.
+      yield* AtomRegistry.mount(registry, serverUpdateStateAtom(TARGET.environmentId));
+      const pending = runAtomCommand(
+        registry,
+        atoms.updateServer,
+        { environmentId: TARGET.environmentId, input: { targetVersion: "0.0.31" } },
+        { reportFailure: false, reportDefect: false },
+      );
       if (loss === "cancel") {
         yield* Fiber.interrupt(yield* Deferred.await(cancelFiber));
         const cancelled = yield* Effect.promise(() => pending);
@@ -1647,11 +1652,13 @@ describe("launcher update resume", () => {
     const updateStateAtom = serverUpdateStateAtom(TARGET.environmentId);
     yield* AtomRegistry.mount(registry, updateStateAtom);
 
-    yield* Effect.promise(() =>
-      atoms.updateServer.run(registry, {
-        environmentId: TARGET.environmentId,
-        input: { targetVersion: "0.0.31" },
-      }),
+    yield* Effect.promise((signal) =>
+      runAtomCommand(
+        registry,
+        atoms.updateServer,
+        { environmentId: TARGET.environmentId, input: { targetVersion: "0.0.31" } },
+        { reportFailure: false, reportDefect: false, signal },
+      ),
     ).pipe(Effect.forkScoped);
     return {
       // The host saw its first call: the update request or a lifecycle subscription.

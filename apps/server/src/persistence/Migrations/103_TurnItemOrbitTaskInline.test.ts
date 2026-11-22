@@ -7,11 +7,11 @@ import { runMigrations } from "../Migrations.ts";
 
 const layer = it.layer(NodeSqliteClient.layer({ filename: ":memory:" }));
 
-layer("100_TurnItemOrbitTaskInline", (it) => {
+layer("103_TurnItemOrbitTaskInline", (it) => {
   it.effect("flags existing Orbit task-create dynamic tools as inline work output", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 99 });
+      yield* runMigrations({ toMigrationInclusive: 102 });
       const rows: ReadonlyArray<readonly [string, string, object, number]> = [
         ["mcp-task", "dynamic_tool", { toolName: "mcp__orbit__task-create", output: "{}" }, 1],
         ["dot-task", "dynamic_tool", { toolName: "orbit.task_create", output: "{}" }, 1],
@@ -30,7 +30,7 @@ layer("100_TurnItemOrbitTaskInline", (it) => {
         `;
       }
 
-      yield* runMigrations({ toMigrationInclusive: 100 });
+      yield* runMigrations({ toMigrationInclusive: 103 });
       const flagged = yield* sql<{ readonly turn_item_id: string; readonly inline: number }>`
         SELECT turn_item_id, inline_work_output AS inline
         FROM orchestration_v2_projection_turn_items

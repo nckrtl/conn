@@ -6,6 +6,7 @@
 // pnpm-lock.yaml installs, and every file those import or read, transitively.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
@@ -45,13 +46,10 @@ const NOT_RUN_BY_CHECKS = [
   "apps/server/scripts/mobile-lab-seed.ts",
 ];
 
-// Files a test adds on top of the checkout, as absolute path → contents.
-const overlay = new Map<string, string>();
 const posix = (file: string) => NodePath.relative(root, file).split(NodePath.sep).join("/");
-const isFile = (file: string) =>
-  overlay.has(file) || (NodeFS.existsSync(file) && NodeFS.statSync(file).isFile());
+const isFile = (file: string) => NodeFS.existsSync(file) && NodeFS.statSync(file).isFile();
 const isDir = (file: string) => NodeFS.existsSync(file) && NodeFS.statSync(file).isDirectory();
-const readText = (file: string) => overlay.get(file) ?? NodeFS.readFileSync(file, "utf8");
+const readText = (file: string) => NodeFS.readFileSync(file, "utf8");
 const readJson = (file: string) => JSON.parse(readText(file));
 
 // CI checks out tracked files only.
@@ -65,11 +63,10 @@ const tracked = new Set(
     .filter((file) => file && !file.startsWith(".repos/"))
     .map((file) => NodePath.join(root, file)),
 );
-const isTracked = (file: string) => overlay.has(file) || (tracked.has(file) && isFile(file));
-const allFiles = () => [...tracked, ...overlay.keys()];
+const isTracked = (file: string) => tracked.has(file) && isFile(file);
 function filesUnder(dir: string): Array<string> {
   const prefix = `${dir}${NodePath.sep}`;
-  return allFiles().filter((file) => file.startsWith(prefix) && isFile(file));
+  return [...tracked].filter((file) => file.startsWith(prefix) && isFile(file));
 }
 
 type Package = {
@@ -91,126 +88,95 @@ const PACKAGE_NAME = new RegExp(
   "g",
 );
 
-/**
- * Every runtime target of an `exports` or `imports` entry: all conditions (node, import,
- * require, default, development...), nested, but not `types`, which nothing runs.
- */
-function conditionTargets(entry: unknown): Array<string> {
-  if (typeof entry === "string") return [entry];
-  if (Array.isArray(entry)) return entry.flatMap(conditionTargets);
-  if (entry && typeof entry === "object") {
-    return Object.entries(entry)
-      .filter(([condition]) => condition !== "types" && !condition.startsWith("types@"))
-      .flatMap(([, target]) => conditionTargets(target));
-  }
-  return [];
-}
+// Node resolves `exports` and `imports` for one set of conditions. The checks run code under
+// Node (import and require), Vite's SSR and Vitest (node, module, development/production) and
+// Vite's browser build (annotation-overlay's `prepare`); the walk takes the union. `default`
+// always matches. This hook hands Node the set for each call and is inert otherwise.
+const CONDITION_SETS = [
+  ["node", "import"],
+  ["node", "require"],
+  ["node", "import", "module", "development"],
+  ["node", "import", "module", "production"],
+  ["browser", "import", "module", "development"],
+  ["browser", "import", "module", "production"],
+];
+let activeConditions: Array<string> | undefined;
+NodeModule.registerHooks({
+  resolve: (specifier, context, nextResolve) =>
+    nextResolve(
+      specifier,
+      activeConditions ? { ...context, conditions: activeConditions } : context,
+    ),
+});
 
-/** The targets a subpath map (`exports` or `imports`) gives `key`, with `*` patterns. */
-function mapTargets(map: Record<string, unknown>, key: string): Array<string> {
-  if (key in map) return conditionTargets(map[key]);
-  return Object.entries(map).flatMap(([pattern, entry]) => {
-    const star = pattern.indexOf("*");
-    if (star === -1) return [];
-    const [prefix, suffix] = [pattern.slice(0, star), pattern.slice(star + 1)];
-    if (!key.startsWith(prefix) || !key.endsWith(suffix) || key.length < pattern.length - 1) {
-      return [];
+/** What Node resolves `specifier` to from `from`, under every condition set. */
+function nodeResolve(from: string, specifier: string): Array<string> {
+  const require = NodeModule.createRequire(from);
+  const found = new Set<string>();
+  for (const conditions of CONDITION_SETS) {
+    activeConditions = conditions;
+    try {
+      const file = require.resolve(specifier);
+      if (NodePath.isAbsolute(file)) found.add(NodeFS.realpathSync(file));
+    } catch {
+      // Not resolvable under these conditions.
+    } finally {
+      activeConditions = undefined;
     }
-    const match = key.slice(prefix.length, key.length - suffix.length);
-    return conditionTargets(entry).map((target) => target.replaceAll("*", match));
-  });
-}
-
-const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
-
-/** A package's subpath map: a string `exports` is its ".". */
-function exportsMap(json: { exports?: unknown }): Record<string, unknown> {
-  const { exports } = json;
-  if (typeof exports === "string" || Array.isArray(exports)) return { ".": exports };
-  if (!exports || typeof exports !== "object") return {};
-  // Conditions without subpaths (`{ "node": "./a.js" }`) are the "." entry.
-  return Object.keys(exports).some((key) => key.startsWith("."))
-    ? (exports as Record<string, unknown>)
-    : { ".": exports };
-}
-
-/** A package folder's entries: every `exports["."]` target and `main`, else `index.*`. */
-function packageEntry(dir: string): Array<string> {
-  const manifest = NodePath.join(dir, "package.json");
-  if (isFile(manifest)) {
-    const json = readJson(manifest);
-    const entries = [...mapTargets(exportsMap(json), "."), json.main]
-      .filter((entry): entry is string => typeof entry === "string")
-      .flatMap((entry) => resolvePath(NodePath.join(dir, entry)));
-    if (entries.length > 0) return entries;
   }
-  return EXTENSIONS.map((extension) => NodePath.join(dir, `index${extension}`))
-    .filter(isFile)
-    .slice(0, 1);
+  return [...found];
 }
 
-/** Node and TypeScript resolution of a path: exact, `.js` → `.ts`, extensions, then folder. */
-function resolvePath(base: string): Array<string> {
-  if (isFile(base)) return [base];
-  const source = base.replace(/\.(m|c)?js(x?)$/, (_, kind = "", x) => `.${kind}ts${x}`);
-  if (source !== base && isFile(source)) return [source];
-  const withExtension = EXTENSIONS.map((extension) => `${base}${extension}`).find(isFile);
-  if (withExtension) return [withExtension];
-  return isDir(base) ||
-    [...overlay.keys()].some((file) => file.startsWith(`${base}${NodePath.sep}`))
-    ? packageEntry(base)
-    : [];
+// What Node does not do: TypeScript's and Vite's `./x.js` → `./x.ts`, extensionless `.ts`
+// and `index.ts`. Taken in addition to Node's answer, since Vite tries them too.
+const TS_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
+function typescriptResolve(from: string, specifier: string): Array<string> {
+  if (!specifier.startsWith(".")) return [];
+  const base = NodePath.resolve(NodePath.dirname(from), specifier);
+  const mapped = base.replace(/\.(m|c)?js(x?)$/, (_, kind = "", x) => `.${kind}ts${x}`);
+  return [
+    mapped,
+    ...TS_EXTENSIONS.map((extension) => `${base}${extension}`),
+    ...TS_EXTENSIONS.map((extension) => NodePath.join(base, `index${extension}`)),
+  ].filter((file) => file !== base && isFile(file));
 }
 
 /** The nearest package.json above a file. */
-function owningManifest(from: string): string | undefined {
-  for (let dir = NodePath.dirname(from); dir.startsWith(root); dir = NodePath.dirname(dir)) {
+function owningManifest(file: string): string | undefined {
+  for (let dir = NodePath.dirname(file); ; dir = NodePath.dirname(dir)) {
     const manifest = NodePath.join(dir, "package.json");
     if (isFile(manifest)) return manifest;
-    if (dir === root) break;
+    if (dir === NodePath.dirname(dir)) return undefined;
   }
-  return undefined;
 }
 
-/** The monorepo files a specifier loads; [] for a package from the registry. */
+/** The monorepo files a specifier loads, with the manifests that decided it. */
 function resolveSpecifier(from: string, specifier: string): Array<string> {
-  if (specifier.startsWith(".")) {
-    const found = resolvePath(NodePath.resolve(NodePath.dirname(from), specifier));
-    // No file: a specifier inside a string or a fixture, so there is nothing to read.
-    return found.flatMap((file) => {
-      const manifest = NodePath.join(NodePath.dirname(file), "package.json");
-      return isFile(manifest) && file !== manifest ? [file, manifest] : [file];
-    });
-  }
-  if (specifier.startsWith("#")) {
-    const manifest = owningManifest(from);
-    if (!manifest) return [];
-    const targets = mapTargets(readJson(manifest).imports ?? {}, specifier);
-    return [
-      manifest,
-      ...targets.flatMap((target) =>
-        target.startsWith(".")
-          ? resolvePath(NodePath.join(NodePath.dirname(manifest), target))
-          : resolveSpecifier(manifest, target),
-      ),
-    ];
-  }
-  const parts = specifier.split("/");
-  const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+  // A tool names workspace packages outside any module that depends on them; Node finds them
+  // from inside the package (self-reference) or from apps/server, which the tools import as.
+  const name = specifier.startsWith("@")
+    ? specifier.split("/").slice(0, 2).join("/")
+    : specifier.split("/")[0]!;
   const pkg = workspace.get(name);
-  if (!pkg) return [];
-  const manifest = NodePath.join(pkg.dir, "package.json");
-  const subpath = `.${specifier.slice(name.length)}`;
-  const map = exportsMap(readJson(manifest));
-  const found =
-    Object.keys(map).length === 0
-      ? subpath === "."
-        ? packageEntry(pkg.dir)
-        : resolvePath(NodePath.join(pkg.dir, subpath))
-      : mapTargets(map, subpath).flatMap((target) => resolvePath(NodePath.join(pkg.dir, target)));
-  // A subpath this test cannot resolve: count the whole package.
-  if (found.length === 0) return filesUnder(pkg.dir);
-  return [...found, manifest];
+  const contexts = [from];
+  if (pkg) {
+    contexts.push(
+      NodePath.join(pkg.dir, "package.json"),
+      NodePath.join(root, "apps/server/package.json"),
+    );
+  }
+  let found: Array<string> = [];
+  for (const context of contexts) {
+    found = [...nodeResolve(context, specifier), ...typescriptResolve(context, specifier)];
+    if (found.length > 0) break;
+  }
+  // A registry package: the lockfile covers it.
+  found = found.filter((file) => !file.split(NodePath.sep).includes("node_modules"));
+  // A workspace package this test cannot resolve: count all of it.
+  if (found.length === 0 && pkg) return filesUnder(pkg.dir);
+  const manifests = found.flatMap((file) => owningManifest(file) ?? []);
+  if (specifier.startsWith("#")) manifests.push(...(owningManifest(from) ?? []));
+  return [...new Set([...found, ...manifests])];
 }
 
 /**
@@ -232,7 +198,7 @@ function toolReferences(source: string): Array<string> {
     else files.push(...(isDir(target) ? filesUnder(target) : [target]));
   }
   for (const [, specifier] of source.matchAll(PACKAGE_NAME)) {
-    files.push(...resolveSpecifier(root, specifier!));
+    files.push(...resolveSpecifier(NodePath.join(root, "package.json"), specifier!));
   }
   return files;
 }
@@ -272,7 +238,7 @@ function checkedFiles(): Set<string> {
   // Config the ancestor rule selects runs when a tool finds it (postcss.config.cjs), so the
   // walk follows its imports too.
   seeds.push(
-    ...allFiles().filter((file) => {
+    ...[...tracked].filter((file) => {
       const relative = posix(file);
       const dir = NodePath.posix.dirname(relative);
       return CODE.test(file) && ANCESTOR_DIRS.has(dir === "." ? "" : dir) && matches(relative);
@@ -294,8 +260,13 @@ function checkedFiles(): Set<string> {
   }
 
   const notRun = new Set(NOT_RUN_BY_CHECKS.map((file) => NodePath.join(root, file)));
+  return new Set([...walk(seeds.filter((file) => !notRun.has(file)))].map(posix));
+}
+
+/** Every file the seeds import or read, transitively, as absolute paths. */
+function walk(seeds: Array<string>): Set<string> {
   const reached = new Set<string>();
-  const queue = seeds.filter((file) => !notRun.has(file));
+  const queue = [...seeds];
   while (queue.length > 0) {
     const file = queue.pop()!;
     if (reached.has(file)) continue;
@@ -310,7 +281,7 @@ function checkedFiles(): Set<string> {
     }
     for (const found of next) if (!reached.has(found)) queue.push(found);
   }
-  return new Set([...reached].map(posix));
+  return reached;
 }
 
 const files = checkedFiles();
@@ -329,79 +300,127 @@ it("follows packages a tool loads through a package importer", () => {
   expect(matches("packages/client-runtime/src/pullRequestDiffFold.ts")).toBe(false);
 });
 
-it("follows imports of config found in a folder above the checked files", () => {
-  overlay.set(
-    NodePath.join(root, "postcss.config.cjs"),
-    'module.exports = require("./postcss-plugins.cjs");',
+/** A throwaway folder of files (and symlinks, for `node_modules`), removed after `run`. */
+function withFixture(
+  files: Record<string, string>,
+  run: (dir: string) => void,
+  links: Record<string, string> = {},
+) {
+  const dir = NodeFS.realpathSync(
+    NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conn-server-checks-resolve-")),
   );
-  overlay.set(NodePath.join(root, "postcss-plugins.cjs"), "module.exports = {};");
   try {
-    const reached = checkedFiles();
-    expect(reached.has("postcss.config.cjs")).toBe(true);
-    expect(reached.has("postcss-plugins.cjs")).toBe(true);
-    // So the first test would fail until the helper is selected.
-    expect(matches("postcss-plugins.cjs")).toBe(false);
+    for (const [file, contents] of Object.entries(files)) {
+      NodeFS.mkdirSync(NodePath.dirname(NodePath.join(dir, file)), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(dir, file), contents);
+    }
+    for (const [link, target] of Object.entries(links)) {
+      NodeFS.mkdirSync(NodePath.dirname(NodePath.join(dir, link)), { recursive: true });
+      NodeFS.symlinkSync(NodePath.join(dir, target), NodePath.join(dir, link), "dir");
+    }
+    run(dir);
   } finally {
-    overlay.clear();
+    NodeFS.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+const reachedFrom = (dir: string, entry: string) =>
+  new Set([...walk([NodePath.join(dir, entry)])].map((file) => NodePath.relative(dir, file)));
+
+it("starts the walk at every config file the ancestor rule selects", () => {
+  expect(files.has(".coderabbit.config.ts")).toBe(true);
+  // Imported only by scripts/e2e.config.ts and scripts/mobile-showcase.config.ts.
+  expect(files.has("scripts/mobile-showcase-environment.ts")).toBe(true);
+  withFixture(
+    {
+      "postcss.config.cjs": 'module.exports = require("./postcss-plugins.cjs");',
+      "postcss-plugins.cjs": "module.exports = {};",
+    },
+    (dir) => expect(reachedFrom(dir, "postcss.config.cjs")).toContain("postcss-plugins.cjs"),
+  );
 });
 
 it.each([
-  ["an extensionless require of a .js file", "./postcss-plugins", "postcss-plugins.js"],
-  ["a .js specifier of a .ts file", "./postcss-plugins.js", "postcss-plugins.ts"],
-  ["a folder's index", "./postcss-plugins", "postcss-plugins/index.mjs"],
-  ["a folder's package.json main", "./postcss-plugins", "postcss-plugins/lib/main.cjs"],
-])("follows %s from ancestor config", (_, specifier, helper) => {
-  overlay.set(
-    NodePath.join(root, "postcss.config.cjs"),
-    `module.exports = require("${specifier}");`,
+  ["an extensionless require of a .js file", "./plugins", { "plugins.js": "" }, "plugins.js"],
+  ["a .js specifier of a .ts file", "./plugins.js", { "plugins.ts": "" }, "plugins.ts"],
+  ["a folder's index", "./plugins", { "plugins/index.js": "" }, "plugins/index.js"],
+  [
+    "a folder's package.json main",
+    "./plugins",
+    { "plugins/package.json": '{ "main": "lib/main.cjs" }', "plugins/lib/main.cjs": "" },
+    "plugins/lib/main.cjs",
+  ],
+  [
+    // `exports` applies to package names, not to a folder path.
+    "a folder with conditional exports and no main to its index",
+    "./plugins",
+    {
+      "plugins/package.json": '{ "exports": { ".": { "node": "./node.js" } } }',
+      "plugins/node.js": "",
+      "plugins/index.js": "",
+    },
+    "plugins/index.js",
+  ],
+])("follows %s from ancestor config", (_, specifier, extra, helper) => {
+  withFixture({ "postcss.config.cjs": `require("${specifier}");`, ...extra }, (dir) =>
+    expect(reachedFrom(dir, "postcss.config.cjs")).toContain(helper),
   );
-  overlay.set(NodePath.join(root, helper), "module.exports = {};");
-  if (helper.endsWith("main.cjs")) {
-    overlay.set(NodePath.join(root, "postcss-plugins/package.json"), '{ "main": "lib/main.cjs" }');
-  }
-  try {
-    expect(checkedFiles().has(helper)).toBe(true);
-  } finally {
-    overlay.clear();
-  }
 });
 
 it("follows every runtime condition of a package's exports", () => {
-  const manifest = NodePath.join(root, "packages/client-runtime/package.json");
-  const json = readJson(manifest);
-  // Node picks `node` here; the test must not settle on `default`.
-  json.exports["./orbit-gateway/client"] = {
-    types: "./src/orbitGateway/client.ts",
-    node: "./src/orbitGateway/client.node.ts",
-    default: "./src/orbitGateway/client.ts",
-  };
-  overlay.set(manifest, JSON.stringify(json));
-  overlay.set(NodePath.join(root, "packages/client-runtime/src/orbitGateway/client.node.ts"), "");
-  try {
-    const reached = checkedFiles();
-    expect(reached.has("packages/client-runtime/src/orbitGateway/client.node.ts")).toBe(true);
-    expect(reached.has("packages/client-runtime/src/orbitGateway/client.ts")).toBe(true);
-  } finally {
-    overlay.clear();
-  }
+  withFixture(
+    {
+      "pkgs/pkg/package.json": JSON.stringify({
+        name: "pkg",
+        exports: {
+          // Node picks `node` here; the walk must not settle on `default`.
+          "./client": {
+            types: "./src/client.d.ts",
+            node: "./src/client.node.js",
+            default: "./src/client.js",
+          },
+        },
+      }),
+      "pkgs/pkg/src/client.d.ts": "",
+      "pkgs/pkg/src/client.node.js": "",
+      "pkgs/pkg/src/client.js": "",
+      "app.cjs": 'require("pkg/client");',
+    },
+    (dir) => {
+      const reached = reachedFrom(dir, "app.cjs");
+      expect(reached).toContain("pkgs/pkg/src/client.node.js");
+      expect(reached).toContain("pkgs/pkg/src/client.js");
+      expect(reached).not.toContain("pkgs/pkg/src/client.d.ts");
+    },
+    { "node_modules/pkg": "pkgs/pkg" },
+  );
 });
 
-it("follows a package's # imports through every condition", () => {
-  overlay.set(
-    NodePath.join(root, "package.json"),
-    JSON.stringify({
-      ...readJson(NodePath.join(root, "package.json")),
-      imports: { "#plugins/*": { types: "./types.d.ts", require: "./plugins/*.cjs" } },
-    }),
+it("follows # imports the way Node picks them", () => {
+  withFixture(
+    {
+      "package.json": JSON.stringify({
+        imports: {
+          "#plugins/*": { types: "./types/*.d.ts", require: "./plugins/*.cjs" },
+          "#plugins/server/*": "./server-plugins/*.cjs",
+        },
+      }),
+      "postcss.config.cjs": 'require("#plugins/tailwind"); require("#plugins/server/auth");',
+      "plugins/tailwind.cjs": "",
+      "plugins/server/auth.cjs": "",
+      "server-plugins/auth.cjs": "",
+      "types/tailwind.d.ts": "",
+    },
+    (dir) => {
+      const reached = reachedFrom(dir, "postcss.config.cjs");
+      expect(reached).toContain("plugins/tailwind.cjs");
+      expect(reached).toContain("package.json");
+      // The most specific pattern wins, as in Node.
+      expect(reached).toContain("server-plugins/auth.cjs");
+      expect(reached).not.toContain("plugins/server/auth.cjs");
+      expect(reached).not.toContain("types/tailwind.d.ts");
+    },
   );
-  overlay.set(NodePath.join(root, "postcss.config.cjs"), 'require("#plugins/tailwind");');
-  overlay.set(NodePath.join(root, "plugins/tailwind.cjs"), "");
-  try {
-    expect(checkedFiles().has("plugins/tailwind.cjs")).toBe(true);
-  } finally {
-    overlay.clear();
-  }
 });
 
 it("follows data files a reached module reads", () => {

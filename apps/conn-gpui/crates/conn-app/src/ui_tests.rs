@@ -967,6 +967,109 @@ fn sidebar_status_dot_renders_10px_cutout_around_6px_dot(cx: &mut TestAppContext
                 (center_x - expected_x).abs() <= 0.75 && (center_y - expected_y).abs() <= 0.75,
                 "{thread_id} cutout center must sit on the icon corner (half-width/half-height) = ({expected_x:.1}, {expected_y:.1}), got ({center_x:.1}, {center_y:.1})"
             );
+
+#[gpui_kit::test]
+fn thread_hover_card_opens_for_the_hovered_row_and_closes_for_menus(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+    let card = "Thread preview: Pinned active thread";
+    assert!(
+        !cx.update_window(window, |_, w, cx| has_label(w, cx, card))
+            .unwrap_or(true)
+    );
+
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.open_thread_hover_for_test("thread-pinned", cx)
+        });
+    });
+    assert_eq!(
+        cx.read(|cx| app.read(cx).thread_hover.open_for().map(str::to_owned)),
+        Some("thread-pinned".to_owned())
+    );
+    assert!(
+        cx.update_window(window, |_, w, cx| has_label(w, cx, card))
+            .unwrap_or(false),
+        "an open hover state must render the flyout inside the hovered row: {:?}",
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.elements()
+                .iter()
+                .filter_map(|e| e.label().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+    );
+
+    // A right-click opens the Thread Actions menu and must take the flyout down.
+    let row_pt = match cx.update_window(window, |_, window, cx| {
+        center_by_label(window, cx, "Selected kitchen-sink thread")
+    }) {
+        Ok(pt) => pt,
+        Err(err) => panic!("failed to locate sidebar thread row: {err}"),
+    };
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.pointer_down(row_pt, MouseButton::Right, cx);
+        window.pointer_up(row_pt, MouseButton::Right, cx);
+        window.render_frame(cx);
+    });
+    assert!(
+        !cx.update_window(window, |_, w, cx| has_label(w, cx, card))
+            .unwrap_or(true),
+        "opening the thread menu must close the hover flyout"
+    );
+}
+
+#[test]
+fn hover_card_model_lists_only_the_fields_the_thread_has() {
+    use conn_contract::OrchestrationV2ProviderFailureClass as FailureClass;
+
+    use crate::sidebar::hover_card_state::{HoverError, hover_card_model};
+
+    let shell = kitchen_sink_shell();
+    let mut thread = shell
+        .threads
+        .iter()
+        .find(|t| t.id == "thread-selected")
+        .cloned()
+        .expect("kitchen-sink thread");
+    let project = shell.project("proj-parity");
+
+    let plain = hover_card_model(&thread, project, None);
+    assert_eq!(plain.project.as_deref(), Some("conn-gpui"));
+    assert_eq!(plain.branch.as_deref(), Some("feat/parity-check"));
+    assert_eq!(plain.model, "claude-sonnet-4-6");
+    assert_eq!(plain.environment, None);
+    assert_eq!(plain.subagents, None);
+    assert_eq!(plain.handed_off_from, None);
+    assert_eq!(plain.error, None);
+    assert!(plain.pull_requests.is_empty());
+
+    thread.subagent_count = Some(2);
+    thread.provider_instance_history = Some(Some(vec![
+        "codex".to_owned(),
+        thread.provider_instance_id.clone(),
+    ]));
+    thread.last_error = Some(Some("boom".to_owned()));
+    thread.last_error_class = Some(Some(FailureClass::UsageLimit));
+    let rich = hover_card_model(&thread, project, Some("Mac mini"));
+    assert_eq!(rich.environment.as_deref(), Some("Mac mini"));
+    assert_eq!(rich.subagents, Some(2));
+    assert_eq!(rich.handed_off_from.as_deref(), Some("Codex"));
+    assert_eq!(rich.error, Some(HoverError::UsageLimit));
+
+    thread.last_error_class = Some(Some(FailureClass::ProviderError));
+    assert_eq!(
+        hover_card_model(&thread, project, None).error,
+        Some(HoverError::Failed)
+    );
+    thread.last_error = Some(Some("  ".to_owned()));
+    assert_eq!(hover_card_model(&thread, project, None).error, None);
+}
         }
     });
 }

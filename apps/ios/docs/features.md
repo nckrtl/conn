@@ -273,6 +273,12 @@ Parity is scoped like `conn-gpui` (Nick, 2026-11-22): not every Expo feature 1:1
 
 Defaults for the open questions below (Nick, 2026-11-22): Issues Later, Orbit-only projects, drop Archive, local and device preview Later, Rust syntax highlighting, no widgets or Live Activities before push, iPhone only.
 
+### Orbit on iOS
+
+- **System frameworks:** `conn-orbit` verifies Orbit Gateway HTTPS and Reverb WSS TLS certificates through `rustls-platform-verifier` (Apple's `SecTrustEvaluateWithError`), so `apps/ios/project.yml` links `Security.framework` and `CoreFoundation.framework` alongside `ConnCore.xcframework`.
+- **Root CA trust on device:** Installing the Orbit root CA configuration profile is not enough by itself on iOS — full trust must also be enabled manually in **Settings → General → About → Certificate Trust Settings**.
+- **WireGuard identity:** The Orbit Gateway identifies the iPhone by its WireGuard address with no credentials; `OrbitCore.me()` verifies reachability, `OrbitCore.primaryAgent()` selects the primary `agent`-role node, and `OrbitCore.connectEnvironment(...)` reuses a cached Keychain bearer or mints a one-time pairing automatically.
+
 ---
 
 ## 21. Open Questions for Nick

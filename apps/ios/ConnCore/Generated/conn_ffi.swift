@@ -535,6 +535,22 @@ fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
+    typealias FfiType = Double
+    typealias SwiftType = Double
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Double {
+        return try lift(readDouble(&buf))
+    }
+
+    public static func write(_ value: Double, into buf: inout [UInt8]) {
+        writeDouble(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -652,6 +668,26 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func dismissUserInput(threadId: String, requestId: String) async throws 
     
     /**
+     * Ensures the server's General / scratch project (`projects.ensureScratch`, `"No project"`)
+     * exists and returns its `project_id`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func ensureScratchProject() async throws  -> String
+    
+    /**
+     * Launches a General (project-unbound) thread on this server by ensuring the scratch project
+     * (`projects.ensureScratch`) and calling [`Self::launch_thread`].
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func launchGeneralThread(text: String) async throws  -> String
+    
+    /**
      * Creates a new thread in `project_id` with `text` as its first message via
      * `orchestration.launchThread`, applies the returned projection, subscribes to the new
      * thread, and returns the created thread id.
@@ -731,6 +767,11 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
     func sendMessage(threadId: String, text: String, mode: FfiSendMode) async throws 
+    
+    /**
+     * Returns the normalized HTTP base URL this connection targets.
+     */
+    func serverUrl()  -> String
     
     /**
      * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
@@ -925,6 +966,54 @@ open func dismissUserInput(threadId: String, requestId: String)async throws   {
 }
     
     /**
+     * Ensures the server's General / scratch project (`projects.ensureScratch`, `"No project"`)
+     * exists and returns its `project_id`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func ensureScratchProject()async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_ensure_scratch_project(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Launches a General (project-unbound) thread on this server by ensuring the scratch project
+     * (`projects.ensureScratch`) and calling [`Self::launch_thread`].
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func launchGeneralThread(text: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_launch_general_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(text)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Creates a new thread in `project_id` with `text` as its first message via
      * `orchestration.launchThread`, applies the returned projection, subscribes to the new
      * thread, and returns the created thread id.
@@ -1114,6 +1203,18 @@ open func sendMessage(threadId: String, text: String, mode: FfiSendMode)async th
             liftFunc: { $0 },
             errorHandler: FfiConverterTypeFfiError_lift
         )
+}
+    
+    /**
+     * Returns the normalized HTTP base URL this connection targets.
+     */
+open func serverUrl() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_server_url(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1561,6 +1662,1173 @@ public func FfiConverterTypeCoreListener_lower(_ value: CoreListener) -> UInt64 
 
 
 
+
+
+/**
+ * UniFFI handle to the Orbit Gateway client, Reverb realtime follower, and Tokio runtime.
+ */
+public protocol OrbitCoreProtocol: AnyObject, Sendable {
+    
+    /**
+     * Reads the currently bound Orbit profile (`GET /me`) and its workspaces + appearance
+     * settings (`GET /profiles/{id}/settings`), or `None` when this device has no bound profile.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func boundProfile() async throws  -> FfiOrbitBoundProfile?
+    
+    /**
+     * Checks whether `name` is available for a new Instance of `project_id`
+     * (`GET /api/v1/conn/projects/{id}/instances/check?name=...`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func checkInstanceName(projectId: Int64, name: String) async throws  -> FfiOrbitInstanceNameCheck
+    
+    /**
+     * Connects a [`ConnCore`] to Orbit environment `server_id` (steps 2–5 of the documented
+     * Orbit connect flow):
+     * - Reuses `cached_bearer` when supplied and accepted by `GET /api/auth/session`.
+     * - Otherwise (no cached bearer, or auth failure on the cached bearer) mints a fresh pairing
+     * link once (`mint_pairing`), extracts the base URL + `#token=` pairing code, and starts
+     * [`ConnCore`] with [`FfiCredential::PairingCode`]; [`CoreListener::on_bearer_issued`]
+     * delivers the resulting bearer token to store per `server_id` in Keychain.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] if the environment is not found or pairing fails, or any
+     * [`FfiError`] returned by [`ConnCore::connect`].
+     */
+    func connectEnvironment(serverId: String, cachedBearer: String?, listener: CoreListener) async throws  -> ConnCore
+    
+    /**
+     * Lists all Orbit Nodes and Instances registered on the Gateway (`GET /api/v1/conn/environments`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func fleet() async throws  -> [FfiOrbitEnvironment]
+    
+    /**
+     * Polls a reservation (`GET /api/v1/conn/reservations/{reservation_id}`) and caches any
+     * one-time pairing ticket returned once `state == Ready` for use by [`Self::start_project_thread`].
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func getReservation(reservationId: String) async throws  -> FfiOrbitReservation
+    
+    /**
+     * Reads the caller's Orbit Node identity (`GET /api/v1/conn/me`), proving WireGuard
+     * reachability without credentials.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func me() async throws  -> FfiOrbitMe
+    
+    /**
+     * Selects the primary Orbit `agent`-role Node (`select_primary_agent_node` with `None`
+     * because the iPhone does not host `conn-server`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func primaryAgent() async throws  -> FfiOrbitEnvironment?
+    
+    /**
+     * Reads workspaces and appearance settings for `profile_id` (`GET /api/v1/conn/profiles/{id}/settings`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func profileSettings(profileId: Int64) async throws  -> FfiOrbitProfileSettings
+    
+    /**
+     * Lists Orbit profiles (`GET /api/v1/conn/profiles`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func profiles() async throws  -> [FfiOrbitProfile]
+    
+    /**
+     * Lists branches of Orbit Project `project_id` (`GET /api/v1/conn/projects/{id}/branches`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func projectBranches(projectId: Int64, query: String?) async throws  -> FfiOrbitBranches
+    
+    /**
+     * Lists startable Orbit Projects (`GET /api/v1/conn/projects`), matching `OrbitThreadStartScreen`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func projects() async throws  -> [FfiOrbitProject]
+    
+    /**
+     * Lists all Orbit Projects including unavailable ones and their readiness checks
+     * (`GET /api/v1/conn/projects?include_unavailable=1`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func projectsIncludingUnavailable() async throws  -> [FfiOrbitProject]
+    
+    /**
+     * Releases an unused pre-warmed reservation (`DELETE /api/v1/conn/reservations/{reservation_id}`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func releaseReservation(reservationId: String) async throws  -> Int64?
+    
+    /**
+     * Pre-warms a clone reservation while the New Orbit Thread screen is open
+     * (`POST /api/v1/conn/projects/{project_id}/reservations`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func reserveProject(projectId: Int64) async throws  -> FfiOrbitReservation
+    
+    /**
+     * Starts a General (unbound) thread on the primary Orbit `agent`-role Node:
+     * resolves `primary_agent()`, connects `ConnCore` (reusing `cached_bearer` or minting a
+     * pairing once), ensures the agent node's scratch project (`projects.ensureScratch`), and
+     * launches the thread via `orchestration.launchThread`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] if `text` is blank, [`FfiError::Orbit`] if no primary
+     * agent node exists or pairing fails, or any connection/RPC [`FfiError`].
+     */
+    func startGeneralThread(text: String, cachedBearer: String?, listener: CoreListener) async throws  -> FfiStartedOrbitThread
+    
+    /**
+     * Starts a thread inside an Orbit Project (mirroring `OrbitThreadStartScreen`,
+     * `orbitThreadStarts.ts`, and `orbitReservations.ts`):
+     * - `NewInstance`: finalizes a ready `reservation_id` (falling back to creating a new clone
+     * Instance if the reservation expired/disappeared), pairs with the clone's `conn-server`,
+     * waits for its `/srv/workspace` project, and launches the thread.
+     * - `ExistingInstance`: wakes the instance if stopped, connects (reusing `cached_bearer` or
+     * minting a pairing once), waits for its `/srv/workspace` project, and launches the thread.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] if `text` is blank, [`FfiError::Orbit`] on Gateway
+     * errors, or any connection/RPC [`FfiError`].
+     */
+    func startProjectThread(target: FfiOrbitProjectTarget, text: String, listener: CoreListener) async throws  -> FfiStartedOrbitThread
+    
+    /**
+     * Starts Orbit's Reverb WebSocket + 30 s fallback poll follower (`conn_orbit::realtime`)
+     * and forwards task/fleet/profile invalidations to `listener`. Replaces any active follower.
+     */
+    func startRealtime(listener: OrbitListener) 
+    
+    /**
+     * Stops the active Reverb realtime follower, if any. Safe to call more than once.
+     */
+    func stopRealtime() 
+    
+    /**
+     * Reads full detail for one Orbit Task (`GET /api/v1/conn/tasks/{task_id}`), including
+     * subtasks, linked agent conversations, usage metrics, and pull request metadata.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func taskDetail(taskId: Int64) async throws  -> FfiTaskDetail
+    
+    /**
+     * Reads the Orbit Tasks board (lanes + task summaries + KPI insights strip), mirroring
+     * `conn_orbit::board` and `conn_orbit::insights`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] if reading the task list fails. If reading `/task-insights`
+     * fails independently (e.g. an older Gateway), `insights` degrades gracefully to `None`.
+     */
+    func tasksBoard(query: FfiTasksBoardQuery) async throws  -> FfiTasksBoard
+    
+    /**
+     * Wakes a stopped Orbit Instance (`POST /api/v1/instances/{instance_id}/wake`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+    func wakeInstance(instanceId: Int64) async throws  -> Int64?
+    
+}
+/**
+ * UniFFI handle to the Orbit Gateway client, Reverb realtime follower, and Tokio runtime.
+ */
+open class OrbitCore: OrbitCoreProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_conn_ffi_fn_clone_orbitcore(self.handle, $0) }
+    }
+    /**
+     * Creates a new [`OrbitCore`] targeting `gateway_url` (or `https://gateway.orbit` when
+     * `None`), backed by `rustls-platform-verifier` for macOS Keychain and iOS trust store roots.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidUrl`] if `gateway_url` is not a valid `http://` or `https://`
+     * URL, [`FfiError::Orbit`] if the TLS/HTTP client fails to initialize, or
+     * [`FfiError::Connection`] if the background Tokio runtime cannot be built.
+     */
+public convenience init(gatewayUrl: String?)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_constructor_orbitcore_new(
+        FfiConverterOptionString.lower(gatewayUrl),uniffiCallStatus
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_conn_ffi_fn_free_orbitcore(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Reads the currently bound Orbit profile (`GET /me`) and its workspaces + appearance
+     * settings (`GET /profiles/{id}/settings`), or `None` when this device has no bound profile.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func boundProfile()async throws  -> FfiOrbitBoundProfile?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_bound_profile(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeFfiOrbitBoundProfile.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Checks whether `name` is available for a new Instance of `project_id`
+     * (`GET /api/v1/conn/projects/{id}/instances/check?name=...`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func checkInstanceName(projectId: Int64, name: String)async throws  -> FfiOrbitInstanceNameCheck  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_check_instance_name(
+                        self.uniffiCloneHandle(),FfiConverterInt64.lower(projectId),FfiConverterString.lower(name)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiOrbitInstanceNameCheck_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Connects a [`ConnCore`] to Orbit environment `server_id` (steps 2–5 of the documented
+     * Orbit connect flow):
+     * - Reuses `cached_bearer` when supplied and accepted by `GET /api/auth/session`.
+     * - Otherwise (no cached bearer, or auth failure on the cached bearer) mints a fresh pairing
+     * link once (`mint_pairing`), extracts the base URL + `#token=` pairing code, and starts
+     * [`ConnCore`] with [`FfiCredential::PairingCode`]; [`CoreListener::on_bearer_issued`]
+     * delivers the resulting bearer token to store per `server_id` in Keychain.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] if the environment is not found or pairing fails, or any
+     * [`FfiError`] returned by [`ConnCore::connect`].
+     */
+open func connectEnvironment(serverId: String, cachedBearer: String?, listener: CoreListener)async throws  -> ConnCore  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_connect_environment(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(serverId),FfiConverterOptionString.lower(cachedBearer),FfiConverterTypeCoreListener_lower(listener)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_u64,
+            completeFunc: ffi_conn_ffi_rust_future_complete_u64,
+            freeFunc: ffi_conn_ffi_rust_future_free_u64,
+            liftFunc: FfiConverterTypeConnCore_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Lists all Orbit Nodes and Instances registered on the Gateway (`GET /api/v1/conn/environments`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func fleet()async throws  -> [FfiOrbitEnvironment]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_fleet(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiOrbitEnvironment.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Polls a reservation (`GET /api/v1/conn/reservations/{reservation_id}`) and caches any
+     * one-time pairing ticket returned once `state == Ready` for use by [`Self::start_project_thread`].
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func getReservation(reservationId: String)async throws  -> FfiOrbitReservation  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_get_reservation(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(reservationId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiOrbitReservation_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Reads the caller's Orbit Node identity (`GET /api/v1/conn/me`), proving WireGuard
+     * reachability without credentials.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func me()async throws  -> FfiOrbitMe  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_me(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiOrbitMe_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Selects the primary Orbit `agent`-role Node (`select_primary_agent_node` with `None`
+     * because the iPhone does not host `conn-server`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func primaryAgent()async throws  -> FfiOrbitEnvironment?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_primary_agent(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeFfiOrbitEnvironment.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Reads workspaces and appearance settings for `profile_id` (`GET /api/v1/conn/profiles/{id}/settings`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func profileSettings(profileId: Int64)async throws  -> FfiOrbitProfileSettings  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_profile_settings(
+                        self.uniffiCloneHandle(),FfiConverterInt64.lower(profileId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiOrbitProfileSettings_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Lists Orbit profiles (`GET /api/v1/conn/profiles`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func profiles()async throws  -> [FfiOrbitProfile]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_profiles(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiOrbitProfile.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Lists branches of Orbit Project `project_id` (`GET /api/v1/conn/projects/{id}/branches`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func projectBranches(projectId: Int64, query: String?)async throws  -> FfiOrbitBranches  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_project_branches(
+                        self.uniffiCloneHandle(),FfiConverterInt64.lower(projectId),FfiConverterOptionString.lower(query)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiOrbitBranches_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Lists startable Orbit Projects (`GET /api/v1/conn/projects`), matching `OrbitThreadStartScreen`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func projects()async throws  -> [FfiOrbitProject]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_projects(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiOrbitProject.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Lists all Orbit Projects including unavailable ones and their readiness checks
+     * (`GET /api/v1/conn/projects?include_unavailable=1`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func projectsIncludingUnavailable()async throws  -> [FfiOrbitProject]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_projects_including_unavailable(
+                        self.uniffiCloneHandle()
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeFfiOrbitProject.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Releases an unused pre-warmed reservation (`DELETE /api/v1/conn/reservations/{reservation_id}`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func releaseReservation(reservationId: String)async throws  -> Int64?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_release_reservation(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(reservationId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionInt64.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Pre-warms a clone reservation while the New Orbit Thread screen is open
+     * (`POST /api/v1/conn/projects/{project_id}/reservations`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func reserveProject(projectId: Int64)async throws  -> FfiOrbitReservation  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_reserve_project(
+                        self.uniffiCloneHandle(),FfiConverterInt64.lower(projectId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiOrbitReservation_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Starts a General (unbound) thread on the primary Orbit `agent`-role Node:
+     * resolves `primary_agent()`, connects `ConnCore` (reusing `cached_bearer` or minting a
+     * pairing once), ensures the agent node's scratch project (`projects.ensureScratch`), and
+     * launches the thread via `orchestration.launchThread`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] if `text` is blank, [`FfiError::Orbit`] if no primary
+     * agent node exists or pairing fails, or any connection/RPC [`FfiError`].
+     */
+open func startGeneralThread(text: String, cachedBearer: String?, listener: CoreListener)async throws  -> FfiStartedOrbitThread  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_start_general_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(text),FfiConverterOptionString.lower(cachedBearer),FfiConverterTypeCoreListener_lower(listener)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiStartedOrbitThread_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Starts a thread inside an Orbit Project (mirroring `OrbitThreadStartScreen`,
+     * `orbitThreadStarts.ts`, and `orbitReservations.ts`):
+     * - `NewInstance`: finalizes a ready `reservation_id` (falling back to creating a new clone
+     * Instance if the reservation expired/disappeared), pairs with the clone's `conn-server`,
+     * waits for its `/srv/workspace` project, and launches the thread.
+     * - `ExistingInstance`: wakes the instance if stopped, connects (reusing `cached_bearer` or
+     * minting a pairing once), waits for its `/srv/workspace` project, and launches the thread.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] if `text` is blank, [`FfiError::Orbit`] on Gateway
+     * errors, or any connection/RPC [`FfiError`].
+     */
+open func startProjectThread(target: FfiOrbitProjectTarget, text: String, listener: CoreListener)async throws  -> FfiStartedOrbitThread  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_start_project_thread(
+                        self.uniffiCloneHandle(),FfiConverterTypeFfiOrbitProjectTarget_lower(target),FfiConverterString.lower(text),FfiConverterTypeCoreListener_lower(listener)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiStartedOrbitThread_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Starts Orbit's Reverb WebSocket + 30 s fallback poll follower (`conn_orbit::realtime`)
+     * and forwards task/fleet/profile invalidations to `listener`. Replaces any active follower.
+     */
+open func startRealtime(listener: OrbitListener)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_orbitcore_start_realtime(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeOrbitListener_lower(listener),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Stops the active Reverb realtime follower, if any. Safe to call more than once.
+     */
+open func stopRealtime()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_orbitcore_stop_realtime(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Reads full detail for one Orbit Task (`GET /api/v1/conn/tasks/{task_id}`), including
+     * subtasks, linked agent conversations, usage metrics, and pull request metadata.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func taskDetail(taskId: Int64)async throws  -> FfiTaskDetail  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_task_detail(
+                        self.uniffiCloneHandle(),FfiConverterInt64.lower(taskId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiTaskDetail_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Reads the Orbit Tasks board (lanes + task summaries + KPI insights strip), mirroring
+     * `conn_orbit::board` and `conn_orbit::insights`.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] if reading the task list fails. If reading `/task-insights`
+     * fails independently (e.g. an older Gateway), `insights` degrades gracefully to `None`.
+     */
+open func tasksBoard(query: FfiTasksBoardQuery)async throws  -> FfiTasksBoard  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_tasks_board(
+                        self.uniffiCloneHandle(),FfiConverterTypeFfiTasksBoardQuery_lower(query)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiTasksBoard_lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Wakes a stopped Orbit Instance (`POST /api/v1/instances/{instance_id}/wake`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Orbit`] with the mapped [`FfiOrbitErrorReason`].
+     */
+open func wakeInstance(instanceId: Int64)async throws  -> Int64?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_orbitcore_wake_instance(
+                        self.uniffiCloneHandle(),FfiConverterInt64.lower(instanceId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionInt64.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOrbitCore: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = OrbitCore
+
+    public static func lift(_ handle: UInt64) throws -> OrbitCore {
+        return OrbitCore(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: OrbitCore) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrbitCore {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: OrbitCore, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOrbitCore_lift(_ handle: UInt64) throws -> OrbitCore {
+    return try FfiConverterTypeOrbitCore.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOrbitCore_lower(_ value: OrbitCore) -> UInt64 {
+    return FfiConverterTypeOrbitCore.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Foreign callback listener implemented in Swift to receive Orbit Gateway realtime invalidations.
+ *
+ * Every method is called with no internal locks held. Invalidations only notify the app to
+ * re-read the authoritative state via [`OrbitCore`].
+ */
+public protocol OrbitListener: AnyObject, Sendable {
+    
+    /**
+     * Fired when Orbit Tasks changed (`task_id` is `None` for a full board refresh or `Some(id)`
+     * for a specific task).
+     */
+    func onTasksChanged(taskId: Int64?) 
+    
+    /**
+     * Fired when the Reverb realtime follower transitions between `Connecting`, `Live`, and
+     * `Polling`.
+     */
+    func onRealtimeStatus(status: FfiTasksLiveStatus) 
+    
+    /**
+     * Fired when a Node or Instance changed on the shared `private-orbit` Reverb channel.
+     */
+    func onFleetChanged() 
+    
+    /**
+     * Fired when the bound Orbit profile changed on another device.
+     */
+    func onProfileChanged() 
+    
+}
+/**
+ * Foreign callback listener implemented in Swift to receive Orbit Gateway realtime invalidations.
+ *
+ * Every method is called with no internal locks held. Invalidations only notify the app to
+ * re-read the authoritative state via [`OrbitCore`].
+ */
+open class OrbitListenerImpl: OrbitListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_conn_ffi_fn_clone_orbitlistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_conn_ffi_fn_free_orbitlistener(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Fired when Orbit Tasks changed (`task_id` is `None` for a full board refresh or `Some(id)`
+     * for a specific task).
+     */
+open func onTasksChanged(taskId: Int64?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_orbitlistener_on_tasks_changed(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionInt64.lower(taskId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Fired when the Reverb realtime follower transitions between `Connecting`, `Live`, and
+     * `Polling`.
+     */
+open func onRealtimeStatus(status: FfiTasksLiveStatus)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_orbitlistener_on_realtime_status(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiTasksLiveStatus_lower(status),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Fired when a Node or Instance changed on the shared `private-orbit` Reverb channel.
+     */
+open func onFleetChanged()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_orbitlistener_on_fleet_changed(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Fired when the bound Orbit profile changed on another device.
+     */
+open func onProfileChanged()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_orbitlistener_on_profile_changed(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceOrbitListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceOrbitListener = UniffiVTableCallbackInterfaceOrbitListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeOrbitListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface OrbitListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeOrbitListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface OrbitListener: handle missing in uniffiClone")
+            }
+        },
+        onTasksChanged: { (
+            uniffiHandle: UInt64,
+            taskId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeOrbitListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onTasksChanged(
+                     taskId: try FfiConverterOptionInt64.lift(taskId)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onRealtimeStatus: { (
+            uniffiHandle: UInt64,
+            status: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeOrbitListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onRealtimeStatus(
+                     status: try FfiConverterTypeFfiTasksLiveStatus_lift(status)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onFleetChanged: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeOrbitListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onFleetChanged(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onProfileChanged: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeOrbitListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onProfileChanged(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceOrbitListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceOrbitListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitOrbitListener() {
+    uniffi_conn_ffi_fn_init_callback_vtable_orbitlistener(UniffiCallbackInterfaceOrbitListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOrbitListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<OrbitListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = OrbitListener
+
+    public static func lift(_ handle: UInt64) throws -> OrbitListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return OrbitListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: OrbitListener) -> UInt64 {
+         if let rustImpl = value as? OrbitListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrbitListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: OrbitListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOrbitListener_lift(_ handle: UInt64) throws -> OrbitListener {
+    return try FfiConverterTypeOrbitListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOrbitListener_lower(_ value: OrbitListener) -> UInt64 {
+    return FfiConverterTypeOrbitListener.lower(value)
+}
+
+
+
+
 /**
  * Attachment summary carried on user and queued user timeline entries.
  */
@@ -1692,6 +2960,1510 @@ public func FfiConverterTypeFfiColor_lift(_ buf: RustBuffer) throws -> FfiColor 
 #endif
 public func FfiConverterTypeFfiColor_lower(_ value: FfiColor) -> RustBuffer {
     return FfiConverterTypeFfiColor.lower(value)
+}
+
+
+/**
+ * Canonical reference to a Conn conversation linked to an Orbit Task agent.
+ */
+public struct FfiConversationRef: Equatable, Hashable {
+    public var environmentId: String
+    public var threadId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(environmentId: String, threadId: String) {
+        self.environmentId = environmentId
+        self.threadId = threadId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiConversationRef: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiConversationRef: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationRef {
+        return
+            try FfiConversationRef(
+                environmentId: FfiConverterString.read(from: &buf), 
+                threadId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiConversationRef, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.environmentId, into: &buf)
+        FfiConverterString.write(value.threadId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConversationRef_lift(_ buf: RustBuffer) throws -> FfiConversationRef {
+    return try FfiConverterTypeFfiConversationRef.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConversationRef_lower(_ value: FfiConversationRef) -> RustBuffer {
+    return FfiConverterTypeFfiConversationRef.lower(value)
+}
+
+
+public struct FfiDeliverable: Equatable, Hashable {
+    public var id: String
+    public var kind: String
+    public var description: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, kind: String, description: String) {
+        self.id = id
+        self.kind = kind
+        self.description = description
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiDeliverable: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiDeliverable: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDeliverable {
+        return
+            try FfiDeliverable(
+                id: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiDeliverable, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiDeliverable_lift(_ buf: RustBuffer) throws -> FfiDeliverable {
+    return try FfiConverterTypeFfiDeliverable.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiDeliverable_lower(_ value: FfiDeliverable) -> RustBuffer {
+    return FfiConverterTypeFfiDeliverable.lower(value)
+}
+
+
+/**
+ * One KPI insight card in [`FfiTaskInsightsStrip`].
+ */
+public struct FfiInsightCard: Equatable, Hashable {
+    public var id: FfiInsightId
+    public var label: String
+    public var value: Double?
+    public var formattedValue: String?
+    public var change: Double?
+    public var changeText: String?
+    public var changeTone: FfiChangeTone
+    /**
+     * `Some(true)` = down arrow, `Some(false)` = up arrow, `None` = no arrow.
+     */
+    public var trendDown: Bool?
+    public var sparkline: [FfiInsightTrendPoint]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: FfiInsightId, label: String, value: Double?, formattedValue: String?, change: Double?, changeText: String?, changeTone: FfiChangeTone, 
+        /**
+         * `Some(true)` = down arrow, `Some(false)` = up arrow, `None` = no arrow.
+         */trendDown: Bool?, sparkline: [FfiInsightTrendPoint]) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.formattedValue = formattedValue
+        self.change = change
+        self.changeText = changeText
+        self.changeTone = changeTone
+        self.trendDown = trendDown
+        self.sparkline = sparkline
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiInsightCard: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiInsightCard: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiInsightCard {
+        return
+            try FfiInsightCard(
+                id: FfiConverterTypeFfiInsightId.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                value: FfiConverterOptionDouble.read(from: &buf), 
+                formattedValue: FfiConverterOptionString.read(from: &buf), 
+                change: FfiConverterOptionDouble.read(from: &buf), 
+                changeText: FfiConverterOptionString.read(from: &buf), 
+                changeTone: FfiConverterTypeFfiChangeTone.read(from: &buf), 
+                trendDown: FfiConverterOptionBool.read(from: &buf), 
+                sparkline: FfiConverterSequenceTypeFfiInsightTrendPoint.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiInsightCard, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiInsightId.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterOptionDouble.write(value.value, into: &buf)
+        FfiConverterOptionString.write(value.formattedValue, into: &buf)
+        FfiConverterOptionDouble.write(value.change, into: &buf)
+        FfiConverterOptionString.write(value.changeText, into: &buf)
+        FfiConverterTypeFfiChangeTone.write(value.changeTone, into: &buf)
+        FfiConverterOptionBool.write(value.trendDown, into: &buf)
+        FfiConverterSequenceTypeFfiInsightTrendPoint.write(value.sparkline, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightCard_lift(_ buf: RustBuffer) throws -> FfiInsightCard {
+    return try FfiConverterTypeFfiInsightCard.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightCard_lower(_ value: FfiInsightCard) -> RustBuffer {
+    return FfiConverterTypeFfiInsightCard.lower(value)
+}
+
+
+/**
+ * One sparkline point on an [`FfiInsightCard`].
+ */
+public struct FfiInsightTrendPoint: Equatable, Hashable {
+    public var date: String
+    public var value: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(date: String, value: Double) {
+        self.date = date
+        self.value = value
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiInsightTrendPoint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiInsightTrendPoint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiInsightTrendPoint {
+        return
+            try FfiInsightTrendPoint(
+                date: FfiConverterString.read(from: &buf), 
+                value: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiInsightTrendPoint, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.date, into: &buf)
+        FfiConverterDouble.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightTrendPoint_lift(_ buf: RustBuffer) throws -> FfiInsightTrendPoint {
+    return try FfiConverterTypeFfiInsightTrendPoint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendPoint) -> RustBuffer {
+    return FfiConverterTypeFfiInsightTrendPoint.lower(value)
+}
+
+
+/**
+ * Parsed `appearance` section of an Orbit profile (mirroring `orbitProfileSync.ts`).
+ */
+public struct FfiOrbitAppearance: Equatable, Hashable {
+    public var mode: FfiOrbitAppearanceMode
+    public var contrast: Double
+    public var lightThemeId: String
+    public var darkThemeId: String
+    public var lightSlot: FfiOrbitThemeSlot
+    public var darkSlot: FfiOrbitThemeSlot
+    public var customThemes: [FfiOrbitCustomTheme]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mode: FfiOrbitAppearanceMode, contrast: Double, lightThemeId: String, darkThemeId: String, lightSlot: FfiOrbitThemeSlot, darkSlot: FfiOrbitThemeSlot, customThemes: [FfiOrbitCustomTheme]) {
+        self.mode = mode
+        self.contrast = contrast
+        self.lightThemeId = lightThemeId
+        self.darkThemeId = darkThemeId
+        self.lightSlot = lightSlot
+        self.darkSlot = darkSlot
+        self.customThemes = customThemes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitAppearance: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitAppearance: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitAppearance {
+        return
+            try FfiOrbitAppearance(
+                mode: FfiConverterTypeFfiOrbitAppearanceMode.read(from: &buf), 
+                contrast: FfiConverterDouble.read(from: &buf), 
+                lightThemeId: FfiConverterString.read(from: &buf), 
+                darkThemeId: FfiConverterString.read(from: &buf), 
+                lightSlot: FfiConverterTypeFfiOrbitThemeSlot.read(from: &buf), 
+                darkSlot: FfiConverterTypeFfiOrbitThemeSlot.read(from: &buf), 
+                customThemes: FfiConverterSequenceTypeFfiOrbitCustomTheme.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitAppearance, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiOrbitAppearanceMode.write(value.mode, into: &buf)
+        FfiConverterDouble.write(value.contrast, into: &buf)
+        FfiConverterString.write(value.lightThemeId, into: &buf)
+        FfiConverterString.write(value.darkThemeId, into: &buf)
+        FfiConverterTypeFfiOrbitThemeSlot.write(value.lightSlot, into: &buf)
+        FfiConverterTypeFfiOrbitThemeSlot.write(value.darkSlot, into: &buf)
+        FfiConverterSequenceTypeFfiOrbitCustomTheme.write(value.customThemes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitAppearance_lift(_ buf: RustBuffer) throws -> FfiOrbitAppearance {
+    return try FfiConverterTypeFfiOrbitAppearance.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitAppearance_lower(_ value: FfiOrbitAppearance) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitAppearance.lower(value)
+}
+
+
+/**
+ * Bound Orbit profile plus its resolved workspaces and appearance settings.
+ */
+public struct FfiOrbitBoundProfile: Equatable, Hashable {
+    public var profile: FfiOrbitProfile
+    public var settings: FfiOrbitProfileSettings
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(profile: FfiOrbitProfile, settings: FfiOrbitProfileSettings) {
+        self.profile = profile
+        self.settings = settings
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitBoundProfile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitBoundProfile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitBoundProfile {
+        return
+            try FfiOrbitBoundProfile(
+                profile: FfiConverterTypeFfiOrbitProfile.read(from: &buf), 
+                settings: FfiConverterTypeFfiOrbitProfileSettings.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitBoundProfile, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiOrbitProfile.write(value.profile, into: &buf)
+        FfiConverterTypeFfiOrbitProfileSettings.write(value.settings, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBoundProfile_lift(_ buf: RustBuffer) throws -> FfiOrbitBoundProfile {
+    return try FfiConverterTypeFfiOrbitBoundProfile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBoundProfile_lower(_ value: FfiOrbitBoundProfile) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitBoundProfile.lower(value)
+}
+
+
+/**
+ * One branch of an Orbit Project's repository.
+ */
+public struct FfiOrbitBranch: Equatable, Hashable {
+    public var name: String
+    public var isDefault: Bool
+    public var pullRequest: FfiOrbitBranchPullRequest?
+    public var instance: FfiOrbitBranchInstance?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, isDefault: Bool, pullRequest: FfiOrbitBranchPullRequest?, instance: FfiOrbitBranchInstance?) {
+        self.name = name
+        self.isDefault = isDefault
+        self.pullRequest = pullRequest
+        self.instance = instance
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitBranch: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitBranch: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitBranch {
+        return
+            try FfiOrbitBranch(
+                name: FfiConverterString.read(from: &buf), 
+                isDefault: FfiConverterBool.read(from: &buf), 
+                pullRequest: FfiConverterOptionTypeFfiOrbitBranchPullRequest.read(from: &buf), 
+                instance: FfiConverterOptionTypeFfiOrbitBranchInstance.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitBranch, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.isDefault, into: &buf)
+        FfiConverterOptionTypeFfiOrbitBranchPullRequest.write(value.pullRequest, into: &buf)
+        FfiConverterOptionTypeFfiOrbitBranchInstance.write(value.instance, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranch_lift(_ buf: RustBuffer) throws -> FfiOrbitBranch {
+    return try FfiConverterTypeFfiOrbitBranch.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranch_lower(_ value: FfiOrbitBranch) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitBranch.lower(value)
+}
+
+
+/**
+ * Existing Orbit Instance working on a project branch.
+ */
+public struct FfiOrbitBranchInstance: Equatable, Hashable {
+    public var id: Int64
+    public var name: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, name: String) {
+        self.id = id
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitBranchInstance: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitBranchInstance: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitBranchInstance {
+        return
+            try FfiOrbitBranchInstance(
+                id: FfiConverterInt64.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitBranchInstance, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranchInstance_lift(_ buf: RustBuffer) throws -> FfiOrbitBranchInstance {
+    return try FfiConverterTypeFfiOrbitBranchInstance.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranchInstance_lower(_ value: FfiOrbitBranchInstance) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitBranchInstance.lower(value)
+}
+
+
+/**
+ * Pull request summary attached to a project branch.
+ */
+public struct FfiOrbitBranchPullRequest: Equatable, Hashable {
+    public var number: Int64
+    public var title: String?
+    public var url: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(number: Int64, title: String?, url: String?) {
+        self.number = number
+        self.title = title
+        self.url = url
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitBranchPullRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitBranchPullRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitBranchPullRequest {
+        return
+            try FfiOrbitBranchPullRequest(
+                number: FfiConverterInt64.read(from: &buf), 
+                title: FfiConverterOptionString.read(from: &buf), 
+                url: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitBranchPullRequest, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.number, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranchPullRequest_lift(_ buf: RustBuffer) throws -> FfiOrbitBranchPullRequest {
+    return try FfiConverterTypeFfiOrbitBranchPullRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranchPullRequest_lower(_ value: FfiOrbitBranchPullRequest) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitBranchPullRequest.lower(value)
+}
+
+
+/**
+ * Branch listing for an Orbit Project.
+ */
+public struct FfiOrbitBranches: Equatable, Hashable {
+    public var branches: [FfiOrbitBranch]
+    public var pullRequestsUnavailable: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(branches: [FfiOrbitBranch], pullRequestsUnavailable: Bool) {
+        self.branches = branches
+        self.pullRequestsUnavailable = pullRequestsUnavailable
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitBranches: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitBranches: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitBranches {
+        return
+            try FfiOrbitBranches(
+                branches: FfiConverterSequenceTypeFfiOrbitBranch.read(from: &buf), 
+                pullRequestsUnavailable: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitBranches, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiOrbitBranch.write(value.branches, into: &buf)
+        FfiConverterBool.write(value.pullRequestsUnavailable, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranches_lift(_ buf: RustBuffer) throws -> FfiOrbitBranches {
+    return try FfiConverterTypeFfiOrbitBranches.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranches_lower(_ value: FfiOrbitBranches) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitBranches.lower(value)
+}
+
+
+/**
+ * Custom theme carried in the Orbit profile's `appearance.customThemes` library.
+ */
+public struct FfiOrbitCustomTheme: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var appearance: FfiAppearance
+    public var colors: [String: String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, appearance: FfiAppearance, colors: [String: String]) {
+        self.id = id
+        self.name = name
+        self.appearance = appearance
+        self.colors = colors
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitCustomTheme: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitCustomTheme: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitCustomTheme {
+        return
+            try FfiOrbitCustomTheme(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                appearance: FfiConverterTypeFfiAppearance.read(from: &buf), 
+                colors: FfiConverterDictionaryStringString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitCustomTheme, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterTypeFfiAppearance.write(value.appearance, into: &buf)
+        FfiConverterDictionaryStringString.write(value.colors, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitCustomTheme_lift(_ buf: RustBuffer) throws -> FfiOrbitCustomTheme {
+    return try FfiConverterTypeFfiOrbitCustomTheme.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitCustomTheme_lower(_ value: FfiOrbitCustomTheme) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitCustomTheme.lower(value)
+}
+
+
+/**
+ * One registered Orbit `conn-server` environment — either a host Node or a per-project Instance.
+ */
+public struct FfiOrbitEnvironment: Equatable, Hashable {
+    /**
+     * Gateway wire identifier (`environment_id` on the wire).
+     */
+    public var serverId: String
+    public var label: String
+    public var displayTitle: String
+    public var displaySubtitle: String
+    public var nodeName: String?
+    public var url: String
+    public var roles: [String]
+    public var isPrimaryAgent: Bool
+    public var hasAgentRole: Bool
+    public var status: FfiOrbitTargetStatus
+    /**
+     * Always `false` on iOS (the phone does not host `conn-server`).
+     */
+    public var isLocal: Bool
+    public var isNode: Bool
+    public var isAwake: Bool
+    public var instanceId: Int64?
+    public var instanceName: String?
+    public var projectId: Int64?
+    public var projectName: String?
+    public var projectSlug: String?
+    public var instanceUrl: String?
+    public var powerState: FfiOrbitPowerState?
+    public var serverVersion: String?
+    public var registeredBy: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Gateway wire identifier (`environment_id` on the wire).
+         */serverId: String, label: String, displayTitle: String, displaySubtitle: String, nodeName: String?, url: String, roles: [String], isPrimaryAgent: Bool, hasAgentRole: Bool, status: FfiOrbitTargetStatus, 
+        /**
+         * Always `false` on iOS (the phone does not host `conn-server`).
+         */isLocal: Bool, isNode: Bool, isAwake: Bool, instanceId: Int64?, instanceName: String?, projectId: Int64?, projectName: String?, projectSlug: String?, instanceUrl: String?, powerState: FfiOrbitPowerState?, serverVersion: String?, registeredBy: String?) {
+        self.serverId = serverId
+        self.label = label
+        self.displayTitle = displayTitle
+        self.displaySubtitle = displaySubtitle
+        self.nodeName = nodeName
+        self.url = url
+        self.roles = roles
+        self.isPrimaryAgent = isPrimaryAgent
+        self.hasAgentRole = hasAgentRole
+        self.status = status
+        self.isLocal = isLocal
+        self.isNode = isNode
+        self.isAwake = isAwake
+        self.instanceId = instanceId
+        self.instanceName = instanceName
+        self.projectId = projectId
+        self.projectName = projectName
+        self.projectSlug = projectSlug
+        self.instanceUrl = instanceUrl
+        self.powerState = powerState
+        self.serverVersion = serverVersion
+        self.registeredBy = registeredBy
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitEnvironment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitEnvironment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitEnvironment {
+        return
+            try FfiOrbitEnvironment(
+                serverId: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                displayTitle: FfiConverterString.read(from: &buf), 
+                displaySubtitle: FfiConverterString.read(from: &buf), 
+                nodeName: FfiConverterOptionString.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf), 
+                roles: FfiConverterSequenceString.read(from: &buf), 
+                isPrimaryAgent: FfiConverterBool.read(from: &buf), 
+                hasAgentRole: FfiConverterBool.read(from: &buf), 
+                status: FfiConverterTypeFfiOrbitTargetStatus.read(from: &buf), 
+                isLocal: FfiConverterBool.read(from: &buf), 
+                isNode: FfiConverterBool.read(from: &buf), 
+                isAwake: FfiConverterBool.read(from: &buf), 
+                instanceId: FfiConverterOptionInt64.read(from: &buf), 
+                instanceName: FfiConverterOptionString.read(from: &buf), 
+                projectId: FfiConverterOptionInt64.read(from: &buf), 
+                projectName: FfiConverterOptionString.read(from: &buf), 
+                projectSlug: FfiConverterOptionString.read(from: &buf), 
+                instanceUrl: FfiConverterOptionString.read(from: &buf), 
+                powerState: FfiConverterOptionTypeFfiOrbitPowerState.read(from: &buf), 
+                serverVersion: FfiConverterOptionString.read(from: &buf), 
+                registeredBy: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitEnvironment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.serverId, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.displayTitle, into: &buf)
+        FfiConverterString.write(value.displaySubtitle, into: &buf)
+        FfiConverterOptionString.write(value.nodeName, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterSequenceString.write(value.roles, into: &buf)
+        FfiConverterBool.write(value.isPrimaryAgent, into: &buf)
+        FfiConverterBool.write(value.hasAgentRole, into: &buf)
+        FfiConverterTypeFfiOrbitTargetStatus.write(value.status, into: &buf)
+        FfiConverterBool.write(value.isLocal, into: &buf)
+        FfiConverterBool.write(value.isNode, into: &buf)
+        FfiConverterBool.write(value.isAwake, into: &buf)
+        FfiConverterOptionInt64.write(value.instanceId, into: &buf)
+        FfiConverterOptionString.write(value.instanceName, into: &buf)
+        FfiConverterOptionInt64.write(value.projectId, into: &buf)
+        FfiConverterOptionString.write(value.projectName, into: &buf)
+        FfiConverterOptionString.write(value.projectSlug, into: &buf)
+        FfiConverterOptionString.write(value.instanceUrl, into: &buf)
+        FfiConverterOptionTypeFfiOrbitPowerState.write(value.powerState, into: &buf)
+        FfiConverterOptionString.write(value.serverVersion, into: &buf)
+        FfiConverterOptionString.write(value.registeredBy, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitEnvironment_lift(_ buf: RustBuffer) throws -> FfiOrbitEnvironment {
+    return try FfiConverterTypeFfiOrbitEnvironment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitEnvironment_lower(_ value: FfiOrbitEnvironment) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitEnvironment.lower(value)
+}
+
+
+/**
+ * Result of `GET /api/v1/conn/projects/{id}/instances/check`.
+ */
+public struct FfiOrbitInstanceNameCheck: Equatable, Hashable {
+    public var name: String
+    public var available: Bool
+    public var reason: FfiOrbitInstanceNameReason?
+    public var domain: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, available: Bool, reason: FfiOrbitInstanceNameReason?, domain: String?) {
+        self.name = name
+        self.available = available
+        self.reason = reason
+        self.domain = domain
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitInstanceNameCheck: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitInstanceNameCheck: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitInstanceNameCheck {
+        return
+            try FfiOrbitInstanceNameCheck(
+                name: FfiConverterString.read(from: &buf), 
+                available: FfiConverterBool.read(from: &buf), 
+                reason: FfiConverterOptionTypeFfiOrbitInstanceNameReason.read(from: &buf), 
+                domain: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitInstanceNameCheck, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.available, into: &buf)
+        FfiConverterOptionTypeFfiOrbitInstanceNameReason.write(value.reason, into: &buf)
+        FfiConverterOptionString.write(value.domain, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitInstanceNameCheck_lift(_ buf: RustBuffer) throws -> FfiOrbitInstanceNameCheck {
+    return try FfiConverterTypeFfiOrbitInstanceNameCheck.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitInstanceNameCheck_lower(_ value: FfiOrbitInstanceNameCheck) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitInstanceNameCheck.lower(value)
+}
+
+
+/**
+ * Caller Node identity seen by the Orbit Gateway (`GET /api/v1/conn/me`).
+ */
+public struct FfiOrbitMe: Equatable, Hashable {
+    public var id: Int64
+    public var name: String
+    public var wireguardIp: String
+    public var profile: FfiOrbitProfile?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, name: String, wireguardIp: String, profile: FfiOrbitProfile?) {
+        self.id = id
+        self.name = name
+        self.wireguardIp = wireguardIp
+        self.profile = profile
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitMe: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitMe: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitMe {
+        return
+            try FfiOrbitMe(
+                id: FfiConverterInt64.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                wireguardIp: FfiConverterString.read(from: &buf), 
+                profile: FfiConverterOptionTypeFfiOrbitProfile.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitMe, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.wireguardIp, into: &buf)
+        FfiConverterOptionTypeFfiOrbitProfile.write(value.profile, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitMe_lift(_ buf: RustBuffer) throws -> FfiOrbitMe {
+    return try FfiConverterTypeFfiOrbitMe.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitMe_lower(_ value: FfiOrbitMe) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitMe.lower(value)
+}
+
+
+/**
+ * Orbit user profile metadata (`GET /api/v1/conn/profiles` or `me.profile`).
+ */
+public struct FfiOrbitProfile: Equatable, Hashable {
+    public var id: Int64
+    public var name: String
+    public var settingsVersion: Int64
+    public var updatedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, name: String, settingsVersion: Int64, updatedAt: String) {
+        self.id = id
+        self.name = name
+        self.settingsVersion = settingsVersion
+        self.updatedAt = updatedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitProfile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitProfile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitProfile {
+        return
+            try FfiOrbitProfile(
+                id: FfiConverterInt64.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                settingsVersion: FfiConverterInt64.read(from: &buf), 
+                updatedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitProfile, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterInt64.write(value.settingsVersion, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProfile_lift(_ buf: RustBuffer) throws -> FfiOrbitProfile {
+    return try FfiConverterTypeFfiOrbitProfile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProfile_lower(_ value: FfiOrbitProfile) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitProfile.lower(value)
+}
+
+
+/**
+ * Settings snapshot for one Orbit profile (workspaces + appearance section).
+ */
+public struct FfiOrbitProfileSettings: Equatable, Hashable {
+    public var profileId: Int64
+    public var version: Int64
+    public var updatedAt: String
+    public var workspaces: [FfiOrbitWorkspace]
+    public var appearance: FfiOrbitAppearance?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(profileId: Int64, version: Int64, updatedAt: String, workspaces: [FfiOrbitWorkspace], appearance: FfiOrbitAppearance?) {
+        self.profileId = profileId
+        self.version = version
+        self.updatedAt = updatedAt
+        self.workspaces = workspaces
+        self.appearance = appearance
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitProfileSettings: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitProfileSettings: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitProfileSettings {
+        return
+            try FfiOrbitProfileSettings(
+                profileId: FfiConverterInt64.read(from: &buf), 
+                version: FfiConverterInt64.read(from: &buf), 
+                updatedAt: FfiConverterString.read(from: &buf), 
+                workspaces: FfiConverterSequenceTypeFfiOrbitWorkspace.read(from: &buf), 
+                appearance: FfiConverterOptionTypeFfiOrbitAppearance.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitProfileSettings, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.profileId, into: &buf)
+        FfiConverterInt64.write(value.version, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+        FfiConverterSequenceTypeFfiOrbitWorkspace.write(value.workspaces, into: &buf)
+        FfiConverterOptionTypeFfiOrbitAppearance.write(value.appearance, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProfileSettings_lift(_ buf: RustBuffer) throws -> FfiOrbitProfileSettings {
+    return try FfiConverterTypeFfiOrbitProfileSettings.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProfileSettings_lower(_ value: FfiOrbitProfileSettings) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitProfileSettings.lower(value)
+}
+
+
+/**
+ * First-party Orbit Project from `GET /api/v1/conn/projects` (mirrors `OrbitGatewayProjectListing`).
+ */
+public struct FfiOrbitProject: Equatable, Hashable {
+    public var id: Int64
+    public var slug: String
+    public var name: String
+    public var nodeId: Int64?
+    public var nodeName: String?
+    public var instanceDomainSuffix: String?
+    public var cloneable: Bool
+    public var startable: Bool
+    public var cloneableReason: String?
+    public var checks: [FfiOrbitProjectCheck]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, slug: String, name: String, nodeId: Int64?, nodeName: String?, instanceDomainSuffix: String?, cloneable: Bool, startable: Bool, cloneableReason: String?, checks: [FfiOrbitProjectCheck]) {
+        self.id = id
+        self.slug = slug
+        self.name = name
+        self.nodeId = nodeId
+        self.nodeName = nodeName
+        self.instanceDomainSuffix = instanceDomainSuffix
+        self.cloneable = cloneable
+        self.startable = startable
+        self.cloneableReason = cloneableReason
+        self.checks = checks
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitProject: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitProject: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitProject {
+        return
+            try FfiOrbitProject(
+                id: FfiConverterInt64.read(from: &buf), 
+                slug: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                nodeId: FfiConverterOptionInt64.read(from: &buf), 
+                nodeName: FfiConverterOptionString.read(from: &buf), 
+                instanceDomainSuffix: FfiConverterOptionString.read(from: &buf), 
+                cloneable: FfiConverterBool.read(from: &buf), 
+                startable: FfiConverterBool.read(from: &buf), 
+                cloneableReason: FfiConverterOptionString.read(from: &buf), 
+                checks: FfiConverterSequenceTypeFfiOrbitProjectCheck.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitProject, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.slug, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionInt64.write(value.nodeId, into: &buf)
+        FfiConverterOptionString.write(value.nodeName, into: &buf)
+        FfiConverterOptionString.write(value.instanceDomainSuffix, into: &buf)
+        FfiConverterBool.write(value.cloneable, into: &buf)
+        FfiConverterBool.write(value.startable, into: &buf)
+        FfiConverterOptionString.write(value.cloneableReason, into: &buf)
+        FfiConverterSequenceTypeFfiOrbitProjectCheck.write(value.checks, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProject_lift(_ buf: RustBuffer) throws -> FfiOrbitProject {
+    return try FfiConverterTypeFfiOrbitProject.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProject_lower(_ value: FfiOrbitProject) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitProject.lower(value)
+}
+
+
+/**
+ * One start-readiness check reported on an [`FfiOrbitProject`].
+ */
+public struct FfiOrbitProjectCheck: Equatable, Hashable {
+    public var key: String
+    public var label: String?
+    public var status: FfiOrbitProjectCheckStatus
+    public var code: String?
+    public var message: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: String, label: String?, status: FfiOrbitProjectCheckStatus, code: String?, message: String?) {
+        self.key = key
+        self.label = label
+        self.status = status
+        self.code = code
+        self.message = message
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitProjectCheck: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitProjectCheck: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitProjectCheck {
+        return
+            try FfiOrbitProjectCheck(
+                key: FfiConverterString.read(from: &buf), 
+                label: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterTypeFfiOrbitProjectCheckStatus.read(from: &buf), 
+                code: FfiConverterOptionString.read(from: &buf), 
+                message: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitProjectCheck, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterOptionString.write(value.label, into: &buf)
+        FfiConverterTypeFfiOrbitProjectCheckStatus.write(value.status, into: &buf)
+        FfiConverterOptionString.write(value.code, into: &buf)
+        FfiConverterOptionString.write(value.message, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProjectCheck_lift(_ buf: RustBuffer) throws -> FfiOrbitProjectCheck {
+    return try FfiConverterTypeFfiOrbitProjectCheck.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProjectCheck_lower(_ value: FfiOrbitProjectCheck) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitProjectCheck.lower(value)
+}
+
+
+/**
+ * Pre-warmed clone reservation returned by [`OrbitCore::reserve_project`] / [`OrbitCore::get_reservation`].
+ */
+public struct FfiOrbitReservation: Equatable, Hashable {
+    public var id: String
+    public var projectId: Int64
+    public var instanceId: Int64?
+    public var state: FfiOrbitReservationState
+    public var expiresAt: String?
+    public var environmentId: String?
+    public var errorCode: String?
+    public var hasPairing: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, projectId: Int64, instanceId: Int64?, state: FfiOrbitReservationState, expiresAt: String?, environmentId: String?, errorCode: String?, hasPairing: Bool) {
+        self.id = id
+        self.projectId = projectId
+        self.instanceId = instanceId
+        self.state = state
+        self.expiresAt = expiresAt
+        self.environmentId = environmentId
+        self.errorCode = errorCode
+        self.hasPairing = hasPairing
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitReservation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitReservation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitReservation {
+        return
+            try FfiOrbitReservation(
+                id: FfiConverterString.read(from: &buf), 
+                projectId: FfiConverterInt64.read(from: &buf), 
+                instanceId: FfiConverterOptionInt64.read(from: &buf), 
+                state: FfiConverterTypeFfiOrbitReservationState.read(from: &buf), 
+                expiresAt: FfiConverterOptionString.read(from: &buf), 
+                environmentId: FfiConverterOptionString.read(from: &buf), 
+                errorCode: FfiConverterOptionString.read(from: &buf), 
+                hasPairing: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitReservation, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterInt64.write(value.projectId, into: &buf)
+        FfiConverterOptionInt64.write(value.instanceId, into: &buf)
+        FfiConverterTypeFfiOrbitReservationState.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.expiresAt, into: &buf)
+        FfiConverterOptionString.write(value.environmentId, into: &buf)
+        FfiConverterOptionString.write(value.errorCode, into: &buf)
+        FfiConverterBool.write(value.hasPairing, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitReservation_lift(_ buf: RustBuffer) throws -> FfiOrbitReservation {
+    return try FfiConverterTypeFfiOrbitReservation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitReservation_lower(_ value: FfiOrbitReservation) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitReservation.lower(value)
+}
+
+
+/**
+ * One theme slot (`themes.light` or `themes.dark`) from the Orbit profile `appearance` section.
+ */
+public struct FfiOrbitThemeSlot: Equatable, Hashable {
+    public var id: String
+    public var normalizedThemeId: String
+    public var source: FfiOrbitThemeSlotSource
+    public var name: String?
+    public var appearance: FfiAppearance?
+    public var colors: [String: String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, normalizedThemeId: String, source: FfiOrbitThemeSlotSource, name: String?, appearance: FfiAppearance?, colors: [String: String]) {
+        self.id = id
+        self.normalizedThemeId = normalizedThemeId
+        self.source = source
+        self.name = name
+        self.appearance = appearance
+        self.colors = colors
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitThemeSlot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitThemeSlot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitThemeSlot {
+        return
+            try FfiOrbitThemeSlot(
+                id: FfiConverterString.read(from: &buf), 
+                normalizedThemeId: FfiConverterString.read(from: &buf), 
+                source: FfiConverterTypeFfiOrbitThemeSlotSource.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                appearance: FfiConverterOptionTypeFfiAppearance.read(from: &buf), 
+                colors: FfiConverterDictionaryStringString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitThemeSlot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.normalizedThemeId, into: &buf)
+        FfiConverterTypeFfiOrbitThemeSlotSource.write(value.source, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionTypeFfiAppearance.write(value.appearance, into: &buf)
+        FfiConverterDictionaryStringString.write(value.colors, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitThemeSlot_lift(_ buf: RustBuffer) throws -> FfiOrbitThemeSlot {
+    return try FfiConverterTypeFfiOrbitThemeSlot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitThemeSlot_lower(_ value: FfiOrbitThemeSlot) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitThemeSlot.lower(value)
+}
+
+
+/**
+ * One workspace filter synced through the Orbit profile (`settings.workspaces`).
+ */
+public struct FfiOrbitWorkspace: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var color: String
+    public var icon: String?
+    public var image: String?
+    public var projectRefs: [String]
+    public var projectKeys: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, color: String, icon: String?, image: String?, projectRefs: [String], projectKeys: [String]) {
+        self.id = id
+        self.name = name
+        self.color = color
+        self.icon = icon
+        self.image = image
+        self.projectRefs = projectRefs
+        self.projectKeys = projectKeys
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiOrbitWorkspace: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitWorkspace: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitWorkspace {
+        return
+            try FfiOrbitWorkspace(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                color: FfiConverterString.read(from: &buf), 
+                icon: FfiConverterOptionString.read(from: &buf), 
+                image: FfiConverterOptionString.read(from: &buf), 
+                projectRefs: FfiConverterSequenceString.read(from: &buf), 
+                projectKeys: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiOrbitWorkspace, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.color, into: &buf)
+        FfiConverterOptionString.write(value.icon, into: &buf)
+        FfiConverterOptionString.write(value.image, into: &buf)
+        FfiConverterSequenceString.write(value.projectRefs, into: &buf)
+        FfiConverterSequenceString.write(value.projectKeys, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitWorkspace_lift(_ buf: RustBuffer) throws -> FfiOrbitWorkspace {
+    return try FfiConverterTypeFfiOrbitWorkspace.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitWorkspace_lower(_ value: FfiOrbitWorkspace) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitWorkspace.lower(value)
 }
 
 
@@ -1899,6 +4671,1144 @@ public func FfiConverterTypeFfiShellSnapshot_lift(_ buf: RustBuffer) throws -> F
 #endif
 public func FfiConverterTypeFfiShellSnapshot_lower(_ value: FfiShellSnapshot) -> RustBuffer {
     return FfiConverterTypeFfiShellSnapshot.lower(value)
+}
+
+
+/**
+ * Result of starting a General or Orbit Project thread, carrying the new thread id, which Orbit
+ * environment it lives on, and the connected [`ConnCore`] handle ready to render it.
+ */
+public struct FfiStartedOrbitThread {
+    public var threadId: String
+    public var environmentId: String
+    public var serverUrl: String
+    public var projectId: String
+    public var instanceId: Int64?
+    public var instanceName: String?
+    public var core: ConnCore
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(threadId: String, environmentId: String, serverUrl: String, projectId: String, instanceId: Int64?, instanceName: String?, core: ConnCore) {
+        self.threadId = threadId
+        self.environmentId = environmentId
+        self.serverUrl = serverUrl
+        self.projectId = projectId
+        self.instanceId = instanceId
+        self.instanceName = instanceName
+        self.core = core
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiStartedOrbitThread: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiStartedOrbitThread: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiStartedOrbitThread {
+        return
+            try FfiStartedOrbitThread(
+                threadId: FfiConverterString.read(from: &buf), 
+                environmentId: FfiConverterString.read(from: &buf), 
+                serverUrl: FfiConverterString.read(from: &buf), 
+                projectId: FfiConverterString.read(from: &buf), 
+                instanceId: FfiConverterOptionInt64.read(from: &buf), 
+                instanceName: FfiConverterOptionString.read(from: &buf), 
+                core: FfiConverterTypeConnCore.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiStartedOrbitThread, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.threadId, into: &buf)
+        FfiConverterString.write(value.environmentId, into: &buf)
+        FfiConverterString.write(value.serverUrl, into: &buf)
+        FfiConverterString.write(value.projectId, into: &buf)
+        FfiConverterOptionInt64.write(value.instanceId, into: &buf)
+        FfiConverterOptionString.write(value.instanceName, into: &buf)
+        FfiConverterTypeConnCore.write(value.core, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiStartedOrbitThread_lift(_ buf: RustBuffer) throws -> FfiStartedOrbitThread {
+    return try FfiConverterTypeFfiStartedOrbitThread.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiStartedOrbitThread_lower(_ value: FfiStartedOrbitThread) -> RustBuffer {
+    return FfiConverterTypeFfiStartedOrbitThread.lower(value)
+}
+
+
+/**
+ * One subtask on [`FfiTaskDetail`].
+ */
+public struct FfiSubtask: Equatable, Hashable {
+    public var id: Int64
+    public var position: Int64
+    public var title: String
+    public var brief: String
+    public var deliverables: [FfiDeliverable]
+    public var status: FfiSubtaskStatus
+    public var statusText: String
+    public var tone: FfiStatusTone
+    public var attention: FfiTaskAttention?
+    public var currentImplementerAgentId: Int64?
+    public var metrics: FfiTaskMetrics
+    public var usageText: String?
+    public var linkedThread: FfiConversationRef?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, position: Int64, title: String, brief: String, deliverables: [FfiDeliverable], status: FfiSubtaskStatus, statusText: String, tone: FfiStatusTone, attention: FfiTaskAttention?, currentImplementerAgentId: Int64?, metrics: FfiTaskMetrics, usageText: String?, linkedThread: FfiConversationRef?) {
+        self.id = id
+        self.position = position
+        self.title = title
+        self.brief = brief
+        self.deliverables = deliverables
+        self.status = status
+        self.statusText = statusText
+        self.tone = tone
+        self.attention = attention
+        self.currentImplementerAgentId = currentImplementerAgentId
+        self.metrics = metrics
+        self.usageText = usageText
+        self.linkedThread = linkedThread
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiSubtask: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiSubtask: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSubtask {
+        return
+            try FfiSubtask(
+                id: FfiConverterInt64.read(from: &buf), 
+                position: FfiConverterInt64.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                brief: FfiConverterString.read(from: &buf), 
+                deliverables: FfiConverterSequenceTypeFfiDeliverable.read(from: &buf), 
+                status: FfiConverterTypeFfiSubtaskStatus.read(from: &buf), 
+                statusText: FfiConverterString.read(from: &buf), 
+                tone: FfiConverterTypeFfiStatusTone.read(from: &buf), 
+                attention: FfiConverterOptionTypeFfiTaskAttention.read(from: &buf), 
+                currentImplementerAgentId: FfiConverterOptionInt64.read(from: &buf), 
+                metrics: FfiConverterTypeFfiTaskMetrics.read(from: &buf), 
+                usageText: FfiConverterOptionString.read(from: &buf), 
+                linkedThread: FfiConverterOptionTypeFfiConversationRef.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiSubtask, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterInt64.write(value.position, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.brief, into: &buf)
+        FfiConverterSequenceTypeFfiDeliverable.write(value.deliverables, into: &buf)
+        FfiConverterTypeFfiSubtaskStatus.write(value.status, into: &buf)
+        FfiConverterString.write(value.statusText, into: &buf)
+        FfiConverterTypeFfiStatusTone.write(value.tone, into: &buf)
+        FfiConverterOptionTypeFfiTaskAttention.write(value.attention, into: &buf)
+        FfiConverterOptionInt64.write(value.currentImplementerAgentId, into: &buf)
+        FfiConverterTypeFfiTaskMetrics.write(value.metrics, into: &buf)
+        FfiConverterOptionString.write(value.usageText, into: &buf)
+        FfiConverterOptionTypeFfiConversationRef.write(value.linkedThread, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSubtask_lift(_ buf: RustBuffer) throws -> FfiSubtask {
+    return try FfiConverterTypeFfiSubtask.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSubtask_lower(_ value: FfiSubtask) -> RustBuffer {
+    return FfiConverterTypeFfiSubtask.lower(value)
+}
+
+
+public struct FfiSubtaskCounts: Equatable, Hashable {
+    public var total: Int64
+    public var todo: Int64
+    public var running: Int64
+    public var completed: Int64
+    public var failed: Int64
+    public var cancelled: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(total: Int64, todo: Int64, running: Int64, completed: Int64, failed: Int64, cancelled: Int64) {
+        self.total = total
+        self.todo = todo
+        self.running = running
+        self.completed = completed
+        self.failed = failed
+        self.cancelled = cancelled
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiSubtaskCounts: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiSubtaskCounts: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSubtaskCounts {
+        return
+            try FfiSubtaskCounts(
+                total: FfiConverterInt64.read(from: &buf), 
+                todo: FfiConverterInt64.read(from: &buf), 
+                running: FfiConverterInt64.read(from: &buf), 
+                completed: FfiConverterInt64.read(from: &buf), 
+                failed: FfiConverterInt64.read(from: &buf), 
+                cancelled: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiSubtaskCounts, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.total, into: &buf)
+        FfiConverterInt64.write(value.todo, into: &buf)
+        FfiConverterInt64.write(value.running, into: &buf)
+        FfiConverterInt64.write(value.completed, into: &buf)
+        FfiConverterInt64.write(value.failed, into: &buf)
+        FfiConverterInt64.write(value.cancelled, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSubtaskCounts_lift(_ buf: RustBuffer) throws -> FfiSubtaskCounts {
+    return try FfiConverterTypeFfiSubtaskCounts.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSubtaskCounts_lower(_ value: FfiSubtaskCounts) -> RustBuffer {
+    return FfiConverterTypeFfiSubtaskCounts.lower(value)
+}
+
+
+/**
+ * One implementer or reviewer agent row on [`FfiTaskDetail`].
+ */
+public struct FfiTaskAgent: Equatable, Hashable {
+    public var id: Int64
+    public var role: FfiAgentRole
+    public var label: String
+    public var subtaskIds: [Int64]
+    public var current: Bool
+    public var attempt: Int64
+    public var provider: String?
+    public var driverKind: String?
+    public var model: String?
+    public var effort: String?
+    public var state: FfiAgentState?
+    public var stateText: String
+    public var stateTone: FfiStatusTone
+    public var needsInput: Bool
+    public var createdAt: String
+    public var observedAt: String?
+    public var conversation: FfiConversationRef?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, role: FfiAgentRole, label: String, subtaskIds: [Int64], current: Bool, attempt: Int64, provider: String?, driverKind: String?, model: String?, effort: String?, state: FfiAgentState?, stateText: String, stateTone: FfiStatusTone, needsInput: Bool, createdAt: String, observedAt: String?, conversation: FfiConversationRef?) {
+        self.id = id
+        self.role = role
+        self.label = label
+        self.subtaskIds = subtaskIds
+        self.current = current
+        self.attempt = attempt
+        self.provider = provider
+        self.driverKind = driverKind
+        self.model = model
+        self.effort = effort
+        self.state = state
+        self.stateText = stateText
+        self.stateTone = stateTone
+        self.needsInput = needsInput
+        self.createdAt = createdAt
+        self.observedAt = observedAt
+        self.conversation = conversation
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskAgent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskAgent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskAgent {
+        return
+            try FfiTaskAgent(
+                id: FfiConverterInt64.read(from: &buf), 
+                role: FfiConverterTypeFfiAgentRole.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                subtaskIds: FfiConverterSequenceInt64.read(from: &buf), 
+                current: FfiConverterBool.read(from: &buf), 
+                attempt: FfiConverterInt64.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf), 
+                driverKind: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                effort: FfiConverterOptionString.read(from: &buf), 
+                state: FfiConverterOptionTypeFfiAgentState.read(from: &buf), 
+                stateText: FfiConverterString.read(from: &buf), 
+                stateTone: FfiConverterTypeFfiStatusTone.read(from: &buf), 
+                needsInput: FfiConverterBool.read(from: &buf), 
+                createdAt: FfiConverterString.read(from: &buf), 
+                observedAt: FfiConverterOptionString.read(from: &buf), 
+                conversation: FfiConverterOptionTypeFfiConversationRef.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskAgent, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterTypeFfiAgentRole.write(value.role, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterSequenceInt64.write(value.subtaskIds, into: &buf)
+        FfiConverterBool.write(value.current, into: &buf)
+        FfiConverterInt64.write(value.attempt, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.driverKind, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.effort, into: &buf)
+        FfiConverterOptionTypeFfiAgentState.write(value.state, into: &buf)
+        FfiConverterString.write(value.stateText, into: &buf)
+        FfiConverterTypeFfiStatusTone.write(value.stateTone, into: &buf)
+        FfiConverterBool.write(value.needsInput, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+        FfiConverterOptionString.write(value.observedAt, into: &buf)
+        FfiConverterOptionTypeFfiConversationRef.write(value.conversation, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskAgent_lift(_ buf: RustBuffer) throws -> FfiTaskAgent {
+    return try FfiConverterTypeFfiTaskAgent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskAgent_lower(_ value: FfiTaskAgent) -> RustBuffer {
+    return FfiConverterTypeFfiTaskAgent.lower(value)
+}
+
+
+public struct FfiTaskAttention: Equatable, Hashable {
+    public var kind: FfiAttentionKind
+    public var question: String?
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: FfiAttentionKind, question: String?, reason: String?) {
+        self.kind = kind
+        self.question = question
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskAttention: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskAttention: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskAttention {
+        return
+            try FfiTaskAttention(
+                kind: FfiConverterTypeFfiAttentionKind.read(from: &buf), 
+                question: FfiConverterOptionString.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskAttention, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiAttentionKind.write(value.kind, into: &buf)
+        FfiConverterOptionString.write(value.question, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskAttention_lift(_ buf: RustBuffer) throws -> FfiTaskAttention {
+    return try FfiConverterTypeFfiTaskAttention.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskAttention_lower(_ value: FfiTaskAttention) -> RustBuffer {
+    return FfiConverterTypeFfiTaskAttention.lower(value)
+}
+
+
+/**
+ * One lane on [`FfiTasksBoard`].
+ */
+public struct FfiTaskBoardLane: Equatable, Hashable {
+    public var id: FfiTaskLane
+    public var label: String
+    public var total: UInt32
+    public var tasks: [FfiTaskSummary]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: FfiTaskLane, label: String, total: UInt32, tasks: [FfiTaskSummary]) {
+        self.id = id
+        self.label = label
+        self.total = total
+        self.tasks = tasks
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskBoardLane: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskBoardLane: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskBoardLane {
+        return
+            try FfiTaskBoardLane(
+                id: FfiConverterTypeFfiTaskLane.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                total: FfiConverterUInt32.read(from: &buf), 
+                tasks: FfiConverterSequenceTypeFfiTaskSummary.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskBoardLane, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiTaskLane.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterUInt32.write(value.total, into: &buf)
+        FfiConverterSequenceTypeFfiTaskSummary.write(value.tasks, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskBoardLane_lift(_ buf: RustBuffer) throws -> FfiTaskBoardLane {
+    return try FfiConverterTypeFfiTaskBoardLane.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskBoardLane_lower(_ value: FfiTaskBoardLane) -> RustBuffer {
+    return FfiConverterTypeFfiTaskBoardLane.lower(value)
+}
+
+
+/**
+ * Full Orbit Task detail (`GET /api/v1/conn/tasks/{id}`).
+ */
+public struct FfiTaskDetail: Equatable, Hashable {
+    public var summary: FfiTaskSummary
+    public var brief: String
+    public var implementerMode: FfiImplementerMode
+    public var metrics: FfiTaskMetrics
+    public var usageText: String
+    public var usageDescription: String
+    public var subtasks: [FfiSubtask]
+    public var agents: [FfiTaskAgent]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(summary: FfiTaskSummary, brief: String, implementerMode: FfiImplementerMode, metrics: FfiTaskMetrics, usageText: String, usageDescription: String, subtasks: [FfiSubtask], agents: [FfiTaskAgent]) {
+        self.summary = summary
+        self.brief = brief
+        self.implementerMode = implementerMode
+        self.metrics = metrics
+        self.usageText = usageText
+        self.usageDescription = usageDescription
+        self.subtasks = subtasks
+        self.agents = agents
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskDetail: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskDetail: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskDetail {
+        return
+            try FfiTaskDetail(
+                summary: FfiConverterTypeFfiTaskSummary.read(from: &buf), 
+                brief: FfiConverterString.read(from: &buf), 
+                implementerMode: FfiConverterTypeFfiImplementerMode.read(from: &buf), 
+                metrics: FfiConverterTypeFfiTaskMetrics.read(from: &buf), 
+                usageText: FfiConverterString.read(from: &buf), 
+                usageDescription: FfiConverterString.read(from: &buf), 
+                subtasks: FfiConverterSequenceTypeFfiSubtask.read(from: &buf), 
+                agents: FfiConverterSequenceTypeFfiTaskAgent.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskDetail, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiTaskSummary.write(value.summary, into: &buf)
+        FfiConverterString.write(value.brief, into: &buf)
+        FfiConverterTypeFfiImplementerMode.write(value.implementerMode, into: &buf)
+        FfiConverterTypeFfiTaskMetrics.write(value.metrics, into: &buf)
+        FfiConverterString.write(value.usageText, into: &buf)
+        FfiConverterString.write(value.usageDescription, into: &buf)
+        FfiConverterSequenceTypeFfiSubtask.write(value.subtasks, into: &buf)
+        FfiConverterSequenceTypeFfiTaskAgent.write(value.agents, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskDetail_lift(_ buf: RustBuffer) throws -> FfiTaskDetail {
+    return try FfiConverterTypeFfiTaskDetail.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskDetail_lower(_ value: FfiTaskDetail) -> RustBuffer {
+    return FfiConverterTypeFfiTaskDetail.lower(value)
+}
+
+
+/**
+ * KPI strip rendered above the Tasks board.
+ */
+public struct FfiTaskInsightsStrip: Equatable, Hashable {
+    public var period: FfiInsightsPeriod
+    public var cards: [FfiInsightCard]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(period: FfiInsightsPeriod, cards: [FfiInsightCard]) {
+        self.period = period
+        self.cards = cards
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskInsightsStrip: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskInsightsStrip: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskInsightsStrip {
+        return
+            try FfiTaskInsightsStrip(
+                period: FfiConverterTypeFfiInsightsPeriod.read(from: &buf), 
+                cards: FfiConverterSequenceTypeFfiInsightCard.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskInsightsStrip, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiInsightsPeriod.write(value.period, into: &buf)
+        FfiConverterSequenceTypeFfiInsightCard.write(value.cards, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskInsightsStrip_lift(_ buf: RustBuffer) throws -> FfiTaskInsightsStrip {
+    return try FfiConverterTypeFfiTaskInsightsStrip.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskInsightsStrip_lower(_ value: FfiTaskInsightsStrip) -> RustBuffer {
+    return FfiConverterTypeFfiTaskInsightsStrip.lower(value)
+}
+
+
+public struct FfiTaskMetrics: Equatable, Hashable {
+    public var durationMs: Double?
+    public var tokens: Double?
+    public var linesAdded: Double?
+    public var linesDeleted: Double?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(durationMs: Double?, tokens: Double?, linesAdded: Double?, linesDeleted: Double?) {
+        self.durationMs = durationMs
+        self.tokens = tokens
+        self.linesAdded = linesAdded
+        self.linesDeleted = linesDeleted
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskMetrics: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskMetrics: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskMetrics {
+        return
+            try FfiTaskMetrics(
+                durationMs: FfiConverterOptionDouble.read(from: &buf), 
+                tokens: FfiConverterOptionDouble.read(from: &buf), 
+                linesAdded: FfiConverterOptionDouble.read(from: &buf), 
+                linesDeleted: FfiConverterOptionDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskMetrics, into buf: inout [UInt8]) {
+        FfiConverterOptionDouble.write(value.durationMs, into: &buf)
+        FfiConverterOptionDouble.write(value.tokens, into: &buf)
+        FfiConverterOptionDouble.write(value.linesAdded, into: &buf)
+        FfiConverterOptionDouble.write(value.linesDeleted, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskMetrics_lift(_ buf: RustBuffer) throws -> FfiTaskMetrics {
+    return try FfiConverterTypeFfiTaskMetrics.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskMetrics_lower(_ value: FfiTaskMetrics) -> RustBuffer {
+    return FfiConverterTypeFfiTaskMetrics.lower(value)
+}
+
+
+public struct FfiTaskProject: Equatable, Hashable {
+    public var id: Int64
+    public var slug: String
+    public var name: String
+    public var code: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, slug: String, name: String, code: String?) {
+        self.id = id
+        self.slug = slug
+        self.name = name
+        self.code = code
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskProject: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskProject: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskProject {
+        return
+            try FfiTaskProject(
+                id: FfiConverterInt64.read(from: &buf), 
+                slug: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                code: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskProject, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.slug, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.code, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskProject_lift(_ buf: RustBuffer) throws -> FfiTaskProject {
+    return try FfiConverterTypeFfiTaskProject.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskProject_lower(_ value: FfiTaskProject) -> RustBuffer {
+    return FfiConverterTypeFfiTaskProject.lower(value)
+}
+
+
+public struct FfiTaskPullRequest: Equatable, Hashable {
+    public var number: Int64
+    public var url: String
+    public var state: FfiPullRequestState?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(number: Int64, url: String, state: FfiPullRequestState?) {
+        self.number = number
+        self.url = url
+        self.state = state
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskPullRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskPullRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskPullRequest {
+        return
+            try FfiTaskPullRequest(
+                number: FfiConverterInt64.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf), 
+                state: FfiConverterOptionTypeFfiPullRequestState.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskPullRequest, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.number, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterOptionTypeFfiPullRequestState.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskPullRequest_lift(_ buf: RustBuffer) throws -> FfiTaskPullRequest {
+    return try FfiConverterTypeFfiTaskPullRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskPullRequest_lower(_ value: FfiTaskPullRequest) -> RustBuffer {
+    return FfiConverterTypeFfiTaskPullRequest.lower(value)
+}
+
+
+/**
+ * One Orbit Task card summary for the board and detail header.
+ */
+public struct FfiTaskSummary: Equatable, Hashable {
+    public var id: Int64
+    public var title: String
+    public var status: FfiTaskStatus
+    public var statusText: String
+    public var lane: FfiTaskLane
+    public var label: String?
+    public var labelTone: FfiTaskLabelTone?
+    public var cardDetail: String
+    public var attention: FfiTaskAttention?
+    public var project: FfiTaskProject
+    public var workspace: FfiTaskWorkspace?
+    public var environment: FfiTaskEnvironmentState
+    public var pullRequest: FfiTaskPullRequest?
+    public var subtaskCounts: FfiSubtaskCounts
+    public var createdAt: String
+    public var updatedAt: String
+    public var lastActivityAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, title: String, status: FfiTaskStatus, statusText: String, lane: FfiTaskLane, label: String?, labelTone: FfiTaskLabelTone?, cardDetail: String, attention: FfiTaskAttention?, project: FfiTaskProject, workspace: FfiTaskWorkspace?, environment: FfiTaskEnvironmentState, pullRequest: FfiTaskPullRequest?, subtaskCounts: FfiSubtaskCounts, createdAt: String, updatedAt: String, lastActivityAt: String?) {
+        self.id = id
+        self.title = title
+        self.status = status
+        self.statusText = statusText
+        self.lane = lane
+        self.label = label
+        self.labelTone = labelTone
+        self.cardDetail = cardDetail
+        self.attention = attention
+        self.project = project
+        self.workspace = workspace
+        self.environment = environment
+        self.pullRequest = pullRequest
+        self.subtaskCounts = subtaskCounts
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.lastActivityAt = lastActivityAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskSummary {
+        return
+            try FfiTaskSummary(
+                id: FfiConverterInt64.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                status: FfiConverterTypeFfiTaskStatus.read(from: &buf), 
+                statusText: FfiConverterString.read(from: &buf), 
+                lane: FfiConverterTypeFfiTaskLane.read(from: &buf), 
+                label: FfiConverterOptionString.read(from: &buf), 
+                labelTone: FfiConverterOptionTypeFfiTaskLabelTone.read(from: &buf), 
+                cardDetail: FfiConverterString.read(from: &buf), 
+                attention: FfiConverterOptionTypeFfiTaskAttention.read(from: &buf), 
+                project: FfiConverterTypeFfiTaskProject.read(from: &buf), 
+                workspace: FfiConverterOptionTypeFfiTaskWorkspace.read(from: &buf), 
+                environment: FfiConverterTypeFfiTaskEnvironmentState.read(from: &buf), 
+                pullRequest: FfiConverterOptionTypeFfiTaskPullRequest.read(from: &buf), 
+                subtaskCounts: FfiConverterTypeFfiSubtaskCounts.read(from: &buf), 
+                createdAt: FfiConverterString.read(from: &buf), 
+                updatedAt: FfiConverterString.read(from: &buf), 
+                lastActivityAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskSummary, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterTypeFfiTaskStatus.write(value.status, into: &buf)
+        FfiConverterString.write(value.statusText, into: &buf)
+        FfiConverterTypeFfiTaskLane.write(value.lane, into: &buf)
+        FfiConverterOptionString.write(value.label, into: &buf)
+        FfiConverterOptionTypeFfiTaskLabelTone.write(value.labelTone, into: &buf)
+        FfiConverterString.write(value.cardDetail, into: &buf)
+        FfiConverterOptionTypeFfiTaskAttention.write(value.attention, into: &buf)
+        FfiConverterTypeFfiTaskProject.write(value.project, into: &buf)
+        FfiConverterOptionTypeFfiTaskWorkspace.write(value.workspace, into: &buf)
+        FfiConverterTypeFfiTaskEnvironmentState.write(value.environment, into: &buf)
+        FfiConverterOptionTypeFfiTaskPullRequest.write(value.pullRequest, into: &buf)
+        FfiConverterTypeFfiSubtaskCounts.write(value.subtaskCounts, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+        FfiConverterOptionString.write(value.lastActivityAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskSummary_lift(_ buf: RustBuffer) throws -> FfiTaskSummary {
+    return try FfiConverterTypeFfiTaskSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskSummary_lower(_ value: FfiTaskSummary) -> RustBuffer {
+    return FfiConverterTypeFfiTaskSummary.lower(value)
+}
+
+
+public struct FfiTaskWorkspace: Equatable, Hashable {
+    public var instanceId: Int64
+    public var name: String
+    public var status: String
+    public var powerState: FfiOrbitPowerState?
+    public var nodeId: Int64?
+    public var nodeName: String?
+    public var branch: String?
+    public var connEnvironmentId: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(instanceId: Int64, name: String, status: String, powerState: FfiOrbitPowerState?, nodeId: Int64?, nodeName: String?, branch: String?, connEnvironmentId: String?) {
+        self.instanceId = instanceId
+        self.name = name
+        self.status = status
+        self.powerState = powerState
+        self.nodeId = nodeId
+        self.nodeName = nodeName
+        self.branch = branch
+        self.connEnvironmentId = connEnvironmentId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTaskWorkspace: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskWorkspace: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskWorkspace {
+        return
+            try FfiTaskWorkspace(
+                instanceId: FfiConverterInt64.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                status: FfiConverterString.read(from: &buf), 
+                powerState: FfiConverterOptionTypeFfiOrbitPowerState.read(from: &buf), 
+                nodeId: FfiConverterOptionInt64.read(from: &buf), 
+                nodeName: FfiConverterOptionString.read(from: &buf), 
+                branch: FfiConverterOptionString.read(from: &buf), 
+                connEnvironmentId: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTaskWorkspace, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.instanceId, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterOptionTypeFfiOrbitPowerState.write(value.powerState, into: &buf)
+        FfiConverterOptionInt64.write(value.nodeId, into: &buf)
+        FfiConverterOptionString.write(value.nodeName, into: &buf)
+        FfiConverterOptionString.write(value.branch, into: &buf)
+        FfiConverterOptionString.write(value.connEnvironmentId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskWorkspace_lift(_ buf: RustBuffer) throws -> FfiTaskWorkspace {
+    return try FfiConverterTypeFfiTaskWorkspace.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskWorkspace_lower(_ value: FfiTaskWorkspace) -> RustBuffer {
+    return FfiConverterTypeFfiTaskWorkspace.lower(value)
+}
+
+
+/**
+ * Full Tasks board snapshot: lanes with filtered task cards plus the KPI insights strip.
+ */
+public struct FfiTasksBoard: Equatable, Hashable {
+    public var lanes: [FfiTaskBoardLane]
+    public var skipped: UInt32
+    public var hasMore: Bool
+    public var insights: FfiTaskInsightsStrip?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(lanes: [FfiTaskBoardLane], skipped: UInt32, hasMore: Bool, insights: FfiTaskInsightsStrip?) {
+        self.lanes = lanes
+        self.skipped = skipped
+        self.hasMore = hasMore
+        self.insights = insights
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTasksBoard: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTasksBoard: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTasksBoard {
+        return
+            try FfiTasksBoard(
+                lanes: FfiConverterSequenceTypeFfiTaskBoardLane.read(from: &buf), 
+                skipped: FfiConverterUInt32.read(from: &buf), 
+                hasMore: FfiConverterBool.read(from: &buf), 
+                insights: FfiConverterOptionTypeFfiTaskInsightsStrip.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTasksBoard, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiTaskBoardLane.write(value.lanes, into: &buf)
+        FfiConverterUInt32.write(value.skipped, into: &buf)
+        FfiConverterBool.write(value.hasMore, into: &buf)
+        FfiConverterOptionTypeFfiTaskInsightsStrip.write(value.insights, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTasksBoard_lift(_ buf: RustBuffer) throws -> FfiTasksBoard {
+    return try FfiConverterTypeFfiTasksBoard.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTasksBoard_lower(_ value: FfiTasksBoard) -> RustBuffer {
+    return FfiConverterTypeFfiTasksBoard.lower(value)
+}
+
+
+/**
+ * Query options for [`OrbitCore::tasks_board`].
+ */
+public struct FfiTasksBoardQuery: Equatable, Hashable {
+    public var projectId: Int64?
+    public var searchQuery: String?
+    public var hiddenLanes: [FfiTaskLane]
+    public var insightsPeriod: FfiInsightsPeriod?
+    public var limit: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(projectId: Int64?, searchQuery: String?, hiddenLanes: [FfiTaskLane], insightsPeriod: FfiInsightsPeriod?, limit: UInt32?) {
+        self.projectId = projectId
+        self.searchQuery = searchQuery
+        self.hiddenLanes = hiddenLanes
+        self.insightsPeriod = insightsPeriod
+        self.limit = limit
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTasksBoardQuery: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTasksBoardQuery: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTasksBoardQuery {
+        return
+            try FfiTasksBoardQuery(
+                projectId: FfiConverterOptionInt64.read(from: &buf), 
+                searchQuery: FfiConverterOptionString.read(from: &buf), 
+                hiddenLanes: FfiConverterSequenceTypeFfiTaskLane.read(from: &buf), 
+                insightsPeriod: FfiConverterOptionTypeFfiInsightsPeriod.read(from: &buf), 
+                limit: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTasksBoardQuery, into buf: inout [UInt8]) {
+        FfiConverterOptionInt64.write(value.projectId, into: &buf)
+        FfiConverterOptionString.write(value.searchQuery, into: &buf)
+        FfiConverterSequenceTypeFfiTaskLane.write(value.hiddenLanes, into: &buf)
+        FfiConverterOptionTypeFfiInsightsPeriod.write(value.insightsPeriod, into: &buf)
+        FfiConverterOptionUInt32.write(value.limit, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTasksBoardQuery_lift(_ buf: RustBuffer) throws -> FfiTasksBoardQuery {
+    return try FfiConverterTypeFfiTasksBoardQuery.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTasksBoardQuery_lower(_ value: FfiTasksBoardQuery) -> RustBuffer {
+    return FfiConverterTypeFfiTasksBoardQuery.lower(value)
 }
 
 
@@ -2898,6 +6808,173 @@ public func FfiConverterTypeFfiWorkGroupTiming_lower(_ value: FfiWorkGroupTiming
 }
 
 
+
+public enum FfiAgentRole: Equatable, Hashable {
+    
+    case implementer
+    case reviewer
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiAgentRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAgentRole: FfiConverterRustBuffer {
+    typealias SwiftType = FfiAgentRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAgentRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .implementer
+        
+        case 2: return .reviewer
+        
+        case 3: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiAgentRole, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .implementer:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .reviewer:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAgentRole_lift(_ buf: RustBuffer) throws -> FfiAgentRole {
+    return try FfiConverterTypeFfiAgentRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAgentRole_lower(_ value: FfiAgentRole) -> RustBuffer {
+    return FfiConverterTypeFfiAgentRole.lower(value)
+}
+
+
+
+
+public enum FfiAgentState: Equatable, Hashable {
+    
+    case idle
+    case working
+    case askingForInput
+    case done
+    case failed
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiAgentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAgentState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiAgentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAgentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .idle
+        
+        case 2: return .working
+        
+        case 3: return .askingForInput
+        
+        case 4: return .done
+        
+        case 5: return .failed
+        
+        case 6: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiAgentState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .idle:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .working:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .askingForInput:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .done:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAgentState_lift(_ buf: RustBuffer) throws -> FfiAgentState {
+    return try FfiConverterTypeFfiAgentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAgentState_lower(_ value: FfiAgentState) -> RustBuffer {
+    return FfiConverterTypeFfiAgentState.lower(value)
+}
+
+
+
 /**
  * Light or dark theme appearance (mirrors [`conn_theme::Appearance`]).
  */
@@ -3053,6 +7130,166 @@ public func FfiConverterTypeFfiApprovalDecision_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeFfiApprovalDecision_lower(_ value: FfiApprovalDecision) -> RustBuffer {
     return FfiConverterTypeFfiApprovalDecision.lower(value)
+}
+
+
+
+
+public enum FfiAttentionKind: Equatable, Hashable {
+    
+    case question
+    case failure
+    case direction
+    case observation
+    case removalFailure
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiAttentionKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAttentionKind: FfiConverterRustBuffer {
+    typealias SwiftType = FfiAttentionKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAttentionKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .question
+        
+        case 2: return .failure
+        
+        case 3: return .direction
+        
+        case 4: return .observation
+        
+        case 5: return .removalFailure
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiAttentionKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .question:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .failure:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .direction:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .observation:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .removalFailure:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAttentionKind_lift(_ buf: RustBuffer) throws -> FfiAttentionKind {
+    return try FfiConverterTypeFfiAttentionKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAttentionKind_lower(_ value: FfiAttentionKind) -> RustBuffer {
+    return FfiConverterTypeFfiAttentionKind.lower(value)
+}
+
+
+
+
+public enum FfiChangeTone: Equatable, Hashable {
+    
+    case good
+    case bad
+    case neutral
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiChangeTone: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiChangeTone: FfiConverterRustBuffer {
+    typealias SwiftType = FfiChangeTone
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiChangeTone {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .good
+        
+        case 2: return .bad
+        
+        case 3: return .neutral
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiChangeTone, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .good:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .bad:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .neutral:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiChangeTone_lift(_ buf: RustBuffer) throws -> FfiChangeTone {
+    return try FfiConverterTypeFfiChangeTone.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiChangeTone_lower(_ value: FfiChangeTone) -> RustBuffer {
+    return FfiConverterTypeFfiChangeTone.lower(value)
 }
 
 
@@ -3247,6 +7484,8 @@ enum FfiError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     )
     case Rpc(message: String
     )
+    case Orbit(message: String, reason: FfiOrbitErrorReason
+    )
     case Closed
 
     
@@ -3295,7 +7534,11 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
         case 6: return .Rpc(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 7: return .Closed
+        case 7: return .Orbit(
+            message: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterTypeFfiOrbitErrorReason.read(from: &buf)
+            )
+        case 8: return .Closed
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3338,8 +7581,14 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
             FfiConverterString.write(message, into: &buf)
             
         
-        case .Closed:
+        case let .Orbit(message,reason):
             writeInt(&buf, Int32(7))
+            FfiConverterString.write(message, into: &buf)
+            FfiConverterTypeFfiOrbitErrorReason.write(reason, into: &buf)
+            
+        
+        case .Closed:
+            writeInt(&buf, Int32(8))
         
         }
     }
@@ -3359,6 +7608,253 @@ public func FfiConverterTypeFfiError_lift(_ buf: RustBuffer) throws -> FfiError 
 public func FfiConverterTypeFfiError_lower(_ value: FfiError) -> RustBuffer {
     return FfiConverterTypeFfiError.lower(value)
 }
+
+
+
+public enum FfiImplementerMode: Equatable, Hashable {
+    
+    case perSubtask
+    case shared
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiImplementerMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiImplementerMode: FfiConverterRustBuffer {
+    typealias SwiftType = FfiImplementerMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiImplementerMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .perSubtask
+        
+        case 2: return .shared
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiImplementerMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .perSubtask:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .shared:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImplementerMode_lift(_ buf: RustBuffer) throws -> FfiImplementerMode {
+    return try FfiConverterTypeFfiImplementerMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImplementerMode_lower(_ value: FfiImplementerMode) -> RustBuffer {
+    return FfiConverterTypeFfiImplementerMode.lower(value)
+}
+
+
+
+
+public enum FfiInsightId: Equatable, Hashable {
+    
+    case completed
+    case spent
+    case tokens
+    case wasted
+    case delivery
+    case firstPass
+    case mergeWait
+    case reviewRounds
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiInsightId: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiInsightId: FfiConverterRustBuffer {
+    typealias SwiftType = FfiInsightId
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiInsightId {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .completed
+        
+        case 2: return .spent
+        
+        case 3: return .tokens
+        
+        case 4: return .wasted
+        
+        case 5: return .delivery
+        
+        case 6: return .firstPass
+        
+        case 7: return .mergeWait
+        
+        case 8: return .reviewRounds
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiInsightId, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .spent:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .tokens:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .wasted:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .delivery:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .firstPass:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .mergeWait:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .reviewRounds:
+            writeInt(&buf, Int32(8))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightId_lift(_ buf: RustBuffer) throws -> FfiInsightId {
+    return try FfiConverterTypeFfiInsightId.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightId_lower(_ value: FfiInsightId) -> RustBuffer {
+    return FfiConverterTypeFfiInsightId.lower(value)
+}
+
+
+
+
+public enum FfiInsightsPeriod: Equatable, Hashable {
+    
+    case day
+    case week
+    case month
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiInsightsPeriod: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiInsightsPeriod: FfiConverterRustBuffer {
+    typealias SwiftType = FfiInsightsPeriod
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiInsightsPeriod {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .day
+        
+        case 2: return .week
+        
+        case 3: return .month
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiInsightsPeriod, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .day:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .week:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .month:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightsPeriod_lift(_ buf: RustBuffer) throws -> FfiInsightsPeriod {
+    return try FfiConverterTypeFfiInsightsPeriod.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInsightsPeriod_lower(_ value: FfiInsightsPeriod) -> RustBuffer {
+    return FfiConverterTypeFfiInsightsPeriod.lower(value)
+}
+
 
 
 /**
@@ -3433,6 +7929,936 @@ public func FfiConverterTypeFfiItemStatus_lift(_ buf: RustBuffer) throws -> FfiI
 #endif
 public func FfiConverterTypeFfiItemStatus_lower(_ value: FfiItemStatus) -> RustBuffer {
     return FfiConverterTypeFfiItemStatus.lower(value)
+}
+
+
+
+/**
+ * Overall appearance mode preference synced in the Orbit profile.
+ */
+
+public enum FfiOrbitAppearanceMode: Equatable, Hashable {
+    
+    case light
+    case dark
+    case system
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitAppearanceMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitAppearanceMode: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitAppearanceMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitAppearanceMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .light
+        
+        case 2: return .dark
+        
+        case 3: return .system
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitAppearanceMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .light:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .dark:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .system:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitAppearanceMode_lift(_ buf: RustBuffer) throws -> FfiOrbitAppearanceMode {
+    return try FfiConverterTypeFfiOrbitAppearanceMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitAppearanceMode_lower(_ value: FfiOrbitAppearanceMode) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitAppearanceMode.lower(value)
+}
+
+
+
+/**
+ * Branch selection when creating or finalizing an Orbit Project clone Instance.
+ */
+
+public enum FfiOrbitBranchSelection: Equatable, Hashable {
+    
+    /**
+     * Cut a new branch named after the Instance from `from`.
+     */
+    case new(from: String
+    )
+    /**
+     * Check out and push to existing branch `name`.
+     */
+    case existing(name: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitBranchSelection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitBranchSelection: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitBranchSelection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitBranchSelection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .new(from: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .existing(name: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitBranchSelection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .new(from):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(from, into: &buf)
+            
+        
+        case let .existing(name):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(name, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranchSelection_lift(_ buf: RustBuffer) throws -> FfiOrbitBranchSelection {
+    return try FfiConverterTypeFfiOrbitBranchSelection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitBranchSelection_lower(_ value: FfiOrbitBranchSelection) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitBranchSelection.lower(value)
+}
+
+
+
+/**
+ * Categorized reason for an [`FfiError::Orbit`] failure (mirrors [`conn_orbit::OrbitErrorReason`]).
+ */
+
+public enum FfiOrbitErrorReason: Equatable, Hashable {
+    
+    case notANode
+    case accessRequired
+    case extensionDisabled
+    case notFound
+    case unreachable
+    case invalidResponse
+    case versionConflict
+    case unsupported
+    case gateway
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitErrorReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitErrorReason: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitErrorReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitErrorReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .notANode
+        
+        case 2: return .accessRequired
+        
+        case 3: return .extensionDisabled
+        
+        case 4: return .notFound
+        
+        case 5: return .unreachable
+        
+        case 6: return .invalidResponse
+        
+        case 7: return .versionConflict
+        
+        case 8: return .unsupported
+        
+        case 9: return .gateway
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitErrorReason, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .notANode:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .accessRequired:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .extensionDisabled:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .notFound:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .unreachable:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .invalidResponse:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .versionConflict:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .unsupported:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .gateway:
+            writeInt(&buf, Int32(9))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitErrorReason_lift(_ buf: RustBuffer) throws -> FfiOrbitErrorReason {
+    return try FfiConverterTypeFfiOrbitErrorReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitErrorReason_lower(_ value: FfiOrbitErrorReason) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitErrorReason.lower(value)
+}
+
+
+
+/**
+ * Why an Orbit Instance name is unavailable.
+ */
+
+public enum FfiOrbitInstanceNameReason: Equatable, Hashable {
+    
+    case taken
+    case invalid
+    case `default`
+    case domainInvalid
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitInstanceNameReason: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitInstanceNameReason: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitInstanceNameReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitInstanceNameReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .taken
+        
+        case 2: return .invalid
+        
+        case 3: return .`default`
+        
+        case 4: return .domainInvalid
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitInstanceNameReason, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .taken:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .invalid:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .`default`:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .domainInvalid:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitInstanceNameReason_lift(_ buf: RustBuffer) throws -> FfiOrbitInstanceNameReason {
+    return try FfiConverterTypeFfiOrbitInstanceNameReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitInstanceNameReason_lower(_ value: FfiOrbitInstanceNameReason) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitInstanceNameReason.lower(value)
+}
+
+
+
+/**
+ * Container power state for an Orbit Instance.
+ */
+
+public enum FfiOrbitPowerState: Equatable, Hashable {
+    
+    case running
+    case stopped
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitPowerState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitPowerState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitPowerState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitPowerState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .running
+        
+        case 2: return .stopped
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitPowerState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .running:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .stopped:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitPowerState_lift(_ buf: RustBuffer) throws -> FfiOrbitPowerState {
+    return try FfiConverterTypeFfiOrbitPowerState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitPowerState_lower(_ value: FfiOrbitPowerState) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitPowerState.lower(value)
+}
+
+
+
+/**
+ * Status of one start-readiness check on an [`FfiOrbitProject`].
+ */
+
+public enum FfiOrbitProjectCheckStatus: Equatable, Hashable {
+    
+    case pass
+    case fail
+    case notChecked
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitProjectCheckStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitProjectCheckStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitProjectCheckStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitProjectCheckStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pass
+        
+        case 2: return .fail
+        
+        case 3: return .notChecked
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitProjectCheckStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pass:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .fail:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .notChecked:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProjectCheckStatus_lift(_ buf: RustBuffer) throws -> FfiOrbitProjectCheckStatus {
+    return try FfiConverterTypeFfiOrbitProjectCheckStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProjectCheckStatus_lower(_ value: FfiOrbitProjectCheckStatus) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitProjectCheckStatus.lower(value)
+}
+
+
+
+/**
+ * Target for [`OrbitCore::start_project_thread`]: either a new clone Instance (optionally
+ * finalizing a pre-warmed reservation) or an existing Orbit Instance environment.
+ */
+
+public enum FfiOrbitProjectTarget: Equatable, Hashable {
+    
+    /**
+     * Provision a new clone Instance (finalizing `reservation_id` when supplied and ready).
+     */
+    case newInstance(projectId: Int64, 
+        /**
+         * Custom instance name; if `None`, derived from the first message and checked for fit.
+         */instanceName: String?, 
+        /**
+         * Pre-warmed reservation id from [`OrbitCore::reserve_project`].
+         */reservationId: String?, 
+        /**
+         * Branch selection; `None` clones the project's default branch.
+         */branch: FfiOrbitBranchSelection?
+    )
+    /**
+     * Start the thread inside an existing Orbit Instance environment (waking it if stopped).
+     */
+    case existingInstance(environmentId: String, 
+        /**
+         * Cached bearer token for `environment_id`, if already paired in Keychain.
+         */cachedBearer: String?
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitProjectTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitProjectTarget: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitProjectTarget
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitProjectTarget {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .newInstance(projectId: try FfiConverterInt64.read(from: &buf), instanceName: try FfiConverterOptionString.read(from: &buf), reservationId: try FfiConverterOptionString.read(from: &buf), branch: try FfiConverterOptionTypeFfiOrbitBranchSelection.read(from: &buf)
+        )
+        
+        case 2: return .existingInstance(environmentId: try FfiConverterString.read(from: &buf), cachedBearer: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitProjectTarget, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .newInstance(projectId,instanceName,reservationId,branch):
+            writeInt(&buf, Int32(1))
+            FfiConverterInt64.write(projectId, into: &buf)
+            FfiConverterOptionString.write(instanceName, into: &buf)
+            FfiConverterOptionString.write(reservationId, into: &buf)
+            FfiConverterOptionTypeFfiOrbitBranchSelection.write(branch, into: &buf)
+            
+        
+        case let .existingInstance(environmentId,cachedBearer):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(environmentId, into: &buf)
+            FfiConverterOptionString.write(cachedBearer, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProjectTarget_lift(_ buf: RustBuffer) throws -> FfiOrbitProjectTarget {
+    return try FfiConverterTypeFfiOrbitProjectTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitProjectTarget_lower(_ value: FfiOrbitProjectTarget) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitProjectTarget.lower(value)
+}
+
+
+
+/**
+ * Lifecycle state of a pre-warmed clone reservation.
+ */
+
+public enum FfiOrbitReservationState: Equatable, Hashable {
+    
+    case preparing
+    case ready
+    case finalizing
+    case finalized
+    case failed
+    case expired
+    case released
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitReservationState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitReservationState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitReservationState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitReservationState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .preparing
+        
+        case 2: return .ready
+        
+        case 3: return .finalizing
+        
+        case 4: return .finalized
+        
+        case 5: return .failed
+        
+        case 6: return .expired
+        
+        case 7: return .released
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitReservationState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .preparing:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .ready:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .finalizing:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .finalized:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .expired:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .released:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitReservationState_lift(_ buf: RustBuffer) throws -> FfiOrbitReservationState {
+    return try FfiConverterTypeFfiOrbitReservationState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitReservationState_lower(_ value: FfiOrbitReservationState) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitReservationState.lower(value)
+}
+
+
+
+/**
+ * Registration status of an Orbit Node or Instance on the Gateway.
+ */
+
+public enum FfiOrbitTargetStatus: Equatable, Hashable {
+    
+    case registered
+    case sessionExpired
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitTargetStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitTargetStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitTargetStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitTargetStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .registered
+        
+        case 2: return .sessionExpired
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitTargetStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .registered:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .sessionExpired:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitTargetStatus_lift(_ buf: RustBuffer) throws -> FfiOrbitTargetStatus {
+    return try FfiConverterTypeFfiOrbitTargetStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitTargetStatus_lower(_ value: FfiOrbitTargetStatus) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitTargetStatus.lower(value)
+}
+
+
+
+/**
+ * Source kind of a theme slot inside the Orbit profile `appearance` section.
+ */
+
+public enum FfiOrbitThemeSlotSource: Equatable, Hashable {
+    
+    case stock
+    case builtin
+    case custom
+    case published
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiOrbitThemeSlotSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiOrbitThemeSlotSource: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitThemeSlotSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrbitThemeSlotSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .stock
+        
+        case 2: return .builtin
+        
+        case 3: return .custom
+        
+        case 4: return .published
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiOrbitThemeSlotSource, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .stock:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .builtin:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .custom:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .published:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitThemeSlotSource_lift(_ buf: RustBuffer) throws -> FfiOrbitThemeSlotSource {
+    return try FfiConverterTypeFfiOrbitThemeSlotSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiOrbitThemeSlotSource_lower(_ value: FfiOrbitThemeSlotSource) -> RustBuffer {
+    return FfiConverterTypeFfiOrbitThemeSlotSource.lower(value)
+}
+
+
+
+
+public enum FfiPullRequestState: Equatable, Hashable {
+    
+    case `open`
+    case merged
+    case closed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiPullRequestState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPullRequestState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPullRequestState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPullRequestState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .`open`
+        
+        case 2: return .merged
+        
+        case 3: return .closed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiPullRequestState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .`open`:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .merged:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .closed:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPullRequestState_lift(_ buf: RustBuffer) throws -> FfiPullRequestState {
+    return try FfiConverterTypeFfiPullRequestState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPullRequestState_lower(_ value: FfiPullRequestState) -> RustBuffer {
+    return FfiConverterTypeFfiPullRequestState.lower(value)
 }
 
 
@@ -3601,6 +9027,646 @@ public func FfiConverterTypeFfiSendMode_lift(_ buf: RustBuffer) throws -> FfiSen
 #endif
 public func FfiConverterTypeFfiSendMode_lower(_ value: FfiSendMode) -> RustBuffer {
     return FfiConverterTypeFfiSendMode.lower(value)
+}
+
+
+
+
+public enum FfiStatusTone: Equatable, Hashable {
+    
+    case success
+    case info
+    case warning
+    case destructive
+    case muted
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiStatusTone: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiStatusTone: FfiConverterRustBuffer {
+    typealias SwiftType = FfiStatusTone
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiStatusTone {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .success
+        
+        case 2: return .info
+        
+        case 3: return .warning
+        
+        case 4: return .destructive
+        
+        case 5: return .muted
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiStatusTone, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .success:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .info:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .warning:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .destructive:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .muted:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiStatusTone_lift(_ buf: RustBuffer) throws -> FfiStatusTone {
+    return try FfiConverterTypeFfiStatusTone.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiStatusTone_lower(_ value: FfiStatusTone) -> RustBuffer {
+    return FfiConverterTypeFfiStatusTone.lower(value)
+}
+
+
+
+
+public enum FfiSubtaskStatus: Equatable, Hashable {
+    
+    case todo
+    case reserved
+    case running
+    case reviewing
+    case completed
+    case failed
+    case cancelled
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiSubtaskStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiSubtaskStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiSubtaskStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSubtaskStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .todo
+        
+        case 2: return .reserved
+        
+        case 3: return .running
+        
+        case 4: return .reviewing
+        
+        case 5: return .completed
+        
+        case 6: return .failed
+        
+        case 7: return .cancelled
+        
+        case 8: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiSubtaskStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .todo:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .reserved:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .running:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .reviewing:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .cancelled:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(8))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSubtaskStatus_lift(_ buf: RustBuffer) throws -> FfiSubtaskStatus {
+    return try FfiConverterTypeFfiSubtaskStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSubtaskStatus_lower(_ value: FfiSubtaskStatus) -> RustBuffer {
+    return FfiConverterTypeFfiSubtaskStatus.lower(value)
+}
+
+
+
+
+public enum FfiTaskEnvironmentState: Equatable, Hashable {
+    
+    case notStarted
+    case disposed
+    case stopped
+    case unreachable
+    case ready(environmentId: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTaskEnvironmentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskEnvironmentState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskEnvironmentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskEnvironmentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .notStarted
+        
+        case 2: return .disposed
+        
+        case 3: return .stopped
+        
+        case 4: return .unreachable
+        
+        case 5: return .ready(environmentId: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTaskEnvironmentState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .notStarted:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .disposed:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .stopped:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .unreachable:
+            writeInt(&buf, Int32(4))
+        
+        
+        case let .ready(environmentId):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(environmentId, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskEnvironmentState_lift(_ buf: RustBuffer) throws -> FfiTaskEnvironmentState {
+    return try FfiConverterTypeFfiTaskEnvironmentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskEnvironmentState_lower(_ value: FfiTaskEnvironmentState) -> RustBuffer {
+    return FfiConverterTypeFfiTaskEnvironmentState.lower(value)
+}
+
+
+
+
+public enum FfiTaskLabelTone: Equatable, Hashable {
+    
+    case info
+    case warning
+    case destructive
+    case muted
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTaskLabelTone: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskLabelTone: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskLabelTone
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskLabelTone {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .info
+        
+        case 2: return .warning
+        
+        case 3: return .destructive
+        
+        case 4: return .muted
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTaskLabelTone, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .info:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .warning:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .destructive:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .muted:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskLabelTone_lift(_ buf: RustBuffer) throws -> FfiTaskLabelTone {
+    return try FfiConverterTypeFfiTaskLabelTone.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskLabelTone_lower(_ value: FfiTaskLabelTone) -> RustBuffer {
+    return FfiConverterTypeFfiTaskLabelTone.lower(value)
+}
+
+
+
+
+public enum FfiTaskLane: Equatable, Hashable {
+    
+    case backlog
+    case todo
+    case inProgress
+    case done
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTaskLane: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskLane: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskLane
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskLane {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .backlog
+        
+        case 2: return .todo
+        
+        case 3: return .inProgress
+        
+        case 4: return .done
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTaskLane, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .backlog:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .todo:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .inProgress:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .done:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskLane_lift(_ buf: RustBuffer) throws -> FfiTaskLane {
+    return try FfiConverterTypeFfiTaskLane.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskLane_lower(_ value: FfiTaskLane) -> RustBuffer {
+    return FfiConverterTypeFfiTaskLane.lower(value)
+}
+
+
+
+
+public enum FfiTaskStatus: Equatable, Hashable {
+    
+    case backlog
+    case todo
+    case reserved
+    case running
+    case reviewing
+    case settling
+    case waitingForReview
+    case completed
+    case failed
+    case cancelled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTaskStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTaskStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTaskStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .backlog
+        
+        case 2: return .todo
+        
+        case 3: return .reserved
+        
+        case 4: return .running
+        
+        case 5: return .reviewing
+        
+        case 6: return .settling
+        
+        case 7: return .waitingForReview
+        
+        case 8: return .completed
+        
+        case 9: return .failed
+        
+        case 10: return .cancelled
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTaskStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .backlog:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .todo:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .reserved:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .running:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .reviewing:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .settling:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .waitingForReview:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .cancelled:
+            writeInt(&buf, Int32(10))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskStatus_lift(_ buf: RustBuffer) throws -> FfiTaskStatus {
+    return try FfiConverterTypeFfiTaskStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTaskStatus_lower(_ value: FfiTaskStatus) -> RustBuffer {
+    return FfiConverterTypeFfiTaskStatus.lower(value)
+}
+
+
+
+
+public enum FfiTasksLiveStatus: Equatable, Hashable {
+    
+    case connecting
+    case live
+    case polling
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTasksLiveStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTasksLiveStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTasksLiveStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTasksLiveStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .connecting
+        
+        case 2: return .live
+        
+        case 3: return .polling
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTasksLiveStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .connecting:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .live:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .polling:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTasksLiveStatus_lift(_ buf: RustBuffer) throws -> FfiTasksLiveStatus {
+    return try FfiConverterTypeFfiTasksLiveStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTasksLiveStatus_lower(_ value: FfiTasksLiveStatus) -> RustBuffer {
+    return FfiConverterTypeFfiTasksLiveStatus.lower(value)
 }
 
 
@@ -4150,6 +10216,30 @@ public func FfiConverterTypeFfiUserInputAnswerValue_lower(_ value: FfiUserInputA
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
@@ -4198,6 +10288,54 @@ fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionDouble: FfiConverterRustBuffer {
+    typealias SwiftType = Double?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterDouble.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterDouble.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -4214,6 +10352,270 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiConversationRef: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConversationRef?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiConversationRef.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiConversationRef.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitAppearance: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitAppearance?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitAppearance.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitAppearance.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitBoundProfile: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitBoundProfile?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitBoundProfile.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitBoundProfile.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitBranchInstance: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitBranchInstance?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitBranchInstance.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitBranchInstance.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitBranchPullRequest: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitBranchPullRequest?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitBranchPullRequest.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitBranchPullRequest.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitEnvironment: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitEnvironment?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitEnvironment.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitEnvironment.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitProfile: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitProfile?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitProfile.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitProfile.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiTaskAttention: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskAttention?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTaskAttention.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTaskAttention.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiTaskInsightsStrip: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskInsightsStrip?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTaskInsightsStrip.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTaskInsightsStrip.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiTaskPullRequest: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskPullRequest?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTaskPullRequest.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTaskPullRequest.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiTaskWorkspace: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskWorkspace?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTaskWorkspace.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTaskWorkspace.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -4240,6 +10642,223 @@ fileprivate struct FfiConverterOptionTypeFfiThemeTokens: FfiConverterRustBuffer 
         case 1: return try FfiConverterTypeFfiThemeTokens.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiAgentState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiAgentState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiAgentState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiAgentState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiAppearance: FfiConverterRustBuffer {
+    typealias SwiftType = FfiAppearance?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiAppearance.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiAppearance.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiInsightsPeriod: FfiConverterRustBuffer {
+    typealias SwiftType = FfiInsightsPeriod?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiInsightsPeriod.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiInsightsPeriod.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitBranchSelection: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitBranchSelection?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitBranchSelection.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitBranchSelection.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitInstanceNameReason: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitInstanceNameReason?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitInstanceNameReason.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitInstanceNameReason.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiOrbitPowerState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiOrbitPowerState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiOrbitPowerState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiOrbitPowerState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiPullRequestState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiPullRequestState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiPullRequestState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiPullRequestState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiTaskLabelTone: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTaskLabelTone?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTaskLabelTone.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTaskLabelTone.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceInt64: FfiConverterRustBuffer {
+    typealias SwiftType = [Int64]
+
+    public static func write(_ value: [Int64], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterInt64.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Int64] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Int64]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterInt64.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -4296,6 +10915,256 @@ fileprivate struct FfiConverterSequenceTypeFfiAttachment: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiDeliverable: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiDeliverable]
+
+    public static func write(_ value: [FfiDeliverable], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiDeliverable.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiDeliverable] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiDeliverable]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiDeliverable.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiInsightCard: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiInsightCard]
+
+    public static func write(_ value: [FfiInsightCard], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiInsightCard.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiInsightCard] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiInsightCard]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiInsightCard.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiInsightTrendPoint: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiInsightTrendPoint]
+
+    public static func write(_ value: [FfiInsightTrendPoint], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiInsightTrendPoint.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiInsightTrendPoint] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiInsightTrendPoint]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiInsightTrendPoint.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOrbitBranch: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOrbitBranch]
+
+    public static func write(_ value: [FfiOrbitBranch], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOrbitBranch.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOrbitBranch] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOrbitBranch]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOrbitBranch.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOrbitCustomTheme: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOrbitCustomTheme]
+
+    public static func write(_ value: [FfiOrbitCustomTheme], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOrbitCustomTheme.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOrbitCustomTheme] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOrbitCustomTheme]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOrbitCustomTheme.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOrbitEnvironment: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOrbitEnvironment]
+
+    public static func write(_ value: [FfiOrbitEnvironment], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOrbitEnvironment.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOrbitEnvironment] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOrbitEnvironment]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOrbitEnvironment.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOrbitProfile: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOrbitProfile]
+
+    public static func write(_ value: [FfiOrbitProfile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOrbitProfile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOrbitProfile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOrbitProfile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOrbitProfile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOrbitProject: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOrbitProject]
+
+    public static func write(_ value: [FfiOrbitProject], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOrbitProject.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOrbitProject] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOrbitProject]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOrbitProject.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOrbitProjectCheck: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOrbitProjectCheck]
+
+    public static func write(_ value: [FfiOrbitProjectCheck], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOrbitProjectCheck.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOrbitProjectCheck] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOrbitProjectCheck]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOrbitProjectCheck.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiOrbitWorkspace: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiOrbitWorkspace]
+
+    public static func write(_ value: [FfiOrbitWorkspace], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiOrbitWorkspace.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiOrbitWorkspace] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiOrbitWorkspace]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiOrbitWorkspace.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiProject: FfiConverterRustBuffer {
     typealias SwiftType = [FfiProject]
 
@@ -4313,6 +11182,106 @@ fileprivate struct FfiConverterSequenceTypeFfiProject: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiProject.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiSubtask: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiSubtask]
+
+    public static func write(_ value: [FfiSubtask], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiSubtask.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiSubtask] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiSubtask]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiSubtask.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiTaskAgent: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTaskAgent]
+
+    public static func write(_ value: [FfiTaskAgent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTaskAgent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTaskAgent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTaskAgent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTaskAgent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiTaskBoardLane: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTaskBoardLane]
+
+    public static func write(_ value: [FfiTaskBoardLane], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTaskBoardLane.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTaskBoardLane] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTaskBoardLane]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTaskBoardLane.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiTaskSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTaskSummary]
+
+    public static func write(_ value: [FfiTaskSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTaskSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTaskSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTaskSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTaskSummary.read(from: &buf))
         }
         return seq
     }
@@ -4521,6 +11490,31 @@ fileprivate struct FfiConverterSequenceTypeFfiWorkGroupTiming: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiTaskLane: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTaskLane]
+
+    public static func write(_ value: [FfiTaskLane], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTaskLane.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTaskLane] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTaskLane]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTaskLane.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiTimelineEntry: FfiConverterRustBuffer {
     typealias SwiftType = [FfiTimelineEntry]
 
@@ -4540,6 +11534,32 @@ fileprivate struct FfiConverterSequenceTypeFfiTimelineEntry: FfiConverterRustBuf
             seq.append(try FfiConverterTypeFfiTimelineEntry.read(from: &buf))
         }
         return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
+    public static func write(_ value: [String: String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for (key, value) in value {
+            FfiConverterString.write(key, into: &buf)
+            FfiConverterString.write(value, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String: String] {
+        let len: Int32 = try readInt(&buf)
+        var dict = [String: String]()
+        dict.reserveCapacity(Int(len))
+        for _ in 0..<len {
+            let key = try FfiConverterString.read(from: &buf)
+            let value = try FfiConverterString.read(from: &buf)
+            dict[key] = value
+        }
+        return dict
     }
 }
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
@@ -4589,6 +11609,34 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     } else {
         print("uniffiFutureContinuationCallback invalid handle")
     }
+}
+/**
+ * Derives an Orbit clone Instance name from the thread's first message plus a suffix
+ * (wrapping [`conn_orbit::orbit_thread_instance_name`]).
+ */
+public func orbitDeriveInstanceName(message: String, suffix: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_orbit_derive_instance_name(
+        FfiConverterString.lower(message),
+        FfiConverterString.lower(suffix),uniffiCallStatus
+    )
+})
+}
+/**
+ * Matches a `conn-server` project against an [`FfiOrbitWorkspace`]'s `project_refs` and
+ * `project_keys` (wrapping [`conn_orbit::workspace_matches_project`]).
+ */
+public func orbitWorkspaceMatchesProject(workspace: FfiOrbitWorkspace, projectId: String, projectTitle: String, workspaceRoot: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_orbit_workspace_matches_project(
+        FfiConverterTypeFfiOrbitWorkspace_lower(workspace),
+        FfiConverterString.lower(projectId),
+        FfiConverterString.lower(projectTitle),
+        FfiConverterString.lower(workspaceRoot),uniffiCallStatus
+    )
+})
 }
 /**
  * Returns every built-in Conn theme in the desktop client's canonical order.
@@ -4643,6 +11691,12 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_conn_ffi_checksum_func_orbit_derive_instance_name() != 52176) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_func_orbit_workspace_matches_project() != 23526) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_func_builtin_themes() != 50022) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4665,6 +11719,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_dismiss_user_input() != 10644) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_ensure_scratch_project() != 24904) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_launch_general_thread() != 58633) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_launch_thread() != 45360) {
@@ -4694,6 +11754,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_send_message() != 39835) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_server_url() != 43789) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_settle_thread() != 64028) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4715,11 +11778,90 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_corelistener_on_error() != 59631) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_bound_profile() != 29553) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_check_instance_name() != 466) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_connect_environment() != 34306) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_fleet() != 23169) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_get_reservation() != 19792) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_me() != 57472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_primary_agent() != 35) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_profile_settings() != 60592) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_profiles() != 23012) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_project_branches() != 14927) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_projects() != 28360) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_projects_including_unavailable() != 23481) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_release_reservation() != 35069) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_reserve_project() != 61780) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_start_general_thread() != 18888) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_start_project_thread() != 57216) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_start_realtime() != 13160) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_stop_realtime() != 64214) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_task_detail() != 49359) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_tasks_board() != 33711) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitcore_wake_instance() != 2957) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitlistener_on_tasks_changed() != 39529) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitlistener_on_realtime_status() != 9989) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitlistener_on_fleet_changed() != 3275) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_orbitlistener_on_profile_changed() != 28485) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_constructor_conncore_connect() != 19757) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_constructor_orbitcore_new() != 57795) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitCoreListener()
+    uniffiCallbackInitOrbitListener()
     return InitializationResult.ok
 }()
 

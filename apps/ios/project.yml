@@ -27,6 +27,8 @@ targets:
       - package: DesignKit
       - framework: build/ConnCore.xcframework
         embed: false
+      - sdk: Security.framework
+      - sdk: CoreFoundation.framework
     info:
       path: Conn/Info.plist
       properties:

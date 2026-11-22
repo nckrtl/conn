@@ -278,6 +278,34 @@ typedef void (*UniffiCallbackInterfaceCoreListenerMethod4)(uint64_t, RustBuffer,
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD0
+typedef void (*UniffiCallbackInterfaceOrbitListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD1
+typedef void (*UniffiCallbackInterfaceOrbitListenerMethod1)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD2
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD2
+typedef void (*UniffiCallbackInterfaceOrbitListenerMethod2)(uint64_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD3
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ORBIT_LISTENER_METHOD3
+typedef void (*UniffiCallbackInterfaceOrbitListenerMethod3)(uint64_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CORE_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CORE_LISTENER
 typedef struct UniffiVTableCallbackInterfaceCoreListener {
@@ -289,6 +317,18 @@ typedef struct UniffiVTableCallbackInterfaceCoreListener {
     UniffiCallbackInterfaceCoreListenerMethod3 _Nonnull onThread;
     UniffiCallbackInterfaceCoreListenerMethod4 _Nonnull onError;
 } UniffiVTableCallbackInterfaceCoreListener;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_ORBIT_LISTENER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_ORBIT_LISTENER
+typedef struct UniffiVTableCallbackInterfaceOrbitListener {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceOrbitListenerMethod0 _Nonnull onTasksChanged;
+    UniffiCallbackInterfaceOrbitListenerMethod1 _Nonnull onRealtimeStatus;
+    UniffiCallbackInterfaceOrbitListenerMethod2 _Nonnull onFleetChanged;
+    UniffiCallbackInterfaceOrbitListenerMethod3 _Nonnull onProfileChanged;
+} UniffiVTableCallbackInterfaceOrbitListener;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_CONNCORE
@@ -329,6 +369,16 @@ void uniffi_conn_ffi_fn_method_conncore_disconnect(uint64_t ptr, RustCallStatus 
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DISMISS_USER_INPUT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DISMISS_USER_INPUT
 uint64_t uniffi_conn_ffi_fn_method_conncore_dismiss_user_input(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ENSURE_SCRATCH_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ENSURE_SCRATCH_PROJECT
+uint64_t uniffi_conn_ffi_fn_method_conncore_ensure_scratch_project(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_launch_general_thread(uint64_t ptr, RustBuffer text
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LAUNCH_THREAD
@@ -374,6 +424,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_respond_user_input(uint64_t ptr, Rus
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
 uint64_t uniffi_conn_ffi_fn_method_conncore_send_message(uint64_t ptr, RustBuffer thread_id, RustBuffer text, RustBuffer mode
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SERVER_URL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SERVER_URL
+RustBuffer uniffi_conn_ffi_fn_method_conncore_server_url(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SETTLE_THREAD
@@ -424,6 +479,171 @@ void uniffi_conn_ffi_fn_method_corelistener_on_thread(uint64_t ptr, RustBuffer s
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_ERROR
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_ERROR
 void uniffi_conn_ffi_fn_method_corelistener_on_error(uint64_t ptr, RustBuffer message, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_ORBITCORE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_ORBITCORE
+uint64_t uniffi_conn_ffi_fn_clone_orbitcore(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_ORBITCORE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_ORBITCORE
+void uniffi_conn_ffi_fn_free_orbitcore(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CONSTRUCTOR_ORBITCORE_NEW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CONSTRUCTOR_ORBITCORE_NEW
+uint64_t uniffi_conn_ffi_fn_constructor_orbitcore_new(RustBuffer gateway_url, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_BOUND_PROFILE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_BOUND_PROFILE
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_bound_profile(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_CHECK_INSTANCE_NAME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_CHECK_INSTANCE_NAME
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_check_instance_name(uint64_t ptr, int64_t project_id, RustBuffer name
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_CONNECT_ENVIRONMENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_CONNECT_ENVIRONMENT
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_connect_environment(uint64_t ptr, RustBuffer server_id, RustBuffer cached_bearer, uint64_t listener
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_FLEET
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_FLEET
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_fleet(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_GET_RESERVATION
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_GET_RESERVATION
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_get_reservation(uint64_t ptr, RustBuffer reservation_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_ME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_ME
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_me(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PRIMARY_AGENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PRIMARY_AGENT
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_primary_agent(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROFILE_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROFILE_SETTINGS
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_profile_settings(uint64_t ptr, int64_t profile_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROFILES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROFILES
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_profiles(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROJECT_BRANCHES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROJECT_BRANCHES
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_project_branches(uint64_t ptr, int64_t project_id, RustBuffer query
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROJECTS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROJECTS
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_projects(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROJECTS_INCLUDING_UNAVAILABLE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_PROJECTS_INCLUDING_UNAVAILABLE
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_projects_including_unavailable(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_RELEASE_RESERVATION
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_RELEASE_RESERVATION
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_release_reservation(uint64_t ptr, RustBuffer reservation_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_RESERVE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_RESERVE_PROJECT
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_reserve_project(uint64_t ptr, int64_t project_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_START_GENERAL_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_START_GENERAL_THREAD
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_start_general_thread(uint64_t ptr, RustBuffer text, RustBuffer cached_bearer, uint64_t listener
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_START_PROJECT_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_START_PROJECT_THREAD
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_start_project_thread(uint64_t ptr, RustBuffer target, RustBuffer text, uint64_t listener
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_START_REALTIME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_START_REALTIME
+void uniffi_conn_ffi_fn_method_orbitcore_start_realtime(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_STOP_REALTIME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_STOP_REALTIME
+void uniffi_conn_ffi_fn_method_orbitcore_stop_realtime(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_TASK_DETAIL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_TASK_DETAIL
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_task_detail(uint64_t ptr, int64_t task_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_TASKS_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_TASKS_BOARD
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_tasks_board(uint64_t ptr, RustBuffer query
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_WAKE_INSTANCE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITCORE_WAKE_INSTANCE
+uint64_t uniffi_conn_ffi_fn_method_orbitcore_wake_instance(uint64_t ptr, int64_t instance_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_ORBITLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_ORBITLISTENER
+uint64_t uniffi_conn_ffi_fn_clone_orbitlistener(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_ORBITLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_ORBITLISTENER
+void uniffi_conn_ffi_fn_free_orbitlistener(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_INIT_CALLBACK_VTABLE_ORBITLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_INIT_CALLBACK_VTABLE_ORBITLISTENER
+void uniffi_conn_ffi_fn_init_callback_vtable_orbitlistener(const UniffiVTableCallbackInterfaceOrbitListener* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_TASKS_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_TASKS_CHANGED
+void uniffi_conn_ffi_fn_method_orbitlistener_on_tasks_changed(uint64_t ptr, RustBuffer task_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_REALTIME_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_REALTIME_STATUS
+void uniffi_conn_ffi_fn_method_orbitlistener_on_realtime_status(uint64_t ptr, RustBuffer status, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_FLEET_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_FLEET_CHANGED
+void uniffi_conn_ffi_fn_method_orbitlistener_on_fleet_changed(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_PROFILE_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_ORBITLISTENER_ON_PROFILE_CHANGED
+void uniffi_conn_ffi_fn_method_orbitlistener_on_profile_changed(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_ORBIT_DERIVE_INSTANCE_NAME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_ORBIT_DERIVE_INSTANCE_NAME
+RustBuffer uniffi_conn_ffi_fn_func_orbit_derive_instance_name(RustBuffer message, RustBuffer suffix, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_ORBIT_WORKSPACE_MATCHES_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_ORBIT_WORKSPACE_MATCHES_PROJECT
+int8_t uniffi_conn_ffi_fn_func_orbit_workspace_matches_project(RustBuffer workspace, RustBuffer project_id, RustBuffer project_title, RustBuffer workspace_root, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_BUILTIN_THEMES
@@ -702,6 +922,18 @@ void ffi_conn_ffi_rust_future_free_void(uint64_t handle
 void ffi_conn_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_ORBIT_DERIVE_INSTANCE_NAME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_ORBIT_DERIVE_INSTANCE_NAME
+uint16_t uniffi_conn_ffi_checksum_func_orbit_derive_instance_name(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_ORBIT_WORKSPACE_MATCHES_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_ORBIT_WORKSPACE_MATCHES_PROJECT
+uint16_t uniffi_conn_ffi_checksum_func_orbit_workspace_matches_project(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_BUILTIN_THEMES
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_BUILTIN_THEMES
 uint16_t uniffi_conn_ffi_checksum_func_builtin_themes(void
@@ -747,6 +979,18 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_disconnect(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DISMISS_USER_INPUT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DISMISS_USER_INPUT
 uint16_t uniffi_conn_ffi_checksum_method_conncore_dismiss_user_input(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_ENSURE_SCRATCH_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_ENSURE_SCRATCH_PROJECT
+uint16_t uniffi_conn_ffi_checksum_method_conncore_ensure_scratch_project(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_launch_general_thread(void
     
 );
 #endif
@@ -804,6 +1048,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_send_message(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SERVER_URL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SERVER_URL
+uint16_t uniffi_conn_ffi_checksum_method_conncore_server_url(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SETTLE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SETTLE_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_settle_thread(void
@@ -846,9 +1096,165 @@ uint16_t uniffi_conn_ffi_checksum_method_corelistener_on_error(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_BOUND_PROFILE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_BOUND_PROFILE
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_bound_profile(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_CHECK_INSTANCE_NAME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_CHECK_INSTANCE_NAME
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_check_instance_name(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_CONNECT_ENVIRONMENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_CONNECT_ENVIRONMENT
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_connect_environment(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_FLEET
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_FLEET
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_fleet(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_GET_RESERVATION
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_GET_RESERVATION
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_get_reservation(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_ME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_ME
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_me(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PRIMARY_AGENT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PRIMARY_AGENT
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_primary_agent(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROFILE_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROFILE_SETTINGS
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_profile_settings(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROFILES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROFILES
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_profiles(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROJECT_BRANCHES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROJECT_BRANCHES
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_project_branches(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROJECTS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROJECTS
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_projects(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROJECTS_INCLUDING_UNAVAILABLE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_PROJECTS_INCLUDING_UNAVAILABLE
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_projects_including_unavailable(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_RELEASE_RESERVATION
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_RELEASE_RESERVATION
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_release_reservation(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_RESERVE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_RESERVE_PROJECT
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_reserve_project(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_START_GENERAL_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_START_GENERAL_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_start_general_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_START_PROJECT_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_START_PROJECT_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_start_project_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_START_REALTIME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_START_REALTIME
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_start_realtime(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_STOP_REALTIME
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_STOP_REALTIME
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_stop_realtime(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_TASK_DETAIL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_TASK_DETAIL
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_task_detail(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_TASKS_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_TASKS_BOARD
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_tasks_board(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_WAKE_INSTANCE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITCORE_WAKE_INSTANCE
+uint16_t uniffi_conn_ffi_checksum_method_orbitcore_wake_instance(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_TASKS_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_TASKS_CHANGED
+uint16_t uniffi_conn_ffi_checksum_method_orbitlistener_on_tasks_changed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_REALTIME_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_REALTIME_STATUS
+uint16_t uniffi_conn_ffi_checksum_method_orbitlistener_on_realtime_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_FLEET_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_FLEET_CHANGED
+uint16_t uniffi_conn_ffi_checksum_method_orbitlistener_on_fleet_changed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_PROFILE_CHANGED
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_ORBITLISTENER_ON_PROFILE_CHANGED
+uint16_t uniffi_conn_ffi_checksum_method_orbitlistener_on_profile_changed(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_CONSTRUCTOR_CONNCORE_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_CONSTRUCTOR_CONNCORE_CONNECT
 uint16_t uniffi_conn_ffi_checksum_constructor_conncore_connect(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_CONSTRUCTOR_ORBITCORE_NEW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_CONSTRUCTOR_ORBITCORE_NEW
+uint16_t uniffi_conn_ffi_checksum_constructor_orbitcore_new(void
     
 );
 #endif

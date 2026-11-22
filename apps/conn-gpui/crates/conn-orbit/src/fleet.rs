@@ -11,10 +11,7 @@
 //! This module harmonizes the client domain model around **Nodes** and **Instances** while speaking
 //! the Gateway's wire paths transparently. All code here is GPUI-free and `#![forbid(unsafe_code)]`.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -698,142 +695,12 @@ fn decode_is_primary_agent(obj: &serde_json::Map<String, Value>) -> bool {
         .unwrap_or(false)
 }
 
-// ---------------------------------------------------------------------------
-// Local bearer session store (isolated under conn-gpui app support)
-// ---------------------------------------------------------------------------
-
-/// Cached bearer token for one paired Orbit Node or Instance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CachedOrbitSession {
-    pub server_id: String,
-    pub url: String,
-    pub label: String,
-    pub bearer: String,
-    pub paired_at_unix: i64,
-}
-
-/// Persistent local store of auto-paired `conn-server` bearer tokens for Orbit Nodes/Instances.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrbitSessionStore {
-    #[serde(default)]
-    pub active_server_id: Option<String>,
-    #[serde(default)]
-    pub sessions: BTreeMap<String, CachedOrbitSession>,
-}
-
-impl OrbitSessionStore {
-    /// Default path (`~/Library/Application Support/conn-gpui/orbit-sessions.json` on macOS),
-    /// overridable with `CONN_GPUI_CONFIG_DIR` for isolated dev/test sessions.
-    #[must_use]
-    pub fn default_path() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os("CONN_GPUI_CONFIG_DIR") {
-            return Some(PathBuf::from(dir).join("orbit-sessions.json"));
-        }
-        let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        #[cfg(target_os = "macos")]
-        let dir = home
-            .join("Library")
-            .join("Application Support")
-            .join("conn-gpui");
-        #[cfg(not(target_os = "macos"))]
-        let dir = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"))
-            .join("conn-gpui");
-        Some(dir.join("orbit-sessions.json"))
-    }
-
-    /// Loads the store from disk, returning empty defaults if missing or unreadable.
-    #[must_use]
-    pub fn load_from(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
-    }
-
-    /// Loads from the default application support path.
-    #[must_use]
-    pub fn load_default() -> Self {
-        Self::default_path()
-            .map(|p| Self::load_from(&p))
-            .unwrap_or_default()
-    }
-
-    /// Saves atomically to `path` (mode `0600` on Unix since it stores bearer tokens).
-    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let payload = serde_json::to_string_pretty(self)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, payload)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, path)
-    }
-
-    /// Saves to the default application support path.
-    pub fn save_default(&self) -> std::io::Result<()> {
-        let Some(path) = Self::default_path() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "HOME directory not set",
-            ));
-        };
-        self.save_to(&path)
-    }
-
-    /// Returns a cached bearer token for `server_id`, when present.
-    #[must_use]
-    pub fn bearer_for(&self, server_id: &str) -> Option<&str> {
-        self.sessions
-            .get(server_id)
-            .map(|s| s.bearer.as_str())
-            .filter(|t| !t.is_empty())
-    }
-
-    /// Records a newly paired bearer token for `server_id` and marks it active.
-    pub fn record_bearer(
-        &mut self,
-        server_id: impl Into<String>,
-        url: impl Into<String>,
-        label: impl Into<String>,
-        bearer: impl Into<String>,
-    ) {
-        let server_id = server_id.into();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-        self.active_server_id = Some(server_id.clone());
-        self.sessions.insert(
-            server_id.clone(),
-            CachedOrbitSession {
-                server_id,
-                url: url.into(),
-                label: label.into(),
-                bearer: bearer.into(),
-                paired_at_unix: now,
-            },
-        );
-    }
-
-    /// Clears a cached bearer token (e.g. after a 401/Auth failure so next attempt re-pairs).
-    pub fn remove_bearer(&mut self, server_id: &str) {
-        self.sessions.remove(server_id);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::orbit::gateway::{BoxFuture, GatewayError, GatewayResponse};
+    use crate::gateway::{BoxFuture, GatewayError, GatewayResponse};
 
     struct MockGateway {
         handler:
@@ -1059,22 +926,6 @@ mod tests {
         assert_eq!(op, Some(991));
     }
 
-    #[test]
-    fn session_store_roundtrips_bearer_tokens() {
-        let dir =
-            std::env::temp_dir().join(format!("conn-orbit-sessions-test-{}", std::process::id()));
-        let path = dir.join("orbit-sessions.json");
-        let mut store = OrbitSessionStore::default();
-        store.record_bearer("node-beast", "http://10.44.0.7:3773", "beast", "tok-secret");
-        store.save_to(&path).expect("save");
-
-        let loaded = OrbitSessionStore::load_from(&path);
-        assert_eq!(loaded.active_server_id.as_deref(), Some("node-beast"));
-        assert_eq!(loaded.bearer_for("node-beast"), Some("tok-secret"));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[tokio::test]
     async fn decodes_agent_roles_and_resolves_primary_agent_node() {
         let payload = serde_json::json!({
@@ -1184,25 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_legacy_orbit_sessions_and_targets_without_agent_fields() {
-        let legacy_sessions_json = serde_json::json!({
-            "active_server_id": "node-nick",
-            "sessions": {
-                "node-nick": {
-                    "server_id": "node-nick",
-                    "url": "http://10.44.0.6:3773",
-                    "label": "nick",
-                    "bearer": "legacy-token",
-                    "paired_at_unix": 1_700_000_000
-                }
-            }
-        })
-        .to_string();
-        let store: OrbitSessionStore =
-            serde_json::from_str(&legacy_sessions_json).expect("legacy orbit-sessions.json");
-        assert_eq!(store.active_server_id.as_deref(), Some("node-nick"));
-        assert_eq!(store.bearer_for("node-nick"), Some("legacy-token"));
-
+    fn deserializes_legacy_orbit_targets_without_agent_fields() {
         let legacy_target_json = serde_json::json!({
             "server_id": "node-nick",
             "label": "nick",

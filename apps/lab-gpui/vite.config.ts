@@ -3,7 +3,7 @@
 // index.html on 127.0.0.1:5800; `vp run build` writes a bundle that loads fast over WireGuard.
 import { fileURLToPath } from "node:url";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
-import type { Plugin, PluginOption, UserConfig } from "vite-plus";
+import { defineConfig, type Plugin, type PluginOption, type UserConfig } from "vite-plus";
 import base from "../web/vite.config";
 
 const lab = fileURLToPath(new URL("./", import.meta.url));
@@ -54,13 +54,25 @@ const isRouterPlugin = (plugin: PluginOption) =>
   "name" in plugin &&
   /^tanstack(-router)?:/.test(String(plugin.name));
 
-export default async (env: Parameters<Extract<typeof base, (...args: never[]) => unknown>>[0]) => {
+// `vp run` reads `run` from this file without executing it (as in apps/web), so building the task
+// graph never loads the app's plugins: CI jobs that install only part of the workspace need that.
+// Keep `run` a literal here, after the spread.
+export default defineConfig(async (env) => {
   // The app's test projects stay with the app.
   const { test: _test, ...config } = (
     typeof base === "function" ? await base(env) : base
   ) as UserConfig;
   return {
     ...config,
+    run: {
+      tasks: {
+        // As in apps/web: a local tsbuildinfo is leftover build state, not a typecheck input.
+        typecheck: {
+          command: "effect-tsgo tsrs --noEmit",
+          cache: { input: [{ auto: true }, "!*.tsbuildinfo"] },
+        },
+      },
+    },
     root: lab,
     // The app's public assets and env files stay in apps/web.
     publicDir: `${web}public`,
@@ -95,4 +107,4 @@ export default async (env: Parameters<Extract<typeof base, (...args: never[]) =>
       manifest: false,
     },
   } satisfies UserConfig;
-};
+});

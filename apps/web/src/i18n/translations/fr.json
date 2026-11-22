@@ -12534,5 +12534,10 @@
   "27d76249d09eb69f": "Guide de revue prêt",
   "faa3bb26abb39c93": "Échec du guide de revue",
   "b7df38b7d8792d78": "Ouvrir le guide",
-  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue"
+  "9e91e9a77b664e4e": "Impossible de démarrer un guide de revue",
+  "feaf5290a4413745": "Dupliquer",
+  "66c4ee40252d9dec": "Copier au format HTML",
+  "82a0120f80907e97": "{via} n’a pas pu obtenir de code d’appairage auprès de {target}",
+  "883abe5832a6732e": "Saisissez plutôt son adresse et un code d’appairage fourni par cette machine.",
+  "5f2e20c62a4fece3": "{via} est lié à {target} en accès complet et récupère donc le code d’appairage. Aucun code à coller."
 }

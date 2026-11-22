@@ -386,7 +386,9 @@ export function PullRequestDescriptionTab({
         scrollRef.current = node;
         scrollerRef(node);
       }}
-      className="h-full overflow-y-auto"
+      tabIndex={-1}
+      data-workspace-focus-default
+      className="h-full overflow-y-auto outline-none"
       data-pull-request-summary-scroll
     >
       <section aria-label={gt("Description")} className="group px-4.5 py-4">

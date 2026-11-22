@@ -2,7 +2,7 @@ import { EnvironmentId, type PeerLinkSummary } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 
-import { peerLinkHealth } from "./peerLinks.ts";
+import { linkThroughRoutes, peerLinkHealth } from "./peerLinks.ts";
 
 const now = DateTime.makeUnsafe("2026-10-06T12:00:00.000Z");
 const link = (overrides: Partial<PeerLinkSummary>): PeerLinkSummary => ({
@@ -44,5 +44,52 @@ describe("peerLinkHealth", () => {
       kind: "failing",
       detail: "Box rejected the link's session.",
     });
+  });
+});
+
+const routeNow = DateTime.makeUnsafe("2026-11-20T00:00:00.000Z");
+const id = (value: string) => EnvironmentId.make(value);
+
+const routeLink = (target: string, overrides: Partial<PeerLinkSummary> = {}): PeerLinkSummary => ({
+  environmentId: id(target),
+  label: target,
+  urls: [`https://${target}.example`],
+  access: "full-access",
+  status: "reachable",
+  linkedAt: routeNow,
+  lastReachedAt: routeNow,
+  lastError: null,
+  expiresAt: DateTime.makeUnsafe("2026-12-20T00:00:00.000Z"),
+  ...overrides,
+});
+
+describe("linkThroughRoutes", () => {
+  it("offers only machines another environment reaches over a full-access link that answers", () => {
+    const routes = linkThroughRoutes({
+      sourceEnvironmentId: id("source"),
+      hosts: [
+        { environmentId: id("source"), links: [routeLink("own")] },
+        {
+          environmentId: id("via"),
+          links: [
+            routeLink("open"),
+            routeLink("source"),
+            routeLink("supervised", { access: "approval-required" }),
+            routeLink("down", { status: "unreachable" }),
+            routeLink("lapsed", { expiresAt: routeNow }),
+          ],
+        },
+        { environmentId: id("later"), links: [routeLink("open")] },
+      ],
+      now: routeNow,
+    });
+    expect([...routes.values()]).toEqual([
+      {
+        viaEnvironmentId: id("via"),
+        environmentId: id("open"),
+        label: "open",
+        urls: ["https://open.example"],
+      },
+    ]);
   });
 });

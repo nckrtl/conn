@@ -67,7 +67,7 @@ export class IssueTargetIncompleteError extends Schema.TaggedError<IssueTargetIn
   {},
 ) {
   override get message(): string {
-    return "Pass either url, or key (with projectId when not running inside a T3 thread).";
+    return "Pass either url, or key (with projectId when not running inside a Conn thread).";
   }
 }
 
@@ -76,7 +76,7 @@ export class IssueProjectRequiredError extends Schema.TaggedError<IssueProjectRe
   {},
 ) {
   override get message(): string {
-    return "Pass projectId: this MCP client is not running inside a T3 thread.";
+    return "Pass projectId: this MCP client is not running inside a Conn thread.";
   }
 }
 
@@ -85,7 +85,7 @@ export class IssueThreadRequiredError extends Schema.TaggedError<IssueThreadRequ
   {},
 ) {
   override get message(): string {
-    return "Pass threadId: this MCP client is not running inside a T3 thread.";
+    return "Pass threadId: this MCP client is not running inside a Conn thread.";
   }
 }
 

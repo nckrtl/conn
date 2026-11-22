@@ -277,6 +277,6 @@ export class TestLoginStoreError extends Schema.TaggedError<TestLoginStoreError>
   { cause: Schema.optional(Schema.Defect()) },
 ) {
   override get message(): string {
-    return "T3 Code could not read or save its test logins.";
+    return "Conn could not read or save its test logins.";
   }
 }

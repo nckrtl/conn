@@ -19,8 +19,8 @@ const hostedAppChannel = import.meta.env.VITE_HOSTED_APP_CHANNEL?.trim().toLower
 export const HOSTED_APP_CHANNEL =
   hostedAppChannel === "latest" || hostedAppChannel === "nightly" ? hostedAppChannel : null;
 export const HOSTED_APP_CHANNEL_LABEL = resolveHostedAppChannelLabel(HOSTED_APP_CHANNEL);
-// oxlint-disable-next-line t3code/no-hardcoded-app-name -- upstream's default brand name when no desktop bridge names one
-export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "T3 Code";
+// Conn: the name a browser or web build shows when no desktop bridge names the app.
+export const APP_BASE_NAME = injectedDesktopAppBranding?.baseName ?? "Conn";
 export const APP_STAGE_LABEL =
   injectedDesktopAppBranding?.stageLabel ??
   resolveWebAppStageLabel({

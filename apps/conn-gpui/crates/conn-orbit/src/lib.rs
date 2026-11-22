@@ -39,7 +39,7 @@ pub mod tasks;
 pub use client::{OrbitTasksClient, TasksError, TasksErrorReason, TasksInvalidation, TasksResult};
 pub use fleet::{
     OrbitFleet, OrbitFleetClient, OrbitPairingTicket, OrbitServerTarget, OrbitTargetKind,
-    OrbitTargetStatus,
+    OrbitTargetStatus, select_primary_agent_node,
 };
 pub use gateway::{GatewayError, GatewayRequest, GatewayResponse, GatewayTransport, OrbitGateway};
 pub use profile::{

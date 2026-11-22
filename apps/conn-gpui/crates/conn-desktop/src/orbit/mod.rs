@@ -24,7 +24,7 @@ pub use conn_orbit::{
     detail, extract_section, find_project, find_project_by_name, find_project_by_slug, fixtures,
     fleet, follow_orbit_tasks, format, gateway, insights, merge_appearance, merge_device_section,
     merge_workspaces, orbit_realtime_event, parse_profile_appearance, parse_profile_device_section,
-    profile, projects, realtime, same_workspaces, tasks, to_gateway_form,
-    workspace_matches_project,
+    profile, projects, realtime, same_workspaces, select_primary_agent_node, tasks,
+    to_gateway_form, workspace_matches_project,
 };
 pub use storage::{CachedOrbitSession, OrbitSessionStore, OrbitSyncSnapshot};

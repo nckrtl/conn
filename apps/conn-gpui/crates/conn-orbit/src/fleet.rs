@@ -328,6 +328,134 @@ impl OrbitFleet {
             })
             .or_else(|| self.nodes.first())
     }
+
+    /// Selects the primary `agent`-role Node from this fleet, falling back only to
+    /// `local_node_name` when that local host Node is registered (otherwise `None`, e.g. on iOS).
+    ///
+    /// Delegates to [`select_primary_agent_node`]; see its docs for the full selection order and
+    /// the Gateway pairing + token-exchange flow needed to connect to the selected node.
+    #[must_use]
+    pub fn select_primary_agent_node(
+        &self,
+        local_node_name: Option<&str>,
+    ) -> Option<&OrbitServerTarget> {
+        select_primary_agent_node(&self.nodes, local_node_name)
+    }
+}
+
+fn matches_local_node(target: &OrbitServerTarget, local_node_name: Option<&str>) -> bool {
+    let Some(needle) = local_node_name.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    target
+        .node_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(needle))
+        || target.label.eq_ignore_ascii_case(needle)
+}
+
+fn deterministic_node_order<'a>(
+    target: &'a OrbitServerTarget,
+    local_node_name: Option<&str>,
+) -> (bool, String, &'a str) {
+    (
+        !matches_local_node(target, local_node_name),
+        target.label.to_ascii_lowercase(),
+        target.server_id.as_str(),
+    )
+}
+
+/// Selects the primary Orbit Node carrying the `"agent"` role from the Gateway's target list
+/// (`docs/scope.md` §5.4).
+///
+/// Mirrors how desktop (`conn-app`) and Expo mobile (`apps/mobile/src/features/orbit/orbitGatewayStore.ts`,
+/// `OrbitEnvironmentSections.tsx`) interpret `GET /api/v1/conn/environments`:
+/// - Only host Nodes (`instance_id == None`, i.e. [`OrbitServerTarget::is_node`]) that are
+///   `Registered` and not `cleanup_pending` are eligible; per-project Instance clones and
+///   `SessionExpired` registrations are skipped.
+/// - Selection priority:
+///   1. Registered host Node with `is_primary_agent == true` (ties broken deterministically:
+///      local node first, then ASCII case-insensitive label, then `server_id`).
+///   2. Registered host Node carrying the `"agent"` role (same deterministic tie-breaker).
+///   3. If no `agent`-role node is set and `local_node_name` is `Some(name)`, the registered host
+///      Node matching `name` by `node_name` or `label` (desktop day-1 local fallback).
+///   4. `None` when no `agent`-role node is configured and no local host Node matches (e.g. on
+///      iOS, where the phone does not host `conn-server`, or when `local_node_name` is `None`).
+///
+/// # Connecting to the selected node (URL + credential)
+///
+/// Selecting a node only identifies the target; callers obtain a `conn-server` URL and bearer
+/// credential via the following flow (not executed here):
+///
+/// 1. **Discover the node & fleet:** Call `GET /api/v1/conn/me`
+///    ([`OrbitProfileClient::me`](super::profile::OrbitProfileClient::me)) for this device's node
+///    name and `GET /api/v1/conn/environments` ([`OrbitFleetClient::list_fleet`]), mirroring
+///    `packages/client-runtime/src/orbitGateway/client.ts` (`me`, `environments`),
+///    `apps/mobile/src/features/orbit/orbitGatewayStore.ts` (`refreshOrbitGateway`), and
+///    `apps/conn-gpui/crates/conn-app/src/orbit_sync.rs` (`fetch_orbit_profile`).
+/// 2. **Reuse a cached bearer token when already paired:** If the client already persisted a
+///    bearer token for `target.server_id` (macOS: `conn_desktop::orbit::OrbitSessionStore`; iOS:
+///    Keychain / SecureStore), connect directly to `target.url` with that bearer token (see
+///    `apps/conn-gpui/crates/conn-app/src/app.rs` `connect_orbit_target` and
+///    `apps/mobile/src/features/orbit/orbitGatewayStore.ts` `reconcileEnvironments`).
+/// 3. **Mint a one-time pairing URL from Orbit Gateway:** Call
+///    [`OrbitFleetClient::mint_pairing`] with `target.server_id`, which sends
+///    `POST /api/v1/conn/environments/{server_id}/pairings` (passing `{ "renew": true }` when
+///    renewing an expired/expiring session). If the Gateway responds `202 Accepted` with an async
+///    `conn.pairing_create` Operation, `mint_pairing` polls `GET /api/v1/operations/{id}` until
+///    `status == "succeeded"` and reads `GET /api/v1/conn/environments/{server_id}/pairings/{pairing_id}`
+///    once to return an [`OrbitPairingTicket`] (see
+///    `packages/client-runtime/src/orbitGateway/client.ts` `pair` and
+///    `apps/mobile/src/features/orbit/orbitGatewayStore.ts` `attemptPairing`).
+/// 4. **Extract the `conn-server` URL and pairing code:** Read
+///    [`OrbitPairingTicket::http_base_url`] (falling back to `target.url`) and
+///    [`OrbitPairingTicket::pairing_code`] (the `#token=<code>` fragment).
+/// 5. **Exchange the pairing code for a `conn-server` bearer token:** `POST {http_base_url}/oauth/token`
+///    (`application/x-www-form-urlencoded`, `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+///    `subject_token=<code>`, `subject_token_type=urn:t3:params:oauth:token-type:environment-bootstrap`,
+///    `requested_token_type=urn:t3:params:oauth:token-type:access_token`). In Rust, passing
+///    `conn_client::Credential::PairingCode(code)` does this exchange automatically (see
+///    `apps/conn-gpui/crates/conn-client/src/auth.rs` `exchange_pairing_code` and
+///    `apps/conn-gpui/crates/conn-client/src/driver.rs`); in TypeScript/Expo, see
+///    `packages/client-runtime/src/connection/onboarding.ts` (`registerPairingConnection`) and
+///    `apps/mobile/src/connection/onboarding.ts` (`connectPairingUrl`). Persist the returned
+///    `access_token` per `server_id` and open `/ws?orchestrationProtocol=2` with
+///    `Authorization: Bearer <access_token>`.
+#[must_use]
+pub fn select_primary_agent_node<'a>(
+    targets: &'a [OrbitServerTarget],
+    local_node_name: Option<&str>,
+) -> Option<&'a OrbitServerTarget> {
+    let eligible: Vec<&OrbitServerTarget> = targets
+        .iter()
+        .filter(|target| {
+            target.is_node()
+                && !target.cleanup_pending
+                && target.status == OrbitTargetStatus::Registered
+        })
+        .collect();
+
+    if let Some(primary) = eligible
+        .iter()
+        .copied()
+        .filter(|node| node.is_primary_agent())
+        .min_by_key(|node| deterministic_node_order(node, local_node_name))
+    {
+        return Some(primary);
+    }
+
+    if let Some(agent) = eligible
+        .iter()
+        .copied()
+        .filter(|node| node.has_agent_role())
+        .min_by_key(|node| deterministic_node_order(node, local_node_name))
+    {
+        return Some(agent);
+    }
+
+    eligible
+        .into_iter()
+        .filter(|node| matches_local_node(node, local_node_name))
+        .min_by_key(|node| deterministic_node_order(node, local_node_name))
 }
 
 /// One-time pairing link minted by Orbit Gateway for a Node or Instance.
@@ -1056,5 +1184,224 @@ mod tests {
         assert!(target.roles().is_empty());
         assert!(!target.is_primary_agent());
         assert!(!target.has_agent_role());
+    }
+
+    fn make_node(
+        server_id: &str,
+        label: &str,
+        node_name: &str,
+        roles: &[&str],
+        is_primary_agent: bool,
+        status: OrbitTargetStatus,
+        cleanup_pending: bool,
+    ) -> OrbitServerTarget {
+        OrbitServerTarget {
+            server_id: server_id.to_owned(),
+            label: label.to_owned(),
+            url: format!("http://10.44.0.10:3773/{server_id}"),
+            server_version: Some("0.1.7".to_owned()),
+            registered_by: Some(node_name.to_owned()),
+            status,
+            cleanup_pending,
+            kind: OrbitTargetKind::Node {
+                node_name: node_name.to_owned(),
+                roles: roles.iter().map(|r| (*r).to_owned()).collect(),
+                is_primary_agent,
+            },
+        }
+    }
+
+    fn make_instance(server_id: &str, label: &str, instance_id: i64) -> OrbitServerTarget {
+        OrbitServerTarget {
+            server_id: server_id.to_owned(),
+            label: label.to_owned(),
+            url: format!("http://10.44.0.10:3800/{server_id}"),
+            server_version: Some("0.1.7".to_owned()),
+            registered_by: Some("beast".to_owned()),
+            status: OrbitTargetStatus::Registered,
+            cleanup_pending: false,
+            kind: OrbitTargetKind::Instance {
+                instance_id,
+                instance_name: label.to_owned(),
+                project_id: Some(1),
+                project_name: Some("Orbit".to_owned()),
+                project_slug: Some("orbit".to_owned()),
+                node_name: Some("beast".to_owned()),
+                instance_url: None,
+                power_state: Some(PowerState::Running),
+            },
+        }
+    }
+
+    #[test]
+    fn select_primary_agent_node_prefers_primary_then_agent_role_then_local_else_none() {
+        let nick = make_node(
+            "node-nick",
+            "nick",
+            "nick",
+            &[],
+            false,
+            OrbitTargetStatus::Registered,
+            false,
+        );
+        let beast_agent = make_node(
+            "node-beast",
+            "beast",
+            "beast",
+            &["router", "agent"],
+            false,
+            OrbitTargetStatus::Registered,
+            false,
+        );
+        let mini_primary = make_node(
+            "node-mini",
+            "mini",
+            "mini",
+            &["agent"],
+            true,
+            OrbitTargetStatus::Registered,
+            false,
+        );
+        let instance = make_instance("inst-1", "orbit / main", 42);
+
+        // 1. Explicit `is_primary_agent` wins regardless of slice order or local node.
+        let targets = vec![
+            instance.clone(),
+            nick.clone(),
+            beast_agent.clone(),
+            mini_primary,
+        ];
+        assert_eq!(
+            select_primary_agent_node(&targets, Some("nick")).map(|n| n.server_id.as_str()),
+            Some("node-mini"),
+            "registered primary agent node should win over other agent nodes and local node"
+        );
+        assert_eq!(
+            select_primary_agent_node(&targets, None).map(|n| n.server_id.as_str()),
+            Some("node-mini"),
+            "iOS caller (no local_node_name) still picks primary agent node"
+        );
+
+        // 2. Without a primary agent, pick an `"agent"`-role node deterministically.
+        let zed_agent = make_node(
+            "node-zed",
+            "zed",
+            "zed",
+            &["Agent"],
+            false,
+            OrbitTargetStatus::Registered,
+            false,
+        );
+        let two_agents = vec![zed_agent, beast_agent, nick.clone()];
+        assert_eq!(
+            select_primary_agent_node(&two_agents, None).map(|n| n.server_id.as_str()),
+            Some("node-beast"),
+            "deterministic alphabetical tie-break when local node does not hold agent role"
+        );
+        assert_eq!(
+            select_primary_agent_node(&two_agents, Some("zed")).map(|n| n.server_id.as_str()),
+            Some("node-zed"),
+            "local node wins tie among non-primary agent-role nodes"
+        );
+
+        // 3. No `"agent"`-role node: desktop falls back to local registered node; iOS gets None.
+        let no_agents = vec![
+            instance,
+            make_node(
+                "node-beast",
+                "beast",
+                "beast",
+                &["router"],
+                false,
+                OrbitTargetStatus::Registered,
+                false,
+            ),
+            nick,
+        ];
+        assert_eq!(
+            select_primary_agent_node(&no_agents, Some("NICK")).map(|n| n.server_id.as_str()),
+            Some("node-nick"),
+            "desktop falls back to matching local node case-insensitively"
+        );
+        assert_eq!(
+            select_primary_agent_node(&no_agents, Some("iphone")),
+            None,
+            "iOS node name not hosting conn-server returns None when no agent-role node exists"
+        );
+        assert_eq!(
+            select_primary_agent_node(&no_agents, None),
+            None,
+            "unset local_node_name returns None when no agent-role node exists"
+        );
+        assert_eq!(
+            select_primary_agent_node(&no_agents, Some("   ")),
+            None,
+            "whitespace-only local_node_name is treated as unset"
+        );
+        assert_eq!(
+            select_primary_agent_node(&[], Some("nick")),
+            None,
+            "empty target list returns None"
+        );
+    }
+
+    #[test]
+    fn select_primary_agent_node_skips_expired_cleanup_and_instances() {
+        let expired_primary = make_node(
+            "node-mini",
+            "mini",
+            "mini",
+            &["agent"],
+            true,
+            OrbitTargetStatus::SessionExpired,
+            false,
+        );
+        let cleaning_agent = make_node(
+            "node-old",
+            "old",
+            "old",
+            &["agent"],
+            false,
+            OrbitTargetStatus::Registered,
+            true,
+        );
+        let healthy_agent = make_node(
+            "node-beast",
+            "beast",
+            "beast",
+            &["agent"],
+            false,
+            OrbitTargetStatus::Registered,
+            false,
+        );
+        let instance = make_instance("inst-99", "orbit / task", 99);
+
+        let targets = vec![
+            expired_primary.clone(),
+            cleaning_agent.clone(),
+            instance.clone(),
+            healthy_agent.clone(),
+        ];
+        assert_eq!(
+            select_primary_agent_node(&targets, None).map(|n| n.server_id.as_str()),
+            Some("node-beast"),
+            "expired primary and cleanup_pending agent nodes are skipped"
+        );
+
+        let only_unusable = vec![expired_primary, cleaning_agent, instance];
+        assert_eq!(
+            select_primary_agent_node(&only_unusable, Some("mini")),
+            None,
+            "expired local node is not selected"
+        );
+
+        let fleet = OrbitFleet::from_targets(vec![healthy_agent], Some("nick"));
+        assert_eq!(
+            fleet
+                .select_primary_agent_node(Some("nick"))
+                .map(|n| n.server_id.as_str()),
+            Some("node-beast"),
+            "OrbitFleet::select_primary_agent_node delegates consistently"
+        );
     }
 }

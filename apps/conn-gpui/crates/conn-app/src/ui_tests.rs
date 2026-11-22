@@ -845,3 +845,76 @@ fn composer_attach_file_uploads_via_background_tokio_runtime(cx: &mut TestAppCon
         "expected attached PNG to reach ready:att-gpui-test-1 on GPUI executor, got {final_states:?}"
     );
 }
+
+#[gpui_kit::test]
+fn composer_keeps_bottom_breathing_room_and_context_strip_layout(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+        });
+    });
+
+    // 1. Active thread with default `persistComposerContextStrip = false`: the composer card must
+    // still sit above Conn's 20px (`h-[1.25rem]`, `ChatView.tsx:4067`) bottom spacer + 4px shell
+    // inset (never slammed flush against the bottom of the window).
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let card = window.find_by_label("Message input card");
+        let bottom_gap = TEST_WINDOW_HEIGHT - f32::from(card.bounds().bottom());
+        assert!(
+            bottom_gap >= 23.5,
+            "composer card must keep >=20px bottom breathing room + 4px shell inset (got {bottom_gap:.1}px)"
+        );
+        assert!(
+            window.try_find_by_label("Thread context").is_none(),
+            "context strip stays hidden on active threads while persist_composer_context_strip is false"
+        );
+    });
+
+    // 2. Enabling `persist_composer_context_strip` renders the branch/worktree row below the
+    // composer card while preserving the >=20px bottom breathing room underneath it.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_persist_composer_context_strip(true, cx);
+        });
+    });
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let card = window.find_by_label("Message input card");
+        let strip = window.find_by_label("Thread context");
+        assert!(
+            f32::from(strip.bounds().top()) >= f32::from(card.bounds().bottom()),
+            "context strip must sit below the composer card"
+        );
+        let strip_bottom_gap = TEST_WINDOW_HEIGHT - f32::from(strip.bounds().bottom());
+        assert!(
+            strip_bottom_gap >= 23.5,
+            "context strip must keep >=20px bottom breathing room + 4px shell inset (got {strip_bottom_gap:.1}px)"
+        );
+    });
+
+    // 3. Even with `persist_composer_context_strip = false`, a new-thread draft always renders the
+    // context strip (workspace/branch + permissions) below the composer card with >=20px spacer.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_persist_composer_context_strip(false, cx);
+            app.start_new_thread(None, None, cx);
+        });
+    });
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let card = window.find_by_label("Message input card");
+        let strip = window.find_by_label("Thread context");
+        assert!(
+            f32::from(strip.bounds().top()) >= f32::from(card.bounds().bottom()),
+            "draft context strip must sit below the composer card"
+        );
+        let strip_bottom_gap = TEST_WINDOW_HEIGHT - f32::from(strip.bounds().bottom());
+        assert!(
+            strip_bottom_gap >= 23.5,
+            "draft context strip must keep >=20px bottom breathing room + 4px shell inset (got {strip_bottom_gap:.1}px)"
+        );
+    });
+}

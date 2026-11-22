@@ -178,6 +178,8 @@ pub(crate) struct Composer {
     thread_branch: Option<String>,
     worktree_active: bool,
     is_draft: bool,
+    /// Mirrors Conn's `settings.persistComposerContextStrip` (`BranchToolbar.logic.ts:72`).
+    persist_context_strip: bool,
     submitting: bool,
     runtime_mode: String,
     /// The user's default permission mode; the footer chip hides while the thread matches it.
@@ -313,6 +315,7 @@ impl Composer {
             thread_branch: None,
             worktree_active: false,
             is_draft: false,
+            persist_context_strip: false,
             submitting: false,
             runtime_mode: "full-access".to_owned(),
             default_runtime_mode: "full-access".to_owned(),
@@ -501,6 +504,14 @@ impl Composer {
                 self.context_meter_open = false;
             }
             self.context_window = usage;
+            cx.notify();
+        }
+    }
+
+    /// Sets whether the branch/worktree context strip stays visible on active (non-draft) threads.
+    pub(crate) fn set_persist_context_strip(&mut self, persist: bool, cx: &mut Context<'_, Self>) {
+        if self.persist_context_strip != persist {
+            self.persist_context_strip = persist;
             cx.notify();
         }
     }
@@ -1973,6 +1984,7 @@ impl Composer {
 
         div()
             .id("composer-context-strip")
+            .test_support()
             .a11y(
                 gpui_kit::Role::Toolbar,
                 "composer.context-strip",
@@ -1984,8 +1996,8 @@ impl Composer {
             .justify_between()
             .gap(px(8.0))
             .w_full()
-            .py(px(9.0))
-            .px(px(6.0))
+            .pt(px(8.0))
+            .px(px(8.0))
             .text_size(px(12.0))
             .line_height(px(16.0))
             .text_color(muted)
@@ -2268,6 +2280,7 @@ impl Render for Composer {
 
         let mut card = div()
             .id("chat-composer-card")
+            .test_support()
             .a11y_group("composer.card", "Message input card")
             .w_full()
             .rounded(px(COMPOSER_RADIUS_PX))
@@ -2653,9 +2666,10 @@ impl Render for Composer {
                 |el, surface| el.child(surface),
             )
             .child(card)
-            // Conn `BranchToolbar.logic.ts:shouldShowComposerContextStrip`: shown on drafts by
-            // default; active threads display workspace/branch in the top-right Thread Details card.
-            .when(self.is_draft, |el| {
+            // Conn `BranchToolbar.logic.ts:shouldShowComposerContextStrip`: shown on drafts and
+            // when `persistComposerContextStrip` is enabled; `composer_lane` always provides the
+            // 20px (`h-[1.25rem]`) bottom spacer below the shell.
+            .when(self.is_draft || self.persist_context_strip, |el| {
                 el.child(self.render_context_strip(&tokens, cx))
             });
 

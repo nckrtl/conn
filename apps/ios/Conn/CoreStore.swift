@@ -53,14 +53,14 @@ final class CoreStore {
         core?.closeThread(threadId: threadId)
     }
 
-    func sendMessage(threadId: String, text: String) async -> Bool {
+    func sendMessage(threadId: String, text: String, mode: FfiSendMode = .auto) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let core else { return false }
         isSending = true
         lastError = nil
         defer { isSending = false }
         do {
-            try await core.sendMessage(threadId: threadId, text: trimmed)
+            try await core.sendMessage(threadId: threadId, text: trimmed, mode: mode)
             return true
         } catch {
             lastError = error.localizedDescription

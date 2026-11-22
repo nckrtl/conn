@@ -168,11 +168,23 @@ struct ThreadView: View {
 
     private func entryFingerprint(_ entry: FfiTimelineEntry) -> String {
         switch entry {
-        case let .user(id, text, _, _): "u:\(id):\(text.count)"
-        case let .assistant(id, markdown, streaming, _): "a:\(id):\(streaming):\(markdown.count)"
-        case let .thinking(id, text, streaming): "th:\(id):\(streaming):\(text.count)"
-        case let .tool(id, _, title, detail, status): "t:\(id):\(status):\(title.count):\(detail?.count ?? 0)"
-        case let .approval(id, title, _): "ap:\(id):\(title.count)"
+        case let .user(id, text, _, _, _, _, _): "u:\(id):\(text.count)"
+        case let .queuedUser(id, _, _, text, _, _, _): "q:\(id):\(text.count)"
+        case let .assistant(id, markdown, streaming, _, _, _): "a:\(id):\(streaming):\(markdown.count)"
+        case let .thinking(id, text, streaming, _, _): "th:\(id):\(streaming):\(text.count)"
+        case let .tool(id, _, title, detail, status, _, _, _): "t:\(id):\(status):\(title.count):\(detail?.count ?? 0)"
+        case let .approval(id, _, title, _): "ap:\(id):\(title.count)"
+        case let .userInputRequest(id, _, _, questions, _, pending, answers, _, _):
+            "ui:\(id):\(pending):\(questions.count):\(answers.count)"
+        case let .secretRequest(id, label, _, _, _, _, status, pending, _):
+            "sec:\(id):\(status):\(pending):\(label.count)"
+        case let .proposedPlan(id, _, title, markdown, _, _, _, streaming, _, _):
+            "plan:\(id):\(streaming):\(title.count):\(markdown.count)"
+        case let .subagent(id, _, title, _, status, _, _, summary, _, _, _, _):
+            "sub:\(id):\(status):\(title.count):\(summary?.count ?? 0)"
+        case let .turnCheckpoint(id, _, _, fileCount, additions, deletions, _):
+            "cp:\(id):\(fileCount):\(additions):\(deletions)"
+        case let .notice(id, text, isError): "n:\(id):\(isError):\(text.count)"
         case let .other(id, label): "o:\(id):\(label.count)"
         }
     }
@@ -183,7 +195,7 @@ private struct TimelineEntryRow: View {
 
     var body: some View {
         switch entry {
-        case let .user(_, text, _, createdByAgent):
+        case let .user(_, text, _, createdByAgent, _, _, _):
             HStack {
                 Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: Kit.Space.xs) {
@@ -205,7 +217,18 @@ private struct TimelineEntryRow: View {
                 }
             }
 
-        case let .assistant(_, markdown, streaming, _):
+        case let .queuedUser(_, _, _, text, _, _, _):
+            Text("Queued: \(text)")
+                .font(.kitDetail)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, Kit.Space.m)
+                .padding(.vertical, Kit.Space.xs)
+                .background(
+                    Capsule()
+                        .fill(Color.kitTile)
+                )
+
+        case let .assistant(_, markdown, streaming, _, _, _):
             VStack(alignment: .leading, spacing: Kit.Space.xs) {
                 markdownText(markdown)
                     .font(.kitBody)
@@ -217,13 +240,13 @@ private struct TimelineEntryRow: View {
                 }
             }
 
-        case let .thinking(_, text, streaming):
+        case let .thinking(_, text, streaming, _, _):
             ThinkingRow(text: text, streaming: streaming)
 
-        case let .tool(_, kind, title, detail, status):
+        case let .tool(_, kind, title, detail, status, _, _, _):
             ToolRow(kind: kind, title: title, detail: detail, status: status)
 
-        case let .approval(_, title, detail):
+        case let .approval(_, _, title, detail):
             HStack(alignment: .top, spacing: Kit.Space.m) {
                 KitStatusIcon(.warning, size: 16, label: "Approval needed")
                     .padding(.top, 2)
@@ -250,17 +273,40 @@ private struct TimelineEntryRow: View {
                     .strokeBorder(Color.kitSeparator, lineWidth: 0.5)
             )
 
+        case let .userInputRequest(_, _, title, questions, _, _, _, _, _):
+            let label = title ?? questions.first?.question ?? "Question"
+            pillRow("Question: \(label)")
+
+        case let .secretRequest(_, label, _, _, _, _, _, _, _):
+            pillRow(label.isEmpty ? "Secret request" : "Secret: \(label)")
+
+        case let .proposedPlan(_, _, title, _, _, _, _, _, _, _):
+            pillRow(title.isEmpty ? "Proposed plan" : "Plan: \(title)")
+
+        case let .subagent(_, _, title, _, _, statusLabel, _, _, _, _, _, _):
+            pillRow("Subagent: \(title) · \(statusLabel)")
+
+        case let .turnCheckpoint(_, _, _, fileCount, additions, deletions, _):
+            pillRow("\(fileCount) changed files +\(additions) -\(deletions)")
+
+        case let .notice(_, text, isError):
+            pillRow(isError ? "Error: \(text)" : text)
+
         case let .other(_, label):
-            Text(label)
-                .font(.kitDetail)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, Kit.Space.m)
-                .padding(.vertical, Kit.Space.xs)
-                .background(
-                    Capsule()
-                        .fill(Color.kitTile)
-                )
+            pillRow(label)
         }
+    }
+
+    private func pillRow(_ label: String) -> some View {
+        Text(label)
+            .font(.kitDetail)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, Kit.Space.m)
+            .padding(.vertical, Kit.Space.xs)
+            .background(
+                Capsule()
+                    .fill(Color.kitTile)
+            )
     }
 
     private func markdownText(_ source: String) -> Text {
@@ -391,11 +437,18 @@ private struct ToolRow: View {
 private extension FfiTimelineEntry {
     var entryId: String {
         switch self {
-        case let .user(id, _, _, _): id
-        case let .assistant(id, _, _, _): id
-        case let .thinking(id, _, _): id
-        case let .tool(id, _, _, _, _): id
-        case let .approval(id, _, _): id
+        case let .user(id, _, _, _, _, _, _): id
+        case let .queuedUser(id, _, _, _, _, _, _): id
+        case let .assistant(id, _, _, _, _, _): id
+        case let .thinking(id, _, _, _, _): id
+        case let .tool(id, _, _, _, _, _, _, _): id
+        case let .approval(id, _, _, _): id
+        case let .userInputRequest(id, _, _, _, _, _, _, _, _): id
+        case let .secretRequest(id, _, _, _, _, _, _, _, _): id
+        case let .proposedPlan(id, _, _, _, _, _, _, _, _, _): id
+        case let .subagent(id, _, _, _, _, _, _, _, _, _, _, _): id
+        case let .turnCheckpoint(id, _, _, _, _, _, _): id
+        case let .notice(id, _, _): id
         case let .other(id, _): id
         }
     }

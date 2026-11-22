@@ -487,6 +487,54 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
+    typealias FfiType = Float
+    typealias SwiftType = Float
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Float {
+        return try lift(readFloat(&buf))
+    }
+
+    public static func write(_ value: Float, into buf: inout [UInt8]) {
+        writeFloat(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -563,9 +611,30 @@ fileprivate struct FfiConverterString: FfiConverter {
 public protocol ConnCoreProtocol: AnyObject, Sendable {
     
     /**
+     * Saves or declines a pending secret request (`secrets.answerRequest`).
+     *
+     * Pass `Some(secret)` to save (trimmed; blank strings are rejected) or `None` to decline.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] if a saved secret is blank, [`FfiError::Closed`] if
+     * disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func answerSecretRequest(threadId: String, turnItemId: String, secret: String?) async throws 
+    
+    /**
      * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
      */
     func closeThread(threadId: String) 
+    
+    /**
+     * Permanently deletes `thread_id` (`thread.delete`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func deleteThread(threadId: String) async throws 
     
     /**
      * Closes the connection and stops the background event pump. Safe to call more than once.
@@ -573,9 +642,49 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func disconnect() 
     
     /**
+     * Dismisses a message-mode `user_input_request` without answering it
+     * (`thread.user-input.dismiss`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func dismissUserInput(threadId: String, requestId: String) async throws 
+    
+    /**
+     * Creates a new thread in `project_id` with `text` as its first message via
+     * `orchestration.launchThread`, applies the returned projection, subscribes to the new
+     * thread, and returns the created thread id.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func launchThread(projectId: String, text: String) async throws  -> String
+    
+    /**
+     * Marks `thread_id` unread so it appears as unseen (`thread.mark-unread`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func markThreadUnread(threadId: String) async throws 
+    
+    /**
      * Loads and subscribes to `thread_id`, emitting snapshots to [`CoreListener::on_thread`].
      */
     func openThread(threadId: String) 
+    
+    /**
+     * Pins (`pinned = true`) or unpins (`pinned = false`) `thread_id` (`thread.pin` /
+     * `thread.unpin`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func pinThread(threadId: String, pinned: Bool) async throws 
     
     /**
      * Drops the active socket or reconnect backoff and reconnects immediately (e.g. when the
@@ -584,16 +693,63 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func reconnect() 
     
     /**
-     * Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
-     *
-     * Executes on this [`ConnCore`]'s owned Tokio runtime so foreign async callers (such as
-     * Swift concurrency) do not need an ambient Tokio executor.
+     * Renames `thread_id` to `title` (`thread.metadata.update`).
      *
      * # Errors
      *
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
-    func sendMessage(threadId: String, text: String) async throws 
+    func renameThread(threadId: String, title: String) async throws 
+    
+    /**
+     * Answers a pending approval request (`runtime-request.respond`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func respondApproval(threadId: String, requestId: String, decision: FfiApprovalDecision) async throws 
+    
+    /**
+     * Submits answers for a pending `user_input_request` (`runtime-request.respond`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func respondUserInput(threadId: String, requestId: String, answers: [FfiUserInputSubmission]) async throws 
+    
+    /**
+     * Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
+     *
+     * Mirrors desktop `SendDispatch`: when the thread is idle, starts immediately; while working,
+     * [`FfiSendMode::Steer`] steers the active run (`steer_active`), and [`FfiSendMode::Auto`] /
+     * [`FfiSendMode::Queue`] queue after the active run (`queue_after_active`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func sendMessage(threadId: String, text: String, mode: FfiSendMode) async throws 
+    
+    /**
+     * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
+     * (`thread.settle` / `thread.unsettle`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func settleThread(threadId: String, settled: Bool) async throws 
+    
+    /**
+     * Stops the running turn on `thread_id` (`thread.stop`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func stopThread(threadId: String) async throws 
     
 }
 /**
@@ -673,6 +829,32 @@ public static func connect(serverUrl: String, credential: FfiCredential, listene
 
     
     /**
+     * Saves or declines a pending secret request (`secrets.answerRequest`).
+     *
+     * Pass `Some(secret)` to save (trimmed; blank strings are rejected) or `None` to decline.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] if a saved secret is blank, [`FfiError::Closed`] if
+     * disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func answerSecretRequest(threadId: String, turnItemId: String, secret: String?)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_answer_secret_request(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(turnItemId),FfiConverterOptionString.lower(secret)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
      */
 open func closeThread(threadId: String)  {try! rustCall() {
@@ -685,6 +867,29 @@ open func closeThread(threadId: String)  {try! rustCall() {
 }
     
     /**
+     * Permanently deletes `thread_id` (`thread.delete`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func deleteThread(threadId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_delete_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Closes the connection and stops the background event pump. Safe to call more than once.
      */
 open func disconnect()  {try! rustCall() {
@@ -693,6 +898,78 @@ open func disconnect()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Dismisses a message-mode `user_input_request` without answering it
+     * (`thread.user-input.dismiss`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func dismissUserInput(threadId: String, requestId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_dismiss_user_input(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(requestId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Creates a new thread in `project_id` with `text` as its first message via
+     * `orchestration.launchThread`, applies the returned projection, subscribes to the new
+     * thread, and returns the created thread id.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func launchThread(projectId: String, text: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_launch_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(projectId),FfiConverterString.lower(text)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Marks `thread_id` unread so it appears as unseen (`thread.mark-unread`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func markThreadUnread(threadId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_mark_thread_unread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
 }
     
     /**
@@ -708,6 +985,30 @@ open func openThread(threadId: String)  {try! rustCall() {
 }
     
     /**
+     * Pins (`pinned = true`) or unpins (`pinned = false`) `thread_id` (`thread.pin` /
+     * `thread.unpin`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func pinThread(threadId: String, pinned: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_pin_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterBool.lower(pinned)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Drops the active socket or reconnect backoff and reconnects immediately (e.g. when the
      * iOS app returns to the foreground).
      */
@@ -720,21 +1021,138 @@ open func reconnect()  {try! rustCall() {
 }
     
     /**
-     * Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
-     *
-     * Executes on this [`ConnCore`]'s owned Tokio runtime so foreign async callers (such as
-     * Swift concurrency) do not need an ambient Tokio executor.
+     * Renames `thread_id` to `title` (`thread.metadata.update`).
      *
      * # Errors
      *
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
-open func sendMessage(threadId: String, text: String)async throws   {
+open func renameThread(threadId: String, title: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_rename_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(title)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Answers a pending approval request (`runtime-request.respond`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func respondApproval(threadId: String, requestId: String, decision: FfiApprovalDecision)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_respond_approval(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(requestId),FfiConverterTypeFfiApprovalDecision_lower(decision)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Submits answers for a pending `user_input_request` (`runtime-request.respond`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func respondUserInput(threadId: String, requestId: String, answers: [FfiUserInputSubmission])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_respond_user_input(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(requestId),FfiConverterSequenceTypeFfiUserInputSubmission.lower(answers)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
+     *
+     * Mirrors desktop `SendDispatch`: when the thread is idle, starts immediately; while working,
+     * [`FfiSendMode::Steer`] steers the active run (`steer_active`), and [`FfiSendMode::Auto`] /
+     * [`FfiSendMode::Queue`] queue after the active run (`queue_after_active`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func sendMessage(threadId: String, text: String, mode: FfiSendMode)async throws   {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_conncore_send_message(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(text)
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(text),FfiConverterTypeFfiSendMode_lower(mode)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
+     * (`thread.settle` / `thread.unsettle`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func settleThread(threadId: String, settled: Bool)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_settle_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterBool.lower(settled)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Stops the running turn on `thread_id` (`thread.stop`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func stopThread(threadId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_stop_thread(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_void,
@@ -1144,6 +1562,140 @@ public func FfiConverterTypeCoreListener_lower(_ value: CoreListener) -> UInt64 
 
 
 /**
+ * Attachment summary carried on user and queued user timeline entries.
+ */
+public struct FfiAttachment: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var mimeType: String
+    public var sizeBytes: Int64
+    public var isImage: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, mimeType: String, sizeBytes: Int64, isImage: Bool) {
+        self.id = id
+        self.name = name
+        self.mimeType = mimeType
+        self.sizeBytes = sizeBytes
+        self.isImage = isImage
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiAttachment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAttachment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAttachment {
+        return
+            try FfiAttachment(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                mimeType: FfiConverterString.read(from: &buf), 
+                sizeBytes: FfiConverterInt64.read(from: &buf), 
+                isImage: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiAttachment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.mimeType, into: &buf)
+        FfiConverterInt64.write(value.sizeBytes, into: &buf)
+        FfiConverterBool.write(value.isImage, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAttachment_lift(_ buf: RustBuffer) throws -> FfiAttachment {
+    return try FfiConverterTypeFfiAttachment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAttachment_lower(_ value: FfiAttachment) -> RustBuffer {
+    return FfiConverterTypeFfiAttachment.lower(value)
+}
+
+
+/**
+ * Straight-alpha sRGB color with channels in `0.0..=1.0` (mirrors [`conn_theme::Rgba`]).
+ */
+public struct FfiColor: Equatable, Hashable {
+    public var r: Float
+    public var g: Float
+    public var b: Float
+    public var a: Float
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(r: Float, g: Float, b: Float, a: Float) {
+        self.r = r
+        self.g = g
+        self.b = b
+        self.a = a
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiColor: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiColor: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiColor {
+        return
+            try FfiColor(
+                r: FfiConverterFloat.read(from: &buf), 
+                g: FfiConverterFloat.read(from: &buf), 
+                b: FfiConverterFloat.read(from: &buf), 
+                a: FfiConverterFloat.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiColor, into buf: inout [UInt8]) {
+        FfiConverterFloat.write(value.r, into: &buf)
+        FfiConverterFloat.write(value.g, into: &buf)
+        FfiConverterFloat.write(value.b, into: &buf)
+        FfiConverterFloat.write(value.a, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiColor_lift(_ buf: RustBuffer) throws -> FfiColor {
+    return try FfiConverterTypeFfiColor.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiColor_lower(_ value: FfiColor) -> RustBuffer {
+    return FfiConverterTypeFfiColor.lower(value)
+}
+
+
+/**
  * One registered project from `orchestration.subscribeShell`.
  */
 public struct FfiProject: Equatable, Hashable {
@@ -1201,6 +1753,91 @@ public func FfiConverterTypeFfiProject_lift(_ buf: RustBuffer) throws -> FfiProj
 #endif
 public func FfiConverterTypeFfiProject_lower(_ value: FfiProject) -> RustBuffer {
     return FfiConverterTypeFfiProject.lower(value)
+}
+
+
+/**
+ * Core shell geometric constants (mirrors [`conn_theme::ShellGeometry`]).
+ */
+public struct FfiShellGeometry: Equatable, Hashable {
+    public var windowRadiusPx: Float
+    public var shellInsetPx: Float
+    public var shellCornerPx: Float
+    public var headerHeightPx: Float
+    public var workspaceControlsRightPx: Float
+    public var uiFontSizePx: Float
+    public var uiLineHeightPx: Float
+    public var toolbarHeightPx: Float
+    public var bubbleRadiusPx: Float
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(windowRadiusPx: Float, shellInsetPx: Float, shellCornerPx: Float, headerHeightPx: Float, workspaceControlsRightPx: Float, uiFontSizePx: Float, uiLineHeightPx: Float, toolbarHeightPx: Float, bubbleRadiusPx: Float) {
+        self.windowRadiusPx = windowRadiusPx
+        self.shellInsetPx = shellInsetPx
+        self.shellCornerPx = shellCornerPx
+        self.headerHeightPx = headerHeightPx
+        self.workspaceControlsRightPx = workspaceControlsRightPx
+        self.uiFontSizePx = uiFontSizePx
+        self.uiLineHeightPx = uiLineHeightPx
+        self.toolbarHeightPx = toolbarHeightPx
+        self.bubbleRadiusPx = bubbleRadiusPx
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiShellGeometry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiShellGeometry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiShellGeometry {
+        return
+            try FfiShellGeometry(
+                windowRadiusPx: FfiConverterFloat.read(from: &buf), 
+                shellInsetPx: FfiConverterFloat.read(from: &buf), 
+                shellCornerPx: FfiConverterFloat.read(from: &buf), 
+                headerHeightPx: FfiConverterFloat.read(from: &buf), 
+                workspaceControlsRightPx: FfiConverterFloat.read(from: &buf), 
+                uiFontSizePx: FfiConverterFloat.read(from: &buf), 
+                uiLineHeightPx: FfiConverterFloat.read(from: &buf), 
+                toolbarHeightPx: FfiConverterFloat.read(from: &buf), 
+                bubbleRadiusPx: FfiConverterFloat.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiShellGeometry, into buf: inout [UInt8]) {
+        FfiConverterFloat.write(value.windowRadiusPx, into: &buf)
+        FfiConverterFloat.write(value.shellInsetPx, into: &buf)
+        FfiConverterFloat.write(value.shellCornerPx, into: &buf)
+        FfiConverterFloat.write(value.headerHeightPx, into: &buf)
+        FfiConverterFloat.write(value.workspaceControlsRightPx, into: &buf)
+        FfiConverterFloat.write(value.uiFontSizePx, into: &buf)
+        FfiConverterFloat.write(value.uiLineHeightPx, into: &buf)
+        FfiConverterFloat.write(value.toolbarHeightPx, into: &buf)
+        FfiConverterFloat.write(value.bubbleRadiusPx, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiShellGeometry_lift(_ buf: RustBuffer) throws -> FfiShellGeometry {
+    return try FfiConverterTypeFfiShellGeometry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiShellGeometry_lower(_ value: FfiShellGeometry) -> RustBuffer {
+    return FfiConverterTypeFfiShellGeometry.lower(value)
 }
 
 
@@ -1266,19 +1903,437 @@ public func FfiConverterTypeFfiShellSnapshot_lower(_ value: FfiShellSnapshot) ->
 
 
 /**
+ * Metadata summary for one built-in Conn theme.
+ */
+public struct FfiThemeSummary: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var appearance: FfiAppearance
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, appearance: FfiAppearance) {
+        self.id = id
+        self.name = name
+        self.appearance = appearance
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiThemeSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThemeSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThemeSummary {
+        return
+            try FfiThemeSummary(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                appearance: FfiConverterTypeFfiAppearance.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiThemeSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterTypeFfiAppearance.write(value.appearance, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThemeSummary_lift(_ buf: RustBuffer) throws -> FfiThemeSummary {
+    return try FfiConverterTypeFfiThemeSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThemeSummary_lower(_ value: FfiThemeSummary) -> RustBuffer {
+    return FfiConverterTypeFfiThemeSummary.lower(value)
+}
+
+
+/**
+ * Every semantic and shell color token derived from one Conn theme, plus shell geometry.
+ *
+ * Field names match [`conn_theme::Tokens`] 1:1 in `snake_case`.
+ */
+public struct FfiThemeTokens: Equatable, Hashable {
+    public var appearance: FfiAppearance
+    public var background: FfiColor
+    public var foreground: FfiColor
+    public var card: FfiColor
+    public var cardForeground: FfiColor
+    public var popover: FfiColor
+    public var popoverForeground: FfiColor
+    public var primary: FfiColor
+    public var primaryForeground: FfiColor
+    public var secondary: FfiColor
+    public var secondaryForeground: FfiColor
+    public var muted: FfiColor
+    public var mutedForeground: FfiColor
+    public var accent: FfiColor
+    public var accentForeground: FfiColor
+    public var border: FfiColor
+    public var input: FfiColor
+    public var ring: FfiColor
+    public var placeholder: FfiColor
+    public var destructive: FfiColor
+    public var destructiveForeground: FfiColor
+    public var warning: FfiColor
+    public var warningForeground: FfiColor
+    public var info: FfiColor
+    public var infoForeground: FfiColor
+    public var success: FfiColor
+    public var successForeground: FfiColor
+    public var sidebar: FfiColor
+    public var sidebarForeground: FfiColor
+    public var sidebarMutedForeground: FfiColor
+    public var sidebarBorder: FfiColor
+    public var toolbarControl: FfiColor
+    public var toolbarControlHover: FfiColor
+    public var codeBackground: FfiColor
+    public var codeForeground: FfiColor
+    public var terminalBackground: FfiColor
+    public var terminalForeground: FfiColor
+    public var terminalCursor: FfiColor
+    public var terminalSelection: FfiColor
+    public var messageSurface: FfiColor
+    public var messageForeground: FfiColor
+    public var shellFill: FfiColor
+    public var shellPanel: FfiColor
+    public var shellCard: FfiColor
+    public var shellInnerFill: FfiColor
+    public var shellInnerBorder: FfiColor
+    public var shellRaised: FfiColor
+    public var shellOverlay: FfiColor
+    public var shellHighlight: FfiColor
+    public var shellTile: FfiColor
+    public var shellTileBorder: FfiColor
+    public var shellField: FfiColor
+    public var shellControl: FfiColor
+    public var shellControlRaised: FfiColor
+    public var shellControlRaisedBorder: FfiColor
+    public var shellDivider: FfiColor
+    public var shellDividerHeader: FfiColor
+    public var shellDividerRaised: FfiColor
+    public var shellSettingsCard: FfiColor
+    public var shellSettingsCardBorder: FfiColor
+    public var shellHeaderControl: FfiColor
+    public var shellHeaderControlHover: FfiColor
+    public var glassDivider: FfiColor
+    public var mutedForegroundRaised: FfiColor
+    public var switchOn: FfiColor
+    public var sidebarRowHover: FfiColor
+    public var sidebarRowSelected: FfiColor
+    public var sidebarRowActive: FfiColor
+    public var diffAdded: FfiColor
+    public var diffAddedBackground: FfiColor
+    public var diffRemoved: FfiColor
+    public var diffRemovedBackground: FfiColor
+    public var geometry: FfiShellGeometry
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(appearance: FfiAppearance, background: FfiColor, foreground: FfiColor, card: FfiColor, cardForeground: FfiColor, popover: FfiColor, popoverForeground: FfiColor, primary: FfiColor, primaryForeground: FfiColor, secondary: FfiColor, secondaryForeground: FfiColor, muted: FfiColor, mutedForeground: FfiColor, accent: FfiColor, accentForeground: FfiColor, border: FfiColor, input: FfiColor, ring: FfiColor, placeholder: FfiColor, destructive: FfiColor, destructiveForeground: FfiColor, warning: FfiColor, warningForeground: FfiColor, info: FfiColor, infoForeground: FfiColor, success: FfiColor, successForeground: FfiColor, sidebar: FfiColor, sidebarForeground: FfiColor, sidebarMutedForeground: FfiColor, sidebarBorder: FfiColor, toolbarControl: FfiColor, toolbarControlHover: FfiColor, codeBackground: FfiColor, codeForeground: FfiColor, terminalBackground: FfiColor, terminalForeground: FfiColor, terminalCursor: FfiColor, terminalSelection: FfiColor, messageSurface: FfiColor, messageForeground: FfiColor, shellFill: FfiColor, shellPanel: FfiColor, shellCard: FfiColor, shellInnerFill: FfiColor, shellInnerBorder: FfiColor, shellRaised: FfiColor, shellOverlay: FfiColor, shellHighlight: FfiColor, shellTile: FfiColor, shellTileBorder: FfiColor, shellField: FfiColor, shellControl: FfiColor, shellControlRaised: FfiColor, shellControlRaisedBorder: FfiColor, shellDivider: FfiColor, shellDividerHeader: FfiColor, shellDividerRaised: FfiColor, shellSettingsCard: FfiColor, shellSettingsCardBorder: FfiColor, shellHeaderControl: FfiColor, shellHeaderControlHover: FfiColor, glassDivider: FfiColor, mutedForegroundRaised: FfiColor, switchOn: FfiColor, sidebarRowHover: FfiColor, sidebarRowSelected: FfiColor, sidebarRowActive: FfiColor, diffAdded: FfiColor, diffAddedBackground: FfiColor, diffRemoved: FfiColor, diffRemovedBackground: FfiColor, geometry: FfiShellGeometry) {
+        self.appearance = appearance
+        self.background = background
+        self.foreground = foreground
+        self.card = card
+        self.cardForeground = cardForeground
+        self.popover = popover
+        self.popoverForeground = popoverForeground
+        self.primary = primary
+        self.primaryForeground = primaryForeground
+        self.secondary = secondary
+        self.secondaryForeground = secondaryForeground
+        self.muted = muted
+        self.mutedForeground = mutedForeground
+        self.accent = accent
+        self.accentForeground = accentForeground
+        self.border = border
+        self.input = input
+        self.ring = ring
+        self.placeholder = placeholder
+        self.destructive = destructive
+        self.destructiveForeground = destructiveForeground
+        self.warning = warning
+        self.warningForeground = warningForeground
+        self.info = info
+        self.infoForeground = infoForeground
+        self.success = success
+        self.successForeground = successForeground
+        self.sidebar = sidebar
+        self.sidebarForeground = sidebarForeground
+        self.sidebarMutedForeground = sidebarMutedForeground
+        self.sidebarBorder = sidebarBorder
+        self.toolbarControl = toolbarControl
+        self.toolbarControlHover = toolbarControlHover
+        self.codeBackground = codeBackground
+        self.codeForeground = codeForeground
+        self.terminalBackground = terminalBackground
+        self.terminalForeground = terminalForeground
+        self.terminalCursor = terminalCursor
+        self.terminalSelection = terminalSelection
+        self.messageSurface = messageSurface
+        self.messageForeground = messageForeground
+        self.shellFill = shellFill
+        self.shellPanel = shellPanel
+        self.shellCard = shellCard
+        self.shellInnerFill = shellInnerFill
+        self.shellInnerBorder = shellInnerBorder
+        self.shellRaised = shellRaised
+        self.shellOverlay = shellOverlay
+        self.shellHighlight = shellHighlight
+        self.shellTile = shellTile
+        self.shellTileBorder = shellTileBorder
+        self.shellField = shellField
+        self.shellControl = shellControl
+        self.shellControlRaised = shellControlRaised
+        self.shellControlRaisedBorder = shellControlRaisedBorder
+        self.shellDivider = shellDivider
+        self.shellDividerHeader = shellDividerHeader
+        self.shellDividerRaised = shellDividerRaised
+        self.shellSettingsCard = shellSettingsCard
+        self.shellSettingsCardBorder = shellSettingsCardBorder
+        self.shellHeaderControl = shellHeaderControl
+        self.shellHeaderControlHover = shellHeaderControlHover
+        self.glassDivider = glassDivider
+        self.mutedForegroundRaised = mutedForegroundRaised
+        self.switchOn = switchOn
+        self.sidebarRowHover = sidebarRowHover
+        self.sidebarRowSelected = sidebarRowSelected
+        self.sidebarRowActive = sidebarRowActive
+        self.diffAdded = diffAdded
+        self.diffAddedBackground = diffAddedBackground
+        self.diffRemoved = diffRemoved
+        self.diffRemovedBackground = diffRemovedBackground
+        self.geometry = geometry
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiThemeTokens: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThemeTokens: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThemeTokens {
+        return
+            try FfiThemeTokens(
+                appearance: FfiConverterTypeFfiAppearance.read(from: &buf), 
+                background: FfiConverterTypeFfiColor.read(from: &buf), 
+                foreground: FfiConverterTypeFfiColor.read(from: &buf), 
+                card: FfiConverterTypeFfiColor.read(from: &buf), 
+                cardForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                popover: FfiConverterTypeFfiColor.read(from: &buf), 
+                popoverForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                primary: FfiConverterTypeFfiColor.read(from: &buf), 
+                primaryForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                secondary: FfiConverterTypeFfiColor.read(from: &buf), 
+                secondaryForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                muted: FfiConverterTypeFfiColor.read(from: &buf), 
+                mutedForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                accent: FfiConverterTypeFfiColor.read(from: &buf), 
+                accentForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                border: FfiConverterTypeFfiColor.read(from: &buf), 
+                input: FfiConverterTypeFfiColor.read(from: &buf), 
+                ring: FfiConverterTypeFfiColor.read(from: &buf), 
+                placeholder: FfiConverterTypeFfiColor.read(from: &buf), 
+                destructive: FfiConverterTypeFfiColor.read(from: &buf), 
+                destructiveForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                warning: FfiConverterTypeFfiColor.read(from: &buf), 
+                warningForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                info: FfiConverterTypeFfiColor.read(from: &buf), 
+                infoForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                success: FfiConverterTypeFfiColor.read(from: &buf), 
+                successForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                sidebar: FfiConverterTypeFfiColor.read(from: &buf), 
+                sidebarForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                sidebarMutedForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                sidebarBorder: FfiConverterTypeFfiColor.read(from: &buf), 
+                toolbarControl: FfiConverterTypeFfiColor.read(from: &buf), 
+                toolbarControlHover: FfiConverterTypeFfiColor.read(from: &buf), 
+                codeBackground: FfiConverterTypeFfiColor.read(from: &buf), 
+                codeForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                terminalBackground: FfiConverterTypeFfiColor.read(from: &buf), 
+                terminalForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                terminalCursor: FfiConverterTypeFfiColor.read(from: &buf), 
+                terminalSelection: FfiConverterTypeFfiColor.read(from: &buf), 
+                messageSurface: FfiConverterTypeFfiColor.read(from: &buf), 
+                messageForeground: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellFill: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellPanel: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellCard: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellInnerFill: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellInnerBorder: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellRaised: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellOverlay: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellHighlight: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellTile: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellTileBorder: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellField: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellControl: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellControlRaised: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellControlRaisedBorder: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellDivider: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellDividerHeader: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellDividerRaised: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellSettingsCard: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellSettingsCardBorder: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellHeaderControl: FfiConverterTypeFfiColor.read(from: &buf), 
+                shellHeaderControlHover: FfiConverterTypeFfiColor.read(from: &buf), 
+                glassDivider: FfiConverterTypeFfiColor.read(from: &buf), 
+                mutedForegroundRaised: FfiConverterTypeFfiColor.read(from: &buf), 
+                switchOn: FfiConverterTypeFfiColor.read(from: &buf), 
+                sidebarRowHover: FfiConverterTypeFfiColor.read(from: &buf), 
+                sidebarRowSelected: FfiConverterTypeFfiColor.read(from: &buf), 
+                sidebarRowActive: FfiConverterTypeFfiColor.read(from: &buf), 
+                diffAdded: FfiConverterTypeFfiColor.read(from: &buf), 
+                diffAddedBackground: FfiConverterTypeFfiColor.read(from: &buf), 
+                diffRemoved: FfiConverterTypeFfiColor.read(from: &buf), 
+                diffRemovedBackground: FfiConverterTypeFfiColor.read(from: &buf), 
+                geometry: FfiConverterTypeFfiShellGeometry.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiThemeTokens, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiAppearance.write(value.appearance, into: &buf)
+        FfiConverterTypeFfiColor.write(value.background, into: &buf)
+        FfiConverterTypeFfiColor.write(value.foreground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.card, into: &buf)
+        FfiConverterTypeFfiColor.write(value.cardForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.popover, into: &buf)
+        FfiConverterTypeFfiColor.write(value.popoverForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.primary, into: &buf)
+        FfiConverterTypeFfiColor.write(value.primaryForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.secondary, into: &buf)
+        FfiConverterTypeFfiColor.write(value.secondaryForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.muted, into: &buf)
+        FfiConverterTypeFfiColor.write(value.mutedForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.accent, into: &buf)
+        FfiConverterTypeFfiColor.write(value.accentForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.border, into: &buf)
+        FfiConverterTypeFfiColor.write(value.input, into: &buf)
+        FfiConverterTypeFfiColor.write(value.ring, into: &buf)
+        FfiConverterTypeFfiColor.write(value.placeholder, into: &buf)
+        FfiConverterTypeFfiColor.write(value.destructive, into: &buf)
+        FfiConverterTypeFfiColor.write(value.destructiveForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.warning, into: &buf)
+        FfiConverterTypeFfiColor.write(value.warningForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.info, into: &buf)
+        FfiConverterTypeFfiColor.write(value.infoForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.success, into: &buf)
+        FfiConverterTypeFfiColor.write(value.successForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.sidebar, into: &buf)
+        FfiConverterTypeFfiColor.write(value.sidebarForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.sidebarMutedForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.sidebarBorder, into: &buf)
+        FfiConverterTypeFfiColor.write(value.toolbarControl, into: &buf)
+        FfiConverterTypeFfiColor.write(value.toolbarControlHover, into: &buf)
+        FfiConverterTypeFfiColor.write(value.codeBackground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.codeForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.terminalBackground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.terminalForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.terminalCursor, into: &buf)
+        FfiConverterTypeFfiColor.write(value.terminalSelection, into: &buf)
+        FfiConverterTypeFfiColor.write(value.messageSurface, into: &buf)
+        FfiConverterTypeFfiColor.write(value.messageForeground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellFill, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellPanel, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellCard, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellInnerFill, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellInnerBorder, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellRaised, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellOverlay, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellHighlight, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellTile, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellTileBorder, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellField, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellControl, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellControlRaised, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellControlRaisedBorder, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellDivider, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellDividerHeader, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellDividerRaised, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellSettingsCard, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellSettingsCardBorder, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellHeaderControl, into: &buf)
+        FfiConverterTypeFfiColor.write(value.shellHeaderControlHover, into: &buf)
+        FfiConverterTypeFfiColor.write(value.glassDivider, into: &buf)
+        FfiConverterTypeFfiColor.write(value.mutedForegroundRaised, into: &buf)
+        FfiConverterTypeFfiColor.write(value.switchOn, into: &buf)
+        FfiConverterTypeFfiColor.write(value.sidebarRowHover, into: &buf)
+        FfiConverterTypeFfiColor.write(value.sidebarRowSelected, into: &buf)
+        FfiConverterTypeFfiColor.write(value.sidebarRowActive, into: &buf)
+        FfiConverterTypeFfiColor.write(value.diffAdded, into: &buf)
+        FfiConverterTypeFfiColor.write(value.diffAddedBackground, into: &buf)
+        FfiConverterTypeFfiColor.write(value.diffRemoved, into: &buf)
+        FfiConverterTypeFfiColor.write(value.diffRemovedBackground, into: &buf)
+        FfiConverterTypeFfiShellGeometry.write(value.geometry, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThemeTokens_lift(_ buf: RustBuffer) throws -> FfiThemeTokens {
+    return try FfiConverterTypeFfiThemeTokens.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThemeTokens_lower(_ value: FfiThemeTokens) -> RustBuffer {
+    return FfiConverterTypeFfiThemeTokens.lower(value)
+}
+
+
+/**
  * Point-in-time snapshot of one subscribed thread emitted to [`crate::CoreListener::on_thread`].
  */
 public struct FfiThreadSnapshot: Equatable, Hashable {
     public var threadId: String
+    public var title: String?
+    public var branch: String?
+    public var modelLabel: String?
     public var entries: [FfiTimelineEntry]
+    public var workGroups: [FfiWorkGroupTiming]
     public var working: Bool
+    public var activeRunId: String?
+    public var queuedCount: UInt32
+    public var synchronized: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(threadId: String, entries: [FfiTimelineEntry], working: Bool) {
+    public init(threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool) {
         self.threadId = threadId
+        self.title = title
+        self.branch = branch
+        self.modelLabel = modelLabel
         self.entries = entries
+        self.workGroups = workGroups
         self.working = working
+        self.activeRunId = activeRunId
+        self.queuedCount = queuedCount
+        self.synchronized = synchronized
     }
 
     
@@ -1298,15 +2353,29 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
         return
             try FfiThreadSnapshot(
                 threadId: FfiConverterString.read(from: &buf), 
+                title: FfiConverterOptionString.read(from: &buf), 
+                branch: FfiConverterOptionString.read(from: &buf), 
+                modelLabel: FfiConverterOptionString.read(from: &buf), 
                 entries: FfiConverterSequenceTypeFfiTimelineEntry.read(from: &buf), 
-                working: FfiConverterBool.read(from: &buf)
+                workGroups: FfiConverterSequenceTypeFfiWorkGroupTiming.read(from: &buf), 
+                working: FfiConverterBool.read(from: &buf), 
+                activeRunId: FfiConverterOptionString.read(from: &buf), 
+                queuedCount: FfiConverterUInt32.read(from: &buf), 
+                synchronized: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiThreadSnapshot, into buf: inout [UInt8]) {
         FfiConverterString.write(value.threadId, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.branch, into: &buf)
+        FfiConverterOptionString.write(value.modelLabel, into: &buf)
         FfiConverterSequenceTypeFfiTimelineEntry.write(value.entries, into: &buf)
+        FfiConverterSequenceTypeFfiWorkGroupTiming.write(value.workGroups, into: &buf)
         FfiConverterBool.write(value.working, into: &buf)
+        FfiConverterOptionString.write(value.activeRunId, into: &buf)
+        FfiConverterUInt32.write(value.queuedCount, into: &buf)
+        FfiConverterBool.write(value.synchronized, into: &buf)
     }
 }
 
@@ -1338,10 +2407,12 @@ public struct FfiThreadSummary: Equatable, Hashable {
     public var updatedAt: String?
     public var settled: Bool
     public var isSubagent: Bool
+    public var pinned: Bool
+    public var unread: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, projectId: String, title: String, branch: String?, activity: FfiThreadActivity, updatedAt: String?, settled: Bool, isSubagent: Bool) {
+    public init(id: String, projectId: String, title: String, branch: String?, activity: FfiThreadActivity, updatedAt: String?, settled: Bool, isSubagent: Bool, pinned: Bool, unread: Bool) {
         self.id = id
         self.projectId = projectId
         self.title = title
@@ -1350,6 +2421,8 @@ public struct FfiThreadSummary: Equatable, Hashable {
         self.updatedAt = updatedAt
         self.settled = settled
         self.isSubagent = isSubagent
+        self.pinned = pinned
+        self.unread = unread
     }
 
     
@@ -1375,7 +2448,9 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
                 activity: FfiConverterTypeFfiThreadActivity.read(from: &buf), 
                 updatedAt: FfiConverterOptionString.read(from: &buf), 
                 settled: FfiConverterBool.read(from: &buf), 
-                isSubagent: FfiConverterBool.read(from: &buf)
+                isSubagent: FfiConverterBool.read(from: &buf), 
+                pinned: FfiConverterBool.read(from: &buf), 
+                unread: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -1388,6 +2463,8 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.updatedAt, into: &buf)
         FfiConverterBool.write(value.settled, into: &buf)
         FfiConverterBool.write(value.isSubagent, into: &buf)
+        FfiConverterBool.write(value.pinned, into: &buf)
+        FfiConverterBool.write(value.unread, into: &buf)
     }
 }
 
@@ -1405,6 +2482,579 @@ public func FfiConverterTypeFfiThreadSummary_lift(_ buf: RustBuffer) throws -> F
 public func FfiConverterTypeFfiThreadSummary_lower(_ value: FfiThreadSummary) -> RustBuffer {
     return FfiConverterTypeFfiThreadSummary.lower(value)
 }
+
+
+/**
+ * One changed file summary inside an [`FfiTimelineEntry::TurnCheckpoint`].
+ */
+public struct FfiTurnCheckpointFile: Equatable, Hashable {
+    public var path: String
+    public var kind: String
+    public var additions: Int64
+    public var deletions: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, kind: String, additions: Int64, deletions: Int64) {
+        self.path = path
+        self.kind = kind
+        self.additions = additions
+        self.deletions = deletions
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTurnCheckpointFile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTurnCheckpointFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTurnCheckpointFile {
+        return
+            try FfiTurnCheckpointFile(
+                path: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                additions: FfiConverterInt64.read(from: &buf), 
+                deletions: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTurnCheckpointFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterInt64.write(value.additions, into: &buf)
+        FfiConverterInt64.write(value.deletions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnCheckpointFile_lift(_ buf: RustBuffer) throws -> FfiTurnCheckpointFile {
+    return try FfiConverterTypeFfiTurnCheckpointFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnCheckpointFile_lower(_ value: FfiTurnCheckpointFile) -> RustBuffer {
+    return FfiConverterTypeFfiTurnCheckpointFile.lower(value)
+}
+
+
+/**
+ * One answered question on a settled [`FfiTimelineEntry::UserInputRequest`].
+ */
+public struct FfiUserInputAnswer: Equatable, Hashable {
+    public var questionId: String
+    public var question: String
+    public var answer: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(questionId: String, question: String, answer: String) {
+        self.questionId = questionId
+        self.question = question
+        self.answer = answer
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiUserInputAnswer: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUserInputAnswer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUserInputAnswer {
+        return
+            try FfiUserInputAnswer(
+                questionId: FfiConverterString.read(from: &buf), 
+                question: FfiConverterString.read(from: &buf), 
+                answer: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiUserInputAnswer, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.questionId, into: &buf)
+        FfiConverterString.write(value.question, into: &buf)
+        FfiConverterString.write(value.answer, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputAnswer_lift(_ buf: RustBuffer) throws -> FfiUserInputAnswer {
+    return try FfiConverterTypeFfiUserInputAnswer.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputAnswer_lower(_ value: FfiUserInputAnswer) -> RustBuffer {
+    return FfiConverterTypeFfiUserInputAnswer.lower(value)
+}
+
+
+/**
+ * One selectable option in an [`FfiUserInputQuestion`].
+ */
+public struct FfiUserInputOption: Equatable, Hashable {
+    public var label: String
+    public var description: String
+    /**
+     * Value submitted when chosen (`option.value ?? option.label`).
+     */
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, description: String, 
+        /**
+         * Value submitted when chosen (`option.value ?? option.label`).
+         */value: String) {
+        self.label = label
+        self.description = description
+        self.value = value
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiUserInputOption: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUserInputOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUserInputOption {
+        return
+            try FfiUserInputOption(
+                label: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf), 
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiUserInputOption, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputOption_lift(_ buf: RustBuffer) throws -> FfiUserInputOption {
+    return try FfiConverterTypeFfiUserInputOption.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputOption_lower(_ value: FfiUserInputOption) -> RustBuffer {
+    return FfiConverterTypeFfiUserInputOption.lower(value)
+}
+
+
+/**
+ * One question in an [`FfiTimelineEntry::UserInputRequest`].
+ */
+public struct FfiUserInputQuestion: Equatable, Hashable {
+    public var id: String
+    public var header: String
+    public var question: String
+    public var options: [FfiUserInputOption]
+    public var multiSelect: Bool
+    public var allowCustomAnswer: Bool
+    public var initialAnswer: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, header: String, question: String, options: [FfiUserInputOption], multiSelect: Bool, allowCustomAnswer: Bool, initialAnswer: String?) {
+        self.id = id
+        self.header = header
+        self.question = question
+        self.options = options
+        self.multiSelect = multiSelect
+        self.allowCustomAnswer = allowCustomAnswer
+        self.initialAnswer = initialAnswer
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiUserInputQuestion: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUserInputQuestion: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUserInputQuestion {
+        return
+            try FfiUserInputQuestion(
+                id: FfiConverterString.read(from: &buf), 
+                header: FfiConverterString.read(from: &buf), 
+                question: FfiConverterString.read(from: &buf), 
+                options: FfiConverterSequenceTypeFfiUserInputOption.read(from: &buf), 
+                multiSelect: FfiConverterBool.read(from: &buf), 
+                allowCustomAnswer: FfiConverterBool.read(from: &buf), 
+                initialAnswer: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiUserInputQuestion, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.header, into: &buf)
+        FfiConverterString.write(value.question, into: &buf)
+        FfiConverterSequenceTypeFfiUserInputOption.write(value.options, into: &buf)
+        FfiConverterBool.write(value.multiSelect, into: &buf)
+        FfiConverterBool.write(value.allowCustomAnswer, into: &buf)
+        FfiConverterOptionString.write(value.initialAnswer, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputQuestion_lift(_ buf: RustBuffer) throws -> FfiUserInputQuestion {
+    return try FfiConverterTypeFfiUserInputQuestion.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputQuestion_lower(_ value: FfiUserInputQuestion) -> RustBuffer {
+    return FfiConverterTypeFfiUserInputQuestion.lower(value)
+}
+
+
+/**
+ * One `(question_id, value)` pair submitted to [`crate::ConnCore::respond_user_input`].
+ */
+public struct FfiUserInputSubmission: Equatable, Hashable {
+    public var questionId: String
+    public var value: FfiUserInputAnswerValue
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(questionId: String, value: FfiUserInputAnswerValue) {
+        self.questionId = questionId
+        self.value = value
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiUserInputSubmission: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUserInputSubmission: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUserInputSubmission {
+        return
+            try FfiUserInputSubmission(
+                questionId: FfiConverterString.read(from: &buf), 
+                value: FfiConverterTypeFfiUserInputAnswerValue.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiUserInputSubmission, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.questionId, into: &buf)
+        FfiConverterTypeFfiUserInputAnswerValue.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputSubmission_lift(_ buf: RustBuffer) throws -> FfiUserInputSubmission {
+    return try FfiConverterTypeFfiUserInputSubmission.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputSubmission_lower(_ value: FfiUserInputSubmission) -> RustBuffer {
+    return FfiConverterTypeFfiUserInputSubmission.lower(value)
+}
+
+
+/**
+ * Timing and grouping metadata for a contiguous run of `Thinking` / `Tool` entries.
+ */
+public struct FfiWorkGroupTiming: Equatable, Hashable {
+    /**
+     * Stable group id matching desktop (`work-group-<first_entry_id>`).
+     */
+    public var id: String
+    public var firstEntryId: String
+    public var entryIds: [String]
+    public var runId: String?
+    public var hasActive: Bool
+    public var continuesSteer: Bool
+    public var durationMs: UInt64?
+    public var durationLabel: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stable group id matching desktop (`work-group-<first_entry_id>`).
+         */id: String, firstEntryId: String, entryIds: [String], runId: String?, hasActive: Bool, continuesSteer: Bool, durationMs: UInt64?, durationLabel: String?) {
+        self.id = id
+        self.firstEntryId = firstEntryId
+        self.entryIds = entryIds
+        self.runId = runId
+        self.hasActive = hasActive
+        self.continuesSteer = continuesSteer
+        self.durationMs = durationMs
+        self.durationLabel = durationLabel
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiWorkGroupTiming: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiWorkGroupTiming: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiWorkGroupTiming {
+        return
+            try FfiWorkGroupTiming(
+                id: FfiConverterString.read(from: &buf), 
+                firstEntryId: FfiConverterString.read(from: &buf), 
+                entryIds: FfiConverterSequenceString.read(from: &buf), 
+                runId: FfiConverterOptionString.read(from: &buf), 
+                hasActive: FfiConverterBool.read(from: &buf), 
+                continuesSteer: FfiConverterBool.read(from: &buf), 
+                durationMs: FfiConverterOptionUInt64.read(from: &buf), 
+                durationLabel: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiWorkGroupTiming, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.firstEntryId, into: &buf)
+        FfiConverterSequenceString.write(value.entryIds, into: &buf)
+        FfiConverterOptionString.write(value.runId, into: &buf)
+        FfiConverterBool.write(value.hasActive, into: &buf)
+        FfiConverterBool.write(value.continuesSteer, into: &buf)
+        FfiConverterOptionUInt64.write(value.durationMs, into: &buf)
+        FfiConverterOptionString.write(value.durationLabel, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiWorkGroupTiming_lift(_ buf: RustBuffer) throws -> FfiWorkGroupTiming {
+    return try FfiConverterTypeFfiWorkGroupTiming.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiWorkGroupTiming_lower(_ value: FfiWorkGroupTiming) -> RustBuffer {
+    return FfiConverterTypeFfiWorkGroupTiming.lower(value)
+}
+
+
+/**
+ * Light or dark theme appearance (mirrors [`conn_theme::Appearance`]).
+ */
+
+public enum FfiAppearance: Equatable, Hashable {
+    
+    case light
+    case dark
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiAppearance: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiAppearance: FfiConverterRustBuffer {
+    typealias SwiftType = FfiAppearance
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAppearance {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .light
+        
+        case 2: return .dark
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiAppearance, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .light:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .dark:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAppearance_lift(_ buf: RustBuffer) throws -> FfiAppearance {
+    return try FfiConverterTypeFfiAppearance.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiAppearance_lower(_ value: FfiAppearance) -> RustBuffer {
+    return FfiConverterTypeFfiAppearance.lower(value)
+}
+
+
+
+/**
+ * User decision for a pending approval request (`runtime-request.respond`).
+ */
+
+public enum FfiApprovalDecision: Equatable, Hashable {
+    
+    case accept
+    case acceptForSession
+    case acceptAlways
+    case decline
+    case cancel
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiApprovalDecision: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiApprovalDecision: FfiConverterRustBuffer {
+    typealias SwiftType = FfiApprovalDecision
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiApprovalDecision {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .accept
+        
+        case 2: return .acceptForSession
+        
+        case 3: return .acceptAlways
+        
+        case 4: return .decline
+        
+        case 5: return .cancel
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiApprovalDecision, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .accept:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .acceptForSession:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .acceptAlways:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .decline:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .cancel:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiApprovalDecision_lift(_ buf: RustBuffer) throws -> FfiApprovalDecision {
+    return try FfiConverterTypeFfiApprovalDecision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiApprovalDecision_lower(_ value: FfiApprovalDecision) -> RustBuffer {
+    return FfiConverterTypeFfiApprovalDecision.lower(value)
+}
+
 
 
 /**
@@ -1587,6 +3237,10 @@ enum FfiError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
     
     case InvalidUrl(message: String
     )
+    case InvalidTheme(message: String
+    )
+    case InvalidInput(message: String
+    )
     case Connection(message: String
     )
     case Auth(message: String
@@ -1626,16 +3280,22 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
         case 1: return .InvalidUrl(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 2: return .Connection(
+        case 2: return .InvalidTheme(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 3: return .Auth(
+        case 3: return .InvalidInput(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 4: return .Rpc(
+        case 4: return .Connection(
             message: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .Closed
+        case 5: return .Auth(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .Rpc(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .Closed
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1653,23 +3313,33 @@ public struct FfiConverterTypeFfiError: FfiConverterRustBuffer {
             FfiConverterString.write(message, into: &buf)
             
         
-        case let .Connection(message):
+        case let .InvalidTheme(message):
             writeInt(&buf, Int32(2))
             FfiConverterString.write(message, into: &buf)
             
         
-        case let .Auth(message):
+        case let .InvalidInput(message):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(message, into: &buf)
             
         
-        case let .Rpc(message):
+        case let .Connection(message):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(message, into: &buf)
             
         
-        case .Closed:
+        case let .Auth(message):
             writeInt(&buf, Int32(5))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .Rpc(message):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(message, into: &buf)
+            
+        
+        case .Closed:
+            writeInt(&buf, Int32(7))
         
         }
     }
@@ -1768,6 +3438,174 @@ public func FfiConverterTypeFfiItemStatus_lower(_ value: FfiItemStatus) -> RustB
 
 
 /**
+ * Status of a secret request timeline card (mirrors [`conn_state::SecretRequestStatus`]).
+ */
+
+public enum FfiSecretRequestStatus: Equatable, Hashable {
+    
+    case pending
+    case saved
+    case declined
+    case cancelled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiSecretRequestStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiSecretRequestStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiSecretRequestStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSecretRequestStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pending
+        
+        case 2: return .saved
+        
+        case 3: return .declined
+        
+        case 4: return .cancelled
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiSecretRequestStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .saved:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .declined:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .cancelled:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSecretRequestStatus_lift(_ buf: RustBuffer) throws -> FfiSecretRequestStatus {
+    return try FfiConverterTypeFfiSecretRequestStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSecretRequestStatus_lower(_ value: FfiSecretRequestStatus) -> RustBuffer {
+    return FfiConverterTypeFfiSecretRequestStatus.lower(value)
+}
+
+
+
+/**
+ * How [`crate::ConnCore::send_message`] dispatches a prompt (mirrors desktop `SendDispatch`).
+ */
+
+public enum FfiSendMode: Equatable, Hashable {
+    
+    /**
+     * Start immediately when idle; queue after the active run while working (desktop default).
+     */
+    case auto
+    /**
+     * Steer the active run while working (falling back to queue if no active run id is known).
+     */
+    case steer
+    /**
+     * Queue after the active run while working; start immediately when idle.
+     */
+    case queue
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiSendMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiSendMode: FfiConverterRustBuffer {
+    typealias SwiftType = FfiSendMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSendMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .auto
+        
+        case 2: return .steer
+        
+        case 3: return .queue
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiSendMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .auto:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .steer:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .queue:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSendMode_lift(_ buf: RustBuffer) throws -> FfiSendMode {
+    return try FfiConverterTypeFfiSendMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiSendMode_lower(_ value: FfiSendMode) -> RustBuffer {
+    return FfiConverterTypeFfiSendMode.lower(value)
+}
+
+
+
+/**
  * Coarse run state of a thread for list indicators.
  */
 
@@ -1856,18 +3694,42 @@ public func FfiConverterTypeFfiThreadActivity_lower(_ value: FfiThreadActivity) 
 
 public enum FfiTimelineEntry: Equatable, Hashable {
     
-    case user(id: String, text: String, createdAt: String?, createdByAgent: Bool
+    case user(id: String, text: String, createdAt: String?, createdByAgent: Bool, isSteer: Bool, runId: String?, attachments: [FfiAttachment]
     )
-    case assistant(id: String, markdown: String, streaming: Bool, createdAt: String?
+    case queuedUser(id: String, runId: String, messageId: String, text: String, createdAt: String, createdByAgent: Bool, attachments: [FfiAttachment]
     )
-    case thinking(id: String, text: String, streaming: Bool
+    case assistant(id: String, markdown: String, streaming: Bool, createdAt: String?, runId: String?, status: FfiItemStatus
     )
-    case tool(id: String, kind: String, title: String, detail: String?, status: FfiItemStatus
+    case thinking(id: String, text: String, streaming: Bool, runId: String?, durationMs: UInt64?
     )
-    case approval(id: String, title: String, detail: String?
+    case tool(id: String, kind: String, title: String, detail: String?, status: FfiItemStatus, outputOmitted: Bool, runId: String?, durationMs: UInt64?
+    )
+    case approval(id: String, 
+        /**
+         * Server runtime request id to pass to [`crate::ConnCore::respond_approval`].
+         */requestId: String, title: String, detail: String?
+    )
+    case userInputRequest(id: String, 
+        /**
+         * Server runtime request id to pass to [`crate::ConnCore::respond_user_input`] or
+         * [`crate::ConnCore::dismiss_user_input`].
+         */requestId: String, title: String?, questions: [FfiUserInputQuestion], status: FfiTurnItemStatus, pending: Bool, answers: [FfiUserInputAnswer], dismissible: Bool, createdAt: String?
+    )
+    case secretRequest(
+        /**
+         * Turn item id to pass as `turn_item_id` when answering the secret request.
+         */id: String, label: String, reason: String, url: String?, placeholder: String?, fileDelivery: Bool, status: FfiSecretRequestStatus, pending: Bool, createdAt: String?
+    )
+    case proposedPlan(id: String, runId: String?, title: String, markdown: String, displayMarkdown: String, previewMarkdown: String, canCollapse: Bool, streaming: Bool, status: FfiItemStatus, createdAt: String?
+    )
+    case subagent(id: String, childThreadId: String?, title: String, role: String, status: FfiTurnItemStatus, statusLabel: String, settled: Bool, summary: String?, remoteLabel: String?, createdAt: String?, startedAt: String?, completedAt: String?
+    )
+    case turnCheckpoint(id: String, runId: String, appRunOrdinal: Int64?, fileCount: UInt32, additions: Int64, deletions: Int64, files: [FfiTurnCheckpointFile]
+    )
+    case notice(id: String, text: String, isError: Bool
     )
     /**
-     * Every other [`conn_state::TimelineEntry`] variant, collapsed to a concise label for now.
+     * Fallback for future timeline entry kinds not yet mapped to a dedicated variant.
      */
     case other(id: String, label: String
     )
@@ -1892,22 +3754,43 @@ public struct FfiConverterTypeFfiTimelineEntry: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .user(id: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf), createdByAgent: try FfiConverterBool.read(from: &buf)
+        case 1: return .user(id: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf), createdByAgent: try FfiConverterBool.read(from: &buf), isSteer: try FfiConverterBool.read(from: &buf), runId: try FfiConverterOptionString.read(from: &buf), attachments: try FfiConverterSequenceTypeFfiAttachment.read(from: &buf)
         )
         
-        case 2: return .assistant(id: try FfiConverterString.read(from: &buf), markdown: try FfiConverterString.read(from: &buf), streaming: try FfiConverterBool.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf)
+        case 2: return .queuedUser(id: try FfiConverterString.read(from: &buf), runId: try FfiConverterString.read(from: &buf), messageId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf), createdAt: try FfiConverterString.read(from: &buf), createdByAgent: try FfiConverterBool.read(from: &buf), attachments: try FfiConverterSequenceTypeFfiAttachment.read(from: &buf)
         )
         
-        case 3: return .thinking(id: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf), streaming: try FfiConverterBool.read(from: &buf)
+        case 3: return .assistant(id: try FfiConverterString.read(from: &buf), markdown: try FfiConverterString.read(from: &buf), streaming: try FfiConverterBool.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf), runId: try FfiConverterOptionString.read(from: &buf), status: try FfiConverterTypeFfiItemStatus.read(from: &buf)
         )
         
-        case 4: return .tool(id: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf), status: try FfiConverterTypeFfiItemStatus.read(from: &buf)
+        case 4: return .thinking(id: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf), streaming: try FfiConverterBool.read(from: &buf), runId: try FfiConverterOptionString.read(from: &buf), durationMs: try FfiConverterOptionUInt64.read(from: &buf)
         )
         
-        case 5: return .approval(id: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        case 5: return .tool(id: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf), status: try FfiConverterTypeFfiItemStatus.read(from: &buf), outputOmitted: try FfiConverterBool.read(from: &buf), runId: try FfiConverterOptionString.read(from: &buf), durationMs: try FfiConverterOptionUInt64.read(from: &buf)
         )
         
-        case 6: return .other(id: try FfiConverterString.read(from: &buf), label: try FfiConverterString.read(from: &buf)
+        case 6: return .approval(id: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 7: return .userInputRequest(id: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), title: try FfiConverterOptionString.read(from: &buf), questions: try FfiConverterSequenceTypeFfiUserInputQuestion.read(from: &buf), status: try FfiConverterTypeFfiTurnItemStatus.read(from: &buf), pending: try FfiConverterBool.read(from: &buf), answers: try FfiConverterSequenceTypeFfiUserInputAnswer.read(from: &buf), dismissible: try FfiConverterBool.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 8: return .secretRequest(id: try FfiConverterString.read(from: &buf), label: try FfiConverterString.read(from: &buf), reason: try FfiConverterString.read(from: &buf), url: try FfiConverterOptionString.read(from: &buf), placeholder: try FfiConverterOptionString.read(from: &buf), fileDelivery: try FfiConverterBool.read(from: &buf), status: try FfiConverterTypeFfiSecretRequestStatus.read(from: &buf), pending: try FfiConverterBool.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 9: return .proposedPlan(id: try FfiConverterString.read(from: &buf), runId: try FfiConverterOptionString.read(from: &buf), title: try FfiConverterString.read(from: &buf), markdown: try FfiConverterString.read(from: &buf), displayMarkdown: try FfiConverterString.read(from: &buf), previewMarkdown: try FfiConverterString.read(from: &buf), canCollapse: try FfiConverterBool.read(from: &buf), streaming: try FfiConverterBool.read(from: &buf), status: try FfiConverterTypeFfiItemStatus.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 10: return .subagent(id: try FfiConverterString.read(from: &buf), childThreadId: try FfiConverterOptionString.read(from: &buf), title: try FfiConverterString.read(from: &buf), role: try FfiConverterString.read(from: &buf), status: try FfiConverterTypeFfiTurnItemStatus.read(from: &buf), statusLabel: try FfiConverterString.read(from: &buf), settled: try FfiConverterBool.read(from: &buf), summary: try FfiConverterOptionString.read(from: &buf), remoteLabel: try FfiConverterOptionString.read(from: &buf), createdAt: try FfiConverterOptionString.read(from: &buf), startedAt: try FfiConverterOptionString.read(from: &buf), completedAt: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 11: return .turnCheckpoint(id: try FfiConverterString.read(from: &buf), runId: try FfiConverterString.read(from: &buf), appRunOrdinal: try FfiConverterOptionInt64.read(from: &buf), fileCount: try FfiConverterUInt32.read(from: &buf), additions: try FfiConverterInt64.read(from: &buf), deletions: try FfiConverterInt64.read(from: &buf), files: try FfiConverterSequenceTypeFfiTurnCheckpointFile.read(from: &buf)
+        )
+        
+        case 12: return .notice(id: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf), isError: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 13: return .other(id: try FfiConverterString.read(from: &buf), label: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -1918,47 +3801,143 @@ public struct FfiConverterTypeFfiTimelineEntry: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .user(id,text,createdAt,createdByAgent):
+        case let .user(id,text,createdAt,createdByAgent,isSteer,runId,attachments):
             writeInt(&buf, Int32(1))
             FfiConverterString.write(id, into: &buf)
             FfiConverterString.write(text, into: &buf)
             FfiConverterOptionString.write(createdAt, into: &buf)
             FfiConverterBool.write(createdByAgent, into: &buf)
+            FfiConverterBool.write(isSteer, into: &buf)
+            FfiConverterOptionString.write(runId, into: &buf)
+            FfiConverterSequenceTypeFfiAttachment.write(attachments, into: &buf)
             
         
-        case let .assistant(id,markdown,streaming,createdAt):
+        case let .queuedUser(id,runId,messageId,text,createdAt,createdByAgent,attachments):
             writeInt(&buf, Int32(2))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(runId, into: &buf)
+            FfiConverterString.write(messageId, into: &buf)
+            FfiConverterString.write(text, into: &buf)
+            FfiConverterString.write(createdAt, into: &buf)
+            FfiConverterBool.write(createdByAgent, into: &buf)
+            FfiConverterSequenceTypeFfiAttachment.write(attachments, into: &buf)
+            
+        
+        case let .assistant(id,markdown,streaming,createdAt,runId,status):
+            writeInt(&buf, Int32(3))
             FfiConverterString.write(id, into: &buf)
             FfiConverterString.write(markdown, into: &buf)
             FfiConverterBool.write(streaming, into: &buf)
             FfiConverterOptionString.write(createdAt, into: &buf)
+            FfiConverterOptionString.write(runId, into: &buf)
+            FfiConverterTypeFfiItemStatus.write(status, into: &buf)
             
         
-        case let .thinking(id,text,streaming):
-            writeInt(&buf, Int32(3))
+        case let .thinking(id,text,streaming,runId,durationMs):
+            writeInt(&buf, Int32(4))
             FfiConverterString.write(id, into: &buf)
             FfiConverterString.write(text, into: &buf)
             FfiConverterBool.write(streaming, into: &buf)
+            FfiConverterOptionString.write(runId, into: &buf)
+            FfiConverterOptionUInt64.write(durationMs, into: &buf)
             
         
-        case let .tool(id,kind,title,detail,status):
-            writeInt(&buf, Int32(4))
+        case let .tool(id,kind,title,detail,status,outputOmitted,runId,durationMs):
+            writeInt(&buf, Int32(5))
             FfiConverterString.write(id, into: &buf)
             FfiConverterString.write(kind, into: &buf)
             FfiConverterString.write(title, into: &buf)
             FfiConverterOptionString.write(detail, into: &buf)
             FfiConverterTypeFfiItemStatus.write(status, into: &buf)
+            FfiConverterBool.write(outputOmitted, into: &buf)
+            FfiConverterOptionString.write(runId, into: &buf)
+            FfiConverterOptionUInt64.write(durationMs, into: &buf)
             
         
-        case let .approval(id,title,detail):
-            writeInt(&buf, Int32(5))
+        case let .approval(id,requestId,title,detail):
+            writeInt(&buf, Int32(6))
             FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
             FfiConverterString.write(title, into: &buf)
             FfiConverterOptionString.write(detail, into: &buf)
             
         
+        case let .userInputRequest(id,requestId,title,questions,status,pending,answers,dismissible,createdAt):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterOptionString.write(title, into: &buf)
+            FfiConverterSequenceTypeFfiUserInputQuestion.write(questions, into: &buf)
+            FfiConverterTypeFfiTurnItemStatus.write(status, into: &buf)
+            FfiConverterBool.write(pending, into: &buf)
+            FfiConverterSequenceTypeFfiUserInputAnswer.write(answers, into: &buf)
+            FfiConverterBool.write(dismissible, into: &buf)
+            FfiConverterOptionString.write(createdAt, into: &buf)
+            
+        
+        case let .secretRequest(id,label,reason,url,placeholder,fileDelivery,status,pending,createdAt):
+            writeInt(&buf, Int32(8))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(label, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            FfiConverterOptionString.write(url, into: &buf)
+            FfiConverterOptionString.write(placeholder, into: &buf)
+            FfiConverterBool.write(fileDelivery, into: &buf)
+            FfiConverterTypeFfiSecretRequestStatus.write(status, into: &buf)
+            FfiConverterBool.write(pending, into: &buf)
+            FfiConverterOptionString.write(createdAt, into: &buf)
+            
+        
+        case let .proposedPlan(id,runId,title,markdown,displayMarkdown,previewMarkdown,canCollapse,streaming,status,createdAt):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterOptionString.write(runId, into: &buf)
+            FfiConverterString.write(title, into: &buf)
+            FfiConverterString.write(markdown, into: &buf)
+            FfiConverterString.write(displayMarkdown, into: &buf)
+            FfiConverterString.write(previewMarkdown, into: &buf)
+            FfiConverterBool.write(canCollapse, into: &buf)
+            FfiConverterBool.write(streaming, into: &buf)
+            FfiConverterTypeFfiItemStatus.write(status, into: &buf)
+            FfiConverterOptionString.write(createdAt, into: &buf)
+            
+        
+        case let .subagent(id,childThreadId,title,role,status,statusLabel,settled,summary,remoteLabel,createdAt,startedAt,completedAt):
+            writeInt(&buf, Int32(10))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterOptionString.write(childThreadId, into: &buf)
+            FfiConverterString.write(title, into: &buf)
+            FfiConverterString.write(role, into: &buf)
+            FfiConverterTypeFfiTurnItemStatus.write(status, into: &buf)
+            FfiConverterString.write(statusLabel, into: &buf)
+            FfiConverterBool.write(settled, into: &buf)
+            FfiConverterOptionString.write(summary, into: &buf)
+            FfiConverterOptionString.write(remoteLabel, into: &buf)
+            FfiConverterOptionString.write(createdAt, into: &buf)
+            FfiConverterOptionString.write(startedAt, into: &buf)
+            FfiConverterOptionString.write(completedAt, into: &buf)
+            
+        
+        case let .turnCheckpoint(id,runId,appRunOrdinal,fileCount,additions,deletions,files):
+            writeInt(&buf, Int32(11))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(runId, into: &buf)
+            FfiConverterOptionInt64.write(appRunOrdinal, into: &buf)
+            FfiConverterUInt32.write(fileCount, into: &buf)
+            FfiConverterInt64.write(additions, into: &buf)
+            FfiConverterInt64.write(deletions, into: &buf)
+            FfiConverterSequenceTypeFfiTurnCheckpointFile.write(files, into: &buf)
+            
+        
+        case let .notice(id,text,isError):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(id, into: &buf)
+            FfiConverterString.write(text, into: &buf)
+            FfiConverterBool.write(isError, into: &buf)
+            
+        
         case let .other(id,label):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(13))
             FfiConverterString.write(id, into: &buf)
             FfiConverterString.write(label, into: &buf)
             
@@ -1982,6 +3961,240 @@ public func FfiConverterTypeFfiTimelineEntry_lower(_ value: FfiTimelineEntry) ->
 }
 
 
+
+/**
+ * Fine-grained turn item status (mirrors [`conn_state::TurnItemStatus`]).
+ */
+
+public enum FfiTurnItemStatus: Equatable, Hashable {
+    
+    case idle
+    case pending
+    case running
+    case waiting
+    case completed
+    case failed
+    case cancelled
+    case interrupted
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTurnItemStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTurnItemStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTurnItemStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTurnItemStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .idle
+        
+        case 2: return .pending
+        
+        case 3: return .running
+        
+        case 4: return .waiting
+        
+        case 5: return .completed
+        
+        case 6: return .failed
+        
+        case 7: return .cancelled
+        
+        case 8: return .interrupted
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTurnItemStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .idle:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .running:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .waiting:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .completed:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .cancelled:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .interrupted:
+            writeInt(&buf, Int32(8))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnItemStatus_lift(_ buf: RustBuffer) throws -> FfiTurnItemStatus {
+    return try FfiConverterTypeFfiTurnItemStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnItemStatus_lower(_ value: FfiTurnItemStatus) -> RustBuffer {
+    return FfiConverterTypeFfiTurnItemStatus.lower(value)
+}
+
+
+
+/**
+ * Value submitted for one user-input question in [`crate::ConnCore::respond_user_input`].
+ */
+
+public enum FfiUserInputAnswerValue: Equatable, Hashable {
+    
+    case single(value: String
+    )
+    case multi(values: [String]
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiUserInputAnswerValue: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUserInputAnswerValue: FfiConverterRustBuffer {
+    typealias SwiftType = FfiUserInputAnswerValue
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUserInputAnswerValue {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .single(value: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .multi(values: try FfiConverterSequenceString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiUserInputAnswerValue, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .single(value):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(value, into: &buf)
+            
+        
+        case let .multi(values):
+            writeInt(&buf, Int32(2))
+            FfiConverterSequenceString.write(values, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputAnswerValue_lift(_ buf: RustBuffer) throws -> FfiUserInputAnswerValue {
+    return try FfiConverterTypeFfiUserInputAnswerValue.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUserInputAnswerValue_lower(_ value: FfiUserInputAnswerValue) -> RustBuffer {
+    return FfiConverterTypeFfiUserInputAnswerValue.lower(value)
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2003,6 +4216,80 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         case 1: return try FfiConverterString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiThemeTokens: FfiConverterRustBuffer {
+    typealias SwiftType = FfiThemeTokens?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiThemeTokens.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiThemeTokens.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiAttachment: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiAttachment]
+
+    public static func write(_ value: [FfiAttachment], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiAttachment.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiAttachment] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiAttachment]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiAttachment.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -2034,6 +4321,31 @@ fileprivate struct FfiConverterSequenceTypeFfiProject: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiThemeSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiThemeSummary]
+
+    public static func write(_ value: [FfiThemeSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiThemeSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiThemeSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiThemeSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiThemeSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiThreadSummary: FfiConverterRustBuffer {
     typealias SwiftType = [FfiThreadSummary]
 
@@ -2051,6 +4363,156 @@ fileprivate struct FfiConverterSequenceTypeFfiThreadSummary: FfiConverterRustBuf
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiThreadSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiTurnCheckpointFile: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTurnCheckpointFile]
+
+    public static func write(_ value: [FfiTurnCheckpointFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTurnCheckpointFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTurnCheckpointFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTurnCheckpointFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTurnCheckpointFile.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiUserInputAnswer: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiUserInputAnswer]
+
+    public static func write(_ value: [FfiUserInputAnswer], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiUserInputAnswer.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiUserInputAnswer] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiUserInputAnswer]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiUserInputAnswer.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiUserInputOption: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiUserInputOption]
+
+    public static func write(_ value: [FfiUserInputOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiUserInputOption.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiUserInputOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiUserInputOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiUserInputOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiUserInputQuestion: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiUserInputQuestion]
+
+    public static func write(_ value: [FfiUserInputQuestion], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiUserInputQuestion.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiUserInputQuestion] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiUserInputQuestion]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiUserInputQuestion.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiUserInputSubmission: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiUserInputSubmission]
+
+    public static func write(_ value: [FfiUserInputSubmission], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiUserInputSubmission.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiUserInputSubmission] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiUserInputSubmission]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiUserInputSubmission.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiWorkGroupTiming: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiWorkGroupTiming]
+
+    public static func write(_ value: [FfiWorkGroupTiming], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiWorkGroupTiming.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiWorkGroupTiming] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiWorkGroupTiming]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiWorkGroupTiming.read(from: &buf))
         }
         return seq
     }
@@ -2128,6 +4590,43 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
+/**
+ * Returns every built-in Conn theme in the desktop client's canonical order.
+ */
+public func builtinThemes() -> [FfiThemeSummary]  {
+    return try!  FfiConverterSequenceTypeFfiThemeSummary.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_builtin_themes(uniffiCallStatus
+    )
+})
+}
+/**
+ * Parses a Conn custom theme JSON payload and derives every color and shell geometry token.
+ *
+ * # Errors
+ *
+ * Returns [`FfiError::InvalidTheme`] if `json` is malformed or contains an invalid CSS color.
+ */
+public func customThemeTokens(id: String, json: String)throws  -> FfiThemeTokens  {
+    return try  FfiConverterTypeFfiThemeTokens_lift(try rustCallWithError(FfiConverterTypeFfiError_lift) {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_custom_theme_tokens(
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(json),uniffiCallStatus
+    )
+})
+}
+/**
+ * Derives every color and shell geometry token for a built-in Conn theme id.
+ */
+public func themeTokens(themeId: String) -> FfiThemeTokens?  {
+    return try!  FfiConverterOptionTypeFfiThemeTokens.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_theme_tokens(
+        FfiConverterString.lower(themeId),uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -2144,19 +4643,61 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_conn_ffi_checksum_func_builtin_themes() != 50022) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_func_custom_theme_tokens() != 16686) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_func_theme_tokens() != 49538) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_answer_secret_request() != 53478) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_close_thread() != 13465) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_delete_thread() != 14454) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_disconnect() != 41483) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_dismiss_user_input() != 10644) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_launch_thread() != 45360) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_mark_thread_unread() != 59744) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_open_thread() != 64642) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_pin_thread() != 33458) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_reconnect() != 9304) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_conncore_send_message() != 63239) {
+    if (uniffi_conn_ffi_checksum_method_conncore_rename_thread() != 26659) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_respond_approval() != 37163) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_respond_user_input() != 18282) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_send_message() != 39835) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_settle_thread() != 64028) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_stop_thread() != 56935) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_corelistener_on_status() != 22783) {

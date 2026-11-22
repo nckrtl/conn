@@ -306,9 +306,19 @@ void uniffi_conn_ffi_fn_free_conncore(uint64_t handle, RustCallStatus *_Nonnull 
 uint64_t uniffi_conn_ffi_fn_constructor_conncore_connect(RustBuffer server_url, RustBuffer credential, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ANSWER_SECRET_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ANSWER_SECRET_REQUEST
+uint64_t uniffi_conn_ffi_fn_method_conncore_answer_secret_request(uint64_t ptr, RustBuffer thread_id, RustBuffer turn_item_id, RustBuffer secret
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_CLOSE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_CLOSE_THREAD
 void uniffi_conn_ffi_fn_method_conncore_close_thread(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DELETE_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DELETE_THREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_delete_thread(uint64_t ptr, RustBuffer thread_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DISCONNECT
@@ -316,9 +326,29 @@ void uniffi_conn_ffi_fn_method_conncore_close_thread(uint64_t ptr, RustBuffer th
 void uniffi_conn_ffi_fn_method_conncore_disconnect(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DISMISS_USER_INPUT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DISMISS_USER_INPUT
+uint64_t uniffi_conn_ffi_fn_method_conncore_dismiss_user_input(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LAUNCH_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LAUNCH_THREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_launch_thread(uint64_t ptr, RustBuffer project_id, RustBuffer text
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_MARK_THREAD_UNREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_MARK_THREAD_UNREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_mark_thread_unread(uint64_t ptr, RustBuffer thread_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_OPEN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_OPEN_THREAD
 void uniffi_conn_ffi_fn_method_conncore_open_thread(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_PIN_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_PIN_THREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_pin_thread(uint64_t ptr, RustBuffer thread_id, int8_t pinned
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RECONNECT
@@ -326,9 +356,34 @@ void uniffi_conn_ffi_fn_method_conncore_open_thread(uint64_t ptr, RustBuffer thr
 void uniffi_conn_ffi_fn_method_conncore_reconnect(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RENAME_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RENAME_THREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_rename_thread(uint64_t ptr, RustBuffer thread_id, RustBuffer title
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RESPOND_APPROVAL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RESPOND_APPROVAL
+uint64_t uniffi_conn_ffi_fn_method_conncore_respond_approval(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id, RustBuffer decision
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RESPOND_USER_INPUT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RESPOND_USER_INPUT
+uint64_t uniffi_conn_ffi_fn_method_conncore_respond_user_input(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id, RustBuffer answers
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
-uint64_t uniffi_conn_ffi_fn_method_conncore_send_message(uint64_t ptr, RustBuffer thread_id, RustBuffer text
+uint64_t uniffi_conn_ffi_fn_method_conncore_send_message(uint64_t ptr, RustBuffer thread_id, RustBuffer text, RustBuffer mode
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SETTLE_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SETTLE_THREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_settle_thread(uint64_t ptr, RustBuffer thread_id, int8_t settled
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_STOP_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_STOP_THREAD
+uint64_t uniffi_conn_ffi_fn_method_conncore_stop_thread(uint64_t ptr, RustBuffer thread_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_CORELISTENER
@@ -369,6 +424,22 @@ void uniffi_conn_ffi_fn_method_corelistener_on_thread(uint64_t ptr, RustBuffer s
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_ERROR
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CORELISTENER_ON_ERROR
 void uniffi_conn_ffi_fn_method_corelistener_on_error(uint64_t ptr, RustBuffer message, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_BUILTIN_THEMES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_BUILTIN_THEMES
+RustBuffer uniffi_conn_ffi_fn_func_builtin_themes(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_CUSTOM_THEME_TOKENS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_CUSTOM_THEME_TOKENS
+RustBuffer uniffi_conn_ffi_fn_func_custom_theme_tokens(RustBuffer id, RustBuffer json, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_THEME_TOKENS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_THEME_TOKENS
+RustBuffer uniffi_conn_ffi_fn_func_theme_tokens(RustBuffer theme_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_CONN_FFI_RUSTBUFFER_ALLOC
@@ -631,9 +702,39 @@ void ffi_conn_ffi_rust_future_free_void(uint64_t handle
 void ffi_conn_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_BUILTIN_THEMES
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_BUILTIN_THEMES
+uint16_t uniffi_conn_ffi_checksum_func_builtin_themes(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CUSTOM_THEME_TOKENS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CUSTOM_THEME_TOKENS
+uint16_t uniffi_conn_ffi_checksum_func_custom_theme_tokens(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_THEME_TOKENS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_THEME_TOKENS
+uint16_t uniffi_conn_ffi_checksum_func_theme_tokens(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_ANSWER_SECRET_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_ANSWER_SECRET_REQUEST
+uint16_t uniffi_conn_ffi_checksum_method_conncore_answer_secret_request(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CLOSE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CLOSE_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_close_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DELETE_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DELETE_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_delete_thread(void
     
 );
 #endif
@@ -643,9 +744,33 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_disconnect(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DISMISS_USER_INPUT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DISMISS_USER_INPUT
+uint16_t uniffi_conn_ffi_checksum_method_conncore_dismiss_user_input(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LAUNCH_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LAUNCH_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_launch_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_MARK_THREAD_UNREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_MARK_THREAD_UNREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_mark_thread_unread(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_OPEN_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_OPEN_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_open_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_PIN_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_PIN_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_pin_thread(void
     
 );
 #endif
@@ -655,9 +780,39 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_reconnect(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RENAME_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RENAME_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_rename_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RESPOND_APPROVAL
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RESPOND_APPROVAL
+uint16_t uniffi_conn_ffi_checksum_method_conncore_respond_approval(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RESPOND_USER_INPUT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RESPOND_USER_INPUT
+uint16_t uniffi_conn_ffi_checksum_method_conncore_respond_user_input(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_MESSAGE
 uint16_t uniffi_conn_ffi_checksum_method_conncore_send_message(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SETTLE_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SETTLE_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_settle_thread(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_STOP_THREAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_STOP_THREAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_stop_thread(void
     
 );
 #endif

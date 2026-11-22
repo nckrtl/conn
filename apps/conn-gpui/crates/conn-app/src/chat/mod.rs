@@ -8,6 +8,10 @@ mod cards;
 mod color;
 mod composer;
 mod composer_state;
+pub(crate) use self::composer_state::{
+    RefEntry, ThreadWorkspace, branch_selection_target, local_branch_name_from_remote_ref,
+    previous_worktree,
+};
 mod draft_hero;
 mod icons;
 pub(crate) mod markdown;
@@ -35,7 +39,7 @@ use gpui_kit::{
 
 use self::cache::{CachedRow, RowCache, VirtualItem};
 use self::color::{hsla, hsla_alpha, message_highlight, muted_icon, prose_foreground};
-pub(crate) use self::composer::SendDispatch;
+pub(crate) use self::composer::{BranchAction, BranchContext, SendDispatch};
 use self::composer::{Composer, ComposerEvent};
 use self::spinner::{SHIMMER_STEP_INTERVAL, TurningArc, shimmer_text};
 use crate::a11y::ConnA11yExt as _;
@@ -140,8 +144,8 @@ pub(crate) enum ChatEvent {
     RuntimeModeSelected(String),
     /// Switch the thread's interaction mode (`thread.interaction-mode.set`).
     InteractionModeSelected(String),
-    /// Toggle Local (`false`) vs Worktree (`true`) for a new-thread draft.
-    WorkspaceModeSelected(bool),
+    /// Workspace or branch change from the composer context strip.
+    Branch(composer::BranchAction),
     /// Switch which project a new-thread draft will launch in.
     DraftProjectSelected(String),
     /// Retarget the draft at the server's scratch project (`or start without a project`).
@@ -340,9 +344,7 @@ impl ChatView {
                 ComposerEvent::InteractionModeSelected(mode) => {
                     cx.emit(ChatEvent::InteractionModeSelected(mode.clone()));
                 }
-                ComposerEvent::WorkspaceModeSelected(worktree) => {
-                    cx.emit(ChatEvent::WorkspaceModeSelected(*worktree));
-                }
+                ComposerEvent::Branch(action) => cx.emit(ChatEvent::Branch(action.clone())),
                 ComposerEvent::SlashCommand(command) => {
                     cx.emit(ChatEvent::SlashCommand(command.clone()));
                 }
@@ -775,6 +777,16 @@ impl ChatView {
     }
 
     /// Updates the composer's bottom `BranchToolbar` context strip.
+    /// Workspace facts for the composer's branch picker and workspace selector.
+    pub(crate) fn set_branch_context(
+        &mut self,
+        context: composer::BranchContext,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.composer
+            .update(cx, |c, cx| c.set_branch_context(context, cx));
+    }
+
     pub(crate) fn set_thread_context(
         &mut self,
         branch: Option<String>,

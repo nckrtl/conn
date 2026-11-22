@@ -11,6 +11,7 @@
 //!   and `32px` round send button (or destructive stop button while working).
 
 mod actions;
+mod branch_picker;
 mod context_meter;
 mod footer;
 mod menus;
@@ -18,6 +19,7 @@ mod model_picker;
 mod stash;
 
 pub(crate) use self::actions::{FollowUpBehavior, SendDispatch};
+pub(crate) use self::branch_picker::{BranchAction, BranchContext};
 pub(crate) use self::context_meter::ContextWindowSnapshot;
 
 use std::fmt;
@@ -172,8 +174,8 @@ pub(crate) enum ComposerEvent {
     },
     RuntimeModeSelected(String),
     InteractionModeSelected(String),
-    /// Toggle between Local (`false`) and Worktree (`true`) when composing a new thread draft.
-    WorkspaceModeSelected(bool),
+    /// Workspace or branch change from the context strip.
+    Branch(BranchAction),
     SlashCommand(String),
     /// `server.getConfig` loaded; carries its `scratchWorkspaceRoot`.
     ScratchWorkspaceRoot(Option<String>),
@@ -212,6 +214,7 @@ pub(crate) struct Composer {
     permission_preview: Option<&'static str>,
     implement_menu_open: bool,
     stash: PromptStash,
+    branch: branch_picker::BranchUi,
     textarea: Entity<TextareaState>,
     model_search_input: Entity<InputState>,
     catalog: ModelCatalog,
@@ -319,6 +322,7 @@ impl Composer {
                 },
             );
 
+        let branch = branch_picker::BranchUi::new(window, cx);
         let mut composer = Self {
             tokens,
             connection,
@@ -347,6 +351,7 @@ impl Composer {
             permission_preview: None,
             implement_menu_open: false,
             stash: PromptStash::default(),
+            branch,
             textarea,
             model_search_input,
             catalog: ModelCatalog::default(),
@@ -823,6 +828,8 @@ impl Composer {
             &mut self.implement_menu_open,
             &mut self.context_meter_open,
             &mut self.stash.menu_open,
+            &mut self.branch.picker_open,
+            &mut self.branch.workspace_menu_open,
         ] {
             if *open {
                 *open = false;
@@ -849,6 +856,7 @@ impl Composer {
             || self.implement_menu_open
             || self.context_meter_open
             || self.stash.menu_open
+            || self.branch_popup_open()
             || self.active_trigger.is_some()
     }
 
@@ -1896,78 +1904,8 @@ impl Composer {
             .flex_1()
             .overflow_hidden();
 
-        let env_icon = if self.worktree_active {
-            "superhero/folder-git.svg"
-        } else {
-            "superhero/folder.svg"
-        };
-        let env_label = if self.worktree_active {
-            "Worktree"
-        } else {
-            "Local"
-        };
-        if self.is_draft {
-            let next_worktree = !self.worktree_active;
-            left = left.child(
-                div()
-                    .id("composer-workspace-mode-toggle")
-                    .a11y_button(
-                        "composer.workspace-mode",
-                        format!("Workspace mode: {env_label}"),
-                    )
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .h(px(22.0))
-                    .px(px(6.0))
-                    .rounded(px(6.0))
-                    .flex_shrink_0()
-                    .cursor_pointer()
-                    .text_color(if self.worktree_active { fg } else { muted })
-                    .when(self.worktree_active, |el| el.bg(hover_bg))
-                    .hover(move |s| s.bg(hover_bg).text_color(fg))
-                    .on_click(cx.listener(move |composer, _, _, cx| {
-                        composer.worktree_active = next_worktree;
-                        cx.emit(ComposerEvent::WorkspaceModeSelected(next_worktree));
-                        cx.notify();
-                    }))
-                    .conn_tooltip(
-                        "Click to switch between Local checkout and new git Worktree",
-                        tokens,
-                    )
-                    .child(icons::icon(
-                        env_icon,
-                        12.0,
-                        if self.worktree_active { fg } else { muted },
-                    ))
-                    .child(env_label),
-            );
-        } else {
-            left = left.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .flex_shrink_0()
-                    .child(icons::icon(env_icon, 12.0, muted))
-                    .child(env_label),
-            );
-        }
-
-        if let Some(branch) = self.thread_branch.as_deref().filter(|b| !b.is_empty()) {
-            left = left.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .min_w_0()
-                    .child(icons::icon("superhero/branch.svg", 12.0, muted))
-                    .child(div().min_w_0().truncate().child(branch.to_owned())),
-            );
-        }
+        left = left.child(self.render_workspace_control(tokens, cx));
+        let branch_control = self.render_branch_control(tokens, cx);
 
         // New-thread drafts name the permissions at the strip's trailing end
         // (`ComposerContextPermissions`); started threads keep them in the footer and picker.
@@ -2048,9 +1986,18 @@ impl Composer {
             .line_height(px(16.0))
             .text_color(muted)
             .child(left)
-            .when_some(trailing, |el, trailing| {
-                el.child(div().flex_none().ml_auto().child(trailing))
-            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .child(branch_control)
+                    .when_some(trailing, |el, trailing| {
+                        el.child(div().flex_none().child(trailing))
+                    }),
+            )
             .into_any_element()
     }
 
@@ -2617,6 +2564,7 @@ impl Render for Composer {
                 }
                 if composer.any_overlay_open() {
                     composer.close_overlays(cx);
+                    composer.focus_input(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -2699,6 +2647,16 @@ impl Render for Composer {
                     // `⌘⇧M` toggles the model picker (`modelPicker.toggle`).
                     if keystroke.key == "m" && m.platform && m.shift && !m.alt && !m.control {
                         composer.toggle_model_picker(window, cx);
+                        cx.stop_propagation();
+                    }
+                    // `⌘⇧G` branch picker, `⌘⇧X` workspace menu, `⌘⇧L` previous worktree.
+                    if m.platform && m.shift && !m.alt && !m.control {
+                        match keystroke.key.as_str() {
+                            "g" => composer.toggle_branch_picker(window, cx),
+                            "x" => composer.toggle_workspace_menu(cx),
+                            "l" => composer.use_previous_worktree(window, cx),
+                            _ => return,
+                        }
                         cx.stop_propagation();
                     }
                 },

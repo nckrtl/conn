@@ -24,6 +24,15 @@ if ! command -v xcodebuild >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ ! -f "$GENERATED_DIR/conn_ffiFFI.h" || ! -f "$GENERATED_DIR/conn_ffiFFI.modulemap" ]]; then
+  echo "Missing generated headers in $GENERATED_DIR; run apps/conn-gpui/scripts/ios-bindings.sh first" >&2
+  exit 1
+fi
+
+cd "$GPUI_ROOT"
+TOOLCHAIN_BIN="$(dirname "$(rustup which cargo)")"
+export PATH="$TOOLCHAIN_BIN:$PATH"
+
 installed_targets="$(rustup target list --installed)"
 for target in "${IOS_TARGETS[@]}"; do
   if ! grep -qx "$target" <<<"$installed_targets"; then
@@ -32,12 +41,6 @@ for target in "${IOS_TARGETS[@]}"; do
   fi
 done
 
-if [[ ! -f "$GENERATED_DIR/conn_ffiFFI.h" || ! -f "$GENERATED_DIR/conn_ffiFFI.modulemap" ]]; then
-  echo "Missing generated headers in $GENERATED_DIR; run apps/conn-gpui/scripts/ios-bindings.sh first" >&2
-  exit 1
-fi
-
-cd "$GPUI_ROOT"
 for target in "${IOS_TARGETS[@]}"; do
   echo "==> Building conn-ffi (release) for $target"
   CARGO_TARGET_DIR="$TARGET_DIR" cargo build --release -p conn-ffi --lib --target "$target"

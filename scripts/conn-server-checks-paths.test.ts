@@ -74,7 +74,6 @@ function filesUnder(dir: string): Array<string> {
 
 type Package = {
   dir: string;
-  exports: Record<string, unknown> | string;
   scripts: Record<string, string>;
 };
 
@@ -84,7 +83,6 @@ for (const { dir } of readCiWorkspace()) {
   const json = readJson(NodePath.join(root, dir, "package.json"));
   workspace.set(json.name, {
     dir: NodePath.join(root, dir),
-    exports: json.exports ?? {},
     scripts: json.scripts ?? {},
   });
 }
@@ -93,71 +91,126 @@ const PACKAGE_NAME = new RegExp(
   "g",
 );
 
-function exportTarget(entry: unknown): string | null {
-  if (typeof entry === "string") return entry;
+/**
+ * Every runtime target of an `exports` or `imports` entry: all conditions (node, import,
+ * require, default, development...), nested, but not `types`, which nothing runs.
+ */
+function conditionTargets(entry: unknown): Array<string> {
+  if (typeof entry === "string") return [entry];
+  if (Array.isArray(entry)) return entry.flatMap(conditionTargets);
   if (entry && typeof entry === "object") {
-    const conditions = entry as Record<string, unknown>;
-    return exportTarget(conditions.import ?? conditions.default ?? conditions.node);
+    return Object.entries(entry)
+      .filter(([condition]) => condition !== "types" && !condition.startsWith("types@"))
+      .flatMap(([, target]) => conditionTargets(target));
   }
-  return null;
+  return [];
+}
+
+/** The targets a subpath map (`exports` or `imports`) gives `key`, with `*` patterns. */
+function mapTargets(map: Record<string, unknown>, key: string): Array<string> {
+  if (key in map) return conditionTargets(map[key]);
+  return Object.entries(map).flatMap(([pattern, entry]) => {
+    const star = pattern.indexOf("*");
+    if (star === -1) return [];
+    const [prefix, suffix] = [pattern.slice(0, star), pattern.slice(star + 1)];
+    if (!key.startsWith(prefix) || !key.endsWith(suffix) || key.length < pattern.length - 1) {
+      return [];
+    }
+    const match = key.slice(prefix.length, key.length - suffix.length);
+    return conditionTargets(entry).map((target) => target.replaceAll("*", match));
+  });
 }
 
 const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
 
-/** A package folder's entry, from `exports["."]`, then `main`, then `index.*`. */
-function packageEntry(dir: string): string | undefined {
+/** A package's subpath map: a string `exports` is its ".". */
+function exportsMap(json: { exports?: unknown }): Record<string, unknown> {
+  const { exports } = json;
+  if (typeof exports === "string" || Array.isArray(exports)) return { ".": exports };
+  if (!exports || typeof exports !== "object") return {};
+  // Conditions without subpaths (`{ "node": "./a.js" }`) are the "." entry.
+  return Object.keys(exports).some((key) => key.startsWith("."))
+    ? (exports as Record<string, unknown>)
+    : { ".": exports };
+}
+
+/** A package folder's entries: every `exports["."]` target and `main`, else `index.*`. */
+function packageEntry(dir: string): Array<string> {
   const manifest = NodePath.join(dir, "package.json");
   if (isFile(manifest)) {
     const json = readJson(manifest);
-    const exported = exportTarget(
-      typeof json.exports === "string" ? json.exports : json.exports?.["."],
-    );
-    for (const entry of [exported, json.main]) {
-      const file = typeof entry === "string" && resolvePath(NodePath.join(dir, entry));
-      if (file) return file;
-    }
+    const entries = [...mapTargets(exportsMap(json), "."), json.main]
+      .filter((entry): entry is string => typeof entry === "string")
+      .flatMap((entry) => resolvePath(NodePath.join(dir, entry)));
+    if (entries.length > 0) return entries;
   }
-  return EXTENSIONS.map((extension) => NodePath.join(dir, `index${extension}`)).find(isFile);
+  return EXTENSIONS.map((extension) => NodePath.join(dir, `index${extension}`))
+    .filter(isFile)
+    .slice(0, 1);
 }
 
 /** Node and TypeScript resolution of a path: exact, `.js` → `.ts`, extensions, then folder. */
-function resolvePath(base: string): string | undefined {
-  if (isFile(base)) return base;
+function resolvePath(base: string): Array<string> {
+  if (isFile(base)) return [base];
   const source = base.replace(/\.(m|c)?js(x?)$/, (_, kind = "", x) => `.${kind}ts${x}`);
-  if (source !== base && isFile(source)) return source;
+  if (source !== base && isFile(source)) return [source];
   const withExtension = EXTENSIONS.map((extension) => `${base}${extension}`).find(isFile);
-  if (withExtension) return withExtension;
+  if (withExtension) return [withExtension];
   return isDir(base) ||
     [...overlay.keys()].some((file) => file.startsWith(`${base}${NodePath.sep}`))
     ? packageEntry(base)
-    : undefined;
+    : [];
+}
+
+/** The nearest package.json above a file. */
+function owningManifest(from: string): string | undefined {
+  for (let dir = NodePath.dirname(from); dir.startsWith(root); dir = NodePath.dirname(dir)) {
+    const manifest = NodePath.join(dir, "package.json");
+    if (isFile(manifest)) return manifest;
+    if (dir === root) break;
+  }
+  return undefined;
 }
 
 /** The monorepo files a specifier loads; [] for a package from the registry. */
 function resolveSpecifier(from: string, specifier: string): Array<string> {
   if (specifier.startsWith(".")) {
-    const file = resolvePath(NodePath.resolve(NodePath.dirname(from), specifier));
+    const found = resolvePath(NodePath.resolve(NodePath.dirname(from), specifier));
     // No file: a specifier inside a string or a fixture, so there is nothing to read.
-    if (!file) return [];
-    const manifest = NodePath.join(NodePath.dirname(file), "package.json");
-    return isFile(manifest) && file !== manifest ? [file, manifest] : [file];
+    return found.flatMap((file) => {
+      const manifest = NodePath.join(NodePath.dirname(file), "package.json");
+      return isFile(manifest) && file !== manifest ? [file, manifest] : [file];
+    });
+  }
+  if (specifier.startsWith("#")) {
+    const manifest = owningManifest(from);
+    if (!manifest) return [];
+    const targets = mapTargets(readJson(manifest).imports ?? {}, specifier);
+    return [
+      manifest,
+      ...targets.flatMap((target) =>
+        target.startsWith(".")
+          ? resolvePath(NodePath.join(NodePath.dirname(manifest), target))
+          : resolveSpecifier(manifest, target),
+      ),
+    ];
   }
   const parts = specifier.split("/");
   const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
   const pkg = workspace.get(name);
   if (!pkg) return [];
+  const manifest = NodePath.join(pkg.dir, "package.json");
   const subpath = `.${specifier.slice(name.length)}`;
-  const { exports } = pkg;
-  const exported = typeof exports === "string" ? { ".": exports } : exports;
-  const target = exportTarget(exported[subpath]);
-  const file = target
-    ? resolvePath(NodePath.join(pkg.dir, target))
-    : subpath === "." && Object.keys(exported).length === 0
-      ? packageEntry(pkg.dir)
-      : undefined;
+  const map = exportsMap(readJson(manifest));
+  const found =
+    Object.keys(map).length === 0
+      ? subpath === "."
+        ? packageEntry(pkg.dir)
+        : resolvePath(NodePath.join(pkg.dir, subpath))
+      : mapTargets(map, subpath).flatMap((target) => resolvePath(NodePath.join(pkg.dir, target)));
   // A subpath this test cannot resolve: count the whole package.
-  if (!file) return filesUnder(pkg.dir);
-  return [file, NodePath.join(pkg.dir, "package.json")];
+  if (found.length === 0) return filesUnder(pkg.dir);
+  return [...found, manifest];
 }
 
 /**
@@ -309,6 +362,43 @@ it.each([
   }
   try {
     expect(checkedFiles().has(helper)).toBe(true);
+  } finally {
+    overlay.clear();
+  }
+});
+
+it("follows every runtime condition of a package's exports", () => {
+  const manifest = NodePath.join(root, "packages/client-runtime/package.json");
+  const json = readJson(manifest);
+  // Node picks `node` here; the test must not settle on `default`.
+  json.exports["./orbit-gateway/client"] = {
+    types: "./src/orbitGateway/client.ts",
+    node: "./src/orbitGateway/client.node.ts",
+    default: "./src/orbitGateway/client.ts",
+  };
+  overlay.set(manifest, JSON.stringify(json));
+  overlay.set(NodePath.join(root, "packages/client-runtime/src/orbitGateway/client.node.ts"), "");
+  try {
+    const reached = checkedFiles();
+    expect(reached.has("packages/client-runtime/src/orbitGateway/client.node.ts")).toBe(true);
+    expect(reached.has("packages/client-runtime/src/orbitGateway/client.ts")).toBe(true);
+  } finally {
+    overlay.clear();
+  }
+});
+
+it("follows a package's # imports through every condition", () => {
+  overlay.set(
+    NodePath.join(root, "package.json"),
+    JSON.stringify({
+      ...readJson(NodePath.join(root, "package.json")),
+      imports: { "#plugins/*": { types: "./types.d.ts", require: "./plugins/*.cjs" } },
+    }),
+  );
+  overlay.set(NodePath.join(root, "postcss.config.cjs"), 'require("#plugins/tailwind");');
+  overlay.set(NodePath.join(root, "plugins/tailwind.cjs"), "");
+  try {
+    expect(checkedFiles().has("plugins/tailwind.cjs")).toBe(true);
   } finally {
     overlay.clear();
   }

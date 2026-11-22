@@ -824,19 +824,7 @@ async fn a_launch_replay_starts_a_run_whose_start_was_lost() {
     let db = TempDb::new("launch-lost-start");
     let (engine, provider) = open(&db);
     dispatch(&engine, create("t1", "c1")).await;
-    let mut command = message("t1", "launch-1:initial-message", "hi");
-    command["messageId"] = json!("m:launch-1");
-    command["modelSelection"] = json!({"instanceId": "claudeAgent", "model": "claude-haiku-4-5"});
-    engine
-        .inner()
-        .db(move |store| {
-            let mut tx = store.tx()?;
-            let handler = crate::commands::handler("message.dispatch").unwrap();
-            handler(&mut tx, command).map_err(|_| "rejected".to_owned())?;
-            tx.commit(Some(("launch-1:initial-message", "message.dispatch")))
-        })
-        .await
-        .unwrap();
+    commit_without_start(&engine, "launch-1").await;
     assert_eq!(
         projection(&engine, "t1").await["runs"][0]["status"],
         "starting"
@@ -852,6 +840,106 @@ async fn a_launch_replay_starts_a_run_whose_start_was_lost() {
     assert_eq!(
         provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
         1
+    );
+}
+
+/// Commits launch `command`'s first message without running its effects: its start is lost.
+async fn commit_without_start(engine: &SqliteEngine, command: &str) {
+    let id = format!("{command}:initial-message");
+    let mut message = message("t1", &id, "hi");
+    message["messageId"] = json!(format!("m:{command}"));
+    message["modelSelection"] = json!({"instanceId": "claudeAgent", "model": "claude-haiku-4-5"});
+    engine
+        .inner()
+        .db(move |store| {
+            let mut tx = store.tx()?;
+            let handler = crate::commands::handler("message.dispatch").unwrap();
+            handler(&mut tx, message).map_err(|_| "rejected".to_owned())?;
+            tx.commit(Some((&id, "message.dispatch")))
+        })
+        .await
+        .unwrap();
+}
+
+/// Closes the thread's provider session and waits until it is gone.
+async fn close_session(engine: &SqliteEngine, thread: &str) {
+    engine
+        .inner()
+        .spawn_effect(crate::commands::Effect::CloseSession {
+            thread_id: thread.to_owned(),
+        });
+    for _ in 0..100 {
+        if engine.inner().live_thread(thread).is_none()
+            && !crate::lock(&engine.inner().effect_lanes).contains_key(thread)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the session did not close");
+}
+
+/// The replay of launch A restarts only A's own run: launch B's run, whose start was lost too,
+/// stays for B's own replay.
+#[tokio::test(flavor = "current_thread")]
+async fn a_launch_replay_never_starts_another_launchs_run() {
+    let db = TempDb::new("launch-replay-other-run");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    engine
+        .launch_thread(reuse_launch("launch-a"))
+        .await
+        .unwrap();
+    let first = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(first["runs"][0]["status"], "completed");
+    close_session(&engine, "t1").await;
+    commit_without_start(&engine, "launch-b").await;
+
+    let replay = engine
+        .launch_thread(reuse_launch("launch-a"))
+        .await
+        .unwrap();
+    assert_eq!(replay["resumed"], true);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        projection(&engine, "t1").await["runs"][1]["status"],
+        "starting"
+    );
+    assert_eq!(
+        provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+/// An inert rehearsal copy (`recover_runs` off) restarts no lost start on a replay either.
+#[tokio::test(flavor = "current_thread")]
+async fn an_inert_copy_restarts_no_lost_start_on_replay() {
+    let db = TempDb::new("launch-replay-inert");
+    let provider = Arc::new(FakeProvider::new("claudeAgent"));
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![provider.clone()];
+    config.recover_runs = false;
+    let engine = SqliteEngine::open(config).unwrap();
+    dispatch(&engine, create("t1", "c1")).await;
+    commit_without_start(&engine, "launch-1").await;
+
+    let replay = engine
+        .launch_thread(reuse_launch("launch-1"))
+        .await
+        .unwrap();
+    assert_eq!(replay["resumed"], true);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        projection(&engine, "t1").await["runs"][0]["status"],
+        "starting"
+    );
+    assert_eq!(
+        provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+        0
     );
 }
 

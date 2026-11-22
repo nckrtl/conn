@@ -198,6 +198,44 @@ describe("sendOrbitFirstMessage", () => {
     expect(launches).toHaveLength(6);
   });
 
+  it("fails at the start's deadline while every send still waits in the thread's queue", async () => {
+    // A held command ahead of the first message never lets the queue reach it.
+    let now = 0;
+    const { launches, ports: base } = ports([]);
+    const run: OrbitFirstMessagePorts = {
+      ...base,
+      clock: () => now,
+      sleep: async (ms) => {
+        now += ms;
+      },
+      startTurn: async (environmentId, input, deadline) => {
+        await base.startTurn(environmentId, input, deadline);
+        return new Promise(() => {});
+      },
+      connection: () => ({ connected: true, generation: 1 }),
+      waitForConnection: async () => true,
+    };
+
+    await expect(sendOrbitFirstMessage(start, run)).rejects.toThrow(
+      "did not confirm the first message in time",
+    );
+    expect(now).toBe(FIRST_MESSAGE_PHASE_MS);
+    expect(launches).toHaveLength(6);
+  });
+
+  it("keeps the may-still-have-arrived wording when a later send is refused", async () => {
+    const { run } = reloading({
+      connection: { connected: true, generation: 1 },
+      send: (attempt) =>
+        attempt === 1
+          ? { ok: false, error: new Error("timed out"), unanswered: true }
+          : { ok: false, error: new Error("Thread thread-1 already exists") },
+    });
+
+    const failed = sendOrbitFirstMessage(start, run);
+    await expect(failed).rejects.toThrow("did not confirm the first message in time");
+  });
+
   it("gives the send only what the clone's readiness left of the start's time", async () => {
     let now = 0;
     const deadlines: number[] = [];

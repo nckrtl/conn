@@ -185,6 +185,8 @@ pub(crate) struct Inner {
     /// Runs inside a command's transaction, with its id: a test pauses a commit there.
     #[cfg(test)]
     pub(crate) in_commit: Mutex<Option<InCommitHook>>,
+    /// [`EngineConfig::recover_runs`]: off, nothing restarts a run this process did not start.
+    recover_runs: bool,
 }
 
 /// A delegated child's checkout, made before its command commits.
@@ -330,6 +332,7 @@ impl SqliteEngine {
                 effect_seq: std::sync::atomic::AtomicU64::new(0),
                 #[cfg(test)]
                 in_commit: Mutex::new(None),
+                recover_runs: config.recover_runs,
             }),
         };
         // Continuations and the reaper start on the caller's runtime; `open` never blocks.
@@ -949,10 +952,18 @@ impl Inner {
     /// A replayed launch whose run is still `starting`, with no start queued or running and no
     /// provider session, lost the start its commit made: it starts the run again, as T3's outbox
     /// runs a committed start that has not run yet.
-    fn restart_lost_start(self: &Arc<Self>, thread_id: &str, projection: &Value) {
+    /// The run is the one the launch's own first message made, as T3 reads it from the accepted
+    /// command; an inert copy (`recover_runs` off) restarts nothing, as at startup.
+    fn restart_lost_start(self: &Arc<Self>, thread_id: &str, message_id: &str, projection: &Value) {
+        if !self.recover_runs {
+            return;
+        }
         let Some(run_id) = projection["runs"]
             .as_array()
-            .and_then(|runs| runs.iter().rev().find(|run| run["status"] == "starting"))
+            .and_then(|runs| {
+                runs.iter()
+                    .find(|run| run["userMessageId"] == message_id && run["status"] == "starting")
+            })
             .and_then(|run| run["id"].as_str())
         else {
             return;
@@ -1188,13 +1199,18 @@ impl Inner {
             resumed = replayed;
         }
         let mut sequence = None;
+        let mut message_id = None;
         if let Some(message) = input.get("initialMessage").filter(|m| m.is_object()) {
+            let id = message["messageId"]
+                .as_str()
+                .map_or_else(|| format!("message:{command_id}"), str::to_owned);
+            message_id = Some(id.clone());
             let message_command = format!("{command_id}:initial-message");
             let mut command = json!({
                 "type": "message.dispatch",
                 "commandId": message_command,
                 "threadId": thread_id,
-                "messageId": message["messageId"].as_str().map_or_else(|| format!("message:{command_id}"), str::to_owned),
+                "messageId": id,
                 "text": message["text"],
                 "attachments": message["attachments"],
                 "modelSelection": input["modelSelection"],
@@ -1221,8 +1237,8 @@ impl Inner {
             .await
             .map_err(|e| (e, true))?
             .ok_or_else(|| (format!("Thread {thread_id} does not exist."), false))?;
-        if resumed && sequence.is_some() {
-            self.restart_lost_start(&thread_id, &projection);
+        if let (true, Some(message_id)) = (resumed, &message_id) {
+            self.restart_lost_start(&thread_id, message_id, &projection);
         }
         let mut result = json!({
             "threadId": thread_id,

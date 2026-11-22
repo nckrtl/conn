@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - The first-message send runs in the app, outside an Effect runtime.
 import {
   CommandId,
   MessageId,
@@ -95,6 +96,8 @@ export interface OrbitFirstMessagePorts {
   ) => Promise<boolean>;
   /** Epoch milliseconds; tests replace it. */
   readonly clock?: () => number;
+  /** Waits; tests replace it. */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 export type OrbitFirstMessageAttempt =
@@ -150,12 +153,31 @@ export async function sendOrbitFirstMessage(
   });
   // Each attempt's deadline is fixed when it is queued, so time spent behind another command of
   // the thread counts; at the phase deadline no attempt is left queued or running.
-  const attempt = () =>
-    ports.startTurn(
-      start.environmentId,
-      input,
-      Math.min(clock() + FIRST_MESSAGE_ATTEMPT_MS, deadline),
-    );
+  // The caller stops waiting at the deadline even while the send waits in the queue: the queued
+  // send then finds its deadline passed when the queue reaches it, and is dropped unsent.
+  let unanswered = false;
+  const attempt = async (): Promise<OrbitFirstMessageAttempt> => {
+    const by = Math.min(clock() + FIRST_MESSAGE_ATTEMPT_MS, deadline);
+    const timedOut: OrbitFirstMessageAttempt = {
+      ok: false,
+      error: new Error(FIRST_MESSAGE_TIMED_OUT),
+      unanswered: true,
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const wait = Math.max(by - clock(), 0);
+    const limit = ports.sleep
+      ? ports.sleep(wait).then(() => timedOut)
+      : new Promise<OrbitFirstMessageAttempt>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), wait);
+        });
+    try {
+      const result = await Promise.race([ports.startTurn(start.environmentId, input, by), limit]);
+      if (!result.ok && result.unanswered === true) unanswered = true;
+      return result;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   if (clock() >= deadline) throw new Error(FIRST_MESSAGE_TIMED_OUT);
   let result = await attempt();
   // Each attempt ends within its limit and is cancelled then, so none is left queued at the end.
@@ -173,8 +195,9 @@ export async function sendOrbitFirstMessage(
     result = await attempt();
   }
   if (!result.ok) {
-    // A send cut off at its deadline may still have reached the server: say only what is known.
-    if (result.unanswered === true) throw new Error(FIRST_MESSAGE_TIMED_OUT);
+    // A send cut off at its deadline, this one or an earlier one, may still have reached the
+    // server: say only what is known.
+    if (unanswered) throw new Error(FIRST_MESSAGE_TIMED_OUT);
     const error = result.error;
     throw new Error(
       `The clone did not take the first message: ${error instanceof Error ? error.message : String(error)}`,

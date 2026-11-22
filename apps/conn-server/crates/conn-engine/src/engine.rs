@@ -1491,8 +1491,18 @@ impl Engine for SqliteEngine {
     fn launch_thread(&self, input: Value) -> BoxFuture<'_, Result<Value, EngineError<Value>>> {
         Box::pin(async move {
             // `ThreadLaunchService` asks `assertProviderInstanceEnabled` before it makes the
-            // thread, so a refused launch leaves no thread behind.
-            if let Some(host) = &self.inner.host
+            // thread, so a refused launch leaves no thread behind. That check passes a command
+            // with a receipt: a replay starts no work, and settings never refuse an accepted retry.
+            let command_id = input["commandId"].as_str().unwrap_or_default().to_owned();
+            let accepted = !command_id.is_empty()
+                && self
+                    .inner
+                    .db(move |store| store.receipt(&command_id))
+                    .await
+                    .map_err(EngineError::Internal)?
+                    .is_some();
+            if !accepted
+                && let Some(host) = &self.inner.host
                 && let (Some(project), Some(instance)) = (
                     input["projectId"].as_str(),
                     input["modelSelection"]["instanceId"].as_str(),

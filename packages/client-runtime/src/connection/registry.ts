@@ -339,9 +339,9 @@ export const make = Effect.gen(function* () {
 
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
   /** Conn: until when (epoch ms) each server is expected to restart; see `settleProvisionalPairing`. */
-  const expectedRestarts = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, number>>(
-    new Map(),
-  );
+  const expectedRestarts = yield* SubscriptionRef.make<
+    ReadonlyMap<EnvironmentId, { readonly until: number; readonly pairingId: string }>
+  >(new Map());
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
   // Conn: seeded before any supervisor exists, so a held-off server never opens a socket at start.
@@ -443,7 +443,7 @@ export const make = Effect.gen(function* () {
               Effect.map((current) => Option.fromUndefinedOr(current.get(environmentId))),
             ),
             restartExpectedUntil: SubscriptionRef.changes(expectedRestarts).pipe(
-              Stream.map((current) => current.get(environmentId) ?? 0),
+              Stream.map((current) => current.get(environmentId)?.until ?? 0),
             ),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
@@ -724,18 +724,25 @@ export const make = Effect.gen(function* () {
    */
   const expectRestart = Effect.fn("EnvironmentRegistry.expectRestart")(function* (
     environmentId: EnvironmentId,
+    pairingId: string,
   ) {
     const now = yield* Clock.currentTimeMillis;
     yield* SubscriptionRef.update(expectedRestarts, (current) => {
-      const next = new Map([...current].filter(([, until]) => until > now));
-      return next.set(environmentId, now + EXPECTED_RESTART_WINDOW_MS);
+      const next = new Map([...current].filter(([, window]) => window.until > now));
+      return next.set(environmentId, { until: now + EXPECTED_RESTART_WINDOW_MS, pairingId });
     });
   });
 
-  /** A removed or replaced connection takes no restart window to its successor. */
-  const clearRestart = (environmentId: EnvironmentId) =>
+  /**
+   * A removed or replaced connection takes no restart window to its successor. A discard ends
+   * only the window of its own pairing, never one a later pairing of the server opened.
+   */
+  const clearRestart = (environmentId: EnvironmentId, pairingId?: string) =>
     SubscriptionRef.update(expectedRestarts, (current) => {
-      if (!current.has(environmentId)) return current;
+      const window = current.get(environmentId);
+      if (window === undefined || (pairingId !== undefined && window.pairingId !== pairingId)) {
+        return current;
+      }
       const next = new Map(current);
       next.delete(environmentId);
       return next;
@@ -780,8 +787,8 @@ export const make = Effect.gen(function* () {
               new Set(current).add(environmentId),
             );
             // Before the install: the session it keeps may already be failing on the reload.
-            if (keep && settled.promoted) yield* expectRestart(environmentId);
-            if (!keep) yield* clearRestart(environmentId);
+            if (keep && settled.promoted) yield* expectRestart(environmentId, installId);
+            if (!keep) yield* clearRestart(environmentId, installId);
             yield* installEntryLocked(
               entryWithRoutes(previous ?? { ...first, enabled: true }, routes),
               {
@@ -802,7 +809,7 @@ export const make = Effect.gen(function* () {
               next.delete(environmentId);
               return next;
             });
-            yield* clearRestart(environmentId);
+            yield* clearRestart(environmentId, installId);
             yield* closeServiceScope(environmentId);
             yield* SubscriptionRef.update(entries, (current) => {
               const next = new Map(current);

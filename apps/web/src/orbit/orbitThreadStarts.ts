@@ -259,11 +259,14 @@ const firstMessagePorts: OrbitFirstMessagePorts = {
     const state = cloneConnection(environmentId);
     return { connected: state?.phase === "connected", generation: state?.generation ?? 0 };
   },
-  waitForConnection: (environmentId, timeoutMs) =>
+  waitForConnection: (environmentId, minGeneration, timeoutMs) =>
     waitForAtomValue({
       registry: appAtomRegistry,
       atom: environmentCatalog.stateAtom(environmentId as EnvironmentId),
-      predicate: (result) => Option.getOrNull(AsyncResult.value(result))?.phase === "connected",
+      predicate: (result) => {
+        const state = Option.getOrNull(AsyncResult.value(result));
+        return state?.phase === "connected" && state.generation >= minGeneration;
+      },
       timeoutMs,
     }),
   startTurn: async (environmentId, input) => {

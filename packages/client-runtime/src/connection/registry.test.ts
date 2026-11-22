@@ -1872,6 +1872,65 @@ describe("EnvironmentRegistry", () => {
       }),
   );
 
+  it.effect(
+    "Conn: a stale discard of an older pairing keeps the current pairing's restart window",
+    () =>
+      Effect.gen(function* () {
+        let refusals = 0;
+        const harness = yield* makeHarness([], [], [], {
+          beforePrepareRoute: () =>
+            Effect.sync(() =>
+              refusals > 0 && refusals-- > 0
+                ? new ConnectionBlockedError({
+                    reason: "authentication",
+                    detail: "The environment credential is invalid.",
+                    hop: "server",
+                  })
+                : undefined,
+            ),
+        });
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.register(PROVISIONAL_REGISTRATION);
+          yield* awaitConnectionState(
+            registry,
+            PROVISIONAL_TARGET.environmentId,
+            (state) => state.phase === "connected",
+          );
+          yield* registry.settleProvisionalPairing(
+            PROVISIONAL_TARGET.environmentId,
+            "install-1",
+            true,
+          );
+          // An older reservation's discard lands after this pairing was promoted.
+          yield* registry.settleProvisionalPairing(
+            PROVISIONAL_TARGET.environmentId,
+            "install-0",
+            false,
+          );
+
+          const [live] = yield* Ref.get(harness.sessions);
+          refusals = 2;
+          yield* Deferred.fail(
+            live!.closed,
+            new ConnectionTransientError({ reason: "transport", detail: "Server reloading." }),
+          );
+          const reconnected = yield* Effect.forkChild(
+            awaitConnectionState(
+              registry,
+              PROVISIONAL_TARGET.environmentId,
+              (state) => state.phase === "connected" && state.generation === 2,
+            ),
+          );
+          for (let step = 0; step < 20; step += 1) {
+            yield* TestClock.adjust("250 millis");
+          }
+          yield* Fiber.join(reconnected);
+          expect(refusals).toBe(0);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
   it.effect("Conn: a server paired again after a removal does not inherit its restart window", () =>
     Effect.gen(function* () {
       let refuse = false;

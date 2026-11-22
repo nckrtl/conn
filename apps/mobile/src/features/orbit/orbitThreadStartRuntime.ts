@@ -148,10 +148,13 @@ const ports: MobileOrbitThreadStartPorts = {
       const state = cloneConnection(environmentId);
       return { connected: state?.phase === "connected", generation: state?.generation ?? 0 };
     },
-    waitForConnection: (environmentId, timeoutMs) =>
+    waitForConnection: (environmentId, minGeneration, timeoutMs) =>
       waitFor(
         environmentCatalog.stateAtom(EnvironmentId.make(environmentId)),
-        (result) => Option.getOrNull(AsyncResult.value(result))?.phase === "connected",
+        (result) => {
+          const state = Option.getOrNull(AsyncResult.value(result));
+          return state?.phase === "connected" && state.generation >= minGeneration;
+        },
         timeoutMs,
       ),
   },

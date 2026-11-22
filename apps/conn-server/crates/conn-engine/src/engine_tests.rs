@@ -688,6 +688,61 @@ async fn launch_thread_creates_and_starts_in_one_call() {
     );
 }
 
+/// A host whose settings can disable a provider instance between two calls.
+#[derive(Default)]
+struct ToggleHost {
+    disabled: std::sync::atomic::AtomicBool,
+}
+
+impl crate::EngineHost for ToggleHost {
+    fn provider_instance_enabled(&self, _project_id: Option<&str>, _instance_id: &str) -> bool {
+        !self.disabled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// `ThreadLaunchService.test.ts`, "replays an accepted launch after the project disables the
+/// instance": the receipt answers a retry before the enablement check; a new launch is refused.
+#[tokio::test(flavor = "current_thread")]
+async fn an_accepted_launch_replays_after_its_provider_instance_is_disabled() {
+    let db = TempDb::new("launch-retry-after-disable");
+    let host = Arc::new(ToggleHost::default());
+    let mut config = EngineConfig::new(db.path());
+    config.projects = vec![ProjectConfig {
+        title: "Project".into(),
+        workspace_root: ROOT.into(),
+    }];
+    config.providers = vec![Arc::new(FakeProvider::new("claudeAgent"))];
+    config.host = Some(host.clone());
+    let engine = SqliteEngine::open(config).unwrap();
+    let launch = |command: &str, thread: &str| {
+        json!({
+            "commandId": command, "threadId": thread, "projectId": project_id(), "title": "Launched",
+            "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-4-5"},
+            "runtimeMode": "full-access", "interactionMode": "default",
+            "workspaceStrategy": {"type": "root"},
+            "initialMessage": {"messageId": format!("m:{thread}"), "text": "Hello", "attachments": []},
+        })
+    };
+    let first = engine
+        .launch_thread(launch("retry-after-disable", "t1"))
+        .await
+        .unwrap();
+
+    host.disabled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let retry = engine
+        .launch_thread(launch("retry-after-disable", "t1"))
+        .await
+        .unwrap();
+    assert_eq!(retry["threadId"], first["threadId"]);
+    assert_eq!(retry["resumed"], true);
+    let fresh = engine
+        .launch_thread(launch("fresh-after-disable", "t2"))
+        .await;
+    assert!(matches!(fresh, Err(EngineError::Rejected(_))));
+}
+
 /// `ThreadLaunchService.launch` for a scheduled run: the first message carries the task id
 /// (the client's timeline marks it) and the launch's own actor.
 #[tokio::test(flavor = "current_thread")]

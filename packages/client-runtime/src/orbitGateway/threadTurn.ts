@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - The first-message send runs in the app, outside an Effect runtime.
 import {
   CommandId,
   MessageId,
@@ -74,8 +75,16 @@ export interface OrbitFirstMessagePorts {
   readonly onModelFallback?: (fallback: OrbitModelFallback) => void;
   /** The clone server's connection now: whether a session is up, and which one. */
   readonly connection?: (environmentId: string) => OrbitCloneConnection;
-  /** Resolves true once a session is up again, or false after `timeoutMs`. */
-  readonly waitForConnection?: (environmentId: string, timeoutMs: number) => Promise<boolean>;
+  /**
+   * Resolves true once a session of at least `minGeneration` is up, or false after `timeoutMs`.
+   */
+  readonly waitForConnection?: (
+    environmentId: string,
+    minGeneration: number,
+    timeoutMs: number,
+  ) => Promise<boolean>;
+  /** Waits; tests replace it. */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 export interface OrbitCloneConnection {
@@ -89,6 +98,19 @@ export interface OrbitCloneConnection {
  */
 const FIRST_MESSAGE_RECONNECTS = 3;
 const FIRST_MESSAGE_RECONNECT_WAIT_MS = 30_000;
+/** A send the server never answers is given up after this, and sent again (same command id). */
+export const FIRST_MESSAGE_ATTEMPT_MS = 45_000;
+
+/** The send never reached a server that answered: its session was gone or went down under it. */
+function isConnectionLoss(error: unknown): boolean {
+  const tag =
+    typeof error === "object" && error !== null && "_tag" in error ? error._tag : undefined;
+  return tag === "EnvironmentRpcUnavailableError" || tag === "RpcClientError";
+}
+
+type Attempt =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: unknown; readonly unanswered?: true };
 
 /** Sends the first message; resolves its clone project. Only a launch the server took counts. */
 export async function sendOrbitFirstMessage(
@@ -112,12 +134,30 @@ export async function sendOrbitFirstMessage(
     modelSelection,
     createdAt: ports.now(),
   });
-  let result = await ports.startTurn(start.environmentId, input);
+  const attempt = async (): Promise<Attempt> => {
+    const unanswered: Attempt = {
+      ok: false,
+      error: new Error("The clone's server did not answer the first message."),
+      unanswered: true,
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = ports.sleep
+      ? ports.sleep(FIRST_MESSAGE_ATTEMPT_MS).then(() => unanswered)
+      : new Promise<Attempt>((resolve) => {
+          timer = setTimeout(() => resolve(unanswered), FIRST_MESSAGE_ATTEMPT_MS);
+        });
+    try {
+      return await Promise.race([ports.startTurn(start.environmentId, input), limit]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  let result = await attempt();
   for (let reconnect = 0; !result.ok && reconnect < FIRST_MESSAGE_RECONNECTS; reconnect += 1) {
-    if (!(await reconnectedAfterFailure(start.environmentId, ports, before))) break;
+    if (!(await reconnectedAfterFailure(start.environmentId, ports, before, result))) break;
     if (ports.stopped()) throw new Error("The thread start was stopped.");
     before = ports.connection?.(start.environmentId);
-    result = await ports.startTurn(start.environmentId, input);
+    result = await attempt();
   }
   if (!result.ok) {
     const error = result.error;
@@ -129,19 +169,26 @@ export async function sendOrbitFirstMessage(
 }
 
 /**
- * Whether a failed send met a lost connection that is back now: the session was down at the send,
- * or it is down or replaced after it. A failure on a steady session is the server's answer.
+ * Whether a failed send may go again, once a session is up to take it. A send lost with its
+ * session waits for a newer one: the old one can still read as connected while it is torn down.
+ * An unanswered send waits for any session. A failure on a steady session is the server's answer.
  */
 async function reconnectedAfterFailure(
   environmentId: string,
   ports: OrbitFirstMessagePorts,
   before: OrbitCloneConnection | undefined,
+  failed: Extract<Attempt, { ok: false }>,
 ): Promise<boolean> {
   if (before === undefined || ports.connection === undefined || !ports.waitForConnection) {
     return false;
   }
   const after = ports.connection(environmentId);
-  const lost = !before.connected || !after.connected || after.generation !== before.generation;
-  if (!lost) return false;
-  return ports.waitForConnection(environmentId, FIRST_MESSAGE_RECONNECT_WAIT_MS);
+  const lost =
+    isConnectionLoss(failed.error) ||
+    !before.connected ||
+    !after.connected ||
+    after.generation !== before.generation;
+  if (!lost && failed.unanswered !== true) return false;
+  const minGeneration = lost ? before.generation + 1 : before.generation;
+  return ports.waitForConnection(environmentId, minGeneration, FIRST_MESSAGE_RECONNECT_WAIT_MS);
 }

@@ -1,7 +1,8 @@
 import { ProjectId, ProviderInstanceId } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  FIRST_MESSAGE_ATTEMPT_MS,
   orbitFirstTurnInput,
   sendOrbitFirstMessage,
   type OrbitFirstMessagePorts,
@@ -117,8 +118,8 @@ describe("sendOrbitFirstMessage", () => {
         return { ok: false, error: new Error("Environment env-41 is not connected.") };
       },
       connection: () => connection,
-      waitForConnection: async (_environmentId, timeoutMs) => {
-        waits.push(timeoutMs);
+      waitForConnection: async (_environmentId, minGeneration, timeoutMs) => {
+        waits.push(minGeneration, timeoutMs);
         connection = { connected: true, generation: 2 };
         return true;
       },
@@ -126,7 +127,63 @@ describe("sendOrbitFirstMessage", () => {
 
     await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
     expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
-    expect(waits).toEqual([30_000]);
+    expect(waits).toEqual([2, 30_000]);
+  });
+
+  it("resends a launch lost while its session is torn down, though it still reads connected", async () => {
+    // The supervisor drops the RPC session before it publishes the disconnect: the send fails as
+    // not connected while the state still shows the old session.
+    const { launches, ports: base } = ports([]);
+    const waited: number[] = [];
+    const run: OrbitFirstMessagePorts = {
+      ...base,
+      startTurn: async (environmentId, input) => {
+        await base.startTurn(environmentId, input);
+        return launches.length > 1
+          ? { ok: true }
+          : {
+              ok: false,
+              error: { _tag: "EnvironmentRpcUnavailableError", message: "Clone is not connected." },
+            };
+      },
+      connection: () => ({ connected: true, generation: 1 }),
+      waitForConnection: async (_environmentId, minGeneration) => {
+        waited.push(minGeneration);
+        return true;
+      },
+    };
+
+    await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
+    expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
+    // Only a session newer than the one that lost the send takes the resend.
+    expect(waited).toEqual([2]);
+  });
+
+  it("gives up on a send the server never answers and sends it again", async () => {
+    const { launches, ports: base } = ports([]);
+    const sleeps: Array<{ ms: number; end: () => void }> = [];
+    const waited: number[] = [];
+    const run: OrbitFirstMessagePorts = {
+      ...base,
+      startTurn: async (environmentId, input) => {
+        await base.startTurn(environmentId, input);
+        return launches.length > 1 ? { ok: true } : new Promise(() => {});
+      },
+      sleep: (ms) => new Promise((end) => sleeps.push({ ms, end })),
+      connection: () => ({ connected: true, generation: 1 }),
+      waitForConnection: async (_environmentId, minGeneration) => {
+        waited.push(minGeneration);
+        return true;
+      },
+    };
+
+    const sent = sendOrbitFirstMessage(start, run);
+    await vi.waitFor(() => expect(sleeps).toHaveLength(1));
+    expect(sleeps[0]!.ms).toBe(FIRST_MESSAGE_ATTEMPT_MS);
+    sleeps[0]!.end();
+    await expect(sent).resolves.toBe(projectId);
+    expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
+    expect(waited).toEqual([1]);
   });
 
   it("never counts a refused launch as sent, and does not resend it on a steady session", async () => {

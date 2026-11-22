@@ -174,6 +174,8 @@ pub(crate) enum ComposerEvent {
     /// Toggle between Local (`false`) and Worktree (`true`) when composing a new thread draft.
     WorkspaceModeSelected(bool),
     SlashCommand(String),
+    /// `server.getConfig` loaded; carries its `scratchWorkspaceRoot`.
+    ScratchWorkspaceRoot(Option<String>),
 }
 
 /// Stateful GPUI entity for the Conn composer, model picker, `/` command menu, and `@` mentions.
@@ -728,6 +730,9 @@ impl Composer {
                 composer.catalog_loading = false;
                 match res {
                     Ok(config) => {
+                        cx.emit(ComposerEvent::ScratchWorkspaceRoot(
+                            config.scratch_workspace_root.clone(),
+                        ));
                         composer.catalog = ModelCatalog::from_server_config(&config);
                         composer.catalog_error = None;
                         if (composer.selected_instance_id.is_none()

@@ -63,6 +63,7 @@ vi.mock("~/components/preview/previewBridge", () => ({
     registerWebview: mocks.registerWebview,
     connectTabHost: mocks.connect,
     disconnectTabHost: mocks.disconnect,
+    onStateChange: () => () => {},
     executeTabRequest: async (
       _tab: string,
       connectionId: string,

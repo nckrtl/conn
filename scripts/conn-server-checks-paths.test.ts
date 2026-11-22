@@ -72,7 +72,11 @@ function filesUnder(dir: string): Array<string> {
   return allFiles().filter((file) => file.startsWith(prefix) && isFile(file));
 }
 
-type Package = { dir: string; exports: Record<string, unknown>; scripts: Record<string, string> };
+type Package = {
+  dir: string;
+  exports: Record<string, unknown> | string;
+  scripts: Record<string, string>;
+};
 
 // Every package pnpm-workspace.yaml lists, as `vp i` installs them.
 const workspace = new Map<string, Package>();
@@ -98,30 +102,62 @@ function exportTarget(entry: unknown): string | null {
   return null;
 }
 
+const EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"];
+
+/** A package folder's entry, from `exports["."]`, then `main`, then `index.*`. */
+function packageEntry(dir: string): string | undefined {
+  const manifest = NodePath.join(dir, "package.json");
+  if (isFile(manifest)) {
+    const json = readJson(manifest);
+    const exported = exportTarget(
+      typeof json.exports === "string" ? json.exports : json.exports?.["."],
+    );
+    for (const entry of [exported, json.main]) {
+      const file = typeof entry === "string" && resolvePath(NodePath.join(dir, entry));
+      if (file) return file;
+    }
+  }
+  return EXTENSIONS.map((extension) => NodePath.join(dir, `index${extension}`)).find(isFile);
+}
+
+/** Node and TypeScript resolution of a path: exact, `.js` → `.ts`, extensions, then folder. */
+function resolvePath(base: string): string | undefined {
+  if (isFile(base)) return base;
+  const source = base.replace(/\.(m|c)?js(x?)$/, (_, kind = "", x) => `.${kind}ts${x}`);
+  if (source !== base && isFile(source)) return source;
+  const withExtension = EXTENSIONS.map((extension) => `${base}${extension}`).find(isFile);
+  if (withExtension) return withExtension;
+  return isDir(base) ||
+    [...overlay.keys()].some((file) => file.startsWith(`${base}${NodePath.sep}`))
+    ? packageEntry(base)
+    : undefined;
+}
+
 /** The monorepo files a specifier loads; [] for a package from the registry. */
 function resolveSpecifier(from: string, specifier: string): Array<string> {
   if (specifier.startsWith(".")) {
-    const base = NodePath.resolve(NodePath.dirname(from), specifier);
-    // TypeScript resolves "./x.js" to x.ts.
-    const sourceBase = base.replace(/\.(m?)js(x?)$/, ".$1ts$2");
-    const file = [
-      base,
-      sourceBase,
-      `${base}.ts`,
-      `${base}.tsx`,
-      NodePath.join(base, "index.ts"),
-    ].find(isFile);
+    const file = resolvePath(NodePath.resolve(NodePath.dirname(from), specifier));
     // No file: a specifier inside a string or a fixture, so there is nothing to read.
-    return file ? [file] : [];
+    if (!file) return [];
+    const manifest = NodePath.join(NodePath.dirname(file), "package.json");
+    return isFile(manifest) && file !== manifest ? [file, manifest] : [file];
   }
   const parts = specifier.split("/");
   const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
   const pkg = workspace.get(name);
   if (!pkg) return [];
-  const target = exportTarget(pkg.exports[`.${specifier.slice(name.length)}`]);
-  // A subpath the manifest does not export: count the whole package.
-  if (!target) return filesUnder(pkg.dir);
-  return [NodePath.join(pkg.dir, target), NodePath.join(pkg.dir, "package.json")];
+  const subpath = `.${specifier.slice(name.length)}`;
+  const { exports } = pkg;
+  const exported = typeof exports === "string" ? { ".": exports } : exports;
+  const target = exportTarget(exported[subpath]);
+  const file = target
+    ? resolvePath(NodePath.join(pkg.dir, target))
+    : subpath === "." && Object.keys(exported).length === 0
+      ? packageEntry(pkg.dir)
+      : undefined;
+  // A subpath this test cannot resolve: count the whole package.
+  if (!file) return filesUnder(pkg.dir);
+  return [file, NodePath.join(pkg.dir, "package.json")];
 }
 
 /**
@@ -252,6 +288,27 @@ it("follows imports of config found in a folder above the checked files", () => 
     expect(reached.has("postcss-plugins.cjs")).toBe(true);
     // So the first test would fail until the helper is selected.
     expect(matches("postcss-plugins.cjs")).toBe(false);
+  } finally {
+    overlay.clear();
+  }
+});
+
+it.each([
+  ["an extensionless require of a .js file", "./postcss-plugins", "postcss-plugins.js"],
+  ["a .js specifier of a .ts file", "./postcss-plugins.js", "postcss-plugins.ts"],
+  ["a folder's index", "./postcss-plugins", "postcss-plugins/index.mjs"],
+  ["a folder's package.json main", "./postcss-plugins", "postcss-plugins/lib/main.cjs"],
+])("follows %s from ancestor config", (_, specifier, helper) => {
+  overlay.set(
+    NodePath.join(root, "postcss.config.cjs"),
+    `module.exports = require("${specifier}");`,
+  );
+  overlay.set(NodePath.join(root, helper), "module.exports = {};");
+  if (helper.endsWith("main.cjs")) {
+    overlay.set(NodePath.join(root, "postcss-plugins/package.json"), '{ "main": "lib/main.cjs" }');
+  }
+  try {
+    expect(checkedFiles().has(helper)).toBe(true);
   } finally {
     overlay.clear();
   }

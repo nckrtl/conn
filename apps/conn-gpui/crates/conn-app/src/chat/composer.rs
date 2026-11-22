@@ -1320,7 +1320,7 @@ impl Composer {
     }
 
     /// Plan / Build toggle (and `Shift+Tab`).
-    pub(super) fn toggle_interaction_mode(&mut self, cx: &mut Context<'_, Self>) {
+    pub(crate) fn toggle_interaction_mode(&mut self, cx: &mut Context<'_, Self>) {
         let next = if self.interaction_mode == "plan" {
             "default"
         } else {
@@ -2149,8 +2149,8 @@ impl Render for Composer {
                 cx,
             )
         });
-        let mode_toggle =
-            render_interaction_mode_toggle(self.interaction_mode == "plan", &tokens, cx);
+        let mode_toggle = (self.interaction_mode == "plan")
+            .then(|| render_interaction_mode_toggle(true, &tokens, cx));
 
         // Context window meter (only when the thread reports usage).
         let supports_compact = self
@@ -2469,6 +2469,10 @@ impl Render for Composer {
                         .child(
                             div()
                                 .id(SharedString::from(format!("composer-att-rm-{local_id}")))
+                                .a11y_button(
+                                    SharedString::from(format!("composer.att.rm.{local_id}")),
+                                    "Remove attachment",
+                                )
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -2523,7 +2527,7 @@ impl Render for Composer {
                             .min_w_0()
                             .child(model_trigger)
                             .when_some(permissions_chip, |el, chip| el.child(chip))
-                            .child(mode_toggle)
+                            .when_some(mode_toggle, |el, toggle| el.child(toggle))
                             .when_some(context_meter, |el, meter| el.child(meter))
                             .when_some(dictation_badge, |el, badge| el.child(badge))
                             .child(mic_btn)
@@ -2649,7 +2653,11 @@ impl Render for Composer {
                 |el, surface| el.child(surface),
             )
             .child(card)
-            .child(self.render_context_strip(&tokens, cx));
+            // Conn `BranchToolbar.logic.ts:shouldShowComposerContextStrip`: shown on drafts by
+            // default; active threads display workspace/branch in the top-right Thread Details card.
+            .when(self.is_draft, |el| {
+                el.child(self.render_context_strip(&tokens, cx))
+            });
 
         if let Some(trigger) = self.active_trigger.clone() {
             let menu = render_command_menu(

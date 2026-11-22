@@ -646,15 +646,33 @@ fn composer_popups_model_picker_and_plan_mode_render_cleanly(cx: &mut TestAppCon
         window.pointer_down(picker_pt, MouseButton::Left, cx);
         window.pointer_up(picker_pt, MouseButton::Left, cx);
         window.render_frame(cx);
-
+    });
+    cx.run_until_parked();
+    let _ = cx.update_window(window, |_, window, cx| {
         window.press("escape", cx);
         window.render_frame(cx);
-
+    });
+    cx.run_until_parked();
+    let _ = cx.update_window(window, |_, window, cx| {
+        // Default mode hides the Build/Plan chip in the footer (Conn `ComposerControlsBar`);
+        // entering Plan mode surfaces the active Plan badge, and clicking it exits back to default.
+        let chat = app.read(cx).chat_for_test();
+        let composer = chat.read(cx).composer_for_test();
+        composer.update(cx, |c, cx| c.toggle_interaction_mode(cx));
+        window.render_frame(cx);
         let plan_pt = center_by_label_contains(window, cx, "plan mode");
         window.pointer_move(plan_pt, None, cx);
         window.pointer_down(plan_pt, MouseButton::Left, cx);
         window.pointer_up(plan_pt, MouseButton::Left, cx);
         window.render_frame(cx);
+        assert!(
+            !has_label(
+                window,
+                cx,
+                "Plan mode. Click to return to normal build mode"
+            ),
+            "clicking active Plan badge must return to default mode and hide the chip"
+        );
     });
 }
 

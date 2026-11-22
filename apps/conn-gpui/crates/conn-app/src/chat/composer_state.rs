@@ -327,13 +327,204 @@ pub(crate) fn previous_worktree<'a>(
         })
 }
 
+/// `PROVIDER_SEND_TURN_MAX_INPUT_CHARS` (`packages/contracts/src/chatAttachment.ts`).
+pub(crate) const PROVIDER_SEND_TURN_MAX_INPUT_CHARS: usize = 120_000;
+const CLAUDE_ULTRATHINK_PREFIX: &str = "Ultrathink:\n";
+const PLAN_IMPLEMENTATION_PROMPT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
+/// `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT` (`composerContextReferences.ts`).
+const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT: &str = "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
+
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Inline alert while the prompt is over the provider limit
+/// (`getComposerPromptLengthValidationMessage`); `None` when it fits.
+#[must_use]
+pub(crate) fn prompt_length_message(prompt: &str) -> Option<String> {
+    let len = prompt.trim().chars().count();
+    let excess = len.checked_sub(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)?;
+    if excess == 0 {
+        return None;
+    }
+    let noun = if excess == 1 {
+        "character"
+    } else {
+        "characters"
+    };
+    Some(format!(
+        "Prompt is {} {noun} over the {}-character limit. Shorten or split it before sending.",
+        group_thousands(excess),
+        group_thousands(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+    ))
+}
+
+/// Default editor placeholder (`DEFAULT_COMPOSER_PLACEHOLDER`).
+pub(crate) const DEFAULT_COMPOSER_PLACEHOLDER: &str = "Ask anything. @ files, $ skills, / commands";
+
+/// Editor placeholder for the composer's state (`ChatComposer.tsx` `placeholder`). The approval
+/// and question placeholders wait until the composer answers those requests itself.
+#[must_use]
+pub(crate) fn composer_placeholder(provider_unavailable: bool) -> &'static str {
+    if provider_unavailable {
+        "Enable a provider in Settings to send a message"
+    } else {
+        DEFAULT_COMPOSER_PLACEHOLDER
+    }
+}
+
+/// Removes trailing `<review_comment>` blocks and legacy context blocks the composer cannot hold.
+fn strip_trailing_blocks(mut prompt: String) -> String {
+    loop {
+        let trimmed = prompt.trim_end();
+        let mut cut = None;
+        for tag in [
+            "review_comment",
+            "terminal_context",
+            "element_context",
+            "preview_annotation",
+        ] {
+            let close = format!("</{tag}>");
+            if trimmed.ends_with(&close)
+                && let Some(start) = trimmed.rfind(&format!("<{tag}"))
+            {
+                cut = Some(start);
+                break;
+            }
+        }
+        match cut {
+            Some(start) => prompt = prompt[..start].trim_end().to_owned(),
+            None => return prompt,
+        }
+    }
+}
+
+/// A sent message's text as the composer can hold it (`recallableComposerPrompt`).
+#[must_use]
+pub(crate) fn recallable_prompt(text: &str) -> String {
+    let mut prompt = text.trim();
+    if let Some(rest) = prompt.strip_prefix(CLAUDE_ULTRATHINK_PREFIX) {
+        prompt = rest;
+    }
+    let prompt = strip_trailing_blocks(prompt.to_owned());
+    let trimmed = prompt.trim();
+    if trimmed == ATTACHMENT_ONLY_BOOTSTRAP_PROMPT
+        || trimmed.starts_with(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+    {
+        return String::new();
+    }
+    trimmed.to_owned()
+}
+
+/// One recallable prompt the user typed in this thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptHistoryEntry {
+    pub(crate) id: String,
+    pub(crate) prompt: String,
+}
+
+/// Recallable prompts from `(message id, text, created_by_agent)` user messages, oldest first;
+/// agent messages are skipped and repeats collapse (`buildComposerPromptHistoryEntries`).
+#[must_use]
+pub(crate) fn prompt_history_entries<'a>(
+    messages: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+) -> Vec<PromptHistoryEntry> {
+    let mut entries: Vec<PromptHistoryEntry> = Vec::new();
+    for (id, text, by_agent) in messages {
+        if by_agent {
+            continue;
+        }
+        let prompt = recallable_prompt(text);
+        if prompt.is_empty() {
+            continue;
+        }
+        let entry = PromptHistoryEntry {
+            id: id.to_owned(),
+            prompt,
+        };
+        match entries.last_mut() {
+            Some(last) if last.prompt == entry.prompt => *last = entry,
+            _ => entries.push(entry),
+        }
+    }
+    entries
+}
+
+/// Where the user is while browsing history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptHistoryPosition {
+    pub(crate) entry_id: String,
+    pub(crate) recalled: String,
+}
+
+/// Result of one ↑/↓ step: the prompt to show and the new position (`None` = back to empty).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptHistoryStep {
+    pub(crate) position: Option<PromptHistoryPosition>,
+    pub(crate) prompt: String,
+}
+
+/// ↑ (`backward`) or ↓ through sent prompts (`stepComposerPromptHistory`). `None` leaves the key
+/// to the editor: ↑ on a prompt the user typed, or ↓ when not browsing.
+#[must_use]
+pub(crate) fn step_prompt_history(
+    backward: bool,
+    entries: &[PromptHistoryEntry],
+    position: Option<&PromptHistoryPosition>,
+    current_prompt: &str,
+) -> Option<PromptHistoryStep> {
+    let active = position
+        .filter(|p| p.recalled == current_prompt)
+        .and_then(|p| {
+            entries
+                .iter()
+                .position(|e| e.id == p.entry_id)
+                .or_else(|| entries.iter().rposition(|e| e.prompt == p.recalled))
+        });
+    let recall = |entry: &PromptHistoryEntry| PromptHistoryStep {
+        position: Some(PromptHistoryPosition {
+            entry_id: entry.id.clone(),
+            recalled: entry.prompt.clone(),
+        }),
+        prompt: entry.prompt.clone(),
+    };
+    if backward {
+        if active.is_none() && !current_prompt.is_empty() {
+            return None;
+        }
+        let idx = match active {
+            None => entries.len().checked_sub(1)?,
+            Some(i) => i.checked_sub(1)?,
+        };
+        return entries.get(idx).map(recall);
+    }
+    let i = active?;
+    Some(entries.get(i + 1).map_or(
+        PromptHistoryStep {
+            position: None,
+            prompt: String::new(),
+        },
+        recall,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BranchPickerRow, ComposerDraft, ComposerDraftStore, NEW_THREAD_DRAFT_KEY, PreviousWorktree,
-        ProjectPickerItem, ProjectPickerRow, RefEntry, ThreadWorkspace, branch_picker_rows,
-        branch_selection_target, branch_trigger_label, local_branch_name_from_remote_ref,
-        previous_worktree, project_picker_rows, ref_badge, sanitize_new_ref_name, thread_draft_key,
+        BranchPickerRow, ComposerDraft, ComposerDraftStore, NEW_THREAD_DRAFT_KEY,
+        PROVIDER_SEND_TURN_MAX_INPUT_CHARS, PreviousWorktree, ProjectPickerItem, ProjectPickerRow,
+        PromptHistoryEntry, RefEntry, ThreadWorkspace, branch_picker_rows, branch_selection_target,
+        branch_trigger_label, composer_placeholder, local_branch_name_from_remote_ref,
+        previous_worktree, project_picker_rows, prompt_history_entries, prompt_length_message,
+        recallable_prompt, ref_badge, sanitize_new_ref_name, step_prompt_history, thread_draft_key,
     };
 
     fn item<'a>(
@@ -567,6 +758,95 @@ mod tests {
         assert_eq!(
             previous_worktree(threads, Some("/wt/c")).map(|p| p.worktree_path),
             Some("/wt/a".to_owned())
+        );
+    }
+
+    #[test]
+    fn prompt_length_message_counts_excess_characters() {
+        let at_limit = "a".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+        assert_eq!(prompt_length_message(&format!("  {at_limit}\n")), None);
+        assert_eq!(
+            prompt_length_message(&format!("{at_limit}b")).as_deref(),
+            Some(
+                "Prompt is 1 character over the 120,000-character limit. Shorten or split it before sending."
+            )
+        );
+        assert_eq!(
+            prompt_length_message(&"é".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1_234))
+                .as_deref(),
+            Some(
+                "Prompt is 1,234 characters over the 120,000-character limit. Shorten or split it before sending."
+            )
+        );
+        assert_eq!(
+            composer_placeholder(true),
+            "Enable a provider in Settings to send a message"
+        );
+    }
+
+    #[test]
+    fn recallable_prompt_strips_prefixes_and_context_blocks() {
+        assert_eq!(recallable_prompt("Ultrathink:\nfix it"), "fix it");
+        assert_eq!(
+            recallable_prompt(
+                "look here\n\n<review_comment path=\"a\">x</review_comment>\n<terminal_context>\n- t lines 1-2:\nls\n</terminal_context>"
+            ),
+            "look here"
+        );
+        assert_eq!(recallable_prompt("PLEASE IMPLEMENT THIS PLAN:\n# Plan"), "");
+        assert_eq!(
+            recallable_prompt(
+                "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]"
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn prompt_history_walks_typed_prompts_and_stops_on_user_text() {
+        let entries = prompt_history_entries([
+            ("m1", "first", false),
+            ("m2", "agent note", true),
+            ("m3", "second", false),
+            ("m4", "second", false),
+            ("m5", "PLEASE IMPLEMENT THIS PLAN:\nx", false),
+        ]);
+        assert_eq!(
+            entries,
+            [
+                PromptHistoryEntry {
+                    id: "m1".into(),
+                    prompt: "first".into()
+                },
+                PromptHistoryEntry {
+                    id: "m4".into(),
+                    prompt: "second".into()
+                },
+            ]
+        );
+        // ↓ does nothing until browsing; ↑ on typed text leaves the key to the editor.
+        assert_eq!(step_prompt_history(false, &entries, None, ""), None);
+        assert_eq!(step_prompt_history(true, &entries, None, "draft"), None);
+
+        let up = step_prompt_history(true, &entries, None, "").expect("latest");
+        assert_eq!(up.prompt, "second");
+        let up2 =
+            step_prompt_history(true, &entries, up.position.as_ref(), "second").expect("older");
+        assert_eq!(up2.prompt, "first");
+        assert_eq!(
+            step_prompt_history(true, &entries, up2.position.as_ref(), "first"),
+            None
+        );
+        let down =
+            step_prompt_history(false, &entries, up2.position.as_ref(), "first").expect("newer");
+        assert_eq!(down.prompt, "second");
+        let back =
+            step_prompt_history(false, &entries, down.position.as_ref(), "second").expect("empty");
+        assert_eq!((back.position, back.prompt.as_str()), (None, ""));
+        // Editing a recalled prompt ends browsing.
+        assert_eq!(
+            step_prompt_history(true, &entries, down.position.as_ref(), "second!"),
+            None
         );
     }
 }

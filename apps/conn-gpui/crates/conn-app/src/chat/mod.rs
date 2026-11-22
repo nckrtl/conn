@@ -592,6 +592,18 @@ impl ChatView {
             return;
         }
         self.synced_revision = Some(thread.revision);
+        let history =
+            composer_state::prompt_history_entries(thread.entries.iter().filter_map(|e| match e {
+                TimelineEntry::User {
+                    id,
+                    text,
+                    created_by_agent,
+                    ..
+                } => Some((id.as_str(), text.as_str(), *created_by_agent)),
+                _ => None,
+            }));
+        self.composer
+            .update(cx, |c, _| c.set_prompt_history(history));
 
         let was_following_tail = self.list_state.is_following_tail();
         let prev_scroll = self.list_state.logical_scroll_top();

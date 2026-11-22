@@ -15,6 +15,7 @@
 //! - [`Connection::call`] / [`Connection::call_json`]: unary RPCs.
 
 mod auth;
+pub mod commands;
 pub mod device_hub;
 mod driver;
 pub mod history;

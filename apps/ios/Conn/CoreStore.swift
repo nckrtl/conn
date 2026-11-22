@@ -68,6 +68,125 @@ final class CoreStore {
         }
     }
 
+    func stopThread(threadId: String) async {
+        guard let core else { return }
+        do {
+            try await core.stopThread(threadId: threadId)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func respondApproval(threadId: String, requestId: String, decision: FfiApprovalDecision) async {
+        guard let core else { return }
+        do {
+            try await core.respondApproval(threadId: threadId, requestId: requestId, decision: decision)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func respondUserInput(threadId: String, requestId: String, answers: [FfiUserInputSubmission]) async {
+        guard let core else { return }
+        do {
+            try await core.respondUserInput(threadId: threadId, requestId: requestId, answers: answers)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func dismissUserInput(threadId: String, requestId: String) async {
+        guard let core else { return }
+        do {
+            try await core.dismissUserInput(threadId: threadId, requestId: requestId)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func answerSecretRequest(threadId: String, turnItemId: String, secret: String?) async {
+        guard let core else { return }
+        do {
+            try await core.answerSecretRequest(threadId: threadId, turnItemId: turnItemId, secret: secret)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func settleThread(threadId: String, settled: Bool) async {
+        guard let core else { return }
+        do {
+            try await core.settleThread(threadId: threadId, settled: settled)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func pinThread(threadId: String, pinned: Bool) async {
+        guard let core else { return }
+        do {
+            try await core.pinThread(threadId: threadId, pinned: pinned)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func renameThread(threadId: String, title: String) async {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let core else { return }
+        do {
+            try await core.renameThread(threadId: threadId, title: trimmed)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func deleteThread(threadId: String) async {
+        guard let core else { return }
+        do {
+            try await core.deleteThread(threadId: threadId)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func markThreadUnread(threadId: String) async {
+        guard let core else { return }
+        do {
+            try await core.markThreadUnread(threadId: threadId)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func launchThread(projectId: String, text: String) async -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let core else { return nil }
+        isSending = true
+        lastError = nil
+        defer { isSending = false }
+        do {
+            return try await core.launchThread(projectId: projectId, text: trimmed)
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func launchGeneralThread(text: String) async -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let core else { return nil }
+        isSending = true
+        lastError = nil
+        defer { isSending = false }
+        do {
+            return try await core.launchGeneralThread(text: trimmed)
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
     func reconnect() {
         core?.reconnect()
     }

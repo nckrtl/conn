@@ -3,7 +3,14 @@ import SwiftUI
 
 struct InboxView: View {
     @Bindable var store: CoreStore
+    @Environment(\.connTheme) private var theme
+
+    @State private var navigationPath: [String] = []
+    @State private var searchText = ""
     @State private var settledExpanded = false
+    @State private var showingNewThread = false
+    @State private var renamingThread: FfiThreadSummary?
+    @State private var renameDraft = ""
 
     private struct ProjectGroup: Identifiable {
         let id: String
@@ -12,111 +19,29 @@ struct InboxView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: Kit.Space.xl) {
-                    if let error = store.lastError, !error.isEmpty {
-                        KitNotice(error, icon: .warning, tone: .error) {
-                            Button("Retry") {
-                                store.reconnect()
-                            }
-                            .buttonStyle(.kit)
-                        }
-                    }
-
-                    if let shell = store.shell, shell.synchronized {
-                        let activeGroups = groupedActiveThreads(in: shell)
-                        let settled = settledThreads(in: shell)
-
-                        if activeGroups.isEmpty && settled.isEmpty {
-                            emptyState
-                        } else {
-                            ForEach(activeGroups) { group in
-                                KitGroup(group.title) {
-                                    VStack(spacing: 0) {
-                                        ForEach(Array(group.threads.enumerated()), id: \.element.id) { index, thread in
-                                            if index > 0 {
-                                                Divider()
-                                                    .overlay(Color.kitSeparator)
-                                                    .padding(.leading, Kit.rowInset)
-                                            }
-                                            NavigationLink(value: thread.id) {
-                                                ThreadSummaryRow(thread: thread)
-                                            }
-                                            .buttonStyle(.plain)
-                                            .accessibilityIdentifier("inbox.thread.\(thread.id)")
-                                        }
-                                    }
-                                }
-                            }
-
-                            if !settled.isEmpty {
-                                KitGroup {
-                                    KitDisclosure(isExpanded: $settledExpanded) {
-                                        HStack(spacing: Kit.Space.m) {
-                                            Text("Settled")
-                                                .font(.kitLabel)
-                                                .foregroundStyle(.secondary)
-                                            Text("\(settled.count)")
-                                                .font(.kitDetail)
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                    } content: {
-                                        VStack(spacing: 0) {
-                                            ForEach(Array(settled.enumerated()), id: \.element.id) { index, thread in
-                                                if index > 0 {
-                                                    Divider()
-                                                        .overlay(Color.kitSeparator)
-                                                        .padding(.leading, Kit.rowInset)
-                                                }
-                                                NavigationLink(value: thread.id) {
-                                                    ThreadSummaryRow(thread: thread)
-                                                }
-                                                .buttonStyle(.plain)
-                                                .accessibilityIdentifier("inbox.settledThread.\(thread.id)")
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        loadingState
-                    }
+        NavigationStack(path: $navigationPath) {
+            Group {
+                if let shell = store.shell, shell.synchronized {
+                    inboxList(shell: shell)
+                } else {
+                    loadingState
                 }
-                .padding(.horizontal, Kit.contentInset)
-                .padding(.top, Kit.Space.l)
-                .padding(.bottom, Kit.Space.xxxl)
             }
-            .background(Color.kitContent.ignoresSafeArea())
-            .navigationTitle("Threads")
+            .background(theme.background.ignoresSafeArea())
+            .navigationTitle("Chats")
+            .searchable(text: $searchText, prompt: "Search threads")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    ConnectionStatusBadge(status: store.status)
+                    ConnectionStatusPill(status: store.status)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if let serverURL = store.serverURL {
-                            Text(serverURL)
-                        }
-                        Button {
-                            store.reconnect()
-                        } label: {
-                            Label("Reconnect", systemImage: KitIcon.sync.symbol)
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            store.disconnect()
-                        } label: {
-                            Label("Disconnect", systemImage: KitIcon.power.symbol)
-                        }
+                    Button {
+                        showingNewThread = true
                     } label: {
-                        KitIconImage(.more, size: 16)
-                            .foregroundStyle(.primary)
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
+                        Image(systemName: "square.and.pencil")
                     }
-                    .accessibilityLabel("Server menu")
+                    .accessibilityLabel("New Thread")
+                    .accessibilityIdentifier("inbox.newThreadButton")
                 }
             }
             .navigationDestination(for: String.self) { threadId in
@@ -124,10 +49,248 @@ struct InboxView: View {
                 ThreadView(
                     store: store,
                     threadId: threadId,
-                    title: summary?.title ?? "Thread",
-                    branch: summary?.branch
+                    initialTitle: summary?.title ?? "Thread",
+                    initialBranch: summary?.branch,
+                    onOpenThread: { childId in
+                        navigationPath.append(childId)
+                    }
                 )
             }
+            .sheet(isPresented: $showingNewThread) {
+                NewThreadView(store: store) { newThreadId in
+                    navigationPath.append(newThreadId)
+                }
+            }
+            .alert(
+                "Rename Thread",
+                isPresented: Binding(
+                    get: { renamingThread != nil },
+                    set: { if !$0 { renamingThread = nil } }
+                )
+            ) {
+                TextField("Title", text: $renameDraft)
+                Button("Cancel", role: .cancel) {
+                    renamingThread = nil
+                }
+                Button("Save") {
+                    if let target = renamingThread {
+                        let newTitle = renameDraft
+                        renamingThread = nil
+                        Task {
+                            await store.renameThread(threadId: target.id, title: newTitle)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func inboxList(shell: FfiShellSnapshot) -> some View {
+        let projectTitles = Dictionary(uniqueKeysWithValues: shell.projects.map { ($0.id, $0.title) })
+        let filtered = filteredThreads(in: shell, projectTitles: projectTitles)
+        let pinned = filtered.filter { !$0.settled && $0.pinned }
+            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+        let activeGroups = groupedActiveThreads(
+            filtered.filter { !$0.settled && !$0.pinned },
+            projectTitles: projectTitles
+        )
+        let settled = filtered.filter { $0.settled }
+            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+
+        if pinned.isEmpty && activeGroups.isEmpty && settled.isEmpty {
+            emptyState
+        } else {
+            List {
+                if let error = store.lastError, !error.isEmpty {
+                    Section {
+                        KitNotice(error, icon: .warning, tone: .error) {
+                            Button("Retry") {
+                                store.reconnect()
+                            }
+                            .buttonStyle(.kit)
+                        }
+                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                    }
+                }
+
+                if !pinned.isEmpty {
+                    Section("Pinned") {
+                        ForEach(pinned, id: \.id) { thread in
+                            threadRow(thread, settled: false)
+                        }
+                    }
+                }
+
+                ForEach(activeGroups) { group in
+                    Section(group.title) {
+                        ForEach(group.threads, id: \.id) { thread in
+                            threadRow(thread, settled: false)
+                        }
+                    }
+                }
+
+                if !settled.isEmpty {
+                    Section {
+                        Button {
+                            withAnimation(Kit.Motion.base) {
+                                settledExpanded.toggle()
+                            }
+                        } label: {
+                            HStack {
+                                Text("Settled")
+                                    .font(.kitLabel.weight(.medium))
+                                    .foregroundStyle(theme.mutedForeground)
+                                KitBadge(count: settled.count)
+                                Spacer()
+                                KitIconImage(.chevronRight, size: 11, weight: .semibold)
+                                    .foregroundStyle(theme.mutedForeground)
+                                    .rotationEffect(.degrees(settledExpanded ? 90 : 0))
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("inbox.settledHeader")
+
+                        if settledExpanded {
+                            ForEach(settled, id: \.id) { thread in
+                                threadRow(thread, settled: true)
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(theme.background)
+        }
+    }
+
+    private func threadRow(_ thread: FfiThreadSummary, settled: Bool) -> some View {
+        Button {
+            navigationPath.append(thread.id)
+        } label: {
+            KitListRow(
+                thread.title.isEmpty ? "Untitled thread" : thread.title,
+                indicator: indicator(for: thread.activity),
+                chip: thread.branch,
+                chipIcon: thread.branch != nil ? .branch : nil,
+                timestamp: parseISODate(from: thread.updatedAt),
+                showsChevron: true
+            ) {
+                HStack(spacing: Kit.Space.xs) {
+                    if thread.pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(theme.mutedForeground)
+                            .accessibilityLabel("Pinned")
+                    }
+                    if thread.unread {
+                        Circle()
+                            .fill(theme.primary)
+                            .frame(width: 8, height: 8)
+                            .accessibilityLabel("Unread")
+                    }
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .listRowInsets(EdgeInsets())
+        .listRowBackground(theme.background)
+        .accessibilityIdentifier(settled ? "inbox.settledThread.\(thread.id)" : "inbox.thread.\(thread.id)")
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button {
+                Task {
+                    await store.settleThread(threadId: thread.id, settled: !settled)
+                }
+            } label: {
+                Label(settled ? "Unsettle" : "Settle", systemImage: settled ? "arrow.uturn.backward" : "checkmark.circle")
+            }
+            .tint(settled ? .blue : .green)
+
+            Button(role: .destructive) {
+                Task {
+                    await store.deleteThread(threadId: thread.id)
+                }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            Button {
+                Task {
+                    await store.pinThread(threadId: thread.id, pinned: !thread.pinned)
+                }
+            } label: {
+                Label(thread.pinned ? "Unpin" : "Pin", systemImage: thread.pinned ? "pin.slash" : "pin")
+            }
+            .tint(.orange)
+
+            if !thread.unread {
+                Button {
+                    Task {
+                        await store.markThreadUnread(threadId: thread.id)
+                    }
+                } label: {
+                    Label("Unread", systemImage: "envelope.badge")
+                }
+                .tint(.indigo)
+            }
+        }
+        .contextMenu {
+            Button {
+                Task {
+                    await store.pinThread(threadId: thread.id, pinned: !thread.pinned)
+                }
+            } label: {
+                Label(thread.pinned ? "Unpin" : "Pin", systemImage: thread.pinned ? "pin.slash" : "pin")
+            }
+
+            Button {
+                Task {
+                    await store.settleThread(threadId: thread.id, settled: !settled)
+                }
+            } label: {
+                Label(settled ? "Unsettle" : "Settle", systemImage: settled ? "arrow.uturn.backward" : "checkmark.circle")
+            }
+
+            if !thread.unread {
+                Button {
+                    Task {
+                        await store.markThreadUnread(threadId: thread.id)
+                    }
+                } label: {
+                    Label("Mark Unread", systemImage: "envelope.badge")
+                }
+            }
+
+            Button {
+                renameDraft = thread.title
+                renamingThread = thread
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                Task {
+                    await store.deleteThread(threadId: thread.id)
+                }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    private func indicator(for activity: FfiThreadActivity) -> KitListRowIndicator {
+        switch activity {
+        case .idle: .idle
+        case .working: .status(.working)
+        case .needsAttention: .status(.warning)
+        case .failed: .status(.error)
         }
     }
 
@@ -136,30 +299,50 @@ struct InboxView: View {
             KitStatusIcon(.working, size: 22, label: "Syncing")
             Text("Syncing threads…")
                 .font(.kitLabel)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.mutedForeground)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 64)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var emptyState: some View {
         VStack(spacing: Kit.Space.s) {
-            Text("No threads yet")
+            Text(searchText.isEmpty ? "No threads yet" : "No matching threads")
                 .font(.kitLabel)
-                .foregroundStyle(.secondary)
-            Text("Start a thread on your conn-server and it will appear here live.")
-                .font(.kitDetail)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
+                .foregroundStyle(theme.mutedForeground)
+            Text(
+                searchText.isEmpty
+                    ? "Tap the compose button to start a new thread."
+                    : "Try a different search query."
+            )
+            .font(.kitDetail)
+            .foregroundStyle(theme.mutedForeground.opacity(0.8))
+            .multilineTextAlignment(.center)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 64)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 32)
     }
 
-    private func groupedActiveThreads(in shell: FfiShellSnapshot) -> [ProjectGroup] {
-        let projectTitles = Dictionary(uniqueKeysWithValues: shell.projects.map { ($0.id, $0.title) })
-        let active = shell.threads.filter { !$0.settled && !$0.isSubagent }
+    private func filteredThreads(
+        in shell: FfiShellSnapshot,
+        projectTitles: [String: String]
+    ) -> [FfiThreadSummary] {
+        let nonSubagents = shell.threads.filter { !$0.isSubagent }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return nonSubagents }
+        return nonSubagents.filter { thread in
+            if thread.title.lowercased().contains(query) { return true }
+            if let branch = thread.branch, branch.lowercased().contains(query) { return true }
+            if let project = projectTitles[thread.projectId], project.lowercased().contains(query) {
+                return true
+            }
+            return false
+        }
+    }
 
+    private func groupedActiveThreads(
+        _ active: [FfiThreadSummary],
+        projectTitles: [String: String]
+    ) -> [ProjectGroup] {
         var buckets: [String: [FfiThreadSummary]] = [:]
         var projectOrder: [String] = []
         for thread in active {
@@ -174,127 +357,21 @@ struct InboxView: View {
             let sorted = rows.sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
             return ProjectGroup(
                 id: projectId,
-                title: projectTitles[projectId] ?? "Other",
+                title: projectTitles[projectId] ?? "General",
                 threads: sorted
             )
         }
     }
-
-    private func settledThreads(in shell: FfiShellSnapshot) -> [FfiThreadSummary] {
-        shell.threads
-            .filter { $0.settled && !$0.isSubagent }
-            .sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
-    }
 }
 
-private struct ThreadSummaryRow: View {
-    let thread: FfiThreadSummary
-
-    var body: some View {
-        HStack(spacing: Kit.Space.l) {
-            activityBadge
-                .frame(width: 20, height: 20)
-
-            VStack(alignment: .leading, spacing: Kit.Space.xs) {
-                Text(thread.title.isEmpty ? "Untitled thread" : thread.title)
-                    .font(.kitBody)
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-
-                HStack(spacing: Kit.Space.m) {
-                    if let branch = thread.branch, !branch.isEmpty {
-                        Text(branch)
-                            .font(.kitDetail.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    if let timestamp = relativeTime(from: thread.updatedAt) {
-                        Text(timestamp)
-                            .font(.kitDetail)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                }
-            }
-
-            Spacer(minLength: Kit.Space.s)
-
-            KitIconImage(.chevronRight, size: 12)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, Kit.rowInset)
-        .padding(.vertical, Kit.Space.l)
-        .frame(minHeight: Kit.rowHeight)
-        .contentShape(Rectangle())
-    }
-
-    @ViewBuilder
-    private var activityBadge: some View {
-        switch thread.activity {
-        case .idle:
-            Circle()
-                .fill(Color.secondary.opacity(0.35))
-                .frame(width: 8, height: 8)
-                .accessibilityLabel("Idle")
-        case .working:
-            KitStatusIcon(.working, size: 16, label: "Working")
-        case .needsAttention:
-            KitStatusIcon(.warning, size: 16, label: "Needs attention")
-        case .failed:
-            KitStatusIcon(.error, size: 16, label: "Failed")
-        }
-    }
-}
-
-private struct ConnectionStatusBadge: View {
-    let status: FfiConnectionStatus?
-
-    var body: some View {
-        HStack(spacing: Kit.Space.s) {
-            switch status {
-            case .connected:
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 8, height: 8)
-                Text("Connected")
-                    .font(.kitDetail)
-                    .foregroundStyle(.secondary)
-            case .connecting, .none:
-                KitStatusIcon(.working, size: 14, label: "Connecting")
-                Text("Connecting")
-                    .font(.kitDetail)
-                    .foregroundStyle(.secondary)
-            case let .reconnecting(attempt):
-                KitStatusIcon(.working, size: 14, label: "Reconnecting")
-                Text("Reconnecting (\(attempt))")
-                    .font(.kitDetail)
-                    .foregroundStyle(.secondary)
-            case .failed:
-                KitStatusIcon(.error, size: 14, label: "Disconnected")
-                Text("Failed")
-                    .font(.kitDetail)
-                    .foregroundStyle(Color.kitErrorText)
-            }
-        }
-        .lineLimit(1)
-        .fixedSize()
-        .padding(.horizontal, Kit.Space.s)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private func relativeTime(from iso: String?) -> String? {
+private func parseISODate(from iso: String?) -> Date? {
     guard let iso, !iso.isEmpty else { return nil }
     let fractional = ISO8601DateFormatter()
     fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     if let date = fractional.date(from: iso) {
-        return Kit.ago(date)
+        return date
     }
     let plain = ISO8601DateFormatter()
     plain.formatOptions = [.withInternetDateTime]
-    if let date = plain.date(from: iso) {
-        return Kit.ago(date)
-    }
-    return nil
+    return plain.date(from: iso)
 }

@@ -5,9 +5,10 @@
 //! `closeDelay=0`, `timeout=400`: the card opens `150ms` after the pointer enters, closes at
 //! once on leave, and a row entered within `400ms` of a close opens at once.
 //!
-//! The card is a child of the hovered row, so `anchored()` places it from the row's own
-//! origin and no bounds are measured. It has no hitbox, so the pointer passes through it.
-//!
+//! The card is a child of the hovered row. A canvas inside the row records the row's window
+//! bounds each frame; the card is then placed from them (level with the row's top, see
+//! `hover_card_state::card_origin`), so it follows the list's scroll position. It has no
+//! hitbox, so the pointer passes through it.
 
 use std::time::Instant;
 
@@ -16,14 +17,16 @@ use conn_state::{ProjectShell, ThreadShell};
 use conn_theme::Tokens;
 use gpui_kit::{
     AnyElement, BoxShadow, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, Styled as _, TestSupportExt as _, anchored, deferred, div, point, px,
+    SharedString, Styled as _, TestSupportExt as _, WeakEntity, anchored, canvas, deferred, div,
+    point, px,
 };
 
 use crate::a11y::ConnA11yExt as _;
 use crate::app::ConnApp;
 use crate::icons;
 use crate::sidebar::hover_card_state::{
-    Entered, HoverError, HoverPullRequest, OPEN_DELAY, hover_card_model,
+    COLLISION_PADDING_PX, Entered, HoverError, HoverPullRequest, OPEN_DELAY, RowRect, RowRectCell,
+    card_height, card_origin, fitting_pr_lines, hover_card_model,
 };
 use crate::sidebar::render_project_favicon;
 use crate::sidebar::thread_list::middle_truncate;
@@ -33,10 +36,6 @@ use crate::theme::{MONO_FONT, hsla, hsla_alpha};
 const CARD_MAX_WIDTH_PX: f32 = 320.0;
 /// `rounded-lg` (the row card's corner radius).
 const CARD_RADIUS_PX: f32 = 8.0;
-/// `sideOffset={4}`.
-const SIDE_OFFSET_PX: f32 = 4.0;
-/// Tooltip positioner `collisionPadding`.
-const COLLISION_PADDING_PX: f32 = 5.0;
 /// `text-ui`.
 const UI_FONT_PX: f32 = 13.0;
 const UI_LINE_PX: f32 = 20.0;
@@ -162,15 +161,50 @@ fn pull_request_line(pr: &HoverPullRequest, tokens: &Tokens) -> gpui_kit::Div {
         )
 }
 
-/// Renders the card, anchored to the right of the row that contains it.
+/// Renders the measuring canvas and, once the row has been measured, the card level with it.
 #[must_use]
 pub(crate) fn render_thread_hover_card(
     thread: &ThreadShell,
     project: Option<&ProjectShell>,
     environment_label: Option<&str>,
+    rect: &RowRectCell,
+    app: WeakEntity<ConnApp>,
     tokens: &Tokens,
 ) -> AnyElement {
-    let model = hover_card_model(thread, project, environment_label);
+    let measure = {
+        let rect = rect.clone();
+        canvas(
+            move |bounds, window, cx| {
+                let measured = RowRect {
+                    x: f32::from(bounds.origin.x),
+                    y: f32::from(bounds.origin.y),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                    viewport_height: f32::from(window.viewport_size().height),
+                };
+                if rect.get() != Some(measured) {
+                    rect.set(Some(measured));
+                    cx.defer(move |cx| {
+                        let _ = app.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+            |_, (), _, _| {},
+        )
+        // `-1px` covers the row's transparent top border, so the rect starts at the row's edge.
+        .absolute()
+        .top(px(-1.0))
+        .left_0()
+        .right_0()
+        .bottom_0()
+    };
+    let wrapper = div().absolute().inset_0().child(measure);
+    let Some(row) = rect.get() else {
+        return wrapper.into_any_element();
+    };
+    let mut model = hover_card_model(thread, project, environment_label);
+    model.pull_requests.truncate(fitting_pr_lines(&model, &row));
+    let (card_x, card_y) = card_origin(&row, card_height(&model, model.pull_requests.len()));
     let muted = hsla(tokens.muted_foreground);
     let text = hsla_alpha(tokens.foreground, 0.75);
     let icon = |path: &'static str, color| icons::concept(path, ICON_PX, color).into_any_element();
@@ -330,14 +364,11 @@ pub(crate) fn render_thread_hover_card(
         .shadow(card_shadow())
         .child(body);
 
-    div()
-        .absolute()
-        .top_0()
-        .left_full()
-        .ml(px(SIDE_OFFSET_PX))
+    wrapper
         .child(
             deferred(
                 anchored()
+                    .position(point(px(card_x), px(card_y)))
                     .snap_to_window_with_margin(px(COLLISION_PADDING_PX))
                     .child(card),
             )

@@ -967,6 +967,9 @@ fn sidebar_status_dot_renders_10px_cutout_around_6px_dot(cx: &mut TestAppContext
                 (center_x - expected_x).abs() <= 0.75 && (center_y - expected_y).abs() <= 0.75,
                 "{thread_id} cutout center must sit on the icon corner (half-width/half-height) = ({expected_x:.1}, {expected_y:.1}), got ({center_x:.1}, {center_y:.1})"
             );
+        }
+    });
+}
 
 #[gpui_kit::test]
 fn thread_hover_card_opens_for_the_hovered_row_and_closes_for_menus(cx: &mut TestAppContext) {
@@ -992,6 +995,11 @@ fn thread_hover_card_opens_for_the_hovered_row_and_closes_for_menus(cx: &mut Tes
         cx.read(|cx| app.read(cx).thread_hover.open_for().map(str::to_owned)),
         Some("thread-pinned".to_owned())
     );
+    // The first frame measures the row; the card shows once that frame has re-rendered.
+    for _ in 0..3 {
+        let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+        cx.run_until_parked();
+    }
     assert!(
         cx.update_window(window, |_, w, cx| has_label(w, cx, card))
             .unwrap_or(false),
@@ -1070,6 +1078,73 @@ fn hover_card_model_lists_only_the_fields_the_thread_has() {
     thread.last_error = Some(Some("  ".to_owned()));
     assert_eq!(hover_card_model(&thread, project, None).error, None);
 }
-        }
+
+#[gpui_kit::test]
+fn thread_hover_card_top_is_level_with_the_hovered_row(cx: &mut TestAppContext) {
+    use crate::sidebar::hover_card_state::{card_height, hover_card_model};
+
+    let (window, app) = mount_app(cx);
+    let mut shell = kitchen_sink_shell();
+    let prs: Vec<conn_contract::ThreadPullRequestLink> = (0..40)
+        .map(|n| {
+            from_json(json!({
+                "host": "github.com", "repository": "a/b", "number": n,
+                "url": "https://example.test/pr", "source": "manual",
+                "linkedAt": "2026-11-22T15:00:00.000Z", "snapshot": null, "stack": null
+            }))
+            .expect("pull request link")
+        })
+        .collect();
+    for thread in shell.threads.iter_mut().filter(|t| t.id == "thread-failed") {
+        thread.pull_requests = Some(prs.clone());
+    }
+    let thread = shell
+        .threads
+        .iter()
+        .find(|t| t.id == "thread-failed")
+        .cloned()
+        .expect("thread");
+    let model = hover_card_model(&thread, shell.project("proj-parity"), None);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(shell, cx);
+            app.set_thread_for_test("thread-selected".to_owned(), kitchen_sink_thread(), cx);
+            app.open_thread_hover_for_test("thread-failed", cx);
+        });
     });
+    let (row, card) = cx
+        .update_window(window, |_, w, cx| {
+            for _ in 0..3 {
+                w.render_frame(cx);
+            }
+            (
+                w.find_by_label("Failed thread card").bounds(),
+                w.find_by_label("Thread preview: Failed thread card")
+                    .bounds(),
+            )
+        })
+        .expect("window");
+    assert!(
+        (f32::from(card.top()) - f32::from(row.top())).abs() <= 1.0,
+        "card top {:?} must sit level with the row top {:?}, not slide up the window",
+        card.top(),
+        row.top()
+    );
+    assert!(
+        f32::from(card.left()) >= f32::from(row.right()),
+        "card must open to the right of the row"
+    );
+    assert!(
+        f32::from(card.bottom()) <= TEST_WINDOW_HEIGHT - 4.0,
+        "card must stay inside the window"
+    );
+    // The pure height estimate that trims the list matches the laid-out card.
+    let lines =
+        ((f32::from(card.size.height) - card_height(&model, 0) - 17.0) / 26.0).round() as usize;
+    let estimated = card_height(&model, lines);
+    assert!(
+        (estimated - f32::from(card.size.height)).abs() <= 1.0,
+        "estimated {estimated} vs laid-out {:?} with {lines} lines",
+        card.size.height
+    );
 }

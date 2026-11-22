@@ -37,6 +37,7 @@ use crate::icons;
 use crate::panels::chrome::ConnTooltipExt as _;
 use crate::shell::{CardJoin, MACOS_TRAFFIC_LIGHTS_INSET_PX, WORKSPACE_RAIL_WIDTH_PX, inset_card};
 use crate::sidebar::hover_card::render_thread_hover_card;
+use crate::sidebar::hover_card_state::RowRectCell;
 use crate::sidebar::{render_project_favicon, render_project_monogram};
 use crate::theme::{hsla, hsla_alpha};
 
@@ -321,6 +322,7 @@ pub(crate) fn render_thread_sidebar(
             now_secs,
             sidebar_width: layout.sidebar_width,
             hover_open: hover.open_for == Some(thread.id.as_str()),
+            hover_rect: hover.rect,
             environment_label: hover.environment_label,
             tokens,
         };
@@ -349,6 +351,7 @@ pub(crate) fn render_thread_sidebar(
             now_secs,
             sidebar_width: layout.sidebar_width,
             hover_open: hover.open_for == Some(thread.id.as_str()),
+            hover_rect: hover.rect,
             environment_label: hover.environment_label,
             tokens,
         };
@@ -462,6 +465,7 @@ pub(crate) fn render_thread_sidebar(
                 now_secs,
                 sidebar_width: layout.sidebar_width,
                 hover_open: hover.open_for == Some(thread.id.as_str()),
+                hover_rect: hover.rect,
                 environment_label: hover.environment_label,
                 tokens,
             };
@@ -839,6 +843,7 @@ struct RowCtx<'a> {
     rename_input: &'a Entity<InputState>,
     now_secs: i64,
     sidebar_width: f32,
+    hover_rect: &'a RowRectCell,
     /// This thread's hover flyout is open.
     hover_open: bool,
     environment_label: Option<&'a str>,
@@ -848,6 +853,8 @@ struct RowCtx<'a> {
 /// Sidebar hover flyout inputs from the app.
 pub(crate) struct ThreadHoverView<'a> {
     /// Thread whose `ThreadHoverCard` is visible.
+    /// Painted bounds of the open row.
+    pub(crate) rect: &'a RowRectCell,
     pub(crate) open_for: Option<&'a str>,
     pub(crate) environment_label: Option<&'a str>,
 }
@@ -900,6 +907,8 @@ fn attach_row_interactions(
         .when(ctx.hover_open, |row| {
             row.child(render_thread_hover_card(
                 thread,
+                ctx.hover_rect,
+                cx.entity().downgrade(),
                 ctx.project,
                 ctx.environment_label,
                 ctx.tokens,

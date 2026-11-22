@@ -5159,6 +5159,7 @@ impl Render for ConnApp {
                             .open_for()
                             .filter(|_| !self.thread_hover_suppressed()),
                         environment_label: self.server_label.as_deref(),
+                        rect: self.thread_hover.row_rect(),
                     },
                                 });
                             },

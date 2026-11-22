@@ -188,6 +188,11 @@ impl ChatView {
         Some(
             div()
                 .id(SharedString::from(format!("ts-{key}")))
+                .a11y(
+                    gpui_kit::Role::Label,
+                    format!("chat.timestamp.{key}"),
+                    format!("Sent {tooltip}"),
+                )
                 .flex_none()
                 .whitespace_nowrap()
                 .text_size(px(12.0))
@@ -241,7 +246,15 @@ impl ChatView {
                     .attachment_pill(chip_id, unknown.name.clone())
                     .child(div().min_w_0().truncate().child(unknown.name.clone())),
             };
-            row = row.child(chip);
+            let name = match att {
+                conn_contract::ChatAttachment::Image(img) => &img.name,
+                conn_contract::ChatAttachment::File(file) => &file.name,
+                conn_contract::ChatAttachment::Unknown(unknown) => &unknown.name,
+            };
+            row = row.child(chip.a11y_group(
+                format!("chat.attachment.{key}.{idx}"),
+                format!("Attachment {name}"),
+            ));
         }
         row.into_any_element()
     }
@@ -275,6 +288,7 @@ impl ChatView {
         let muted = hsla(self.tokens.muted_foreground);
         div()
             .id(SharedString::from(format!("steer-{id}")))
+            .a11y_group(format!("chat.steer.{id}"), "Steered the active turn")
             .mr(px(4.0))
             .mb(px(4.0))
             .flex()
@@ -301,6 +315,8 @@ impl ChatView {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let mut actions = div()
+            .id(SharedString::from(format!("user-actions-{id}")))
+            .a11y_group(format!("chat.user.{id}.actions"), "Message actions")
             .flex()
             .flex_row()
             .items_center()
@@ -342,6 +358,8 @@ impl ChatView {
         let fg = hsla(self.tokens.foreground);
         let hover_bg = hsla(self.tokens.shell_highlight);
         let mut meta = div()
+            .id(SharedString::from(format!("assistant-actions-{id}")))
+            .a11y_group(format!("chat.assistant.{id}.actions"), "Message actions")
             .mt(px(6.0))
             .flex()
             .flex_row()
@@ -357,6 +375,12 @@ impl ChatView {
             };
             meta = meta.child(
                 div()
+                    .id(SharedString::from(format!("assistant-status-{id}")))
+                    .a11y(
+                        gpui_kit::Role::Status,
+                        format!("chat.assistant.{id}.status"),
+                        format!("Message {label}"),
+                    )
                     .px(px(6.0))
                     .py(px(2.0))
                     .rounded_full()
@@ -1679,6 +1703,10 @@ impl ChatView {
 
         let mut card = div()
             .id(SharedString::from(format!("subagent-{id}")))
+            .a11y_group(
+                format!("chat.subagent.{id}"),
+                format!("Subagent {title}, {status_label}"),
+            )
             .flex()
             .flex_col()
             .gap(px(4.0))
@@ -1858,6 +1886,8 @@ impl ChatView {
         );
 
         let mut card = div()
+            .id(SharedString::from(format!("changed-files-{run_id}")))
+            .a11y_group(format!("chat.changed-files.{run_id}"), label)
             .flex()
             .flex_col()
             .w_full()
@@ -2002,6 +2032,10 @@ impl ChatView {
                 div().px(px(12.0)).pb(px(8.0)).child(
                     div()
                         .id(SharedString::from(format!("cf-more-{run_id}")))
+                        .a11y_button(
+                            format!("chat.changed-files.{run_id}.more"),
+                            more_label.clone(),
+                        )
                         .flex()
                         .items_center()
                         .h(px(24.0))
@@ -2188,23 +2222,49 @@ impl ChatView {
         key: &str,
         label: &str,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
-        let hover_bg = hsla(self.tokens.shell_highlight);
-        div()
-            .id(SharedString::from(key.to_owned()))
-            .a11y_button(SharedString::from(format!("chat.{key}")), label.to_owned())
-            .flex()
-            .items_center()
-            .justify_center()
-            .h(px(32.0))
-            .px(px(12.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(hsla(self.tokens.border))
-            .cursor_pointer()
-            .text_size(px(UI_FONT_PX))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(hsla(self.tokens.foreground))
-            .hover(move |s| s.bg(hover_bg))
-            .child(label.to_owned())
+        outline_button_surface(
+            &self.tokens,
+            SharedString::from(key.to_owned()),
+            SharedString::from(format!("chat.{key}")),
+            label.to_owned(),
+        )
+        .h(px(32.0))
+        .px(px(12.0))
+        .rounded(px(8.0))
+        .text_size(px(UI_FONT_PX))
+        .child(label.to_owned())
     }
+}
+
+/// Colors and behavior of Conn `Button variant="outline"`: `border-input`, `bg-popover`
+/// (`dark:bg-input/32`), hover `bg-accent/50` (`dark:bg-input/64`). Callers add size and content.
+pub(super) fn outline_button_surface(
+    tokens: &conn_theme::Tokens,
+    id: SharedString,
+    ax_id: SharedString,
+    label: String,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let dark = tokens.appearance == Appearance::Dark;
+    let (bg, hover_bg) = if dark {
+        (
+            hsla_alpha(tokens.input, tokens.input.a * 0.32),
+            hsla_alpha(tokens.input, tokens.input.a * 0.64),
+        )
+    } else {
+        (hsla(tokens.popover), hsla_alpha(tokens.accent, 0.5))
+    };
+    div()
+        .id(id)
+        .a11y_button(ax_id, label)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(hsla(tokens.input))
+        .bg(bg)
+        .cursor_pointer()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(hsla(tokens.foreground))
+        .hover(move |s| s.bg(hover_bg))
 }

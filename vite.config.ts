@@ -7,6 +7,7 @@ import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
 const TEST_EXCLUDE = [
   "**/.repos/**",
   "**/.t3/**",
+  "**/.conn/**",
   "**/node_modules/**",
   "**/dist/**",
   "**/dist-electron/**",
@@ -186,6 +187,8 @@ export default defineConfig({
       "apps/conn-server/**",
       // So does the GPUI desktop client (apps/conn-gpui/scripts/check.sh).
       "apps/conn-gpui/**",
+      // The native SwiftUI iPhone app (Xcode project, asset catalogs, generated bindings).
+      "apps/ios/**",
       "infra/task-cache/vendor/**",
       // Macroscope requires one glob per line; Markdown formatting corrupts it.
       ".macroscope/ignore.md",
@@ -224,6 +227,7 @@ export default defineConfig({
       ".repos/**",
       "apps/conn-server/**",
       "apps/conn-gpui/**",
+      "apps/ios/**",
       "infra/task-cache/vendor/**",
       "dist",
       "dist-electron",
@@ -808,7 +812,13 @@ export default defineConfig({
         rules: { "t3code/no-manual-memo": ["error", { allowMemoHooks: true }] },
       },
       {
-        files: ["apps/web/src/**", "apps/mobile/src/**", "packages/*/src/**"],
+        files: [
+          "apps/web/src/**",
+          "apps/lab-gpui/src/**",
+          "apps/lab-ios/src/**",
+          "apps/mobile/src/**",
+          "packages/*/src/**",
+        ],
         rules: { "t3code/no-unreasoned-state-sync": "error" },
       },
       {
@@ -854,9 +864,8 @@ export default defineConfig({
         // icon maps list every glyph name, the stand-ins keep the hook names of the modules they
         // replace, and the lab driver talks to the fake environment's RPC.
         files: [
-          "apps/web/src/lab/**",
-          "apps/web/scripts/mobile-lab/**",
-          "apps/web/vite.lab.config.ts",
+          "apps/lab-gpui/**",
+          "apps/lab-ios/**",
           "apps/mobile/scripts/lab/**",
           "apps/mobile/src/lab/**",
         ],

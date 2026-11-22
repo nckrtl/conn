@@ -102,6 +102,7 @@ pub(crate) struct SettingsConnectionInfo {
 pub(crate) enum SettingsEvent {
     ApplyTheme(String),
     ReduceTransparency(bool),
+    PersistComposerContextStrip(bool),
     OrbitSyncNow,
     OrbitBindProfile(i64),
     OrbitCreateProfile(String),
@@ -175,6 +176,7 @@ pub(crate) struct SettingsModal {
     active_page: SettingsPage,
     active_theme_id: String,
     reduce_transparency: bool,
+    persist_composer_context_strip: bool,
     connection: SettingsConnectionInfo,
     orbit: OrbitSettingsInfo,
     themes: Vec<ThemeOption>,
@@ -221,6 +223,7 @@ impl SettingsModal {
         active_theme_id: impl Into<String>,
         tokens: Tokens,
         reduce_transparency: bool,
+        persist_composer_context_strip: bool,
         connection: SettingsConnectionInfo,
         live_connection: Option<Connection>,
         projects: Vec<ScheduledTaskProjectOption>,
@@ -286,6 +289,7 @@ impl SettingsModal {
             active_page: SettingsPage::Appearance,
             active_theme_id: active_theme_id.into(),
             reduce_transparency,
+            persist_composer_context_strip,
             connection,
             orbit,
             themes,
@@ -396,6 +400,14 @@ impl SettingsModal {
     fn toggle_reduce_transparency(&mut self, cx: &mut Context<'_, Self>) {
         self.reduce_transparency = !self.reduce_transparency;
         cx.emit(SettingsEvent::ReduceTransparency(self.reduce_transparency));
+        cx.notify();
+    }
+
+    fn toggle_persist_composer_context_strip(&mut self, cx: &mut Context<'_, Self>) {
+        self.persist_composer_context_strip = !self.persist_composer_context_strip;
+        cx.emit(SettingsEvent::PersistComposerContextStrip(
+            self.persist_composer_context_strip,
+        ));
         cx.notify();
     }
 
@@ -677,14 +689,34 @@ impl SettingsModal {
                 entity.update(cx, |this, cx| this.toggle_reduce_transparency(cx));
             },
         );
-
-        let window_rows = vec![settings_row(
-            "Reduce transparency",
-            Some("Use opaque card surfaces instead of translucent frosted fills."),
-            reduce_switch.into_any_element(),
+        let entity_strip = cx.entity();
+        let context_strip_switch = pill_switch(
+            "conn-settings-persist-composer-context",
+            self.persist_composer_context_strip,
             &self.tokens,
-            &self.geometry,
-        )];
+            move |_window, cx| {
+                entity_strip.update(cx, |this, cx| {
+                    this.toggle_persist_composer_context_strip(cx)
+                });
+            },
+        );
+
+        let window_rows = vec![
+            settings_row(
+                "Reduce transparency",
+                Some("Use opaque card surfaces instead of translucent frosted fills."),
+                reduce_switch.into_any_element(),
+                &self.tokens,
+                &self.geometry,
+            ),
+            settings_row(
+                "Keep composer context visible",
+                Some("Keep branch and worktree controls below the composer after a thread starts."),
+                context_strip_switch.into_any_element(),
+                &self.tokens,
+                &self.geometry,
+            ),
+        ];
 
         let mut col = div().flex().flex_col().w_full().gap(px(20.0));
         if !orbit_rows.is_empty() {
@@ -736,6 +768,7 @@ impl SettingsModal {
             );
         }
 
+        let mut window_matches: Vec<AnyElement> = Vec::new();
         if "reduce transparency opaque frosted window appearance".contains(needle) {
             let entity = cx.entity();
             let reduce_switch = pill_switch(
@@ -746,20 +779,39 @@ impl SettingsModal {
                     entity.update(cx, |this, cx| this.toggle_reduce_transparency(cx));
                 },
             );
+            window_matches.push(settings_row(
+                "Reduce transparency",
+                Some("Use opaque card surfaces instead of translucent frosted fills."),
+                reduce_switch.into_any_element(),
+                &self.tokens,
+                &self.geometry,
+            ));
+        }
+        if "keep composer context visible branch worktree strip prompt appearance".contains(needle)
+        {
+            let entity = cx.entity();
+            let context_switch = pill_switch(
+                "conn-settings-search-persist-composer-context-strip",
+                self.persist_composer_context_strip,
+                &self.tokens,
+                move |_window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.toggle_persist_composer_context_strip(cx)
+                    });
+                },
+            );
+            window_matches.push(settings_row(
+                "Keep composer context visible",
+                Some("Show the branch and worktree strip below the composer on active threads."),
+                context_switch.into_any_element(),
+                &self.tokens,
+                &self.geometry,
+            ));
+        }
+        if !window_matches.is_empty() {
             sections.push(
-                settings_section(
-                    "Window",
-                    vec![settings_row(
-                        "Reduce transparency",
-                        Some("Use opaque card surfaces instead of translucent frosted fills."),
-                        reduce_switch.into_any_element(),
-                        &self.tokens,
-                        &self.geometry,
-                    )],
-                    &self.tokens,
-                    &self.geometry,
-                )
-                .into_any_element(),
+                settings_section("Window", window_matches, &self.tokens, &self.geometry)
+                    .into_any_element(),
             );
         }
 
@@ -1930,14 +1982,12 @@ fn over(top: conn_theme::Rgba, below: conn_theme::Rgba) -> conn_theme::Rgba {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OrbitNodeRoleBadge {
-    PrimaryAgent,
     Agent,
 }
 
 impl OrbitNodeRoleBadge {
     const fn label(self) -> &'static str {
         match self {
-            Self::PrimaryAgent => "Primary agent",
             Self::Agent => "Agent",
         }
     }
@@ -1946,17 +1996,12 @@ impl OrbitNodeRoleBadge {
 fn orbit_node_role_badge(
     node: &conn_desktop::orbit::OrbitServerTarget,
 ) -> Option<OrbitNodeRoleBadge> {
-    if node.is_primary_agent() {
-        Some(OrbitNodeRoleBadge::PrimaryAgent)
-    } else if node.has_agent_role() {
-        Some(OrbitNodeRoleBadge::Agent)
-    } else {
-        None
-    }
+    node.has_agent_role().then_some(OrbitNodeRoleBadge::Agent)
 }
 
 /// Renders an Orbit Node row inside `Settings › Connections`, placing a subtle Conn-styled
-/// `Agent` / `Primary agent` pill badge next to the node label when applicable.
+/// `Agent` pill badge next to the node label when the Node carries the Orbit `agent` role (the
+/// Conn entry point).
 fn orbit_node_row(
     title: &str,
     role_badge: Option<OrbitNodeRoleBadge>,
@@ -1985,11 +2030,6 @@ fn orbit_node_row(
 
     if let Some(badge) = role_badge {
         let (badge_bg, badge_border, badge_fg) = match badge {
-            OrbitNodeRoleBadge::PrimaryAgent => (
-                hsla_alpha(tokens.info, 0.14),
-                hsla_alpha(tokens.info, 0.30),
-                hsla(tokens.info_foreground),
-            ),
             OrbitNodeRoleBadge::Agent => (
                 hsla(tokens.shell_control_raised),
                 hsla(tokens.shell_control_raised_border),
@@ -2054,7 +2094,7 @@ mod tests {
 
     use super::{OrbitNodeRoleBadge, orbit_node_role_badge};
 
-    fn node_target(roles: &[&str], is_primary_agent: bool) -> OrbitServerTarget {
+    fn node_target(roles: &[&str]) -> OrbitServerTarget {
         OrbitServerTarget {
             server_id: "node-mini".to_owned(),
             label: "mini".to_owned(),
@@ -2066,28 +2106,20 @@ mod tests {
             kind: OrbitTargetKind::Node {
                 node_name: "mini".to_owned(),
                 roles: roles.iter().map(|r| (*r).to_owned()).collect(),
-                is_primary_agent,
             },
         }
     }
 
     #[test]
     fn resolves_orbit_node_role_badges() {
-        let primary = node_target(&["agent"], true);
-        assert_eq!(
-            orbit_node_role_badge(&primary),
-            Some(OrbitNodeRoleBadge::PrimaryAgent)
-        );
-        assert_eq!(OrbitNodeRoleBadge::PrimaryAgent.label(), "Primary agent");
-
-        let agent = node_target(&["router", "agent"], false);
+        let agent = node_target(&["router", "agent"]);
         assert_eq!(
             orbit_node_role_badge(&agent),
             Some(OrbitNodeRoleBadge::Agent)
         );
         assert_eq!(OrbitNodeRoleBadge::Agent.label(), "Agent");
 
-        let plain = node_target(&["router"], false);
+        let plain = node_target(&["router"]);
         assert_eq!(orbit_node_role_badge(&plain), None);
     }
 }

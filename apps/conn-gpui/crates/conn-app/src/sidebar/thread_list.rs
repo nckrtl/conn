@@ -787,18 +787,36 @@ pub(crate) fn middle_truncate(value: &str, max_chars: usize) -> String {
     format!("{head_str}…{tail_str}")
 }
 
-/// Branch character budget for the meta line at the current sidebar width (`12px` text,
-/// ~6.6px per glyph, minus row insets and trailing badges).
-fn branch_char_budget(sidebar_width: f32) -> usize {
-    let usable = (sidebar_width - 96.0).max(48.0);
+/// Branch character budget for the meta line after subtracting row insets, indent,
+/// provider icon, project label, time label, dots, and flex gaps (`13px` text, ~7px/glyph).
+fn branch_char_budget(
+    sidebar_width: f32,
+    project_width_px: f32,
+    time_chars: usize,
+    indented: bool,
+) -> usize {
+    let indent_px = if indented { META_LINE_INDENT_PX } else { 0.0 };
+    let project_slot_px = if project_width_px > 0.0 {
+        project_width_px + 18.0
+    } else {
+        0.0
+    };
+    let time_slot_px = if time_chars > 0 {
+        (time_chars as f32) * 7.2 + 18.0
+    } else {
+        0.0
+    };
+    // Card horizontal insets (20px) + provider icon (12px) + branch dot/gap (18px).
+    let fixed_px = 20.0 + indent_px + 12.0 + project_slot_px + 18.0 + time_slot_px;
+    let usable = (sidebar_width - fixed_px).max(36.0);
     // Truncation toward zero is intended: a partial glyph does not fit.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "width is clamped positive and small"
     )]
-    let chars = (usable / 6.6) as usize;
-    chars
+    let chars = (usable / 7.0) as usize;
+    chars.max(5)
 }
 
 /// Shared row context for [`render_thread_card`] and [`render_settled_row`].
@@ -946,29 +964,38 @@ fn render_thread_card(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
         .min_w_0();
 
     if let Some(project) = row.project {
-        let dot_ring = if row.selected {
-            active_bg
-        } else {
-            hsla(tokens.shell_inner_fill)
-        };
-        let mut favicon_badge = div()
+        let (dot_ring, dot_hover_ring) =
+            crate::panels::chrome::sidebar_status_dot_rings(tokens, row.selected);
+        let favicon_badge = div()
+            .id(("thread-favicon-badge", row.row_key))
             .relative()
             .flex()
             .items_center()
             .flex_shrink_0()
             .child(render_project_favicon(project, ROW_FAVICON_PX, tokens));
+        #[cfg(test)]
+        let mut favicon_badge = favicon_badge.test_support().a11y_group(
+            SharedString::from(format!("test.sidebar.thread.{}.favicon", thread.id)),
+            SharedString::from(format!("Thread favicon: {}", thread.id)),
+        );
+        #[cfg(not(test))]
+        let mut favicon_badge = favicon_badge;
         if let Some(status) = status {
-            favicon_badge = favicon_badge.child(
-                div()
-                    .absolute()
-                    .top(px(-2.0))
-                    .right(px(-2.0))
-                    .size(px(8.0))
-                    .rounded_full()
-                    .border_2()
-                    .border_color(dot_ring)
-                    .bg(status.dot_color(tokens)),
+            let cutout = crate::panels::chrome::status_dot_cutout(
+                status.dot_color(tokens),
+                dot_ring,
+                dot_hover_ring.map(|hover| (group.clone(), hover)),
+                false,
             );
+            #[cfg(test)]
+            let cutout = cutout
+                .id(("thread-status-cutout", row.row_key))
+                .test_support()
+                .a11y_group(
+                    SharedString::from(format!("test.sidebar.thread.{}.status-cutout", thread.id)),
+                    SharedString::from(format!("Status cutout: {}", thread.id)),
+                );
+            favicon_badge = favicon_badge.child(cutout);
         }
         line1 = line1.child(favicon_badge);
     }
@@ -1074,10 +1101,12 @@ fn render_thread_card(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
         .when(row.project.is_some(), |el| el.pl(px(META_LINE_INDENT_PX)))
         .child(provider_mark);
 
+    let mut project_width_px = 0.0_f32;
     if let Some(project) = row.project
         && !project.title.is_empty()
     {
         let project_max_w = (row.sidebar_width * 0.36).clamp(64.0, 128.0);
+        project_width_px = ((project.title.chars().count() as f32) * 7.0).min(project_max_w);
         line2 = line2.child("·").child(
             div()
                 .max_w(px(project_max_w))
@@ -1088,12 +1117,18 @@ fn render_thread_card(row: &RowCtx<'_>, cx: &mut Context<'_, ConnApp>) -> gpui_k
     }
 
     if let Some(branch) = branch {
-        line2 =
-            line2
-                .child("·")
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().child(
-                    middle_truncate(branch, branch_char_budget(row.sidebar_width)),
-                ));
+        let budget = branch_char_budget(
+            row.sidebar_width,
+            project_width_px,
+            time_label.chars().count(),
+            row.project.is_some(),
+        );
+        line2 = line2.child("·").child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(middle_truncate(branch, budget)),
+        );
     }
 
     if !time_label.is_empty() {

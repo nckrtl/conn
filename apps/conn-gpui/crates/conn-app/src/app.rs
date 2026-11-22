@@ -89,6 +89,8 @@ pub(crate) struct ConnApp {
     scratch_workspace_root: Option<String>,
     /// Project id returned by `projects.ensureScratch`, before the shell lists it.
     scratch_project_id: Option<String>,
+    /// The new-thread draft left by opening a thread, restored by the next new thread.
+    parked_draft: Option<DraftThreadState>,
     /// Right panel tabs the user has open, in order (Conn's `RightPanelTabs`).
     right_panel_open_tabs: Vec<PanelSurface>,
     /// The open file while `layout.right_panel_tab` is [`RightPanelTab::File`].
@@ -397,6 +399,7 @@ impl ConnApp {
             draft: None,
             scratch_workspace_root: None,
             scratch_project_id: None,
+            parked_draft: None,
             right_panel_open_tabs: vec![PanelSurface::Kind(RightPanelTab::Files)],
             right_panel_file: None,
             right_panel_add_menu_open: false,
@@ -1082,7 +1085,11 @@ impl ConnApp {
 
     /// Selects `thread_id` and subscribes to its timeline once.
     fn open_thread(&mut self, thread_id: String) {
-        self.draft = None;
+        if let Some(draft) = self.draft.take()
+            && !draft.launching
+        {
+            self.parked_draft = Some(draft);
+        }
         if conn_client::perf::enabled()
             && self.layout.selected_thread_id.as_deref() != Some(thread_id.as_str())
         {
@@ -1304,15 +1311,19 @@ impl ConnApp {
         }
         self.layout.selected_project_id = Some(project_id.clone());
         self.layout.selected_thread_id = None;
-        self.draft = Some(DraftThreadState {
-            project_id,
-            model_instance_id,
-            model_slug,
-            model_options,
-            runtime_mode,
-            interaction_mode,
-            use_worktree: false,
-            launching: false,
+        // Coming back to the same project's draft keeps its model, modes and workspace choice.
+        self.draft = Some(match self.parked_draft.take() {
+            Some(parked) if parked.project_id == project_id => parked,
+            _ => DraftThreadState {
+                project_id,
+                model_instance_id,
+                model_slug,
+                model_options,
+                runtime_mode,
+                interaction_mode,
+                use_worktree: false,
+                launching: false,
+            },
         });
         self.chat.update(cx, |chat, cx| chat.set_error(None, cx));
         self.sync_chat(cx);

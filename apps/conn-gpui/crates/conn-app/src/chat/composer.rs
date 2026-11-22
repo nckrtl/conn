@@ -57,6 +57,7 @@ use self::menus::{
 use self::model_picker::{ModelCatalog, ModelOption, ModelPickerView, render_model_picker};
 use self::stash::{PromptStash, render_stash_badge, render_stash_menu};
 use super::color::{hsla, hsla_alpha};
+use super::composer_state::{ComposerDraft, ComposerDraftStore};
 use super::icons;
 use crate::a11y::ConnA11yExt as _;
 use crate::panels::chrome::ConnTooltipExt as _;
@@ -230,6 +231,8 @@ pub(crate) struct Composer {
     file_mentions_loading: bool,
     file_search_generation: u64,
     attachments: Vec<PendingAttachment>,
+    /// Unsent prompt + attachments parked per thread / draft (`composerDraftStore`).
+    drafts: ComposerDraftStore<PendingAttachment>,
     next_attachment_id: u64,
     editing_queued: Option<EditingQueuedRun>,
     dictation: DictationState,
@@ -363,6 +366,7 @@ impl Composer {
             file_mentions_loading: false,
             file_search_generation: 0,
             attachments: Vec::new(),
+            drafts: ComposerDraftStore::default(),
             next_attachment_id: 1,
             editing_queued: None,
             dictation: DictationState::Idle,
@@ -557,6 +561,34 @@ impl Composer {
         self.textarea.update(cx, |input, cx| {
             input.set_value(text, window, cx);
             input.focus(window, cx);
+        });
+        self.on_draft_changed(cx);
+    }
+
+    /// Shows the draft for `key` (a thread or the new-thread draft), parking the current one.
+    pub(crate) fn sync_draft_key(
+        &mut self,
+        key: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.drafts.active_key() == key {
+            return;
+        }
+        let mut text = self.textarea.read(cx).value().to_string();
+        let mut attachments = std::mem::take(&mut self.attachments);
+        if let Some(editing) = self.editing_queued.take() {
+            text = editing.saved_draft;
+            attachments.clear();
+            cx.emit(ComposerEvent::CancelEditQueuedMessage);
+        }
+        let Some(next) = self.drafts.switch(key, ComposerDraft { text, attachments }) else {
+            return;
+        };
+        self.close_overlays(cx);
+        self.attachments = next.attachments;
+        self.textarea.update(cx, |input, cx| {
+            input.set_value(next.text, window, cx);
         });
         self.on_draft_changed(cx);
     }
@@ -910,9 +942,11 @@ impl Composer {
         cx.spawn_in(window, async move |this, cx| {
             let upload_res = conn.upload_chat_attachment(name, mime_type, bytes).await;
             let _ = this.update(cx, |composer, cx| {
+                // The upload may finish after the user switched threads; its draft is parked then.
                 if let Some(slot) = composer
                     .attachments
                     .iter_mut()
+                    .chain(composer.drafts.parked_attachments_mut())
                     .find(|a| a.local_id == local_id)
                 {
                     slot.status = match upload_res {

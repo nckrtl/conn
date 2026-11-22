@@ -2804,6 +2804,17 @@ impl Render for ChatView {
                 .child(self.render_empty_no_thread(cx));
         }
 
+        let draft_key = if self.draft.is_some() {
+            Some(composer_state::NEW_THREAD_DRAFT_KEY.to_owned())
+        } else {
+            self.thread_id
+                .as_deref()
+                .map(composer_state::thread_draft_key)
+        };
+        self.composer.update(cx, |c, cx| {
+            c.sync_draft_key(draft_key.as_deref(), window, cx)
+        });
+
         if let Some(draft) = self.draft.clone() {
             return div()
                 .flex()

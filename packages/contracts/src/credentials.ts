@@ -66,7 +66,7 @@ export const FillCredentialInput = Schema.Struct({
   selector: Schema.optional(
     Schema.String.check(Schema.isNonEmpty()).check(Schema.isMaxLength(512)).annotate({
       description:
-        "Optional CSS selector for the input. Omit to let T3 Code find the field for this credential type.",
+        "Optional CSS selector for the input. Omit to let Conn find the field for this credential type.",
     }),
   ),
 });

@@ -6041,7 +6041,6 @@
   "bd2304f25f6f999e": "{selected, plural, one {{selected} von {total} ausgewählt} other {{selected} von {total} ausgewählt}}",
   "228cd9fd55a55070": "Projekte konnten nicht erneut geprüft werden. {error}",
   "1cc599c5f5874014": "Smartphone",
-  "7d9b423d3abf8180": "{appName}-App für iPhone und Android",
   "431bee88ecc944e4": "T3 Connect prüfen",
   "c747696796f64468": "T3 Connect ist aktiv, aber die App kann diesen Computer nicht erreichen.",
   "96557a906f6167b9": "Angemeldet. Gib diesen Computer frei, damit die App ihn erreichen kann.",
@@ -6142,7 +6141,6 @@
     },
     " auf dem Smartphone nutzen"
   ],
-  "37c66042ce1906da": "Scanne mit deinem Smartphone, um die App zu holen.",
   "1b4364ef89b07f35": "T3 Connect konnte nicht geprüft werden.",
   "7b10d40dd15938e5": "Dein Smartphone kann diesen Computer erreichen. Melde dich in der App mit demselben Konto an.",
   "8330812e7b81f020": "T3 Connect ist für diesen Computer aktiv. Melde dich in der App mit demselben Konto an.",
@@ -8827,10 +8825,6 @@
   "0be6b2546df12f66": "Stoppen",
   "7dbd7e8943e8931f": "Mikrofon wird geöffnet…",
   "efa31f38b611e912": "Diese Aufnahme konnte nicht abgespielt werden. Versuch erneut aufzunehmen.",
-  "0cebac0a2a6bdc99": "iPhone und iPad",
-  "d797c9687a256a50": "Verbinde dich von deinem Smartphone oder Tablet mit deinem Server.",
-  "c21858dee1b62639": "{store}-Link",
-  "cdcdc54a444a3636": "Mit der Kamera deines Smartphones scannen.",
   "243e8d40c3cf428d": [
     "Wir raten davon ab, mehrere ",
     {
@@ -11637,8 +11631,6 @@
   "d65bdf6748801734": "release-kanal stabil latest nightly vorabversion",
   "0767c794edea8f03": "t3-Befehl",
   "46dd4dc08c1e552f": "cli terminal shell pfad installieren kommandozeile",
-  "86479042bae0e2db": "Mobile App",
-  "dc2a999ca67ccf31": "telefon tablet iPhone iPad iOS Android App Store Google Play QR",
   "6310b97b04ef239f": "Willkommensseite",
   "df9fa3a9cb004b9b": "onboarding einrichtung erster start erste schritte agenten import projekte",
   "3188bc3b3c4508bc": "Datenschutzerklärung",

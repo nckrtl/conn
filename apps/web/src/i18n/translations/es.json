@@ -6039,7 +6039,6 @@
   "bd2304f25f6f999e": "{selected, plural, one {{selected} de {total} seleccionado} other {{selected} de {total} seleccionados}}",
   "228cd9fd55a55070": "No se pudieron volver a comprobar los proyectos. {error}",
   "1cc599c5f5874014": "Teléfono",
-  "7d9b423d3abf8180": "App de {appName} para iPhone y Android",
   "431bee88ecc944e4": "Comprobar T3 Connect",
   "c747696796f64468": "T3 Connect está activado, pero la app no puede acceder a este equipo.",
   "96557a906f6167b9": "Sesión iniciada. Comparte este equipo para que la app pueda acceder a él.",
@@ -6143,7 +6142,6 @@
     },
     " en tu teléfono"
   ],
-  "37c66042ce1906da": "Escanéalo con tu teléfono para obtener la app.",
   "1b4364ef89b07f35": "No se pudo comprobar T3 Connect.",
   "7b10d40dd15938e5": "Tu teléfono puede acceder a este equipo. Inicia sesión en la app con la misma cuenta.",
   "8330812e7b81f020": "T3 Connect está activado en este equipo. Inicia sesión en la app con la misma cuenta.",
@@ -8826,10 +8824,6 @@
   "0be6b2546df12f66": "Detener",
   "7dbd7e8943e8931f": "Abriendo micrófono…",
   "efa31f38b611e912": "No se pudo reproducir esta grabación. Vuelve a grabar.",
-  "0cebac0a2a6bdc99": "iPhone y iPad",
-  "d797c9687a256a50": "Conéctate a tu servidor desde el teléfono o la tableta.",
-  "c21858dee1b62639": "Enlace de {store}",
-  "cdcdc54a444a3636": "Escanéalo con la cámara del teléfono.",
   "243e8d40c3cf428d": [
     "No recomendamos gestionar varias cuentas de ",
     {
@@ -11630,8 +11624,6 @@
   "d65bdf6748801734": "canal de versiones estable latest nightly preliminar",
   "0767c794edea8f03": "Comando t3",
   "46dd4dc08c1e552f": "cli terminal shell ruta instalar línea de comandos",
-  "86479042bae0e2db": "App móvil",
-  "dc2a999ca67ccf31": "teléfono tableta iPhone iPad iOS Android App Store Google Play QR",
   "6310b97b04ef239f": "Página de bienvenida",
   "df9fa3a9cb004b9b": "bienvenida configuración primer inicio primeros pasos agentes importar proyectos",
   "3188bc3b3c4508bc": "Política de privacidad",

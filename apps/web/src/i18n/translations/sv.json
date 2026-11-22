@@ -6040,7 +6040,6 @@
   "bd2304f25f6f999e": "{selected, plural, one {{selected} av {total} markerad} other {{selected} av {total} markerade}}",
   "228cd9fd55a55070": "Kunde inte kontrollera projekten igen. {error}",
   "1cc599c5f5874014": "Telefon",
-  "7d9b423d3abf8180": "{appName}-appen för iPhone och Android",
   "431bee88ecc944e4": "Kontrollera T3 Connect",
   "c747696796f64468": "T3 Connect är på, men appen kan inte nå den här datorn.",
   "96557a906f6167b9": "Inloggad. Dela den här datorn så att appen kan nå den.",
@@ -6145,7 +6144,6 @@
     },
     " på telefonen"
   ],
-  "37c66042ce1906da": "Skanna med telefonen för att skaffa appen.",
   "1b4364ef89b07f35": "Kunde inte kontrollera T3 Connect.",
   "7b10d40dd15938e5": "Din telefon kan nå den här datorn. Logga in i appen med samma konto.",
   "8330812e7b81f020": "T3 Connect är på för den här datorn. Logga in i appen med samma konto.",
@@ -8834,10 +8832,6 @@
   "0be6b2546df12f66": "Stoppa",
   "7dbd7e8943e8931f": "Öppnar mikrofonen…",
   "efa31f38b611e912": "Kunde inte spela upp inspelningen. Försök spela in igen.",
-  "0cebac0a2a6bdc99": "iPhone och iPad",
-  "d797c9687a256a50": "Anslut till din server från din telefon eller surfplatta.",
-  "c21858dee1b62639": "Länk till {store}",
-  "cdcdc54a444a3636": "Skanna med telefonens kamera.",
   "243e8d40c3cf428d": [
     "Vi rekommenderar inte att du hanterar flera ",
     {
@@ -11643,8 +11637,6 @@
   "d65bdf6748801734": "versionskanal stabil latest nightly förhandsversion",
   "0767c794edea8f03": "Kommandot t3",
   "46dd4dc08c1e552f": "cli terminal skal sökväg installera kommandorad",
-  "86479042bae0e2db": "Mobilapp",
-  "dc2a999ca67ccf31": "telefon surfplatta iPhone iPad iOS Android App Store Google Play QR",
   "6310b97b04ef239f": "Välkomstsida",
   "df9fa3a9cb004b9b": "introduktion konfiguration första start kom igång agenter importera projekt",
   "3188bc3b3c4508bc": "Integritetspolicy",

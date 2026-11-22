@@ -6043,7 +6043,6 @@
   "bd2304f25f6f999e": "{selected, plural, one {{selected} of {total} selected} other {{selected} of {total} selected}}",
   "228cd9fd55a55070": "Could not check projects again. {error}",
   "1cc599c5f5874014": "Phone",
-  "7d9b423d3abf8180": "{appName} app for iPhone and Android",
   "431bee88ecc944e4": "Check T3 Connect",
   "c747696796f64468": "T3 Connect is on, but the app cannot reach this computer.",
   "96557a906f6167b9": "Signed in. Share this computer so the app can reach it.",
@@ -6149,7 +6148,6 @@
     },
     " on your phone"
   ],
-  "37c66042ce1906da": "Scan with your phone to get the app.",
   "1b4364ef89b07f35": "Could not check T3 Connect.",
   "7b10d40dd15938e5": "Your phone can reach this computer. Sign in to the app with the same account.",
   "8330812e7b81f020": "T3 Connect is on for this computer. Sign in to the app with the same account.",
@@ -8843,10 +8841,6 @@
   "0be6b2546df12f66": "Stop",
   "7dbd7e8943e8931f": "Opening microphone…",
   "efa31f38b611e912": "Could not play this recording. Try recording again.",
-  "0cebac0a2a6bdc99": "iPhone and iPad",
-  "d797c9687a256a50": "Connect to your server from your phone or tablet.",
-  "c21858dee1b62639": "{store} link",
-  "cdcdc54a444a3636": "Scan with your phone camera.",
   "243e8d40c3cf428d": [
     "We do not recommend managing multiple ",
     {
@@ -11654,8 +11648,6 @@
   "d65bdf6748801734": "release channel stable latest nightly prerelease",
   "0767c794edea8f03": "t3 command",
   "46dd4dc08c1e552f": "cli terminal shell path install command line",
-  "86479042bae0e2db": "Mobile app",
-  "dc2a999ca67ccf31": "phone tablet iPhone iPad iOS Android App Store Google Play QR",
   "6310b97b04ef239f": "Welcome page",
   "df9fa3a9cb004b9b": "onboarding setup first run getting started agents import projects",
   "3188bc3b3c4508bc": "Privacy policy",

@@ -256,18 +256,22 @@ Line counts report production code (`+tests` where unit tests exist inside the m
 
 ---
 
-## 20. Suggested Build Order
+## 20. Build Order (Orbit + Conn first)
 
-1. **Pair & connect (`conn-client` UniFFI + Orbit Gateway):** Wire UniFFI bindings for `conn-client`/`conn-state`/`conn-theme`, Orbit Gateway discovery & auto-pairing, plus manual URL + QR scanner pairing and Keychain credential storage.
-2. **Thread inbox & Orbit workspaces:** Subscribe to `orchestration.subscribeShell`, render flat inbox with project/Orbit workspace filtering, full-text search (`orchestration.searchThreads`), settle/pin/rename/delete swipe actions, and General-first + Orbit Project thread launch.
-3. **Live chat timeline & composer:** Subscribe to `orchestration.subscribeThread` + `subscribeCommandOutput`; render streaming markdown/code, work-log rows, approval/question/secret/plan cards, rich composer (`t3-composer-editor` adapted) with `@`/`/` menus, attachments, model/effort picker, and steer/queue/stop.
-4. **Voice input (Operator + Apple Speech):** Add composer mic control + floating edge dictation pill using Operator device-code auth (`/v1/audio/transcriptions`) with offline `SFSpeechRecognizer` fallback.
-5. **Review diffs & inline review comments:** Adapt `t3-review-diff` (`T3ReviewDiffView.swift`) for `ThreadReview` (working tree, branch, commits, turn diffs) and line-selection comment composer appending context into the thread draft.
-6. **Git sheets & Workspace files:** Port `GitOverview`/`GitBranches`/`GitCommit`/`GitConfirm` plus workspace file tree (`projects.listEntries`/`searchEntries`) and file/attachment viewer (source, markdown, media, Quick Look).
-7. **GitHub Pull Requests:** Port PR tab (`pullRequests.list`), PR detail (overview, checks, activity, stack), file diffs (reusing adapted `t3-review-diff`), inline discussions, review submission, and reviewers/labels/edit sheets.
-8. **Orbit Tasks tab:** Port `TasksScreen` (lanes + KPI insights strip) and `OrbitTask`/`OrbitSubtask` detail screens with direct jump to agent threads and PRs.
-9. **Interactive Terminal & Scheduled Tasks:** Adapt `t3-terminal` (`GhosttyKit.xcframework`) with extra-keys toolbar and session picker; port `SettingsScheduledTasks` (list, create/edit, run now, webhooks).
-10. **Polish & `Later` extensions:** Settings appearance/themes synced via Orbit, client cache management, Home Screen Quick Actions, and then optional `Later` tracks (WidgetKit/ActivityKit Live Activities, Share Extension, Browser/Local preview tunnel, Device preview, Issues).
+Parity is scoped like `conn-gpui` (Nick, 2026-11-22): not every Expo feature 1:1. Orbit + Conn synergy comes first, following `apps/conn-gpui/docs/scope.md`. The UX and structure follow the Expo app; styling is polished later.
+
+1. **Orbit connection:** reach the Orbit Gateway (WireGuard identity, no credentials), auto-select the primary `agent`-role node and connect `conn-server` to it; manual pairing URL stays as a fallback. Needs the GPUI-free `conn-orbit` crate through `conn-ffi`.
+2. **Inbox with Orbit workspaces:** shell subscription, Orbit profile workspaces as filters, General threads, settle/pin/rename/delete actions, search.
+3. **Thread + composer:** full timeline (approvals, questions, plans, subagent lineage), steer/queue/stop, attachments, model picker routed through `ai-router`.
+4. **Start work, Orbit style:** General-first new thread on the agent node; Orbit Project picker and Orbit thread start (`OrbitThreadStartScreen`); no Conn-only "Add project".
+5. **Orbit Tasks:** Tasks board with lanes and insights, task and subtask detail, jump to agent threads and PRs.
+6. **Voice:** Operator dictation in the composer.
+7. **Review diffs + GitHub PRs:** adapt `t3-review-diff`; PR list, detail, files, inline comments, review submission.
+8. **Files + Git sheets:** workspace tree, file and attachment viewer, git overview/branches/commit.
+9. **Terminal + Scheduled tasks:** adapt `t3-terminal` (GhosttyKit); scheduled task list and editor.
+10. **Settings + theme:** Orbit profile sync (appearance, themes from `conn-theme`), connections with the `agent` badge; then styling polish to match desktop.
+
+Defaults for the open questions below (Nick, 2026-11-22): Issues Later, Orbit-only projects, drop Archive, local and device preview Later, Rust syntax highlighting, no widgets or Live Activities before push, iPhone only.
 
 ---
 

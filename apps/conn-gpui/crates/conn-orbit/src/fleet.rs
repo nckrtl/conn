@@ -11,7 +11,9 @@
 //! This module harmonizes the client domain model around **Nodes** and **Instances** while speaking
 //! the Gateway's wire paths transparently. All code here is GPUI-free and `#![forbid(unsafe_code)]`.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -490,6 +492,96 @@ impl OrbitPairingTicket {
     }
 }
 
+/// Outcome of checking whether a cached bearer token is still accepted by a `conn-server`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BearerCheckOutcome {
+    /// The server accepted the bearer token (or does not expose `/api/auth/session`).
+    Valid,
+    /// The server explicitly rejected the bearer token (401/403 or `authenticated: false`).
+    Rejected,
+    /// The server could not be reached or answered 5xx; keep the cached token for retry.
+    Unreachable,
+}
+
+/// Resolved connection plan for an Orbit `conn-server` target (steps 2–4 of the Orbit flow).
+#[derive(Clone, PartialEq, Eq)]
+pub enum EnvironmentConnectPlan {
+    /// Reuse the caller's cached bearer token against `server_url`.
+    ReuseBearer { server_url: String, bearer: String },
+    /// Exchange a freshly minted single-use pairing code against `server_url`.
+    PairWithCode {
+        server_url: String,
+        pairing_code: String,
+        expires_at: String,
+    },
+}
+
+impl std::fmt::Debug for EnvironmentConnectPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReuseBearer { server_url, .. } => f
+                .debug_struct("ReuseBearer")
+                .field("server_url", server_url)
+                .field("bearer", &"<redacted>")
+                .finish(),
+            Self::PairWithCode {
+                server_url,
+                expires_at,
+                ..
+            } => f
+                .debug_struct("PairWithCode")
+                .field("server_url", server_url)
+                .field("pairing_code", &"<redacted>")
+                .field("expires_at", expires_at)
+                .finish(),
+        }
+    }
+}
+
+/// Probes `GET {server_url}/api/auth/session` with `Authorization: Bearer {bearer}` to distinguish
+/// a revoked/expired cached bearer from a valid session or transient network failure.
+pub async fn check_bearer_session(server_url: &str, bearer: &str) -> BearerCheckOutcome {
+    let Ok(base) = url::Url::parse(server_url.trim()) else {
+        return BearerCheckOutcome::Unreachable;
+    };
+    let Ok(session_url) = base.join("api/auth/session") else {
+        return BearerCheckOutcome::Unreachable;
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return BearerCheckOutcome::Unreachable;
+    };
+    let Ok(response) = client
+        .get(session_url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .bearer_auth(bearer)
+        .send()
+        .await
+    else {
+        return BearerCheckOutcome::Unreachable;
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return BearerCheckOutcome::Rejected;
+    }
+    if (200..300).contains(&status) {
+        if let Ok(body) = response.text().await
+            && let Ok(parsed) = serde_json::from_str::<Value>(&body)
+            && parsed.get("authenticated").and_then(Value::as_bool) == Some(false)
+        {
+            return BearerCheckOutcome::Rejected;
+        }
+        return BearerCheckOutcome::Valid;
+    }
+    if status == 404 {
+        return BearerCheckOutcome::Valid;
+    }
+    BearerCheckOutcome::Unreachable
+}
+
 /// Client for Orbit Node & Instance discovery, pairing, and waking.
 #[derive(Clone)]
 pub struct OrbitFleetClient {
@@ -614,6 +706,110 @@ impl OrbitFleetClient {
             .or_else(|| data.get("id"))
             .and_then(Value::as_i64);
         Ok(op_id)
+    }
+
+    /// Requests Orbit to wake a stopped Instance and polls `GET /api/v1/operations/{id}` until
+    /// the wake operation finishes (mirroring `packages/client-runtime/src/orbitGateway/instanceWake.ts`).
+    pub async fn wake_and_wait_instance(&self, instance_id: i64) -> ProfileResult<()> {
+        let Some(op_id) = self.wake_instance(instance_id).await? else {
+            return Ok(());
+        };
+        let op_path = format!("/operations/{op_id}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let op = self.call(GatewayRequest::get(&op_path).at_root()).await?;
+            let status = op.get("status").and_then(Value::as_str).unwrap_or_default();
+            match status {
+                "succeeded" => return Ok(()),
+                "failed" | "cancelled" | "interrupted" | "timed_out" => {
+                    let code = op
+                        .get("error_code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("instance.wake_failed")
+                        .to_owned();
+                    let message = op
+                        .get("error")
+                        .and_then(|e| {
+                            e.as_str()
+                                .or_else(|| e.get("message").and_then(Value::as_str))
+                        })
+                        .unwrap_or("Orbit could not wake the instance.")
+                        .to_owned();
+                    return Err(ProfileError::Gateway {
+                        code,
+                        message,
+                        status: 500,
+                    });
+                }
+                _ => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ProfileError::Gateway {
+                    code: "operation.timeout".to_owned(),
+                    message: "Timed out waiting for Orbit instance to wake.".to_owned(),
+                    status: 504,
+                });
+            }
+            let wait_secs = op
+                .get("poll_after_seconds")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, 2);
+            tokio::time::sleep(Duration::from_millis(wait_secs * 500)).await;
+        }
+    }
+
+    /// Resolves how to connect to `server_id` (steps 2–4 of the Orbit connect flow):
+    /// - Looks up `server_id` in the Gateway's fleet.
+    /// - When a non-empty `cached_bearer` is supplied, invokes `verify_bearer(url, bearer)`:
+    ///   reuses it on [`BearerCheckOutcome::Valid`] or [`BearerCheckOutcome::Unreachable`], and
+    ///   falls back to minting a fresh pairing **once** on [`BearerCheckOutcome::Rejected`].
+    /// - When no cached bearer is supplied, mints a pairing directly via [`Self::mint_pairing`].
+    pub async fn resolve_environment_connect<F, Fut>(
+        &self,
+        server_id: &str,
+        cached_bearer: Option<&str>,
+        verify_bearer: F,
+    ) -> ProfileResult<EnvironmentConnectPlan>
+    where
+        F: FnOnce(String, String) -> Fut,
+        Fut: Future<Output = BearerCheckOutcome>,
+    {
+        let fleet = self.list_fleet(None).await?;
+        let target = fleet
+            .find_by_server_id(server_id)
+            .ok_or_else(|| ProfileError::Gateway {
+                code: "http.404".to_owned(),
+                message: format!("Orbit environment `{server_id}` was not found."),
+                status: 404,
+            })?;
+        let target_url = target.url.clone();
+
+        if let Some(bearer) = cached_bearer.map(str::trim).filter(|s| !s.is_empty()) {
+            match verify_bearer(target_url.clone(), bearer.to_owned()).await {
+                BearerCheckOutcome::Valid | BearerCheckOutcome::Unreachable => {
+                    return Ok(EnvironmentConnectPlan::ReuseBearer {
+                        server_url: target_url,
+                        bearer: bearer.to_owned(),
+                    });
+                }
+                BearerCheckOutcome::Rejected => {}
+            }
+        }
+
+        let ticket = self.mint_pairing(server_id).await?;
+        let pairing_code = ticket
+            .pairing_code()
+            .ok_or_else(|| invalid(&format!("/environments/{server_id}/pairings")))?;
+        let server_url = ticket
+            .http_base_url()
+            .map(|u| u.to_string())
+            .unwrap_or(target_url);
+        Ok(EnvironmentConnectPlan::PairWithCode {
+            server_url,
+            pairing_code,
+            expires_at: ticket.expires_at,
+        })
     }
 
     async fn call(&self, request: GatewayRequest) -> ProfileResult<Value> {
@@ -1402,6 +1598,141 @@ mod tests {
                 .map(|n| n.server_id.as_str()),
             Some("node-beast"),
             "OrbitFleet::select_primary_agent_node delegates consistently"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_environment_connect_reuses_valid_bearer_and_mints_on_none_or_rejection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mint_calls = Arc::new(AtomicUsize::new(0));
+        let mint_calls_ref = Arc::clone(&mint_calls);
+        let transport = MockGateway::new(move |req| match req.path.as_str() {
+            "/environments" => Ok(GatewayResponse {
+                status: 200,
+                body: serde_json::json!({
+                    "data": [{
+                        "environment_id": "node-mini",
+                        "label": "mini",
+                        "url": "http://10.44.0.8:3773",
+                        "status": "registered",
+                        "cleanup_pending": false,
+                        "instance_id": null,
+                        "roles": ["agent"],
+                        "is_primary_agent": true
+                    }]
+                })
+                .to_string(),
+            }),
+            "/environments/node-mini/pairings" => {
+                mint_calls_ref.fetch_add(1, Ordering::SeqCst);
+                Ok(GatewayResponse {
+                    status: 200,
+                    body: serde_json::json!({
+                        "data": {
+                            "pairing_url": "http://10.44.0.8:3773/pair#token=fresh-code",
+                            "pairing": {
+                                "environment_id": "node-mini",
+                                "expires_at": "2026-11-22T20:00:00Z"
+                            }
+                        }
+                    })
+                    .to_string(),
+                })
+            }
+            other => panic!("unexpected path: {other}"),
+        });
+
+        let client = OrbitFleetClient::new(transport);
+
+        // 1. Valid cached bearer -> reused, zero mints.
+        let plan = client
+            .resolve_environment_connect("node-mini", Some("cached-tok"), |_, _| async {
+                BearerCheckOutcome::Valid
+            })
+            .await
+            .expect("reuse plan");
+        assert_eq!(
+            plan,
+            EnvironmentConnectPlan::ReuseBearer {
+                server_url: "http://10.44.0.8:3773".to_owned(),
+                bearer: "cached-tok".to_owned(),
+            },
+            "valid cached bearer must be reused"
+        );
+        assert_eq!(
+            mint_calls.load(Ordering::SeqCst),
+            0,
+            "valid cached bearer must not mint a pairing"
+        );
+
+        // 2. Unreachable probe -> keep cached bearer for ConnCore reconnect, zero mints.
+        let plan = client
+            .resolve_environment_connect("node-mini", Some("cached-tok"), |_, _| async {
+                BearerCheckOutcome::Unreachable
+            })
+            .await
+            .expect("unreachable plan");
+        assert!(
+            matches!(plan, EnvironmentConnectPlan::ReuseBearer { .. }),
+            "unreachable probe should preserve cached bearer"
+        );
+        assert_eq!(mint_calls.load(Ordering::SeqCst), 0);
+
+        // 3. Rejected cached bearer -> falls back to minting a pairing once.
+        let plan = client
+            .resolve_environment_connect("node-mini", Some("stale-tok"), |_, _| async {
+                BearerCheckOutcome::Rejected
+            })
+            .await
+            .expect("fallback mint plan");
+        assert_eq!(
+            plan,
+            EnvironmentConnectPlan::PairWithCode {
+                server_url: "http://10.44.0.8:3773/".to_owned(),
+                pairing_code: "fresh-code".to_owned(),
+                expires_at: "2026-11-22T20:00:00Z".to_owned(),
+            },
+            "rejected cached bearer must fall back to minting a pairing"
+        );
+        assert_eq!(
+            mint_calls.load(Ordering::SeqCst),
+            1,
+            "rejected cached bearer must mint exactly once"
+        );
+
+        // 4. No cached bearer -> mints directly without probing.
+        let probed = Arc::new(AtomicUsize::new(0));
+        let probed_ref = Arc::clone(&probed);
+        let plan = client
+            .resolve_environment_connect("node-mini", None, move |_, _| async move {
+                probed_ref.fetch_add(1, Ordering::SeqCst);
+                BearerCheckOutcome::Valid
+            })
+            .await
+            .expect("direct mint plan");
+        assert!(
+            matches!(plan, EnvironmentConnectPlan::PairWithCode { .. }),
+            "missing bearer must mint directly"
+        );
+        assert_eq!(
+            probed.load(Ordering::SeqCst),
+            0,
+            "verify_bearer must not run when cached_bearer is None"
+        );
+        assert_eq!(mint_calls.load(Ordering::SeqCst), 2);
+
+        // 5. Unknown server_id -> 404 NotFound.
+        let err = client
+            .resolve_environment_connect("missing-env", None, |_, _| async {
+                BearerCheckOutcome::Valid
+            })
+            .await
+            .expect_err("unknown server_id must fail");
+        assert_eq!(
+            err.reason(),
+            crate::OrbitErrorReason::NotFound,
+            "unknown server_id should classify as NotFound"
         );
     }
 }

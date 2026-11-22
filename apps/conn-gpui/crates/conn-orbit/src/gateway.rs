@@ -37,6 +37,7 @@ pub enum GatewayMethod {
     Post,
     Put,
     Patch,
+    Delete,
 }
 
 impl GatewayMethod {
@@ -46,6 +47,7 @@ impl GatewayMethod {
             Self::Post => reqwest::Method::POST,
             Self::Put => reqwest::Method::PUT,
             Self::Patch => reqwest::Method::PATCH,
+            Self::Delete => reqwest::Method::DELETE,
         }
     }
 }
@@ -89,6 +91,11 @@ impl GatewayRequest {
         Self::with_method(GatewayMethod::Patch, path)
     }
 
+    /// A `DELETE` below `/api/v1/conn` (allowed only on `/reservations/{id}`).
+    pub fn delete(path: impl Into<String>) -> Self {
+        Self::with_method(GatewayMethod::Delete, path)
+    }
+
     fn with_method(method: GatewayMethod, path: impl Into<String>) -> Self {
         Self {
             method,
@@ -112,6 +119,20 @@ impl GatewayRequest {
     #[must_use]
     pub fn with_query(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.query.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets a custom request timeout (must be between 1 and 120 seconds).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Attaches an `Idempotency-Key` header.
+    #[must_use]
+    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
         self
     }
 
@@ -206,27 +227,49 @@ fn http_tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
 #[derive(Debug, Clone)]
 pub struct OrbitGateway {
     http: reqwest::Client,
+    base_url: Url,
 }
 
 impl OrbitGateway {
-    /// Builds the client. Redirects are off, so no answer can lead a call off the allowlist.
+    /// Builds the client targeting [`DEFAULT_ORBIT_GATEWAY_URL`]. Redirects are off, so no answer
+    /// can lead a call off the allowlist.
     ///
     /// # Errors
     /// Returns [`GatewayError::Network`] if the platform TLS verifier or HTTP client fails to
     /// initialize.
     pub fn new() -> Result<Self, GatewayError> {
+        Self::with_base_url(DEFAULT_ORBIT_GATEWAY_URL)
+    }
+
+    /// Builds the client targeting a custom Orbit Gateway origin (`http://` or `https://`).
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::InvalidRequest`] if `base_url` is not a valid `http://` or
+    /// `https://` URL with a host, or [`GatewayError::Network`] if the TLS/HTTP client fails to
+    /// initialize.
+    pub fn with_base_url(base_url: &str) -> Result<Self, GatewayError> {
+        let parsed = parse_gateway_base_url(base_url)?;
         let tls = http_tls_config().map_err(|error| GatewayError::Network(error.to_string()))?;
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(tls)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| GatewayError::Network(error.to_string()))?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            base_url: parsed,
+        })
+    }
+
+    /// Normalized base origin this Gateway client targets.
+    #[must_use]
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
     }
 
     /// Sends one allowed call and returns any HTTP answer. Port of `send` in `orbitGateway.ts`.
     pub async fn send(&self, request: &GatewayRequest) -> Result<GatewayResponse, GatewayError> {
-        let mut url = checked_url(request)?;
+        let mut url = checked_url_with_base(&self.base_url, request)?;
         if !request.query.is_empty() {
             let mut pairs = url.query_pairs_mut();
             for (key, value) in &request.query {
@@ -270,9 +313,31 @@ fn network_error(error: reqwest::Error) -> GatewayError {
     }
 }
 
-/// Validates the whole request (the IPC schema's rules, then the allowlist) and returns its URL.
+fn parse_gateway_base_url(raw: &str) -> Result<Url, GatewayError> {
+    let mut parsed = Url::parse(raw.trim()).map_err(|err| {
+        GatewayError::InvalidRequest(format!("invalid Orbit Gateway URL `{raw}`: {err}"))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") || !parsed.has_host() {
+        return Err(GatewayError::InvalidRequest(format!(
+            "expected http:// or https:// Orbit Gateway URL with host, got `{raw}`"
+        )));
+    }
+    parsed.set_path("");
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed)
+}
+
+/// Validates the whole request against [`DEFAULT_ORBIT_GATEWAY_URL`] and returns its URL.
 pub fn checked_url(request: &GatewayRequest) -> Result<Url, GatewayError> {
-    if !is_request_path(&request.path) {
+    let base = gateway_base().ok_or(GatewayError::PathNotAllowed)?;
+    checked_url_with_base(&base, request)
+}
+
+/// Validates the whole request (the IPC schema's rules, then the allowlist) against `base` and
+/// returns its URL.
+pub fn checked_url_with_base(base: &Url, request: &GatewayRequest) -> Result<Url, GatewayError> {
+    if !is_request_path(&request.path) || !is_allowed_conn_method(request) {
         return Err(GatewayError::PathNotAllowed);
     }
     if let Some(body) = &request.body
@@ -297,15 +362,37 @@ pub fn checked_url(request: &GatewayRequest) -> Result<Url, GatewayError> {
         ));
     }
     let url = if request.root {
-        resolve_root_url(request)
+        resolve_root_url_with_base(base, request)
     } else {
-        resolve_conn_url(&request.path)
+        resolve_conn_url_with_base(base, &request.path)
     };
     let url = url.ok_or(GatewayError::PathNotAllowed)?;
     if !request.root && !is_allowed_conn_query(request) {
         return Err(GatewayError::QueryNotAllowed);
     }
     Ok(url)
+}
+
+/// `DELETE` is only permitted on non-root `/reservations/{id}` (matching `orbitGateway.ts`).
+#[must_use]
+pub fn is_allowed_conn_method(request: &GatewayRequest) -> bool {
+    if request.method != GatewayMethod::Delete {
+        return true;
+    }
+    if request.root {
+        return false;
+    }
+    let Some(parts) = segments(&request.path) else {
+        return false;
+    };
+    matches!(
+        parts.as_slice(),
+        ["reservations", id]
+            if (1..=64).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    )
 }
 
 /// `^\/[A-Za-z0-9/_.%-]{0,512}$`
@@ -363,12 +450,18 @@ fn gateway_base() -> Option<Url> {
 
 /// The Gateway URL for a Conn path, or `None` when the path would leave `/api/v1/conn`.
 pub fn resolve_conn_url(path: &str) -> Option<Url> {
+    resolve_conn_url_with_base(&gateway_base()?, path)
+}
+
+/// The Gateway URL for a Conn path under `base`, or `None` when the path would leave `/api/v1/conn`.
+pub fn resolve_conn_url_with_base(base: &Url, path: &str) -> Option<Url> {
     if has_unsafe_segment(path) {
         return None;
     }
-    let url = Url::parse(&format!("{DEFAULT_ORBIT_GATEWAY_URL}{CONN_PREFIX}{path}")).ok()?;
+    let origin = base.origin().ascii_serialization();
+    let url = Url::parse(&format!("{origin}{CONN_PREFIX}{path}")).ok()?;
     let inside = url.path() == CONN_PREFIX || url.path().starts_with(&format!("{CONN_PREFIX}/"));
-    (inside && url.origin() == gateway_base()?.origin()).then_some(url)
+    (inside && url.origin() == base.origin()).then_some(url)
 }
 
 /// `^[1-9][0-9]{0,15}$`
@@ -435,9 +528,15 @@ fn is_root_call(method: GatewayMethod, path: &str) -> bool {
 
 /// The Gateway URL of an allowed call below `/api/v1`, or `None` for anything else.
 pub fn resolve_root_url(request: &GatewayRequest) -> Option<Url> {
+    resolve_root_url_with_base(&gateway_base()?, request)
+}
+
+/// The Gateway URL of an allowed call below `/api/v1` under `base`, or `None` for anything else.
+pub fn resolve_root_url_with_base(base: &Url, request: &GatewayRequest) -> Option<Url> {
+    let origin = base.origin().ascii_serialization();
     if request.method == GatewayMethod::Get && request.path == "/task-insights" {
         return if is_task_insights_query(&request.query) {
-            Url::parse(&format!("{DEFAULT_ORBIT_GATEWAY_URL}/api/v1/task-insights")).ok()
+            Url::parse(&format!("{origin}/api/v1/task-insights")).ok()
         } else {
             None
         };
@@ -451,11 +550,7 @@ pub fn resolve_root_url(request: &GatewayRequest) -> Option<Url> {
     if !is_root_call(request.method, &request.path) {
         return None;
     }
-    Url::parse(&format!(
-        "{DEFAULT_ORBIT_GATEWAY_URL}/api/v1{}",
-        request.path
-    ))
-    .ok()
+    Url::parse(&format!("{origin}/api/v1{}", request.path)).ok()
 }
 
 /// `^[a-z0-9-]{1,63}$`: Orbit's Instance name rule.
@@ -904,5 +999,53 @@ mod tests {
         );
 
         OrbitGateway::new().expect("OrbitGateway builds with platform TLS verifier");
+    }
+
+    #[test]
+    fn supports_custom_gateway_base_url_and_reservation_delete_allowlist() {
+        let custom = OrbitGateway::with_base_url("https://gateway.staging.orbit:8443/ignored/")
+            .expect("custom gateway URL builds");
+        assert_eq!(
+            custom.base_url().as_str(),
+            "https://gateway.staging.orbit:8443/",
+            "base URL normalizes to origin"
+        );
+        assert_eq!(
+            checked_url_with_base(custom.base_url(), &GatewayRequest::get("/me"))
+                .expect("conn route resolves under custom origin")
+                .as_str(),
+            "https://gateway.staging.orbit:8443/api/v1/conn/me"
+        );
+        assert_eq!(
+            checked_url_with_base(
+                custom.base_url(),
+                &GatewayRequest::get("/projects").at_root()
+            )
+            .expect("root route resolves under custom origin")
+            .as_str(),
+            "https://gateway.staging.orbit:8443/api/v1/projects"
+        );
+        assert!(
+            OrbitGateway::with_base_url("ftp://gateway.orbit").is_err(),
+            "non-http(s) gateway URL must be rejected"
+        );
+
+        let allowed_delete = GatewayRequest::delete("/reservations/res-123-abc");
+        assert_eq!(
+            checked_url(&allowed_delete)
+                .expect("DELETE /reservations/{id} is allowed")
+                .as_str(),
+            "https://gateway.orbit/api/v1/conn/reservations/res-123-abc"
+        );
+        assert_eq!(
+            checked_url(&GatewayRequest::delete("/profiles/1")),
+            Err(GatewayError::PathNotAllowed),
+            "DELETE outside /reservations/{{id}} must be rejected"
+        );
+        assert_eq!(
+            checked_url(&GatewayRequest::delete("/reservations/res-1").at_root()),
+            Err(GatewayError::PathNotAllowed),
+            "root DELETE must be rejected"
+        );
     }
 }

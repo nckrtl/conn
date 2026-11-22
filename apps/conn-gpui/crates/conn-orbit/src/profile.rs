@@ -18,6 +18,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::client::OrbitErrorReason;
 use super::gateway::{GatewayRequest, GatewayTransport, OrbitGateway};
 
 /// Current schema version for `appearance` and `devices.*` profile sections.
@@ -55,6 +56,26 @@ pub enum ProfileError {
 }
 
 pub type ProfileResult<T> = Result<T, ProfileError>;
+
+impl ProfileError {
+    /// Maps this error to a canonical [`OrbitErrorReason`] matching [`TasksErrorReason`](super::client::TasksErrorReason).
+    #[must_use]
+    pub fn reason(&self) -> OrbitErrorReason {
+        match self {
+            Self::Unreachable(_) => OrbitErrorReason::Unreachable,
+            Self::InvalidResponse { .. } => OrbitErrorReason::InvalidResponse,
+            Self::VersionConflict => OrbitErrorReason::VersionConflict,
+            Self::Unsupported => OrbitErrorReason::Unsupported,
+            Self::Gateway { code, status, .. } => match (*status, code.as_str()) {
+                (403, "peer.identity_unknown") => OrbitErrorReason::NotANode,
+                (403, "node_access.required") => OrbitErrorReason::AccessRequired,
+                (409, "extension.disabled") => OrbitErrorReason::ExtensionDisabled,
+                (404, _) => OrbitErrorReason::NotFound,
+                _ => OrbitErrorReason::Gateway,
+            },
+        }
+    }
+}
 
 /// An Orbit user profile metadata record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +204,30 @@ impl ProfileThemeSlot {
         Self::Reference {
             id: "t3-code".to_owned(),
             source: ThemeSlotSource::Stock,
+        }
+    }
+
+    /// Resolves this slot to the Conn theme id (`t3-code-light` / `t3-code-dark` for stock, or
+    /// the slot's own id for built-in / custom / published themes), matching desktop and mobile.
+    #[must_use]
+    pub fn normalized_theme_id(&self, appearance: ProfileThemeAppearance) -> String {
+        let stock_id = match appearance {
+            ProfileThemeAppearance::Light => "t3-code-light",
+            ProfileThemeAppearance::Dark => "t3-code-dark",
+        };
+        match self {
+            Self::Reference {
+                source: ThemeSlotSource::Stock,
+                ..
+            } => stock_id.to_owned(),
+            other => {
+                let id = other.id();
+                if id == "t3-code" {
+                    stock_id.to_owned()
+                } else {
+                    id.to_owned()
+                }
+            }
         }
     }
 }

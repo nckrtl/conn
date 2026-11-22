@@ -35,13 +35,21 @@ pub mod profile;
 pub mod projects;
 pub mod realtime;
 pub mod tasks;
+pub mod thread_start;
 
-pub use client::{OrbitTasksClient, TasksError, TasksErrorReason, TasksInvalidation, TasksResult};
-pub use fleet::{
-    OrbitFleet, OrbitFleetClient, OrbitPairingTicket, OrbitServerTarget, OrbitTargetKind,
-    OrbitTargetStatus, select_primary_agent_node,
+pub use client::{
+    OrbitErrorReason, OrbitTasksClient, TasksError, TasksErrorReason, TasksInvalidation,
+    TasksResult,
 };
-pub use gateway::{GatewayError, GatewayRequest, GatewayResponse, GatewayTransport, OrbitGateway};
+pub use fleet::{
+    BearerCheckOutcome, EnvironmentConnectPlan, OrbitFleet, OrbitFleetClient, OrbitPairingTicket,
+    OrbitServerTarget, OrbitTargetKind, OrbitTargetStatus, check_bearer_session,
+    select_primary_agent_node,
+};
+pub use gateway::{
+    DEFAULT_ORBIT_GATEWAY_URL, GatewayError, GatewayRequest, GatewayResponse, GatewayTransport,
+    OrbitGateway,
+};
 pub use profile::{
     APPEARANCE_SECTION, DESKTOP_DEVICE_SECTION, OrbitNode, OrbitProfile, OrbitProfileClient,
     OrbitProfileSettings, OrbitSyncPrefs, OrbitWorkspace, PROFILE_SCHEMA_VERSION,
@@ -61,6 +69,13 @@ pub use realtime::{
 pub use tasks::{
     InsightsPeriod, OrbitEnvironment, TaskDetail, TaskInsights, TaskInsightsQuery, TaskLane,
     TaskSummary, TasksListQuery, TasksPage,
+};
+pub use thread_start::{
+    ORBIT_CLONE_WORKSPACE, OrbitBranch, OrbitBranchInstance, OrbitBranchPullRequest,
+    OrbitBranchSelection, OrbitBranches, OrbitConnProject, OrbitConnProjectCheck,
+    OrbitConnProjectCheckStatus, OrbitInstanceNameCheck, OrbitInstanceNameReason, OrbitOperation,
+    OrbitOperationStatus, OrbitReservation, OrbitReservationState, OrbitThreadStartClient,
+    PreparedOrbitInstance, orbit_thread_instance_name,
 };
 
 /// Live checks against `https://gateway.orbit`, read-only GETs only. Run on a Mac that is an

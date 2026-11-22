@@ -89,6 +89,14 @@ Nothing here was skipped without asking. RPC **203 of 251** after this step; `/m
   `CodexAdapterV2.uploadFeedback` (`classification: "bug"`, `includeLogs: true`, `reason`,
   `threadId`).
 
+## Typed Gateway client (2026-11-22)
+
+`crates/conn-gateway-api` (#227): types and one value per operation, generated from Orbit's
+OpenAPI document (pinned from Orbit `7eeccf8`, `docs-site` branch). The `gateway-api --check`
+step fails a stale generation. **Not yet:** no client uses it; the Conn Server's
+`managed/gateway.rs` moves first, then `orbit_link.rs`, then `conn-orbit`. `--fetch` waits for
+Orbit group 6200's `GET /api/v1/openapi.json`, which also types the untyped objects.
+
 ## T3 state import (2026-11-21)
 
 A Conn Server that starts in a T3 server's state folder has the same threads (Nick,

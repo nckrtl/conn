@@ -242,7 +242,7 @@ const T3_TOOL_SENTENCES: ReadonlyMap<string, T3ToolSentence> = new Map<string, T
     },
   ],
   [
-    "Create\nCreating\nCreated\nT3 threads",
+    "Create\nCreating\nCreated\nConn threads",
     {
       detail: msg(
         "{status, select, inProgress {Creating Conn threads} completed {Created Conn threads} failed {Failed to create Conn threads} declined {Declined to create Conn threads} stopped {Stopped creating Conn threads} other {Creating Conn threads}}",
@@ -258,7 +258,7 @@ const T3_TOOL_SENTENCES: ReadonlyMap<string, T3ToolSentence> = new Map<string, T
     },
   ],
   [
-    "List\nListing\nListed\nT3 threads",
+    "List\nListing\nListed\nConn threads",
     {
       detail: msg(
         "{status, select, inProgress {Listing Conn threads} completed {Listed Conn threads} failed {Failed to list Conn threads} declined {Declined to list Conn threads} stopped {Stopped listing Conn threads} other {Listing Conn threads}}",
@@ -682,7 +682,7 @@ const T3_TOOL_SENTENCES: ReadonlyMap<string, T3ToolSentence> = new Map<string, T
     },
   ],
   [
-    "Update\nUpdating\nUpdated\nT3 thread metadata",
+    "Update\nUpdating\nUpdated\nConn thread metadata",
     {
       detail: msg(
         "{status, select, inProgress {Updating Conn thread metadata} completed {Updated Conn thread metadata} failed {Failed to update Conn thread metadata} declined {Declined to update Conn thread metadata} stopped {Stopped updating Conn thread metadata} other {Updating Conn thread metadata}}",

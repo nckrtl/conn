@@ -352,7 +352,7 @@ fn sign_in_refusal(input: &SourceControlSignInInput, step: SignInStep) -> Source
         SignInStep::Start => error(
             host,
             SourceControlSignInFailure::Unsupported,
-            "This server is not set up to sign in with Conn for GitHub.".into(),
+            "This server is not set up to sign in with T3 Code for GitHub.".into(),
         ),
         SignInStep::Wait | SignInStep::Cancel => error(
             host,
@@ -519,7 +519,7 @@ mod tests {
         );
         assert_eq!(github.host, "github.com", "host lowercased");
         assert_eq!(
-            github.detail, "This server is not set up to sign in with Conn for GitHub.",
+            github.detail, "This server is not set up to sign in with T3 Code for GitHub.",
             "start detail"
         );
         let waiting = sign_in_refusal(&sign_in("github", "github.com"), SignInStep::Wait);

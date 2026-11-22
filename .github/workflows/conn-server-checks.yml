@@ -22,6 +22,8 @@ on:
       - packages/client-runtime/src/environment/endpoint.ts
       - packages/client-runtime/src/errors/translatable.ts
       - packages/client-runtime/src/orbitGateway/client.ts
+      - packages/client-runtime/src/orbitGateway/operationNotices.ts
+      - packages/client-runtime/src/orbitGateway/realtimeSubscription.ts
       - packages/client-runtime/src/platform/capabilities.ts
       - packages/client-runtime/src/providerClients.ts
       - packages/client-runtime/src/rpc/http.ts

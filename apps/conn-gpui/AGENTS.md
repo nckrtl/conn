@@ -40,10 +40,11 @@ Keep crate boundaries strict so parallel sub-agents do not collide:
 | `crates/conn-state` | Pure Rust client state, shell & thread reducers, workspace/tab/panel layout state, settings model, unit tests | `gpui` / `gpui-kit` / I/O |
 | `crates/conn-theme` | Conn theme definitions (Dark Ocean, T3 Light/Dark, Grove, Ocean, Ember, Iris), `color-mix` shell token derivation, GPUI `Hsla` conversion | networking / app views |
 | `crates/conn-web` | Embedded browser runtime (CEF-on-demand via `cef-rs`, DevTools/CDP, offscreen/host surfaces) | `conn-state` / app views |
+| `crates/conn-ffi` | UniFFI Swift/iOS bridge wrapping `conn-client` + `conn-state` (Tokio runtime, event pump, snapshot coalescing, generated FFI bindings) | `gpui` / `gpui-kit` / `conn-app` / `conn-web` |
 | `crates/conn-app` | GPUI desktop binary: macOS window frame, workspace rail, thread sidebar, 44px header, chat timeline, composer, right panel (Files, Diff, Terminal, Browser, etc.), Settings modal, command palette, automation hook | direct raw WS protocol logic |
 
 - `conn-client`, `conn-state`, and `conn-theme` stay `#![forbid(unsafe_code)]`.
-- `unsafe` is permitted only in `conn-app` (macOS AppKit/Metal window shims) and `conn-web` (CEF FFI), and every `unsafe` block must carry a `// SAFETY:` comment (`undocumented_unsafe_blocks = "deny"`).
+- `unsafe` is permitted only in `conn-app` (macOS AppKit/Metal window shims), `conn-web` (CEF FFI), and generated UniFFI scaffolding inside `conn-ffi` (hand-written code in `conn-ffi` must remain free of `unsafe`); every hand-written `unsafe` block must carry a `// SAFETY:` comment (`undocumented_unsafe_blocks = "deny"`).
 - Keep `conn-client`, `conn-state`, and `conn-theme` 100% GPUI-free so `cargo test -p conn-client -p conn-state -p conn-theme` runs in seconds with no window server and so the same Rust core can be exposed to a future pure SwiftUI iOS client via UniFFI.
 
 ## Visual parity rules (pixel-for-pixel Conn)

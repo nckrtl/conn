@@ -471,6 +471,8 @@ async function fitOrbitThreadInstanceName(
   message: string,
   suffix: string,
   beforeCheck: () => void = () => {},
+  /** A check that fails after a refusal is unknown (null) instead of refusing every name. */
+  explicitOnly = false,
 ): Promise<OrbitInstanceNameFit | null> {
   let refused = false;
   for (const name of orbitThreadInstanceNameTries(message, suffix)) {
@@ -479,7 +481,7 @@ async function fitOrbitThreadInstanceName(
     try {
       answer = await client.checkInstanceName(projectId, name);
     } catch {
-      if (!refused) return null;
+      if (!refused || explicitOnly) return null;
       break;
     }
     if (answer.reason !== "domain_invalid") return { kind: "fits", name };
@@ -517,9 +519,15 @@ export function createOrbitInstanceNameFits(
       if (message.trim() === "") return;
       const id = key(projectId, message, suffix);
       if (checks.has(id)) return;
-      const check = fitOrbitThreadInstanceName(client, projectId, message, suffix).catch(
-        () => null,
-      );
+      // Kept only when Orbit answered: a refusal is cached only if it refused every name.
+      const check = fitOrbitThreadInstanceName(
+        client,
+        projectId,
+        message,
+        suffix,
+        undefined,
+        true,
+      ).catch(() => null);
       checks.set(id, check);
       // A failed check is not kept: the send or the next keystroke checks again.
       void check.then((fit) => {
@@ -1039,6 +1047,8 @@ export async function runOrbitThreadStart(
       checkStopped();
       // A name made from the message fits Orbit's address limits, as for a create.
       if (!current.createKey && current.nameSuffix) await fitDerivedName(current.nameSuffix);
+      /** A key saved by an earlier run: the finalize below may replay its Operation. */
+      const replayKey = current.createKey != null;
       const begin = current.createKey
         ? stamp("createStartedAt")
         : {
@@ -1073,7 +1083,10 @@ export async function runOrbitThreadStart(
         if (isOrbitGatewayError(error) && !isLostAdmission(error)) return null;
         throw error;
       }
-      admittedAt = ports.now();
+      // Only a finalize this call admitted counts as seen just now: a replay under a saved key may
+      // return one that ended long ago, whose clone may sleep since.
+      admittedAt =
+        replayKey || OPERATION_TERMINAL_STATUSES.has(operation.status) ? null : ports.now();
       update({ createOperationId: operation.id, instanceId: instanceId ?? operation.targetId });
       await cancelIfRequested(operation.id);
     }

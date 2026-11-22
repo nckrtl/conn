@@ -1174,6 +1174,30 @@ describe("runOrbitThreadStart with a reservation", () => {
     expect(harness.sent).toEqual(["env-501"]);
   });
 
+  it("lists the environments when a reload replays a finalize under its saved key", async () => {
+    const harness = startHarness({ finalize: async () => op(900, "succeeded") });
+    const replayed = { ...reservedStart(), createKey: "k", instanceId: 501 };
+    expect(await harness.run(replayed, (id) => id === "env-501")).toBe(true);
+    expect(harness.calls).toEqual(["finalize r1 fix-login", "operation 900", "environments"]);
+  });
+
+  it("does not keep a typed refusal when a shorter name's check failed", async () => {
+    const message = "Please refactor the checkout payment flow handlers";
+    let calls = 0;
+    const fits = createOrbitInstanceNameFits({
+      checkInstanceName: async (_projectId, name) => {
+        if (calls++ > 0) throw new Error("offline");
+        return { name, available: false, reason: "domain_invalid", domain: null };
+      },
+    });
+    fits.prefetch(78, message, "k3j9");
+    expect(await fits.lookup(78, message, "k3j9")).toBeNull();
+    expect(fits.lookup(78, message, "k3j9")).toBeUndefined();
+    const harness = startHarness({ nameLimit: 20, nameFits: fits });
+    expect(await harness.run({ ...reservedStart(), message, nameSuffix: "k3j9" })).toBe(true);
+    expect(harness.calls).toContain("finalize r1 please-refac-k3j9");
+  });
+
   it("lists the environments for a finalize resumed after a reload", async () => {
     const harness = startHarness({});
     const resumed = { ...reservedStart(), createKey: "k", createOperationId: 900, instanceId: 501 };

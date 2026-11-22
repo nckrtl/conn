@@ -1887,7 +1887,7 @@ impl ChatView {
 
         let mut card = div()
             .id(SharedString::from(format!("changed-files-{run_id}")))
-            .a11y_group(format!("chat.changed-files.{run_id}"), label.clone())
+            .a11y_group(format!("chat.changed-files.{run_id}"), label)
             .flex()
             .flex_col()
             .w_full()

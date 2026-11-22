@@ -322,7 +322,7 @@ fn render_popover_body(
                         None => "Context window usage".to_owned(),
                     },
                 )
-                .h(px(6.0))
+                .h(px(5.0))
                 .w_full()
                 .rounded_full()
                 .overflow_hidden()

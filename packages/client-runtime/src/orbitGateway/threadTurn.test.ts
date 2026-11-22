@@ -1,10 +1,12 @@
 import { ProjectId, ProviderInstanceId } from "@t3tools/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   FIRST_MESSAGE_ATTEMPT_MS,
+  FIRST_MESSAGE_SEND_MS,
   orbitFirstTurnInput,
   sendOrbitFirstMessage,
+  type OrbitFirstMessageAttempt,
   type OrbitFirstMessagePorts,
 } from "./threadTurn.ts";
 import { newOrbitThreadStart } from "./threadStart.ts";
@@ -29,7 +31,7 @@ function ports(results: Array<{ ok: true } | { ok: false; error: unknown }>) {
   const launches: Array<ReturnType<typeof orbitFirstTurnInput>> = [];
   const value: OrbitFirstMessagePorts = {
     waitForClone: async () => ({ projectId, modelSelection }),
-    startTurn: async (_environmentId, input) => {
+    startTurn: async (_environmentId, input, _timeoutMs) => {
       launches.push(input);
       return results.shift() ?? { ok: true };
     },
@@ -104,86 +106,94 @@ describe("sendOrbitFirstMessage", () => {
     expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
   });
 
-  it("resends the launch once the clone's server is back from the reload that dropped it", async () => {
-    // The finalize reloads the clone: its session drops just as the first message goes out.
-    let connection = { connected: true, generation: 1 };
-    const waits: number[] = [];
+  /**
+   * A clone server for the resend cases: `send` answers each send in turn, and the connection
+   * moves as the test says. Every wait records the session generation it asked for.
+   */
+  function reloading(options: {
+    readonly connection: { connected: boolean; generation: number };
+    readonly send: (attempt: number) => OrbitFirstMessageAttempt;
+    readonly reconnectTo?: { connected: boolean; generation: number };
+    readonly clock?: () => number;
+  }) {
+    let connection = options.connection;
     const { launches, ports: base } = ports([]);
+    const asked: number[] = [];
+    const limits: number[] = [];
     const run: OrbitFirstMessagePorts = {
       ...base,
-      startTurn: async (environmentId, input) => {
-        await base.startTurn(environmentId, input);
-        if (launches.length > 1) return { ok: true };
-        connection = { connected: false, generation: 1 };
-        return { ok: false, error: new Error("Environment env-41 is not connected.") };
+      startTurn: async (environmentId, input, timeoutMs) => {
+        limits.push(timeoutMs);
+        await base.startTurn(environmentId, input, timeoutMs);
+        return options.send(launches.length);
       },
       connection: () => connection,
-      waitForConnection: async (_environmentId, minGeneration, timeoutMs) => {
-        waits.push(minGeneration, timeoutMs);
-        connection = { connected: true, generation: 2 };
-        return true;
+      waitForConnection: async (_environmentId, minGeneration) => {
+        asked.push(minGeneration);
+        connection = options.reconnectTo ?? { connected: true, generation: minGeneration };
+        return connection.connected && connection.generation >= minGeneration;
       },
+      ...(options.clock ? { clock: options.clock } : {}),
     };
-
-    await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
-    expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
-    expect(waits).toEqual([2, 30_000]);
-  });
+    return { launches, asked, limits, run };
+  }
+  const notConnected = { _tag: "EnvironmentRpcUnavailableError", message: "not connected" };
 
   it("resends a launch lost while its session is torn down, though it still reads connected", async () => {
-    // The supervisor drops the RPC session before it publishes the disconnect: the send fails as
-    // not connected while the state still shows the old session.
-    const { launches, ports: base } = ports([]);
-    const waited: number[] = [];
-    const run: OrbitFirstMessagePorts = {
-      ...base,
-      startTurn: async (environmentId, input) => {
-        await base.startTurn(environmentId, input);
-        return launches.length > 1
-          ? { ok: true }
-          : {
-              ok: false,
-              error: { _tag: "EnvironmentRpcUnavailableError", message: "Clone is not connected." },
-            };
-      },
-      connection: () => ({ connected: true, generation: 1 }),
-      waitForConnection: async (_environmentId, minGeneration) => {
-        waited.push(minGeneration);
-        return true;
-      },
-    };
+    // The supervisor drops the RPC session before it publishes the disconnect.
+    const { launches, asked, limits, run } = reloading({
+      connection: { connected: true, generation: 1 },
+      send: (attempt) => (attempt > 1 ? { ok: true } : { ok: false, error: notConnected }),
+    });
 
     await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
     expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
     // Only a session newer than the one that lost the send takes the resend.
-    expect(waited).toEqual([2]);
+    expect(asked).toEqual([2]);
+    expect(limits).toEqual([FIRST_MESSAGE_ATTEMPT_MS, FIRST_MESSAGE_ATTEMPT_MS]);
   });
 
-  it("gives up on a send the server never answers and sends it again", async () => {
-    const { launches, ports: base } = ports([]);
-    const sleeps: Array<{ ms: number; end: () => void }> = [];
-    const waited: number[] = [];
-    const run: OrbitFirstMessagePorts = {
-      ...base,
-      startTurn: async (environmentId, input) => {
-        await base.startTurn(environmentId, input);
-        return launches.length > 1 ? { ok: true } : new Promise(() => {});
-      },
-      sleep: (ms) => new Promise((end) => sleeps.push({ ms, end })),
-      connection: () => ({ connected: true, generation: 1 }),
-      waitForConnection: async (_environmentId, minGeneration) => {
-        waited.push(minGeneration);
-        return true;
-      },
-    };
+  it("resends a launch made during a reconnect on the session that reconnect brings up", async () => {
+    // Session 1 is closed and the supervisor connects session 2: a send now has no session.
+    const { launches, asked, run } = reloading({
+      connection: { connected: false, generation: 2 },
+      send: (attempt) => (attempt > 1 ? { ok: true } : { ok: false, error: notConnected }),
+      reconnectTo: { connected: true, generation: 2 },
+    });
 
-    const sent = sendOrbitFirstMessage(start, run);
-    await vi.waitFor(() => expect(sleeps).toHaveLength(1));
-    expect(sleeps[0]!.ms).toBe(FIRST_MESSAGE_ATTEMPT_MS);
-    sleeps[0]!.end();
-    await expect(sent).resolves.toBe(projectId);
+    await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
+    expect(launches).toHaveLength(2);
+    expect(asked).toEqual([0]);
+  });
+
+  it("sends again after a send that was cancelled at its limit, on any session", async () => {
+    const { launches, asked, run } = reloading({
+      connection: { connected: true, generation: 1 },
+      send: (attempt) =>
+        attempt > 1 ? { ok: true } : { ok: false, error: new Error("timed out"), unanswered: true },
+    });
+
+    await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
     expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
-    expect(waited).toEqual([1]);
+    expect(asked).toEqual([0]);
+  });
+
+  it("fails once the send's deadline passes, with no send left waiting", async () => {
+    let now = 0;
+    const { launches, limits, run } = reloading({
+      connection: { connected: true, generation: 1 },
+      clock: () => now,
+      send: () => {
+        // Each send is cancelled at its limit.
+        now += FIRST_MESSAGE_ATTEMPT_MS;
+        return { ok: false, error: new Error("timed out"), unanswered: true };
+      },
+    });
+
+    await expect(sendOrbitFirstMessage(start, run)).rejects.toThrow("did not take");
+    // 75 s: three full sends and a last one cut to what is left.
+    expect(limits).toEqual([20_000, 20_000, 20_000, FIRST_MESSAGE_SEND_MS - 60_000]);
+    expect(launches).toHaveLength(4);
   });
 
   it("never counts a refused launch as sent, and does not resend it on a steady session", async () => {

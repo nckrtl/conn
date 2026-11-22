@@ -1636,6 +1636,36 @@ describe("runtime command runner", () => {
     registry.dispose();
   });
 
+  it("Conn: a send past its time limit is interrupted and frees its serial lane", async () => {
+    // `startTurnWithin`: the limit sits inside the scheduled effect, so the hung request is
+    // cancelled and the resend queued behind it on the same thread runs.
+    const events: string[] = [];
+    const runtime = Atom.runtime(Layer.empty);
+    const scheduler = createAtomCommandScheduler();
+    const concurrency = { mode: "serial" as const, key: () => "thread-1" };
+    const send = createRuntimeCommand(runtime, {
+      label: "test.send-within",
+      scheduler,
+      concurrency,
+      execute: (attempt: number) =>
+        (attempt === 1
+          ? Effect.never.pipe(
+              Effect.onInterrupt(() => Effect.sync(() => events.push("1:cancelled"))),
+            )
+          : Effect.sync(() => events.push(`${attempt}:sent`))
+        ).pipe(Effect.timeout(5)),
+    });
+    const registry = AtomRegistry.make();
+
+    const first = send.run(registry, 1);
+    const resend = send.run(registry, 2);
+    const timedOut = await first;
+    expect(timedOut._tag).toBe("Failure");
+    expect(await resend).toMatchObject({ _tag: "Success" });
+    expect(events).toEqual(["1:cancelled", "2:sent"]);
+    registry.dispose();
+  });
+
   it.effect("releases a shared scheduler lane before the outer command finishes", () =>
     Effect.gen(function* () {
       const handoffStarted = Latch.makeUnsafe();

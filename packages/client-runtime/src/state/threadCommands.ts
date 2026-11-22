@@ -325,6 +325,21 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    /**
+     * Conn: a turn start with a time limit, in the same per-thread queue. The limit interrupts the
+     * request, so an unanswered send leaves the queue for the next; it fails with a
+     * `TimeoutError`. A resend under the same command id finishes the first, never a second.
+     */
+    startTurnWithin: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:start-turn-within",
+      execute: (input: {
+        readonly threadId: ThreadId;
+        readonly turn: Parameters<typeof startThreadTurn>[0];
+        readonly timeoutMs: number;
+      }) => startThreadTurn(input.turn).pipe(Effect.timeout(input.timeoutMs)),
+      scheduler,
+      concurrency,
+    }),
     interruptTurn: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:interrupt-turn",
       execute: interruptTurn,

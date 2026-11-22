@@ -18,6 +18,7 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 
@@ -269,16 +270,21 @@ const firstMessagePorts: OrbitFirstMessagePorts = {
       },
       timeoutMs,
     }),
-  startTurn: async (environmentId, input) => {
+  startTurn: async (environmentId, input, timeoutMs) => {
     const result = await runAtomCommand(
       appAtomRegistry,
-      threadEnvironment.startTurn,
-      { environmentId: environmentId as EnvironmentId, input },
+      threadEnvironment.startTurnWithin,
+      {
+        environmentId: environmentId as EnvironmentId,
+        input: { threadId: input.threadId, turn: input, timeoutMs },
+      },
       { reportFailure: false },
     );
-    return result._tag === "Success"
-      ? { ok: true }
-      : { ok: false, error: squashAtomCommandFailure(result) };
+    if (result._tag === "Success") return { ok: true };
+    const error = squashAtomCommandFailure(result);
+    return Cause.isTimeoutError(error)
+      ? { ok: false, error, unanswered: true }
+      : { ok: false, error };
   },
   now: () => new Date().toISOString(),
   stopped: () => false,

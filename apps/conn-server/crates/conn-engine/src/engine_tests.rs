@@ -741,6 +741,23 @@ async fn an_accepted_launch_replays_after_its_provider_instance_is_disabled() {
         .launch_thread(launch("fresh-after-disable", "t2"))
         .await;
     assert!(matches!(fresh, Err(EngineError::Rejected(_))));
+
+    // A launch into the existing thread has only its first message's receipt.
+    host.disabled
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let reuse = |command: &str| {
+        let mut input = launch(command, "t1");
+        input["reuseExistingThread"] = json!(true);
+        input["initialMessage"]["messageId"] = json!(format!("m:{command}"));
+        input
+    };
+    engine.launch_thread(reuse("reuse-1")).await.unwrap();
+    host.disabled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let replayed = engine.launch_thread(reuse("reuse-1")).await.unwrap();
+    assert_eq!(replayed["resumed"], true);
+    let refused = engine.launch_thread(reuse("reuse-2")).await;
+    assert!(matches!(refused, Err(EngineError::Rejected(_))));
 }
 
 /// `ThreadLaunchService.launch` for a scheduled run: the first message carries the task id

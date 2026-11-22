@@ -1,4 +1,3 @@
-// @effect-diagnostics globalTimers:off - The first-message send runs in the app, outside an Effect runtime.
 import {
   CommandId,
   MessageId,
@@ -63,11 +62,15 @@ export interface OrbitFirstMessagePorts {
     /** Whether the clone's server offers a model's provider; without it every model counts. */
     readonly offers?: (selection: ModelSelection) => boolean;
   } | null>;
-  /** Runs the launch; resolves the failure when the server did not take it. */
+  /**
+   * Runs the launch within `timeoutMs`; resolves the failure when the server did not take it.
+   * A send past its limit is cancelled, so it holds the thread's queue no longer.
+   */
   readonly startTurn: (
     environmentId: string,
     input: ReturnType<typeof orbitFirstTurnInput>,
-  ) => Promise<{ readonly ok: true } | { readonly ok: false; readonly error: unknown }>;
+    timeoutMs: number,
+  ) => Promise<OrbitFirstMessageAttempt>;
   readonly now: () => string;
   /** True once the start was dismissed; no launch goes out then. */
   readonly stopped: () => boolean;
@@ -83,9 +86,13 @@ export interface OrbitFirstMessagePorts {
     minGeneration: number,
     timeoutMs: number,
   ) => Promise<boolean>;
-  /** Waits; tests replace it. */
-  readonly sleep?: (ms: number) => Promise<void>;
+  /** Epoch milliseconds; tests replace it. */
+  readonly clock?: () => number;
 }
+
+export type OrbitFirstMessageAttempt =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: unknown; readonly unanswered?: true };
 
 export interface OrbitCloneConnection {
   readonly connected: boolean;
@@ -96,10 +103,8 @@ export interface OrbitCloneConnection {
  * A clone reloads its server when its reservation is finalized, and the first message can meet
  * that reload. The same command id makes a resend finish the first launch, never start a second.
  */
-const FIRST_MESSAGE_RECONNECTS = 3;
-const FIRST_MESSAGE_RECONNECT_WAIT_MS = 30_000;
-/** A send the server never answers is given up after this, and sent again (same command id). */
-export const FIRST_MESSAGE_ATTEMPT_MS = 45_000;
+export const FIRST_MESSAGE_ATTEMPT_MS = 20_000;
+export const FIRST_MESSAGE_SEND_MS = 75_000;
 
 /** The send never reached a server that answered: its session was gone or went down under it. */
 function isConnectionLoss(error: unknown): boolean {
@@ -107,10 +112,6 @@ function isConnectionLoss(error: unknown): boolean {
     typeof error === "object" && error !== null && "_tag" in error ? error._tag : undefined;
   return tag === "EnvironmentRpcUnavailableError" || tag === "RpcClientError";
 }
-
-type Attempt =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly error: unknown; readonly unanswered?: true };
 
 /** Sends the first message; resolves its clone project. Only a launch the server took counts. */
 export async function sendOrbitFirstMessage(
@@ -134,27 +135,25 @@ export async function sendOrbitFirstMessage(
     modelSelection,
     createdAt: ports.now(),
   });
-  const attempt = async (): Promise<Attempt> => {
-    const unanswered: Attempt = {
-      ok: false,
-      error: new Error("The clone's server did not answer the first message."),
-      unanswered: true,
-    };
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const limit = ports.sleep
-      ? ports.sleep(FIRST_MESSAGE_ATTEMPT_MS).then(() => unanswered)
-      : new Promise<Attempt>((resolve) => {
-          timer = setTimeout(() => resolve(unanswered), FIRST_MESSAGE_ATTEMPT_MS);
-        });
-    try {
-      return await Promise.race([ports.startTurn(start.environmentId, input), limit]);
-    } finally {
-      clearTimeout(timer);
-    }
-  };
+  const clock = ports.clock ?? Date.now;
+  const deadline = clock() + FIRST_MESSAGE_SEND_MS;
+  const attempt = () =>
+    ports.startTurn(
+      start.environmentId,
+      input,
+      Math.max(Math.min(FIRST_MESSAGE_ATTEMPT_MS, deadline - clock()), 0),
+    );
   let result = await attempt();
-  for (let reconnect = 0; !result.ok && reconnect < FIRST_MESSAGE_RECONNECTS; reconnect += 1) {
-    if (!(await reconnectedAfterFailure(start.environmentId, ports, before, result))) break;
+  // Each attempt ends within its limit and is cancelled then, so none is left queued at the end.
+  while (!result.ok && clock() < deadline) {
+    const minGeneration = resendAfter(start.environmentId, ports, before, result);
+    if (minGeneration === null) break;
+    const back = await ports.waitForConnection!(
+      start.environmentId,
+      minGeneration,
+      Math.max(deadline - clock(), 0),
+    );
+    if (!back || clock() >= deadline) break;
     if (ports.stopped()) throw new Error("The thread start was stopped.");
     before = ports.connection?.(start.environmentId);
     result = await attempt();
@@ -169,26 +168,23 @@ export async function sendOrbitFirstMessage(
 }
 
 /**
- * Whether a failed send may go again, once a session is up to take it. A send lost with its
- * session waits for a newer one: the old one can still read as connected while it is torn down.
- * An unanswered send waits for any session. A failure on a steady session is the server's answer.
+ * The session generation a failed send may go again on, or null when it may not. A send lost with
+ * the session it used waits for a newer one: that one can still read as connected while it is torn
+ * down. A send made with no session up, or one that was not answered, takes any session. A failure
+ * on a steady session is the server's answer.
  */
-async function reconnectedAfterFailure(
+function resendAfter(
   environmentId: string,
   ports: OrbitFirstMessagePorts,
   before: OrbitCloneConnection | undefined,
-  failed: Extract<Attempt, { ok: false }>,
-): Promise<boolean> {
+  failed: Extract<OrbitFirstMessageAttempt, { ok: false }>,
+): number | null {
   if (before === undefined || ports.connection === undefined || !ports.waitForConnection) {
-    return false;
+    return null;
   }
   const after = ports.connection(environmentId);
   const lost =
-    isConnectionLoss(failed.error) ||
-    !before.connected ||
-    !after.connected ||
-    after.generation !== before.generation;
-  if (!lost && failed.unanswered !== true) return false;
-  const minGeneration = lost ? before.generation + 1 : before.generation;
-  return ports.waitForConnection(environmentId, minGeneration, FIRST_MESSAGE_RECONNECT_WAIT_MS);
+    isConnectionLoss(failed.error) || !after.connected || after.generation !== before.generation;
+  if (!before.connected || failed.unanswered === true) return 0;
+  return lost ? before.generation + 1 : null;
 }

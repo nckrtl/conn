@@ -1493,14 +1493,20 @@ impl Engine for SqliteEngine {
             // `ThreadLaunchService` asks `assertProviderInstanceEnabled` before it makes the
             // thread, so a refused launch leaves no thread behind. That check passes a command
             // with a receipt: a replay starts no work, and settings never refuse an accepted retry.
+            // A launch into an existing thread makes no `thread.create`: its receipt is its first
+            // message's, as T3 reads the launch receipt and then the message's.
             let command_id = input["commandId"].as_str().unwrap_or_default().to_owned();
             let accepted = !command_id.is_empty()
                 && self
                     .inner
-                    .db(move |store| store.receipt(&command_id))
+                    .db(move |store| {
+                        Ok(store.receipt(&command_id)?.is_some()
+                            || store
+                                .receipt(&format!("{command_id}:initial-message"))?
+                                .is_some())
+                    })
                     .await
-                    .map_err(EngineError::Internal)?
-                    .is_some();
+                    .map_err(EngineError::Internal)?;
             if !accepted
                 && let Some(host) = &self.inner.host
                 && let (Some(project), Some(instance)) = (

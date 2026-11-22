@@ -3707,7 +3707,6 @@
   "b725843fd45b74aa": "Credenciales",
   "b239ba3ce2899a3e": "O usa tus propias credenciales",
   "f0e6397ab4de588e": "Token",
-  "15ad0159a826b290": "Elige el {scope} de {tracker} cuyas issues lista cada proyecto junto a las de su propio repositorio.",
   "ce2136b36f87b655": "Conecta este entorno para cambiar sus ajustes.",
   "a90a441fd0e08de7": "Este entorno",
   "32fb83554cfd85b4": "Modelos de transcripción",
@@ -5465,5 +5464,9 @@
   "ad208e3e32c85029": "Ocultar todo",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Llamadas a herramientas en el chat",
-  "8d545d54c0a9e950": "Oculta los comandos, ediciones y búsquedas que ejecutan los agentes. Ocultar las correctas mantiene los fallos. Zen solo muestra las respuestas finales. Las aprobaciones, preguntas y errores siempre se muestran."
+  "8d545d54c0a9e950": "Oculta los comandos, ediciones y búsquedas que ejecutan los agentes. Ocultar las correctas mantiene los fallos. Zen solo muestra las respuestas finales. Las aprobaciones, preguntas y errores siempre se muestran.",
+  "cf3ad61859b09910": "Aprobado antes del último commit",
+  "3e562db94c685f71": "Desactualizado",
+  "295392927d5c8a84": "Elige uno o más {scope}s de {tracker} para cada proyecto. Sus issues aparecen junto a las del repositorio, y los agentes crean issues nuevas en el primero.",
+  "c1968621dc365115": "No se pudieron sincronizar los mensajes"
 }

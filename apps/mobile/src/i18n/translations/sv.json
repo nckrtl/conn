@@ -3711,7 +3711,6 @@
   "b725843fd45b74aa": "Autentiseringsuppgifter",
   "b239ba3ce2899a3e": "Eller använd dina egna autentiseringsuppgifter",
   "f0e6397ab4de588e": "Token",
-  "15ad0159a826b290": "Välj den {scope} i {tracker} vars ärenden varje projekt listar bredvid repots egna.",
   "ce2136b36f87b655": "Anslut den här miljön för att ändra dess inställningar.",
   "a90a441fd0e08de7": "Den här miljön",
   "32fb83554cfd85b4": "Transkriberingsmodeller",
@@ -5469,5 +5468,9 @@
   "ad208e3e32c85029": "Dölj alla",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Verktygsanrop i chatten",
-  "8d545d54c0a9e950": "Dölj kommandon, redigeringar och sökningar som agenter kör. Dölj lyckade behåller misslyckanden. Zen visar bara slutliga svar. Godkännanden, frågor och fel visas alltid."
+  "8d545d54c0a9e950": "Dölj kommandon, redigeringar och sökningar som agenter kör. Dölj lyckade behåller misslyckanden. Zen visar bara slutliga svar. Godkännanden, frågor och fel visas alltid.",
+  "cf3ad61859b09910": "Godkänd före den senaste committen",
+  "3e562db94c685f71": "Inaktuell",
+  "295392927d5c8a84": "Välj en eller flera {scope} i {tracker} för varje projekt. Deras ärenden listas bredvid repots egna, och agenter skapar nya ärenden i den första.",
+  "c1968621dc365115": "Det gick inte att synkronisera meddelanden"
 }

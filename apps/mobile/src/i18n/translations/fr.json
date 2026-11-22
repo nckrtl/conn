@@ -3707,7 +3707,6 @@
   "b725843fd45b74aa": "Identifiants",
   "b239ba3ce2899a3e": "Ou utilisez vos propres identifiants",
   "f0e6397ab4de588e": "Jeton",
-  "15ad0159a826b290": "Choisissez le {scope} {tracker} dont chaque projet liste les tickets à côté de ceux de son propre dépôt.",
   "ce2136b36f87b655": "Connectez cet environnement pour modifier ses paramètres.",
   "a90a441fd0e08de7": "Cet environnement",
   "32fb83554cfd85b4": "Modèles de transcription",
@@ -5465,5 +5464,9 @@
   "ad208e3e32c85029": "Tout masquer",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Appels d’outils dans la discussion",
-  "8d545d54c0a9e950": "Masque les commandes, modifications et recherches lancées par les agents. Masquer les réussis garde les échecs. Zen n’affiche que les réponses finales. Les approbations, questions et erreurs s’affichent toujours."
+  "8d545d54c0a9e950": "Masque les commandes, modifications et recherches lancées par les agents. Masquer les réussis garde les échecs. Zen n’affiche que les réponses finales. Les approbations, questions et erreurs s’affichent toujours.",
+  "cf3ad61859b09910": "Approuvé avant le dernier commit",
+  "3e562db94c685f71": "Obsolète",
+  "295392927d5c8a84": "Choisissez un ou plusieurs {scope}s {tracker} pour chaque projet. Leurs tickets s'affichent à côté de ceux du dépôt, et les agents créent les nouveaux tickets dans le premier.",
+  "c1968621dc365115": "Impossible de synchroniser les messages"
 }

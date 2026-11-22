@@ -1,4 +1,4 @@
-import { RefreshCwIcon } from "lucide-react";
+import { CircleAlertIcon, RefreshCwIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { threadSyncLabel, type ThreadSyncPhase } from "../../threadSync";
@@ -66,9 +66,13 @@ function ThreadNowLine({
 function ThreadSyncLine({ phase }: { readonly phase: ThreadSyncPhase }) {
   const m = useMessages();
   return (
-    <div className={lineClassName} role="status" data-composer-sync-status={phase}>
+    <div
+      className={lineClassName}
+      role={phase === "failed" ? "alert" : "status"}
+      data-composer-sync-status={phase}
+    >
       <span aria-hidden className="flex w-6 shrink-0 items-center justify-center">
-        <RefreshCwIcon />
+        {phase === "failed" ? <CircleAlertIcon /> : <RefreshCwIcon />}
       </span>
       <span className="truncate">{threadSyncLabel(phase, m)}</span>
     </div>

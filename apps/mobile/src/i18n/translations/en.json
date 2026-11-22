@@ -3711,7 +3711,6 @@
   "b725843fd45b74aa": "Credentials",
   "b239ba3ce2899a3e": "Or use your own credentials",
   "f0e6397ab4de588e": "Token",
-  "15ad0159a826b290": "Pick the {tracker} {scope} whose issues each project lists beside its repository's own.",
   "ce2136b36f87b655": "Connect this environment to change its settings.",
   "a90a441fd0e08de7": "This environment",
   "32fb83554cfd85b4": "Transcription models",
@@ -5470,5 +5469,9 @@
   "ad208e3e32c85029": "Hide all",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Tool calls in chat",
-  "8d545d54c0a9e950": "Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show."
+  "8d545d54c0a9e950": "Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show.",
+  "cf3ad61859b09910": "Approved before the latest commit",
+  "3e562db94c685f71": "Outdated",
+  "295392927d5c8a84": "Pick one or more {tracker} {scope}s for each project. Their issues list beside the repository's own, and agents file new issues in the first one.",
+  "c1968621dc365115": "Could not sync messages"
 }

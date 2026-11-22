@@ -1,4 +1,10 @@
-import { EnvironmentId, ProviderInstanceId, RunId, type VcsRef } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  GitCommandError,
+  ProviderInstanceId,
+  RunId,
+  type VcsRef,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import { dedupeRemoteBranchesWithLocalMatches } from "@t3tools/shared/git";
 import {
@@ -17,8 +23,25 @@ import {
   shouldIncludeBranchPickerItem,
   shouldShowComposerContextStrip,
   isBranchHoldCurrent,
+  toBranchActionErrorMessage,
 } from "./BranchToolbar.logic";
 import { orbitDraftContextRow, type OrbitDraftTarget } from "../orbit/orbitDraft";
+
+describe("toBranchActionErrorMessage", () => {
+  it("shows a Git failure's detail without the operation and cwd", () => {
+    const error = new GitCommandError({
+      operation: "GitVcsDriver.switchRef.checkout",
+      command: "git",
+      cwd: "/tmp/repo",
+      detail: "Commit, stash, or discard them, then switch again.",
+    });
+
+    expect(toBranchActionErrorMessage(error)).toBe(
+      "Commit, stash, or discard them, then switch again.",
+    );
+    expect(toBranchActionErrorMessage(new Error("boom"))).toBe("boom");
+  });
+});
 
 describe("resolveDraftEnvModeAfterBranchChange", () => {
   it("switches to local mode when returning from an existing worktree to the main worktree", () => {

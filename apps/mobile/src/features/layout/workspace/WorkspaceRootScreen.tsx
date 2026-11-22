@@ -42,7 +42,7 @@ import { useWorkspacePhoneBar } from "./useWorkspacePhoneBar";
 import { WORKSPACE_DOCK, workspaceDockBottomClearance } from "./workspace-tabs-state";
 import { NATIVE_MAIL_SEARCH_TOOLBAR_CONTENT_INSET } from "../native-mail-search-toolbar";
 import { HomeConnectionStatusOverlay } from "../../home/WorkspaceConnectionTitle";
-import { WorkspaceSidebarTabs } from "./WorkspaceSidebarTabs";
+import { WorkspaceTabDock } from "./WorkspaceTabDock";
 import {
   useCompactWorkspaceTabs,
   useSidebarWorkspaceTabs,
@@ -196,7 +196,7 @@ function WorkspaceRootContent() {
           )}
         </SafeAreaInsetsContext>
         {deviceType !== "pad" && deviceType !== "phone" && sidebarPicker ? (
-          <WorkspaceSidebarTabs />
+          <WorkspaceTabDock placement="column" />
         ) : null}
         {connPhoneBar ? (
           <HomeConnectionStatusOverlay

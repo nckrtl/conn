@@ -846,54 +846,51 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
-)
-  .pipe(
-    Layer.provide(
-      PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
+).pipe(
+  Layer.provide(
+    PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
+  ),
+  // delegate_task to a linked environment, from /mcp and the follower above.
+  Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
+  // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
+  Layer.provide(PeerLinkRequests.layer),
+  // Share the service so HTTP/WS clients single-flight reads and invalidate each other's cached patches.
+  Layer.provide(layerPullRequestService),
+  // Conn: one pipe step for both, since this pipe is at its 20-step limit; the issue service
+  // still reaches the thread issue service and the routes, as two steps did upstream.
+  Layer.provide(layerThreadIssueService.pipe(Layer.provideMerge(layerIssueService))),
+  // The same activity instance RunExecutionService reports to, by layer memoization.
+  Layer.provide(
+    ServerBrowser.layer.pipe(
+      Layer.provide(Layer.merge(DesktopBrowserChannel.layer, PreviewAgentActivity.layer)),
     ),
-    // delegate_task to a linked environment, from /mcp and the follower above.
-    Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
-    // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
-    Layer.provide(PeerLinkRequests.layer),
-    // Share the service so HTTP/WS clients single-flight reads and invalidate each other's cached patches.
-    Layer.provide(layerPullRequestService),
-    // Conn: one pipe step for both, since this pipe is at its 20-step limit; the issue service
-    // still reaches the thread issue service and the routes, as two steps did upstream.
-    Layer.provide(layerThreadIssueService.pipe(Layer.provideMerge(layerIssueService))),
-    // The same activity instance RunExecutionService reports to, by layer memoization.
-    Layer.provide(
-      ServerBrowser.layer.pipe(
-        Layer.provide(Layer.merge(DesktopBrowserChannel.layer, PreviewAgentActivity.layer)),
-      ),
+  ),
+  Layer.provide(PreviewBrowser.layer),
+  // Links to other environments, shared by clients (WebSocket) and agents (/mcp).
+  Layer.provide(
+    Layer.mergeAll(PeerForwarding.layer, PeerThreadRelay.layer, PeerClientPairing.layer).pipe(
+      Layer.provideMerge(PeerMcpClient.layer),
+      Layer.provideMerge(PeerLinks.layer),
     ),
-    Layer.provide(PreviewBrowser.layer),
-    // Links to other environments, shared by clients (WebSocket) and agents (/mcp).
-    Layer.provide(
-      Layer.mergeAll(PeerForwarding.layer, PeerThreadRelay.layer, PeerClientPairing.layer).pipe(
-        Layer.provideMerge(PeerMcpClient.layer),
-        Layer.provideMerge(PeerLinks.layer),
-      ),
+  ),
+  Layer.provide(
+    SpeechService.layer.pipe(
+      Layer.provide(layerServerSettings),
+      Layer.provide(SpeechModelStore.layer),
     ),
-    Layer.provide(
-      SpeechService.layer.pipe(
-        Layer.provide(layerServerSettings),
-        Layer.provide(SpeechModelStore.layer),
-      ),
-    ),
-    Layer.provide(CloudSpeech.layer.pipe(Layer.provide(SecretResolver.layer))),
-    Layer.provide(layerServerSettings),
-    Layer.provide(DesktopTabRelay.layer),
-    Layer.provide(CredentialAutofill.layer.pipe(Layer.provide(TestLoginStore.layer))),
-    Layer.provide(AgentPanelBroker.layer),
-    Layer.provide(AnnotationStore.layer),
-    Layer.provide(PreviewAutomationBroker.layer),
-    Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
-    Layer.provide(layerCommandReadiness),
-    Layer.provide(ServerHttp.layerBrowserApiCors),
-    Layer.provide(ServerHttp.layerHttpCompression),
-    // Conn: past pipe's 20-step limit; a second pipe applies the same step in the same order.
-  )
-  .pipe(Layer.provide(ServerHttp.layerUnloggedSignedRequests));
+  ),
+  Layer.provide(CloudSpeech.layer.pipe(Layer.provide(SecretResolver.layer))),
+  Layer.provide(layerServerSettings),
+  Layer.provide(DesktopTabRelay.layer),
+  Layer.provide(CredentialAutofill.layer.pipe(Layer.provide(TestLoginStore.layer))),
+  Layer.provide(AgentPanelBroker.layer),
+  Layer.provide(AnnotationStore.layer),
+  Layer.provide(PreviewAutomationBroker.layer),
+  Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
+  Layer.provide(layerCommandReadiness),
+  Layer.provide(ServerHttp.layerBrowserApiCors),
+  Layer.provide(ServerHttp.layerHttpCompression),
+);
 
 const layerMakeServer = Layer.unwrap(
   Effect.gen(function* () {

@@ -18,7 +18,9 @@ import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import {
   deriveLogicalProjectKeyFromSettings,
   getProjectOrderKey,
+  resolveGroupDefaultProject,
   selectProjectGroupingSettings,
+  type ProjectGroupingSettings,
 } from "@t3tools/client-runtime/state/project-grouping";
 import { resolveNewThreadEnvMode, resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -43,7 +45,7 @@ import { environmentSummaries } from "../state/presentation";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
-import { getClientSettings } from "./useSettings";
+import { getClientSettings, useClientSettings } from "./useSettings";
 import { useActiveWorkspaceProjectRefs } from "../workspaceStore";
 import { getLocalStorageItem, useLocalStorage } from "./useLocalStorage";
 import * as Schema from "effect/Schema";
@@ -466,6 +468,7 @@ export function resolveDefaultProjectRef(
   projectOrder: readonly string[],
   lastUsedProjectKey: string | null,
   fallbackReady = true,
+  groupingSettings?: ProjectGroupingSettings,
   // Conn: inside a workspace, only its projects can be the default.
   workspaceRefs: ReadonlySet<string> | null = null,
 ): ScopedProjectRef | null {
@@ -479,8 +482,9 @@ export function resolveDefaultProjectRef(
   );
   if (lastUsed) return scopeProjectRef(lastUsed.environmentId, lastUsed.id);
   if (!fallbackReady) return null;
+  const liveProjects = projects.filter((project) => project.archivedAt == null);
   const orderedProjects = orderItemsByPreferredIds({
-    items: projects.filter((project) => project.archivedAt == null),
+    items: liveProjects,
     preferredIds: projectOrder,
     getId: getProjectOrderKey,
     getPreferenceIds: (project) => [
@@ -488,8 +492,12 @@ export function resolveDefaultProjectRef(
       legacyProjectCwdPreferenceKey(project.workspaceRoot),
     ],
   });
-  const defaultProject = orderedProjects.find(inWorkspace) ?? orderedProjects[0];
-  return defaultProject ? scopeProjectRef(defaultProject.environmentId, defaultProject.id) : null;
+  const firstProject = orderedProjects.find(inWorkspace) ?? orderedProjects[0];
+  if (!firstProject) return null;
+  const defaultProject = groupingSettings
+    ? resolveGroupDefaultProject(firstProject, liveProjects, groupingSettings)
+    : firstProject;
+  return scopeProjectRef(defaultProject.environmentId, defaultProject.id);
 }
 
 export function useHandleNewThread() {
@@ -516,6 +524,7 @@ export function useHandleNewThread() {
   );
   const projects = useProjects();
   const handleNewThread = useNewThreadHandler();
+  const groupingSettings = useClientSettings(selectProjectGroupingSettings);
   // Inside a workspace, the default is its first project (rooms-patches).
   const workspaceRefs = useActiveWorkspaceProjectRefs();
   const defaultProjectRef = resolveDefaultProjectRef(
@@ -523,6 +532,7 @@ export function useHandleNewThread() {
     projectOrder,
     lastUsedProjectKey,
     defaultProjectFallbackReady,
+    groupingSettings,
     workspaceRefs,
   );
 

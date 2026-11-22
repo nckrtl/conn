@@ -151,7 +151,11 @@ function CommentCard(props: {
       )}
     >
       {/* The name and time fit one row on a phone, so the header drops "commented". */}
-      <View className="min-h-11 flex-row items-center border-b border-border bg-foreground/5 px-3">
+      <View
+        accessible
+        accessibilityRole="header"
+        className="min-h-11 flex-row items-center border-b border-border bg-foreground/5 px-3"
+      >
         <Text className="min-w-0 flex-1 text-[15px]" numberOfLines={1}>
           <Text className="font-t3-medium text-foreground">
             {props.author?.login ?? gt("Unknown author")}

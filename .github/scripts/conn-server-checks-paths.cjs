@@ -1,12 +1,14 @@
 // Whether a change needs the Conn Server checks: the workflow's `changes` job runs this on the
 // full diff (`paths` filters see only 3,000 files). scripts/conn-server-checks-paths.test.ts
-// fails when a file the checks read is outside PATHS.
+// fails when a file the checks read is not selected.
 // Usage: node .github/scripts/conn-server-checks-paths.cjs <`git diff -z --name-only` output>
 const fs = require("node:fs");
 
 // GitHub path filter syntax: `**` crosses folders, `*` does not, and the last matching
 // pattern decides (`!` excludes).
-const PATHS = [
+// Files the checks' tools read. Tools also find config by walking up from these (rustfmt,
+// clippy, postcss, tsconfig, .npmrc, .gitattributes...), so ANCESTOR_DIRS adds that config.
+const READ = [
   "apps/conn-server/**",
   "apps/server/**",
   // Every package apps/server imports, and annotation-overlay, whose `prepare` builds on `vp i`.
@@ -35,10 +37,6 @@ const PATHS = [
   "packages/client-runtime/src/state/threadRelationships.ts",
   "packages/client-runtime/src/threadPullRequests.ts",
   "packages/client-runtime/src/work-log/commandLabel.ts",
-  "packages/client-runtime/tsconfig.json",
-  // apps/server/vite.config.ts, for the T3 tests the tools run.
-  "vite.config.ts",
-  ".task-cache.json",
   "infra/task-cache/src/remoteCache.ts",
   "scripts/lib/brand-assets.ts",
   "scripts/lib/cached-tests.ts",
@@ -47,33 +45,46 @@ const PATHS = [
   "scripts/lib/linux-arm64-sea.ts",
   "scripts/lib/public-config.ts",
   "scripts/lib/tagged-source-version.ts",
-  "tsconfig.base.json",
-  "tsconfig.effect.json",
+];
+
+// Inputs read by name, not by walking up from them: no config above them counts.
+const OTHER = [
   // Install inputs, with the tarballs pnpm-lock.yaml installs from.
   "**/package.json",
-  "pnpm-lock.yaml",
-  "pnpm-workspace.yaml",
-  ".pnpmfile.cjs",
   "patches/**",
   "apps/mobile/deps/*.tgz",
+  // Cargo reads `.cargo/config.toml` in every folder above the crate.
+  "**/.cargo/**",
   // tools/check.sh checks the Rust toolchain pin in all three.
   ".github/workflows/conn-server-checks.yml",
   ".github/workflows/conn-server-ci.yml",
   ".github/workflows/conn-server-release.yml",
   ".github/scripts/conn-server-checks-paths.cjs",
-  // Config git, cargo, pnpm, npm and Node read from any folder above the files they use.
-  "**/.gitattributes",
-  "**/.cargo/**",
-  "**/.npmrc",
-  "**/.node-version",
-  "**/.nvmrc",
-  "**/.tool-versions",
-  // scripts/lib/public-config.ts loads these from the root.
-  ".env",
-  ".env.local",
-  // Vendored references; no job checks them out.
-  "!.repos/**",
 ];
+
+// Vendored references; no job checks them out.
+const PATHS = [...READ, ...OTHER, "!.repos/**"];
+
+/** The folders above a READ pattern's files: the root, `apps/`, `packages/client-runtime/`... */
+const ANCESTOR_DIRS = new Set(
+  READ.filter((path) => !path.startsWith("!")).flatMap((path) => {
+    const folders = path.split(/[*?]/)[0].split("/").slice(0, -1);
+    return folders.map((_, index) => folders.slice(0, index).join("/")).concat(folders.join("/"));
+  }),
+);
+// Source modules run only when imported, and the test follows imports; docs configure nothing.
+const SOURCE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const CONFIG_NAMED = /^\.|\.config\.[^/]+$|rc(\.[^/]+)?$/;
+const DOCS = /\.md$|^LICENSE/i;
+
+/** A non-source file directly in a folder above files the checks read, such as rustfmt.toml. */
+function isAncestorConfig(file) {
+  const slash = file.lastIndexOf("/");
+  const name = file.slice(slash + 1);
+  if (!ANCESTOR_DIRS.has(slash === -1 ? "" : file.slice(0, slash))) return false;
+  if (DOCS.test(name)) return false;
+  return !SOURCE.test(name) || CONFIG_NAMED.test(name);
+}
 
 function globToRegExp(glob) {
   let pattern = "";
@@ -97,8 +108,20 @@ const RULES = PATHS.map((path) => ({
   glob: globToRegExp(path.replace(/^!/, "")),
 }));
 
+const OTHER_RULES = OTHER.map(globToRegExp);
+
+/** Whether the file is an input read only by name (a manifest, a tarball, a workflow). */
+function readByName(file) {
+  return OTHER_RULES.some((glob) => glob.test(file));
+}
+
 function matches(file) {
-  return RULES.reduce((included, rule) => (rule.glob.test(file) ? !rule.exclude : included), false);
+  const included = RULES.reduce(
+    (matched, rule) => (rule.glob.test(file) ? !rule.exclude : matched),
+    false,
+  );
+  // `.repos/` is never an ancestor folder, so this keeps its exclusion.
+  return included || isAncestorConfig(file);
 }
 
 function main() {
@@ -115,4 +138,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { PATHS, matches };
+module.exports = { PATHS, ANCESTOR_DIRS, matches, readByName };

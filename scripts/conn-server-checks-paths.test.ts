@@ -10,7 +10,12 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
 
-import { matches, PATHS } from "../.github/scripts/conn-server-checks-paths.cjs";
+import {
+  ANCESTOR_DIRS,
+  matches,
+  PATHS,
+  readByName,
+} from "../.github/scripts/conn-server-checks-paths.cjs";
 import { decide, readWorkspace as readCiWorkspace } from "../.github/scripts/ci-changes.cjs";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
@@ -233,27 +238,41 @@ it("covers the tarballs pnpm-lock.yaml installs", () => {
   }
 });
 
-it("covers config in every folder above a file the checks read", () => {
+// Tools find config by walking up from the files they read, whatever its name.
+it("runs for any config file in a folder above a file the checks read", () => {
   const folders = new Set<string>();
   for (const file of files) {
+    if (readByName(file)) continue;
     for (let dir = NodePath.posix.dirname(file); ; dir = NodePath.posix.dirname(dir)) {
       folders.add(dir === "." ? "" : `${dir}/`);
       if (dir === ".") break;
     }
   }
   const configs = [
+    "rustfmt.toml",
+    "clippy.toml",
+    "postcss.config.cjs",
+    "babel.config.js",
+    "tsconfig.json",
+    ".browserslistrc",
+    ".editorconfig",
     ".gitattributes",
     ".npmrc",
-    ".node-version",
-    ".nvmrc",
-    ".tool-versions",
     ".cargo/config.toml",
-    ".cargo/config",
   ];
   const missed = [...folders].flatMap((dir) =>
     configs.map((name) => `${dir}${name}`).filter((file) => !matches(file)),
   );
   expect(missed).toEqual([]);
+});
+
+it("keeps ancestor folders' other files and folders out", () => {
+  for (const dir of ANCESTOR_DIRS) expect(dir.startsWith(".repos")).toBe(false);
+  expect(matches("packages/client-runtime/src/orbitGateway/threadStart.ts")).toBe(false);
+  expect(matches("packages/client-runtime/src/pullRequestDiffFold.ts")).toBe(false);
+  expect(matches("README.md")).toBe(false);
+  expect(matches("apps/mobile/app.config.ts")).toBe(false);
+  expect(matches(".github/workflows/ci.yml")).toBe(false);
 });
 
 it("reads the workspace from pnpm-workspace.yaml", () => {
@@ -336,6 +355,8 @@ it.each([
   "packages/annotation-overlay/src/inject.ts",
   "patches/electron-updater@6.8.9.patch",
   "tsconfig.base.json",
+  "rustfmt.toml",
+  "postcss.config.cjs",
   "apps/conn-server/helpers/sdk-host/package-lock.json",
   // tools/check.sh reads the Rust toolchain pin from these three.
   ".github/workflows/conn-server-checks.yml",

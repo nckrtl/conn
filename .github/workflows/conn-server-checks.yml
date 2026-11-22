@@ -1,17 +1,64 @@
 name: Conn Server checks
 
-# Every model-free Conn Server check against this tree's server, web client and packages.
+# Every model-free Conn Server check against this tree's server, packages and client-runtime.
 # Main checks are called after CI. Generated drift fails the job on every trigger.
 
 on:
+  # Only what the checks read: the Conn Server, apps/server and what it imports (most of
+  # packages/), the few client-runtime files the tools load, and install inputs. A
+  # client-only change skips them. scripts/conn-server-checks-paths.test.ts follows the
+  # tools' imports and fails when a file they read falls outside this list.
   pull_request:
     paths: &paths
       - apps/conn-server/**
       - apps/server/**
-      - apps/web/**
       - packages/**
+      - "!packages/annotation-overlay/**"
+      - "!packages/client-runtime/**"
+      - packages/client-runtime/src/authorization/remote.ts
+      - packages/client-runtime/src/connection/compatibility.ts
+      - packages/client-runtime/src/connection/model.ts
+      - packages/client-runtime/src/environment/descriptor.ts
+      - packages/client-runtime/src/environment/endpoint.ts
+      - packages/client-runtime/src/errors/translatable.ts
+      - packages/client-runtime/src/orbitGateway/client.ts
+      - packages/client-runtime/src/platform/capabilities.ts
+      - packages/client-runtime/src/providerClients.ts
+      - packages/client-runtime/src/rpc/http.ts
+      - packages/client-runtime/src/sourceControlClients.ts
+      - packages/client-runtime/src/state/models.ts
+      - packages/client-runtime/src/state/orchestrationV2Projection.ts
+      - packages/client-runtime/src/state/shellReducer.ts
+      - packages/client-runtime/src/state/subagentDisplay.ts
+      - packages/client-runtime/src/state/subagentRuntime.ts
+      - packages/client-runtime/src/state/threadCheckpoints.ts
+      - packages/client-runtime/src/state/threadExecution.ts
+      - packages/client-runtime/src/state/threadRelationships.ts
+      - packages/client-runtime/src/threadPullRequests.ts
+      - packages/client-runtime/src/work-log/commandLabel.ts
+      - packages/client-runtime/tsconfig.json
+      # apps/server/vite.config.ts, for the T3 tests the tools run.
+      - vite.config.ts
+      - infra/task-cache/src/remoteCache.ts
+      - scripts/lib/brand-assets.ts
+      - scripts/lib/cached-tests.ts
+      - scripts/lib/cli-executable-imports.ts
+      - scripts/lib/cli-external-packages.ts
+      - scripts/lib/linux-arm64-sea.ts
+      - scripts/lib/public-config.ts
+      - scripts/lib/tagged-source-version.ts
+      - tsconfig.base.json
+      - tsconfig.effect.json
+      # Install inputs.
+      - "**/package.json"
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .pnpmfile.cjs
+      - patches/**
+      # tools/check.sh checks the Rust toolchain pin in all three.
       - .github/workflows/conn-server-checks.yml
       - .github/workflows/conn-server-ci.yml
+      - .github/workflows/conn-server-release.yml
   push:
     branches:
       - "sync/**"

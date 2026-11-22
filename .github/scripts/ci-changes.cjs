@@ -63,6 +63,14 @@ const TEST_ONLY_DEPS = {
     "@t3tools/provider-cursor",
   ],
 };
+// Tests that read files outside every package; they do not change what the packages ship.
+const TEST_ONLY_FILES = [
+  // scripts/conn-server-checks-paths.test.ts reads the checks' tools and the workflow's paths.
+  [
+    /^apps\/conn-server\/.*\.(mjs|cjs|js|ts|sh|py)$|^\.github\/workflows\/conn-server-checks\.yml$/,
+    "@t3tools/scripts",
+  ],
+];
 // The server bundles the web build without importing it.
 const BUILD_ONLY_DEPS = { t3: ["@t3tools/web"] };
 
@@ -178,6 +186,9 @@ function decide(files, packages, full) {
     scriptsChanged = affected.has("@t3tools/scripts");
     for (const [name, deps] of Object.entries(TEST_ONLY_DEPS)) {
       if (deps.some((dep) => affected.has(dep))) affected.add(name);
+    }
+    for (const [pattern, name] of TEST_ONLY_FILES) {
+      if (files.some((file) => pattern.test(file))) affected.add(name);
     }
   }
 

@@ -45,6 +45,10 @@ const READ = [
   "scripts/lib/linux-arm64-sea.ts",
   "scripts/lib/public-config.ts",
   "scripts/lib/tagged-source-version.ts",
+  // Imported by scripts/e2e.config.ts and scripts/mobile-showcase.config.ts, which the
+  // ancestor rule selects as config.
+  "scripts/mobile-showcase-environment.ts",
+  "scripts/scenarios/shell.ts",
 ];
 
 // Inputs read by name, not by walking up from them: no config above them counts.
@@ -55,6 +59,10 @@ const OTHER = [
   "apps/mobile/deps/*.tgz",
   // Cargo reads `.cargo/config.toml` in every folder above the crate.
   "**/.cargo/**",
+  // Git applies `.gitattributes` above every file it checks out (line endings of a workflow
+  // or a tarball), and by-name inputs such as package.json sit in any folder. Nothing else
+  // reads config above these inputs, so the full ancestor rule stays with READ.
+  "**/.gitattributes",
   // tools/check.sh checks the Rust toolchain pin in all three.
   ".github/workflows/conn-server-checks.yml",
   ".github/workflows/conn-server-ci.yml",

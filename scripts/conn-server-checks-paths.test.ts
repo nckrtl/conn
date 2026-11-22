@@ -45,10 +45,14 @@ const NOT_RUN_BY_CHECKS = [
   "apps/server/scripts/mobile-lab-seed.ts",
 ];
 
+// Files a test adds on top of the checkout, as absolute path → contents.
+const overlay = new Map<string, string>();
 const posix = (file: string) => NodePath.relative(root, file).split(NodePath.sep).join("/");
-const isFile = (file: string) => NodeFS.existsSync(file) && NodeFS.statSync(file).isFile();
+const isFile = (file: string) =>
+  overlay.has(file) || (NodeFS.existsSync(file) && NodeFS.statSync(file).isFile());
 const isDir = (file: string) => NodeFS.existsSync(file) && NodeFS.statSync(file).isDirectory();
-const readJson = (file: string) => JSON.parse(NodeFS.readFileSync(file, "utf8"));
+const readText = (file: string) => overlay.get(file) ?? NodeFS.readFileSync(file, "utf8");
+const readJson = (file: string) => JSON.parse(readText(file));
 
 // CI checks out tracked files only.
 const tracked = new Set(
@@ -61,10 +65,11 @@ const tracked = new Set(
     .filter((file) => file && !file.startsWith(".repos/"))
     .map((file) => NodePath.join(root, file)),
 );
-const isTracked = (file: string) => tracked.has(file) && isFile(file);
+const isTracked = (file: string) => overlay.has(file) || (tracked.has(file) && isFile(file));
+const allFiles = () => [...tracked, ...overlay.keys()];
 function filesUnder(dir: string): Array<string> {
   const prefix = `${dir}${NodePath.sep}`;
-  return [...tracked].filter((file) => file.startsWith(prefix) && isFile(file));
+  return allFiles().filter((file) => file.startsWith(prefix) && isFile(file));
 }
 
 type Package = { dir: string; exports: Record<string, unknown>; scripts: Record<string, string> };
@@ -172,9 +177,18 @@ function checkedFiles(): Set<string> {
   for (const file of filesUnder(NodePath.join(root, "apps/conn-server"))) {
     if (!TOOL_SOURCE.test(file)) continue;
     if (CODE.test(file)) seeds.push(file);
-    seeds.push(...toolReferences(NodeFS.readFileSync(file, "utf8")));
+    seeds.push(...toolReferences(readText(file)));
   }
   seeds.push(...filesUnder(NodePath.join(root, "apps/server")));
+  // Config the ancestor rule selects runs when a tool finds it (postcss.config.cjs), so the
+  // walk follows its imports too.
+  seeds.push(
+    ...allFiles().filter((file) => {
+      const relative = posix(file);
+      const dir = NodePath.posix.dirname(relative);
+      return CODE.test(file) && ANCESTOR_DIRS.has(dir === "." ? "" : dir) && matches(relative);
+    }),
+  );
   // `vp i` runs workspace install scripts (annotation-overlay's `prepare` builds it). The root
   // `prepare` only configures git hooks.
   for (const pkg of workspace.values()) {
@@ -198,7 +212,7 @@ function checkedFiles(): Set<string> {
     if (reached.has(file)) continue;
     reached.add(file);
     if (!CODE.test(file)) continue;
-    const source = NodeFS.readFileSync(file, "utf8");
+    const source = readText(file);
     const next = dataFiles(file, source);
     for (const pattern of SPECIFIERS) {
       for (const [, specifier] of source.matchAll(pattern)) {
@@ -224,6 +238,23 @@ it("follows packages a tool loads through a package importer", () => {
   ).map(posix);
   expect(reached).toContain("packages/client-runtime/src/pullRequestDiffFold.ts");
   expect(matches("packages/client-runtime/src/pullRequestDiffFold.ts")).toBe(false);
+});
+
+it("follows imports of config found in a folder above the checked files", () => {
+  overlay.set(
+    NodePath.join(root, "postcss.config.cjs"),
+    'module.exports = require("./postcss-plugins.cjs");',
+  );
+  overlay.set(NodePath.join(root, "postcss-plugins.cjs"), "module.exports = {};");
+  try {
+    const reached = checkedFiles();
+    expect(reached.has("postcss.config.cjs")).toBe(true);
+    expect(reached.has("postcss-plugins.cjs")).toBe(true);
+    // So the first test would fail until the helper is selected.
+    expect(matches("postcss-plugins.cjs")).toBe(false);
+  } finally {
+    overlay.clear();
+  }
 });
 
 it("follows data files a reached module reads", () => {
@@ -264,6 +295,21 @@ it("runs for any config file in a folder above a file the checks read", () => {
     configs.map((name) => `${dir}${name}`).filter((file) => !matches(file)),
   );
   expect(missed).toEqual([]);
+});
+
+it("runs for .gitattributes above any file the checks read, even by name", () => {
+  const missed = new Set<string>();
+  const named = PATHS.filter((path) => !/[*?!]/.test(path));
+  for (const file of [...files, ...named]) {
+    for (let dir = NodePath.posix.dirname(file); ; dir = NodePath.posix.dirname(dir)) {
+      const attributes = dir === "." ? ".gitattributes" : `${dir}/.gitattributes`;
+      if (!matches(attributes)) missed.add(attributes);
+      if (dir === ".") break;
+    }
+  }
+  expect([...missed]).toEqual([]);
+  expect(matches(".github/workflows/.gitattributes")).toBe(true);
+  expect(matches("apps/mobile/deps/.gitattributes")).toBe(true);
 });
 
 it("keeps ancestor folders' other files and folders out", () => {

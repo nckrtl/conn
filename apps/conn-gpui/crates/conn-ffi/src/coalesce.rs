@@ -153,13 +153,26 @@ mod tests {
     fn thread_snap(thread_id: &str, text: &str, working: bool) -> FfiThreadSnapshot {
         FfiThreadSnapshot {
             thread_id: thread_id.to_owned(),
+            title: None,
+            branch: None,
+            model_label: None,
             entries: vec![FfiTimelineEntry::Assistant {
                 id: "a1".to_owned(),
                 markdown: text.to_owned(),
                 streaming: working,
                 created_at: None,
+                run_id: None,
+                status: if working {
+                    crate::types::FfiItemStatus::Running
+                } else {
+                    crate::types::FfiItemStatus::Completed
+                },
             }],
+            work_groups: Vec::new(),
             working,
+            active_run_id: None,
+            queued_count: 0,
+            synchronized: true,
         }
     }
 
@@ -262,6 +275,8 @@ mod tests {
                 markdown: "abc".to_owned(),
                 streaming: false,
                 created_at: None,
+                run_id: None,
+                status: crate::types::FfiItemStatus::Completed,
             }],
             "flushed t1 must carry the final streaming text"
         );

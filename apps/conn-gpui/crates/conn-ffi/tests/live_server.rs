@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use conn_client::{Connection, Credential, ServerConfig};
 use conn_ffi::{
-    ConnCore, CoreListener, FfiConnectionStatus, FfiCredential, FfiShellSnapshot, FfiThreadSnapshot,
+    ConnCore, CoreListener, FfiConnectionStatus, FfiCredential, FfiSendMode, FfiShellSnapshot,
+    FfiThreadSnapshot,
 };
 use serde_json::json;
 
@@ -237,6 +238,7 @@ fn seed_thread_on_fresh_server(
     futures::executor::block_on(core.send_message(
         thread_id.clone(),
         "Hello from conn-ffi live test".to_owned(),
+        FfiSendMode::Auto,
     ))?;
     Ok(thread_id)
 }
@@ -340,6 +342,23 @@ fn connects_with_pairing_code_receives_shell_and_opens_thread()
     }
 
     core.close_thread(target_thread_id);
+
+    // Launch a new thread via ConnCore::launch_thread and stop it via ConnCore::stop_thread.
+    let launched_id = futures::executor::block_on(
+        core.launch_thread(project_id, "Hello from conn-ffi launch_thread".to_owned()),
+    )?;
+    assert!(
+        !launched_id.is_empty(),
+        "launch_thread must return a non-empty thread id"
+    );
+    listener.wait_for(Duration::from_secs(20), |s| {
+        s.latest_thread
+            .as_ref()
+            .is_some_and(|th| th.thread_id == launched_id && !th.entries.is_empty())
+    })?;
+    futures::executor::block_on(core.stop_thread(launched_id.clone()))?;
+    core.close_thread(launched_id);
+
     core.disconnect();
     Ok(())
 }

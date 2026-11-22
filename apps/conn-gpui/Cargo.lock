@@ -1411,6 +1411,7 @@ dependencies = [
  "conn-client",
  "conn-contract",
  "conn-state",
+ "conn-theme",
  "conn-wire",
  "futures",
  "serde_json",

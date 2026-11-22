@@ -18,7 +18,8 @@ T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitte
 out, the child bound to it; a refused or replayed command removes it. Proof: four `conn-mcp`
 tests (`tests/delegate_worktree.rs`) and live Claude and Codex children on a scratch server.
 Left: T3's generated branch name and waiting for the setup script (both also open for a
-worktree launch).
+worktree launch). One difference by design: when the checkout fails, the call is
+refused and no child is made; T3 makes the child and fails its run in preparation.
 
 **Known difference, stop in progress (2026-11-18):** with the provider's reply to
 `turn/interrupt` held, T3 reported the run interrupted on one slow CI run (cause not proven).

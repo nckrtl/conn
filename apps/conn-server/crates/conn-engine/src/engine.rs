@@ -1383,7 +1383,21 @@ impl Engine for SqliteEngine {
                     &message,
                 ))
             };
-            match self.inner.dispatch_value(command.clone()).await {
+            // A worktree delegate makes a checkout before its command commits: that runs on its
+            // own task, so a caller that goes away cannot leave the checkout behind.
+            let outcome = if command["type"] == "delegated_task.request"
+                && command["workspaceStrategy"]["type"] == "worktree"
+            {
+                let inner = self.inner.clone();
+                let detached = command.clone();
+                tokio::spawn(async move { inner.dispatch_value(detached).await })
+                    .await
+                    .map_err(|e| DispatchError::Internal(format!("dispatch ended: {e}")))
+                    .and_then(|outcome| outcome)
+            } else {
+                self.inner.dispatch_value(command.clone()).await
+            };
+            match outcome {
                 Ok((sequence, _)) => from_json(json!({"sequence": sequence}))
                     .map_err(|e| EngineError::Internal(e.to_string())),
                 Err(DispatchError::Rejected(message)) => Err(rejected(refusal(message))),

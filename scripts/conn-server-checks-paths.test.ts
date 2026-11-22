@@ -6,10 +6,11 @@
 // pnpm-lock.yaml installs, and every file those import or read, transitively.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
 
-import { matches } from "../.github/scripts/conn-server-checks-paths.cjs";
+import { matches, PATHS } from "../.github/scripts/conn-server-checks-paths.cjs";
 import { decide, readWorkspace as readCiWorkspace } from "../.github/scripts/ci-changes.cjs";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
@@ -63,15 +64,15 @@ function filesUnder(dir: string): Array<string> {
 
 type Package = { dir: string; exports: Record<string, unknown>; scripts: Record<string, string> };
 
+// Every package pnpm-workspace.yaml lists, as `vp i` installs them.
 const workspace = new Map<string, Package>();
-for (const parent of ["apps", "packages", "infra"]) {
-  for (const name of NodeFS.readdirSync(NodePath.join(root, parent))) {
-    const dir = NodePath.join(root, parent, name);
-    const manifest = NodePath.join(dir, "package.json");
-    if (!isTracked(manifest)) continue;
-    const json = readJson(manifest);
-    workspace.set(json.name, { dir, exports: json.exports ?? {}, scripts: json.scripts ?? {} });
-  }
+for (const { dir } of readCiWorkspace()) {
+  const json = readJson(NodePath.join(root, dir, "package.json"));
+  workspace.set(json.name, {
+    dir: NodePath.join(root, dir),
+    exports: json.exports ?? {},
+    scripts: json.scripts ?? {},
+  });
 }
 const PACKAGE_NAME = new RegExp(
   `["'\`]((?:${[...workspace.keys()].map((name) => name.replace(/[.+^$()|[\]\\]/g, "\\$&")).join("|")})(?:/[\\w./-]+)?)["'\`]`,
@@ -229,6 +230,90 @@ it("covers the tarballs pnpm-lock.yaml installs", () => {
   expect(local).toContain("apps/mobile/deps/react-native-screens-5.0.0-t3.61-conn.tgz");
   for (const path of local) {
     expect(files.has(isFile(NodePath.join(root, path)) ? path : `${path}/package.json`)).toBe(true);
+  }
+});
+
+it("covers config in every folder above a file the checks read", () => {
+  const folders = new Set<string>();
+  for (const file of files) {
+    for (let dir = NodePath.posix.dirname(file); ; dir = NodePath.posix.dirname(dir)) {
+      folders.add(dir === "." ? "" : `${dir}/`);
+      if (dir === ".") break;
+    }
+  }
+  const configs = [
+    ".gitattributes",
+    ".npmrc",
+    ".node-version",
+    ".nvmrc",
+    ".tool-versions",
+    ".cargo/config.toml",
+    ".cargo/config",
+  ];
+  const missed = [...folders].flatMap((dir) =>
+    configs.map((name) => `${dir}${name}`).filter((file) => !matches(file)),
+  );
+  expect(missed).toEqual([]);
+});
+
+it("reads the workspace from pnpm-workspace.yaml", () => {
+  expect([...workspace.values()].map((pkg) => posix(pkg.dir))).toContain("scripts");
+});
+
+it("leaves .repos out, as every job's checkout does", () => {
+  expect(PATHS.at(-1)).toBe("!.repos/**");
+  expect(matches(".repos/effect/package.json")).toBe(false);
+  const workflow = NodeFS.readFileSync(
+    NodePath.join(root, ".github/workflows/conn-server-checks.yml"),
+    "utf8",
+  );
+  const fullCheckouts = workflow.match(/sparse-checkout: \|\n\s+\/\*\n/g) ?? [];
+  expect(fullCheckouts.length).toBeGreaterThan(0);
+  expect(workflow.match(/sparse-checkout: \|\n\s+\/\*\n\s+!\/\.repos\/\n/g)).toHaveLength(
+    fullCheckouts.length,
+  );
+});
+
+it.each([
+  "apps/conn-server/fixtures/sessions/café.ndjson",
+  'apps/conn-server/fixtures/sessions/a\n"b.ndjson',
+])("selects from git's NUL-separated diff when a PR adds only %j", (name) => {
+  const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conn-server-checks-paths-"));
+  try {
+    const git = (...args: Array<string>) =>
+      NodeChildProcess.execFileSync(
+        "git",
+        ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args],
+        { encoding: "utf8" },
+      );
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "base");
+    NodeFS.mkdirSync(NodePath.join(repo, NodePath.dirname(name)), { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(repo, name), "");
+    // Listed first, so a list split on the wrong separator starts with a file no check reads.
+    NodeFS.writeFileSync(NodePath.join(repo, "a.md"), "");
+    git("add", "-A");
+    git("commit", "-q", "-m", "change");
+    // The diff the workflow's Detect step takes.
+    const workflow = NodeFS.readFileSync(
+      NodePath.join(root, ".github/workflows/conn-server-checks.yml"),
+      "utf8",
+    );
+    const diff = workflow
+      .match(/git (diff [^"\n]+) "\$base" HEAD/)![1]!
+      .trim()
+      .split(/\s+/);
+    const list = NodePath.join(repo, "..", `${NodePath.basename(repo)}.paths`);
+    NodeFS.writeFileSync(list, git(...diff, "HEAD^1", "HEAD"));
+    const output = NodeChildProcess.execFileSync(
+      process.execPath,
+      [NodePath.join(root, ".github/scripts/conn-server-checks-paths.cjs"), list],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    NodeFS.rmSync(list);
+    expect(output).toBe("run=true\n");
+  } finally {
+    NodeFS.rmSync(repo, { recursive: true, force: true });
   }
 });
 

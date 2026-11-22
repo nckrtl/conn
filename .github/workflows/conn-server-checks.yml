@@ -80,7 +80,7 @@ jobs:
               ;;
             *) run_all "A ${EVENT_NAME} run always checks." ;;
           esac
-          git diff --name-only --no-renames "$base" HEAD > "$RUNNER_TEMP/changed-paths" \
+          git diff -z --name-only --no-renames "$base" HEAD > "$RUNNER_TEMP/changed-paths" \
             || run_all "Could not diff against ${base}."
           node .github/scripts/conn-server-checks-paths.cjs "$RUNNER_TEMP/changed-paths" > "$RUNNER_TEMP/run" \
             || run_all "Could not select."

@@ -1,7 +1,7 @@
 // Whether a change needs the Conn Server checks: the workflow's `changes` job runs this on the
 // full diff (`paths` filters see only 3,000 files). scripts/conn-server-checks-paths.test.ts
 // fails when a file the checks read is outside PATHS.
-// Usage: node .github/scripts/conn-server-checks-paths.cjs <file of changed paths>
+// Usage: node .github/scripts/conn-server-checks-paths.cjs <`git diff -z --name-only` output>
 const fs = require("node:fs");
 
 // GitHub path filter syntax: `**` crosses folders, `*` does not, and the last matching
@@ -61,6 +61,18 @@ const PATHS = [
   ".github/workflows/conn-server-ci.yml",
   ".github/workflows/conn-server-release.yml",
   ".github/scripts/conn-server-checks-paths.cjs",
+  // Config git, cargo, pnpm, npm and Node read from any folder above the files they use.
+  "**/.gitattributes",
+  "**/.cargo/**",
+  "**/.npmrc",
+  "**/.node-version",
+  "**/.nvmrc",
+  "**/.tool-versions",
+  // scripts/lib/public-config.ts loads these from the root.
+  ".env",
+  ".env.local",
+  // Vendored references; no job checks them out.
+  "!.repos/**",
 ];
 
 function globToRegExp(glob) {
@@ -68,10 +80,10 @@ function globToRegExp(glob) {
   for (let index = 0; index < glob.length; index++) {
     const char = glob[index];
     if (glob.startsWith("**/", index)) {
-      pattern += "(?:.*/)?";
+      pattern += "(?:[\\s\\S]*/)?";
       index += 2;
     } else if (glob.startsWith("**", index)) {
-      pattern += ".*";
+      pattern += "[\\s\\S]*";
       index += 1;
     } else if (char === "*") pattern += "[^/]*";
     else if (char === "?") pattern += "[^/]";
@@ -90,9 +102,14 @@ function matches(file) {
 }
 
 function main() {
-  const files = fs.readFileSync(process.argv[2], "utf8").split("\n").filter(Boolean);
+  // NUL-separated: git quotes other names with unusual characters, and a name may hold "\n".
+  const files = fs.readFileSync(process.argv[2], "utf8").split("\0").filter(Boolean);
   const hit = files.find(matches);
-  console.error(hit ? `Runs the checks: ${hit}` : `None of ${files.length} changed files is read.`);
+  console.error(
+    hit
+      ? `Runs the checks: ${JSON.stringify(hit)}`
+      : `None of ${files.length} changed files is read.`,
+  );
   console.log(`run=${Boolean(hit)}`);
 }
 

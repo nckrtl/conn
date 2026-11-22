@@ -21,6 +21,7 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 conn-client.workspace = true
 conn-contract.workspace = true
+conn-orbit.workspace = true
 conn-state.workspace = true
 conn-theme.workspace = true
 serde_json.workspace = true

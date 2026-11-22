@@ -467,6 +467,36 @@ pub struct FfiThreadSnapshot {
     pub synchronized: bool,
 }
 
+/// Categorized reason for an [`FfiError::Orbit`] failure (mirrors [`conn_orbit::OrbitErrorReason`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum FfiOrbitErrorReason {
+    NotANode,
+    AccessRequired,
+    ExtensionDisabled,
+    NotFound,
+    Unreachable,
+    InvalidResponse,
+    VersionConflict,
+    Unsupported,
+    Gateway,
+}
+
+impl From<conn_orbit::OrbitErrorReason> for FfiOrbitErrorReason {
+    fn from(reason: conn_orbit::OrbitErrorReason) -> Self {
+        match reason {
+            conn_orbit::OrbitErrorReason::NotANode => Self::NotANode,
+            conn_orbit::OrbitErrorReason::AccessRequired => Self::AccessRequired,
+            conn_orbit::OrbitErrorReason::ExtensionDisabled => Self::ExtensionDisabled,
+            conn_orbit::OrbitErrorReason::NotFound => Self::NotFound,
+            conn_orbit::OrbitErrorReason::Unreachable => Self::Unreachable,
+            conn_orbit::OrbitErrorReason::InvalidResponse => Self::InvalidResponse,
+            conn_orbit::OrbitErrorReason::VersionConflict => Self::VersionConflict,
+            conn_orbit::OrbitErrorReason::Unsupported => Self::Unsupported,
+            conn_orbit::OrbitErrorReason::Gateway => Self::Gateway,
+        }
+    }
+}
+
 /// Errors returned across the UniFFI boundary.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
@@ -482,8 +512,45 @@ pub enum FfiError {
     Auth { message: String },
     #[error("rpc error: {message}")]
     Rpc { message: String },
+    #[error("orbit error: {message}")]
+    Orbit {
+        message: String,
+        reason: FfiOrbitErrorReason,
+    },
     #[error("connection closed")]
     Closed,
+}
+
+impl From<conn_orbit::TasksError> for FfiError {
+    fn from(err: conn_orbit::TasksError) -> Self {
+        let reason = conn_orbit::OrbitErrorReason::from(err.reason).into();
+        Self::Orbit {
+            message: err.message,
+            reason,
+        }
+    }
+}
+
+impl From<conn_orbit::ProfileError> for FfiError {
+    fn from(err: conn_orbit::ProfileError) -> Self {
+        let reason = err.reason().into();
+        Self::Orbit {
+            message: err.to_string(),
+            reason,
+        }
+    }
+}
+
+impl From<conn_orbit::GatewayError> for FfiError {
+    fn from(err: conn_orbit::GatewayError) -> Self {
+        match err {
+            conn_orbit::GatewayError::InvalidRequest(message) => Self::InvalidUrl { message },
+            other => Self::Orbit {
+                message: other.to_string(),
+                reason: FfiOrbitErrorReason::Unreachable,
+            },
+        }
+    }
 }
 
 impl From<ClientError> for FfiError {

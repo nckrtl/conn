@@ -1420,6 +1420,7 @@ version = "0.1.0"
 dependencies = [
  "conn-client",
  "conn-contract",
+ "conn-orbit",
  "conn-state",
  "conn-theme",
  "conn-wire",

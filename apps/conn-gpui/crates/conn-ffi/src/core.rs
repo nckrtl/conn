@@ -14,7 +14,7 @@ use conn_contract::{
 };
 use conn_state::{ShellState, ThreadActivity, ThreadState};
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
 use crate::coalesce::SnapshotCoalescer;
@@ -27,6 +27,7 @@ use crate::types::{
 const TAG_SUBSCRIBE_SHELL: &str = "orchestration.subscribeShell";
 const TAG_SUBSCRIBE_THREAD: &str = "orchestration.subscribeThread";
 const TAG_LAUNCH_THREAD: &str = "orchestration.launchThread";
+const TAG_ENSURE_SCRATCH: &str = "projects.ensureScratch";
 /// Maximum time `Drop` waits for worker threads to wind down when dropped off-runtime.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -76,12 +77,15 @@ enum PumpControl {
 pub struct ConnCore {
     runtime: Option<tokio::runtime::Runtime>,
     runtime_handle: tokio::runtime::Handle,
+    server_url: String,
     connection: Connection,
     ctrl_tx: mpsc::UnboundedSender<PumpControl>,
     /// Tracks whether each known thread currently has an active run and its `active_run_id`,
     /// so [`Self::send_message`] chooses `start_immediately` / `queue_after_active` /
     /// `steer_active` without blocking the pump task.
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
+    shell_watch: watch::Receiver<Option<FfiShellSnapshot>>,
+    status_watch: watch::Receiver<FfiConnectionStatus>,
     disconnected: AtomicBool,
 }
 
@@ -149,6 +153,70 @@ impl ConnCore {
             .map_err(|_| FfiError::Closed)?
             .map_err(FfiError::from)
     }
+
+    /// Waits for `orchestration.subscribeShell` to synchronize and returns the project id whose
+    /// `workspace_root` matches `preferred_workspace_root` (e.g. `"/srv/workspace"`), falling back
+    /// to the first non-archived project if any exist.
+    pub(crate) async fn wait_for_project(
+        &self,
+        preferred_workspace_root: &str,
+        timeout: Duration,
+    ) -> Result<String, FfiError> {
+        self.ensure_connected()?;
+        let mut shell_rx = self.shell_watch.clone();
+        let mut status_rx = self.status_watch.clone();
+        let preferred = preferred_workspace_root.trim_end_matches('/').to_owned();
+
+        self.runtime_handle
+            .spawn(async move {
+                let deadline = tokio::time::Instant::now() + timeout;
+                loop {
+                    if let FfiConnectionStatus::Failed { message } = status_rx.borrow().clone() {
+                        return Err(FfiError::Connection { message });
+                    }
+                    if let Some(shell) = shell_rx.borrow().clone()
+                        && shell.synchronized
+                    {
+                        if let Some(project) = shell.projects.iter().find(|p| {
+                            p.workspace_root.trim_end_matches('/') == preferred
+                        }) {
+                            return Ok(project.id.clone());
+                        }
+                        if let Some(first) = shell.projects.first() {
+                            return Ok(first.id.clone());
+                        }
+                    }
+
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(FfiError::Connection {
+                            message: "timed out waiting for server project catalog".to_owned(),
+                        });
+                    }
+
+                    tokio::select! {
+                        res = tokio::time::timeout(remaining, shell_rx.changed()) => {
+                            match res {
+                                Ok(Ok(())) => {}
+                                Ok(Err(_)) => return Err(FfiError::Closed),
+                                Err(_) => {
+                                    return Err(FfiError::Connection {
+                                        message: "timed out waiting for server project catalog".to_owned(),
+                                    });
+                                }
+                            }
+                        }
+                        res = status_rx.changed() => {
+                            if res.is_err() {
+                                return Err(FfiError::Closed);
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .map_err(|_| FfiError::Closed)?
+    }
 }
 
 fn map_build_error(what: &str, err: serde_json::Error) -> FfiError {
@@ -183,6 +251,7 @@ impl ConnCore {
             })?;
 
         let runtime_handle = runtime.handle().clone();
+        let normalized_url = http_base_url.to_string();
         let config = ServerConfig {
             http_base_url,
             credential: credential.into(),
@@ -192,6 +261,8 @@ impl ConnCore {
 
         let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
         let thread_runs = Arc::new(RwLock::new(HashMap::new()));
+        let (shell_watch_tx, shell_watch) = watch::channel(None);
+        let (status_watch_tx, status_watch) = watch::channel(FfiConnectionStatus::Connecting);
 
         runtime_handle.spawn(run_pump(
             connection.clone(),
@@ -199,16 +270,27 @@ impl ConnCore {
             ctrl_rx,
             listener,
             Arc::clone(&thread_runs),
+            shell_watch_tx,
+            status_watch_tx,
         ));
 
         Ok(Arc::new(Self {
             runtime: Some(runtime),
             runtime_handle,
+            server_url: normalized_url,
             connection,
             ctrl_tx,
             thread_runs,
+            shell_watch,
+            status_watch,
             disconnected: AtomicBool::new(false),
         }))
+    }
+
+    /// Returns the normalized HTTP base URL this connection targets.
+    #[must_use]
+    pub fn server_url(&self) -> String {
+        self.server_url.clone()
     }
 
     /// Loads and subscribes to `thread_id`, emitting snapshots to [`CoreListener::on_thread`].
@@ -466,6 +548,35 @@ impl ConnCore {
         Ok(final_thread_id)
     }
 
+    /// Ensures the server's General / scratch project (`projects.ensureScratch`, `"No project"`)
+    /// exists and returns its `project_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn ensure_scratch_project(&self) -> Result<String, FfiError> {
+        let value = self.call_json(TAG_ENSURE_SCRATCH, json!({})).await?;
+        value
+            .get("projectId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| FfiError::Rpc {
+                message: "projects.ensureScratch did not return a projectId".to_owned(),
+            })
+    }
+
+    /// Launches a General (project-unbound) thread on this server by ensuring the scratch project
+    /// (`projects.ensureScratch`) and calling [`Self::launch_thread`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn launch_general_thread(&self, text: String) -> Result<String, FfiError> {
+        let project_id = self.ensure_scratch_project().await?;
+        self.launch_thread(project_id, text).await
+    }
+
     /// Drops the active socket or reconnect backoff and reconnects immediately (e.g. when the
     /// iOS app returns to the foreground).
     pub fn reconnect(&self) {
@@ -508,6 +619,8 @@ struct PumpState {
     shell_snapshot_required: bool,
     coalescer: SnapshotCoalescer,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
+    shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
+    status_watch: watch::Sender<FfiConnectionStatus>,
 }
 
 impl PumpState {
@@ -657,7 +770,9 @@ impl PumpState {
     fn handle_event(&mut self, event: ClientEvent) {
         match event {
             ClientEvent::Status(status) => {
-                self.listener.on_status(status.into());
+                let ffi_status: FfiConnectionStatus = status.into();
+                self.status_watch.send_replace(ffi_status.clone());
+                self.listener.on_status(ffi_status);
             }
             ClientEvent::BearerIssued(token) => {
                 self.listener.on_bearer_issued(token);
@@ -673,6 +788,7 @@ impl PumpState {
                     self.connection.subscribe_shell();
                 }
                 let snapshot = build_shell_snapshot(&self.shell);
+                self.shell_watch.send_replace(Some(snapshot.clone()));
                 self.emit_or_buffer_shell(snapshot);
 
                 // Refresh header metadata (title/branch/model) on open threads updated by shell.
@@ -789,6 +905,8 @@ async fn run_pump(
     mut ctrl_rx: mpsc::UnboundedReceiver<PumpControl>,
     listener: Arc<dyn CoreListener>,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
+    shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
+    status_watch: watch::Sender<FfiConnectionStatus>,
 ) {
     let mut state = PumpState {
         connection,
@@ -801,6 +919,8 @@ async fn run_pump(
         shell_snapshot_required: false,
         coalescer: SnapshotCoalescer::default(),
         thread_runs,
+        shell_watch,
+        status_watch,
     };
 
     loop {

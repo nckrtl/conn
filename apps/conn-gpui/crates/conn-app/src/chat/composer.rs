@@ -67,6 +67,12 @@ pub(super) const COMPOSER_MAX_LINES: usize = 8;
 
 /// Composer card corner radius matching Conn's `rounded-2xl` (`16px`).
 const COMPOSER_RADIUS_PX: f32 = 16.0;
+/// Bottom breathing room below the composer card when the context strip is hidden
+/// (`ChatView.tsx:4067` `sm:h-[1.25rem]`).
+const COMPOSER_BOTTOM_SPACER_PX: f32 = 20.0;
+/// Symmetric vertical margin around the `22px` bottom context strip (`9px` top + `9px` bottom)
+/// so the strip sits visually balanced between the composer card and the bottom of the chat card.
+const CONTEXT_STRIP_VERTICAL_MARGIN_PX: f32 = 9.0;
 /// Maximum width of the model name label in the trigger (`max-w-56` = `224px`).
 const MODEL_LABEL_MAX_WIDTH_PX: f32 = 224.0;
 /// Maximum file mention results requested from `projects.searchEntries`.
@@ -1996,7 +2002,8 @@ impl Composer {
             .justify_between()
             .gap(px(8.0))
             .w_full()
-            .pt(px(8.0))
+            .h(px(22.0))
+            .my(px(CONTEXT_STRIP_VERTICAL_MARGIN_PX))
             .px(px(8.0))
             .text_size(px(12.0))
             .line_height(px(16.0))
@@ -2665,13 +2672,16 @@ impl Render for Composer {
                 },
                 |el, surface| el.child(surface),
             )
-            .child(card)
-            // Conn `BranchToolbar.logic.ts:shouldShowComposerContextStrip`: shown on drafts and
-            // when `persistComposerContextStrip` is enabled; `composer_lane` always provides the
-            // 20px (`h-[1.25rem]`) bottom spacer below the shell.
-            .when(self.is_draft || self.persist_context_strip, |el| {
-                el.child(self.render_context_strip(&tokens, cx))
-            });
+            .child(card);
+        let show_context_strip = self.is_draft || self.persist_context_strip;
+        // Conn `BranchToolbar.logic.ts:shouldShowComposerContextStrip`: shown on drafts and when
+        // `persistComposerContextStrip` is enabled (with symmetric 9px vertical margins); when
+        // hidden on active threads, keep Conn's 20px (`h-[1.25rem]`) bottom spacer below the card.
+        root = if show_context_strip {
+            root.child(self.render_context_strip(&tokens, cx))
+        } else {
+            root.pb(px(COMPOSER_BOTTOM_SPACER_PX))
+        };
 
         if let Some(trigger) = self.active_trigger.clone() {
             let menu = render_command_menu(

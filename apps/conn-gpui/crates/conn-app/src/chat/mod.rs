@@ -41,8 +41,6 @@ use crate::panels::chrome::ConnTooltipExt as _;
 const CHAT_CONTENT_MAX_WIDTH_PX: f32 = 736.0;
 /// Horizontal lane padding matching `.chat-composer-lane` / `.messages-timeline-scroll` (`3rem`).
 const CHAT_LANE_PADDING_X_PX: f32 = 48.0;
-/// Bottom breathing room below the composer (`ChatView.tsx:4067` `sm:h-[1.25rem]`).
-const COMPOSER_BOTTOM_SPACER_PX: f32 = 20.0;
 /// User bubble radius matching Conn's `--radius-bubble: calc(var(--radius) + 6px)` (`8px + 6px`).
 const BUBBLE_RADIUS_PX: f32 = 14.0;
 /// Tight corner radius where consecutive user bubbles meet (`rounded-tr-md` / `rounded-br-md`).
@@ -3239,8 +3237,7 @@ impl Render for ChatView {
             .flex_none()
             .w_full()
             .px(px(CHAT_LANE_PADDING_X_PX))
-            .pt(px(8.0))
-            .pb(px(COMPOSER_BOTTOM_SPACER_PX));
+            .pt(px(8.0));
         if let Some(error) = self.error_banner.as_deref() {
             composer_lane = composer_lane.child(self.render_error_banner(error, cx));
         }

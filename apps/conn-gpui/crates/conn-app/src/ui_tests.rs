@@ -857,15 +857,16 @@ fn composer_keeps_bottom_breathing_room_and_context_strip_layout(cx: &mut TestAp
     });
 
     // 1. Active thread with default `persistComposerContextStrip = false`: the composer card must
-    // still sit above Conn's 20px (`h-[1.25rem]`, `ChatView.tsx:4067`) bottom spacer + 4px shell
-    // inset (never slammed flush against the bottom of the window).
+    // sit above Conn's 20px (`h-[1.25rem]`, `ChatView.tsx:4067`) bottom spacer + ~4.5px shell
+    // inset/border (never slammed flush against the bottom of the window).
+    const SHELL_BOTTOM_CHROME_PX: f32 = 4.5;
     let _ = cx.update_window(window, |_, window, cx| {
         window.render_frame(cx);
         let card = window.find_by_label("Message input card");
         let bottom_gap = TEST_WINDOW_HEIGHT - f32::from(card.bounds().bottom());
         assert!(
-            bottom_gap >= 23.5,
-            "composer card must keep >=20px bottom breathing room + 4px shell inset (got {bottom_gap:.1}px)"
+            (23.5..=26.0).contains(&bottom_gap),
+            "composer card must keep 20px bottom breathing room + ~4.5px shell inset (got {bottom_gap:.1}px)"
         );
         assert!(
             window.try_find_by_label("Thread context").is_none(),
@@ -874,7 +875,8 @@ fn composer_keeps_bottom_breathing_room_and_context_strip_layout(cx: &mut TestAp
     });
 
     // 2. Enabling `persist_composer_context_strip` renders the branch/worktree row below the
-    // composer card while preserving the >=20px bottom breathing room underneath it.
+    // composer card with symmetric 9px margins above and below (not stacked on top of the 20px
+    // no-strip spacer).
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_persist_composer_context_strip(true, cx);
@@ -884,19 +886,25 @@ fn composer_keeps_bottom_breathing_room_and_context_strip_layout(cx: &mut TestAp
         window.render_frame(cx);
         let card = window.find_by_label("Message input card");
         let strip = window.find_by_label("Thread context");
+        let top_gap = f32::from(strip.bounds().top()) - f32::from(card.bounds().bottom());
+        let bottom_gap =
+            (TEST_WINDOW_HEIGHT - SHELL_BOTTOM_CHROME_PX) - f32::from(strip.bounds().bottom());
         assert!(
-            f32::from(strip.bounds().top()) >= f32::from(card.bounds().bottom()),
-            "context strip must sit below the composer card"
+            (8.0..=10.5).contains(&top_gap),
+            "context strip top margin should be ~9px (got {top_gap:.1}px)"
         );
-        let strip_bottom_gap = TEST_WINDOW_HEIGHT - f32::from(strip.bounds().bottom());
         assert!(
-            strip_bottom_gap >= 23.5,
-            "context strip must keep >=20px bottom breathing room + 4px shell inset (got {strip_bottom_gap:.1}px)"
+            (8.0..=10.5).contains(&bottom_gap),
+            "context strip bottom margin should be ~9px without excessive padding (got {bottom_gap:.1}px)"
+        );
+        assert!(
+            (top_gap - bottom_gap).abs() <= 1.5,
+            "context strip vertical margins must be symmetric (top {top_gap:.1}px vs bottom {bottom_gap:.1}px)"
         );
     });
 
     // 3. Even with `persist_composer_context_strip = false`, a new-thread draft always renders the
-    // context strip (workspace/branch + permissions) below the composer card with >=20px spacer.
+    // context strip (workspace/branch + permissions) with the same symmetric 9px margins.
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_persist_composer_context_strip(false, cx);
@@ -907,14 +915,20 @@ fn composer_keeps_bottom_breathing_room_and_context_strip_layout(cx: &mut TestAp
         window.render_frame(cx);
         let card = window.find_by_label("Message input card");
         let strip = window.find_by_label("Thread context");
+        let top_gap = f32::from(strip.bounds().top()) - f32::from(card.bounds().bottom());
+        let bottom_gap =
+            (TEST_WINDOW_HEIGHT - SHELL_BOTTOM_CHROME_PX) - f32::from(strip.bounds().bottom());
         assert!(
-            f32::from(strip.bounds().top()) >= f32::from(card.bounds().bottom()),
-            "draft context strip must sit below the composer card"
+            (8.0..=10.5).contains(&top_gap),
+            "draft context strip top margin should be ~9px (got {top_gap:.1}px)"
         );
-        let strip_bottom_gap = TEST_WINDOW_HEIGHT - f32::from(strip.bounds().bottom());
         assert!(
-            strip_bottom_gap >= 23.5,
-            "draft context strip must keep >=20px bottom breathing room + 4px shell inset (got {strip_bottom_gap:.1}px)"
+            (8.0..=10.5).contains(&bottom_gap),
+            "draft context strip bottom margin should be ~9px without excessive padding (got {bottom_gap:.1}px)"
+        );
+        assert!(
+            (top_gap - bottom_gap).abs() <= 1.5,
+            "draft context strip vertical margins must be symmetric (top {top_gap:.1}px vs bottom {bottom_gap:.1}px)"
         );
     });
 }

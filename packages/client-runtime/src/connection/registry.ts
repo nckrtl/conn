@@ -564,7 +564,11 @@ export const make = Effect.gen(function* () {
 
   const installEntryLocked = Effect.fn("EnvironmentRegistry.installEntryLocked")(function* (
     entry: ConnectionCatalogEntry,
-    options?: { readonly retainEquivalentRuntime?: boolean },
+    options?: {
+      readonly retainEquivalentRuntime?: boolean;
+      /** The provisional pairing whose own credential the store just promoted. */
+      readonly promotedPairingId?: string;
+    },
   ) {
     const target = entry.target;
     const previous = (yield* SubscriptionRef.get(entries)).get(target.environmentId);
@@ -579,10 +583,16 @@ export const make = Effect.gen(function* () {
       return;
     }
     // Conn: promoting a provisional pairing changes no address or credential. Its live session
-    // stays; the supervisor takes the saved route at its next attempt (`latestEntry`).
+    // stays; the supervisor takes the saved route at its next attempt (`latestEntry`). Only the
+    // promotion of the pairing that session uses: another credential needs a new session.
+    const promoted = options?.promotedPairingId;
     if (
-      options?.retainEquivalentRuntime === true &&
+      promoted !== undefined &&
       existingScope !== undefined &&
+      connectionRoutes(existingScope.entry).some(
+        ({ target: route }) =>
+          route._tag === "BearerConnectionTarget" && route.provisionalPairingId === promoted,
+      ) &&
       Equal.equals(withoutProvisionalPairing(existingScope.entry), withoutProvisionalPairing(entry))
     ) {
       yield* SubscriptionRef.update(entries, (current) =>
@@ -700,6 +710,7 @@ export const make = Effect.gen(function* () {
         yield* Ref.update(persistedEnvironmentIds, (current) =>
           new Set(current).add(environmentId),
         );
+        yield* clearRestart(environmentId);
         yield* installEntryLocked(entry);
         return true;
       }),
@@ -714,11 +725,21 @@ export const make = Effect.gen(function* () {
   const expectRestart = Effect.fn("EnvironmentRegistry.expectRestart")(function* (
     environmentId: EnvironmentId,
   ) {
-    const until = (yield* Clock.currentTimeMillis) + EXPECTED_RESTART_WINDOW_MS;
-    yield* SubscriptionRef.update(expectedRestarts, (current) =>
-      new Map(current).set(environmentId, until),
-    );
+    const now = yield* Clock.currentTimeMillis;
+    yield* SubscriptionRef.update(expectedRestarts, (current) => {
+      const next = new Map([...current].filter(([, until]) => until > now));
+      return next.set(environmentId, now + EXPECTED_RESTART_WINDOW_MS);
+    });
   });
+
+  /** A removed or replaced connection takes no restart window to its successor. */
+  const clearRestart = (environmentId: EnvironmentId) =>
+    SubscriptionRef.update(expectedRestarts, (current) => {
+      if (!current.has(environmentId)) return current;
+      const next = new Map(current);
+      next.delete(environmentId);
+      return next;
+    });
 
   const settleProvisionalPairing = Effect.fn("EnvironmentRegistry.settleProvisionalPairing")(
     function* (environmentId: EnvironmentId, installId: string, keep: boolean) {
@@ -760,9 +781,13 @@ export const make = Effect.gen(function* () {
             );
             // Before the install: the session it keeps may already be failing on the reload.
             if (keep && settled.promoted) yield* expectRestart(environmentId);
+            if (!keep) yield* clearRestart(environmentId);
             yield* installEntryLocked(
               entryWithRoutes(previous ?? { ...first, enabled: true }, routes),
-              { retainEquivalentRuntime: true },
+              {
+                retainEquivalentRuntime: true,
+                ...(keep && settled.promoted ? { promotedPairingId: installId } : {}),
+              },
             );
           } else if (
             previous !== undefined &&
@@ -777,6 +802,7 @@ export const make = Effect.gen(function* () {
               next.delete(environmentId);
               return next;
             });
+            yield* clearRestart(environmentId);
             yield* closeServiceScope(environmentId);
             yield* SubscriptionRef.update(entries, (current) => {
               const next = new Map(current);
@@ -1061,6 +1087,7 @@ export const make = Effect.gen(function* () {
       next.delete(environmentId);
       return next;
     });
+    yield* clearRestart(environmentId);
     yield* closeServiceScope(environmentId);
     yield* SubscriptionRef.update(entries, (current) => {
       const next = new Map(current);

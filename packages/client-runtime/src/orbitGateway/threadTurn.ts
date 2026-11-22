@@ -72,7 +72,23 @@ export interface OrbitFirstMessagePorts {
   readonly stopped: () => boolean;
   /** The clone lacks the start's provider: the first turn uses the clone's default instead. */
   readonly onModelFallback?: (fallback: OrbitModelFallback) => void;
+  /** The clone server's connection now: whether a session is up, and which one. */
+  readonly connection?: (environmentId: string) => OrbitCloneConnection;
+  /** Resolves true once a session is up again, or false after `timeoutMs`. */
+  readonly waitForConnection?: (environmentId: string, timeoutMs: number) => Promise<boolean>;
 }
+
+export interface OrbitCloneConnection {
+  readonly connected: boolean;
+  readonly generation: number;
+}
+
+/**
+ * A clone reloads its server when its reservation is finalized, and the first message can meet
+ * that reload. The same command id makes a resend finish the first launch, never start a second.
+ */
+const FIRST_MESSAGE_RECONNECTS = 3;
+const FIRST_MESSAGE_RECONNECT_WAIT_MS = 30_000;
 
 /** Sends the first message; resolves its clone project. Only a launch the server took counts. */
 export async function sendOrbitFirstMessage(
@@ -89,15 +105,20 @@ export async function sendOrbitFirstMessage(
     ports.onModelFallback?.({ requestedModel: requested.model, usedModel: modelSelection.model });
   }
   if (ports.stopped()) throw new Error("The thread start was stopped.");
-  const result = await ports.startTurn(
-    start.environmentId,
-    orbitFirstTurnInput({
-      start: fallBack ? { ...start, modelSelection } : start,
-      projectId: clone.projectId,
-      modelSelection,
-      createdAt: ports.now(),
-    }),
-  );
+  let before = ports.connection?.(start.environmentId);
+  const input = orbitFirstTurnInput({
+    start: fallBack ? { ...start, modelSelection } : start,
+    projectId: clone.projectId,
+    modelSelection,
+    createdAt: ports.now(),
+  });
+  let result = await ports.startTurn(start.environmentId, input);
+  for (let reconnect = 0; !result.ok && reconnect < FIRST_MESSAGE_RECONNECTS; reconnect += 1) {
+    if (!(await reconnectedAfterFailure(start.environmentId, ports, before))) break;
+    if (ports.stopped()) throw new Error("The thread start was stopped.");
+    before = ports.connection?.(start.environmentId);
+    result = await ports.startTurn(start.environmentId, input);
+  }
   if (!result.ok) {
     const error = result.error;
     throw new Error(
@@ -105,4 +126,22 @@ export async function sendOrbitFirstMessage(
     );
   }
   return clone.projectId;
+}
+
+/**
+ * Whether a failed send met a lost connection that is back now: the session was down at the send,
+ * or it is down or replaced after it. A failure on a steady session is the server's answer.
+ */
+async function reconnectedAfterFailure(
+  environmentId: string,
+  ports: OrbitFirstMessagePorts,
+  before: OrbitCloneConnection | undefined,
+): Promise<boolean> {
+  if (before === undefined || ports.connection === undefined || !ports.waitForConnection) {
+    return false;
+  }
+  const after = ports.connection(environmentId);
+  const lost = !before.connected || !after.connected || after.generation !== before.generation;
+  if (!lost) return false;
+  return ports.waitForConnection(environmentId, FIRST_MESSAGE_RECONNECT_WAIT_MS);
 }

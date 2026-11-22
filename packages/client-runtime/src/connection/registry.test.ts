@@ -1834,6 +1834,91 @@ describe("EnvironmentRegistry", () => {
   );
 
   it.effect(
+    "Conn: a discard that finds the pairing replaced by another window starts a new session",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness([]);
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.register(PROVISIONAL_REGISTRATION);
+          yield* awaitConnectionState(
+            registry,
+            PROVISIONAL_TARGET.environmentId,
+            (state) => state.phase === "connected",
+          );
+          // Another window saved its own credential for this route before this one discards.
+          yield* Ref.update(harness.storedTargets, (current) =>
+            current.map((target) =>
+              Equal.equals(target, PROVISIONAL_TARGET) ? PROMOTED_TARGET : target,
+            ),
+          );
+
+          expect(
+            yield* registry.settleProvisionalPairing(
+              PROVISIONAL_TARGET.environmentId,
+              "install-1",
+              false,
+            ),
+          ).toBe(false);
+
+          yield* awaitConnectionState(
+            registry,
+            PROVISIONAL_TARGET.environmentId,
+            (state) => state.phase === "connected" && state.generation === 1,
+          );
+          expect(yield* Ref.get(harness.releasedSessions)).toBe(1);
+          expect(yield* Ref.get(harness.sessions)).toHaveLength(2);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
+  it.effect("Conn: a server paired again after a removal does not inherit its restart window", () =>
+    Effect.gen(function* () {
+      let refuse = false;
+      const harness = yield* makeHarness([], [], [], {
+        prepareRoute: () =>
+          refuse
+            ? new ConnectionBlockedError({
+                reason: "authentication",
+                detail: "The environment credential is invalid.",
+                hop: "server",
+              })
+            : undefined,
+      });
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.register(PROVISIONAL_REGISTRATION);
+        yield* awaitConnectionState(
+          registry,
+          PROVISIONAL_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        yield* registry.settleProvisionalPairing(
+          PROVISIONAL_TARGET.environmentId,
+          "install-1",
+          true,
+        );
+        yield* registry.remove(PROVISIONAL_TARGET.environmentId);
+
+        refuse = true;
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: PROMOTED_TARGET,
+            profile: PROVISIONAL_REGISTRATION.profile,
+            credential: new BearerConnectionCredential({ token: "new-token" }),
+          }),
+        );
+        // A real refusal, not a reload: it blocks instead of retrying every 500 ms.
+        yield* awaitConnectionState(
+          registry,
+          PROVISIONAL_TARGET.environmentId,
+          (state) => state.phase === "blocked",
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect(
     "Conn: a clone server that reloads as its pairing is promoted is connected again, not blocked",
     () =>
       Effect.gen(function* () {

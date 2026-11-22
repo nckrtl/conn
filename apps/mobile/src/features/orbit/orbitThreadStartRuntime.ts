@@ -4,7 +4,8 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import type { Atom } from "effect/reactivity";
+import * as Option from "effect/Option";
+import { AsyncResult, type Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../../connection/catalog";
 import { connectPairingUrl } from "../../connection/onboarding";
@@ -44,7 +45,19 @@ import {
 const ORBIT_CLONE_WORKSPACE = "/srv/workspace";
 const CLONE_READY_TIMEOUT_MS = 60_000;
 
-function waitFor<A>(atom: Atom.Atom<A>, predicate: (value: A) => boolean): Promise<boolean> {
+function cloneConnection(environmentId: string) {
+  return Option.getOrNull(
+    AsyncResult.value(
+      appAtomRegistry.get(environmentCatalog.stateAtom(EnvironmentId.make(environmentId))),
+    ),
+  );
+}
+
+function waitFor<A>(
+  atom: Atom.Atom<A>,
+  predicate: (value: A) => boolean,
+  timeoutMs = CLONE_READY_TIMEOUT_MS,
+): Promise<boolean> {
   if (predicate(appAtomRegistry.get(atom))) return Promise.resolve(true);
   return new Promise((resolve) => {
     const unsubscribe = appAtomRegistry.subscribe(atom, (value) => {
@@ -56,7 +69,7 @@ function waitFor<A>(atom: Atom.Atom<A>, predicate: (value: A) => boolean): Promi
     const timeout = setTimeout(() => {
       unsubscribe();
       resolve(false);
-    }, CLONE_READY_TIMEOUT_MS);
+    }, timeoutMs);
   });
 }
 
@@ -131,6 +144,16 @@ const ports: MobileOrbitThreadStartPorts = {
         : { ok: false, error: squashAtomCommandFailure(result) };
     },
     now: () => new Date().toISOString(),
+    connection: (environmentId) => {
+      const state = cloneConnection(environmentId);
+      return { connected: state?.phase === "connected", generation: state?.generation ?? 0 };
+    },
+    waitForConnection: (environmentId, timeoutMs) =>
+      waitFor(
+        environmentCatalog.stateAtom(EnvironmentId.make(environmentId)),
+        (result) => Option.getOrNull(AsyncResult.value(result))?.phase === "connected",
+        timeoutMs,
+      ),
   },
   keepInWorkspace: keepProjectInOrbitWorkspace,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),

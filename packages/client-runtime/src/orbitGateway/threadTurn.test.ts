@@ -103,12 +103,44 @@ describe("sendOrbitFirstMessage", () => {
     expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
   });
 
-  it("never counts a refused launch as sent", async () => {
-    const { ports: run } = ports([
+  it("resends the launch once the clone's server is back from the reload that dropped it", async () => {
+    // The finalize reloads the clone: its session drops just as the first message goes out.
+    let connection = { connected: true, generation: 1 };
+    const waits: number[] = [];
+    const { launches, ports: base } = ports([]);
+    const run: OrbitFirstMessagePorts = {
+      ...base,
+      startTurn: async (environmentId, input) => {
+        await base.startTurn(environmentId, input);
+        if (launches.length > 1) return { ok: true };
+        connection = { connected: false, generation: 1 };
+        return { ok: false, error: new Error("Environment env-41 is not connected.") };
+      },
+      connection: () => connection,
+      waitForConnection: async (_environmentId, timeoutMs) => {
+        waits.push(timeoutMs);
+        connection = { connected: true, generation: 2 };
+        return true;
+      },
+    };
+
+    await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
+    expect(launches.map((launch) => launch.commandId)).toEqual(["command-1", "command-1"]);
+    expect(waits).toEqual([30_000]);
+  });
+
+  it("never counts a refused launch as sent, and does not resend it on a steady session", async () => {
+    const { launches, ports: run } = ports([
       { ok: false, error: new Error("Thread thread-1 already exists") },
     ]);
+    const steady = {
+      ...run,
+      connection: () => ({ connected: true, generation: 1 }),
+      waitForConnection: async () => true,
+    };
 
-    await expect(sendOrbitFirstMessage(start, run)).rejects.toThrow("did not take");
+    await expect(sendOrbitFirstMessage(start, steady)).rejects.toThrow("did not take");
+    expect(launches).toHaveLength(1);
   });
 
   it("sends nothing once the start was dismissed", async () => {

@@ -175,7 +175,8 @@ function resolveSpecifier(from: string, specifier: string): Array<string> {
   // A workspace package this test cannot resolve: count all of it.
   if (found.length === 0 && pkg) return filesUnder(pkg.dir);
   const manifests = found.flatMap((file) => owningManifest(file) ?? []);
-  if (specifier.startsWith("#")) manifests.push(...(owningManifest(from) ?? []));
+  const importsManifest = specifier.startsWith("#") ? owningManifest(from) : undefined;
+  if (importsManifest) manifests.push(importsManifest);
   return [...new Set([...found, ...manifests])];
 }
 
@@ -412,13 +413,13 @@ it("follows # imports the way Node picks them", () => {
       "types/tailwind.d.ts": "",
     },
     (dir) => {
-      const reached = reachedFrom(dir, "postcss.config.cjs");
-      expect(reached).toContain("plugins/tailwind.cjs");
-      expect(reached).toContain("package.json");
-      // The most specific pattern wins, as in Node.
-      expect(reached).toContain("server-plugins/auth.cjs");
-      expect(reached).not.toContain("plugins/server/auth.cjs");
-      expect(reached).not.toContain("types/tailwind.d.ts");
+      // The most specific pattern wins, as in Node; `types` targets are never followed.
+      expect([...reachedFrom(dir, "postcss.config.cjs")].sort()).toEqual([
+        "package.json",
+        "plugins/tailwind.cjs",
+        "postcss.config.cjs",
+        "server-plugins/auth.cjs",
+      ]);
     },
   );
 });

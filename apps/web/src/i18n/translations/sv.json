@@ -94,6 +94,19 @@
   "21be308917bd450e": "Kunde inte länka: {failure}",
   "acd01e781e2355cc": "Begäran avslutades",
   "97e4c50a99272f63": "Kunde inte svara på begäran. Försök igen.",
+  "605a491783d18b3f": "Det gick inte att läsa den här tråden via {via}",
+  "50f19209548b70d9": "{via} kan behöva uppdateras innan den kan läsa länkade trådar.",
+  "3d624e57d675358c": "Länkade miljöer är avstängt på {via}",
+  "01b2231effdb835f": "Slå på det i Inställningar → Labs på {via} för att läsa trådar på maskinerna den länkar till.",
+  "e767e8901a0a3f35": "{via} är inte längre länkad till {label}",
+  "df3cd6ccd77084b4": "Länka den igen i Inställningar → Anslutningar på {via} för att läsa dess trådar härifrån.",
+  "3920637506407ca0": "Länken från {via} till {label} har gått ut",
+  "80fec3c2b4fba678": "Länka den igen i Inställningar → Anslutningar på {via} med en ny parkopplingskod.",
+  "fec50d228dc9aa9b": "{label} nekade läsningen",
+  "cd63d78559603b12": "Den här tråden finns inte längre på {label}",
+  "bd29efc163476e72": "Den kan ha raderats där.",
+  "f7870ef3a4828ab1": "{label} behöver uppdateras",
+  "eabbf064657519ee": "{label} svarar inte {via}",
   "f71597ae3afaef44": "{first} och {second}",
   "4047174839a16714": "{first} och {last}",
   "65ca7867c176afbf": "{first}, {rest}",
@@ -449,12 +462,14 @@
   "d59a295ee6688a9d": "{appName} på {host} var för upptagen för att svara.",
   "5c5941732d5dfac6": "Uppgifterna för parkopplingen är ogiltiga.",
   "b8ca23ad7dda376e": "Den adressen leder till {host}, en annan dator. Lägg till den som en egen miljö i stället.",
+  "0c0150a90b582a7a": "Miljöns URL är ogiltig.",
   "693cb5c4fb40f109": "Bara sparade bearer-miljöer kan redigeras.",
   "5f5844b910cb1544": "Den sparade bearer-uppgiften är inte tillgänglig.",
   "51b0133f1ed3cf5c": "Miljöns etikett får inte vara tom.",
-  "0c0150a90b582a7a": "Miljöns URL är ogiltig.",
   "f82d215f41af6401": "Uppdatera {appName} på {host} manuellt; det kan inte uppdatera sig självt.",
   "6fd310d23099f107": "{host} kom inte tillbaka med en kompatibel version av {appName}.",
+  "3aa15bfbe1920376": "Uppdatera T3 Code på {host} manuellt; det kan inte uppdatera sig självt.",
+  "71907f57b7ec64d5": "{host} kom inte tillbaka med en kompatibel version av T3 Code.",
   "e77ac580a4ddcd3b": "Tillgänglig",
   "a980c44b06fc7b26": "Offline",
   "fef710ef9d9e365d": "Ansluter...",
@@ -1576,11 +1591,11 @@
   "dbb08d8033f0a1a8": "Lägg till på en annan dator",
   "a679fa27ddfabfd5": [
     "Klona ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " och ta med de lokala filer som git inte spårar."
   ],
   "77494a56d6315a2e": "Klona via",
@@ -1639,11 +1654,11 @@
   "bc81dfd7ade60791": "Gren: {branch}",
   "459e639b9a89964f": [
     "Skapa ny ref ”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "”"
   ],
   "b77a2b4d9abda043": "Arbetsyta",
@@ -1844,15 +1859,18 @@
   "cd33738b793eb8a6": [
     "Ny tråd i",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "dbc0288da29ce1d4": "Söker i meddelanden…",
   "360702bf29668cf7": "Läser in mappar...",
@@ -1933,11 +1951,11 @@
   "07ec9dca9507f98f": "Spela upp en inspelad omgång",
   "5226427a0a03f324": [
     "Spela upp i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "de57709b5c104ab0": "Kräver ett projekt och leverantören Replay (dev), som utvecklingsservrar startar.",
   "b9906c1e0a3e49ee": "Kopiera filsökväg",
@@ -2004,11 +2022,11 @@
   "c35ff689e28afdcf": "Omgång",
   "b736ae3cc48c6809": [
     "Omgång ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "cb6401c0e520f909": "Commits",
   "edde0b7e8a04b15b": "Läser in commits...",
@@ -2105,21 +2123,21 @@
   "3309a41a16389eaa": "Protokoll",
   "00b90fd91fba54d4": [
     "Publicerar repot till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "..."
   ],
   "1f1233e893f475ff": "Publiceringen misslyckades",
   "629b9179d2883b0c": [
     "Öppna på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "029dbda77aea8039": "Publiceringsresultatet är inte tillgängligt.",
   "768644e21dec2838": "Klar",
@@ -2156,11 +2174,11 @@
   "1fa714c0c7855545": "Dina agenter körs på din dator.",
   "3163b4d1243aa409": [
     "Dina agenter körs på din dator. Starta ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " där först."
   ],
   "0e2f68b7c6915c72": "Öppna Miljöer",
@@ -2174,40 +2192,40 @@
   "0e79b7a6508a6286": "Sedan",
   "363b9991fa23d36b": [
     "Hoppa över installationen om du redan har ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": "t3"
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      ["c", "t3"]
+    ],
     ". Om",
     " ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": "t3"
-    },
+    [
+      ["t", "code"],
+      ["i", 2],
+      ["c", "t3"]
+    ],
     " inte hittas efter installationen, lägg till mappen som installationsprogrammet anger i din PATH."
   ],
   "87b24d00c08f54bb": "Det gick inte att öppna filen med kortkommandon",
   "0ee16208cbfcdbf4": "Okänt fel när filen öppnades.",
   "9e20856550715c74": [
     "Öppna ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "8fffd1cf07b7fbc6": "Ogiltig konfiguration av kortkommandon",
   "9e4394e5b89e57a1": "Återställer dina trådar…",
   "5579a5d039c6962c": "{count, plural, one {Migrerar {total} tråd från den tidigare versionen. Du kan fortsätta arbeta medan det blir klart.} other {Migrerar {total} trådar från den tidigare versionen. Du kan fortsätta arbeta medan det blir klart.}}",
   "8117d2b1eaef9f82": [
     "Den här miljön hanteras av ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "."
   ],
   "d71a78d5a0b8045d": "Få hjälp",
@@ -2254,19 +2272,19 @@
   "8b4c89c1e1343190": "Välj projektåtgärd",
   "4d1b505668527740": [
     "Från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "572b504c2a4fb41c": [
     "Kör ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "93fa9502d3486944": "Projektåtgärder",
   "4951ced799fd3053": "Lägg till projektåtgärd…",
@@ -2287,25 +2305,25 @@
   "52c10a39cde79c44": "Worktree",
   "2f2234c55b186b68": [
     "#",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " ·",
     " ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " till",
     " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    }
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ]
   ],
   "aece11422a97a057": "Håll ned {shortcut} eller tryck två gånger för att avsluta",
   "404941d325a2755b": "Tryck på {shortcut} igen för att avsluta",
@@ -2343,6 +2361,7 @@
   "3e90738d0ff19a29": "Databas",
   "36a410dfbf4dda56": "MCP",
   "fae3639874428042": "Tasks",
+  "1944f04b75ddf26d": "Tråd på {label}",
   "314cfeebf191ba0d": "behöver godkännande",
   "4e5b7363441a3831": "behöver input",
   "97af4e74a5f95e5e": "körs",
@@ -2353,6 +2372,7 @@
   "566810ac726b119a": "Stäng av ljudet för {title}",
   "f6d1af395ae7bfcb": "Namn på enhetsflik",
   "e7ba2fded155ecdd": "{title}, {state}",
+  "2906d1220b6a2872": "Öppna i huvudvyn",
   "69ba5155e6e2ef95": "Byt namn",
   "44c90f8f19346bfb": "Stäng andra",
   "e6cd4726a7513754": "Stäng till höger",
@@ -2486,38 +2506,41 @@
   "2ce2d13c03c0b396": "Vissa begäranden är långsamma",
   "28493cea4aebe7c3": [
     "Startade ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "7f8ed52b364cd3bd": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " är inte installerad på",
     " ",
-    {
-      "t": "span",
-      "i": 2,
-      "c": {
-        "i": 3,
-        "k": "_gt_value_3",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 2],
+      [
+        "c",
+        [
+          ["i", 3],
+          ["k", "_gt_value_3"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     ", så begäranden här använder din egen GitHub-inloggning och dess lägre hastighetsgräns."
   ],
   "ece21b01a395e62c": [
     "Installera på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "5bbac0e5afeec779": "Aktuell tråd",
   "33c7e68fca089036": "Tråd, {title}",
@@ -2660,11 +2683,11 @@
   "3f400d1470c76ff8": "Tryck på kortkommando",
   "3bf42e08dad6483f": [
     "Ta bort åtgärden ”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "”?"
   ],
   "fc55702435f9adce": "Den här åtgärden kan inte ångras.",
@@ -2676,11 +2699,11 @@
   "d3502e7db0cdb998": "Kortkommando",
   "86f71ac04d41f95e": [
     "Tryck på ett kortkommando. Använd ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": "Backspace"
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      ["c", "Backspace"]
+    ],
     " för att rensa. Kortkommandon gäller hela miljön. Projekt som använder samma åtgärd delar dess kortkommando."
   ],
   "ac049cf1be6726fc": "Kommando",
@@ -2831,6 +2854,7 @@
   "276c7fa42a15a542": "Uppdatera äldre servrar för att spara den här inställningen.",
   "52163ddccc1eb594": "Inställningen sparades i vissa miljöer",
   "fee07035b4a2a1c3": "Sparat på {environments}.",
+  "2a1ecf7863e204aa": "Öppna i sidopanelen",
   "8a7ee5752bb91550": "Kunde inte kopiera. Skriv {command} i stället.",
   "7dfdfa116c6a9d86": "Kunde inte starta felsökningen",
   "25fe0f5f3ef3bb02": "{description} Kör {command} i en terminal på den datorn i stället.",
@@ -2931,11 +2955,11 @@
   "f08afb1daf7281d0": "Sidan hittades inte",
   "361299a34f2139c5": [
     "Den här länken pekar inte på en sida i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Gå till startsidan för att välja ett projekt eller starta en tråd."
   ],
   "a76e3ae104cb075e": "Gå till startsidan",
@@ -2954,11 +2978,11 @@
   "dc06ede61ff5d1cc": "Återställ enhetens standardvärden",
   "c4b395da633cf4d3": [
     "Återanslut ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för att ändra dess inställningar."
   ],
   "247e01cc01583645": "Förhandsvisning finns bara i skrivbordsappen",
@@ -3046,92 +3070,98 @@
   "724b26759d3c7e93": [
     "Den här agenten vill använda trådarna i alla projekt på",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "(",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     ")."
   ],
   "2d3d4fb05ed5ea44": [
     "Den här agenten vill använda trådarna i alla projekt på",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     "."
   ],
   "06c894eff8be1d35": "App",
   "4fbde10ab07d40dd": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " ",
-    {
-      "t": "span",
-      "i": 2,
-      "c": "· namn satt av appen"
-    }
+    [
+      ["t", "span"],
+      ["i", 2],
+      ["c", "· namn satt av appen"]
+    ]
   ],
   "47d3ba1a39016131": "Åtkomsten går till",
   "d121a97a3e275036": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    {
-      "t": "span",
-      "i": 2,
-      "c": [" ", "på datorn som öppnade den här sidan"]
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "span"],
+      ["i", 2],
+      ["c", [" ", "på datorn som öppnade den här sidan"]]
+    ]
   ],
   "b2d53b4d1d48fbef": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    {
-      "t": "span",
-      "i": 2,
-      "c": [" ", "· den som kör den får den här åtkomsten"]
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "span"],
+      ["i", 2],
+      ["c", [" ", "· den som kör den får den här åtkomsten"]]
+    ]
   ],
   "c54cc9c75db9dc58": "Godkänn bara en inloggning som du själv precis har startat.",
   "e9f4b93c4ec30453": "Inloggningskod",
   "de680c7875580f35": [
     "Hämta en från Använd ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " i en annan app (MCP), Inställningar → Delning och åtkomst eller ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": "t3 auth pairing create"
-    },
+    [
+      ["t", "code"],
+      ["i", 2],
+      ["c", "t3 auth pairing create"]
+    ],
     " på den här datorn."
   ],
   "49e3cf16b3ac3e5f": "Åtkomst",
@@ -3161,15 +3191,18 @@
   "0528294df7656322": [
     "Värd:",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "ff5f1c260e87ecde": "Kontrollera att backenden kan nås från den här webbläsaren, stöder CORS för webbaserade klienter och betjänas via HTTPS när den här sidan öppnas via HTTPS.",
   "08570ee0982df89d": "Parkopplar...",
@@ -3192,11 +3225,11 @@
   "8cd59ff5c8cc17f9": [
     "Kommentarer får innehålla högst",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " tecken."
   ],
   "c86597c99c507722": "Kunde inte öppna det citerade svaret",
@@ -3270,11 +3303,11 @@
   "412187d16dc11adf": [
     "Byt till",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "3dbc42464b2bfb20": "Snabb och Ultrasnabb är inte tillgängliga med den här ChatGPT-anslutningen. Använd en befintlig Codex CLI-inloggning för de hastighetsalternativ ditt konto stöder.",
   "5c0eb4217bb673bd": "Använder ChatGPT-abonnemang",
@@ -3284,19 +3317,19 @@
   "ab42a6d2ab6073d9": "Trådåtgärder för {title}",
   "cd8fd5a47060164b": [
     "Ny tråd i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "1c983a010570cdbb": [
     "Startad av en agent på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " via en länkad miljö."
   ],
   "601807baf4e25b94": "Förhandsvisa {name}",
@@ -3309,15 +3342,18 @@
   "13d83e7c0e44494c": [
     "Byta till",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     "?"
   ],
   "2ce5b965862599cc": "Du har ändringar som inte är committade. De följer med till den andra grenen eller blockerar bytet om de är i konflikt.",
@@ -3330,20 +3366,20 @@
   "8d9617edf6eee5b9": "Det gick inte att skicka godkännandebeslutet.",
   "160ead9e70889628": [
     "Godkännande behövs från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "1b1131295f62c44c": "Leverantörsprocessen finns inte längre. Avbryt eller starta om undertråden för att svara.",
   "da66023072c473d1": [
     "Kunde inte läsa in utdata: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "5b56b7c5d024d2f2": "Läser in utdata…",
   "890b662798f00182": "Inga utdata.",
@@ -3479,11 +3515,11 @@
   "ce0cbeabf2f6e711": "Inget undanlagt än.",
   "bc471379e3bcdf40": [
     "Tryck på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " med en prompt i inmatningsfältet för att lägga undan den."
   ],
   "cde2a4fd18e27557": "{count, plural, one {{count} konto} other {{count} konton}}",
@@ -3503,11 +3539,11 @@
   "074db680e148e829": "Lägg till ett projekt",
   "1bbfd30a652f7e0f": "eller starta utan projekt",
   "b8e0e89c83a639fa": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för att starta"
   ],
   "99c183d2407cd36d": "Lägg till ett projekt för att starta",
@@ -3557,11 +3593,11 @@
   "f66c9318201502e0": "Öppna i helskärm",
   "dc0b188b0761f98a": [
     "Det gick inte att läsa in ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "63fd02d55f0e4417": "Länka en dator till den här miljön",
   "4136b6bb217cc0b8": "Länka {target} till den här miljön",
@@ -3583,35 +3619,61 @@
   "89a68ae66d9266dc": "Den här appen har ingen adress som en annan dator kan nå. Ange dess https- eller Tailscale-adress.",
   "71a4002c45077fe2": [
     "Den här appen har ingen adress till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " som en annan dator kan nå. Ange dess https- eller Tailscale-adress."
   ],
   "7ebb23e6bf9b19e8": "Parkopplingskod",
   "c1244cdfaf295b5d": "Create a link on a machine: Settings → Connections → Create link, then paste its code here.",
   "5fd75732c718cdf1": [
     "Create a link on ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ": Settings → Connections → Create link, then paste its code here."
   ],
   "c205277bd4ab61d2": [
     "Den här miljön är redan länkad till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Agenten kan använda den länken som den är; ändra dess åtkomst under Inställningar → Miljöer."
   ],
   "000b0df227182d39": "En annan adress…",
   "0e3e59f7185ccebb": "Text",
+  "fd07b24350a7643f": "en länkad miljö",
+  "6bb5b1b35b2796ae": "På {label} via {via} · Arbetar",
+  "a73b7ab25d6e9bdf": "På {label} via {via}",
+  "009e2ca841fdc1ef": "den här miljön",
+  "4ab24e2807a0d82f": "Ansluten till {label}",
+  "b797c7beccf2dc46": "Den här enheten är parkopplad med den och kan använda dess trådar.",
+  "d8c4a71a728fcf68": "Ansluter till {label}…",
+  "93e690821c726e13": "{label} kan inte nås från den här enheten",
+  "a5424a5a76e10aa3": "Anslut till ett nätverk som den finns på, till exempel dess Tailscale-nätverk, och försök igen. Du kan fortsätta läsa här.",
+  "1942567fd95da447": "{label} behöver en parkopplingskod",
+  "0f62d432499e13f9": "Skapa en där och lägg till den på den här enheten som en miljö.",
+  "8cb2e5692c4f05ab": "Öppna den här tråden på {label} för att se den här visualiseringen.",
+  "745a0b899008618c": "Kunde inte läsa in tidigare omgångar. Försök igen.",
+  "0014ce0aaf1bd68a": "Skrivskyddad",
+  "10ca916def8211d4": "Ange kod",
+  "a446e3bda256c2b3": "Anslut för att interagera",
+  "d0bda35aeec66684": [
+    "Läser från ",
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
+    "…"
+  ],
+  "c3e8cd9bf44e2f43": "Visar det som lästes tidigare.",
   "eb6e0584cf4a2a1d": "Språk: {language}",
   "d76c606a3c519b78": "Inaktivera radbrytning",
   "2b683498cee8c8a7": "Bryt rader",
@@ -3639,6 +3701,7 @@
   "6d329f7d3a50c7e7": "Kopiera tabell",
   "6c71d251d9917587": "Kopiera som Markdown",
   "d510b122f84051a0": "Kopiera som CSV",
+  "2912e4ac3697686b": "Läs tråden på {label}",
   "ced684880c2e1961": "Tillåta {server} att köra {tool}?",
   "b66fa23b5647b62d": "Skicka det här meddelandet från {server}?",
   "bae7f74153fa8a05": "Spara {names} från {server}?",
@@ -3646,41 +3709,41 @@
   "efd6c11387619a64": "Appen {server}",
   "cda76d56e346d417": [
     "Appen ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " stängdes"
   ],
   "dff97202cbdaec5b": "Visa app",
   "705cf2b2ee4e0e42": [
     "Appen ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " lämnade sin sida och stoppades"
   ],
   "5ef18e4d39b398bf": [
     "Det gick inte att läsa in appen ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "9cc6288e83305ca3": "Diagrammet kunde inte renderas.",
   "74d986aed0381cb0": "Diagramrenderaren kunde inte läsas in.",
   "d694484d6fea351e": "Expandera diagram",
   "e68fd3dac926848b": [
     "Det gick inte att rendera diagrammet: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "9bbecec926c3b695": "Försök igen",
   "4fd8927b7afc2a92": "Kopiera meddelande",
@@ -3716,44 +3779,44 @@
   "2e5c8e3a72fe169b": "Läser in arbetshistorik",
   "70267e0b78c1df51": "Skicka ett meddelande för att starta konversationen.",
   "fcb06624d70ce0f1": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
-    {
-      "t": "ArrowRightIcon",
-      "i": 3
-    },
-    {
-      "i": 4,
-      "k": "_gt_value_4",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "ArrowRightIcon"],
+      ["i", 3]
+    ],
+    [
+      ["i", 4],
+      ["k", "_gt_value_4"],
+      ["v", "v"]
+    ],
     " token"
   ],
   "2f41c67ef702413b": [
     "Kontexten komprimerades ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
-    {
-      "t": "ArrowRightIcon",
-      "i": 2
-    },
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "ArrowRightIcon"],
+      ["i", 2]
+    ],
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     " token"
   ],
   "5e304d3afa0b58f1": "Avbröts av en omstyrning",
@@ -3807,11 +3870,11 @@
   "a034c6eed75c3256": "Inga installerade redigerare hittades",
   "dafffd8aabbe22d2": [
     "Öppna i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "d951cb8c12ccd52e": "Öppna i…",
   "88c91fd12cf0f7d7": "Välj redigerare",
@@ -3851,24 +3914,27 @@
   "730433ae490bb9ae": [
     "Ange en sökväg relativt till",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     "."
   ],
   "dcd203d82cc65b22": [
     "Ange en sökväg relativt till ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": "arbetsytan"
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      ["c", "arbetsytan"]
+    ],
     "."
   ],
   "fc3b6bf340ccc47b": "Arbetsytans sökväg",
@@ -3920,11 +3986,11 @@
   "49414ffb9aed57ab": "Ta bort från kön",
   "38f2601f7424e07e": [
     "Skickat av ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "ded43a280aed9f20": "Öppna tråd",
   "7635dd64bbbe10ec": "Öppna automatisering",
@@ -3941,6 +4007,7 @@
   "6a116665c8d9ad75": "Stäng sidochatt",
   "a5e57fdfde50aade": "Lägg till i chatten",
   "492a438bf9dbd45d": "Den här sidochatten togs bort.",
+  "255a537ab23ddd2d": "Den här tråden är inte längre tillgänglig.",
   "7350aa3df15b9802": "Färdighet {label}",
   "9ff9f24d1568fbaf": "Ingen beskrivning finns för den här färdigheten.",
   "274e087f814611a7": "Visa instruktioner",
@@ -3984,49 +4051,49 @@
   "b9a547b1936fb658": "Tvångsstoppa",
   "7100c70090280026": [
     "Väntar · ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "797b0ad147bdfe1f": [
     "Körs · ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "58ac05b9fbce58ce": "Stoppar...",
   "4bf9327818b58241": "Stoppa",
   "8fe132a05b04a8dc": [
     "Den här tråden kördes senast på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Om du skickar fortsätter det på",
     " ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     "."
   ],
   "4698c3007479de8c": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Grenen ändrades från"
-    },
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "Grenen ändrades från"]
+    ],
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ]
   ],
   "67571d84e5950239": "Återställer...",
   "8dc01c69f37e07bb": "Återställ gren",
@@ -4040,10 +4107,10 @@
   "336eece883d0643d": "Återuppta {title}",
   "4a98174d589dc462": [
     "nästa ",
-    {
-      "t": "ScheduledRelativeLabel",
-      "i": 1
-    }
+    [
+      ["t", "ScheduledRelativeLabel"],
+      ["i", 1]
+    ]
   ],
   "768f1e16f55ea307": "pausad",
   "ac242b57dbfa5259": "Hantera schemalagda uppgifter",
@@ -4051,21 +4118,21 @@
   "3fe420ed9b5bdb75": "Kör nu",
   "0c433351a8606e50": [
     "Kunde inte läsa in automatiseringar: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "e58a1d884fa1d8f2": "Tråddetaljer",
   "43c5fbd02c6f330a": "Visa mindre",
   "de45b075b016cb14": [
     "Visa ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " till"
   ],
   "02d9667ff2c8e0b8": "Ärende {key}: {title}",
@@ -4099,11 +4166,11 @@
   "1567df8ab4aaac42": "Det här mergar #{number} med {method, select, merge {merge} squash {squash} rebase {rebase} fastForward {fast-forward} other {merge}}.",
   "636eb97a97862aef": [
     "Merge-konflikter med ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "159ddd0d146a0f22": "Bevakar: agenten vaknar när kontrollerna är klara, någon kommenterar eller grenen får konflikter. Klicka för att sluta.",
   "1cbc8b5db51b4c77": "Merga",
@@ -4167,14 +4234,13 @@
   "5e7eb0f2952de1b2": "Ersatt",
   "59bcb9db3f0f59ea": "Inaktiv",
   "94124ad2133e3aed": "Okänd",
-  "1a6f6154d1cb51a9": "Öppna sidochatten i den här chatten",
+  "000646e27e304b8b": "Öppna sidochatt",
   "56567586cbe00c86": "Öppna kontextöverföringen i den här chatten",
-  "7fe7d5ae5fb4a655": "Öppna subagenten i den här chatten",
+  "405e76cdd602bbcf": "Öppna subagent",
   "520c15dbd507b804": "Öppna den överordnade agenten i den här chatten",
   "309b160785f6c473": "Öppna forken i den här chatten",
   "6676cd4b8299663f": "Öppna den överordnade tråden i den här chatten",
   "63e8c7a0ef0513b5": "Relaterade trådar",
-  "68060b380fe53942": "Körs på {label}. Anslut till den för att öppna tråden där.",
   "9996d9dac573001a": "Öppna på {label}",
   "15a601a94893277f": "Kunde inte öppna den överordnade tråden",
   "5eb43f554a5b7a58": "Den överordnade tråden togs bort",
@@ -4198,20 +4264,20 @@
   "a65861ad58565591": "Sidochattar · {runningSideChats} körs",
   "dc28386e0a961d4d": "Sidochattar",
   "05c120510a9b85d8": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " misslyckades"
   ],
   "0bc72950072ee1aa": [
     "på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "3237699bd13dd4bb": "Stoppa subagent",
   "075398ac562d74b0": "Koppla från agentsession",
@@ -4229,20 +4295,20 @@
   "95b263aa683271cc": "Stoppa localhost:{port}",
   "f94866e17faddc05": [
     "Öppna i webbläsarpanelen. ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för din webbläsare."
   ],
   "781fba367a220012": [
     "Vidarebefordrad till localhost:",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på den här datorn. Klicka för att stoppa."
   ],
   "92347683e33e9f02": "Vidarebefordra till den här datorn, för alla appar här",
@@ -4291,11 +4357,11 @@
   "5b30ae788fdc4fd0": "Skickar…",
   "b8e1cd0265566143": [
     "Ladda ned ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "31c5a7eb89641aba": "Redigera härifrån",
   "918cd5477d0c0e9b": "Visa hela meddelandet",
@@ -4309,89 +4375,89 @@
   "6fb5edb3f496ba7f": "Öppna skapad tråd",
   "c0f9321d0e5b50b6": "Öppna subagenttråd",
   "436773daf874e62f": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Läste tråden ”"
-    },
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
-    {
-      "t": "span",
-      "i": 3,
-      "c": "”"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "Läste tråden ”"]
+    ],
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "span"],
+      ["i", 3],
+      ["c", "”"]
+    ]
   ],
   "20e8c0c6d9f710cc": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Kunde inte läsa tråden ”"
-    },
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
-    {
-      "t": "span",
-      "i": 3,
-      "c": "”"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "Kunde inte läsa tråden ”"]
+    ],
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "span"],
+      ["i", 3],
+      ["c", "”"]
+    ]
   ],
   "d3e39673276735f7": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Avböjde att läsa tråden ”"
-    },
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
-    {
-      "t": "span",
-      "i": 3,
-      "c": "”"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "Avböjde att läsa tråden ”"]
+    ],
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "span"],
+      ["i", 3],
+      ["c", "”"]
+    ]
   ],
   "1142cc8cc93ad54b": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Slutade läsa tråden ”"
-    },
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
-    {
-      "t": "span",
-      "i": 3,
-      "c": "”"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "Slutade läsa tråden ”"]
+    ],
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "span"],
+      ["i", 3],
+      ["c", "”"]
+    ]
   ],
   "7f1ddce0d74afeb3": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": "Läser tråden ”"
-    },
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
-    {
-      "t": "span",
-      "i": 3,
-      "c": "”"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "Läser tråden ”"]
+    ],
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
+    [
+      ["t", "span"],
+      ["i", 3],
+      ["c", "”"]
+    ]
   ],
   "a2aaca7ff8310186": "Öppna chatt",
   "a3048aaa541b7744": "Aktivitet",
@@ -4402,19 +4468,19 @@
   "ff6edf13509031be": "Konfigurerar worktree…",
   "eb06160a98c4dd18": [
     "Har arbetat i ",
-    {
-      "t": "WorkingTimer",
-      "i": 1
-    }
+    [
+      ["t", "WorkingTimer"],
+      ["i", 1]
+    ]
   ],
   "90e4f528f3f30fc2": "Arbetar...",
   "6f4b0e797341e214": "Konfiguration i bakgrunden",
   "e81927b01b8b505c": [
     "Har komprimerat i ",
-    {
-      "t": "WorkingTimer",
-      "i": 1
-    }
+    [
+      ["t", "WorkingTimer"],
+      ["i", 1]
+    ]
   ],
   "e9b38212eb281365": "Komprimerar…",
   "e49d80b76b38931e": "Agent",
@@ -4433,25 +4499,28 @@
   "b29e1856c4aab31f": "Den här datorn",
   "c722bc4d833dc79c": [
     "Agenten läser ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "s loggar och källkod här och frågar innan den tillämpar en åtgärd eller publicerar något."
   ],
   "e7588632064e0364": "Kopierat",
   "996f7752fa033da6": [
     "eller kör",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "275a97b4af3c6482": "Kopiera kommando, för en terminal",
   "2b07985d23563374": "Återupptas {time}",
@@ -4478,11 +4547,11 @@
   "e8c80b6d40c0944c": "Sökresultat",
   "8d1906900b5c95c7": [
     "avslutningskod ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "83c29850641c8935": "I kö",
   "8402f099f88fd0e0": "Körs",
@@ -4506,11 +4575,11 @@
   "4d765811334b8edf": "Kontextöverlämning",
   "54915723f9384a19": [
     "Skapade tråd · ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "0832a03c4dc5eac4": "Skapade tråd",
   "50581b0c78ba5b66": "Mikrofonen blockerad",
@@ -4554,11 +4623,11 @@
   "c89e52c7e756475e": "Kräver en administratör för att laddas ned",
   "0ce52f02e2622a13": [
     "Rekommenderas för ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Innehåller en tystnadsdetektor på 1,2 MB."
   ],
   "8f66127ac7b35a99": "Innehåller en tystnadsdetektor på 1,2 MB.",
@@ -4866,11 +4935,11 @@
   "fe4e834cd36123fe": "Inga mobilklienter",
   "096cd971e11827dc": [
     "Installera ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på telefonen och logga in på T3 Connect för att få push-aviseringar och liveaktiviteter."
   ],
   "de111af2fe5653a6": "Kunde inte läsa in mobilklienter",
@@ -4879,32 +4948,32 @@
   "fba00de8e861f8c1": "T3 Connect-inställningar",
   "83a0e763474f61be": [
     "Ta bort ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " från den här enheten?"
   ],
   "e4881cc289fa945c": "Det här glömmer dess parkoppling, autentiseringsuppgifter och cachade trådar här.",
   "c6e67d2a213f4e8d": [
     "Den finns kvar på ditt T3 Connect-konto och behåller sin värdplats. Avregistrera den under",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för att frigöra den."
   ],
   "221ad7ff2e9f5452": [
     "Det här ändrar inte ditt T3 Connect-konto. Använd",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för att avregistrera den där."
   ],
   "3bd17825c03a079e": "Ta bort från den här enheten",
@@ -4917,42 +4986,42 @@
   "059a4cf9769039b8": "Länka T3 Chat",
   "7a61689a0b789db0": [
     "Premier · upp till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " tunnlar"
   ],
   "eadafc8408e122aa": [
     "Pro · upp till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " tunnlar.",
     " ",
-    {
-      "t": "a",
-      "i": 2,
-      "c": "Uppgradera på T3 Chat"
-    },
+    [
+      ["t", "a"],
+      ["i", 2],
+      ["c", "Uppgradera på T3 Chat"]
+    ],
     " ",
     "till Premier för ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     "."
   ],
   "b50f44cd6c5c9bfa": [
-    {
-      "t": "a",
-      "i": 1,
-      "c": "Uppgradera på T3 Chat"
-    },
+    [
+      ["t", "a"],
+      ["i", 1],
+      ["c", "Uppgradera på T3 Chat"]
+    ],
     " ",
     "för fler tunnlar"
   ],
@@ -4961,11 +5030,11 @@
   "ac298836b1483a1a": [
     "Bekräfta på",
     " ",
-    {
-      "t": "a",
-      "i": 1,
-      "c": "t3.chat"
-    },
+    [
+      ["t", "a"],
+      ["i", 1],
+      ["c", "t3.chat"]
+    ],
     " och välj sedan Uppdatera."
   ],
   "cf09d31e268af127": "Försök med T3 Connect igen",
@@ -4986,11 +5055,11 @@
   "f46ef5a6005bb954": "Avregistrera server",
   "5f7f976fec024153": [
     "”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "” tas bort från det här kontot."
   ],
   "f5dfd8cd69fc27fd": "Åtkomsten till T3 Connect återkallas, eventuella hanterade tunnlar tas bort och en värdplats blir ledig. Lokala anslutningar på dina enheter ändras inte.",
@@ -5062,26 +5131,26 @@
   "752bb0ea8b33e33e": "Förlopp för installationen av reläklienten",
   "735d71759e25f797": [
     "Håll ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " öppet medan reläklienten installeras."
   ],
   "0932e0330e2f409d": "Hanterad reläklient",
   "41ace79912ff09a3": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " laddar ned och installerar version ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " lokalt."
   ],
   "f042fc0f38af7e57": "Ladda ned och installera",
@@ -5118,27 +5187,30 @@
   "f76ea65218a25f9f": "SSH-verifiering krävs",
   "633b8b107de280c7": [
     "Ange lösenordet eller verifieringskoden som krävs av ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     ". ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     " skickar ditt svar till den lokala SSH-processen och behåller det i minnet för att återanvända det för den här värden. ",
-    {
-      "i": 4,
-      "k": "_gt_value_4",
-      "v": "v"
-    },
+    [
+      ["i", 4],
+      ["k", "_gt_value_4"],
+      ["v", "v"]
+    ],
     " skriver det inte till disk."
   ],
   "1c26f62937f27d39": "SSH-nycklar kan ersätta ett lösenord, men servern kan fortfarande kräva en verifieringskod.",
@@ -5219,11 +5291,11 @@
   "4fe2c8b0597366cc": "Stäng enhetsvarning för {host}",
   "df1f7df93a1dcee4": [
     "Startar ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "… Det kan ta en minut."
   ],
   "e902f208c4e6146f": "Inga virtuella Android-enheter hittades. Skapa en i Android Studios Device Manager och uppdatera sedan.",
@@ -5260,17 +5332,17 @@
   "34e1bfdda3a65b18": "Uppdaterar agentåtkomst…",
   "1a12cadd7a5d03d6": "Redo",
   "ac9e85e35d103d39": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ": ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    }
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ]
   ],
   "09a9981e86938b4b": "Aktivera enhetshubben",
   "65c8a5ecb362f4c0": "Kontrollera simulatorstöd",
@@ -5424,11 +5496,11 @@
   "b6b07d6a9d9ac3d8": "Ingen förhandsvisning för den här filen",
   "8fd3002cbb2d0528": [
     "Spara den för att öppna den i en app som stöder ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-filer."
   ],
   "774654575f014b55": "Spara den för att öppna den i en app som stöder det här filformatet.",
@@ -5472,11 +5544,11 @@
   "26b8986d63cba0e4": "Filsökväg",
   "4fae76516685c0a0": [
     "Tillbaka till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "e5612e9fec20f0c9": "Läser in mapp…",
   "44bbb4a5e6fbd4bb": "Försök läsa in mappen igen",
@@ -5515,28 +5587,34 @@
   "94e68b57b9d38925": "Skrivskyddad anslutning. Osparade ändringar behålls tills skrivåtkomsten är tillbaka.",
   "944f4dc367eea775": [
     "Försökte med sökvägen",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "a27abcd7b5a4b539": [
     "Arbetsytans mapp:",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     ". Kontrollera länkens sökväg eller leta upp filen i Filer."
   ],
   "b9b6bbd1e1ea189f": "Hela filen",
@@ -5741,7 +5819,6 @@
   "4333d220c55ba5e4": "Frågan mot arbetsytan misslyckades.",
   "422c1671dfcfe474": "''{path}'' finns inte.",
   "20194b81e50497ad": "Det gick inte att läsa in mappen.",
-  "745a0b899008618c": "Kunde inte läsa in tidigare omgångar. Försök igen.",
   "0061fff77e36bd4f": "Kunde inte nå servern.",
   "04dfdd46e3dd4a2e": "Något gick fel. Försök igen.",
   "084bb2d8127a508d": "Skickat",
@@ -5777,19 +5854,19 @@
   "80bb66fe1c536e09": "Öppna på {provider}",
   "6899d17239a4b04e": [
     "öppnade ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "aaa1e21cddb497b2": [
     "stängde ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "166e4903e8ae7b37": "Etiketter",
   "cdac45c7efe1cfcc": "inga",
@@ -5831,19 +5908,17 @@
   "56ca98b79cc9ce49": "Aktivitet ({count})",
   "ddc5e5413923c471": "Du kan inte kommentera här.",
   "516def6f5a881e00": "Stänger det här ärendet",
-  "0014ce0aaf1bd68a": "Skrivskyddad",
   "fd93f4720ff70aaf": "Inga",
   "b6a29fff7c7c0808": "Ingen",
   "54420465784bb1bd": "Läs in äldre kommentarer",
   "9d82ebf35bfb4043": "Inget har hänt här än.",
-  "1cf216566c1ee064": "Projektet är inte tillgängligt",
   "b5ddadeb0810688c": "Status",
   "93c1fc19d9bf1db0": "Inblandning",
   "d5a8b335d88b65bc": "{hidden} dolda",
   "2160067266a61dd8": "Alla",
   "cd4ec4acf33c65b9": "{count, plural, one {{count} etikett} other {{count} etiketter}}",
   "bfd20acb8b7dee6b": "Vem som helst",
-  "ad208e3e32c85029": "Dölj alla",
+  "aead644e2cf1233f": "Visa alla",
   "77ce79d865716719": "Inga matchande projekt.",
   "af7eb4f9c7f0f575": "Filter",
   "08247dd39b0c85ff": "Tilldelad",
@@ -5885,11 +5960,11 @@
   "2ccf231996dc89c2": "Inga ärendehanterare att läsa",
   "ffdb63a22901a1fa": "Lägg till ett projekt vars fjärr finns i en ärendehanterare som stöds.",
   "403e9debff81d7df": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " Visar de ärenden som lästes in."
   ],
   "952ef13679903db1": "Inget matchar det.",
@@ -5946,17 +6021,17 @@
   "5492129175e04f8d": "Ditt T3 Connect-konto har slut på tunnlar.",
   "5a302c2d18f5e917": [
     "Starta om ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     "."
   ],
   "82b53d699f86a160": "Vilken app?",
@@ -5966,15 +6041,18 @@
   "24192b7587ed724f": [
     "Kod att godkänna",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "bf753d700be48474": "Koden har gått ut.",
   "9d35f9835027f16f": "Öppna poke.com/integrations/new.",
@@ -6101,92 +6179,95 @@
   "efc48b9736a534bc": "nu",
   "ee8d164144fc4b9d": [
     "Välkommen till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "3cc77f9daa7eeafd": [
     "Konfigurerar",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     "."
   ],
   "216ab7514aea1d61": "Starta utan agent",
   "501ce2d99da8bfd1": "Konfigurera en agent för att starta.",
   "7da791b649c8a9e2": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " samlar in anonym användningsdata för att förbättra appen. Se ",
-    {
-      "t": "a",
-      "i": 2,
-      "c": "integritetspolicyn"
-    },
+    [
+      ["t", "a"],
+      ["i", 2],
+      ["c", "integritetspolicyn"]
+    ],
     " för att välja bort det."
   ],
   "b33f35083757b42c": [
     "Se",
     " ",
-    {
-      "t": "a",
-      "i": 1,
-      "c": "integritetspolicyn"
-    },
+    [
+      ["t", "a"],
+      ["i", 1],
+      ["c", "integritetspolicyn"]
+    ],
     "."
   ],
   "f77d000c0710f066": "Aktivera",
   "4ed27bf946e504db": "Konfigurera",
   "7a26eaacff0607f7": [
     "Kontrollerar ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "…"
   ],
   "41c978af6006ea19": "Fler agenter i ACP Registry",
   "2e2db5059c528f47": "Bläddra",
   "479c0cfec556167f": [
     "Letar efter projekt i din ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-historik…"
   ],
   "45194b35dc6d858a": [
     "Från din ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-historik"
   ],
   "5c6a6009aedbf1d0": "Markera allt",
   "24c98c5086b8e76e": "Välj ingen",
   "fd3885544ce693bb": [
     "Använd ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på telefonen"
   ],
   "37c66042ce1906da": "Skanna med telefonen för att skaffa appen.",
@@ -6199,49 +6280,52 @@
   "cade8b9f59f4b690": [
     "Kör",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "i den här terminalen."
   ],
   "9d9b9624c7bd95df": "Andra mappar",
   "1eb8f3d4695033fb": [
     "Tillagd i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Öppna en ny terminal för att använda",
     " ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": "t3"
-    },
+    [
+      ["t", "code"],
+      ["i", 2],
+      ["c", "t3"]
+    ],
     "."
   ],
   "ad72bb102aa39c31": [
     "Använd ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": "t3"
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      ["c", "t3"]
+    ],
     " från valfri terminal. Lägger till en rad i",
     " ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     "."
   ],
   "f5d986fad54b4670": "Lägg till i PATH",
@@ -6285,11 +6369,11 @@
   "b9bc0e4256a4f6a5": "Zoom",
   "f63dd7b268afcf8d": [
     "Profil: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "ea8745cfdf25286d": "Rensa cookies",
   "2f7b5572591cd41e": "Rensa cache",
@@ -6299,43 +6383,49 @@
   "189cb97125af21c1": "Dölj detaljer",
   "8321ff20c739dafb": "Den här filen kan inte visas här",
   "a43f940915211a99": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "från ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     " laddades ned i stället."
   ],
   "ac2b8c939e6cb51b": "Öppna i webbläsaren",
   "193d5c0bdab38589": "Ladda ned",
   "b1343b62b1b140cc": "Den här webbplatsen kan inte nås",
   "a7daf7102601242d": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     ": ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     "."
   ],
   "f9048e2ce643daba": "Prova:",
@@ -6367,11 +6457,11 @@
   "4616fb6552fd8875": "Sidan lästes inte in. Välj är inte tillgängligt förrän sidan har renderats",
   "345dd7a051e55098": [
     "Den här fliken är öppen i skrivbordsappen ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "."
   ],
   "b252602c8f71d6af": "Det gick inte att bryta ut förhandsvisningen",
@@ -6416,11 +6506,11 @@
   "2053d7c11214c657": "Fortsätt här",
   "631867ac7aa347c6": [
     "Skaffa ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "d2e48075c05360e5": "Kom ihåg mitt val",
   "32fc7d210cbbc615": "Länken bad om {provider}, som inte är konfigurerad här, så din standardmodell används.",
@@ -6502,53 +6592,71 @@
     " ",
     "numret på",
     " ",
-    {
-      "t": "Branch",
-      "i": 1,
-      "d": {
-        "b": {
-          "mr": "MR:en",
-          "cr": "ändringsbegäran"
-        },
-        "t": "b"
-      },
-      "c": "PR:en"
-    }
+    [
+      ["t", "Branch"],
+      ["i", 1],
+      [
+        "d",
+        [
+          [
+            "b",
+            [
+              ["mr", "MR:en"],
+              ["cr", "ändringsbegäran"]
+            ]
+          ],
+          ["t", "b"]
+        ]
+      ],
+      ["c", "PR:en"]
+    ]
   ],
   "832a8920f622de9b": "Kopiera utcheckningskommando",
   "98035bebbcecd0bf": [
     "Öppna",
     " ",
-    {
-      "t": "Branch",
-      "i": 1,
-      "d": {
-        "b": {
-          "mr": "merge requesten",
-          "cr": "ändringsbegäran"
-        },
-        "t": "b"
-      },
-      "c": "pull requesten"
-    },
+    [
+      ["t", "Branch"],
+      ["i", 1],
+      [
+        "d",
+        [
+          [
+            "b",
+            [
+              ["mr", "merge requesten"],
+              ["cr", "ändringsbegäran"]
+            ]
+          ],
+          ["t", "b"]
+        ]
+      ],
+      ["c", "pull requesten"]
+    ],
     " ",
     "igen"
   ],
   "605261b246f7f98e": [
     "Kunde inte läsa in aktivitet för",
     " ",
-    {
-      "t": "Branch",
-      "i": 1,
-      "d": {
-        "b": {
-          "mr": "merge requesten",
-          "cr": "ändringsbegäran"
-        },
-        "t": "b"
-      },
-      "c": "pull requesten"
-    }
+    [
+      ["t", "Branch"],
+      ["i", 1],
+      [
+        "d",
+        [
+          [
+            "b",
+            [
+              ["mr", "merge requesten"],
+              ["cr", "ändringsbegäran"]
+            ]
+          ],
+          ["t", "b"]
+        ]
+      ],
+      ["c", "pull requesten"]
+    ]
   ],
   "4ce1deae56b7392d": "Den här grenen är inaktuell jämfört med {baseBranch}.",
   "5f8d4e13f877cd06": "{count, plural, one {Den här grenen ligger {formatted} commit efter {baseBranch}.} other {Den här grenen ligger {formatted} commits efter {baseBranch}.}}",
@@ -6561,29 +6669,31 @@
   "64d0189be492147c": "Det gick inte att öppna kontrolldetaljer",
   "600347ca50400a54": "Läser in kontroller…",
   "1b381201aba745c2": "Inga kontroller rapporterade",
-  "aead644e2cf1233f": "Visa alla",
   "a6d75a4380173c60": "Öppna kontroller: {summary}",
   "be3d1766bad18693": "Kontroller: {summary}",
   "425e4a3d6c5c2867": "{count, plural, one {{count} misslyckades} other {{count} misslyckades}}",
   "cb116c139cdace98": "Inga kontroller rapporterade",
   "d84d09b4818c50b7": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": [
-        {
-          "i": 2,
-          "k": "_gt_value_2",
-          "v": "v"
-        },
-        "/",
-        {
-          "i": 3,
-          "k": "_gt_value_3",
-          "v": "v"
-        }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          [
+            ["i", 2],
+            ["k", "_gt_value_2"],
+            ["v", "v"]
+          ],
+          "/",
+          [
+            ["i", 3],
+            ["k", "_gt_value_3"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    },
+    ],
     " ",
     "kontroller"
   ],
@@ -6639,11 +6749,11 @@
   "d27b1db7f856ec3a": "Den här värden sparar ingen delad uppgift om vilka filer du har läst, så de här bockarna sparas av den här miljön. De följer med dig mellan apparna som är anslutna till den, men värdens eget webbgränssnitt visar dem inte.",
   "b990fa781293a64e": [
     "Rutorna nedan visar det som senast lästes och är tomma om inget har lästs än. ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "1c70364624c9ff9d": "Den här ändringen har fler filer än värden rapporterar bockar för i en läsning, så antalet är för lågt och vissa rutor nedan börjar tomma.",
   "d01be46a5dda7091": "Värden höll inne en del av den här diffen: en binär fil eller en ändring som är för stor för att visas direkt.",
@@ -6676,18 +6786,24 @@
   "98455a5ec0567bcb": [
     "Checka ut den här",
     " ",
-    {
-      "t": "Branch",
-      "i": 1,
-      "d": {
-        "b": {
-          "mr": "merge requesten",
-          "cr": "ändringsbegäran"
-        },
-        "t": "b"
-      },
-      "c": "pull requesten"
-    }
+    [
+      ["t", "Branch"],
+      ["i", 1],
+      [
+        "d",
+        [
+          [
+            "b",
+            [
+              ["mr", "merge requesten"],
+              ["cr", "ändringsbegäran"]
+            ]
+          ],
+          ["t", "b"]
+        ]
+      ],
+      ["c", "pull requesten"]
+    ]
   ],
   "443742ebc45e90e4": "I en separat worktree",
   "6035b70e92f126e3": "En egen mapp och tråd. Inget du har öppet flyttas.",
@@ -6707,23 +6823,23 @@
   "8e8e8db34c0a14c3": "Ändringar",
   "26c22a87e8064697": "Flikar för pull request",
   "a1cb30fd3681f967": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " ",
-    {
-      "t": "span",
-      "i": 2,
-      "c": "till"
-    },
+    [
+      ["t", "span"],
+      ["i", 2],
+      ["c", "till"]
+    ],
     " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    }
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ]
   ],
   "ccb3210828c51d7a": "Kunde inte merga den här {term, select, mr {merge requesten} cr {ändringsbegäran} other {pull requesten}}",
   "c62dad153b80c083": "Kunde inte markera den som redo för granskning",
@@ -6838,11 +6954,11 @@
   "12caa5f714eef2d1": "Lägg till ett projekt, så visas pull requests från dess repo här.",
   "eed696a7905d305e": [
     "Inget matchar ”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "”"
   ],
   "335f16c766b675f9": "Värdarna söktes igenom. Prova färre ord eller sök efter nummer, författare eller gren.",
@@ -6879,11 +6995,11 @@
   "36690ee5d989e07e": [
     "Öppna bilagan på",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "a42a2e72023007f3": "Läge för Markdown-redigeraren",
   "52c1065afd9755da": "Skriv",
@@ -6919,7 +7035,6 @@
   "1eadc7b869a55c68": "Läs in fler kommentarer",
   "8fa405d27bb3180a": "Väntande. Skickas när du skickar granskningen",
   "9dde74668b73ad29": "Svara",
-  "a5e57fdfde50aade": "Lägg till i chatten",
   "904e8e33ad31d233": "Kommentar",
   "7e0db7bc417222c3": "Granskningen skickades",
   "b9386055cb456370": "Godkänn",
@@ -6967,11 +7082,11 @@
   "bb0614eb361e525d": "Kan vara inaktuell",
   "f1152662c2b89b0d": [
     "Stack #",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "ce703d4ba40dc9b4": "Mergar stacken...",
   "ac7feb9c583b02a0": "Rebasar stacken...",
@@ -6992,33 +7107,33 @@
   "140dc384c58b74f3": "Rebasa stacken",
   "2ae374dd9a808904": [
     "Visa stack #",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ", lager ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " av",
     " ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    }
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ]
   ],
   "bed78531c2555646": "Försök uppdatera stacken igen",
   "eaa50802c08e9734": [
     "Merga stacken (",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ")"
   ],
   "30440f98e929440a": "Rebasa stacken",
@@ -7041,18 +7156,24 @@
   "beb920ffd1cac72b": [
     "Länka",
     " ",
-    {
-      "t": "Branch",
-      "i": 1,
-      "d": {
-        "b": {
-          "mr": "merge request",
-          "cr": "ändringsbegäran"
-        },
-        "t": "b"
-      },
-      "c": "pull request"
-    },
+    [
+      ["t", "Branch"],
+      ["i", 1],
+      [
+        "d",
+        [
+          [
+            "b",
+            [
+              ["mr", "merge request"],
+              ["cr", "ändringsbegäran"]
+            ]
+          ],
+          ["t", "b"]
+        ]
+      ],
+      ["c", "pull request"]
+    ],
     " ",
     "till en tråd"
   ],
@@ -7069,30 +7190,30 @@
   "042d9dd81dd9fef3": "Ändringar begärda, före de senaste commitsen",
   "5f7a8589a5b15102": "Granskning avfärdad, före de senaste commitsen",
   "7db600825bfa2c73": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " ",
-    {
-      "t": "span",
-      "i": 2,
-      "c": "granskade"
-    }
+    [
+      ["t", "span"],
+      ["i", 2],
+      ["c", "granskade"]
+    ]
   ],
   "4affc3da49f673c2": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " ",
-    {
-      "t": "span",
-      "i": 2,
-      "c": "kommenterade"
-    }
+    [
+      ["t", "span"],
+      ["i", 2],
+      ["c", "kommenterade"]
+    ]
   ],
   "04ea50285b00dcdd": "Översikt",
   "37819cf9b549b56b": "Löst",
@@ -7152,11 +7273,11 @@
   "f034c05267f161ce": [
     "synkad",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "7d160729d1afcd58": "Länka pull request",
   "2b82c15cd4dc73c6": "Kunde inte uppdatera visade filer",
@@ -7288,11 +7409,11 @@
   "5c143e386f171670": "Prova en bredare sökning.",
   "9852e524f053c372": [
     "Om ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "1e0eb5e0c7c7f4f2": "ACP-åtgärden misslyckades.",
   "3a64c5360f09982f": "Headers måste vara giltig JSON.",
@@ -7356,8 +7477,10 @@
   "53c162d8868a1d0e": "Lägg till miljö",
   "53339e47accf021a": "Sök värdar eller skriv devbox",
   "d808738388ab80b0": "Lägg till en rutt till {environment}",
+  "8a333daf9b7fd03f": "Anslut till {environment}",
   "7662025844bf543f": "Lägg till miljö",
   "65b1d784a5e84254": "Parkoppla den här datorn igen via en annan adress, till exempel dess Tailscale-namn. Den ansluter till de befintliga rutterna i stället för att lägga till en andra dator.",
+  "e1cb1c8599e84e26": "Skapa en parkopplingskod på {environment}, i dess Inställningar → Delning och åtkomst eller med `t3 auth pairing create`, och ange den här.",
   "1bea4864d46d70d0": "Parkoppla en annan miljö med den här klienten.",
   "9b24ef052b321e57": "Ange en backend-värd och en parkopplingskod.",
   "3e20f17f71edf0ad": "Använd lokal SSH-konfiguration, agent och tunnlar för backenden.",
@@ -7369,11 +7492,11 @@
   "41f365a84e96f8ec": "Läser in värdar…",
   "dc77ab3506d3cf5d": [
     "Inga värdar matchar ”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "”."
   ],
   "6498bf7f6fb1554a": "Användarnamn",
@@ -7413,11 +7536,11 @@
   "3cfe596e1f02e49f": "Lägg till instans",
   "764aae21fbbf37aa": [
     "Lägg till ett konto eller konfigurera en leverantör på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "."
   ],
   "87885e38700e366f": "Eller välj från ACP Registry",
@@ -7434,11 +7557,11 @@
   "432e85a50e2e7964": [
     "Visa kvoten för alla konton som hubben samlar, bredvid leverantörerna på",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Nyckeln stannar på den servern."
   ],
   "556a695b117565ac": "Hubb-URL",
@@ -7499,17 +7622,17 @@
   "89d08a5be3347890": "Arkiverade trådar visas här.",
   "5d3ed45f43611ff4": [
     "Arkiverad ",
-    {
-      "i": 1,
-      "k": "_gt_time_1",
-      "v": "rt"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_time_1"],
+      ["v", "rt"]
+    ],
     " · Skapad ",
-    {
-      "i": 2,
-      "k": "_gt_time_2",
-      "v": "rt"
-    }
+    [
+      ["i", 2],
+      ["k", "_gt_time_2"],
+      ["v", "rt"]
+    ]
   ],
   "ae85d885630b0e51": "{count, plural, one {{count} omfång} other {{count} omfång}}",
   "129431563dc043bc": "{label}: visa {scopes}",
@@ -7656,66 +7779,66 @@
   "4daea52e5c94a9f2": "Överhoppade",
   "fb5ddb28ee4b2efc": [
     "Avsluta ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för att importera"
   ],
   "f0f1c5c4cb4cafdf": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " är öppen, så dess cookies kan inte läsas än. Avsluta den och fortsätt sedan."
   ],
   "33e46d95a6e43975": "Jag har avslutat den",
   "c99e38ae75b3f5d3": [
     "Låt ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " läsa cookies från ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    }
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ]
   ],
   "8dcf4cae5c1238f2": [
     "För att importera cookies från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " behöver ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " Full skivåtkomst. Aktivera det i Systeminställningar och kom sedan tillbaka för att slutföra importen. Du kan återkalla det igen när importen är klar."
   ],
   "6418483c2e2b1e27": [
     "Importera från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "23523f286a272f4d": [
     "Välj vilka cookies som ska importeras för ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "."
   ],
   "2860d54cde04d33f": "Importerar cookies",
@@ -7723,19 +7846,19 @@
   "f207560eef7a6e83": "Importerar…",
   "d0147a73f61ae8b5": [
     "Kontrollerar ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "c6f6eec2b07cd625": [
     "Kunde inte importera från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "a2fc467e1a6e2e29": "Kunde inte förbereda ändringarna. Se Avancerat för hjälp.",
   "9c09c0fc3f65c734": "Kortkommandot sparades",
@@ -7766,30 +7889,30 @@
   "8ab8ef3dc5c9ccbe": "Bara de här ändringarna sparas. Vi behåller en säkerhetskopia.",
   "5a00ecfbf6d79823": [
     "Låt ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " läsa dina skrivbordsinställningar. Du granskar eventuella ändringar här innan de sparas."
   ],
   "0f3ce8b38a3b806f": "Felsökning",
   "b472a7b2482b54bf": "Inställningsfil",
   "4bdcc6c44ad4ea20": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " läser också alla filer som den här filen inkluderar."
   ],
   "3790c926a39864b6": [
     "Länkad till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Länken behålls."
   ],
   "d13378ea75992f68": "Välj en annan fil…",
@@ -7798,17 +7921,17 @@
   "3e02b74615e20d82": "Manuell konfiguration",
   "957213d003612ea8": [
     "Stäng av inspelning i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för att stoppa den. Ta bort kortkommandot från ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " för att frigöra tangenterna."
   ],
   "4bf700ad94c0c486": "Jag har lagt till kortkommandot",
@@ -7821,25 +7944,25 @@
   "6b9b6ebc5d641bc1": "Ditt ChatGPT-abonnemang är anslutet",
   "7658fdd43abdbd60": [
     "Kvalificerad användning i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " använder ditt ChatGPT-abonnemang. Hantera din delade användning och eventuella kreditinställningar i ChatGPT."
   ],
   "a07fd9e52e88a7b1": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    }
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ]
   ],
   "d0e747ae0c4f68a5": "Kunde inte installera t3",
   "ba3ac338f36cba74": "Kunde inte ta bort t3",
@@ -7875,50 +7998,50 @@
   "a2f4d7c36423bbe5": "Ingen transkriberingsmodell matchar.",
   "cfbf2641f6fbc99b": [
     "OpenRouter listar inte längre ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Diktering är avstängd tills du väljer en annan modell."
   ],
   "3e91d66852dfc3fe": [
     "Anslut till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " med dikteringsåtkomst för att fortsätta."
   ],
   "1d33877ef8ea3559": "Försök läsa in API-nyckeln igen",
   "be805c1729dc0726": [
     "Uppdatera ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " för att använda diktering med OpenRouter."
   ],
   "d7acad5dde4c1d1b": "Söker efter en API-nyckel…",
   "8257030da7a4ad4e": "Modell",
   "418d9b293a8983a9": [
     "Be en administratör på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " att lägga till en API-nyckel."
   ],
   "914772dfae40881e": [
     "Använder API-nyckeln som är sparad på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Det här valet gäller bara den här enheten."
   ],
   "04d1b655740efd75": "Det här valet gäller bara den här enheten. Välj Av för att sluta dela.",
@@ -7926,11 +8049,11 @@
   "0e8b39933f68ff59": "Ta bort nyckel",
   "f483c3f170663a6e": [
     "Använd ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "cd67d110c09bfdf4": "Växla synlighet för kontots e-postadress",
   "6b2ce50ea6a13f57": "Klicka för att visa e-postadressen",
@@ -7976,10 +8099,10 @@
   "2c2643bd8741ad26": [
     "Inloggad som",
     " ",
-    {
-      "t": "RedactedSensitiveText",
-      "i": 1
-    },
+    [
+      ["t", "RedactedSensitiveText"],
+      ["i", 1]
+    ],
     "."
   ],
   "a697d09d9d25dd04": "Redo",
@@ -7989,11 +8112,11 @@
   "f91296e641fed934": "Öppna inloggningssidan",
   "a4bf940e2844d4d4": [
     "Om inloggningen inte återvänder till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ", klistra in URL:en från den sista localhost-sidan."
   ],
   "90f46dbf8782cfde": "Anslut",
@@ -8008,33 +8131,36 @@
   "c9ae6751db0ea9cb": [
     "Väntar på godkännande ·",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "d823dc6bc2f0b59f": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Godkänn bara om enheten framför dig visar den här koden."
   ],
   "7c5eb60743d53f71": "Neka",
   "0ecf3435b0434d1b": [
     "Betrodd sedan",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "220872060b083701": "Ingen enhet har anslutit via T3 Connect än.",
   "0d644095a2e1392c": "Misslyckades",
@@ -8046,11 +8172,11 @@
   "8c8c2b1fdea8815e": "Kunde inte kopiera diagnostiken",
   "d3b1ed5b53b653ad": [
     "försök ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "30da3cd3e5597bc9": "Vad du kan prova",
   "988aa861f1b7241d": "Mer information",
@@ -8165,11 +8291,11 @@
   "03f150efa96ec728": "Byt till Windows",
   "664cbd37e00858eb": [
     "WSL-backenden kunde inte starta: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "2b382086196fdd96": "Standarddistribution",
   "dd2ebe5b11195240": "Ändringar av nätverksexponering startar om backenden och måste styras där serverprocessen startas.",
@@ -8177,21 +8303,21 @@
   "40335d08877bc746": "Tillämpar…",
   "84fc63fcbcce915e": "Inaktivera Tailscale HTTPS?",
   "fb36d16d84bd4bf1": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " startar om den lokala backenden utan Tailscale Serve."
   ],
   "336b538d6e55ed78": "Startar om…",
   "cd7ad8d91a063d09": "Konfigurera Tailscale HTTPS?",
   "eb599d6440c3565d": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " startar om den lokala backenden med Tailscale Serve aktiverat och ber Tailscale att vidarebefordra HTTPS-trafik till den här backenden."
   ],
   "2a0148ea9068a814": "HTTPS-port",
@@ -8232,37 +8358,37 @@
   "32441d85d8403ba4": "Kopiera kommando",
   "8ed537ee14e5afe9": [
     "Återta ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     "?"
   ],
   "55c43a67d4dbc4ee": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " stoppar, bygger om sin databas och startar igen. Det är offline i cirka ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     " min. Agenter som körs stoppas vid omstarten."
   ],
   "c56b618d212bf018": "Starta om och återta",
@@ -8420,15 +8546,18 @@
   "5db22d69327dcf35": [
     "Kontrollerades för",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "sedan"
   ],
@@ -8564,18 +8693,18 @@
   "862a3e2e99dfadb6": [
     "Öppna simulatorer och emulatorer i enhetspanelen. Hub:",
     " ",
-    {
-      "t": "DeviceToolVersions",
-      "i": 1
-    }
+    [
+      ["t", "DeviceToolVersions"],
+      ["i", 1]
+    ]
   ],
   "151f86b6dcd56244": [
     "Nya agentsessioner kan öppna och styra de här enheterna. agent-device:",
     " ",
-    {
-      "t": "DeviceToolVersions",
-      "i": 1
-    }
+    [
+      ["t", "DeviceToolVersions"],
+      ["i", 1]
+    ]
   ],
   "093c68324c1b1280": "Lägg till profil",
   "1f404c456e5b2a0b": "Tom profil",
@@ -8588,22 +8717,22 @@
   "78dd698804a59bd5": "Ta bort profil och data",
   "2d434a1071ccac9f": [
     "Ta bort ”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "”?"
   ],
   "a3de7be51efc0bf0": "Dess cookies och inloggningar tas bort. Skrivbordsflikar som redan är öppna i profilen förblir öppna tills du stänger dem; serverns webbläsarflikar stängs nu.",
   "9685712e18e4d104": "Anslut till en miljö för att ta bort den här profilen och dess data.",
   "a3cc262be03ff420": [
     "Rensa cookies och cache för ”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "”?"
   ],
   "e913ae62f3907911": "Du loggas ut från dess webbplatser. Serverns webbläsarflikar som är öppna i profilen stängs nu.",
@@ -8740,11 +8869,11 @@
   "38aae3d3373b7e6e": "Anslut en miljö för att ändra kortkommandon.",
   "523dd4a75f84834c": "Den här anslutningen kan visa kortkommandon men inte ändra dem.",
   "6e9aec982adb14d3": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " känner inte igen det här villkoret än. Det kan ändå sparas, men det kanske inte matchar om inte körmiljön tillhandahåller det."
   ],
   "be1f3ea0fa490562": "Den senaste matchande bindningen vinner när båda villkoren kan gälla.",
@@ -8770,42 +8899,42 @@
   "ec7623deed751c05": [
     "Dela en tråd med en gäst som följer den live i en webbläsare och skickar meddelanden som du godkänner. Kräver T3 Connect: logga in och länka den här datorn under",
     " ",
-    {
-      "t": "Link",
-      "i": 1,
-      "c": "Delning och åtkomst"
-    },
+    [
+      ["t", "Link"],
+      ["i", 1],
+      ["c", "Delning och åtkomst"]
+    ],
     ". Om du stänger av det stoppas alla gästlänkar."
   ],
   "bff0033ea41eb38e": [
     "Låt agenter här arbeta på dina andra datorer, och deras här. Aktivera det på varje dator och länka dem sedan under",
     " ",
-    {
-      "t": "Link",
-      "i": 1,
-      "c": "Anslutningar"
-    },
+    [
+      ["t", "Link"],
+      ["i", 1],
+      ["c", "Anslutningar"]
+    ],
     ". När det är av startar inget nytt via en länk; pågående uppgifter slutförs."
   ],
   "aea6614a5a6684ee": [
     "Låt enhetspanelen hyra simulatorer och emulatorer från din egen ",
-    {
-      "t": "a",
-      "i": 1,
-      "c": "Simlock"
-    },
+    [
+      ["t", "a"],
+      ["i", 1],
+      ["c", "Simlock"]
+    ],
     "-pool, tillagd under ",
-    {
-      "t": "Link",
-      "i": 2,
-      "c": "Enheter"
-    },
+    [
+      ["t", "Link"],
+      ["i", 2],
+      ["c", "Enheter"]
+    ],
     ". En alfaversion som kan ändras eller sluta fungera. ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     " installerar aldrig Simlock."
   ],
   "3836976622328d61": "Vad agenter här får göra där",
@@ -8899,23 +9028,23 @@
   "cdcdc54a444a3636": "Skanna med telefonens kamera.",
   "243e8d40c3cf428d": [
     "Vi rekommenderar inte att du hanterar flera ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-konton i ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     ". ",
-    {
-      "t": "a",
-      "i": 3,
-      "c": "Mer info"
-    }
+    [
+      ["t", "a"],
+      ["i", 3],
+      ["c", "Mer info"]
+    ]
   ],
   "bd87779b86bb96bd": "Systemaviseringar när en tråd blir klar, misslyckas eller behöver indata eller godkännande. Gäller den här enheten medan {appName} är öppen.",
   "24a0ac9e7e55975c": "Aviseringar kräver en webbläsare som stöds via HTTPS, eller skrivbordsappen. Endast ljud är fortfarande tillgängligt.",
@@ -8940,11 +9069,11 @@
   "1c16849175c9fdd3": "Skicka {signal}",
   "3e2c2cacab23110c": [
     "Skicka ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "f905637a69a1f15c": "konfiguration",
   "cb07d6a2663a0d1d": "Inga åtgärder konfigurerade.",
@@ -9120,10 +9249,10 @@
   "3dc5298b137a9434": [
     "Inloggad som",
     " ",
-    {
-      "t": "RedactedSensitiveText",
-      "i": 1
-    }
+    [
+      ["t", "RedactedSensitiveText"],
+      ["i", 1]
+    ]
   ],
   "f507d41f66760d83": "Leverantörens standard",
   "366e370da9d8b04c": "Öppna webbläsare",
@@ -9133,15 +9262,18 @@
   "e53ca6f665197e44": [
     "Ange koden",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "i din webbläsare."
   ],
@@ -9181,26 +9313,29 @@
   "ab4e8ccc69c28a8c": [
     "Autentiserad som",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "2d1d0e566712a2b2": "Hanteras av Orbit",
   "8e728d2eab98cf3d": "Fortsätt autentiseringen",
   "7138ee745e248c17": [
     "Den här instansen använder",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     ", som inte finns i den här versionen. Dess konfiguration bevaras."
   ],
   "b534d4cd528ede39": "Modellinställningar och anpassade modeller sparas i den valda miljön och delas mellan anslutna enheter.",
@@ -9428,30 +9563,36 @@
   "ac524d626057ee8b": [
     "Uppdaterades för",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "sedan"
   ],
   "f717a7cb4715dd3d": [
     "Uppdaterades",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "33822b085993c953": "CPU-genomsnitt",
   "0e7c0560ff9ac6b8": "I/O-läsningar",
@@ -9485,11 +9626,11 @@
   "a18608b4e604c90f": "Väntar på insamlarens hälsa.",
   "ebd63e7a302c5790": [
     "Identitet: ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": "PID + starttid"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "PID + starttid"]
+    ]
   ],
   "e3f32bcf2e8f7f4e": "Logiska byte per åtgärd",
   "1f9cf5bf4b81c465": "Inbyggda räknare visar vilken process som läser eller skriver. De här räknarna på applikationsnivå identifierar kända T3-åtgärder så att processtoppar kan kopplas till specifika lagrings- och loggningsvägar.",
@@ -9679,19 +9820,19 @@
   "5a8eb023f363e0d8": "Anslut en miljö för att hantera schemalagda uppgifter.",
   "8273d53bd6a6f665": [
     "Nästa körning ",
-    {
-      "t": "ScheduledRelativeLabel",
-      "i": 1
-    }
+    [
+      ["t", "ScheduledRelativeLabel"],
+      ["i", 1]
+    ]
   ],
   "f2a687289f3b3c81": "Leveranser",
   "b07d394fdeed8b92": [
     "Leveranser · ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "9bb9879a90bfb76d": "Senaste begäranden till uppgiftens webhook-URL.",
   "53f3f42caf314bb9": "Läser in leverans…",
@@ -9735,11 +9876,11 @@
   "bc714daca44e1826": "Spara ändringar",
   "787b3fff435313e4": [
     "Leverantörsvariabler på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " kan läsa värden från den via namn. Värden läses med op-CLI:t på den servern när en leverantör startar."
   ],
   "daf8daec701f0863": "Konto",
@@ -9762,17 +9903,17 @@
   "40426afd511710f8": "Leverantör som inte stöds ({kind})",
   "fa551327f599487c": [
     "Uppdatera ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " på ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " för att hantera dess hemlighetsleverantörer."
   ],
   "13d4f258e93f1dc1": "Anslut en miljö för att hantera de hemlighetsleverantörer som dess leverantörsvariabler läser från.",
@@ -9780,30 +9921,30 @@
   "111a44209dc6e701": "Ta bort",
   "a3538ba5ca802bd7": [
     "Ta bort ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "?"
   ],
   "0d5b3b39f92c04e4": "Ta bort leverantör",
   "c52bdbe39649742c": [
     "Inget läser från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Själva hemligheterna påverkas inte."
   ],
   "59c40978bc7c05ad": [
     "De här läser från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " och kommer att avmarkeras. Själva hemligheterna påverkas inte."
   ],
   "910a79263d640e22": "Tillåtet",
@@ -9860,6 +10001,7 @@
   "51497bd401292062": "Håll ned",
   "9d6cc6ac23312071": "Dubbeltryck",
   "f001fa7b329c8fbf": "Dölj lyckade",
+  "ad208e3e32c85029": "Dölj alla",
   "c80e4bb3201efd71": "Zen",
   "0cb9ffcd1fb46b0c": "Endast status",
   "cf0f7fc3df26fa75": "Status och meddelanden",
@@ -9908,6 +10050,7 @@
   "2407d5d61e7f7206": "Inmatningsfält med formaterad text",
   "64b8fd2c284c3137": "Kortkommando för att skicka",
   "6163f91bddf474ae": "Beteende för uppföljningar",
+  "425021487583cf8a": "Öppna subagenter och sidochattar i",
   "856812e7e1fc445e": "Verktygsanrop i chatten",
   "216ed20b6f40fa6f": "Uppläsningar för skärmläsare",
   "0ce04933a7047deb": "Fönstertitel för skärmläsare",
@@ -9965,6 +10108,12 @@
   "1ea00f7b1a88ee2e": "Återställ beteende för uppföljningar till standard",
   "845e7f34c156ffd4": "Köa",
   "81a74689d0319316": "Styr om",
+  "6dc57547546cbe96": "Subagenter och sidochattar",
+  "ffbc33f6b6ddc689": "Var ett klick öppnar en subagent, en sidochatt eller en tråd i en länkad miljö. {modifier}-klick eller mittenklick öppnar den i huvudvyn i stället.",
+  "7b7062c4b277e235": "Var ett klick öppnar en subagent, en sidochatt eller en tråd i en länkad miljö. {modifier}-klick eller mittenklick öppnar den i sidopanelen i stället.",
+  "1eba4b1f5ae00974": "Återställ var subagenter och sidochattar öppnas till standard",
+  "f8062ccf65d4bb2a": "Sidopanel",
+  "a8072bdf7ae4a288": "Huvudvy",
   "162108e16ed96771": "Skärmläsare",
   "18807e775248380c": "Dölj kommandon, redigeringar och sökningar som agenter kör. Dölj lyckade behåller misslyckanden. Zen visar bara slutliga svar. Godkännanden, frågor och fel visas alltid.",
   "5848a9c1d77f45b2": "Återställ verktygsanrop i chatten till standard",
@@ -10045,6 +10194,8 @@
   "b9ebecdb8db71466": "Systemstandard följer webbläsarens eller operativsystemets klockinställning.",
   "62f8a7774dc1ffb7": "Köa",
   "c711b55bc1500f08": "Styr om",
+  "e79128045796685d": "Sidopanel",
+  "d81dc62319ba223e": "Huvudvy",
   "54139af0114a2729": "Rött och grönt (standard)",
   "8d4a851d370639e4": "Blått och orange",
   "b1d7c1ea891b7db5": "Utfällda",
@@ -10066,173 +10217,204 @@
   "573ea5fdf293a9d6": "Alla utcheckningar",
   "470ad8c54049d1e1": "Sök utcheckningar",
   "7e2dfdd9f97fc027": "Projektomfång",
+  "1cf216566c1ee064": "Projektet är inte tillgängligt",
   "c1b8c351aa90f319": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": [
-        {
-          "t": "span",
-          "i": 2,
-          "c": "Tillämpar inställningar för"
-        },
-        {
-          "i": 3,
-          "k": "_gt_value_3",
-          "v": "v"
-        }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 2],
+            ["c", "Tillämpar inställningar för"]
+          ],
+          [
+            ["i", 3],
+            ["k", "_gt_value_3"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    },
-    {
-      "t": "span",
-      "i": 4,
-      "c": [
-        {
-          "t": "span",
-          "i": 5,
-          "c": "på"
-        },
-        {
-          "i": 6,
-          "k": "_gt_value_6",
-          "v": "v"
-        }
+    ],
+    [
+      ["t", "span"],
+      ["i", 4],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 5],
+            ["c", "på"]
+          ],
+          [
+            ["i", 6],
+            ["k", "_gt_value_6"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    },
-    {
-      "t": "span",
-      "i": 7,
-      "c": [
-        {
-          "t": "span",
-          "i": 8,
-          "c": "i"
-        },
-        {
-          "i": 9,
-          "k": "_gt_value_9",
-          "v": "v"
-        }
+    ],
+    [
+      ["t", "span"],
+      ["i", 7],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 8],
+            ["c", "i"]
+          ],
+          [
+            ["i", 9],
+            ["k", "_gt_value_9"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    }
+    ]
   ],
   "6de8a5700498d20f": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": [
-        {
-          "t": "span",
-          "i": 2,
-          "c": "Tillämpar inställningar för"
-        },
-        {
-          "i": 3,
-          "k": "_gt_value_3",
-          "v": "v"
-        }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 2],
+            ["c", "Tillämpar inställningar för"]
+          ],
+          [
+            ["i", 3],
+            ["k", "_gt_value_3"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    },
-    {
-      "t": "span",
-      "i": 4,
-      "c": [
-        {
-          "t": "span",
-          "i": 5,
-          "c": "på"
-        },
-        {
-          "i": 6,
-          "k": "_gt_value_6",
-          "v": "v"
-        }
+    ],
+    [
+      ["t", "span"],
+      ["i", 4],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 5],
+            ["c", "på"]
+          ],
+          [
+            ["i", 6],
+            ["k", "_gt_value_6"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    }
+    ]
   ],
   "fc2262bcc4a2e4f0": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": [
-        {
-          "t": "span",
-          "i": 2,
-          "c": "Tillämpar inställningar för"
-        },
-        {
-          "i": 3,
-          "k": "_gt_value_3",
-          "v": "v"
-        }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 2],
+            ["c", "Tillämpar inställningar för"]
+          ],
+          [
+            ["i", 3],
+            ["k", "_gt_value_3"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    },
-    {
-      "t": "span",
-      "i": 4,
-      "c": [
-        {
-          "t": "span",
-          "i": 5,
-          "c": "över"
-        },
-        {
-          "i": 6,
-          "k": "_gt_value_6",
-          "v": "v"
-        }
+    ],
+    [
+      ["t", "span"],
+      ["i", 4],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 5],
+            ["c", "över"]
+          ],
+          [
+            ["i", 6],
+            ["k", "_gt_value_6"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    },
-    {
-      "t": "span",
-      "i": 7,
-      "c": [
-        {
-          "t": "span",
-          "i": 8,
-          "c": "i"
-        },
-        {
-          "i": 9,
-          "k": "_gt_value_9",
-          "v": "v"
-        }
+    ],
+    [
+      ["t", "span"],
+      ["i", 7],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 8],
+            ["c", "i"]
+          ],
+          [
+            ["i", 9],
+            ["k", "_gt_value_9"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    }
+    ]
   ],
   "86d52b318b1a3e7a": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": [
-        {
-          "t": "span",
-          "i": 2,
-          "c": "Tillämpar inställningar för"
-        },
-        {
-          "i": 3,
-          "k": "_gt_value_3",
-          "v": "v"
-        }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 2],
+            ["c", "Tillämpar inställningar för"]
+          ],
+          [
+            ["i", 3],
+            ["k", "_gt_value_3"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    },
-    {
-      "t": "span",
-      "i": 4,
-      "c": [
-        {
-          "t": "span",
-          "i": 5,
-          "c": "över"
-        },
-        {
-          "i": 6,
-          "k": "_gt_value_6",
-          "v": "v"
-        }
+    ],
+    [
+      ["t", "span"],
+      ["i", 4],
+      [
+        "c",
+        [
+          [
+            ["t", "span"],
+            ["i", 5],
+            ["c", "över"]
+          ],
+          [
+            ["i", 6],
+            ["k", "_gt_value_6"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    }
+    ]
   ],
   "a8c2b705bbb43a80": "Inga träffar hittades.",
   "425f7ce2f24cb248": "Inställningsavsnitt",
@@ -10258,49 +10440,49 @@
   "421783b2de6419f4": [
     "Hyr, styr och strömmar enheter. Skapa en per miljö med",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": "simlock --gateway token create --role agent"
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      ["c", "simlock --gateway token create --role agent"]
+    ],
     ", eller lämna tomt för att lägga till den senare. En tom token använder datorns",
     " ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": "AGENT_DEVICE_DAEMON_AUTH_TOKEN"
-    },
+    [
+      ["t", "code"],
+      ["i", 2],
+      ["c", "AGENT_DEVICE_DAEMON_AUTH_TOKEN"]
+    ],
     " när dess",
     " ",
-    {
-      "t": "code",
-      "i": 3,
-      "c": "AGENT_DEVICE_DAEMON_BASE_URL"
-    },
+    [
+      ["t", "code"],
+      ["i", 3],
+      ["c", "AGENT_DEVICE_DAEMON_BASE_URL"]
+    ],
     " är den här gatewayen."
   ],
   "74f3dd9df612bf6b": [
     "Hyr, styr och strömmar enheter. Skapa en med",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": "simlock --gateway token create --role agent"
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      ["c", "simlock --gateway token create --role agent"]
+    ],
     ", eller lämna tomt för att lägga till den senare. En tom token använder datorns",
     " ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": "AGENT_DEVICE_DAEMON_AUTH_TOKEN"
-    },
+    [
+      ["t", "code"],
+      ["i", 2],
+      ["c", "AGENT_DEVICE_DAEMON_AUTH_TOKEN"]
+    ],
     " när dess",
     " ",
-    {
-      "t": "code",
-      "i": 3,
-      "c": "AGENT_DEVICE_DAEMON_BASE_URL"
-    },
+    [
+      ["t", "code"],
+      ["i", 3],
+      ["c", "AGENT_DEVICE_DAEMON_BASE_URL"]
+    ],
     " är den här gatewayen."
   ],
   "d6152c288ef31ce7": "Kontrollerar ögonblicksbilder…",
@@ -10365,11 +10547,11 @@
   "b5f3ce16ca9e62f8": "Behörigheter för kortkommandon",
   "b8366d1d16d38d54": [
     "Whoosh ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": "(standard)"
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      ["c", "(standard)"]
+    ]
   ],
   "53a960b81e52d6d6": "Kan fortfarande inte kontrollera åtkomsten. Se Avancerat för hjälp.",
   "0049f99dadc28047": "Klart. Du väljer ett fönster varje gång.",
@@ -10435,11 +10617,11 @@
   "435b1ca4e061c17d": "Kunde inte slutföra det här steget. Försök igen eller se Avancerat för hjälp.",
   "0596114a5b979419": [
     "Ingår i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Ingen nedladdning behövs."
   ],
   "e67452f247cc5272": "Inaktivera tillägget",
@@ -10468,11 +10650,11 @@
   "61c679fe5bf0e3ee": "Lägg till alternativ",
   "2dcb34eb2856dca0": [
     "Upp till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " alternativ"
   ],
   "5a15598cf35f21d5": "Dolt konto",
@@ -10484,119 +10666,131 @@
   "01bc6ecd8046472b": [
     "Logga in med",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "på servervärden och sök sedan igen för att välja konton här."
   ],
   "e16fcb963aa57134": [
     "Välj vilken",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     "-",
     "inloggning varje ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     "-värd använder, eller stäng av en värd."
   ],
   "9e8b725de0072098": "Inloggad som",
   "25d2d58cd2a8f103": [
     "Aktivt ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-konto (",
-    {
-      "t": "RedactedLogin",
-      "i": 2
-    },
+    [
+      ["t", "RedactedLogin"],
+      ["i", 2]
+    ],
     ")"
   ],
   "5047a415b9380805": [
     "Aktivt ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-konto"
   ],
   "5274057e57269312": [
     "Den valda inloggningen är inte längre inloggad, så den aktiva ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-",
     "inloggningen används."
   ],
   "6e72b298ef439944": "Använd aktiv inloggning",
   "720ad3bcd44f1740": [
-    {
-      "t": "RedactedLogin",
-      "i": 1
-    },
+    [
+      ["t", "RedactedLogin"],
+      ["i", 1]
+    ],
     " ",
-    {
-      "t": "span",
-      "i": 2,
-      "c": [
-        "kan inte användas: ",
-        {
-          "i": 3,
-          "k": "_gt_value_3",
-          "v": "v"
-        }
+    [
+      ["t", "span"],
+      ["i", 2],
+      [
+        "c",
+        [
+          "kan inte användas: ",
+          [
+            ["i", 3],
+            ["k", "_gt_value_3"],
+            ["v", "v"]
+          ]
+        ]
       ]
-    }
+    ]
   ],
   "4a95a2620a1e282c": [
-    {
-      "t": "RedactedLogin",
-      "i": 1
-    },
+    [
+      ["t", "RedactedLogin"],
+      ["i", 1]
+    ],
     " ",
-    {
-      "t": "span",
-      "i": 2,
-      "c": [
-        "kan inte användas: ",
-        {
-          "i": 3,
-          "k": "_gt_value_3",
-          "v": "v"
-        },
-        " rapporterar den här inloggningen som ogiltig."
+    [
+      ["t", "span"],
+      ["i", 2],
+      [
+        "c",
+        [
+          "kan inte användas: ",
+          [
+            ["i", 3],
+            ["k", "_gt_value_3"],
+            ["v", "v"]
+          ],
+          " rapporterar den här inloggningen som ogiltig."
+        ]
       ]
-    }
+    ]
   ],
   "216ea20c7b110871": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " är angiven på servern, så den åsidosätter kontot som valts här tills den tas bort."
   ],
   "b53527a02b031077": "Urklipps-API:t är inte tillgängligt vid kopiering av inloggningskoden.",
@@ -10611,19 +10805,19 @@
   "e860c536bb9cad2d": "Logga in med GitHub",
   "c97e21dd6897fa79": [
     "Inloggad som",
-    {
-      "t": "RedactedSensitiveText",
-      "i": 1
-    }
+    [
+      ["t", "RedactedSensitiveText"],
+      ["i", 1]
+    ]
   ],
   "a9d6996c73500a5c": "Kopiera koden och öppna GitHub",
   "4b4a237faa5c3ded": [
     "Väntar på godkännande · koden går ut ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "795283fe03fcfac4": "Når repon i konton och organisationer som har installerat appen.",
   "834dced9a4651f60": "Installera i en organisation",
@@ -10642,73 +10836,76 @@
   "3bd42b40bd62ca11": "Leverantörer av versionshantering",
   "d6738114d4de6d92": [
     "Stöd för ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " kommer snart."
   ],
   "babdf7cafe2344e4": [
     "Inte tillgängligt på den här servern: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "3d084099adaeed61": "Autentiserad",
   "3dbd16ab0f7ba2b3": [
     "Tillgänglig. ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "1bbe294e31d1e6e8": [
     "Alla ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "-värdar är avstängda."
   ],
   "856bf9625cba9748": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " är inte autentiserad på den här servern. Logga in eller konfigurera autentiseringsuppgifter med verktyget",
     " ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": {
-        "i": 3,
-        "k": "_gt_value_3",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 2],
+      [
+        "c",
+        [
+          ["i", 3],
+          ["k", "_gt_value_3"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "på servervärden för att aktivera funktioner för ändringsförfrågningar."
   ],
   "5d1b37511b9e6b18": [
     "Could not verify ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ".",
     " ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    }
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ]
   ],
   "64481e76ed30c67f": "Tillgänglig",
   "59045f37c3c67266": "Kommer snart",
@@ -10724,47 +10921,53 @@
   "36c33a32cfe8dc68": [
     "En token som sparas här används före",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "och",
     " ",
-    {
-      "t": "code",
-      "i": 3,
-      "c": {
-        "i": 4,
-        "k": "_gt_value_4",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "code"],
+      ["i", 3],
+      [
+        "c",
+        [
+          ["i", 4],
+          ["k", "_gt_value_4"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     "-",
     "inloggningen, så ",
-    {
-      "i": 5,
-      "k": "_gt_value_5",
-      "v": "v"
-    },
+    [
+      ["i", 5],
+      ["k", "_gt_value_5"],
+      ["v", "v"]
+    ],
     " fungerar utan",
     " ",
-    {
-      "i": 6,
-      "k": "_gt_value_6",
-      "v": "v"
-    },
+    [
+      ["i", 6],
+      ["k", "_gt_value_6"],
+      ["v", "v"]
+    ],
     ". Ge den ",
-    {
-      "i": 7,
-      "k": "_gt_value_7",
-      "v": "v"
-    },
+    [
+      ["i", 7],
+      ["k", "_gt_value_7"],
+      ["v", "v"]
+    ],
     "."
   ],
   "c3b322e041dd88da": "Skapa en token",
@@ -10807,37 +11010,40 @@
   "2a1b110f3ff0e966": "Transkriberingsspråk",
   "431f261556bd1db8": "Auto",
   "acfbe083349fe87a": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ":",
     " ",
-    {
-      "t": "strong",
-      "i": 2,
-      "c": {
-        "i": 3,
-        "k": "_gt_value_3",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "strong"],
+      ["i", 2],
+      [
+        "c",
+        [
+          ["i", 3],
+          ["k", "_gt_value_3"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "(",
-    {
-      "i": 4,
-      "k": "_gt_value_4",
-      "v": "v"
-    },
+    [
+      ["i", 4],
+      ["k", "_gt_value_4"],
+      ["v", "v"]
+    ],
     " % fel)"
   ],
   "5abc5b5c6a125b61": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ": inte testad"
   ],
   "a9d4380a5bd24f74": "Hastighet: uppdatera servern för den här benchmarken",
@@ -10845,18 +11051,21 @@
   "66155c4050c90867": [
     "Hastighet:",
     " ",
-    {
-      "t": "strong",
-      "i": 1,
-      "c": [
-        {
-          "i": 2,
-          "k": "_gt_value_2",
-          "v": "v"
-        },
-        " s"
+    [
+      ["t", "strong"],
+      ["i", 1],
+      [
+        "c",
+        [
+          [
+            ["i", 2],
+            ["k", "_gt_value_2"],
+            ["v", "v"]
+          ],
+          " s"
+        ]
       ]
-    },
+    ],
     " ",
     "/ 30 s"
   ],
@@ -10922,11 +11131,11 @@
   "de770505be25f1ff": "Mapp",
   "ada7b9a4d96959d2": "Tråd",
   "ceab58aa6cb191f3": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ": Inget behövde rensas."
   ],
   "9e2be427e443b069": "Ärv",
@@ -10954,35 +11163,41 @@
   "f7c3ae7a79ede728": "Testa",
   "b93d2ec53e944576": [
     "Körs: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " från",
     " ",
-    {
-      "t": "code",
-      "i": 2,
-      "c": {
-        "i": 3,
-        "k": "_gt_value_3",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "code"],
+      ["i", 2],
+      [
+        "c",
+        [
+          ["i", 3],
+          ["k", "_gt_value_3"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "ae9958ee0d8ed8e8": [
     "Körning: inaktiverad från",
     " ",
-    {
-      "t": "code",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "code"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "97585565390197f6": "Kasta",
   "c0fce4a3555c5c17": "Anslut",
@@ -11013,31 +11228,31 @@
   "64ef6f9ef3517980": [
     "Ta bort",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "?"
   ],
   "25cda5585875c18a": [
     "Detta tar bort API-nyckeln som lagras på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ". Allt som är inställt på att använda den här generatorn faller tillbaka på modellen för textgenerering."
   ],
   "2e487089c231536b": "Tjänst",
   "c732b08a5fa8c3d7": "Bas-URL",
   "3953d1cccd71ab7e": "Namn (valfritt)",
   "304d6712ac5d3a89": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " svarade. Det fungerar."
   ],
   "74718b8533319acb": "Följer modellen för textgenerering",
@@ -11070,17 +11285,17 @@
   "d598fbc869d6c293": "Tab flyttar till nästa kontroll.",
   "3a4e3ff836d14019": [
     "Rad ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     ", kol ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    }
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ]
   ],
   "5f5669d347691db4": "Rensa CSS",
   "ceaab5ad13352a6f": "Kunde inte spara ditt tema",
@@ -11199,11 +11414,11 @@
   "527534aec969c018": "Inga teman med öppen källkod som stöds hittades",
   "32e9e3ecd209aad2": [
     "Uppdatera ”",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "”?"
   ],
   "85aedcd69539b7b2": "Detta ersätter dess installerade varianter, inklusive lokala ändringar. Varianter som inte längre finns i tillägget tas bort.",
@@ -11254,17 +11469,17 @@
   "662288b90e19635f": "Återställ tråddetaljer till standard",
   "871d059d88548434": "Tråddetaljer: {enabled} av {total} på",
   "cec1fbb8b4c9180d": [
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " av ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    },
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ],
     " på"
   ],
   "42d843f45e1de53b": "Läggs till i prompten för nya och omgenererade trådtitlar.",
@@ -11307,11 +11522,11 @@
   "13ac42dfcb138399": "Byt till {label}",
   "8260b80501b07b13": [
     "Byt till ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "f54364b854a07918": "Inga hubbar konfigurerade.",
   "4cf6a373a7535324": "{name} · Inaktiverad",
@@ -11435,11 +11650,11 @@
   "4f6141a8af8dc570": "Frasen du säger för att rätta ett misstag, till exempel ”stryk det”.",
   "f7158c1af1da3afb": [
     "Använder din fil på ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "bff944189ba9c100": "Ladda ned",
   "b3976c9787134fd1": "Vald",
@@ -11459,11 +11674,11 @@
   "23196cabaa71f1da": "I en miljö",
   "3ba49a214600d0ac": [
     "Moln via ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "625f25278bc683ba": "Vald miljö (inte tillgänglig)",
   "e69e34d4f44d4136": "Inbyggd",
@@ -11679,6 +11894,8 @@
   "ade91c8927c48175": "inmatningsfält formaterad text tiptap fet kursiv markdown formaterad wysiwyg",
   "34d74827c2a8b009": "enter retur command ctrl flera rader prompt ny rad inmatningsfält",
   "9d1013084c46ecce": "kö styr om pågående omgång skicka standardbeteende inmatningsfält",
+  "e5e7f5e1fb1f2e4c": "subagent sidochatt länkad tråd klick högerpanel sidopanel huvudvy kommando ctrl mittenklick",
+  "5b8b854de7ee6f4d": "installerade cli versioner nyare tillgänglig codex claude cursor grok fx kiro opencode",
   "64f12530d55d2ad1": "återuppta pågående aktiv avbrutet arbete omstart starta om dator krasch skrivbord uppdatering automatiskt",
   "214a98497c4ed05d": "caffeinate viloläge förhindra håll vaken ström laptop lock förhindra",
   "00469926c7027e2d": "balanserad prestanda batterisparläge avancerat git fetch leverantör hälsa uppdatera värd ström övervakning inaktiv policy",
@@ -11855,11 +12072,11 @@
   "aca5896600bf173e": "Du har en annan gren utcheckad just nu.",
   "f665b5be60d8c144": [
     "Överlämnad från ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "4b53176b7af3d87a": "Snooza tråd",
   "9f20632581a1de90": "Fäst",
@@ -11903,11 +12120,11 @@
   "bf9b64067962d8fa": "Vad har ändrats",
   "f2558154d4c241ee": [
     "Ändringar i ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "e7f35f60e6229cf5": "Skrivbordsapp",
   "77be1b7e2a1d3d31": "{count, plural, one {Uppdatera {count} dator?} other {Uppdatera {count} datorer?}}",
@@ -12033,15 +12250,18 @@
   "8b7b761c81db9e5c": [
     "Premium",
     " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ]
   ],
   "b93dc3faeb8d9b2e": "{label} ({shortcut})",
   "71efdf870da332e8": "{start} till {end}",
@@ -12086,11 +12306,11 @@
   "26f2732fd6317056": [
     "API-uppskattningen utesluter",
     " ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " poster utan pris."
   ],
   "6753deea17e91bf5": "Delad användning i ChatGPT",
@@ -12147,11 +12367,11 @@
   "cb4c62402fe1409a": "Automatisk prissättning efter att du har sparat",
   "8157cac6d08126b7": [
     "Räknas som ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "435dd01dc4455e95": "Bearbetade token per timme per leverantör",
   "37069a5ef57ee9fa": "Kostnad per timme per leverantör",
@@ -12263,36 +12483,39 @@
   "dd4d954561a97a95": "Fråga agenten",
   "150a57dcd79b7ff4": [
     "Läser in ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     "..."
   ],
   "e2e683ba0b4fa1a6": [
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    },
+    [
+      ["t", "span"],
+      ["i", 1],
+      [
+        "c",
+        [
+          ["i", 2],
+          ["k", "_gt_value_2"],
+          ["v", "v"]
+        ]
+      ]
+    ],
     " ",
     "rader ",
-    {
-      "i": 3,
-      "k": "_gt_value_3",
-      "v": "v"
-    },
+    [
+      ["i", 3],
+      ["k", "_gt_value_3"],
+      ["v", "v"]
+    ],
     "-",
-    {
-      "i": 4,
-      "k": "_gt_value_4",
-      "v": "v"
-    },
+    [
+      ["i", 4],
+      ["k", "_gt_value_4"],
+      ["v", "v"]
+    ],
     " finns inte i den inlästa diffen."
   ],
   "400e883fd0e1a9b6": "Öppna i Kod",
@@ -12316,36 +12539,36 @@
   "7f374cd57f92706d": "Fråga en agent: ",
   "0a94b4b3f28dc66f": [
     "Stopp ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    },
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ],
     " av ",
-    {
-      "i": 2,
-      "k": "_gt_value_2",
-      "v": "v"
-    }
+    [
+      ["i", 2],
+      ["k", "_gt_value_2"],
+      ["v", "v"]
+    ]
   ],
   "8a79c29136eccfc5": "Frågor att fundera på",
   "ece7c08d198323df": "Fråga om det här stoppet",
   "f73ebbb67abc9f7b": [
     "Nästa: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "dc51df37e4ab575c": "Avsluta granskningen",
   "15672ff2f044d23a": [
     "Diffen kunde inte läsas in, så utdrag saknas: ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
+    [
+      ["i", 1],
+      ["k", "_gt_value_1"],
+      ["v", "v"]
+    ]
   ],
   "b30e4bab74bac872": "Ändringen har inga filer att visa.",
   "27d76249d09eb69f": "Granskningsguiden är klar",

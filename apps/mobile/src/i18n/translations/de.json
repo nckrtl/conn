@@ -3166,7 +3166,6 @@
   "ffc9b1ef30d0c03b": "Lokal",
   "9614272348cc04cf": "Letzte Runde",
   "9e3bec1565bba8ea": "Runde",
-  "706084d25f85dd5a": "Repository",
   "347abb91b1250a79": "Keine Review-Diffs",
   "5439d3917c97951f": "Dieser Thread hat keine fertigen Diffs der Runden und der Worktree-Diff ist leer.",
   "323793c598edeb57": "Keine Änderungen",
@@ -5536,6 +5535,8 @@
   "8d545d54c0a9e950": "Die Befehle, Bearbeitungen und Suchen ausblenden, die Agenten ausführen. „Erfolgreiche ausblenden“ behält Fehler. „Zen“ zeigt nur endgültige Antworten. Genehmigungen, Fragen und Fehler werden immer angezeigt.",
   "cf3ad61859b09910": "Vor dem letzten Commit genehmigt",
   "3e562db94c685f71": "Veraltet",
-  "295392927d5c8a84": "Wähle für jedes Projekt ein oder mehrere {scope}s in {tracker}. Ihre Issues erscheinen neben denen des Repositorys, und Agenten legen neue Issues im ersten an.",
-  "c1968621dc365115": "Nachrichten konnten nicht synchronisiert werden"
+  "c1968621dc365115": "Nachrichten konnten nicht synchronisiert werden",
+  "439737cb6de2a5b3": "Bild-URL kopieren",
+  "d3d24474c922eef2": "{count} Bild-URLs kopieren",
+  "ed83b25c71c98a20": "Wähle für jedes Projekt ein oder mehrere {scope}s in {tracker}. Ihre Issues erscheinen neben denen des Repositorys, und Agenten legen neue Issues im ersten an, sofern kein anderes verlangt wird."
 }

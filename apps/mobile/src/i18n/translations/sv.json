@@ -2641,7 +2641,7 @@
   "fab845f54ae10809": "Visa mer",
   "85308c9317c0d751": "Ingen beskrivning angiven.",
   "bf66f2a6e7907771": "Bilagor",
-  "706084d25f85dd5a": "Repository",
+  "706084d25f85dd5a": "Repo",
   "e176b5f17630f05b": "Länk",
   "45af525d50514254": "Öppna #{number} hos leverantören",
   "9f52ea3133da8ea4": "Uppgift",
@@ -3165,7 +3165,6 @@
   "ffc9b1ef30d0c03b": "Ej committat",
   "9614272348cc04cf": "Senaste omgången",
   "9e3bec1565bba8ea": "Omgång",
-  "706084d25f85dd5a": "Repo",
   "347abb91b1250a79": "Inga granskningsdiffar",
   "5439d3917c97951f": "Tråden har inga färdiga omgångsdiffar och worktree-diffen är tom.",
   "323793c598edeb57": "Inga ändringar",
@@ -5534,6 +5533,8 @@
   "8d545d54c0a9e950": "Dölj kommandon, redigeringar och sökningar som agenter kör. Dölj lyckade behåller misslyckanden. Zen visar bara slutliga svar. Godkännanden, frågor och fel visas alltid.",
   "cf3ad61859b09910": "Godkänd före den senaste committen",
   "3e562db94c685f71": "Inaktuell",
-  "295392927d5c8a84": "Välj en eller flera {scope} i {tracker} för varje projekt. Deras ärenden listas bredvid repots egna, och agenter skapar nya ärenden i den första.",
-  "c1968621dc365115": "Det gick inte att synkronisera meddelanden"
+  "c1968621dc365115": "Det gick inte att synkronisera meddelanden",
+  "439737cb6de2a5b3": "Kopiera bild-URL",
+  "d3d24474c922eef2": "Kopiera {count} bild-URL:er",
+  "ed83b25c71c98a20": "Välj en eller flera {scope} i {tracker} för varje projekt. Deras ärenden listas bredvid repots egna, och agenter skapar nya ärenden i det första om de inte ombeds välja ett annat."
 }

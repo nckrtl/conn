@@ -397,7 +397,6 @@ export const MAX_SNAPSHOT_TEXT_BYTES = 20_000;
 const MAX_SNAPSHOT_VISIBLE_TEXT_CHARS = 8_000;
 // Page text and the ARIA tree both shrink to this before either drops below it.
 const SNAPSHOT_TEXT_FLOOR_CHARS = 2_000;
-const MAX_SNAPSHOT_ELEMENT_NAME_CHARS = 200;
 const MAX_SNAPSHOT_LOG_ENTRIES = 40;
 const MAX_SNAPSHOT_LOG_TEXT_CHARS = 500;
 const MAX_SNAPSHOT_IDENTIFIER_CHARS = 2_048;
@@ -431,10 +430,6 @@ type SnapshotMetadata = {
   readonly url: string;
   readonly title: string;
   readonly visibleText: string;
-  readonly interactiveElements: ReadonlyArray<{
-    readonly name: string;
-    readonly [key: string]: unknown;
-  }>;
   readonly consoleEntries: ReadonlyArray<unknown>;
   readonly networkEntries: ReadonlyArray<unknown>;
   readonly actionTimeline: ReadonlyArray<unknown>;
@@ -455,7 +450,7 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
   const { accessibilityTree, ...withoutTree } = metadata;
   const ariaTree = typeof accessibilityTree === "string" ? accessibilityTree : undefined;
   if (accessibilityTree !== undefined && ariaTree === undefined) {
-    omitted.push("accessibilityTree (use interactiveElements locators or preview_evaluate)");
+    omitted.push("accessibilityTree (use preview_evaluate)");
   }
   const tail = <A>(entries: ReadonlyArray<A>, label: string) => {
     if (entries.length > MAX_SNAPSHOT_LOG_ENTRIES) {
@@ -473,21 +468,10 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
   ) {
     omitted.push(`url or title after ${MAX_SNAPSHOT_IDENTIFIER_CHARS} characters`);
   }
-  if (
-    metadata.interactiveElements.some(
-      (element) => element.name.length > MAX_SNAPSHOT_ELEMENT_NAME_CHARS,
-    )
-  ) {
-    omitted.push(`element names longer than ${MAX_SNAPSHOT_ELEMENT_NAME_CHARS} characters`);
-  }
   const bounded = {
     ...withoutTree,
     url: cutText(metadata.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
     title: cutText(metadata.title, MAX_SNAPSHOT_IDENTIFIER_CHARS),
-    interactiveElements: metadata.interactiveElements.map((element) => ({
-      ...element,
-      name: cutText(element.name, MAX_SNAPSHOT_ELEMENT_NAME_CHARS),
-    })),
     consoleEntries: tail(metadata.consoleEntries, "console entries"),
     networkEntries: tail(metadata.networkEntries, "network entries"),
     actionTimeline: tail(metadata.actionTimeline, "action timeline entries"),
@@ -496,21 +480,14 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
   // Per-field caps do not sum below the ceiling: three log arrays of 40 capped
   // entries alone can pass 60 KB, and the caps count characters, not bytes.
   // Halve one field per round until the JSON fits: logs first, then balance
-  // page text and ARIA refs, then legacy locators. Identifier caps bound the rest.
-  const shedOrder = [
-    "actionTimeline",
-    "networkEntries",
-    "consoleEntries",
-    "interactiveElements",
-  ] as const;
+  // page text and ARIA refs. Identifier caps bound the rest.
+  const shedOrder = ["actionTimeline", "networkEntries", "consoleEntries"] as const;
   const lists: Record<(typeof shedOrder)[number], ReadonlyArray<unknown>> = {
-    interactiveElements: bounded.interactiveElements,
     consoleEntries: bounded.consoleEntries,
     networkEntries: bounded.networkEntries,
     actionTimeline: bounded.actionTimeline,
   };
   const dropped: Record<(typeof shedOrder)[number], number> = {
-    interactiveElements: 0,
     consoleEntries: 0,
     networkEntries: 0,
     actionTimeline: 0,
@@ -525,11 +502,9 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
   });
   let text = encodeJsonText(value());
   while (utf8Length(text) > MAX_SNAPSHOT_TEXT_BYTES) {
-    // Logs shed first, oldest first. Below the floors, locator-bearing elements and tree go last.
+    // Logs shed first, oldest first. Below the floors, the locator-bearing tree goes last.
     const key =
-      shedOrder.find(
-        (candidate) => candidate !== "interactiveElements" && lists[candidate].length > 0,
-      ) ??
+      shedOrder.find((candidate) => lists[candidate].length > 0) ??
       // Page text and the ARIA tree shrink together (the larger first) down to the floor before
       // either drops below it.
       (visibleTextChars > SNAPSHOT_TEXT_FLOOR_CHARS &&
@@ -539,11 +514,9 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
           ? "accessibilityTree"
           : visibleTextChars > 0
             ? "visibleText"
-            : lists.interactiveElements.length > 0
-              ? "interactiveElements"
-              : ariaTreeChars > 0
-                ? "accessibilityTree"
-                : undefined);
+            : ariaTreeChars > 0
+              ? "accessibilityTree"
+              : undefined);
     if (key === undefined) break;
     if (key === "visibleText") {
       visibleTextChars = halveToFloor(visibleTextChars);
@@ -552,12 +525,7 @@ const boundSnapshotMetadata = (metadata: SnapshotMetadata) => {
     } else {
       const keep = Math.floor(lists[key].length / 2);
       dropped[key] += lists[key].length - keep;
-      lists[key] =
-        keep === 0
-          ? []
-          : key === "interactiveElements"
-            ? lists[key].slice(0, keep)
-            : lists[key].slice(-keep);
+      lists[key] = keep === 0 ? [] : lists[key].slice(-keep);
     }
     text = encodeJsonText(value());
   }

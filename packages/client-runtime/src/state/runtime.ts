@@ -1152,6 +1152,7 @@ export function createEnvironmentRpcCommand<
         readonly input: NoInfer<Input>;
       },
       registry: AtomRegistry.AtomRegistry,
+      exit: Exit.Exit<EnvironmentRpcSuccess<TTag>, unknown>,
     ) => Effect.Effect<void, never, R>;
   },
 ) {
@@ -1182,7 +1183,7 @@ export function createEnvironmentRpcCommand<
         Effect.tap(
           (result) => options.onSuccess?.(target, registry, result, started) ?? Effect.void,
         ),
-        Effect.ensuring(options.onSettled?.(target, registry) ?? Effect.void),
+        Effect.onExit((exit) => options.onSettled?.(target, registry, exit) ?? Effect.void),
       );
     },
   });

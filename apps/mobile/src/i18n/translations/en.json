@@ -3165,7 +3165,6 @@
   "ffc9b1ef30d0c03b": "Uncommitted",
   "9614272348cc04cf": "Latest turn",
   "9e3bec1565bba8ea": "Turn",
-  "706084d25f85dd5a": "Repository",
   "347abb91b1250a79": "No review diffs",
   "5439d3917c97951f": "This thread has no ready turn diffs and the worktree diff is empty.",
   "323793c598edeb57": "No changes",
@@ -5536,6 +5535,8 @@
   "8d545d54c0a9e950": "Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show.",
   "cf3ad61859b09910": "Approved before the latest commit",
   "3e562db94c685f71": "Outdated",
-  "295392927d5c8a84": "Pick one or more {tracker} {scope}s for each project. Their issues list beside the repository's own, and agents file new issues in the first one.",
-  "c1968621dc365115": "Could not sync messages"
+  "c1968621dc365115": "Could not sync messages",
+  "439737cb6de2a5b3": "Copy Image URL",
+  "d3d24474c922eef2": "Copy {count} Image URLs",
+  "ed83b25c71c98a20": "Pick one or more {tracker} {scope}s for each project. Their issues list beside the repository's own, and agents file new issues in the first one unless asked for another."
 }

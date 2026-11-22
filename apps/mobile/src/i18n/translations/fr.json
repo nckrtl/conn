@@ -3161,7 +3161,6 @@
   "ffc9b1ef30d0c03b": "Locales",
   "9614272348cc04cf": "Dernier tour",
   "9e3bec1565bba8ea": "Tour",
-  "706084d25f85dd5a": "Dépôt",
   "347abb91b1250a79": "Aucun diff à relire",
   "5439d3917c97951f": "Ce fil n’a aucun diff de tour prêt et le diff du worktree est vide.",
   "323793c598edeb57": "Aucune modification",
@@ -5530,6 +5529,8 @@
   "8d545d54c0a9e950": "Masque les commandes, modifications et recherches lancées par les agents. Masquer les réussis garde les échecs. Zen n’affiche que les réponses finales. Les approbations, questions et erreurs s’affichent toujours.",
   "cf3ad61859b09910": "Approuvé avant le dernier commit",
   "3e562db94c685f71": "Obsolète",
-  "295392927d5c8a84": "Choisissez un ou plusieurs {scope}s {tracker} pour chaque projet. Leurs tickets s'affichent à côté de ceux du dépôt, et les agents créent les nouveaux tickets dans le premier.",
-  "c1968621dc365115": "Impossible de synchroniser les messages"
+  "c1968621dc365115": "Impossible de synchroniser les messages",
+  "439737cb6de2a5b3": "Copier l’URL de l’image",
+  "d3d24474c922eef2": "Copier {count} URL d’images",
+  "ed83b25c71c98a20": "Choisissez un ou plusieurs {scope}s {tracker} pour chaque projet. Leurs tickets s'affichent à côté de ceux du dépôt, et les agents créent les nouveaux tickets dans le premier, sauf si vous leur indiquez une autre destination."
 }

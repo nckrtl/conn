@@ -521,9 +521,6 @@ const config: ExpoConfig = {
     // nckrtl fork: a renamed build shows its name and the Conn mark in the app's brand lockups.
     // Omit it when unset: manifest null becomes {} and crashes the brand title at launch.
     ...(ownAppName ? { brandName: ownAppName } : {}),
-    secretsFeatureEnabled: ["1", "true"].includes(
-      process.env.T3CODE_FEATURE_SECRETS?.trim().toLowerCase() ?? "",
-    ),
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,

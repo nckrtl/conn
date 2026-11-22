@@ -3161,7 +3161,6 @@
   "ffc9b1ef30d0c03b": "Sem commit",
   "9614272348cc04cf": "Último turno",
   "9e3bec1565bba8ea": "Turno",
-  "706084d25f85dd5a": "Repositório",
   "347abb91b1250a79": "Nenhum diff para revisão",
   "5439d3917c97951f": "Esta thread não tem diffs de turno prontos e o diff do worktree está vazio.",
   "323793c598edeb57": "Nenhuma alteração",
@@ -5530,6 +5529,8 @@
   "8d545d54c0a9e950": "Oculta os comandos, edições e pesquisas que os agentes executam. \"Ocultar bem-sucedidas\" mantém as falhas. Zen mostra só as respostas finais. Aprovações, perguntas e erros sempre aparecem.",
   "cf3ad61859b09910": "Aprovado antes do último commit",
   "3e562db94c685f71": "Desatualizado",
-  "295392927d5c8a84": "Escolha um ou mais {scope}s do {tracker} para cada projeto. As issues deles aparecem ao lado das do repositório, e os agentes criam novas issues no primeiro.",
-  "c1968621dc365115": "Não foi possível sincronizar as mensagens"
+  "c1968621dc365115": "Não foi possível sincronizar as mensagens",
+  "439737cb6de2a5b3": "Copiar URL da imagem",
+  "d3d24474c922eef2": "Copiar {count} URLs de imagens",
+  "ed83b25c71c98a20": "Escolha um ou mais {scope}s do {tracker} para cada projeto. As issues deles aparecem ao lado das do repositório, e os agentes criam novas issues no primeiro, a menos que outro seja pedido."
 }

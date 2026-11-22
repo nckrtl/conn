@@ -10,7 +10,7 @@ import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
 import PeerLinks from "./Migrations/070_PeerLinks.ts";
-import TurnItemOrbitTaskInline from "./Migrations/104_TurnItemOrbitTaskInline.ts";
+import TurnItemOrbitTaskInline from "./Migrations/106_TurnItemOrbitTaskInline.ts";
 
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -85,7 +85,9 @@ describe("V2 preview upgrade", () => {
         [101, "DelegatedTaskReadIndexes"],
         [102, "ThreadItemCounts"],
         [103, "IssueTrackerAdditionalScopes"],
-        [104, "TurnItemOrbitTaskInline"],
+        [104, "ProjectionProjectsTrackedFolders"],
+        [105, "TaskFolders"],
+        [106, "TurnItemOrbitTaskInline"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -212,7 +214,9 @@ describe("V2 preview upgrade", () => {
         [101, "DelegatedTaskReadIndexes"],
         [102, "ThreadItemCounts"],
         [103, "IssueTrackerAdditionalScopes"],
-        [104, "TurnItemOrbitTaskInline"],
+        [104, "ProjectionProjectsTrackedFolders"],
+        [105, "TaskFolders"],
+        [106, "TurnItemOrbitTaskInline"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

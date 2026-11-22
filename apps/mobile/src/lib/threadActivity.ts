@@ -9,6 +9,7 @@ import {
 } from "@t3tools/client-runtime/orbit-gateway";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { turnHasChanges } from "@t3tools/client-runtime/state/thread-repositories";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import {
   isLiveSubagentTurnItem,
@@ -2514,6 +2515,7 @@ function checkpointSummariesEqual(
       summary.completedAt === other.completedAt &&
       summary.status === other.status &&
       summary.files === other.files &&
+      summary.repositories === other.repositories &&
       summary.assistantMessageId === other.assistantMessageId
     );
   });
@@ -2805,7 +2807,12 @@ export function buildThreadFeed(
   }
   const checkpointByMessageId = new Map(
     (options?.checkpointSummaries ?? [])
-      .filter((checkpoint) => checkpoint.status === "ready" && checkpoint.files.length > 0)
+      // A plain folder holding repositories never has a ready checkpoint of its own.
+      .filter(
+        (checkpoint) =>
+          (checkpoint.status === "ready" || checkpoint.repositories !== undefined) &&
+          turnHasChanges(checkpoint),
+      )
       .map((checkpoint) => [checkpoint.assistantMessageId, checkpoint]),
   );
   const grouped = groupAdjacentActivities(

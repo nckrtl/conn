@@ -121,7 +121,9 @@ import Migration0100 from "./Migrations/100_TurnStartReadIndexes.ts";
 import Migration0101 from "./Migrations/101_DelegatedTaskReadIndexes.ts";
 import Migration0102 from "./Migrations/102_ThreadItemCounts.ts";
 import Migration0103 from "./Migrations/103_IssueTrackerAdditionalScopes.ts";
-import Migration0104 from "./Migrations/104_TurnItemOrbitTaskInline.ts";
+import Migration0104 from "./Migrations/104_ProjectionProjectsTrackedFolders.ts";
+import Migration0105 from "./Migrations/105_TaskFolders.ts";
+import Migration0106 from "./Migrations/106_TurnItemOrbitTaskInline.ts";
 
 /**
  * All migrations, keyed "{id}_{name}"; Migrator.fromRecord sorts them by id.
@@ -232,7 +234,9 @@ export const migrationEntries = [
   [101, "DelegatedTaskReadIndexes", Migration0101],
   [102, "ThreadItemCounts", Migration0102],
   [103, "IssueTrackerAdditionalScopes", Migration0103],
-  [104, "TurnItemOrbitTaskInline", Migration0104],
+  [104, "ProjectionProjectsTrackedFolders", Migration0104],
+  [105, "TaskFolders", Migration0105],
+  [106, "TurnItemOrbitTaskInline", Migration0106],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -379,7 +383,7 @@ const reconcileConnPeerLinksMigration = Effect.fn("reconcileConnPeerLinksMigrati
  * migrator would skip upstream's migrations from there. Its update is idempotent: drop that
  * record and let the migrator run upstream's migrations at their ids and Conn's again at its own.
  */
-const CONN_ORBIT_TASK_INLINE_MIGRATION_ID = 104;
+const CONN_ORBIT_TASK_INLINE_MIGRATION_ID = 106;
 const CONN_ORBIT_TASK_INLINE_MIGRATION_NAME = "TurnItemOrbitTaskInline";
 const reconcileConnOrbitTaskInlineMigration = Effect.fn("reconcileConnOrbitTaskInlineMigration")(
   function* () {

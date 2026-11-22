@@ -176,6 +176,7 @@ export function HostedBrowserWebview(props: {
     let registrationRequested = false;
     let stopHost: (() => void) | undefined;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
+    let registeredWebContentsId: number | null = null;
     const register = () => {
       const lease = tabLeaseRef.current;
       if (registrationPending) {
@@ -197,6 +198,7 @@ export function HostedBrowserWebview(props: {
         if (disposed || webviewRef.current !== webview || !webview.isConnected) return;
         if (Number.isInteger(webContentsId) && webContentsId > 0) {
           await bridge.registerWebview(runtimeTabId, webContentsId);
+          registeredWebContentsId = webContentsId;
           if (!disposed && !serverDriven && !stopHost)
             stopHost = hostDesktopTab(
               { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
@@ -238,6 +240,13 @@ export function HostedBrowserWebview(props: {
     };
     const relayLaravelToolbar = (event: Event) =>
       relayLaravelToolbarMessage(runtimeTabId, webview, event);
+    // The desktop clears a destroyed guest's id; nothing reattaches this element, so remount it.
+    const unsubscribeState = bridge.onStateChange((changedTabId, state) => {
+      if (changedTabId !== runtimeTabId || registeredWebContentsId === null) return;
+      if (state.webContentsId !== null) return;
+      registeredWebContentsId = null;
+      recoverGuest();
+    });
     webview.addEventListener("did-attach", register);
     const stopListeningForReady = onWebviewDomReady(webview, register);
     webview.addEventListener("render-process-gone", recoverGuest);
@@ -250,6 +259,7 @@ export function HostedBrowserWebview(props: {
       stopHost?.();
       if (recoveryTimeout !== null) clearTimeout(recoveryTimeout);
       stopListeningForReady();
+      unsubscribeState();
       webview.removeEventListener("render-process-gone", recoverGuest);
       webview.removeEventListener("focus", dismissHostPopups);
       webview.removeEventListener("ipc-message", guestPointerDown);
@@ -440,6 +450,8 @@ export function HostedBrowserWebview(props: {
           />
         ) : null}
         <div
+          // Keyed here, not on the webview: a destroyed guest's element may already be detached.
+          key={webviewGeneration}
           className="absolute"
           style={{
             left: layout.viewportX,
@@ -450,7 +462,6 @@ export function HostedBrowserWebview(props: {
           }}
         >
           <webview
-            key={webviewGeneration}
             ref={setWebviewRef}
             // Electron needs allowpopups at attachment. React drops boolean values for unknown attributes.
             {...({ allowpopups: "true" } as unknown as { readonly allowpopups?: boolean })}

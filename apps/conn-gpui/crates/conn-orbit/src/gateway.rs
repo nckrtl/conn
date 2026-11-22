@@ -2,8 +2,8 @@
 //!
 //! Port of `apps/desktop/src/ipc/methods/orbitGateway.ts`. Conn runs this in the Electron main
 //! process because the Gateway refuses requests that carry a page `Origin`, and only the main
-//! process trusts the Orbit root CA from the keychain. Here it is a plain `reqwest` client with
-//! the platform's native roots, and it never sends `Origin`.
+//! process trusts the Orbit root CA from the keychain. Here it is a plain `reqwest` client backed
+//! by `rustls-platform-verifier`, and it never sends `Origin`.
 //!
 //! Every Conn call goes below `/api/v1/conn`. A `root` call goes below `/api/v1`, and only the
 //! exact calls in [`resolve_root_url`] may go that way.
@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustls_platform_verifier::BuilderVerifierExt as _;
 use url::Url;
 
 /// The Gateway every call goes to.
@@ -164,7 +165,44 @@ impl<T: GatewayTransport + ?Sized> GatewayTransport for Arc<T> {
     }
 }
 
-/// The live Gateway over HTTPS, trusting the platform's root store (the macOS keychain).
+/// Builds a `rustls::ClientConfig` backed by `rustls-platform-verifier` and `ring`.
+///
+/// Why `rustls-platform-verifier` instead of `rustls-tls-native-roots` (`rustls-native-certs`):
+/// - `rustls-native-certs` 0.8 only queries Apple's keychain under `#[cfg(target_os = "macos")]`.
+///   On `target_os = "ios"` it falls through to `#[cfg(all(unix, not(target_os = "macos")))]`,
+///   which runs `openssl-probe` against `/etc/ssl/certs` and never reads the iOS device trust
+///   store — so Orbit's root CA (installed via iOS Configuration Profile + Certificate Trust
+///   Settings) would be rejected on iOS.
+/// - `rustls-platform-verifier` compiles its Apple verifier under `#[cfg(target_vendor = "apple")]`
+///   (macOS, iOS, iPadOS, visionOS, tvOS) and delegates chain verification directly to Apple's
+///   `Security.framework` (`SecPolicy::create_ssl` + `SecTrust::create_with_certificates` +
+///   `SecTrustEvaluateWithError`), trusting both system roots and user-trusted CAs on macOS and
+///   iOS without dumping raw certificates.
+/// - Passing `rustls::crypto::ring::default_provider()` explicitly avoids panicking if an iOS
+///   or UniFFI host has not installed a process-wide default `CryptoProvider`.
+///
+/// iOS deployment notes (not compile-verified on this macOS-only host):
+/// - The iOS `.xcframework` link step must link `-framework Security -framework CoreFoundation`.
+/// - On iOS devices, installing the Orbit root CA profile also requires enabling full trust in
+///   Settings → General → About → Certificate Trust Settings.
+pub(crate) fn platform_tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_platform_verifier()?
+        .with_no_client_auth())
+}
+
+fn http_tls_config() -> Result<rustls::ClientConfig, rustls::Error> {
+    let mut config = platform_tls_config()?;
+    // Workspace `reqwest` enables HTTP/1.1 (`default-features = false`); advertise ALPN `http/1.1`
+    // explicitly because `use_preconfigured_tls` bypasses reqwest's automatic ALPN setup.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+/// The live Gateway over HTTPS, trusting the OS certificate verifier (macOS Keychain and iOS
+/// device trust store via `rustls-platform-verifier`).
 #[derive(Debug, Clone)]
 pub struct OrbitGateway {
     http: reqwest::Client,
@@ -172,8 +210,14 @@ pub struct OrbitGateway {
 
 impl OrbitGateway {
     /// Builds the client. Redirects are off, so no answer can lead a call off the allowlist.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::Network`] if the platform TLS verifier or HTTP client fails to
+    /// initialize.
     pub fn new() -> Result<Self, GatewayError> {
+        let tls = http_tls_config().map_err(|error| GatewayError::Network(error.to_string()))?;
         let http = reqwest::Client::builder()
+            .use_preconfigured_tls(tls)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| GatewayError::Network(error.to_string()))?;
@@ -842,5 +886,23 @@ mod tests {
             Some("https://gateway.orbit/api/v1/conn/tasks")
         );
         assert_eq!(GatewayError::Timeout.to_string(), TIMED_OUT);
+    }
+
+    #[test]
+    fn builds_platform_verified_tls_config_and_gateway_client() {
+        let ws_tls = platform_tls_config().expect("platform TLS config builds without default");
+        assert!(
+            ws_tls.alpn_protocols.is_empty(),
+            "WebSocket TLS config leaves ALPN unset for HTTP/1.1 Upgrade"
+        );
+
+        let http_tls = http_tls_config().expect("HTTP platform TLS config builds");
+        assert_eq!(
+            http_tls.alpn_protocols,
+            vec![b"http/1.1".to_vec()],
+            "HTTP TLS config advertises http/1.1 ALPN"
+        );
+
+        OrbitGateway::new().expect("OrbitGateway builds with platform TLS verifier");
     }
 }

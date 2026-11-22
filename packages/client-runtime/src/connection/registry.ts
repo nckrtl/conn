@@ -339,7 +339,9 @@ export const make = Effect.gen(function* () {
 
   const leaseLocks = yield* Ref.make<ReadonlyMap<EnvironmentId, LeaseLock>>(new Map());
   /** Conn: until when (epoch ms) each server is expected to restart; see `settleProvisionalPairing`. */
-  const expectedRestarts = yield* Ref.make<ReadonlyMap<EnvironmentId, number>>(new Map());
+  const expectedRestarts = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, number>>(
+    new Map(),
+  );
   const leaseLocksGuard = yield* Semaphore.make(1);
   const started = yield* Ref.make(false);
   // Conn: seeded before any supervisor exists, so a held-off server never opens a socket at start.
@@ -440,8 +442,8 @@ export const make = Effect.gen(function* () {
             latestEntry: SubscriptionRef.get(entries).pipe(
               Effect.map((current) => Option.fromUndefinedOr(current.get(environmentId))),
             ),
-            restartExpectedUntil: Ref.get(expectedRestarts).pipe(
-              Effect.map((current) => current.get(environmentId) ?? 0),
+            restartExpectedUntil: SubscriptionRef.changes(expectedRestarts).pipe(
+              Stream.map((current) => current.get(environmentId) ?? 0),
             ),
           }).pipe(
             Effect.provideService(Connectivity.Connectivity, connectivity),
@@ -706,18 +708,16 @@ export const make = Effect.gen(function* () {
 
   /**
    * Conn: a pairing is promoted when its Orbit reservation is finalized, and the finalize reloads
-   * the clone's server at that moment. A failure there retries soon instead of blocking, and a
-   * connection that already failed tries again now.
+   * the clone's server at that moment. The supervisor watches this window: a failure in it retries
+   * soon instead of blocking, and one that failed just before it tries again.
    */
   const expectRestart = Effect.fn("EnvironmentRegistry.expectRestart")(function* (
     environmentId: EnvironmentId,
   ) {
     const until = (yield* Clock.currentTimeMillis) + EXPECTED_RESTART_WINDOW_MS;
-    yield* Ref.update(expectedRestarts, (current) => new Map(current).set(environmentId, until));
-    const scope = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
-    if (scope === undefined) return;
-    const phase = (yield* SubscriptionRef.get(scope.supervisor.state)).phase;
-    if (phase === "blocked" || phase === "backoff") yield* scope.supervisor.retryNow;
+    yield* SubscriptionRef.update(expectedRestarts, (current) =>
+      new Map(current).set(environmentId, until),
+    );
   });
 
   const settleProvisionalPairing = Effect.fn("EnvironmentRegistry.settleProvisionalPairing")(
@@ -758,11 +758,12 @@ export const make = Effect.gen(function* () {
             yield* Ref.update(persistedEnvironmentIds, (current) =>
               new Set(current).add(environmentId),
             );
+            // Before the install: the session it keeps may already be failing on the reload.
+            if (keep && settled.promoted) yield* expectRestart(environmentId);
             yield* installEntryLocked(
               entryWithRoutes(previous ?? { ...first, enabled: true }, routes),
               { retainEquivalentRuntime: true },
             );
-            if (keep && settled.promoted) yield* expectRestart(environmentId);
           } else if (
             previous !== undefined &&
             connectionRoutes(previous).some(

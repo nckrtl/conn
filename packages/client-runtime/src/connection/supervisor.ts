@@ -184,11 +184,12 @@ export interface EnvironmentSupervisorOptions {
    */
   readonly latestEntry?: Effect.Effect<Option.Option<ConnectionCatalogEntry>>;
   /**
-   * Conn: until this time (epoch ms) the server is expected to restart, as an Orbit clone does when
-   * its reservation is finalized. Failures then retry soon, and a host credential refusal counts as
-   * one of them instead of blocking the connection.
+   * Conn: until when (epoch ms) the server is expected to restart, as an Orbit clone does when its
+   * reservation is finalized: the current value first, then each change. Failures then retry soon,
+   * a host credential refusal counts as one of them, and a window that opens while the connection
+   * is blocked or waiting retries it at once.
    */
-  readonly restartExpectedUntil?: Effect.Effect<number>;
+  readonly restartExpectedUntil?: Stream.Stream<number>;
 }
 
 function retryDelayMs(failureCount: number, random: number): number {
@@ -1234,6 +1235,23 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     );
   });
 
+  const restartWindow = options?.restartExpectedUntil;
+  const currentRestartUntil =
+    restartWindow === undefined
+      ? Effect.succeed(0)
+      : restartWindow.pipe(Stream.runHead, Effect.map(Option.getOrElse(() => 0)));
+  /** Resolves `true` (start over) once a restart window later than `sampled` is open. */
+  const restartOpensAfter = (sampled: number): Effect.Effect<boolean> =>
+    restartWindow === undefined
+      ? Effect.never
+      : restartWindow.pipe(
+          Stream.filter((until) => until > sampled),
+          Stream.runHead,
+          Effect.flatMap(
+            Option.match({ onNone: () => Effect.never, onSome: () => Effect.succeed(true) }),
+          ),
+        );
+
   const waitForSignal = Queue.take(signals).pipe(
     Effect.repeat({ while: (next) => next._tag === "BetterRouteAvailable" }),
     Effect.map(
@@ -1319,9 +1337,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       if (!outcome.established) {
         latestFailure = error;
       }
-      const restarting =
-        options?.restartExpectedUntil !== undefined &&
-        (yield* Clock.currentTimeMillis) < (yield* options.restartExpectedUntil);
+      const restartUntil = yield* currentRestartUntil;
+      const restarting = (yield* Clock.currentTimeMillis) < restartUntil;
+      // A window that opens after this sample ends the wait below, whatever the order.
+      const restartOpens = restartOpensAfter(restartUntil);
       if (
         error._tag === "ConnectionBlockedError" &&
         !(restarting && isHostCredentialRefusal(error))
@@ -1338,7 +1357,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           retryAt: null,
           refusedRouteIds: NO_REFUSED_ROUTES,
         });
-        const applicationActivated = yield* waitForSignal;
+        const applicationActivated = yield* Effect.raceFirst(waitForSignal, restartOpens);
         if (applicationActivated) {
           resetRetryLadder();
         }
@@ -1390,7 +1409,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         retryAt: (yield* Clock.currentTimeMillis) + delayMs,
         refusedRouteIds: NO_REFUSED_ROUTES,
       });
-      const applicationActivated = yield* waitForRetrySignal(delayMs);
+      const applicationActivated = yield* Effect.raceFirst(
+        waitForRetrySignal(delayMs),
+        restartOpens,
+      );
       if (applicationActivated) {
         resetRetryLadder();
       }

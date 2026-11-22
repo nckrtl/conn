@@ -228,6 +228,59 @@ describe("history loading", () => {
   );
 });
 
+describe("Conn: a first message with a deadline", () => {
+  const turn = (text: string) => ({
+    threadId: THREAD_ID,
+    message: {
+      messageId: MessageId.make(`message:${text}`),
+      role: "user" as const,
+      text,
+      attachments: [],
+    },
+    runtimeMode: "full-access" as const,
+    interactionMode: "default" as const,
+    dispatchMode: "start" as const,
+  });
+
+  it.effect(
+    "is dropped unsent when its deadline passed while it waited in the thread's queue",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        // A command ahead of it on the same thread holds the queue past the deadline.
+        const ahead = h.commands.startTurn.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: turn("ahead"),
+        });
+        const held = yield* Queue.take(h.requests);
+        const late = h.commands.startTurnBy.run(h.registry, {
+          environmentId: ENVIRONMENT_ID,
+          input: { threadId: THREAD_ID, turn: turn("late"), deadline: 0 },
+        });
+        yield* Deferred.succeed(held.reply, { sequence: 1 });
+        const [first, second] = yield* Effect.promise(() => Promise.all([ahead, late]));
+
+        expect(first._tag).toBe("Success");
+        expect(second._tag).toBe("Failure");
+        expect(yield* Queue.size(h.requests)).toBe(0);
+      }),
+  );
+
+  it.effect("goes out while its deadline is ahead", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const send = h.commands.startTurnBy.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID, turn: turn("now"), deadline: Number.MAX_SAFE_INTEGER },
+      });
+      const request = yield* Queue.take(h.requests);
+      yield* Deferred.succeed(request.reply, { sequence: 1 });
+      expect((yield* Effect.promise(() => send))._tag).toBe("Success");
+      expect(request.command).toMatchObject({ type: "message.dispatch", threadId: THREAD_ID });
+    }),
+  );
+});
+
 describe("interrupt turn", () => {
   // A stale cached item has nothing left to interrupt, so the server can reject Stop.
   it.effect("reconciles pending work when the server rejects the interrupt", () =>

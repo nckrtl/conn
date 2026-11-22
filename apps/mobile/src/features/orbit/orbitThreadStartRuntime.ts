@@ -118,13 +118,20 @@ const ports: MobileOrbitThreadStartPorts = {
     if (installId === undefined) await recordOrbitThreadStartPaired(environmentId);
   },
   firstMessage: {
-    waitForClone: async (environmentId) => {
+    waitForClone: async (environmentId, timeoutMs) => {
       const id = EnvironmentId.make(environmentId);
+      const deadline = Date.now() + timeoutMs;
       const found = await waitFor(
         environmentProjects.projectsAtom,
         () => findCloneProject(id) !== undefined,
+        timeoutMs,
       );
-      const configured = await waitFor(environmentServerConfigsAtom, (configs) => configs.has(id));
+      // One budget for both: the send that follows has what is left of it.
+      const configured = await waitFor(
+        environmentServerConfigsAtom,
+        (configs) => configs.has(id),
+        Math.max(deadline - Date.now(), 0),
+      );
       const project = findCloneProject(id);
       const config = appAtomRegistry.get(environmentServerConfigsAtom).get(id);
       if (!found || !configured || project === undefined || config === undefined) return null;
@@ -133,13 +140,13 @@ const ports: MobileOrbitThreadStartPorts = {
         modelSelection: scheduledTaskDefaultModel(config, project),
       };
     },
-    startTurn: async (environmentId, input, timeoutMs) => {
+    startTurn: async (environmentId, input, deadline) => {
       const result = await runAtomCommand(
         appAtomRegistry,
-        threadEnvironment.startTurnWithin,
+        threadEnvironment.startTurnBy,
         {
           environmentId: EnvironmentId.make(environmentId),
-          input: { threadId: input.threadId, turn: input, timeoutMs },
+          input: { threadId: input.threadId, turn: input, deadline },
         },
         { reportFailure: false },
       );

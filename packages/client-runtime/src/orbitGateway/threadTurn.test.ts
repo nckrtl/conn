@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   FIRST_MESSAGE_ATTEMPT_MS,
-  FIRST_MESSAGE_SEND_MS,
+  FIRST_MESSAGE_PHASE_MS,
   orbitFirstTurnInput,
   sendOrbitFirstMessage,
   type OrbitFirstMessageAttempt,
@@ -31,7 +31,7 @@ function ports(results: Array<{ ok: true } | { ok: false; error: unknown }>) {
   const launches: Array<ReturnType<typeof orbitFirstTurnInput>> = [];
   const value: OrbitFirstMessagePorts = {
     waitForClone: async () => ({ projectId, modelSelection }),
-    startTurn: async (_environmentId, input, _timeoutMs) => {
+    startTurn: async (_environmentId, input, _deadline) => {
       launches.push(input);
       return results.shift() ?? { ok: true };
     },
@@ -122,9 +122,9 @@ describe("sendOrbitFirstMessage", () => {
     const limits: number[] = [];
     const run: OrbitFirstMessagePorts = {
       ...base,
-      startTurn: async (environmentId, input, timeoutMs) => {
-        limits.push(timeoutMs);
-        await base.startTurn(environmentId, input, timeoutMs);
+      startTurn: async (environmentId, input, deadline) => {
+        limits.push(deadline - (options.clock?.() ?? 0));
+        await base.startTurn(environmentId, input, deadline);
         return options.send(launches.length);
       },
       connection: () => connection,
@@ -133,7 +133,7 @@ describe("sendOrbitFirstMessage", () => {
         connection = options.reconnectTo ?? { connected: true, generation: minGeneration };
         return connection.connected && connection.generation >= minGeneration;
       },
-      ...(options.clock ? { clock: options.clock } : {}),
+      clock: options.clock ?? (() => 0),
     };
     return { launches, asked, limits, run };
   }
@@ -178,22 +178,46 @@ describe("sendOrbitFirstMessage", () => {
     expect(asked).toEqual([0]);
   });
 
-  it("fails once the send's deadline passes, with no send left waiting", async () => {
+  it("fails once the start's deadline passes, with no send left waiting, and claims no refusal", async () => {
     let now = 0;
     const { launches, limits, run } = reloading({
       connection: { connected: true, generation: 1 },
       clock: () => now,
       send: () => {
-        // Each send is cancelled at its limit.
+        // Each send is cancelled at its deadline.
         now += FIRST_MESSAGE_ATTEMPT_MS;
         return { ok: false, error: new Error("timed out"), unanswered: true };
       },
     });
 
-    await expect(sendOrbitFirstMessage(start, run)).rejects.toThrow("did not take");
-    // 75 s: three full sends and a last one cut to what is left.
-    expect(limits).toEqual([20_000, 20_000, 20_000, FIRST_MESSAGE_SEND_MS - 60_000]);
-    expect(launches).toHaveLength(4);
+    const failed = sendOrbitFirstMessage(start, run);
+    await expect(failed).rejects.toThrow("did not confirm the first message in time");
+    await expect(failed).rejects.not.toThrow("did not take");
+    // Six sends of 20 s fill the 120 s of the start.
+    expect(limits).toEqual(Array.from({ length: 6 }, () => FIRST_MESSAGE_ATTEMPT_MS));
+    expect(launches).toHaveLength(6);
+  });
+
+  it("gives the send only what the clone's readiness left of the start's time", async () => {
+    let now = 0;
+    const deadlines: number[] = [];
+    const { ports: base } = ports([]);
+    const run: OrbitFirstMessagePorts = {
+      ...base,
+      clock: () => now,
+      waitForClone: async (_environmentId, timeoutMs) => {
+        expect(timeoutMs).toBe(FIRST_MESSAGE_PHASE_MS);
+        now += 110_000;
+        return { projectId, modelSelection };
+      },
+      startTurn: async (_environmentId, _input, deadline) => {
+        deadlines.push(deadline);
+        return { ok: true };
+      },
+    };
+
+    await expect(sendOrbitFirstMessage(start, run)).resolves.toBe(projectId);
+    expect(deadlines).toEqual([FIRST_MESSAGE_PHASE_MS]);
   });
 
   it("never counts a refused launch as sent, and does not resend it on a steady session", async () => {

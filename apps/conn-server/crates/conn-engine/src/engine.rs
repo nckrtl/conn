@@ -182,6 +182,9 @@ pub(crate) struct Inner {
     /// Numbers the effects, so a lane's last effect knows it is still the last.
     pub(crate) effect_seq: std::sync::atomic::AtomicU64,
     thread_gates: crate::thread_locks::ThreadLocks,
+    /// Runs inside a command's transaction, with its id: a test pauses a commit there.
+    #[cfg(test)]
+    pub(crate) in_commit: Mutex<Option<InCommitHook>>,
 }
 
 /// A delegated child's checkout, made before its command commits.
@@ -194,6 +197,10 @@ struct DelegatedWorktree {
 /// An effect with its place in its thread's lane. Dropped without [`Self::start`] (its commit
 /// failed), it gives its place up only after the effect before it ended, so the lane keeps its
 /// order.
+/// A test's pause inside a command's transaction, given the command id.
+#[cfg(test)]
+pub(crate) type InCommitHook = Box<dyn Fn(&str) + Send>;
+
 pub(crate) struct ReservedEffect {
     inner: Arc<Inner>,
     effect: Option<Effect>,
@@ -321,6 +328,8 @@ impl SqliteEngine {
                 idle_session: config.idle_session,
                 effect_lanes: Mutex::new(HashMap::new()),
                 effect_seq: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                in_commit: Mutex::new(None),
             }),
         };
         // Continuations and the reaper start on the caller's runtime; `open` never blocks.
@@ -851,9 +860,13 @@ impl Inner {
                             "The command was already accepted.".into(),
                         ));
                     }
-                    return Ok((vec![], seq, true));
+                    return Ok(((), seq, true));
                 }
                 let mut tx = store.tx().map_err(CommandError::Store)?;
+                #[cfg(test)]
+                if let Some(pause) = crate::lock(&inner.in_commit).as_ref() {
+                    pause(&command_id);
+                }
                 if let Some(guard) = &guard
                     && let Err(error) = crate::guard::check(&tx, guard, &command)
                 {
@@ -908,12 +921,16 @@ impl Inner {
                             }
                         };
                         // Lane slots are taken under the store lock, so a thread's effects
-                        // run in the order their commands committed.
+                        // run in the order their commands committed. They start here, with the
+                        // commit: a caller that stops waiting now (a cancelled request) must not
+                        // drop the work its command committed, such as a provider start.
                         let reserved = effects
                             .into_iter()
                             .map(|effect| inner.reserve_effect(effect))
                             .collect::<Vec<_>>();
-                        Ok((reserved, seq, false))
+                        inner.notify.send_replace(seq);
+                        reserved.into_iter().for_each(ReservedEffect::start);
+                        Ok(((), seq, false))
                     }
                     Err(e) => {
                         tx.rollback();
@@ -922,17 +939,32 @@ impl Inner {
                 }
             })
             .await;
-        let (effects, seq, replayed) = outcome.map_err(|e| match e {
+        let ((), seq, replayed) = outcome.map_err(|e| match e {
             CommandError::Rejected(message) => DispatchError::Rejected(message),
             CommandError::Store(message) => DispatchError::Internal(message),
         })?;
-        if !replayed {
-            self.notify.send_replace(seq);
-        }
-        for effect in effects {
-            effect.start();
-        }
         Ok((seq, replayed))
+    }
+
+    /// A replayed launch whose run is still `starting`, with no start queued or running and no
+    /// provider session, lost the start its commit made: it starts the run again, as T3's outbox
+    /// runs a committed start that has not run yet.
+    fn restart_lost_start(self: &Arc<Self>, thread_id: &str, projection: &Value) {
+        let Some(run_id) = projection["runs"]
+            .as_array()
+            .and_then(|runs| runs.iter().rev().find(|run| run["status"] == "starting"))
+            .and_then(|run| run["id"].as_str())
+        else {
+            return;
+        };
+        let pending = crate::lock(&self.effect_lanes).contains_key(thread_id);
+        if pending || self.live_thread(thread_id).is_some() {
+            return;
+        }
+        self.spawn_effect(Effect::StartTurn {
+            thread_id: thread_id.to_owned(),
+            run_id: run_id.to_owned(),
+        });
     }
 
     /// Runs an effect after every earlier effect of its thread. Title generation has its own
@@ -1189,6 +1221,9 @@ impl Inner {
             .await
             .map_err(|e| (e, true))?
             .ok_or_else(|| (format!("Thread {thread_id} does not exist."), false))?;
+        if resumed && sequence.is_some() {
+            self.restart_lost_start(&thread_id, &projection);
+        }
         let mut result = json!({
             "threadId": thread_id,
             "projection": projection,

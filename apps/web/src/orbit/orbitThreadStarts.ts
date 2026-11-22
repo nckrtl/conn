@@ -209,7 +209,8 @@ export async function connectOrbitClone(
 }
 
 /** The clone's workspace project and its server's default model, once both loaded. */
-async function waitForClone(environmentId: string) {
+async function waitForClone(environmentId: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
   const id = environmentId as EnvironmentId;
   const findProject = () =>
     appAtomRegistry
@@ -222,13 +223,14 @@ async function waitForClone(environmentId: string) {
     registry: appAtomRegistry,
     atom: environmentProjects.projectsAtom,
     predicate: () => findProject() !== undefined,
-    timeoutMs: CLONE_READY_TIMEOUT_MS,
+    timeoutMs,
   });
+  // One budget for both: the send that follows has what is left of it.
   const configured = await waitForAtomValue({
     registry: appAtomRegistry,
     atom: environmentServerConfigsAtom,
     predicate: (configs) => configs.has(id),
-    timeoutMs: CLONE_READY_TIMEOUT_MS,
+    timeoutMs: Math.max(deadline - Date.now(), 0),
   });
   const project = findProject();
   const config = appAtomRegistry.get(environmentServerConfigsAtom).get(id);
@@ -270,13 +272,13 @@ const firstMessagePorts: OrbitFirstMessagePorts = {
       },
       timeoutMs,
     }),
-  startTurn: async (environmentId, input, timeoutMs) => {
+  startTurn: async (environmentId, input, deadline) => {
     const result = await runAtomCommand(
       appAtomRegistry,
-      threadEnvironment.startTurnWithin,
+      threadEnvironment.startTurnBy,
       {
         environmentId: environmentId as EnvironmentId,
-        input: { threadId: input.threadId, turn: input, timeoutMs },
+        input: { threadId: input.threadId, turn: input, deadline },
       },
       { reportFailure: false },
     );

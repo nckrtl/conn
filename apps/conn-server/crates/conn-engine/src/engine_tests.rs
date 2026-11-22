@@ -760,6 +760,101 @@ async fn an_accepted_launch_replays_after_its_provider_instance_is_disabled() {
     assert!(matches!(refused, Err(EngineError::Rejected(_))));
 }
 
+fn reuse_launch(command: &str) -> Value {
+    json!({
+        "commandId": command, "threadId": "t1", "projectId": project_id(), "title": "Launched",
+        "modelSelection": {"instanceId": "claudeAgent", "model": "claude-haiku-4-5"},
+        "runtimeMode": "full-access", "interactionMode": "default",
+        "workspaceStrategy": {"type": "root"}, "reuseExistingThread": true,
+        "initialMessage": {"messageId": format!("m:{command}"), "text": "hi", "attachments": []},
+    })
+}
+
+/// The WebSocket interrupt aborts a launch while its first message is inside its transaction:
+/// the message commits, and its provider start runs although nobody waits for it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_launch_cancelled_while_its_message_commits_still_starts_the_provider() {
+    let db = TempDb::new("launch-cancelled-commit");
+    let (engine, provider) = open(&db);
+    let engine = Arc::new(engine);
+    dispatch(&engine, create("t1", "c1")).await;
+
+    let (entered, is_entered) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    *crate::lock(&engine.inner().in_commit) = Some(Box::new(move |command_id: &str| {
+        if command_id == "launch-1:initial-message" {
+            let _ = entered.send(());
+            let _ = crate::lock(&released).recv();
+        }
+    }));
+    let launching = {
+        let engine = engine.clone();
+        tokio::spawn(async move { engine.launch_thread(reuse_launch("launch-1")).await })
+    };
+    // The transaction runs on a blocking thread: wait there, off the runtime thread.
+    tokio::task::spawn_blocking(move || is_entered.recv().unwrap())
+        .await
+        .unwrap();
+    launching.abort();
+    let _ = launching.await;
+    release.send(()).unwrap();
+
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed");
+    assert_eq!(
+        provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let replay = engine
+        .launch_thread(reuse_launch("launch-1"))
+        .await
+        .unwrap();
+    assert_eq!(replay["resumed"], true);
+    assert_eq!(
+        provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+/// A committed first message whose start never ran (here: committed without its effects) is
+/// started by the launch's replay instead of answered as resumed with a run left `starting`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_launch_replay_starts_a_run_whose_start_was_lost() {
+    let db = TempDb::new("launch-lost-start");
+    let (engine, provider) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut command = message("t1", "launch-1:initial-message", "hi");
+    command["messageId"] = json!("m:launch-1");
+    command["modelSelection"] = json!({"instanceId": "claudeAgent", "model": "claude-haiku-4-5"});
+    engine
+        .inner()
+        .db(move |store| {
+            let mut tx = store.tx()?;
+            let handler = crate::commands::handler("message.dispatch").unwrap();
+            handler(&mut tx, command).map_err(|_| "rejected".to_owned())?;
+            tx.commit(Some(("launch-1:initial-message", "message.dispatch")))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        projection(&engine, "t1").await["runs"][0]["status"],
+        "starting"
+    );
+
+    let replay = engine
+        .launch_thread(reuse_launch("launch-1"))
+        .await
+        .unwrap();
+    assert_eq!(replay["resumed"], true);
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(p["runs"][0]["status"], "completed");
+    assert_eq!(
+        provider.sessions.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
 /// `ThreadLaunchService.launch` for a scheduled run: the first message carries the task id
 /// (the client's timeline marks it) and the launch's own actor.
 #[tokio::test(flavor = "current_thread")]

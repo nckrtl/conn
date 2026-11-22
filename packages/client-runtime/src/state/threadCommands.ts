@@ -1,5 +1,7 @@
 import { CommandId, type ModelSelection, type ThreadId } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
@@ -75,6 +77,16 @@ export type LoadEarlierThreadHistoryInput = {
   readonly throughEntryId?: string;
   readonly workAnchorId?: string;
 };
+
+const startThreadTurnBy = Effect.fn("ThreadCommands.startThreadTurnBy")(function* (input: {
+  readonly threadId: ThreadId;
+  readonly turn: Parameters<typeof startThreadTurn>[0];
+  readonly deadline: number;
+}) {
+  const left = input.deadline - (yield* Clock.currentTimeMillis);
+  if (left <= 0) return yield* new Cause.TimeoutError();
+  return yield* startThreadTurn(input.turn).pipe(Effect.timeout(left));
+});
 
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | SecureRandom.SecureRandom | R, E>,
@@ -326,17 +338,14 @@ export function createThreadEnvironmentAtoms<R, E>(
       concurrency,
     }),
     /**
-     * Conn: a turn start with a time limit, in the same per-thread queue. The limit interrupts the
-     * request, so an unanswered send leaves the queue for the next; it fails with a
-     * `TimeoutError`. A resend under the same command id finishes the first, never a second.
+     * Conn: a turn start that must go out by `deadline` (epoch ms), set when it is queued, in the
+     * same per-thread queue. One still queued at its deadline is dropped unsent; one running at it
+     * is interrupted, so it leaves the queue for the next. Both fail with a `TimeoutError`. A
+     * resend under the same command id finishes the first, never a second.
      */
-    startTurnWithin: createEnvironmentCommand(runtime, {
-      label: "environment-data:commands:thread:start-turn-within",
-      execute: (input: {
-        readonly threadId: ThreadId;
-        readonly turn: Parameters<typeof startThreadTurn>[0];
-        readonly timeoutMs: number;
-      }) => startThreadTurn(input.turn).pipe(Effect.timeout(input.timeoutMs)),
+    startTurnBy: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:start-turn-by",
+      execute: startThreadTurnBy,
       scheduler,
       concurrency,
     }),

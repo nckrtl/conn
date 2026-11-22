@@ -8,11 +8,13 @@ struct ConnApp: App {
 
     var body: some Scene {
         WindowGroup {
-            Group {
-                if store.isPaired {
-                    InboxView(store: store)
-                } else {
-                    PairingView(store: store)
+            ConnThemeProvider {
+                Group {
+                    if store.isPaired {
+                        WorkspaceRootView(store: store)
+                    } else {
+                        PairingView(store: store)
+                    }
                 }
             }
             .kitAppearance()

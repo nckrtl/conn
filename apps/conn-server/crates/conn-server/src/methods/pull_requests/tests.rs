@@ -131,6 +131,7 @@ fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
         engine,
         environment: None,
         cache: TtlCache::new(32),
+        diffs: TtlCache::new(DIFF_CACHE_CAPACITY),
         identities: TtlCache::new(8),
         endpoints: Endpoints {
             github_rest: Some(endpoint.into()),
@@ -139,7 +140,7 @@ fn panel(engine: Arc<Shell>, dir: &TestDir, endpoint: &str) -> Arc<Panel> {
         child_env: vec![("PATH", path), ("HOME", dir.0.clone().into_os_string())],
         credentials: Mutex::new(VecDeque::new()),
         next_scope: AtomicU64::new(1),
-        revisions: Mutex::new(VecDeque::new()),
+        readings: Mutex::new(VecDeque::new()),
         refreshes: watch::channel(0).0,
         linked: watch::channel(0).0,
         monitor: OnceCell::new(),
@@ -1542,6 +1543,141 @@ async fn a_partly_applied_viewed_batch_shows_the_marks_the_host_accepted() {
         "viewed writes never evict the diff"
     );
     task.abort();
+}
+
+/// Records a fresh summary reading for each PR number, as the panel sees new PRs.
+async fn observe_prs(panel: &Arc<Panel>, numbers: std::ops::RangeInclusive<u32>) {
+    for number in numbers {
+        let mut input = reference();
+        input["method"] = json!("summary");
+        input["number"] = json!(number);
+        panel.mcp_call("fresh", input).await.expect("fresh summary");
+    }
+}
+
+/// T3's pinned diffs carry no revision, so no newly seen PR evicts them (`readDiff`).
+#[tokio::test]
+async fn a_pinned_diff_stays_cached_while_new_prs_are_observed() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut pinned = reference();
+    pinned["commit"] = json!("c".repeat(40));
+
+    panel.call("summary", reference()).await.expect("summary");
+    panel
+        .call("diff", pinned.clone())
+        .await
+        .expect("pinned diff");
+    observe_prs(&panel, 100..=355).await;
+    panel.call("diff", pinned).await.expect("pinned diff");
+    let reads = host.pinned_reads.load(Ordering::SeqCst);
+    println!("round 2 pinned: host reads {reads} after 256 new PRs");
+    assert_eq!(reads, 1, "the second read of the same SHA is cached");
+    task.abort();
+}
+
+/// T3's `lastGoodSummary` makes a recorded reading the most recent entry, so a PR read
+/// again after many others stays held, and a late, older detail read cannot replace it.
+#[tokio::test]
+async fn a_late_older_read_cannot_replace_a_recently_recorded_reading() {
+    let host = Arc::new(ReviewHost::default());
+    let (base, task) = review_api(host.clone()).await;
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, &base);
+    let mut strict = reference();
+    strict["allowStale"] = json!(false);
+    let mut fresh = reference();
+    fresh["method"] = json!("detail");
+
+    // A detail read reaches the host at revision A and is held there.
+    host.detail_gate.armed.store(true, Ordering::SeqCst);
+    let mut late_detail = Box::pin(panel.mcp_call("fresh", fresh.clone()));
+    tokio::select! {
+        () = host.detail_gate.arrived.notified() => {},
+        read = &mut late_detail => panic!("detail ended before the gate: {read:?}"),
+    }
+    host.revision.store(1, Ordering::SeqCst);
+    let detail = panel.call("detail", strict).await.expect("detail B");
+    assert_eq!(detail["headSha"], revision_head(1));
+    assert_eq!(
+        patch_of(panel.call("diff", reference()).await),
+        revision_patch(1)
+    );
+
+    observe_prs(&panel, 100..=354).await;
+    fresh["method"] = json!("summary");
+    panel
+        .mcp_call("fresh", fresh)
+        .await
+        .expect("summary B again");
+    observe_prs(&panel, 355..=355).await;
+    host.detail_gate.release.notify_one();
+    assert_eq!(
+        late_detail.await.expect("late detail")["headSha"],
+        revision_head(0),
+        "the older observation arrives last"
+    );
+
+    let after = patch_of(panel.call("diff", reference()).await);
+    let reads = host.diff_reads.load(Ordering::SeqCst);
+    println!("round 2 late read: patch {after:?}, host diff reads {reads}");
+    assert_eq!(
+        (after, reads),
+        (revision_patch(1), 1),
+        "B stays the held reading, so B's diff stays warm"
+    );
+    task.abort();
+}
+
+/// T3's diff cache keeps the newest patches that fit its 32 MiB UTF-16 budget.
+#[tokio::test]
+async fn the_diff_cache_keeps_the_newest_patches_within_t3s_budget() {
+    let dir = TestDir::new();
+    let panel = panel(shell(&dir.0), &dir, "http://127.0.0.1:9");
+    let patch = "x".repeat(6 * 1024 * 1024);
+    let diff = |number| ReadKey {
+        method: "diff".into(),
+        number: Some(number),
+        ..ReadKey::default()
+    };
+    for number in 1..=3 {
+        panel
+            .diffs
+            .get_with(
+                diff(number),
+                |_| Duration::from_secs(60),
+                || async { Ok(json!({"patch": patch})) },
+            )
+            .await
+            .expect("diff");
+        panel
+            .diffs
+            .evict_beyond(DIFF_PATCH_BUDGET_BYTES, patch_weight);
+    }
+    let held = |number| {
+        panel.diffs.get_with(
+            diff(number),
+            |_| Duration::from_secs(60),
+            || async { Ok(json!({"patch": "reread"})) },
+        )
+    };
+    assert_ne!(
+        text(&held(3).await.expect("3"), "patch"),
+        "reread",
+        "newest kept"
+    );
+    assert_ne!(
+        text(&held(2).await.expect("2"), "patch"),
+        "reread",
+        "fits in budget"
+    );
+    assert_eq!(
+        text(&held(1).await.expect("1"), "patch"),
+        "reread",
+        "oldest evicted"
+    );
 }
 
 #[tokio::test]

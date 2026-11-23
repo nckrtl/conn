@@ -148,6 +148,8 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
 pub struct ProviderStatus {
     revision: Arc<watch::Sender<u64>>,
     leases: Arc<std::sync::Mutex<Vec<Lease>>>,
+    /// The full probe pass in flight (T3's `refreshAllInFlightRef`): later callers wait for it.
+    pass: Arc<std::sync::Mutex<Option<watch::Receiver<bool>>>>,
 }
 
 /// One client's `ClientActivityLease`, as far as provider status needs it.
@@ -184,6 +186,7 @@ impl Default for ProviderStatus {
         Self {
             revision: Arc::new(watch::channel(0).0),
             leases: Arc::default(),
+            pass: Arc::default(),
         }
     }
 }
@@ -340,16 +343,81 @@ fn refresh_interval(deps: &Deps) -> Option<Duration> {
 }
 
 /// Probes the providers (all, or the one named) with their current settings, then tells the
-/// config streams.
+/// config streams. All of them: the shared pass of [`refresh_all`].
 pub async fn refresh(deps: &Deps, only: Option<&str>) {
+    let Some(only) = only else {
+        return refresh_all(deps).await;
+    };
     for provider in deps.providers.snapshot() {
         let id = provider.instance_id().as_str();
-        if only.is_some_and(|only| only != id) {
-            continue;
+        if id == only {
+            provider.refresh_status(instance_settings(deps, id)).await;
         }
-        provider.refresh_status(instance_settings(deps, id)).await;
     }
     deps.provider_status.bump();
+}
+
+/// T3's `refreshAll`: one full pass at a time, which every caller joins. The pass runs on its
+/// own task, so a caller that goes away (a closed connection) does not stop it for the
+/// others. It probes the instances at once, and at the end records the manifest it started
+/// with as probed.
+pub async fn refresh_all(deps: &Deps) {
+    let mut done = {
+        let mut pass = deps
+            .provider_status
+            .pass
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match pass.as_ref() {
+            Some(running) => running.clone(),
+            None => {
+                let (finished, done) = watch::channel(false);
+                *pass = Some(done.clone());
+                let deps = deps.clone();
+                tokio::spawn(async move {
+                    let manifest = deps
+                        .model_manifest
+                        .as_ref()
+                        .map(|manifest| manifest.current_updated_at());
+                    let mut probes = tokio::task::JoinSet::new();
+                    for provider in deps.providers.snapshot() {
+                        let settings = instance_settings(&deps, provider.instance_id().as_str());
+                        probes.spawn(async move { provider.refresh_status(settings).await });
+                    }
+                    while probes.join_next().await.is_some() {}
+                    deps.provider_status.bump();
+                    if let (Some(model_manifest), Some(updated)) = (&deps.model_manifest, manifest)
+                    {
+                        model_manifest.set_probed(updated);
+                    }
+                    *deps
+                        .provider_status
+                        .pass
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    let _ = finished.send(true);
+                });
+                done
+            }
+        }
+    };
+    let _ = done.wait_for(|finished| *finished).await;
+}
+
+/// T3's `refreshModelCatalog`, for an opened model picker: refetch a manifest older than
+/// 5 minutes, and run full passes until the providers have been probed with the manifest now
+/// known. A pass that started before the fetch does not count, so a second one may follow.
+pub async fn refresh_model_catalog(deps: &Deps) {
+    let Some(manifest) = deps.model_manifest.clone() else {
+        return;
+    };
+    let updated = manifest.refresh_on_demand().await;
+    for _ in 0..2 {
+        if manifest.probed_updated_at() == updated {
+            return;
+        }
+        refresh_all(deps).await;
+    }
 }
 
 /// The model refresh of `server.refreshProviders` with `refreshModels`, after the probe: each

@@ -169,6 +169,29 @@ same(
     rustText("REFRESH_TIMED_OUT"),
     /detail: "(Antigravity model refresh timed out[^"]*)"/.exec(agyTs)?.[1],
   );
+  same(
+    "antigravity_provider.rs REFRESH_SIGN_IN = AntigravityDriver's sign-in detail",
+    rustText("REFRESH_SIGN_IN"),
+    /\? "(Sign in to Antigravity in provider settings[^"]*)"/.exec(agyTs)?.[1],
+  );
+  const agyStateRs = rust("crates/conn-provider-acp/src/antigravity.rs");
+  const stateText = (name) =>
+    new RegExp(`const ${name}: &str =\\s*"([^"]*)";`).exec(agyStateRs)?.[1];
+  same(
+    "antigravity.rs PYTHON_SOCKS_REQUIRED = AntigravityDriver's",
+    stateText("PYTHON_SOCKS_REQUIRED"),
+    /const PYTHON_SOCKS_REQUIRED = "([^"]*)";/.exec(agyTs)?.[1],
+  );
+  same(
+    "antigravity.rs SIGN_IN_MESSAGE = AntigravityProvider's",
+    stateText("SIGN_IN_MESSAGE"),
+    /const SIGN_IN_MESSAGE = "([^"]*)";/.exec(ts("apps/server/src/provider/AntigravityProvider.ts"))?.[1],
+  );
+  same(
+    "antigravity.rs NO_BROWSER_PREFIX = antigravityAuthSupport's",
+    stateText("NO_BROWSER_PREFIX"),
+    /const NATIVE_CLI_NO_BROWSER_PREFIX = "([^"]*)";/.exec(ts("apps/server/src/provider/antigravityAuthSupport.ts"))?.[1],
+  );
 }
 
 // ---- The Codex status probe's tables (apps/server/src/provider/CodexProvider.ts) ---------------

@@ -281,6 +281,13 @@ more per `providerInstances` entry with that driver (`supportsMultipleInstances`
   `<agy> --version` (5 s), so it follows the binary Orbit puts on `PATH`; T3 runs no
   `--version` and keeps the last version it saw. `setup.canInstall` is `false`: Orbit
   installs and updates the CLI (Nick, 2026-11-20); T3 says `true` for its managed runtime.
+- **Model refresh** (`server.refreshProviders` with `refreshModels`, T3's `refreshModels`
+  and `publishCatalog`): the throwaway session selects each model, then the original again,
+  and waits for the agent's updates before each reply; each model lists the thinking levels
+  it reported. An error reply that asks for a sign-in (`-32000`, or the native CLI's "No
+  browser is available here") makes the entry `unauthenticated` without models before the
+  refresh fails with T3's sign-in instruction; health checks then start no agent until a
+  session proves the sign-in. A `python-socks` failure keeps T3's diagnostic.
 - **One accepted difference:** `BROWSER` runs this server (`<self> antigravity-browser -- %s`,
   which reports the URL on stderr with T3's marker) where T3 runs its Node with an inline
   script.
@@ -291,7 +298,7 @@ more per `providerInstances` entry with that driver (`supportsMultipleInstances`
   ACP resources (images go as image blocks, every path in the text); background commands,
   child work and subagents (`deferFinalizeForBackgroundWork`, `toolOutlivesPrompt`,
   `watchPromptOutcome`); the stderr harness-failure and stdout sign-in URL filters; the
-  prompt inactivity timeout; per-turn usage; thinking levels per model; text generation;
+  prompt inactivity timeout; per-turn usage; text generation;
   usage limits; slash commands in the entry.
 
 ## Proofs

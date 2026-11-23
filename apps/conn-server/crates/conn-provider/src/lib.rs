@@ -17,6 +17,7 @@
 //!
 //! To add a provider: make a crate that depends on this one and implements both traits.
 
+pub mod manifest;
 pub mod mcp_apps;
 mod set;
 pub mod tool_output;
@@ -33,6 +34,7 @@ use conn_contract::{
 };
 
 pub use conn_contract::AppThread as ProviderAppThread;
+pub use manifest::LiveManifest;
 use serde::{Deserialize, Serialize};
 pub use set::ProviderSet;
 use tokio::sync::mpsc;

@@ -71,6 +71,7 @@ fn run_server() {
         status_probe: std::env::var_os("CONN_CODEX_STATUS_PROBE").is_none_or(|v| v != "off"),
         // T3 probes Codex in the server's working folder (`process.cwd()`).
         status_cwd: std::env::current_dir().ok(),
+        model_manifest: options.model_manifest.clone(),
         ..Default::default()
     };
     // One SDK host process for every Claude instance (it runs only while a query is open).

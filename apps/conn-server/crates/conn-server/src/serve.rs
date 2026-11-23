@@ -51,6 +51,8 @@ pub struct ServeOptions {
     /// `--managed-provision`: serve managed callers on a second ingress
     /// (`crate::managed`).
     pub managed_provision: Option<PathBuf>,
+    /// Receives each model manifest the server accepts; `main` gives it to the providers.
+    pub model_manifest: conn_provider::LiveManifest,
 }
 
 impl ServeOptions {
@@ -109,6 +111,7 @@ impl ServeOptions {
             session_idle: args.session_idle,
             sdk_host: args.sdk_host,
             managed_provision: args.managed_provision,
+            model_manifest: conn_provider::LiveManifest::default(),
         }
     }
 }
@@ -155,6 +158,7 @@ pub async fn serve_with_instances(
         session_idle,
         sdk_host: _,
         managed_provision,
+        model_manifest,
     } = options;
     // SIGHUP asks for a reload (`reload.rs`). Its default action stops the process, so the
     // handler goes in before any startup work an Orbit finalize could overlap.
@@ -407,6 +411,7 @@ pub async fn serve_with_instances(
         model_manifest: Some(crate::model_manifest::ModelManifest::new(
             state_dir.clone(),
             environment.clone(),
+            model_manifest,
         )),
         ..Deps::default()
     };

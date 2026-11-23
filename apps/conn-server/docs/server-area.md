@@ -154,8 +154,10 @@ The T3 server builds `ServerConfig` in `S/ws.ts` (1806 to 1920) and the capabili
 
 This server advertises `serverRestart` when its supervisor can restart it; the key is absent
 otherwise. It advertises `modelCatalogRefresh`: `server.refreshProviders` with
-`modelCatalogOnly` refetches a manifest older than 5 minutes and probes the providers when it
-changed, as T3 does (`crate::model_manifest`). The other capabilities in this area remain
+`modelCatalogOnly` refetches a manifest older than 5 minutes and, until the providers were
+probed with the manifest now known, joins the shared full probe pass, as T3 does
+(`crate::model_manifest`, `methods::provider::refresh_all`). Codex classifies its models with
+the accepted manifest, so the picker shows it. The other capabilities in this area remain
 unserved. What else it advertises
 (`environment::capabilities`, `config_flags`): `repositoryIdentity: false`,
 `attachmentUploads`, `fileAttachments`, `threadForceStop`, `shellThreadFamilies`,

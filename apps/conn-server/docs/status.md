@@ -14,17 +14,29 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 `tools/check.sh` 46/46, no skips; touched-crate tests pass; the original cases are unchanged.
 
 **Model catalog refresh (2026-11-23):** `server.refreshProviders` follows T3's `ws.ts`.
-`modelCatalogOnly` answers no providers, refetches a manifest older than 5 minutes and probes
-every provider when the manifest changed; `modelCatalogRefresh` is advertised.
-`refreshModels` fetches the manifest at once, probes, then runs each targeted, enabled and
-installed provider's model refresh (Antigravity only, as in T3) and probes it again; a
-failure answers `ProviderSetupError` with operation `refresh-models`. Proof: the
-`refresh_providers_follows_model_catalog_only_and_refresh_models` and
-`on_demand_and_forced_refreshes_use_their_own_windows` tests, and `check-copies.mjs` for the
-Antigravity texts. Not ported: T3's other `invalidateModelCaches` work (Claude's capability
-probe cache and the latest-version cache), because this server keeps neither; Antigravity's
-sign-in and `python-socks` failure texts, because this runtime does not tell those errors
-apart.
+`modelCatalogOnly` answers no providers, refetches a manifest older than 5 minutes, and joins
+the shared full probe pass until the providers were probed with the manifest now known
+(T3's `refreshModelCatalog`). One full pass runs at a time on its own task: later callers wait
+for it, a cancelled caller does not stop it, and it records its manifest when it ends. An
+accepted manifest reaches Codex's model catalog (`conn_provider::LiveManifest`), as T3's
+drivers read `ModelCatalog.current`. `refreshModels` fetches the manifest at once, probes, then
+runs each targeted, enabled and installed provider's model refresh (Antigravity only, as in
+T3) and probes it again; a failure answers `ProviderSetupError` with operation
+`refresh-models`. Antigravity's refresh selects each model to list its thinking levels, and
+an expired sign-in publishes the `unauthenticated` entry before it fails. The reply follows
+`omitProviders`, `cwd` and `workspaceSnapshotsOnDemand`. Proof: the
+`refresh_providers_follows_model_catalog_only_and_refresh_models`,
+`model_catalog_refreshes_share_one_pass_that_outlives_its_first_caller`,
+`a_fetched_manifest_reaches_the_codex_entry_in_the_config`,
+`the_accepted_manifest_replaces_the_bundled_catalog`,
+`a_model_refresh_lists_each_models_thinking_levels`,
+`an_expired_sign_in_publishes_unauthenticated_before_the_failure` and
+`error_replies_keep_t3s_sign_in_and_python_socks_texts` tests (each fails with its fix
+reverted), and `check-copies.mjs` for the Antigravity texts. Not ported: T3's other
+`invalidateModelCaches` work (Claude's capability probe cache and the latest-version cache),
+because this server keeps neither; Claude and Antigravity still classify with their bundled
+catalogs; this server keeps no per-workspace snapshots, so a workspace refresh probes the
+instance.
 
 **Worktree delegates (2026-11-22):** `delegate_task` with `isolation: worktree` works, as in
 T3: a new worktree from the parent's `HEAD` on a `t3/<8 hex>` branch, uncommitted edits left

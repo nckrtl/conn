@@ -599,7 +599,43 @@ pub static ANTIGRAVITY: Flavor = Flavor {
     background: None,
     mcp_over_http: true,
     supports_image_prompts: true,
+    rpc_failure,
 };
+
+/// `ProviderError::Failed` operation of an error reply that asks for a Google sign-in.
+pub(crate) const SIGN_IN_REQUIRED: &str = "sign-in-required";
+/// `ProviderError::Failed` operation of an error reply whose details T3 shows.
+pub(crate) const RECEIVE_RESPONSE: &str = "receive-response";
+/// `AntigravityDriver.ts`'s `PYTHON_SOCKS_REQUIRED` (`tools/check-copies.mjs`).
+pub(crate) const PYTHON_SOCKS_REQUIRED: &str = "python-socks is required to use a SOCKS proxy";
+/// `NATIVE_CLI_NO_BROWSER_PREFIX` (`antigravityAuthSupport.ts`).
+const NO_BROWSER_PREFIX: &str = "No browser is available here";
+
+/// `isAntigravitySignInRequiredError` for an error reply (auth required, or the native CLI's
+/// browser sign-in that cannot open), and the `python-socks` details T3 passes on. The other
+/// replies keep the generic failure.
+fn rpc_failure(error: &crate::protocol::RpcError) -> Option<conn_provider::ProviderError> {
+    let detail = conn_provider_support::redact::redact(&error.message);
+    if error.code == -32000
+        || (error.code == -32603 && error.message.starts_with(NO_BROWSER_PREFIX))
+    {
+        return Some(conn_provider::ProviderError::Failed {
+            operation: SIGN_IN_REQUIRED,
+            detail,
+        });
+    }
+    let details = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("details"))
+        .and_then(Value::as_str);
+    details
+        .filter(|details| details.contains(PYTHON_SOCKS_REQUIRED))
+        .map(|_| conn_provider::ProviderError::Failed {
+            operation: RECEIVE_RESPONSE,
+            detail: PYTHON_SOCKS_REQUIRED.to_owned(),
+        })
+}
 
 // ---- the `ServerProvider` entry -----------------------------------------------------------
 
@@ -611,8 +647,14 @@ pub(crate) struct Observed {
     /// `null` until checked; then T3's status of the last check or session.
     pub status: Option<&'static str>,
     pub authenticated: bool,
+    /// The agent asked for a sign-in (`onAuthRequired`): the entry says so, and health checks
+    /// open no session until one proves the sign-in again.
+    pub signed_out: bool,
     pub message: Option<String>,
     pub models: Vec<Value>,
+    /// The thinking option each model reported while selected (T3's `thinkingLevels`);
+    /// `None`: it has none. One entry per listed model at most; cleared on sign-out.
+    pub thinking_levels: std::collections::BTreeMap<String, Option<Value>>,
 }
 
 /// `buildServerProvider` + `withInstanceIdentity` for Antigravity.
@@ -624,6 +666,12 @@ pub(crate) fn entry(
 ) -> Value {
     let auth = if observed.authenticated {
         json!({"status": "authenticated", "type": settings.auth_method, "label": settings.auth_label()})
+    } else if observed.signed_out {
+        if settings.uses_credentials() {
+            json!({"status": "unauthenticated", "type": settings.auth_method, "label": settings.auth_label()})
+        } else {
+            json!({"status": "unauthenticated"})
+        }
     } else {
         json!({"status": "unknown", "type": settings.auth_method})
     };
@@ -713,7 +761,9 @@ pub(crate) fn check(
     });
     next.message = error.or_else(|| {
         (!next.authenticated).then(|| {
-            if settings.uses_credentials() {
+            if next.signed_out {
+                sign_in_message(settings)
+            } else if settings.uses_credentials() {
                 format!(
                     "Antigravity is installed. Connect with {} to load models.",
                     settings.auth_label()
@@ -729,7 +779,200 @@ pub(crate) fn check(
 /// Whether a health check should open a throwaway session (`loadModels`): only a session
 /// proves the sign-in and lists the models, so the check opens one while neither is known.
 pub(crate) fn needs_session(observed: &Observed) -> bool {
-    observed.installed && observed.status == Some("warning") && !observed.authenticated
+    observed.installed
+        && observed.status == Some("warning")
+        && !observed.authenticated
+        && !observed.signed_out
+}
+
+/// `AntigravityProvider.ts`'s `SIGN_IN_MESSAGE` (`tools/check-copies.mjs`).
+const SIGN_IN_MESSAGE: &str = "Sign in with Google to use Antigravity.";
+
+/// `signInMessage`.
+fn sign_in_message(settings: &AntigravitySettings) -> String {
+    if settings.uses_credentials() {
+        format!(
+            "Connect with {} to use Antigravity and load models.",
+            settings.auth_label()
+        )
+    } else {
+        SIGN_IN_MESSAGE.to_owned()
+    }
+}
+
+/// `onAuthRequired` (`clearAccountMetadata`): the agent asked for a sign-in, so the entry
+/// shows it and drops the account's models. A disabled instance keeps its entry.
+pub(crate) fn auth_required(settings: &AntigravitySettings, previous: &Observed) -> Observed {
+    if !settings.enabled {
+        return previous.clone();
+    }
+    Observed {
+        installed: previous.installed,
+        version: previous.version.clone(),
+        status: Some("warning"),
+        authenticated: false,
+        signed_out: true,
+        message: Some(sign_in_message(settings)),
+        models: Vec::new(),
+        thinking_levels: Default::default(),
+    }
+}
+
+/// `observeThinkingLevels`: the thinking option the selected model reports.
+fn observe_thinking_levels(
+    levels: &mut std::collections::BTreeMap<String, Option<Value>>,
+    options: &Value,
+) {
+    let model = options.as_array().and_then(|options| {
+        options
+            .iter()
+            .find(|o| o["id"] == "model" || o["category"] == "model")
+    });
+    if let Some(model) = model
+        && model["type"] == "select"
+        && let Some(current) = model["currentValue"].as_str().filter(|c| !c.is_empty())
+    {
+        levels.insert(current.to_owned(), thinking_config(options).cloned());
+    }
+}
+
+/// `onConfigOptionsUpdated`: the selected model's thinking levels are recorded, and the
+/// models are listed again while the account is signed in.
+pub(crate) fn config_options_updated(previous: &Observed, options: &Value) -> Observed {
+    let mut next = previous.clone();
+    observe_thinking_levels(&mut next.thinking_levels, options);
+    if next.authenticated {
+        next.models =
+            models_from_session(&json!({"configOptions": options}), &next.thinking_levels);
+    }
+    next
+}
+
+/// `antigravityThinkingConfig`: the `thought_level` select option.
+pub(crate) fn thinking_config(options: &Value) -> Option<&Value> {
+    options
+        .as_array()?
+        .iter()
+        .find(|o| o["category"] == "thought_level")
+        .filter(|o| o["type"] == "select")
+}
+
+/// `antigravityModelOptions`: the values of the `model` option.
+pub(crate) fn model_option_values(options: &Value) -> Vec<String> {
+    let model = options
+        .as_array()
+        .and_then(|options| options.iter().find(|o| o["id"] == "model"));
+    let Some(model) = model.filter(|m| m["type"] == "select") else {
+        return Vec::new();
+    };
+    flatten_choices(&model["options"])
+        .into_iter()
+        .filter_map(|entry| entry["value"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `flattenSelectChoices`: grouped choices in order.
+fn flatten_choices(options: &Value) -> Vec<&Value> {
+    options
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| {
+            if entry.get("value").is_some() {
+                vec![entry]
+            } else {
+                entry["options"].as_array().into_iter().flatten().collect()
+            }
+        })
+        .collect()
+}
+
+/// `boundedText`.
+fn bounded_text(value: &Value, max: usize) -> String {
+    value
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// `choiceId`: the empty value as T3's placeholder, else a value without outer spaces.
+fn choice_id(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return Some("_t3/empty".to_owned());
+    }
+    (value == value.trim() && value.chars().count() <= 256).then(|| value.to_owned())
+}
+
+/// `thinkingCapabilities`: the thinking option as a reasoning descriptor
+/// (`acpProviderOptionDescriptors`). A level another model selected is not this model's
+/// default, so an unobserved model gets the levels without the current one.
+fn thinking_capabilities(config: Option<&Value>, observed: bool) -> Value {
+    let empty = json!({"optionDescriptors": []});
+    let Some(config) = config else {
+        return empty;
+    };
+    let Some(id) = config["id"]
+        .as_str()
+        .and_then(choice_id)
+        .filter(|id| id != "_t3/empty")
+    else {
+        return empty;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut choices = Vec::new();
+    for candidate in flatten_choices(&config["options"]) {
+        let Some(choice) = candidate["value"].as_str().and_then(choice_id) else {
+            continue;
+        };
+        if !seen.insert(choice.clone()) {
+            continue;
+        }
+        let label = bounded_text(&candidate["name"], 256);
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(choice));
+        entry.insert(
+            "label".into(),
+            json!(if label.is_empty() {
+                choice.clone()
+            } else {
+                label
+            }),
+        );
+        let description = bounded_text(&candidate["description"], 1024);
+        if !description.is_empty() {
+            entry.insert("description".into(), json!(description));
+        }
+        choices.push(Value::Object(entry));
+        if choices.len() == 64 {
+            break;
+        }
+    }
+    if choices.is_empty() {
+        return empty;
+    }
+    let label = bounded_text(&config["name"], 256);
+    let mut descriptor = serde_json::Map::new();
+    let label = if label.is_empty() { id.clone() } else { label };
+    descriptor.insert("id".into(), json!(id));
+    descriptor.insert("label".into(), json!(label));
+    let description = bounded_text(&config["description"], 1024);
+    if !description.is_empty() {
+        descriptor.insert("description".into(), json!(description));
+    }
+    descriptor.insert("type".into(), json!("select"));
+    let current = config["currentValue"].as_str().and_then(choice_id);
+    if observed
+        && let Some(current) = current
+        && choices.iter().any(|c| c["id"] == current.as_str())
+    {
+        descriptor.insert("currentValue".into(), json!(current));
+    }
+    descriptor.insert("options".into(), Value::Array(choices));
+    descriptor.insert("role".into(), json!("reasoning"));
+    json!({"optionDescriptors": [Value::Object(descriptor)]})
 }
 
 /// `onSessionStarted`: the session proves the sign-in; its models are listed. A version from
@@ -739,20 +982,28 @@ pub(crate) fn session_started(previous: &Observed, initialize: &Value, setup: &V
         .as_str()
         .filter(|v| !v.is_empty())
         .map(str::to_owned);
+    let mut thinking_levels = previous.thinking_levels.clone();
+    observe_thinking_levels(&mut thinking_levels, &setup["configOptions"]);
     Observed {
         installed: true,
         version: previous.version.clone().or(session_version),
         status: Some("ready"),
         authenticated: true,
+        signed_out: false,
         message: None,
-        models: models_from_session(setup),
+        models: models_from_session(setup, &thinking_levels),
+        thinking_levels,
     }
 }
 
 /// `buildAntigravityModelsFromSession`: the `model` option's values (or the session's
-/// `models`), the current one the default with the `antigravity-default` alias. Thinking
-/// levels are not reported per model here (`capabilities` stay empty).
-pub(crate) fn models_from_session(setup: &Value) -> Vec<Value> {
+/// `models`), the current one the default with the `antigravity-default` alias, each with
+/// the thinking levels it reported while selected.
+pub(crate) fn models_from_session(
+    setup: &Value,
+    thinking_levels: &std::collections::BTreeMap<String, Option<Value>>,
+) -> Vec<Value> {
+    let current_thinking = thinking_config(&setup["configOptions"]);
     let (_, current, _) = model_options(setup);
     let options = setup["configOptions"].as_array();
     let model = options.and_then(|o| {
@@ -814,11 +1065,19 @@ pub(crate) fn models_from_session(setup: &Value) -> Vec<Value> {
             base.clone()
         };
         names.insert(base);
+        let capabilities = if current.as_deref() == Some(value.as_str()) {
+            thinking_capabilities(current_thinking, true)
+        } else {
+            match thinking_levels.get(&value) {
+                Some(observed) => thinking_capabilities(observed.as_ref(), true),
+                None => thinking_capabilities(current_thinking, false),
+            }
+        };
         let mut model = json!({
             "slug": value,
             "name": label,
             "isCustom": false,
-            "capabilities": {"optionDescriptors": []},
+            "capabilities": capabilities,
         });
         if current.as_deref() == Some(value.as_str()) {
             model["isDefault"] = json!(true);
@@ -906,7 +1165,10 @@ mod tests {
         assert_eq!(entry["auth"]["status"], "authenticated");
         assert_eq!(entry["version"], "1.5.14");
         assert!(entry.get("message").is_none());
-        assert_eq!(entry["models"], json!(models_from_session(&setup())));
+        assert_eq!(
+            entry["models"],
+            json!(models_from_session(&setup(), &Default::default()))
+        );
         let again = check(&settings, &ready, agy(), cli_version("1.5.14\n"));
         assert!(!needs_session(&again));
         assert_eq!(again.models, ready.models);

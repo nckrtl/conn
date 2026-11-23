@@ -118,7 +118,12 @@ struct State<E: Env> {
     active_model: Option<String>,
     /// The running turn's `ProviderAdapterV2RuntimePolicy` (or the session's), as JSON.
     policy: Value,
+    /// Requests whose reply the driver hands over in order with the agent's updates
+    /// ([`AcpSession::set_config_option_in_order`]); one per caller in flight.
+    ordered_calls: Vec<(i64, OrderedReply)>,
 }
+
+type OrderedReply = tokio::sync::oneshot::Sender<Result<Value, CallError>>;
 
 /// What a prompt carried (`promptParts`): recorded only when the prompt succeeds, as T3
 /// records `promptInstructionStates` and `promptRuntimeInstructions` in the reply callback.
@@ -192,7 +197,12 @@ fn protocol_error(detail: impl Into<String>) -> ProviderError {
     }
 }
 
-fn failed(operation: &'static str, error: &CallError) -> ProviderError {
+fn failed(flavor: &Flavor, operation: &'static str, error: &CallError) -> ProviderError {
+    if let CallError::Rpc(rpc) = error
+        && let Some(recognised) = (flavor.rpc_failure)(rpc)
+    {
+        return recognised;
+    }
     ProviderError::Failed {
         operation,
         detail: conn_provider_support::redact::redact(&error.detail()),
@@ -276,7 +286,7 @@ impl AcpSession {
                     inner.session_setup_params(&initialize, Some(&session_id)),
                 )
                 .await
-                .map_err(|e| failed(method, &e))?;
+                .map_err(|e| failed(inner.config.flavor, method, &e))?;
             let mut state = inner.state.lock().await;
             state.initialize = initialize;
             state.setup = setup;
@@ -481,6 +491,7 @@ impl AcpSession {
                 runtime_mode,
                 policy: config.policy.clone(),
                 active_model: None,
+                ordered_calls: Vec::new(),
             }),
             config,
             abandoned_run: std::sync::Mutex::new(None),
@@ -490,7 +501,7 @@ impl AcpSession {
         let setup = connection
             .call("session/new", inner.session_setup_params(&initialize, None))
             .await
-            .map_err(|e| failed("session/new", &e))?;
+            .map_err(|e| failed(inner.config.flavor, "session/new", &e))?;
         let session_id = setup["sessionId"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
@@ -519,6 +530,45 @@ impl AcpSession {
     pub(crate) async fn handshake(&self) -> (Value, Value) {
         let state = self.inner.state.lock().await;
         (state.initialize.clone(), state.setup.clone())
+    }
+
+    /// `setConfigOption`, then `drainEvents`: sets a session config option and waits until
+    /// the driver has applied every update the agent sent before its reply. Returns the
+    /// session's config options after it.
+    pub(crate) async fn set_config_option_in_order(
+        &self,
+        config_id: &str,
+        value: &str,
+    ) -> ProviderResult<Value> {
+        let (reply_tx, reply) = tokio::sync::oneshot::channel();
+        {
+            // Held across the send, so the driver sees the waiter before the reply.
+            let mut state = self.inner.state.lock().await;
+            let Some(runtime) = &state.runtime else {
+                return Err(ProviderError::SessionStopped);
+            };
+            let connection = runtime.connection.clone();
+            let params = obj()
+                .with("sessionId", state.session_id.clone().unwrap_or_default())
+                .with("configId", config_id)
+                .with("value", value);
+            let Some(id) = connection.send("session/set_config_option", params).await else {
+                return Err(ProviderError::SessionStopped);
+            };
+            state.ordered_calls.push((id, reply_tx));
+        }
+        let reply = reply
+            .await
+            .map_err(|_| ProviderError::SessionStopped)?
+            .map_err(|e| failed(self.inner.config.flavor, "session/set_config_option", &e))?;
+        let mut state = self.inner.state.lock().await;
+        match reply.get("configOptions") {
+            Some(options) if options.is_array() => {
+                state.setup["configOptions"] = options.clone();
+            }
+            _ => crate::antigravity::set_current(&mut state.setup, config_id, value),
+        }
+        Ok(state.setup["configOptions"].clone())
     }
 
     #[cfg(test)]
@@ -582,7 +632,7 @@ impl Inner {
         let initialize = connection
             .call("initialize", params)
             .await
-            .map_err(|e| failed("initialize", &e))?;
+            .map_err(|e| failed(flavor, "initialize", &e))?;
         if flavor.authenticate_eagerly {
             // The configured method is authoritative: Antigravity accepts methods it does not
             // list. effect-acp names it by the protocol generation of the reply's shape.
@@ -600,7 +650,7 @@ impl Inner {
                     ),
                 )
                 .await
-                .map_err(|e| failed("authenticate", &e))?;
+                .map_err(|e| failed(flavor, "authenticate", &e))?;
         }
         Ok(initialize)
     }
@@ -662,11 +712,11 @@ impl Inner {
                                     .with_opt("_meta", meta),
                             )
                             .await
-                            .map_err(|e| failed("session/set_model", &e))?;
+                            .map_err(|e| failed(self.config.flavor, "session/set_model", &e))?;
                         sent = Some(model_id);
                     }
                 }
-                Err(e) => return Err(failed("session/set_model", &e)),
+                Err(e) => return Err(failed(self.config.flavor, "session/set_model", &e)),
             }
         }
         let mut state = self.state.lock().await;
@@ -709,7 +759,7 @@ impl Inner {
                         .with("value", value.clone()),
                 )
                 .await
-                .map_err(|e| failed("session/set_config_option", &e))?;
+                .map_err(|e| failed(self.config.flavor, "session/set_config_option", &e))?;
             let mut state = self.state.lock().await;
             match reply.get("configOptions") {
                 Some(options) if options.is_array() => {
@@ -960,6 +1010,15 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 inner.deliver(&mut state, outs).await;
             }
             Incoming::Reply { id, result } => {
+                let waiter = {
+                    let mut state = inner.state.lock().await;
+                    let at = state.ordered_calls.iter().position(|(call, _)| *call == id);
+                    at.map(|at| state.ordered_calls.swap_remove(at).1)
+                };
+                if let Some(waiter) = waiter {
+                    let _ = waiter.send(result);
+                    continue;
+                }
                 let is_prompt = {
                     let state = inner.state.lock().await;
                     state.generation == generation && state.prompt_request == Some(id)
@@ -989,6 +1048,7 @@ async fn drive(inner: Weak<Inner>, mut incoming: mpsc::Receiver<Incoming>, gener
                 }
                 state.runtime = None;
                 state.active_prompt = None;
+                state.ordered_calls.clear();
                 state.restart_required = true;
                 let detail = exit.map_or_else(
                     || "the agent closed its output".to_owned(),
@@ -1094,6 +1154,13 @@ async fn handle_notification(inner: &Arc<Inner>, generation: u64, method: &str, 
         let mut state = inner.state.lock().await;
         if state.generation != generation {
             return;
+        }
+        // `ConfigOptionsUpdated`: the session's options follow the agent.
+        let update = &params["update"];
+        if update["sessionUpdate"] == "config_option_update"
+            && let Some(options) = update.get("configOptions").filter(|o| o.is_array())
+        {
+            state.setup["configOptions"] = options.clone();
         }
         let outs = state.mapper.session_update(params);
         inner.deliver(&mut state, outs).await;

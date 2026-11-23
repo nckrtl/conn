@@ -169,6 +169,8 @@ struct Live {
     held_since: Option<Instant>,
     /// Where Claude Code writes task output (`claudeTaskOutputRoot`), from the CLI's environment.
     task_output_root: std::path::PathBuf,
+    /// `workflowFilesRoot`: where this query's CLI writes workflow transcripts.
+    workflow_files_root: std::path::PathBuf,
 }
 
 impl ClaudeSession {
@@ -300,6 +302,29 @@ impl Inner {
                                 .await;
                         });
                     }
+                }
+                Out::ReadMemberTranscript(member) => {
+                    let root = self
+                        .lock()
+                        .live
+                        .as_ref()
+                        .map(|l| l.workflow_files_root.clone());
+                    let file = member.dir.join(format!("agent-{}.jsonl", member.agent_id));
+                    let answers = match root {
+                        Some(root) => tokio::task::spawn_blocking(move || {
+                            read_contained_tail(&root, &file, MEMBER_TRANSCRIPT_BYTE_CAP).map(
+                                |(text, truncated)| {
+                                    crate::mapper::transcript_answers(&text, truncated)
+                                },
+                            )
+                        })
+                        .await
+                        .ok()
+                        .flatten(),
+                        None => None,
+                    };
+                    let outs = self.lock().mapper.member_transcript(member, answers);
+                    Box::pin(self.deliver(query, outs)).await;
                 }
                 Out::Skipped(kind) => {
                     let mut state = self.lock();
@@ -478,6 +503,62 @@ fn callback_request(kind: &str, args: &Value) -> Option<ControlRequest> {
         })),
         _ => None,
     }
+}
+
+/// `TRANSCRIPT_READ_BYTE_CAP` times the reads T3 drains for one settled member.
+const MEMBER_TRANSCRIPT_BYTE_CAP: u64 = 8 * 1024 * 1024;
+
+/// `readContainedWorkflowFile` with `tail`: the last `cap` bytes of an absolute `.jsonl` file
+/// whose real path stays inside `root`, cut to whole lines, and whether the start was cut off.
+/// `None` when the file is missing, outside `root`, or not a regular file.
+fn read_contained_tail(
+    root: &std::path::Path,
+    file: &std::path::Path,
+    cap: u64,
+) -> Option<(String, bool)> {
+    use std::io::{Read, Seek, SeekFrom};
+    if !file.is_absolute() || file.extension()? != "jsonl" {
+        return None;
+    }
+    let root = std::fs::canonicalize(root).ok()?;
+    let resolved = std::fs::canonicalize(file).ok()?;
+    if !resolved.starts_with(&root) || resolved.extension()? != "jsonl" {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A leaf swapped for a symlink since the check fails to open; a FIFO cannot block.
+        options.custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
+    }
+    let mut handle = options.open(&resolved).ok()?;
+    let meta = handle.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let start = meta.len().saturating_sub(cap);
+    handle.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    handle.take(cap).read_to_end(&mut bytes).ok()?;
+    let first = if start > 0 {
+        bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |at| at + 1)
+    } else {
+        0
+    };
+    let end = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1)
+        .max(first);
+    let lines = bytes.get(first..end).unwrap_or_default();
+    Some((String::from_utf8_lossy(lines).into_owned(), start > 0))
 }
 
 /// The driver: one per query, ends after the query's `End`.
@@ -1418,8 +1499,9 @@ impl ClaudeSession {
         let env = self.environment(&input.thread_id, input.resume).await;
         // T3 resolves a relative CLAUDE_CODE_TMPDIR against the real cwd; this uses the cwd
         // as given (it differs only through a symlinked cwd and a relative value).
-        let task_output_root =
-            crate::tail::output_root(&env, input.cwd.as_deref().map(std::path::Path::new));
+        let cwd_path = input.cwd.as_deref().map(std::path::Path::new);
+        let task_output_root = crate::tail::output_root(&env, cwd_path);
+        let workflow_files_root = launch::workflow_files_root(&env, cwd_path);
         // `launchArgs`: files read off the runtime thread; a value the CLI would refuse fails
         // the start, as T3's query runner does.
         let (args, cwd) = (inner.config.launch_args.clone(), input.cwd.clone());
@@ -1469,6 +1551,7 @@ impl ClaudeSession {
                 last_activity: Instant::now(),
                 held_since: None,
                 task_output_root,
+                workflow_files_root,
             });
             generation
         };
@@ -2376,6 +2459,43 @@ fn require_unambiguous_server(statuses: &Value, server: &str) -> ProviderResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `readContainedWorkflowFile`: absolute paths only, the real path inside the root, a
+    /// regular file, and with a cap the whole lines at the end.
+    #[test]
+    fn member_transcripts_are_read_from_their_tail_inside_the_root() {
+        let dir = std::env::temp_dir().join(format!("conn-claude-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("projects");
+        std::fs::create_dir_all(root.join("dir.jsonl")).unwrap();
+        let file = root.join("agent-a1.jsonl");
+        std::fs::write(&file, "first\nsecond\nthird\npartial").unwrap();
+        assert_eq!(
+            read_contained_tail(&root, &file, 1024),
+            Some(("first\nsecond\nthird\n".to_owned(), false))
+        );
+        // The cap cuts into "second": the read starts at the next whole line.
+        assert_eq!(
+            read_contained_tail(&root, &file, 18),
+            Some(("third\n".to_owned(), true))
+        );
+        assert_eq!(
+            read_contained_tail(&root, std::path::Path::new("projects/agent-a1.jsonl"), 1024),
+            None
+        );
+        assert_eq!(
+            read_contained_tail(&root, &root.join("dir.jsonl"), 1024),
+            None
+        );
+        let outside = dir.join("outside.jsonl");
+        std::fs::write(&outside, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.jsonl")).unwrap();
+        assert_eq!(
+            read_contained_tail(&root, &root.join("link.jsonl"), 1024),
+            None
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn callbacks_become_the_control_requests_the_mapper_reads() {

@@ -192,7 +192,10 @@ fn replay(name: &str, runtime_mode: &str) -> Replay {
                 }
                 Out::Write(line) => replay.writes.push(serde_json::from_str(&line).unwrap()),
                 Out::Skipped(kind) => replay.skipped.push(kind),
-                Out::TailOutput { .. } | Out::StopTail { .. } | Out::StopTask { .. } => {}
+                Out::TailOutput { .. }
+                | Out::StopTail { .. }
+                | Out::StopTask { .. }
+                | Out::ReadMemberTranscript(_) => {}
             }
         }
     }
@@ -619,7 +622,8 @@ fn subagent_compaction_and_retry_frames_decode_without_failing() {
                 Out::Write(_)
                 | Out::TailOutput { .. }
                 | Out::StopTail { .. }
-                | Out::StopTask { .. } => {}
+                | Out::StopTask { .. }
+                | Out::ReadMemberTranscript(_) => {}
             }
         }
     }
@@ -1077,4 +1081,41 @@ fn an_idle_restart_then_completion_leaves_the_workflow_finished() {
         .unwrap();
     assert_eq!(last["subagent"]["status"], "completed");
     assert!(!mapper.has_pending_background_work());
+}
+
+/// `readContainedWorkflowFile` refuses a path that is not absolute: a relative
+/// `transcriptDir` is never read, and the progress excerpt stands in.
+#[test]
+fn a_relative_transcript_dir_is_not_read() {
+    let mut mapper = Mapper::new(FixedEnv::default(), SESSION);
+    let thread = provider_thread("workflow-relative");
+    mapper.begin_turn(&turn_input(1, &thread, "x", "full-access"), "default");
+    let frames = [
+        json!({"type":"assistant", "parent_tool_use_id":null, "uuid":"wf-2", "message":{
+            "id":"m-wf", "content":[{"type":"tool_use", "id":"tool-workflow", "name":"Run",
+            "input":{"script":"await workflow.run()"}}]}}),
+        json!({"type":"system", "subtype":"task_started", "task_id":"wf1",
+            "tool_use_id":"tool-workflow", "task_type":"local_workflow", "workflow_name":"Audit",
+            "description":"Audit code", "prompt":"await workflow.run()"}),
+        json!({"type":"user", "parent_tool_use_id":null, "uuid":"wf-4", "message":{"role":"user",
+            "content":[{"type":"tool_result", "tool_use_id":"tool-workflow", "content":"launched"}]},
+            "tool_use_result":{"taskType":"local_workflow", "runId":"wf-run",
+            "transcriptDir":"projects/workflow"}}),
+        json!({"type":"system", "subtype":"task_progress", "task_id":"wf1",
+            "tool_use_id":"tool-workflow", "description":"Review", "workflow_progress":[
+            {"type":"workflow_agent", "index":0, "label":"Reviewer", "state":"done", "attempt":1,
+             "startedAt":1, "lastProgressAt":5, "agentId":"a1", "resultPreview":"Looks good"}]}),
+    ];
+    let outs: Vec<Out> = frames
+        .into_iter()
+        .flat_map(|frame| mapper.handle(Inbound::from_value(frame)))
+        .collect();
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, Out::ReadMemberTranscript(_)))
+    );
+    assert!(outs.iter().any(|o| matches!(o,
+        Out::Event(ProviderEvent::TurnItemUpdated { turn_item })
+            if to_json(turn_item)["text"] == "Partial answer from workflow progress:\n\nLooks good")));
 }

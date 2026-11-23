@@ -1019,3 +1019,290 @@ async fn an_interrupted_root_cancels_its_workflow_without_stop_task() {
     session.close().await;
     helper.stop_if_idle().await;
 }
+
+const MEMBER_ANSWER: &str = "Reviewed both migrations. The second one needs an index.";
+
+/// A member transcript's assistant line, as Claude writes it.
+fn member_line(uuid: &str, message_id: &str, text: &str) -> String {
+    let line = serde_json::json!({"type":"assistant","effort":"high","uuid":uuid,"message":{
+        "id":message_id,"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":text}]}});
+    format!("{line}\n")
+}
+
+/// A `workflow_agent` progress entry for the one member, `a1`.
+fn member_entry(state: &str, attempt: u64, result: Option<&str>) -> serde_json::Value {
+    let mut entry = serde_json::json!({"type":"workflow_agent","index":0,"label":"Reviewer",
+        "state":state,"attempt":attempt,"startedAt":attempt * 10,"model":"claude-sonnet-4-6",
+        "agentId":"a1","promptPreview":"Inspect code"});
+    if state == "done" {
+        entry["lastProgressAt"] = serde_json::json!(attempt * 10 + 5);
+    }
+    if let Some(result) = result {
+        entry["resultPreview"] = serde_json::json!(result);
+    }
+    entry
+}
+
+/// Where the member's transcript sits, and how the session finds Claude's config folder.
+enum MemberFile {
+    /// `<config>/projects/workflow/agent-a1.jsonl`, the config folder as the `homePath` setting.
+    Written(String),
+    /// No transcript.
+    Missing,
+    /// A FIFO in the transcript's place. A writer waits for a reader and sends an answer.
+    Fifo,
+    /// The transcript under a relative `CLAUDE_CONFIG_DIR` in the instance environment, which
+    /// the CLI resolves from the session cwd.
+    RelativeConfig(String),
+}
+
+/// The assistant messages (id, text) a workflow member's child thread got, in order. The
+/// member reports `progress` (one frame per entry), then the workflow and root complete.
+async fn member_messages(
+    name: &str,
+    file: MemberFile,
+    progress: &[serde_json::Value],
+) -> Vec<(String, String)> {
+    use serde_json::{Value, json};
+    let dir = Scratch::new(name);
+    let relative = matches!(file, MemberFile::RelativeConfig(_));
+    let config = dir
+        .0
+        .join(if relative { "claude-config" } else { "config" });
+    let transcripts = config.join("projects/workflow");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let transcript = transcripts.join("agent-a1.jsonl");
+    match &file {
+        MemberFile::Written(text) | MemberFile::RelativeConfig(text) => {
+            std::fs::write(&transcript, text).unwrap();
+        }
+        MemberFile::Missing => {}
+        MemberFile::Fifo => {
+            let made = std::process::Command::new("mkfifo")
+                .arg(&transcript)
+                .status()
+                .unwrap();
+            assert!(made.success());
+            let fifo = transcript.clone();
+            // Never joined: with no reader it waits until the test process ends.
+            std::thread::spawn(move || {
+                use std::io::Write;
+                if let Ok(mut pipe) = std::fs::OpenOptions::new().write(true).open(fifo) {
+                    let _ =
+                        pipe.write_all(member_line("pipe", "msg_pipe", "From a pipe").as_bytes());
+                }
+            });
+        }
+    }
+
+    let (helper, log) = fake_host(&dir.0, true);
+    let (tx, mut events) = mpsc::channel(crate::session::EVENT_CAPACITY);
+    let config = if relative {
+        ClaudeConfig {
+            instance_env: vec![("CLAUDE_CONFIG_DIR".to_owned(), "claude-config".to_owned())].into(),
+            ..ClaudeConfig::default()
+        }
+    } else {
+        ClaudeConfig {
+            home_path: Some(config),
+            ..ClaudeConfig::default()
+        }
+    };
+    let session = ClaudeSession::open(
+        "provider-sixth".into(),
+        "claudeAgent",
+        config,
+        helper.clone(),
+        tx,
+        vec![],
+        Default::default(),
+    );
+    let cwd = dir.cwd();
+    let thread = new_thread(&session, "full-access", &cwd).await;
+    let mut frames = Vec::new();
+    for line in include_str!("../testdata/cli/e16_workflow.ndjson").lines() {
+        let envelope: Value = serde_json::from_str(line).unwrap();
+        let mut msg = envelope["msg"].clone();
+        if envelope["dir"] != "in" || msg["subtype"] == "task_progress" {
+            continue;
+        }
+        if msg["uuid"] == "wf-4" {
+            msg["tool_use_result"]["transcriptDir"] = json!(transcripts);
+            frames.push(msg);
+            for (n, entry) in progress.iter().enumerate() {
+                frames.push(
+                    json!({"type":"system","subtype":"task_progress","uuid":format!("member-{n}"),
+                    "task_id":"wf1","tool_use_id":"tool-workflow","description":"Review",
+                    "workflow_progress":[entry]}),
+                );
+            }
+            continue;
+        }
+        let done = msg["uuid"] == "wf-7";
+        frames.push(msg);
+        if done {
+            break;
+        }
+    }
+    frames.push(json!({"type":"result","subtype":"success","is_error":false,"result":"Review complete",
+        "duration_ms":1,"duration_api_ms":1,"num_turns":1,"usage":{},"modelUsage":{},"total_cost_usd":0}));
+    std::fs::write(log.with_extension("log.frames"), json!(frames).to_string()).unwrap();
+    session
+        .start_turn(turn(1, &thread, "inspect", "full-access", &cwd))
+        .await
+        .unwrap();
+    let seen = until(&mut events, is_terminal).await;
+    assert_eq!(seen.last().unwrap()["status"], "completed");
+    let coordinator = seen
+        .iter()
+        .rev()
+        .find(|e| e["subagent"]["workflow"]["runHandles"]["transcriptDir"] == json!(transcripts))
+        .unwrap();
+    let member = &coordinator["subagent"]["workflow"]["agents"][0];
+    assert_eq!(member["agentId"], "a1");
+    let messages = seen
+        .iter()
+        .map(|e| &e["message"])
+        .filter(|m| m["threadId"] == member["childThreadId"] && m["role"] == "assistant")
+        .map(|m| {
+            (
+                m["id"].as_str().unwrap().to_owned(),
+                m["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    session.close().await;
+    helper.stop_if_idle().await;
+    messages
+}
+
+fn texts(messages: Vec<(String, String)>) -> Vec<String> {
+    messages.into_iter().map(|(_, text)| text).collect()
+}
+
+/// The member settles once, with the excerpt "Looks good".
+fn settles_once() -> [serde_json::Value; 2] {
+    [
+        member_entry("start", 1, None),
+        member_entry("done", 1, Some("Looks good")),
+    ]
+}
+
+/// `ClaudeAdapterV2`'s member transcript reader: a settled workflow member's child shows the
+/// answer from its transcript, not the progress excerpt that contradicts it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_settled_workflow_member_shows_its_transcript_answer() {
+    if !node_available() {
+        return;
+    }
+    let written = MemberFile::Written(member_line("wf-line-1", "msg_a1", MEMBER_ANSWER));
+    let shown = member_messages("member-transcript", written, &settles_once()).await;
+    assert_eq!(texts(shown), [MEMBER_ANSWER]);
+    // Without a readable transcript the progress excerpt stands in, once.
+    let shown = member_messages("member-excerpt", MemberFile::Missing, &settles_once()).await;
+    assert_eq!(
+        texts(shown),
+        ["Partial answer from workflow progress:\n\nLooks good"]
+    );
+}
+
+/// `readContainedWorkflowFile` opens the leaf with `O_NONBLOCK` and reads only a regular file:
+/// a FIFO in the transcript's place neither blocks the session nor feeds it an answer.
+#[tokio::test(flavor = "current_thread")]
+async fn a_transcript_that_is_not_a_regular_file_is_not_read() {
+    if !node_available() {
+        return;
+    }
+    let shown = member_messages("member-fifo", MemberFile::Fifo, &settles_once()).await;
+    assert_eq!(
+        texts(shown),
+        ["Partial answer from workflow progress:\n\nLooks good"]
+    );
+}
+
+/// `!textShown && !resultShown`: a member that settled with nothing to show shows the excerpt
+/// that arrives later, once.
+#[tokio::test(flavor = "current_thread")]
+async fn a_late_excerpt_is_shown_once() {
+    if !node_available() {
+        return;
+    }
+    let progress = [
+        member_entry("start", 1, None),
+        member_entry("done", 1, None),
+        member_entry("done", 1, Some("Late excerpt")),
+        member_entry("done", 1, Some("Changed excerpt")),
+    ];
+    let shown = member_messages("member-late-excerpt", MemberFile::Missing, &progress).await;
+    assert_eq!(
+        texts(shown),
+        ["Partial answer from workflow progress:\n\nLate excerpt"]
+    );
+}
+
+/// `ClaudeAdapterV2.test.ts` "reads a settled workflow member's transcript to its end past the
+/// read cap": 80 long early messages, then `FINAL ANSWER`. The bounded import keeps the end,
+/// and the excerpt stays because the import is incomplete.
+#[tokio::test(flavor = "current_thread")]
+async fn a_long_transcript_keeps_its_final_answer() {
+    if !node_available() {
+        return;
+    }
+    let filler = "x".repeat(16 * 1024);
+    let mut transcript: String = (0..80)
+        .map(|n| {
+            member_line(
+                &format!("line-early-{n}"),
+                &format!("msg_early_{n}"),
+                &format!("{n} {filler}"),
+            )
+        })
+        .collect();
+    transcript.push_str(&member_line("line-final", "msg_final", "FINAL ANSWER"));
+    let shown = member_messages(
+        "member-long-transcript",
+        MemberFile::Written(transcript),
+        &settles_once(),
+    )
+    .await;
+    let shown = texts(shown);
+    assert_eq!(shown.last().map(String::as_str), Some("FINAL ANSWER"));
+    assert_eq!(
+        shown.first().map(String::as_str),
+        Some("Partial answer from workflow progress:\n\nLooks good")
+    );
+    assert!(shown.len() > 2, "{}", shown.len());
+}
+
+/// Transcript lines keep their item ids across attempts (`nativeItemId: line.uuid`): a retry
+/// that reads the same transcript updates the answer instead of adding a second one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_retry_does_not_duplicate_transcript_answers() {
+    if !node_available() {
+        return;
+    }
+    let progress = [
+        member_entry("start", 1, None),
+        member_entry("done", 1, Some("First")),
+        member_entry("start", 2, None),
+        member_entry("done", 2, Some("Second")),
+    ];
+    let written = MemberFile::Written(member_line("wf-line-1", "msg_a1", MEMBER_ANSWER));
+    let shown = member_messages("member-retry", written, &progress).await;
+    let mut ids: Vec<&str> = shown.iter().map(|(id, _)| id.as_str()).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), 1, "{shown:?}");
+    assert_eq!(shown.last().unwrap().1, MEMBER_ANSWER);
+}
+
+/// `ClaudeAdapterV2` reads transcripts under the query's own `CLAUDE_CONFIG_DIR`, resolved from
+/// the session cwd when relative.
+#[tokio::test(flavor = "current_thread")]
+async fn transcripts_are_read_under_the_querys_config_dir() {
+    if !node_available() {
+        return;
+    }
+    let file = MemberFile::RelativeConfig(member_line("wf-line-1", "msg_a1", MEMBER_ANSWER));
+    let shown = member_messages("member-relative-config", file, &settles_once()).await;
+    assert_eq!(texts(shown), [MEMBER_ANSWER]);
+}

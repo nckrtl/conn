@@ -268,9 +268,12 @@ pub fn read_file(
         return Err(FileFailure::plain(Failure::PathNotFile, Some(&real_target)));
     }
     let size = meta.len();
-    let mut bytes = Vec::with_capacity(size.min(READ_FILE_MAX_BYTES) as usize);
+    // Read no more than `stat` reported, as T3 does: bytes appended after the stat could
+    // split a character while `truncated` is still false, and that file would read as binary.
+    let limit = size.min(READ_FILE_MAX_BYTES);
+    let mut bytes = Vec::with_capacity(limit as usize);
     (&mut file)
-        .take(READ_FILE_MAX_BYTES)
+        .take(limit)
         .read_to_end(&mut bytes)
         .map_err(|e| FileFailure::op(Operation::Read, &real_target, &real_target, e))?;
     let binary = || FileFailure::plain(Failure::BinaryFile, Some(&real_target));

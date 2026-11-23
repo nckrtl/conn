@@ -1227,15 +1227,31 @@ impl<E: Env> Mapper<E> {
         (owner.native_turn_id, node)
     }
 
-    /// The running turns that belong to a turn's lineage: the turn and every running
-    /// descendant (`isDescendantCodexTurn`), the turn first.
-    pub fn lineage(&self, native_turn: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        if let Some(turn) = self.turns.get(native_turn) {
-            out.push((turn.native_thread_id.clone(), native_turn.to_owned()));
-        }
+    /// A Stop's lineage roots (`lineageRoots`), as provider turn ids: the turn, and the earlier
+    /// turns of its goal run, whose subagents and background terminals the Stop also ends.
+    pub fn lineage_roots(&self, native_turn: &str) -> Vec<String> {
+        self.turns
+            .get(native_turn)
+            .map(|turn| {
+                let mut roots = vec![turn.provider_turn_id.clone()];
+                roots.extend(turn.continues.iter().cloned());
+                roots
+            })
+            .unwrap_or_default()
+    }
+
+    /// The running turns in the lineage of `roots` (provider turn ids): each running root and
+    /// every running descendant (`isDescendantCodexTurn`), the roots first.
+    pub fn lineage(&self, roots: &[String]) -> Vec<(String, String)> {
+        let is_root = |id: &str| roots.iter().any(|r| r == id);
+        let mut out: Vec<(String, String)> = self
+            .turns
+            .values()
+            .filter(|turn| is_root(&turn.provider_turn_id))
+            .map(|turn| (turn.native_thread_id.clone(), turn.native_turn_id.clone()))
+            .collect();
         for turn in self.turns.values() {
-            if turn.native_turn_id == native_turn {
+            if is_root(&turn.provider_turn_id) {
                 continue;
             }
             let mut hops = 0;
@@ -1245,7 +1261,7 @@ impl<E: Env> Mapper<E> {
                 .and_then(|k| self.subagents.get(k))
                 .map(|s| s.parent.clone());
             while let Some(scope) = parent {
-                if scope.native_turn_id == native_turn {
+                if is_root(&scope.provider_turn_id) {
                     out.push((turn.native_thread_id.clone(), turn.native_turn_id.clone()));
                     break;
                 }

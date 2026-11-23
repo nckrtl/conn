@@ -107,6 +107,9 @@ struct State {
     /// matches no later run.
     abandoned_run: Option<String>,
     logged: HashSet<String>,
+    /// The goal grace timers and expiry pauses running; close cancels them. Finished ones are
+    /// dropped at each spawn, and a session holds one goal run at a time.
+    goal_tasks: Vec<tokio::task::AbortHandle>,
 }
 
 impl CodexSession {
@@ -285,27 +288,47 @@ impl CodexSession {
 
     /// `turn/interrupt` for the turn and its lineage, then the wait for Codex to end it.
     async fn interrupt_native(&self, input: InterruptInput) -> ProviderResult<()> {
-        let inner = &self.inner;
-        // The turn and its running subagent turns (`interruptTargetContexts`), the turn
-        // first; each gets `turn/interrupt`, as in T3.
-        let (native_turn, targets) = {
-            let mut state = inner.lock();
+        let (native_turn, roots) = {
+            let state = self.inner.lock();
             let Some(turn) = state.mapper.native_turn(input.provider_turn_id.as_str()) else {
                 return Ok(());
             };
-            let targets: Vec<(String, String, Vec<String>)> = state
+            let roots = state.mapper.lineage_roots(&turn);
+            (turn, roots)
+        };
+        self.interrupt_lineage(Some(&native_turn), &roots).await
+    }
+
+    /// Stops the lineage of `roots` (provider turn ids): `turn/interrupt` for each running turn,
+    /// the requested one (`native_turn`) first, and `thread/backgroundTerminals/terminate` for
+    /// each terminal they or the roots' completed turns left running, as in T3.
+    async fn interrupt_lineage(
+        &self,
+        native_turn: Option<&str>,
+        roots: &[String],
+    ) -> ProviderResult<()> {
+        let inner = &self.inner;
+        let (targets, settled) = {
+            let mut state = inner.lock();
+            let mut targets: Vec<(String, String, Vec<String>)> = state
                 .mapper
-                .lineage(&turn)
+                .lineage(roots)
                 .into_iter()
                 .map(|(thread, native)| {
                     let processes = state.mapper.running_processes(&native);
                     (thread, native, processes)
                 })
                 .collect();
+            if let Some(first) = targets
+                .iter()
+                .position(|(_, native, _)| Some(native.as_str()) == native_turn)
+            {
+                targets.swap(0, first);
+            }
             for (_, native, _) in &targets {
                 state.mapper.mark_interrupting(native);
             }
-            (turn, targets)
+            (targets, state.mapper.settled_processes(roots))
         };
         let mut sent = Ok(Value::Null);
         for (thread, native, _) in &targets {
@@ -319,20 +342,23 @@ impl CodexSession {
                     json!({"threadId": thread, "turnId": native}),
                 )
                 .await;
-            if *native == native_turn {
+            if Some(native.as_str()) == native_turn {
                 sent = result;
             }
         }
+        let mut terminals: Vec<(&str, &str)> = Vec::new();
         for (thread, _, processes) in &targets {
-            for process in processes {
-                let _ = inner
-                    .server
-                    .request(
-                        "thread/backgroundTerminals/terminate",
-                        json!({"threadId": thread, "processId": process}),
-                    )
-                    .await;
-            }
+            terminals.extend(processes.iter().map(|p| (thread.as_str(), p.as_str())));
+        }
+        terminals.extend(settled.iter().map(|(t, p)| (t.as_str(), p.as_str())));
+        for (thread, process) in terminals {
+            let _ = inner
+                .server
+                .request(
+                    "thread/backgroundTerminals/terminate",
+                    json!({"threadId": thread, "processId": process}),
+                )
+                .await;
         }
         let wait = async {
             loop {
@@ -357,7 +383,7 @@ impl CodexSession {
             Err(e) => return Err(failed("interrupt_turn", e.to_string())),
         }
         if confirmed {
-            settle_lineage(inner, &native_turn, &targets).await;
+            settle_lineage(inner, roots, &targets).await;
         }
         // Codex may still be working: the turn stays open and marked interrupting, and
         // whatever ends it later (Codex's `turn/completed`, a close, Force stop) settles it
@@ -394,14 +420,32 @@ impl CodexSession {
         command: GoalCommand,
     ) -> ProviderResult<()> {
         let inner = &self.inner;
+        let run_id = input.run_id.as_str();
+        // Each request goes out only while the start stands, and its wait ends with it (T3
+        // interrupts `startTurn`): an abandoned command changes no goal.
         let request = |method: &'static str, params: Value| async move {
+            inner.ensure_not_abandoned(run_id)?;
             let result = inner
-                .server
-                .request(method, params)
-                .await
-                .map_err(call_failed("start_turn"));
+                .unless_abandoned(run_id, async {
+                    inner
+                        .server
+                        .request(method, params)
+                        .await
+                        .map_err(call_failed("start_turn"))
+                })
+                .await;
             inner.check_open()?;
             result
+        };
+        // A goal answer loses to a notification for the thread that came after it went out.
+        let set = |params: Value| async move {
+            let version = inner.lock().mapper.goal_version();
+            let answer = request("thread/goal/set", params).await?;
+            inner
+                .lock()
+                .mapper
+                .store_goal_answer(native, &answer["goal"], version);
+            Ok::<_, ProviderError>(())
         };
         inner
             .lock()
@@ -430,12 +474,7 @@ impl CodexSession {
             }
             GoalCommand::Pause | GoalCommand::Resume if current.is_null() => none(),
             GoalCommand::Pause => {
-                let paused = request(
-                    "thread/goal/set",
-                    json!({"threadId": native, "status": "paused"}),
-                )
-                .await?;
-                inner.lock().mapper.store_goal(native, &paused["goal"]);
+                set(json!({"threadId": native, "status": "paused"})).await?;
                 None
             }
             GoalCommand::Set(objective) => {
@@ -444,12 +483,8 @@ impl CodexSession {
                     request("thread/goal/clear", json!({ "threadId": native })).await?;
                 }
                 // Paused until our turn starts, so Codex cannot start one first.
-                let set = request(
-                    "thread/goal/set",
-                    json!({"threadId": native, "objective": objective, "status": "paused"}),
-                )
-                .await?;
-                inner.lock().mapper.store_goal(native, &set["goal"]);
+                set(json!({"threadId": native, "objective": objective, "status": "paused"}))
+                    .await?;
                 let codex_input = launch::user_input(
                     &format!("{GOAL_START_PROMPT}{objective}"),
                     &input.message.attachments,
@@ -460,6 +495,16 @@ impl CodexSession {
             }
             GoalCommand::Resume => return self.activate_goal(native, input, json!([])).await,
         };
+        // The goal row still shows what the command changed; the run is no longer ours.
+        if let Err(abandoned) = inner.ensure_not_abandoned(run_id) {
+            let outs = inner.lock().mapper.remember_root_thread(
+                native,
+                to_json(&input.provider_thread),
+                true,
+            );
+            inner.deliver(outs).await;
+            return Err(abandoned);
+        }
         let outs = inner
             .lock()
             .mapper
@@ -469,7 +514,8 @@ impl CodexSession {
     }
 
     /// `activateGoal`: starts the turn, then makes its paused goal active. A Stop in between
-    /// leaves the goal paused.
+    /// leaves the goal paused. A start Stop abandoned after its turn started sets nothing more
+    /// and stops that turn.
     async fn activate_goal(
         &self,
         native: &str,
@@ -477,28 +523,36 @@ impl CodexSession {
         codex_input: Value,
     ) -> ProviderResult<()> {
         let inner = &self.inner;
+        let run_id = input.run_id.as_str();
         inner.lock().mapper.begin_goal_activation(native);
+        let mut started = false;
         let result = async {
             self.start_native_turn(native, input, codex_input).await?;
-            if inner.lock().mapper.goal_activation_stopped(native) {
-                return Ok(());
-            }
+            started = true;
             let set = |status: &'static str| async move {
+                inner.ensure_not_abandoned(run_id)?;
                 let version = inner.lock().mapper.goal_version();
                 let answer = inner
-                    .server
-                    .request(
-                        "thread/goal/set",
-                        json!({"threadId": native, "status": status}),
-                    )
-                    .await
-                    .map_err(call_failed("start_turn"))?;
+                    .unless_abandoned(run_id, async {
+                        inner
+                            .server
+                            .request(
+                                "thread/goal/set",
+                                json!({"threadId": native, "status": status}),
+                            )
+                            .await
+                            .map_err(call_failed("start_turn"))
+                    })
+                    .await?;
                 inner
                     .lock()
                     .mapper
                     .store_goal_answer(native, &answer["goal"], version);
                 Ok::<_, ProviderError>(())
             };
+            if inner.lock().mapper.goal_activation_stopped(native) {
+                return Ok(());
+            }
             set("active").await?;
             if inner.lock().mapper.goal_activation_stopped(native) {
                 set("paused").await?;
@@ -506,6 +560,18 @@ impl CodexSession {
             Ok(())
         }
         .await;
+        if started
+            && result.is_err()
+            && inner.start_abandoned(run_id)
+            && let Some(turn) = inner.lock().mapper.run_native_turn(run_id)
+        {
+            tokio::spawn(interrupt(
+                Arc::clone(&inner.server),
+                native.to_owned(),
+                turn,
+                "a goal turn Stop abandoned",
+            ));
+        }
         // The goal row shows before the run can settle.
         let outs = {
             let mut state = inner.lock();
@@ -549,6 +615,7 @@ impl CodexSession {
                 closed: false,
                 abandoned_run: None,
                 logged: HashSet::new(),
+                goal_tasks: Vec::new(),
             }),
             progressed: Notify::new(),
             abandon: Notify::new(),
@@ -588,7 +655,16 @@ impl Inner {
         };
         tokio::select! {
             result = work => result,
-            () = abandoned => Err(failed("start_turn", "Stop ended the turn before Codex started it.")),
+            () = abandoned => Err(abandoned_start()),
+        }
+    }
+
+    /// Fails once Stop abandoned `run_id`'s start; checked before each later request.
+    fn ensure_not_abandoned(&self, run_id: &str) -> ProviderResult<()> {
+        if self.start_abandoned(run_id) {
+            Err(abandoned_start())
+        } else {
+            Ok(())
         }
     }
 
@@ -685,27 +761,24 @@ impl Inner {
                 Out::GoalHeld { thread, seq } => {
                     let inbox = self.inbox.clone();
                     let grace = self.goal_continuation_grace;
-                    tokio::spawn(async move {
+                    self.spawn_goal_task(async move {
                         tokio::time::sleep(grace).await;
                         let _ = inbox.send(SessionMsg::GoalGrace { thread, seq }).await;
                     });
                 }
                 Out::PauseGoal { thread } => {
-                    eprintln!("conn-provider-codex: Codex did not continue the goal; pausing it");
                     let server = Arc::clone(&self.server);
                     let inbox = self.inbox.clone();
-                    tokio::spawn(async move {
+                    self.spawn_goal_task(async move {
                         let pause = server.request(
                             "thread/goal/set",
                             json!({"threadId": thread, "status": "paused"}),
                         );
-                        let response = match tokio::time::timeout(GOAL_PAUSE_TIMEOUT, pause).await {
-                            Ok(Ok(response)) => Some(response),
-                            _ => {
-                                eprintln!("conn-provider-codex: the goal did not pause");
-                                None
-                            }
-                        };
+                        // No answer in time: the claimed run settles all the same.
+                        let response = tokio::time::timeout(GOAL_PAUSE_TIMEOUT, pause)
+                            .await
+                            .ok()
+                            .and_then(Result::ok);
                         let _ = inbox
                             .send(SessionMsg::GoalPaused { thread, response })
                             .await;
@@ -714,16 +787,13 @@ impl Inner {
                 Out::StopOrphanGoalTurn { thread, turn } => {
                     let server = Arc::clone(&self.server);
                     tokio::spawn(async move {
-                        eprintln!(
-                            "conn-provider-codex: a goal turn started with no run; pausing it"
-                        );
-                        let pause = server.request(
-                            "thread/goal/set",
-                            json!({"threadId": thread, "status": "paused"}),
-                        );
-                        if let Err(e) = pause.await {
-                            eprintln!("conn-provider-codex: the goal did not pause: {e}");
-                        }
+                        // A failed pause still stops the turn.
+                        let _ = server
+                            .request(
+                                "thread/goal/set",
+                                json!({"threadId": thread, "status": "paused"}),
+                            )
+                            .await;
                         interrupt(server, thread, turn, "a goal turn with no run").await;
                     });
                 }
@@ -745,6 +815,16 @@ impl Inner {
             }
         }
         self.progressed.notify_waiters();
+    }
+
+    /// Runs a goal timer or expiry pause that close cancels; none starts once close began.
+    fn spawn_goal_task(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        let mut state = self.lock();
+        if state.closed {
+            return;
+        }
+        state.goal_tasks.retain(|t| !t.is_finished());
+        state.goal_tasks.push(tokio::spawn(task).abort_handle());
     }
 
     /// The native thread loaded on the running app-server, resuming it after a restart.
@@ -864,6 +944,10 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                 SessionMsg::ChildMetadata { thread, response } => {
                     state.mapper.child_metadata(&thread, &response)
                 }
+                // A closing session pauses no goal; its close settles the held run.
+                SessionMsg::GoalGrace { .. } | SessionMsg::GoalPaused { .. } if state.closed => {
+                    Vec::new()
+                }
                 SessionMsg::GoalGrace { thread, seq } => {
                     state.mapper.goal_grace_ended(&thread, seq)
                 }
@@ -936,11 +1020,15 @@ async fn watch_abandoned_start(
 /// After a confirmed Stop: subagent turns of the lineage that started meanwhile get
 /// `turn/interrupt` (`interruptLateDescendants`), and any still open end as interrupted
 /// (`finalizeRemainingInterruptLineage`).
-async fn settle_lineage(inner: &Inner, root: &str, targets: &[(String, String, Vec<String>)]) {
+async fn settle_lineage(
+    inner: &Inner,
+    roots: &[String],
+    targets: &[(String, String, Vec<String>)],
+) {
     let late: Vec<(String, String)> = inner
         .lock()
         .mapper
-        .lineage(root)
+        .lineage(roots)
         .into_iter()
         .filter(|(_, native)| !targets.iter().any(|(_, t, _)| t == native))
         .collect();
@@ -954,7 +1042,7 @@ async fn settle_lineage(inner: &Inner, root: &str, targets: &[(String, String, V
     }
     let outs: Vec<Out> = {
         let mut state = inner.lock();
-        let open = state.mapper.lineage(root);
+        let open = state.mapper.lineage(roots);
         open.into_iter()
             .flat_map(|(_, native)| state.mapper.end_interrupted(&native))
             .collect()
@@ -1001,6 +1089,11 @@ fn failed(operation: &'static str, detail: impl Into<String>) -> ProviderError {
         operation,
         detail: detail.into(),
     }
+}
+
+/// A start Stop abandoned (`abandon_turn_start`) before Codex took it.
+fn abandoned_start() -> ProviderError {
+    failed("start_turn", "Stop ended the turn before Codex started it.")
 }
 
 fn call_failed(operation: &'static str) -> impl Fn(CallError) -> ProviderError {
@@ -1445,24 +1538,22 @@ impl Session for CodexSession {
                         "thread/goal/set",
                         json!({"threadId": goal_thread, "status": "paused"}),
                     );
-                    match pause.await {
-                        Ok(result) => {
-                            inner.lock().mapper.store_goal_answer(
-                                &goal_thread,
-                                &result["goal"],
-                                version,
-                            );
-                        }
-                        Err(e) => eprintln!("conn-provider-codex: the goal did not pause: {e}"),
+                    // A failed pause still stops the turn (`codex-goal-pause-failed`).
+                    if let Ok(result) = pause.await {
+                        inner.lock().mapper.store_goal_answer(
+                            &goal_thread,
+                            &result["goal"],
+                            version,
+                        );
                     }
                 }
                 let held = inner
                     .lock()
                     .mapper
                     .stop_held_goal(&goal_thread, input.provider_turn_id.as_str());
-                if let Some(outs) = held {
+                if let Some((outs, roots)) = held {
                     inner.deliver(outs).await;
-                    return Ok(());
+                    return self.interrupt_lineage(None, &roots).await;
                 }
                 self.interrupt_native(input).await
             }
@@ -1694,6 +1785,9 @@ impl Session for CodexSession {
             let thread = {
                 let mut state = inner.lock();
                 state.closed = true;
+                for task in state.goal_tasks.drain(..) {
+                    task.abort();
+                }
                 state.thread.clone()
             };
             if let Some((native, Some(generation))) = thread {

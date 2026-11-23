@@ -17,7 +17,8 @@
 //! - `background-reported`: like `background-hold`, but the work shows only as
 //!   `background_work.updated` (pending), and a running background command row.
 //! - `goal`: the provider thread gets an active goal, as Codex's `thread/goal/updated`
-//!   does, then the turn completes.
+//!   does, then the turn completes. `/goal <objective>`: the same goal, and the turn waits
+//!   for an interrupt, as a running goal turn.
 //! - anything else: streams `echo: <text>` in three chunks and completes.
 //!
 //! A steer into a running turn reports `steer.updated` pending then completed, answers
@@ -734,7 +735,7 @@ impl Session for FakeSession {
                         started.push(terminal(&turn, TurnStatus::Completed, None));
                     }
                 }
-                "goal" => {
+                t if t == "goal" || t.starts_with("/goal ") => {
                     let mut provider_thread = conn_contract::to_json(&input.provider_thread);
                     provider_thread["goal"] = json!({"objective": "Ship the feature",
                         "status": "active", "tokensUsed": 12, "tokenBudget": null,
@@ -742,8 +743,10 @@ impl Session for FakeSession {
                     provider_thread["updatedAt"] = json!(now_iso());
                     started.push(event(json!({"type": "provider_thread.updated",
                         "providerThread": provider_thread})));
-                    started.push(provider_turn(&turn, "completed"));
-                    started.push(terminal(&turn, TurnStatus::Completed, None));
+                    if t == "goal" {
+                        started.push(provider_turn(&turn, "completed"));
+                        started.push(terminal(&turn, TurnStatus::Completed, None));
+                    }
                 }
                 "background-hold" => {
                     self.background.store(true, Ordering::SeqCst);

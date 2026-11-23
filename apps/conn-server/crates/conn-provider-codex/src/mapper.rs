@@ -723,9 +723,15 @@ impl<E: Env> Mapper<E> {
     /// Whether a `turn/started` already registered the run's turn while its `turn/start`
     /// waits for the answer.
     pub fn run_registered(&self, run_id: &str) -> bool {
+        self.run_native_turn(run_id).is_some()
+    }
+
+    /// The running root turn of `run_id`, if Codex started one.
+    pub fn run_native_turn(&self, run_id: &str) -> Option<String> {
         self.turns
             .values()
-            .any(|t| t.subagent.is_none() && t.run_id.as_deref() == Some(run_id))
+            .find(|t| t.subagent.is_none() && t.run_id.as_deref() == Some(run_id))
+            .map(|t| t.native_turn_id.clone())
     }
 
     /// Whether a root turn on this native thread is running or starting.
@@ -768,6 +774,21 @@ impl<E: Env> Mapper<E> {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Background terminals that completed root turns among `roots` (provider turn ids) left
+    /// running (`settledTurns` in a Stop's lineage), as (native thread, process id).
+    pub fn settled_processes(&self, roots: &[String]) -> Vec<(String, String)> {
+        self.settled
+            .iter()
+            .filter(|s| roots.contains(&s.turn.provider_turn_id))
+            .flat_map(|s| {
+                s.turn.running_commands.iter().filter_map(|c| {
+                    let process = c.process_id.clone()?;
+                    Some((s.turn.native_thread_id.clone(), process))
+                })
+            })
+            .collect()
     }
 
     /// The app-server is gone: every open turn ends. `expected` (a close) ends them as

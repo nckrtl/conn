@@ -99,15 +99,18 @@ pub(super) struct Goals {
     /// Stops and expiry pauses in flight (`goalStops`).
     stops: HashMap<String, u32>,
     seq: u64,
-    /// Counts goal notifications. An answer to a request sent before a notification is older
-    /// than it, and does not replace the goal it reported.
+    /// Counts goal notifications: the clock of [`Mapper::goal_version`].
     notified: u64,
+    /// Native thread → the count at its latest goal notification. An answer to a request sent
+    /// before that is older, and does not replace the goal the notification reported.
+    notified_at: HashMap<String, u64>,
 }
 
 impl Goals {
     #[cfg(test)]
-    pub(super) fn sizes(&self) -> [usize; 7] {
+    pub(super) fn sizes(&self) -> [usize; 8] {
         [
+            self.notified_at.len(),
             self.claimed.len(),
             self.goals.len(),
             self.threads.len(),
@@ -142,11 +145,15 @@ impl<E: Env> Mapper<E> {
         self.goals.notified
     }
 
-    /// Stores the goal a request answered with, unless a notification came after the
-    /// request went out: Codex may finish a goal turn before its `thread/goal/set` answer
-    /// is read. Returns whether it stored.
+    /// Stores the goal a request answered with, unless a notification for the same thread
+    /// came after the request went out: Codex may finish a goal turn before its
+    /// `thread/goal/set` answer is read. Returns whether it stored.
     pub fn store_goal_answer(&mut self, native: &str, codex_goal: &Value, version: u64) -> bool {
-        let current = self.goals.notified == version;
+        let current = self
+            .goals
+            .notified_at
+            .get(native)
+            .is_none_or(|&at| at <= version);
         if current {
             self.store_goal(native, codex_goal);
         }
@@ -172,7 +179,10 @@ impl<E: Env> Mapper<E> {
         } else {
             &p["goal"]
         };
-        self.goals.notified = self.goals.notified.wrapping_add(1);
+        self.goals.notified += 1;
+        self.goals
+            .notified_at
+            .insert(native.clone(), self.goals.notified);
         self.store_goal(&native, goal);
         self.emit_goal_update(&native, out);
         if self.goals.status(&native) != Some("active") {
@@ -201,10 +211,15 @@ impl<E: Env> Mapper<E> {
         self.goals.updates_held.insert(native.to_owned());
     }
 
+    /// Shows the held goal row; a goal that stopped driving the thread meanwhile then ends
+    /// its held run, so the row comes first.
     pub fn release_goal_updates(&mut self, native: &str) -> Vec<Out> {
         let mut out = Vec::new();
         if self.goals.updates_held.remove(native) {
             self.emit_goal_update(native, &mut out);
+            if self.goals.status(native) != Some("active") {
+                out.extend(self.release_goal_hold(native, None));
+            }
         }
         out
     }
@@ -337,6 +352,13 @@ impl<E: Env> Mapper<E> {
     /// run settles (`releaseGoalHold`).
     pub fn goal_grace_ended(&mut self, native: &str, seq: u64) -> Vec<Out> {
         let matches = self.goals.holds.get(native).is_some_and(|h| h.seq == seq);
+        // The goal row is held: the run cannot settle before it shows, so the grace restarts.
+        if matches && self.goals.updates_held.contains(native) {
+            return vec![Out::GoalHeld {
+                thread: native.to_owned(),
+                seq,
+            }];
+        }
         if !matches
             || self.goals.stops.contains_key(native)
             || self.goals.status(native) != Some("active")
@@ -379,7 +401,10 @@ impl<E: Env> Mapper<E> {
             .holds
             .get(native)
             .is_some_and(|h| seq.is_none_or(|s| s == h.seq));
-        if !matches || self.goals.stops.contains_key(native) {
+        if !matches
+            || self.goals.stops.contains_key(native)
+            || self.goals.updates_held.contains(native)
+        {
             return Vec::new();
         }
         match self.goals.holds.remove(native) {
@@ -415,8 +440,13 @@ impl<E: Env> Mapper<E> {
         }
     }
 
-    /// Stop named a held run's turn: it ends interrupted, with no `turn/interrupt`.
-    pub fn stop_held_goal(&mut self, native: &str, provider_turn_id: &str) -> Option<Vec<Out>> {
+    /// Stop named a held run's turn: it ends interrupted, with no `turn/interrupt`. Returns
+    /// its events and the run's provider turns, whose work the Stop also ends.
+    pub fn stop_held_goal(
+        &mut self,
+        native: &str,
+        provider_turn_id: &str,
+    ) -> Option<(Vec<Out>, Vec<String>)> {
         let held = self.goals.holds.get(native).is_some_and(|h| {
             h.provider_turn_id == provider_turn_id
                 || h.continues.iter().any(|c| c == provider_turn_id)
@@ -425,7 +455,9 @@ impl<E: Env> Mapper<E> {
             return None;
         }
         let hold = self.goals.holds.remove(native)?;
-        Some(self.settle_goal_hold(hold, "interrupted"))
+        let mut roots = hold.continues.clone();
+        roots.push(hold.provider_turn_id.clone());
+        Some((self.settle_goal_hold(hold, "interrupted"), roots))
     }
 
     /// The app-server is gone: a held run's turn did complete.

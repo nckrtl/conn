@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use conn_contract::{ProviderThread, from_json, to_json};
 use conn_provider::{
-    EnsureThreadInput, InterruptInput, OpenSessionInput, OpenedSession, Provider, ProviderEvent,
-    Session,
+    AbandonTurnStartInput, EnsureThreadInput, InterruptInput, OpenSessionInput, OpenedSession,
+    Provider, ProviderEvent, Session,
 };
 use conn_provider_support::ids;
 use serde_json::{Value, json};
@@ -29,6 +29,11 @@ fn goal(status: &str, tokens: u64) -> String {
 /// The app-server: `thread/goal/get` answers `current`; setting a goal active runs `on_active`
 /// (the frames Codex sends once the goal drives the thread).
 fn script(current: &str, on_active: &[String]) -> String {
+    script_with(current, on_active, "")
+}
+
+/// [`script`] with `cases` (shell `case` arms) matched first.
+fn script_with(current: &str, on_active: &[String], cases: &str) -> String {
     let emits: String = on_active
         .iter()
         .map(|frame| format!("      emit '{frame}'\n"))
@@ -42,6 +47,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> "$0.stdin"
   id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
   case "$line" in
+{cases}
     *'"method":"initialize"'*) emit "{{\"id\":$id,\"result\":{{\"userAgent\":\"t3code_desktop/0.167.0 (x)\"}}}}" ;;
     *'"method":"model/list"'*) emit "{{\"id\":$id,\"result\":{{\"data\":[],\"nextCursor\":null}}}}" ;;
     *'"method":"thread/start"'*) emit "{{\"id\":$id,\"result\":{{\"thread\":{{\"id\":\"th1\",\"createdAt\":1,\"updatedAt\":2}}}}}}" ;;
@@ -59,7 +65,12 @@ while IFS= read -r line; do
     *'"method":"turn/start"'*)
       emit "{{\"id\":$id,\"result\":{{\"turn\":{{\"id\":\"tu0\",\"startedAt\":null}}}}}}"
       emit '{{"method":"turn/completed","params":{{"threadId":"th1","turn":{{"id":"tu0","status":"completed","completedAt":3}}}}}}' ;;
-    *'"method":"turn/interrupt"'*) emit "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *'"method":"turn/interrupt"'*)
+      emit "{{\"id\":$id,\"result\":{{}}}}"
+      turn=$(printf '%s' "$line" | sed -n 's/.*"turnId":"\([^"]*\)".*/\1/p')
+      emit "{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"th1\",\"turn\":{{\"id\":\"$turn\",\"status\":\"interrupted\",\"completedAt\":4}}}}}}" ;;
+    *'"method":"thread/backgroundTerminals/terminate"'*) emit "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *'"method":"thread/unsubscribe"'*) emit "{{\"id\":$id,\"result\":{{}}}}" ;;
   esac
 done
 "#
@@ -68,6 +79,7 @@ done
 
 struct Fixture {
     dir: PathBuf,
+    provider: CodexProvider,
     session: Box<dyn Session>,
     events: mpsc::Receiver<ProviderEvent>,
     thread: ProviderThread,
@@ -93,22 +105,9 @@ impl Fixture {
                 ..CodexConfig::default()
             },
         );
-        let selection =
-            || from_json(json!({"instanceId": "codex", "model": "gpt-6-luna"})).unwrap();
         let OpenedSession {
             session, events, ..
-        } = provider
-            .open_session(OpenSessionInput {
-                thread_id: "t1".into(),
-                provider_session_id: "s1".into(),
-                model_selection: selection(),
-                runtime_policy: policy(),
-                resume_from_session: None,
-                mcp_servers: vec![],
-                host: None,
-            })
-            .await
-            .unwrap();
+        } = open_session(&provider, "s1").await;
         let thread = session
             .ensure_thread(EnsureThreadInput {
                 thread_id: "t1".into(),
@@ -121,10 +120,16 @@ impl Fixture {
             .unwrap();
         Self {
             dir,
+            provider,
             session,
             events,
             thread,
         }
+    }
+
+    /// A second session on the same app-server, which keeps the process shared.
+    async fn second_session(&self) -> Box<dyn Session> {
+        open_session(&self.provider, "s2").await.session
     }
 
     /// Events until the run's terminal, within 10 s.
@@ -148,15 +153,37 @@ impl Fixture {
     }
 }
 
+fn selection() -> conn_contract::ModelSelection {
+    from_json(json!({"instanceId": "codex", "model": "gpt-6-luna"})).unwrap()
+}
+
+async fn open_session(provider: &CodexProvider, id: &str) -> OpenedSession {
+    provider
+        .open_session(OpenSessionInput {
+            thread_id: "t1".into(),
+            provider_session_id: id.into(),
+            model_selection: selection(),
+            runtime_policy: policy(),
+            resume_from_session: None,
+            mcp_servers: vec![],
+            host: None,
+        })
+        .await
+        .unwrap()
+}
+
 fn wire(log: &Path) -> Vec<Value> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|frame| {
-            frame["method"]
-                .as_str()
-                .is_some_and(|m| m.starts_with("thread/goal/") || m.starts_with("turn/"))
+            frame["method"].as_str().is_some_and(|m| {
+                m.starts_with("thread/goal/")
+                    || m.starts_with("turn/")
+                    || m.starts_with("thread/backgroundTerminals/")
+                    || m == "thread/unsubscribe"
+            })
         })
         .collect()
 }
@@ -209,6 +236,22 @@ fn updated(status: &str, tokens: u64, turn: &str) -> String {
         r#"{{"method":"thread/goal/updated","params":{{"threadId":"th1","turnId":{turn},"goal":{}}}}}"#,
         goal(status, tokens)
     )
+}
+
+/// A background terminal (`processId` 9) the goal turn `turn` starts and leaves running.
+fn background_command(turn: &str) -> String {
+    format!(
+        r#"{{"method":"item/started","params":{{"threadId":"th1","turnId":"{turn}","item":{{"type":"commandExecution","id":"c9","command":"npm run dev","processId":"9","status":"inProgress"}}}}}}"#
+    )
+}
+
+/// The `thread/backgroundTerminals/terminate` requests, as their process ids.
+fn terminated(frames: &[Value]) -> Vec<Value> {
+    frames
+        .iter()
+        .filter(|f| f["method"] == "thread/backgroundTerminals/terminate")
+        .map(|f| f["params"]["processId"].clone())
+        .collect()
 }
 
 fn turn_frame(method: &str, id: &str, status: &str) -> String {
@@ -396,13 +439,15 @@ async fn a_goal_codex_does_not_continue_is_paused_before_the_run_settles() {
 }
 
 /// `settles a run held for the next goal turn when Stop arrives in between`: no
-/// `turn/interrupt`, the held turn completes and the run ends interrupted.
+/// `turn/interrupt`, the held turn completes and the run ends interrupted. The held turn is
+/// still an interruption root: its background terminal is stopped.
 #[tokio::test(flavor = "current_thread")]
 async fn stop_between_goal_turns_settles_the_held_run() {
     let script = script(
         "null",
         &[
             updated("active", 10, "\"g1\""),
+            background_command("g1"),
             turn_frame("turn/completed", "g1", "completed"),
             updated("active", 11, "null"),
         ],
@@ -436,8 +481,151 @@ async fn stop_between_goal_turns_settles_the_held_run() {
         .await
         .unwrap();
     seen.extend(fixture.until_terminal().await);
-    assert!(!methods(&fixture.requests()).contains(&"turn/interrupt"));
+    let requests = fixture.requests();
+    assert!(!methods(&requests).contains(&"turn/interrupt"));
+    assert_eq!(terminated(&requests), [json!("9")]);
     assert_eq!(turn_statuses(&seen, &g1), ["running", "completed"]);
     assert_eq!(terminals(&seen), [(g1, "interrupted".to_owned())]);
     fixture.finish().await;
+}
+
+/// `CodexAdapterV2.interruptTurn` keeps a goal run's earlier turns as lineage roots: a Stop
+/// during the turn Codex continued with also stops what the first turn left running.
+#[tokio::test(flavor = "current_thread")]
+async fn stop_during_a_continued_goal_turn_stops_the_earlier_turns_work() {
+    let script = script(
+        "null",
+        &[
+            updated("active", 10, "\"g1\""),
+            background_command("g1"),
+            turn_frame("turn/completed", "g1", "completed"),
+            turn_frame("turn/started", "g2", "inProgress"),
+        ],
+    );
+    let mut fixture = Fixture::open("stop-continued", &script, Duration::from_secs(30)).await;
+    fixture
+        .session
+        .start_turn(turn(&fixture.thread, 1, &format!("/goal {OBJECTIVE}")))
+        .await
+        .unwrap();
+    let g2 = ids::provider_turn_id(DRIVER, "g2");
+    let mut seen = Vec::new();
+    while turn_statuses(&seen, &g2).is_empty() {
+        let event = tokio::time::timeout(Duration::from_secs(10), fixture.events.recv())
+            .await
+            .expect("the continued turn within 10 s")
+            .expect("events");
+        seen.push(serde_json::to_value(event).unwrap());
+    }
+    fixture
+        .session
+        .interrupt_turn(InterruptInput {
+            provider_thread: fixture.thread.clone(),
+            provider_turn_id: g2.as_str().into(),
+        })
+        .await
+        .unwrap();
+    seen.extend(fixture.until_terminal().await);
+    let requests = fixture.requests();
+    assert!(methods(&requests).contains(&"turn/interrupt"));
+    assert_eq!(terminated(&requests), [json!("9")]);
+    assert_eq!(terminals(&seen), [(g2, "interrupted".to_owned())]);
+    fixture.finish().await;
+}
+
+/// T3 interrupts an abandoned `startTurn` at its next wait: a `/goal clear` whose start Stop
+/// abandoned while `thread/goal/get` was in flight sends nothing more.
+#[tokio::test(flavor = "current_thread")]
+async fn an_abandoned_goal_command_sends_nothing_more() {
+    // `thread/goal/get` gets no answer; a goal notification tells the test it went out.
+    let get = format!(
+        "    *'\"method\":\"thread/goal/get\"'*) emit '{}' ;;",
+        updated("paused", 5, "null")
+    );
+    let script = script_with(&goal("paused", 7), &[], &get);
+    let mut fixture = Fixture::open("abandon", &script, Duration::from_secs(5)).await;
+    let input = turn(&fixture.thread, 1, "/goal clear");
+    let abandon = AbandonTurnStartInput {
+        thread_id: input.thread_id.clone(),
+        run_id: input.run_id.clone(),
+    };
+    let session = &fixture.session;
+    let events = &mut fixture.events;
+    let (started, ()) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(5), session.start_turn(input)),
+        async {
+            while events.recv().await.is_some_and(|e| {
+                serde_json::to_value(e).unwrap()["type"] != "provider_thread.updated"
+            }) {}
+            session.abandon_turn_start(abandon).await;
+        }
+    );
+    let error = started
+        .expect("the abandoned start ends at its wait")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Stop ended the turn"), "{error}");
+    assert_eq!(methods(&fixture.requests()), ["thread/goal/get"]);
+    fixture.finish().await;
+}
+
+/// Close cancels the goal's grace timer: a grace that runs out while a shared app-server
+/// unloads the thread pauses nothing for the closed session.
+#[tokio::test(flavor = "current_thread")]
+async fn close_cancels_the_goal_grace() {
+    let unsubscribe =
+        r#"    *'"method":"thread/unsubscribe"'*) sleep 1; emit "{\"id\":$id,\"result\":{}}" ;;"#;
+    let script = script_with(
+        "null",
+        &[
+            updated("active", 10, "\"g1\""),
+            turn_frame("turn/completed", "g1", "completed"),
+            updated("active", 11, "null"),
+        ],
+        unsubscribe,
+    );
+    let mut fixture = Fixture::open("close", &script, Duration::from_millis(200)).await;
+    let witness = fixture.second_session().await;
+    fixture
+        .session
+        .start_turn(turn(&fixture.thread, 1, &format!("/goal {OBJECTIVE}")))
+        .await
+        .unwrap();
+    // The update after the turn ended: the run is held and its grace is running.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), fixture.events.recv())
+            .await
+            .expect("the goal update within 10 s")
+            .expect("events");
+        let event = serde_json::to_value(event).unwrap();
+        if event["type"] == "provider_thread.updated"
+            && event["providerThread"]["goal"]["tokensUsed"] == 11
+        {
+            break;
+        }
+    }
+    fixture.session.close().await;
+    // A request on the shared process: every earlier line has been read by then.
+    witness
+        .ensure_thread(EnsureThreadInput {
+            thread_id: "t2".into(),
+            title: None,
+            model_selection: selection(),
+            runtime_policy: policy(),
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    let requests = fixture.requests();
+    let methods = methods(&requests);
+    let closing = methods
+        .iter()
+        .position(|m| *m == "thread/unsubscribe")
+        .expect("the shared process unloads the thread");
+    assert!(
+        !methods[closing..].contains(&"thread/goal/set"),
+        "{methods:?}"
+    );
+    witness.close().await;
+    let _ = std::fs::remove_dir_all(&fixture.dir);
 }

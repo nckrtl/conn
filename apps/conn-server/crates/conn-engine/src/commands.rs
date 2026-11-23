@@ -369,7 +369,10 @@ enum Delivery {
 
 /// `resolveDeliveryIntent` in `CommandPolicy.ts`, for one provider that may or may not steer:
 /// we steer into a running provider turn and let the provider decline (then it queues).
-fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>), CommandError> {
+fn delivery(
+    tx: &Tx<'_>,
+    c: &mut MessageDispatch,
+) -> Result<(Delivery, Option<Value>), CommandError> {
     let active = active_run(tx, &c.thread_id)?;
     let Some(active) = active else {
         return Ok((Delivery::Start, None));
@@ -412,8 +415,19 @@ fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>
             "queue_after_active" if c.delivery_intent.is_some() => Some(active),
             _ => steer_target.clone(),
         };
-        if let Some(delivery) = goal_delivery(tx, &c.thread_id, &goal, target)? {
-            return Ok(delivery);
+        if let Some(target) = target
+            && let Some(stops) = goal_stops_run(tx, &c.thread_id, &goal, &target)?
+        {
+            // A goal stays its own run: never a steer, now or once the turn runs.
+            c.dispatch_mode = DispatchMode {
+                kind: "queue_after_active".into(),
+                target_run_id: None,
+            };
+            return Ok(if stops {
+                (Delivery::Queue { first: true }, Some(target))
+            } else {
+                (Delivery::Queue { first: false }, None)
+            });
         }
     }
     let restart =
@@ -426,19 +440,24 @@ fn delivery(tx: &Tx<'_>, c: &MessageDispatch) -> Result<(Delivery, Option<Value>
     })
 }
 
-/// `dispatchMessage` for a `/goal` to a provider that runs goals natively (`None` for any
-/// other provider, or with no run to join): it never joins a running turn. One that starts or ends the goal driving the run stops that run and goes
-/// first in the queue; the rest wait. A run that is only finishing is never stopped, nor one
-/// whose own message is a `/compact` or `/goal` (`isNativeMaintenanceCommand`).
-fn goal_delivery(
+/// `isNativeMaintenanceCommand`: compaction and sign-out, which take no steering input.
+fn is_native_maintenance(message: &Value) -> bool {
+    let text =
+        conn_support::text::js_trim(message["text"].as_str().unwrap_or_default()).to_lowercase();
+    message["attachments"].as_array().is_none_or(Vec::is_empty)
+        && matches!(text.as_str(), "/compact" | "/logout")
+}
+
+/// The goal rule of `dispatchMessage` and `promoteQueuedMessageToSteer`, for a `/goal` aimed at
+/// `target`: `None` when its provider runs no native goals, else whether the goal stops the
+/// run (`goalCommandStopsActiveRun`). A run that is only finishing is never stopped, nor a
+/// compaction or sign-out.
+fn goal_stops_run(
     tx: &Tx<'_>,
     thread_id: &str,
     goal: &conn_provider::goal::GoalCommand,
-    target: Option<Value>,
-) -> Result<Option<(Delivery, Option<Value>)>, CommandError> {
-    let Some(target) = target else {
-        return Ok(None);
-    };
+    target: &Value,
+) -> Result<Option<bool>, CommandError> {
     let provider_thread = match target["providerThreadId"].as_str() {
         Some(id) => tx.entity(thread_id, "providerThreads", id)?,
         None => None,
@@ -460,15 +479,11 @@ fn goal_delivery(
     let maintenance = match target["userMessageId"].as_str() {
         Some(id) => tx
             .entity(thread_id, "messages", id)?
-            .is_some_and(|m| crate::merge_back::defers_history(&m)),
+            .is_some_and(|m| is_native_maintenance(&m)),
         None => false,
     };
     Ok(Some(
-        if live && goal.stops_active_run(goal_status) && !maintenance {
-            (Delivery::Queue { first: true }, Some(target))
-        } else {
-            (Delivery::Queue { first: false }, None)
-        },
+        live && goal.stops_active_run(goal_status) && !maintenance,
     ))
 }
 
@@ -509,7 +524,7 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             c.dispatch_mode.kind
         ));
     }
-    let (delivery, interrupt) = delivery(tx, &c)?;
+    let (delivery, interrupt) = delivery(tx, &mut c)?;
     if let Delivery::Steer(target) = delivery {
         return steer_into(tx, &c, &target);
     }
@@ -1212,6 +1227,22 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
     let Some(message) = tx.entity(&c.thread_id, "messages", &message_id)? else {
         return reject(format!("Message {message_id} does not exist."));
     };
+    let has_attachments = message["attachments"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty());
+    if let Some(goal) = conn_provider::goal::parse_command(
+        message["text"].as_str().unwrap_or_default(),
+        has_attachments,
+    ) && let Some(stops) = goal_stops_run(tx, &c.thread_id, &goal, &target)?
+    {
+        // A goal keeps its own run, first in the queue, and stops the turn it ends or replaces.
+        queue_first(tx, &c.thread_id, &queued)?;
+        return Ok(if stops {
+            stop_run(tx, &c.thread_id, &target, None, false)?
+        } else {
+            vec![]
+        });
+    }
     finish_run(tx, &c.thread_id, &c.queued_run_id, "cancelled", None)?;
     let dispatch = MessageDispatch {
         command_id: String::new(),
@@ -1254,6 +1285,23 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }
     effects.truncate(1);
     Ok(effects)
+}
+
+/// Moves a queued run to the front; the others follow in their order (`stopRunForQueuedCommand`).
+fn queue_first(tx: &mut Tx<'_>, thread_id: &str, run: &Value) -> StoreResult<()> {
+    let others = queued_runs(tx, thread_id)?
+        .into_iter()
+        .filter(|r| r["id"] != run["id"]);
+    let positions = std::iter::once(run.clone()).chain(others).zip(1_u64..);
+    for (mut run, position) in positions {
+        if run["queuePosition"] == position {
+            continue;
+        }
+        run["queuePosition"] = json!(position);
+        let id = run["id"].as_str().unwrap_or_default().to_owned();
+        tx.append(Draft::new(thread_id, "run.updated", run).run(Some(&id)))?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]

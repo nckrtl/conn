@@ -134,11 +134,11 @@ after. Errors carry T3's texts ("Codex CLI request timed out.", "Codex CLI comma
   feedback upload; the `additionalContext` restore after compaction (`thread/inject_items`).
 - **Goals** (`/goal`, `src/mapper/goals.rs`): built as T3's `runGoalCommand`, including the run
   held across Codex's own goal turns and the pause after the 5 s grace. The engine never
-  steers a `/goal` into a running turn, and stops the run a goal replaces (`goal_delivery` in
-  `conn-engine`). Not built: the pause at once when a delegated task will wake the thread
-  (`goalsPausedForWake`). Two differences:
-  an answer to `thread/goal/set` does not replace a goal notification that came after the
-  request went out, and the goal row shows before the run's terminal.
+  steers a `/goal` into a running turn, sent or promoted from the queue, and stops the run a
+  goal replaces (`goal_stops_run` in `conn-engine`). Not built: the pause at once when a
+  delegated task will wake the thread (`goalsPausedForWake`). Two differences: an answer to
+  `thread/goal/set` does not replace a goal notification for the same thread that came after
+  the request went out, and the goal row shows before the run's terminal.
 - **Retries:** `error` with `willRetry: true` makes no retry row; the turn keeps running.
 - **Rate limits:** `account/rateLimits/*` is ignored, so usage-limit failures have no `resetAt`.
 - **T3 context details:** browser tools are assumed on (TS reads them from the MCP session);

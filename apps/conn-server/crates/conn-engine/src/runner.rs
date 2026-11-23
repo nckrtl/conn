@@ -871,9 +871,16 @@ impl Inner {
                         .run(Some(&rid))
                         .node(Some(&root_id))
                 };
-                if provider_thread_json["id"].is_string() {
+                if let Some(id) = provider_thread_json["id"].as_str() {
                     let mut running = provider_thread_json.clone();
                     running["updatedAt"] = json!(now);
+                    // The session's cached row predates goal updates the provider reported since.
+                    if let Some(goal) = tx
+                        .entity(&tid, "providerThreads", id)?
+                        .and_then(|stored| stored.get("goal").cloned())
+                    {
+                        running["goal"] = goal;
+                    }
                     tx.append(Draft::new(&tid, "provider-thread.updated", running))?;
                 }
                 if let Some(transfer) = &fork_transfer {

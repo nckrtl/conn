@@ -920,3 +920,88 @@ fn deferred_mcp_app_uses_t3s_failed_cli_result() {
         recording["result"]["structuredContent"]
     );
 }
+
+/// A Codex goal on `th`.
+fn codex_goal(status: &str) -> Value {
+    json!({"threadId": "th", "objective": "Ship", "status": status, "tokenBudget": null,
+        "tokensUsed": 1, "timeUsedSeconds": 1, "createdAt": 1, "updatedAt": 2})
+}
+
+/// The goal turn `g1` on `th`, started by a `/goal` whose updates are held while the goal
+/// activates (`runGoalCommand`, `activateGoal`), with its goal answered active.
+fn activating_goal_turn(mapper: &mut Mapper<FixedEnv>) {
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let ts: Value = serde_json::from_str(&read(format!("{dir}/testdata/ts/simple.json"))).unwrap();
+    let input = turn_input(&ts["startTurn"][0]);
+    let _ =
+        mapper.remember_root_thread("th", conn_contract::to_json(&input.provider_thread), false);
+    mapper.hold_goal_updates("th");
+    mapper.begin_goal_activation("th");
+    mapper.begin_turn("th", &input);
+    let _ = mapper.turn_start_result("th", &json!({"turn": {"id": "g1", "startedAt": null}}));
+    let version = mapper.goal_version();
+    assert!(mapper.store_goal_answer("th", &codex_goal("active"), version));
+}
+
+fn event_types(outs: &[Out]) -> Vec<String> {
+    outs.iter()
+        .filter_map(|o| match o {
+            Out::Event(e) => Some(serde_json::to_value(e).unwrap()["type"].clone()),
+            _ => None,
+        })
+        .filter_map(|t| t.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `emitGoalUpdate` before `settleGoalHold`: a goal that completes while its updates are held
+/// (the `/goal` is still activating) settles the held run only after its row shows.
+#[test]
+fn a_held_goal_row_shows_before_the_run_settles() {
+    let mut mapper = Mapper::new(FixedEnv::default());
+    activating_goal_turn(&mut mapper);
+    let mut outs = feed(
+        &mut mapper,
+        &[
+            json!({"method": "turn/completed", "params": {"threadId": "th",
+                "turn": {"id": "g1", "status": "completed", "completedAt": 3}}}),
+            json!({"method": "thread/goal/updated", "params": {"threadId": "th",
+                "turnId": "g1", "goal": codex_goal("complete")}}),
+        ],
+    );
+    outs.extend(mapper.release_goal_updates("th"));
+    outs.extend(mapper.end_goal_activation("th"));
+    let types = event_types(&outs);
+    let row = types.iter().position(|t| t == "provider_thread.updated");
+    let terminal = types.iter().position(|t| t == "turn.terminal");
+    assert!(
+        row.is_some() && terminal.is_some() && row < terminal,
+        "{types:?}"
+    );
+}
+
+/// `goalsByNativeThread` is per native thread: a goal notification on another thread (a
+/// subagent's) does not make an answer for this thread stale.
+#[test]
+fn a_goal_answer_is_stale_only_after_its_own_threads_notification() {
+    let mut mapper = Mapper::new(FixedEnv::default());
+    let version = mapper.goal_version();
+    let _ = feed(
+        &mut mapper,
+        &[
+            json!({"method": "thread/goal/updated", "params": {"threadId": "child",
+                "turnId": null, "goal": codex_goal("active")}}),
+        ],
+    );
+    assert!(mapper.store_goal_answer("th", &codex_goal("active"), version));
+    assert_eq!(mapper.goal_status("th").as_deref(), Some("active"));
+    let version = mapper.goal_version();
+    let _ = feed(
+        &mut mapper,
+        &[
+            json!({"method": "thread/goal/updated", "params": {"threadId": "th",
+                "turnId": null, "goal": codex_goal("complete")}}),
+        ],
+    );
+    assert!(!mapper.store_goal_answer("th", &codex_goal("paused"), version));
+    assert_eq!(mapper.goal_status("th").as_deref(), Some("complete"));
+}

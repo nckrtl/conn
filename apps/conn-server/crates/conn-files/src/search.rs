@@ -22,7 +22,7 @@ use nucleo_matcher::{
 };
 
 use crate::{
-    entries::{WalkEnd, walk_files},
+    entries::{FileLinks, WalkEnd, walk_files},
     mime,
     paths::InternalPaths,
 };
@@ -34,8 +34,9 @@ const MAX_LINE_CHARS: usize = 512;
 /// The TypeScript server spends 250 ms in a warm index. A cold walk needs longer for the same
 /// answer, so the budget is larger; the result says `truncated` when it runs out.
 const CONTENT_TIME_BUDGET: Duration = Duration::from_millis(1500);
-/// Larger files are skipped by content search.
-const CONTENT_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// The longest line content search holds; a file with a longer one is searched up to it and
+/// the result says `truncated`. Files of any size stream through a buffer this size at most.
+const CONTENT_MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// `normalizeSearchQuery(query, { trimLeadingPattern: /^[@./]+/ })`, then fff's quirk: `[`
 /// starts a glob it cannot escape, so it is dropped.
@@ -158,7 +159,7 @@ pub fn search_entries(
             matched: 0,
         };
         let mut seen_dirs: HashSet<String> = HashSet::new();
-        let end = walk_files(root, internal, None, &mut |path| {
+        let end = walk_files(root, internal, FileLinks::Listed, None, &mut |path| {
             if want_dirs {
                 let mut rest = path;
                 while let Some(i) = rest.rfind('/') {
@@ -274,48 +275,71 @@ pub fn search_contents(
     let mut searcher = grep_searcher::SearcherBuilder::new()
         .binary_detection(grep_searcher::BinaryDetection::quit(0))
         .line_number(true)
-        .heap_limit(Some(CONTENT_MAX_FILE_BYTES as usize))
+        .heap_limit(Some(CONTENT_MAX_LINE_BYTES))
         .build();
-    let end = walk_files(root, internal, Some(deadline), &mut |path| {
-        let full = root.join(path);
-        if !std::fs::metadata(&full).is_ok_and(|m| m.is_file() && m.len() <= CONTENT_MAX_FILE_BYTES)
-        {
-            return true;
-        }
-        let mut in_file = 0;
-        let sink = grep_searcher::sinks::Lossy(|line_number, line: &str| {
-            let line = line.trim_end_matches(['\n', '\r']);
-            let shown_end = line
-                .char_indices()
-                .nth(MAX_LINE_CHARS)
-                .map_or(line.len(), |(i, _)| i);
-            let ranges: Vec<ProjectContentMatchRange> = find_all(&matcher, line)
-                .into_iter()
-                .filter(|&(start, end)| {
-                    end <= shown_end && line.is_char_boundary(start) && line.is_char_boundary(end)
-                })
-                .filter(|&(start, end)| !input.whole_word || whole_word(line, start, end))
-                .map(|(start, end)| ProjectContentMatchRange {
-                    start: utf16_index(line, start),
-                    end: utf16_index(line, end),
-                })
-                .collect();
-            if input.whole_word && ranges.is_empty() {
-                return Ok(true);
-            }
-            matches.push(ProjectContentMatch {
-                path: path.to_owned(),
-                line_number: line_number as i64,
-                line_content: line[..shown_end].to_owned(),
-                match_ranges: ranges,
+    // A file left part-read by the line limit or the time budget.
+    let mut cut = false;
+    let end = walk_files(
+        root,
+        internal,
+        FileLinks::Skipped,
+        Some(deadline),
+        &mut |path| {
+            let full = root.join(path);
+            let mut in_file = 0;
+            let mut late = false;
+            let sink = grep_searcher::sinks::Lossy(|line_number, line: &str| {
+                if Instant::now() >= deadline {
+                    late = true;
+                    return Ok(false);
+                }
+                let line = line.trim_end_matches(['\n', '\r']);
+                let shown_end = line
+                    .char_indices()
+                    .nth(MAX_LINE_CHARS)
+                    .map_or(line.len(), |(i, _)| i);
+                let ranges: Vec<ProjectContentMatchRange> = find_all(&matcher, line)
+                    .into_iter()
+                    .filter(|&(start, end)| {
+                        end <= shown_end
+                            && line.is_char_boundary(start)
+                            && line.is_char_boundary(end)
+                    })
+                    .filter(|&(start, end)| !input.whole_word || whole_word(line, start, end))
+                    .map(|(start, end)| ProjectContentMatchRange {
+                        start: utf16_index(line, start),
+                        end: utf16_index(line, end),
+                    })
+                    .collect();
+                if input.whole_word && ranges.is_empty() {
+                    return Ok(true);
+                }
+                matches.push(ProjectContentMatch {
+                    path: path.to_owned(),
+                    line_number: line_number as i64,
+                    line_content: line[..shown_end].to_owned(),
+                    match_ranges: ranges,
+                });
+                in_file += 1;
+                Ok(matches.len() <= limit && in_file < MAX_MATCHES_PER_FILE)
             });
-            in_file += 1;
-            Ok(matches.len() <= limit && in_file < MAX_MATCHES_PER_FILE)
-        });
-        let _ = searcher.search_path(&matcher, &full, sink);
-        matches.len() <= limit && Instant::now() < deadline
-    });
-    let truncated = matches.len() > limit || end != WalkEnd::Complete;
+            let searched = searcher.search_path(&matcher, &full, sink);
+            // A file that vanished or cannot be read is not part of the answer; a line over the
+            // limit is, and is left unread.
+            if late
+                || searched.is_err_and(|e| {
+                    !matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                    )
+                })
+            {
+                cut = true;
+            }
+            matches.len() <= limit && Instant::now() < deadline
+        },
+    );
+    let truncated = cut || matches.len() > limit || end != WalkEnd::Complete;
     matches.truncate(limit);
     ProjectSearchContentsResult {
         matches,

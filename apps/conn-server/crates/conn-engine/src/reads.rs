@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::params;
 use serde_json::{Value, json};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::store::{Store, StoreResult};
 use crate::time::millis_from_iso;
@@ -25,6 +26,8 @@ const SEARCH_CANDIDATE_LIMIT: i64 = 10_000;
 const SEARCH_HIT_LIMIT: i64 = 2_000;
 /// `MESSAGE_TOKEN_MIN_LENGTH` in `paletteSearch.ts`: a shorter Latin word is noise.
 const MESSAGE_TOKEN_MIN_LENGTH: usize = 3;
+/// `MESSAGE_WORD_START_LENGTH`: a shorter word must start a word, so "fts" does not find "drafts".
+const MESSAGE_WORD_START_LENGTH: usize = 4;
 
 /// The filters every search shares, after `hits(rowid)` names the candidate messages, newest
 /// first. `CROSS JOIN` keeps the hits first, so the planner never scans `entities` or
@@ -81,18 +84,19 @@ struct MessageSearch {
     substrings: Vec<String>,
     /// The word the snippet centres on.
     needle: String,
+    /// Words too short to count inside a word (`MESSAGE_WORD_START_LENGTH`): each must start a
+    /// word in the message.
+    must_start_word: Vec<String>,
 }
 
 impl MessageSearch {
     /// `None` when the query has no word long enough to search (`messageSearchTokens`).
     fn new(query: &str) -> Option<Self> {
-        let quotes: &[char] = &[
-            '"', '\'', '`', '\u{201c}', '\u{201d}', '\u{2018}', '\u{2019}',
-        ];
-        let query = query
+        let query: String = query
             .trim()
-            .trim_matches(quotes)
-            .replace(['\u{2018}', '\u{2019}'], "'");
+            .trim_matches(crate::fold::WRAPPING_QUOTES)
+            .nfc()
+            .collect();
         let query = crate::fold::fold(&query);
         let (long, short): (Vec<&str>, Vec<&str>) = query
             .split_whitespace()
@@ -113,10 +117,17 @@ impl MessageSearch {
             long.iter().map(|t| (*t).to_owned()).collect()
         };
         substrings.extend(short.iter().map(|t| (*t).to_owned()));
+        let must_start_word = long
+            .iter()
+            .chain(&short)
+            .filter(|token| token.chars().count() < MESSAGE_WORD_START_LENGTH)
+            .map(|token| (*token).to_owned())
+            .collect();
         Some(Self {
             fts_match,
             substrings,
             needle,
+            must_start_word,
         })
     }
 }
@@ -435,11 +446,20 @@ impl Store {
             }
             let message = &hit["message"];
             let text = message["text"].as_str().unwrap_or_default();
+            let folded = crate::fold::Folded::new(text, crate::fold::push_indexed);
+            // `messageMatcher` drops a message where a short word only sits inside words.
+            if !search
+                .must_start_word
+                .iter()
+                .all(|token| folded.has_at_word_start(token))
+            {
+                continue;
+            }
             matches.push(json!({
                 "threadId": thread_id,
                 "projectId": hit["projectId"],
                 "source": if message["role"] == "user" { "user" } else { "assistant" },
-                "snippet": snippet(text, &search.needle),
+                "snippet": snippet(text, &folded, &search.needle),
                 "messageCreatedAt": message["createdAt"],
                 "messageId": message["id"],
             }));
@@ -555,21 +575,10 @@ fn count_occurrences(text: &str, needle: &str) -> u64 {
 }
 
 /// Up to 240 characters of the original text around the first match of a folded `needle`.
-///
 /// Folding can change a character's length (`ﬁ` stays, a lone mark goes), so the match is found
-/// in a folded copy that records, for each of its bytes, the original character it came from.
-fn snippet(text: &str, needle: &str) -> String {
-    let mut lower = String::with_capacity(text.len());
-    let mut origin: Vec<usize> = Vec::with_capacity(text.len());
-    for (index, c) in text.chars().enumerate() {
-        let before = lower.len();
-        crate::fold::push_folded(c, &mut lower);
-        origin.resize(origin.len() + (lower.len() - before), index);
-    }
-    let at = lower
-        .find(needle)
-        .and_then(|byte| origin.get(byte).copied())
-        .unwrap_or(0);
+/// in `folded`, which maps back to the original characters.
+fn snippet(text: &str, folded: &crate::fold::Folded, needle: &str) -> String {
+    let at = folded.find(needle).unwrap_or(0);
     let start = at.saturating_sub(SNIPPET_CHARS / 3);
     text.chars()
         .skip(start)
@@ -584,12 +593,20 @@ fn snippet(text: &str, needle: &str) -> String {
 mod tests {
     use super::*;
 
+    fn snip(text: &str, needle: &str) -> String {
+        snippet(
+            text,
+            &crate::fold::Folded::new(text, crate::fold::push_indexed),
+            needle,
+        )
+    }
+
     /// `İ` (U+0130) lowercases to two characters, so a lowercase index is not an index into
     /// the original text. Before the fix this panicked (`range start index 320 out of range`).
     #[test]
     fn snippet_survives_lowercase_expansion() {
         let text = format!("{}abc tail", "İ".repeat(200));
-        let got = snippet(&text, "abc");
+        let got = snip(&text, "abc");
         assert!(got.contains("abc tail"), "{got}");
         assert!(got.starts_with('İ'), "{got}");
         // The match sits 80 characters into the snippet, as for plain text.
@@ -677,8 +694,8 @@ mod tests {
     fn snippet_handles_every_expanding_position() {
         for before in 0..300 {
             let text = format!("{}needle{}", "İ".repeat(before), "İ".repeat(before));
-            assert!(snippet(&text, "needle").contains("needle"));
-            assert!(snippet(&text, "absent").chars().count() <= SNIPPET_CHARS);
+            assert!(snip(&text, "needle").contains("needle"));
+            assert!(snip(&text, "absent").chars().count() <= SNIPPET_CHARS);
             assert_eq!(count_occurrences(&text, "needle"), 1);
         }
     }

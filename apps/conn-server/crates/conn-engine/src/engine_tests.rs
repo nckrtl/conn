@@ -3709,6 +3709,86 @@ async fn search_folds_case_and_accents_before_and_after_the_upgrade() {
     engine.shutdown().await;
 }
 
+/// The index folds as T3's `trigram remove_diacritics 1` and the query is NFC, as
+/// `messageSearchTokens`: Latin accents fold, other scripts' marks and other letters stay apart.
+/// A store folded by the first, wider fold (mark 1) is folded again once, from the messages.
+#[tokio::test(flavor = "current_thread")]
+async fn search_folds_latin_accents_only_and_normalizes_the_query() {
+    let db = TempDb::new("search-scripts");
+    let (engine, _) = open(&db);
+    for (thread, text) in [
+        ("kana", "かがく の じっけん"),
+        ("hangul", "한글 문서 작성"),
+        ("french", "Le garçon était déjà prêt"),
+        ("letters", "Straße ørsted ﬁle"),
+    ] {
+        dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
+        dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
+        run_to_end(&engine, thread, &format!("run:{thread}:1")).await;
+    }
+    let none = Vec::<String>::new();
+    assert_eq!(search(&engine, "かがく").await, ["kana"]);
+    assert_eq!(
+        search(&engine, "かかく").await,
+        none,
+        "dakuten tells か from が"
+    );
+    // "한글" typed as decomposed jamo finds the composed syllables.
+    let decomposed = "\u{1112}\u{1161}\u{11ab}\u{1100}\u{1173}\u{11af}";
+    assert_eq!(search(&engine, decomposed).await, ["hangul"]);
+    assert_eq!(search(&engine, "한글").await, ["hangul"]);
+    assert_eq!(search(&engine, "garcon etait deja pret").await, ["french"]);
+    assert_eq!(search(&engine, "GARÇON déjà").await, ["french"]);
+    for query in ["straße", "ørsted", "ﬁle"] {
+        assert_eq!(search(&engine, query).await, ["letters"], "{query}");
+    }
+    for query in ["strasse", "orsted", "file"] {
+        assert_eq!(search(&engine, query).await, none, "{query}");
+    }
+    engine.shutdown().await;
+    drop(engine);
+
+    // The first fold took dakuten off ("かかく の しっけん") and marked the store 1.
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "UPDATE message_search SET text = 'かかく の しっけん' WHERE text LIKE 'かがく%';
+         UPDATE meta SET value = 1 WHERE key = 'message_search_folded';",
+    )
+    .unwrap();
+    drop(conn);
+    let (engine, _) = open(&db);
+    assert_eq!(search(&engine, "かかく").await, none);
+    assert_eq!(search(&engine, "かがく").await, ["kana"]);
+    assert_eq!(search(&engine, "じっけん").await, ["kana"]);
+    engine.shutdown().await;
+}
+
+/// `messageMatcher` in `paletteSearch.ts`: a word shorter than four characters must start a
+/// word in the message, so "me" does not find "fermé" and "fts" does not find "drafts".
+#[tokio::test(flavor = "current_thread")]
+async fn search_short_words_must_start_a_word() {
+    let db = TempDb::new("search-word-starts");
+    let (engine, _) = open(&db);
+    for (thread, text) in [("closed", "marker fermé"), ("drafts", "marker drafts")] {
+        dispatch(&engine, create(thread, &format!("{thread}:c1"))).await;
+        dispatch(&engine, message(thread, &format!("{thread}:c2"), text)).await;
+        run_to_end(&engine, thread, &format!("run:{thread}:1")).await;
+    }
+    let none = Vec::<String>::new();
+    assert_eq!(search(&engine, "marker").await.len(), 2);
+    assert_eq!(search(&engine, "marker me").await, none);
+    assert_eq!(search(&engine, "marker ke").await, none);
+    assert_eq!(search(&engine, "marker fe").await, ["closed"]);
+    assert_eq!(search(&engine, "fts").await, none);
+    assert_eq!(search(&engine, "dra").await, ["drafts"]);
+    assert_eq!(
+        search(&engine, "afts").await,
+        ["drafts"],
+        "four letters match inside a word"
+    );
+    engine.shutdown().await;
+}
+
 /// Search follows `ThreadSearch.ts`: every long word must match, `%` and `_` are plain
 /// characters, short words narrow, two CJK characters count as a word, and deleted or
 /// archived threads drop out in SQL.

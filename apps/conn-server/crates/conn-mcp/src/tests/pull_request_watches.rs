@@ -304,14 +304,32 @@ async fn search_finds_a_thread_by_its_linked_pull_request() {
         .ok("list_thread_pull_requests", json!({"threadId": thread}))
         .await;
     assert_eq!(listed["pullRequests"][0]["number"], 7483);
+    dispatch(
+        &f,
+        json!({"type": "thread.pull-request-link.sync", "commandId": "pr-search-sync",
+            "threadId": thread, "host": "github.com", "repository": "example/fixture",
+            "number": 7483, "stack": null,
+            "snapshot": {"state": "open", "title": "Résumé indexing", "headBranch": "resume",
+                "baseBranch": "main", "isDraft": false, "updatedAt": "2026-11-19T08:00:00Z",
+                "syncedAt": "2026-11-19T09:00:00.000Z", "closedAt": null, "mergedAt": null,
+                "checksState": null, "reviewDecision": null}}),
+    )
+    .await;
 
+    // `foldSearchQuery`: quotes around a pasted query go, case and accents fold. A PR title
+    // matches token by token at word starts (`matchToken`).
     for query in [
         "Spring maintenance",
         "#7483",
         "PR 7483",
         "example/fixture#7483",
+        "\"example/fixture#7483\"",
         url,
         "https://github.com/example/fixture/pull/7483/files",
+        "resume",
+        "Résumé",
+        "indexing resume",
+        "\u{201c}résumé index\u{201d}",
     ] {
         assert_eq!(
             search_sources(&mut swamp, &thread, query).await,
@@ -319,7 +337,13 @@ async fn search_finds_a_thread_by_its_linked_pull_request() {
             "{query}"
         );
     }
-    for query in ["#7484", "example/fixture#74830", "fixture/pull/74"] {
+    for query in [
+        "#7484",
+        "example/fixture#74830",
+        "fixture/pull/74",
+        "sume",
+        "resume draft",
+    ] {
         assert_eq!(
             search_sources(&mut swamp, &thread, query).await,
             Vec::<Value>::new(),

@@ -76,6 +76,7 @@ pub use engine::{
     CommandOutputTap, DEFAULT_IDLE_SESSION, EngineConfig, ProjectConfig, RuntimePolicyOverride,
     SqliteEngine,
 };
+pub use fold::{field_holds_words, fold, fold_field, fold_search_query};
 pub use guard::{
     CommitDecision, CommitGate, DispatchGuard, GuardRule, OwnedMessage, is_frozen_message,
 };

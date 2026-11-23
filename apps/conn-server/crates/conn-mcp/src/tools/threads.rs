@@ -273,12 +273,9 @@ fn items_within_budget(
 /// engine's index (one per thread, outside the title hits), with a fifth of the slots kept
 /// for messages. Candidates are the project's active, listed threads.
 pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
-    let query = str_arg(args, "query")
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase();
+    let raw = str_arg(args, "query").unwrap_or_default().trim();
     // `OrchestrationSearchThreadsInput.query`: trimmed, 2 to 200 UTF-16 units.
-    let length = query.encode_utf16().count();
+    let length = raw.encode_utf16().count();
     if length < 2 {
         return Err(ToolError::InvalidParams(
             "Expected a value with a length of at least 2\n  at [\"query\"]".into(),
@@ -289,6 +286,9 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
             "Expected a value with a length of at most {SEARCH_QUERY_MAX_LENGTH}\n  at [\"query\"]"
         )));
     }
+    // Fields and the query fold the same way (`foldSearchQuery`): quotes around a pasted query
+    // go, and case and accents do not count.
+    let query = conn_engine::fold_search_query(raw);
     let limit = u64_arg(args, "limit").map_or(SEARCH_DEFAULT_LIMIT, |l| l as usize);
     let own = cx.caller_projection().await?;
     let project_id = str_arg(args, "projectId").map(str::to_owned).or_else(|| {
@@ -304,7 +304,7 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
         .map(|p| {
             (
                 &p["id"],
-                p["title"].as_str().unwrap_or_default().to_lowercase(),
+                conn_engine::fold_field(p["title"].as_str().unwrap_or_default()),
             )
         })
         .collect();
@@ -332,20 +332,22 @@ pub(super) async fn search(cx: &Cx<'_>, args: &Args) -> ToolResult {
         .iter()
         .copied()
         .filter(|thread| {
-            let lower = |key: &str| thread[key].as_str().unwrap_or_default().to_lowercase();
+            let folded =
+                |key: &str| conn_engine::fold_field(thread[key].as_str().unwrap_or_default());
             let project_hit = live_projects
                 .iter()
                 .any(|(id, title)| *id == &thread["projectId"] && title.contains(&query));
-            lower("title").contains(&query)
-                || lower("branch").contains(&query)
-                || project_hit
-                || pull_request_hit(&query, thread)
+            !query.is_empty()
+                && (folded("title").contains(&query)
+                    || folded("branch").contains(&query)
+                    || project_hit
+                    || pull_request_hit(&query, thread))
         })
         .take(limit)
         .collect();
     let shown: Vec<&Value> = title_hits.iter().map(|t| &t["id"]).collect();
     let mut input = json!({
-        "query": query,
+        "query": raw,
         "limit": SEARCH_MESSAGE_LIMIT,
         "excludedThreadIds": shown,
     });
@@ -421,9 +423,10 @@ fn search_pull_requests(thread: &Value) -> Vec<(&Value, Option<&str>)> {
     found
 }
 
-/// Whether a lowercased query finds the thread through its pull requests, as `scoreThreadSearch`
-/// does: the number (after a `pr`, `pull` or `#` prefix), a searched title, or a whole
-/// `owner/repo#N`, URL or thread id (`matchReference`).
+/// Whether a folded query finds the thread through its pull requests, as `scoreThreadSearch`
+/// does: every word at a word start in one PR's `#N` and searched title (`matchToken`,
+/// `matchHint`), after a `pr`, `pull` or `#` before a number; else a whole `owner/repo#N`, URL or
+/// thread id (`matchReference`).
 fn pull_request_hit(query: &str, thread: &Value) -> bool {
     let pull_requests = search_pull_requests(thread);
     // `threadFieldQuery`: a `pr`, `pull` or `pull request` before a number, then a `#`.
@@ -440,13 +443,14 @@ fn pull_request_hit(query: &str, thread: &Value) -> bool {
         .strip_prefix('#')
         .unwrap_or(field_query)
         .trim_start();
-    let field_hit = !field_query.is_empty()
-        && pull_requests.iter().any(|(link, title)| {
-            link["number"]
-                .as_u64()
-                .is_some_and(|n| n.to_string().starts_with(field_query))
-                || title.is_some_and(|t| t.to_lowercase().contains(field_query))
-        });
+    let field_hit = pull_requests.iter().any(|(link, title)| {
+        let number = link["number"].as_u64().unwrap_or_default();
+        let field = match title {
+            Some(title) => format!("#{number} {title}"),
+            None => format!("#{number}"),
+        };
+        conn_engine::field_holds_words(&field, field_query)
+    });
     field_hit || reference_hit(query, thread, &pull_requests)
 }
 

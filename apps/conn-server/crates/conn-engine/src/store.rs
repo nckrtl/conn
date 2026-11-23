@@ -1929,25 +1929,10 @@ fn migrate(conn: &Connection) -> StoreResult<()> {
         .map_err(err)?;
     }
     // The index holds folded text, so a search without accents finds an accented message
-    // written before the upgrade (T3 indexes with `remove_diacritics`). A `meta` mark, not a
-    // schema version, so this step composes with versioned steps in any order.
-    let folded: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = 'message_search_folded')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(err)?;
-    if !folded {
-        let tx = conn.unchecked_transaction().map_err(err)?;
-        fold_message_search(&tx)?;
-        tx.execute(
-            "INSERT INTO meta (key, value) VALUES ('message_search_folded', 1)",
-            [],
-        )
-        .map_err(err)?;
-        tx.commit().map_err(err)?;
-    }
+    // written before the upgrade (T3 indexes with `remove_diacritics`).
+    refold_message_search_once(conn, &mut |event| {
+        eprintln!("conn-engine: {}", event.line())
+    })?;
     Ok(())
 }
 
@@ -1980,30 +1965,125 @@ fn index_message(
     Ok(())
 }
 
-/// Folds every `message_search` text that is not folded yet, a batch of rows at a time, so a
-/// large store never holds all its texts in memory. Folding is idempotent.
-pub(crate) fn fold_message_search(conn: &Connection) -> StoreResult<()> {
+/// The fold the search index holds, in the `meta` row `message_search_folded`: 1 was the first
+/// fold, which also took marks off other scripts' letters; 2 folds as T3's index (`fold.rs`).
+/// A `meta` mark, not a schema version, so this step composes with versioned steps in any order.
+const MESSAGE_SEARCH_FOLD: i64 = 2;
+/// Messages between two progress lines of a refold.
+const REFOLD_REPORT_EVERY: u64 = 10_000;
+
+/// What a refold of the search index reports. Its lines carry T3's migration messages, which the
+/// desktop reads in the server's output: while a refold runs, it waits past its readiness limit
+/// instead of reporting a failed start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refold {
+    Started { messages: u64 },
+    Progress { done: u64, messages: u64 },
+    Finished,
+}
+
+impl Refold {
+    pub(crate) fn line(self) -> String {
+        use conn_contract::{
+            DATABASE_MIGRATION_PROGRESS_MESSAGE, DATABASE_MIGRATIONS_FINISHED_MESSAGE,
+            DATABASE_MIGRATIONS_STARTED_MESSAGE,
+        };
+        match self {
+            Self::Started { messages } => format!(
+                "{DATABASE_MIGRATIONS_STARTED_MESSAGE} to fold the message search index \
+                 ({messages} messages, once)"
+            ),
+            Self::Progress { done, messages } => format!(
+                "{DATABASE_MIGRATION_PROGRESS_MESSAGE}: message search index, {done} of \
+                 {messages} messages"
+            ),
+            Self::Finished => {
+                format!("{DATABASE_MIGRATIONS_FINISHED_MESSAGE} (message search index folded)")
+            }
+        }
+    }
+}
+
+/// Folds the search index again from the messages when it holds an older fold, in one
+/// transaction, and marks it done. Reports only when there is a message to fold.
+pub(crate) fn refold_message_search_once(
+    conn: &Connection,
+    report: &mut dyn FnMut(Refold),
+) -> StoreResult<()> {
+    let folded: i64 = conn
+        .query_row(
+            "SELECT COALESCE((SELECT value FROM meta WHERE key = 'message_search_folded'), 0)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(err)?;
+    if folded >= MESSAGE_SEARCH_FOLD {
+        return Ok(());
+    }
+    let messages: i64 = conn
+        .query_row("SELECT COUNT(*) FROM message_keys", [], |row| row.get(0))
+        .map_err(err)?;
+    let messages = u64::try_from(messages).unwrap_or(0);
+    if messages > 0 {
+        report(Refold::Started { messages });
+    }
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    let mut reported = 0;
+    refold_message_search(&tx, &mut |done| {
+        if done / REFOLD_REPORT_EVERY > reported / REFOLD_REPORT_EVERY {
+            reported = done;
+            report(Refold::Progress { done, messages });
+        }
+    })?;
+    tx.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('message_search_folded', ?1)",
+        [MESSAGE_SEARCH_FOLD],
+    )
+    .map_err(err)?;
+    tx.commit().map_err(err)?;
+    if messages > 0 {
+        report(Refold::Finished);
+    }
+    Ok(())
+}
+
+/// Folds every `message_search` text again from its message's text, so an older fold that lost
+/// marks is rebuilt, a batch of rows at a time, so a large store never holds all its texts in
+/// memory. `progress` hears the messages read so far after each batch. A row whose message is
+/// gone keeps its text.
+pub(crate) fn refold_message_search(
+    conn: &Connection,
+    progress: &mut dyn FnMut(u64),
+) -> StoreResult<()> {
     const BATCH: i64 = 500;
     let mut after = i64::MIN;
+    let mut done = 0;
     loop {
-        let rows: Vec<(i64, String)> = {
+        let rows: Vec<(i64, String, String)> = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT rowid, text FROM message_search WHERE rowid > ?1
-                     ORDER BY rowid LIMIT ?2",
+                    "SELECT k.id, s.text, COALESCE(json_extract(e.body, '$.text'), '')
+                     FROM message_keys k
+                     CROSS JOIN message_search s ON s.rowid = k.id
+                     CROSS JOIN entities e ON e.thread_id = k.thread_id
+                       AND e.kind = 'messages' AND e.id = k.message_id
+                     WHERE k.id > ?1 ORDER BY k.id LIMIT ?2",
                 )
                 .map_err(err)?;
-            stmt.query_map(params![after, BATCH], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(err)?
-                .collect::<rusqlite::Result<_>>()
-                .map_err(err)?
+            stmt.query_map(params![after, BATCH], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(err)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(err)?
         };
-        let Some(&(last, _)) = rows.last() else {
+        let Some(&(last, ..)) = rows.last() else {
             return Ok(());
         };
-        for (rowid, text) in rows {
+        done += rows.len() as u64;
+        for (rowid, stored, text) in rows {
             let folded = crate::fold::fold(&text);
-            if folded != text {
+            if folded != stored {
                 conn.execute(
                     "UPDATE message_search SET text = ?2 WHERE rowid = ?1",
                     params![rowid, folded],
@@ -2011,6 +2091,7 @@ pub(crate) fn fold_message_search(conn: &Connection) -> StoreResult<()> {
                 .map_err(err)?;
             }
         }
+        progress(done);
         after = last;
     }
 }
@@ -2458,6 +2539,73 @@ mod tests {
         let solo = threads.iter().find(|t| t["id"] == "solo").unwrap();
         assert_eq!(parent["subagentCount"], json!(2));
         assert!(solo.get("subagentCount").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refold of a large index runs inside the engine's open, before the server listens, so
+    /// it tells the desktop with T3's migration lines (`databaseMigrationLog.ts`): started, a
+    /// progress line every 10,000 messages, finished. It folds from the message text and runs
+    /// once.
+    #[test]
+    fn a_refold_reports_its_start_progress_and_end_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "conn-engine-{}-refold-progress",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10001)
+                 INSERT INTO entities (thread_id, kind, id, first_seq, seq, ordinal, body)
+                   SELECT 't1', 'messages', 'm' || i, i, i, NULL,
+                          json_object('id', 'm' || i, 'text', 'École ' || i) FROM n;
+                 INSERT INTO message_keys (thread_id, message_id)
+                   SELECT thread_id, id FROM entities WHERE kind = 'messages';
+                 INSERT INTO message_search (rowid, text) SELECT id, 'ecole' FROM message_keys;
+                 UPDATE meta SET value = 1 WHERE key = 'message_search_folded';",
+            )
+            .unwrap();
+        let mut events = vec![];
+        refold_message_search_once(&store.conn, &mut |event| events.push(event)).unwrap();
+        assert_eq!(
+            events,
+            [
+                Refold::Started { messages: 10_001 },
+                Refold::Progress {
+                    done: 10_000,
+                    messages: 10_001
+                },
+                Refold::Finished,
+            ]
+        );
+        let text: String = store
+            .conn
+            .query_row(
+                "SELECT text FROM message_search
+                 WHERE rowid = (SELECT id FROM message_keys WHERE message_id = 'm10001')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "ecole 10001", "folded again from the message");
+        let lines: Vec<String> = events.iter().map(|event| event.line()).collect();
+        assert!(
+            lines[0].starts_with("Running database migrations"),
+            "{lines:?}"
+        );
+        assert!(lines[1].starts_with("Upgrading database"), "{lines:?}");
+        assert!(
+            lines[2].starts_with("Migrations ran successfully"),
+            "{lines:?}"
+        );
+
+        events.clear();
+        refold_message_search_once(&store.conn, &mut |event| events.push(event)).unwrap();
+        assert_eq!(events, [], "the mark holds");
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

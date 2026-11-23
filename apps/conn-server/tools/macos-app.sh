@@ -87,6 +87,28 @@ EOF
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 [[ -n "$commit" ]] || plutil -remove ConnServerCommit "$app/Contents/Info.plist"
 
+# The regex above is only a first filter: Core Foundation decides. CFBundleGetVersionNumber
+# returns 0 for a CFBundleVersion it cannot pack (e.g. 123456789.1.1 or 1.100.1).
+packed="$(/usr/bin/python3 -I - "$app" <<'PY'
+import ctypes, sys
+cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+cf.CFURLCreateFromFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+cf.CFBundleCreate.restype = ctypes.c_void_p
+cf.CFBundleCreate.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+cf.CFBundleGetVersionNumber.restype = ctypes.c_uint32
+cf.CFBundleGetVersionNumber.argtypes = [ctypes.c_void_p]
+path = sys.argv[1].encode()
+url = cf.CFURLCreateFromFileSystemRepresentation(None, path, len(path), True)
+bundle = cf.CFBundleCreate(None, url) if url else None
+if not bundle:
+    sys.exit("CFBundleCreate failed")
+print(cf.CFBundleGetVersionNumber(bundle))
+PY
+)" || fail "could not read the bundle version with Core Foundation"
+[[ "$packed" =~ ^[0-9]+$ && "$packed" != 0 ]] \
+  || fail "Core Foundation cannot parse CFBundleVersion $build (CFBundleGetVersionNumber returned ${packed:-nothing})"
+
 # Signing the bundle signs its main executable with the bundle id and seals Resources.
 codesign --force --sign "$IDENTITY" --options runtime --timestamp "$app"
 codesign --verify --deep --strict "$app"

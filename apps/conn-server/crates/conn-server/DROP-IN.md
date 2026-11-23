@@ -159,10 +159,11 @@ persistence as a goal.
 
 **Install.** Keep the bundle at one path (`~/Applications/Conn Server.app`) and replace it in
 place on updates. The launchd job runs `Contents/MacOS/conn-server` and sets
-`AssociatedBundleIdentifiers` to `com.nckrtl.conn-server`, so Login Items attributes the job to
-the bundle. The server finds the SDK host in `Contents/Resources` only inside a `.app`, after
-the folder beside the binary. `CFBundleVersion` is a numeric build number; the git commit goes in
-`ConnServerCommit`. The bundle is not notarized, so `spctl` rejects it ("Unnotarized Developer
+`AssociatedBundleIdentifiers` to `com.nckrtl.conn-server`, which Apple documents for Login Items
+attribution; whether it changes TCC attribution is part of the test above. On macOS only, the
+server finds the SDK host in `Contents/Resources` inside a `.app`, after the folder beside the
+binary. `CFBundleVersion` must be a build number that `CFBundleGetVersionNumber` can parse; the
+packager checks that before signing. The git commit goes in `ConnServerCommit`. The bundle is not notarized, so `spctl` rejects it ("Unnotarized Developer
 ID"); that does not matter for a launchd job, because Gatekeeper checks only quarantined files.
 
 ## 2. Conn desktop's local backend

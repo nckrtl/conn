@@ -358,6 +358,8 @@ struct MessageDispatch {
     scheduled_task_id: Option<String>,
     /// Start a new provider conversation without the thread's earlier context. Never steers.
     fresh_context: Option<bool>,
+    /// The server's own `/compact` before a prompt cache expires (`IdleCompactionService`).
+    idle_compaction: Option<String>,
 }
 
 /// How a message reaches the thread, after the busy-thread rules.
@@ -453,6 +455,16 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             "Conn Server does not support dispatch mode `{}` yet.",
             c.dispatch_mode.kind
         ));
+    }
+    // The service checked idleness before this command; a run that landed since makes the
+    // thread busy, and that turn refreshes the cache anyway (`Orchestrator.ts:7027`).
+    if c.idle_compaction.as_deref() == Some("beforeCacheExpires")
+        && tx
+            .entities(&c.thread_id, "runs")?
+            .iter()
+            .any(|run| run["status"] == "queued" || is_active(run))
+    {
+        return Ok(vec![]);
     }
     let (delivery, interrupt) = delivery(tx, &c)?;
     if let Delivery::Steer(target) = delivery {
@@ -617,6 +629,9 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
     }
     if let Some(sender) = &c.sender_thread_id {
         message["senderThreadId"] = json!(sender);
+    }
+    if let Some(mode) = &c.idle_compaction {
+        message["idleCompaction"] = json!(mode);
     }
     if let Some(merge_back) = &merge_back {
         tx.append(draft("turn-item.updated", merge_back.turn_item.clone()))?;
@@ -1189,6 +1204,7 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
             .cloned(),
         scheduled_task_id: message["scheduledTaskId"].as_str().map(str::to_owned),
         fresh_context: None,
+        idle_compaction: None,
     };
     let mut effects = steer_into(tx, &dispatch, &target)?;
     // The item records that it came from the queue.
@@ -2258,6 +2274,30 @@ fn thread_settle(tx: &mut Tx<'_>, command: Value) -> Outcome {
         let thread = live_thread(tx, &thread_id)?;
         if !is_null(&thread, "autoSettleDisabledAt") || !is_null(&thread, "pinnedAt") {
             return Ok(vec![]);
+        }
+        // `Orchestrator.ts:15119`: changes and explicit overrides since the sweep read the
+        // thread win over its snapshot. The thread's `updatedAt` is its activity time.
+        let activity_at: String = tx
+            .conn()
+            .query_row(
+                "SELECT activity_at FROM threads WHERE id = ?1",
+                [&thread_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("store: {e}"))?;
+        let changed = match (
+            conn_support::time::millis_from_iso(&activity_at),
+            command["snapshotAt"]
+                .as_str()
+                .and_then(conn_support::time::millis_from_iso),
+        ) {
+            (Some(updated), Some(snapshot)) => updated > snapshot,
+            _ => true,
+        };
+        if !is_null(&thread, "settledOverride") || changed {
+            return reject(format!(
+                "Thread {thread_id} changed before automatic settlement."
+            ));
         }
     }
     if active_run(tx, &thread_id)?.is_some() {

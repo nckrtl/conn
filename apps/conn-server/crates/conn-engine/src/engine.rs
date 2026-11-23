@@ -464,6 +464,24 @@ impl SqliteEngine {
     }
 
     /// The project id the engine gives a configured folder.
+    /// The threads automatic settlement may consider now, as shell rows with the fields its
+    /// decision reads (`getSettlementCandidates`); with `thread_id`, at most that thread.
+    pub async fn settlement_candidates(
+        &self,
+        thread_id: Option<String>,
+    ) -> Result<Vec<Value>, String> {
+        self.inner
+            .db(move |store| store.settlement_candidates(thread_id.as_deref()))
+            .await
+    }
+
+    /// A live thread's shell row, as the shell stream last sent it.
+    pub async fn thread_shell(&self, thread_id: String) -> Result<Option<Value>, String> {
+        self.inner
+            .db(move |store| store.stored_shell(&thread_id))
+            .await
+    }
+
     pub fn project_id_for(workspace_root: &str) -> String {
         project_id(workspace_root)
     }

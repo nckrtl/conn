@@ -441,6 +441,25 @@ impl Store {
         }))
     }
 
+    /// The stored shell row of a live thread.
+    pub(crate) fn stored_shell(&self, thread_id: &str) -> StoreResult<Option<Value>> {
+        self.conn
+            .query_row(
+                "SELECT shell FROM threads WHERE id = ?1 AND deleted = 0 AND shell IS NOT NULL",
+                [thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(err)?
+            .map(parse)
+            .transpose()
+    }
+
+    /// See [`crate::settlement`].
+    pub(crate) fn settlement_candidates(&self, thread_id: Option<&str>) -> StoreResult<Vec<Value>> {
+        crate::settlement::candidates(&self.conn, thread_id)
+    }
+
     pub(crate) fn projects_snapshot(&self) -> StoreResult<Vec<Value>> {
         let mut stmt = self
             .conn

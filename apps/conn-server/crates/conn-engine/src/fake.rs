@@ -16,6 +16,8 @@
 //!   the same roster, and the turn waits for an interrupt.
 //! - `background-reported`: like `background-hold`, but the work shows only as
 //!   `background_work.updated` (pending), and a running background command row.
+//! - `large-context:<iso>`: answers from a 250,000-token context whose prompt cache expires at
+//!   `<iso>` (the provider turn's `tokenUsage`).
 //! - anything else: streams `echo: <text>` in three chunks and completes.
 //!
 //! A steer into a running turn reports `steer.updated` pending then completed, answers
@@ -810,6 +812,23 @@ impl Session for FakeSession {
                     TurnStatus::Failed,
                     Some(json!({"class": "provider_error", "message": "The fake provider failed.", "code": null, "retryable": false})),
                 )),
+                // `large-context:<iso>`: an answer from a large Claude context whose prompt cache
+                // expires at `<iso>`, as Claude's usage reports it (`promptCacheExpiresAt`).
+                t if t.starts_with("large-context:") => {
+                    let expires = t.trim_start_matches("large-context:");
+                    started.extend(assistant(&turn, &format!("{}:a", turn.run_id), "a large answer", false));
+                    let now = now_iso();
+                    started.push(event(json!({"type": "provider_turn.updated", "threadId": turn.thread_id,
+                        "providerTurn": {
+                            "id": format!("turn:{}", turn.run_id), "providerThreadId": turn.provider_thread_id,
+                            "nodeId": turn.root, "runAttemptId": format!("{}:attempt:1", turn.run_id),
+                            "nativeTurnRef": null, "ordinal": turn.ordinal, "status": "completed",
+                            "startedAt": now, "completedAt": now,
+                            "tokenUsage": {"usedTokens": 250_000, "promptCacheExpiresAt": expires,
+                                           "updatedAt": now},
+                        }})));
+                    started.push(terminal(&turn, TurnStatus::Completed, None));
+                }
                 _ => {
                     let reply = format!("echo: {text}");
                     let cut = |n: usize| reply.chars().take(n).collect::<String>();

@@ -273,6 +273,8 @@ pub async fn serve_with_instances(
         environment: environment.clone(),
         scheduled_tasks: OnceLock::new(),
         devices: OnceLock::new(),
+        settlement_wake: Arc::default(),
+        idle_compaction: OnceLock::new(),
     });
 
     // A state folder the T3 server used: its threads and projects, once (`t3_import.rs`).
@@ -378,6 +380,20 @@ pub async fn serve_with_instances(
         })
         .await;
     let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
+    // An inert rehearsal copy settles and compacts nothing: its threads belong to the original.
+    if !inert {
+        let _ = host
+            .idle_compaction
+            .set(crate::idle_compaction::IdleCompaction::new(
+                sqlite_engine.clone(),
+                environment.clone(),
+            ));
+        crate::settlement::start(
+            sqlite_engine.clone(),
+            environment.clone(),
+            host.settlement_wake.clone(),
+        );
+    }
     let preview = conn_preview::tabs::Preview::new(state_dir.clone());
     let mut deps = Deps {
         preview: Some(preview.clone()),

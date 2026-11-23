@@ -34,6 +34,10 @@ pub struct Host {
     pub scheduled_tasks: OnceLock<conn_features::scheduled::ScheduledTasks>,
     /// Device sessions a closed thread held (`ResourceCleanupService.cleanupDevices`).
     pub devices: OnceLock<conn_devices::Devices>,
+    /// Wakes the automatic settlement sweep: a settlement can free a parent's delegates.
+    pub settlement_wake: Arc<tokio::sync::Notify>,
+    /// Compacts idle Claude threads before their prompt cache expires.
+    pub idle_compaction: OnceLock<Arc<crate::idle_compaction::IdleCompaction>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -266,7 +270,11 @@ impl EngineHost for Host {
 
     fn thread_closed(&self, thread_id: &str, reason: ThreadClose) {
         match reason {
-            ThreadClose::Settled => self.terminals.close_on_settle(thread_id),
+            ThreadClose::Settled => {
+                self.terminals.close_on_settle(thread_id);
+                // T3 sweeps again on `thread.settled`: a delegate may settle with its parent.
+                self.settlement_wake.notify_one();
+            }
             ThreadClose::Archived | ThreadClose::Deleted => {
                 self.terminals.close(TerminalCloseInput {
                     thread_id: thread_id.to_owned(),
@@ -318,7 +326,13 @@ impl TurnObserver for Host {
     }
 
     /// The turn may have changed files: refresh the status the VCS streams show.
-    fn turn_ended(&self, point: TurnPoint, _status: String) -> BoxFuture<'_, ()> {
+    fn turn_ended(&self, point: TurnPoint, status: String) -> BoxFuture<'_, ()> {
+        // `IdleCompactionService`: a completed run starts its thread's timer over.
+        if status == "completed"
+            && let Some(idle) = self.idle_compaction.get()
+        {
+            idle.run_completed(&point.thread_id, &point.run_id);
+        }
         Box::pin(async move {
             if let Some(cwd) = point.cwd {
                 let _ = self.vcs.hub.refresh_local(&cwd).await;
@@ -333,6 +347,95 @@ mod tests {
     use crate::{methods::Deps, routes::mcp};
     use conn_engine::Engine;
     use serde_json::json;
+
+    /// `IdleCompactionService` through the production path: the engine's turn end reaches the
+    /// host, whose timer sends `/compact` two minutes before the cache expires, on a clock the
+    /// test moves. Without the host's hook no compaction runs.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_completed_turn_reaches_idle_compaction_through_the_host() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("conn-host-idle-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(dir.join("project")).unwrap();
+        let root = dir.join("project").to_string_lossy().into_owned();
+        let environment =
+            Arc::new(Environment::load(&dir, None, dir.clone(), Default::default()).unwrap());
+        environment
+            .settings
+            .update(json!({"idleCompaction": "beforeCacheExpires"}), None)
+            .unwrap();
+        let host = Arc::new(Host {
+            mcp: OnceLock::new(),
+            files: None,
+            vcs: VcsShared::default(),
+            terminals: crate::methods::terminal::manager(Some(&environment)),
+            environment: environment.clone(),
+            scheduled_tasks: OnceLock::new(),
+            devices: OnceLock::new(),
+            settlement_wake: Arc::default(),
+            idle_compaction: OnceLock::new(),
+        });
+        let t0 = 1_800_000_000_000_u64;
+        let clock = Arc::new(conn_engine::ManualClock::at(t0));
+        let mut config = conn_engine::EngineConfig::new(dir.join("engine.sqlite"));
+        config.projects = vec![conn_engine::ProjectConfig {
+            title: "Project".into(),
+            workspace_root: root.clone(),
+        }];
+        config.providers = vec![Arc::new(conn_engine::fake::FakeProvider::new(
+            "claudeAgent",
+        ))];
+        config.host = Some(host.clone());
+        config.turn_observer = Some(host.clone());
+        config.clock = clock.clone();
+        let engine = Arc::new(conn_engine::SqliteEngine::open(config).unwrap());
+        let _ = host
+            .idle_compaction
+            .set(crate::idle_compaction::IdleCompaction::new(
+                engine.clone(),
+                environment.clone(),
+            ));
+        let expires = conn_support::time::iso_from_millis(i64::try_from(t0 + 10 * 60_000).unwrap());
+        for command in [
+            json!({"type":"thread.create","commandId":"create","threadId":"thread",
+                "projectId":conn_engine::SqliteEngine::project_id_for(&root),"title":"Idle",
+                "modelSelection":{"instanceId":"claudeAgent","model":"claude-haiku-5-5"},
+                "runtimeMode":"auto","interactionMode":"default","branch":null,"worktreePath":null,
+                "createdBy":"user","creationSource":"web"}),
+            json!({"type":"message.dispatch","commandId":"send","threadId":"thread",
+                "messageId":"message-1","text":format!("large-context:{expires}"),"attachments":[],
+                "dispatchMode":{"type":"start_immediately"},"createdBy":"user","creationSource":"web"}),
+        ] {
+            engine
+                .dispatch(conn_contract::from_json(command).unwrap())
+                .await
+                .unwrap();
+        }
+        let run_of = |message: String| {
+            let engine = engine.clone();
+            async move {
+                for _ in 0..500 {
+                    let p = engine.get_thread_projection("thread".into()).await.unwrap();
+                    if let Some(run) = p["runs"].as_array().and_then(|runs| {
+                        runs.iter().find(|r| {
+                            r["userMessageId"] == message.as_str() && r["status"] == "completed"
+                        })
+                    }) {
+                        return run["id"].as_str().unwrap().to_owned();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                panic!("no completed run for {message}");
+            }
+        };
+        let run = run_of("message-1".into()).await;
+        let step = Duration::from_secs(8 * 60 + 1);
+        clock.advance(step);
+        tokio::time::advance(step).await;
+        run_of(format!("idle-compact:thread:{run}")).await;
+        engine.shutdown().await;
+        drop(host);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn browser_access_is_scoped_to_project_and_captured_at_session_start() {
@@ -360,6 +463,8 @@ mod tests {
             environment: environment.clone(),
             scheduled_tasks: OnceLock::new(),
             devices: OnceLock::new(),
+            settlement_wake: Arc::default(),
+            idle_compaction: OnceLock::new(),
         };
         host.mcp.set(service.clone()).unwrap();
         let issue = |project: Option<&str>| {

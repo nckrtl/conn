@@ -11,7 +11,7 @@ use std::{path::Path, time::Duration};
 use serde_json::{Value, json};
 
 use super::{
-    Args, Cx, ToolError, ToolResult, fail, projects, str_arg,
+    Args, Cx, ToolError, ToolResult, fail, str_arg,
     threads::{self, MAX_WAIT_MS},
 };
 use crate::{Caller, view};
@@ -39,18 +39,6 @@ fn task_status(run: Option<&Value>) -> &'static str {
         Some("cancelled" | "rolled_back") => "cancelled",
         Some("interrupted") => "interrupted",
         _ => "running",
-    }
-}
-
-fn options_array(options: Option<&Value>) -> Option<Value> {
-    match options? {
-        Value::Array(items) => Some(Value::Array(items.clone())),
-        Value::Object(map) => Some(Value::Array(
-            map.iter()
-                .map(|(id, value)| json!({"id": id, "value": value}))
-                .collect(),
-        )),
-        _ => None,
     }
 }
 
@@ -132,54 +120,19 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
             "Delegated tasks require an active run owned by this MCP provider session.",
         ));
     }
-    let inherited = &parent_thread["modelSelection"];
-    let requested_driver = target["driverKind"].as_str();
-    let instance = match (target["providerInstanceId"].as_str(), requested_driver) {
-        (Some(instance), _) => instance.to_owned(),
-        (None, Some(driver)) => driver_instance(cx, driver, &inherited["instanceId"])?,
-        (None, None) => inherited["instanceId"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
-    };
-    let provider = projects::provider(cx, &instance).ok_or_else(|| {
-        fail(
-            "provider_unavailable",
-            format!("Provider {instance} is not available here. orchestrator_capabilities lists providers."),
-        )
-    })?;
-    if let Some(driver) = requested_driver
-        && provider["driver"] != driver
-    {
-        return Err(fail(
-            "invalid_request",
-            format!(
-                "Provider instance {instance} uses driver {}, not {driver}.",
-                provider["driver"].as_str().unwrap_or_default()
-            ),
-        ));
-    }
-    let model = target["model"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| {
-            (inherited["instanceId"] == instance.as_str())
-                .then(|| inherited["model"].as_str().map(str::to_owned))
-                .flatten()
-        })
-        .or_else(|| provider["models"][0]["slug"].as_str().map(str::to_owned))
-        .ok_or_else(|| {
-            fail(
-                "model_unavailable",
-                format!("Provider {instance} lists no model."),
-            )
-        })?;
-    let mut selection = json!({"instanceId": instance, "model": model});
-    if let Some(options) = options_array(target.get("options")) {
-        selection["options"] = options;
-    } else if inherited["instanceId"] == instance.as_str() && inherited["options"].is_array() {
-        selection["options"] = inherited["options"].clone();
-    }
+    let key = Cx::request_key(args);
+    let command_id = cx.stable_id("command", "delegate-task", &key);
+    // TS `isRetryOfAcceptedDelegation`: a retry keeps the checkout and the provider the first
+    // call was accepted with, so it skips the project enablement filter, as T3's receipt replay.
+    let retried = cx
+        .engine()
+        .created_run_status(&command_id)
+        .await
+        .map_err(super::internal)?
+        .is_some();
+    // T3 `resolveTarget`, shared with `create_threads`: driver and instance resolution, project
+    // enablement, the health check, the model and its options.
+    let selection = super::create_threads::resolve_target(cx, parent_thread, &target, retried)?;
     let runtime_mode = threads::resolve_runtime_mode(
         parent_thread["runtimeMode"]
             .as_str()
@@ -194,17 +147,8 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
     )?;
 
     let parent_run = active.cloned().unwrap_or_default();
-    let key = Cx::request_key(args);
-    let command_id = cx.stable_id("command", "delegate-task", &key);
     let task_id = format!("{TASK_PREFIX}{command_id}");
     let child = format!("thread:delegated-task:{command_id}");
-    // TS `isRetryOfAcceptedDelegation`: a retry keeps the checkout the first call made.
-    let retried = cx
-        .engine()
-        .created_run_status(&command_id)
-        .await
-        .map_err(super::internal)?
-        .is_some();
     let isolated = if str_arg(args, "isolation") == Some("worktree") && !retried {
         Some(worktree_base(cx, parent_thread).await?)
     } else {
@@ -265,38 +209,6 @@ pub(super) async fn delegate(cx: &Cx<'_>, args: &Args) -> ToolResult {
         return read_task(cx, &caller.thread_id, &task_id, timed_out).await;
     }
     read_task(cx, &caller.thread_id, &task_id, false).await
-}
-
-/// T3 `resolveTarget` for `target.driverKind` without an instance
-/// (`OrchestratorMcpService.ts:1576`): a healthy instance of that driver, the parent's own
-/// first. No instance of the driver fails; it never falls back to another driver.
-fn driver_instance(cx: &Cx<'_>, driver: &str, inherited: &Value) -> Result<String, ToolError> {
-    let candidates: Vec<Value> = (cx.config().providers)()
-        .into_iter()
-        .filter(|p| p["driver"] == driver)
-        .collect();
-    if candidates.is_empty() {
-        return Err(fail(
-            "provider_unavailable",
-            format!("No V2 provider adapter is registered for driver {driver}."),
-        ));
-    }
-    let healthy: Vec<&Value> = candidates
-        .iter()
-        .filter(|p| super::create_threads::constraints(p).is_empty())
-        .collect();
-    healthy
-        .iter()
-        .find(|p| p["instanceId"] == *inherited)
-        .or_else(|| healthy.first())
-        .and_then(|p| p["instanceId"].as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            fail(
-                "provider_unavailable",
-                format!("No available V2 provider instance for driver {driver}."),
-            )
-        })
 }
 
 /// The project and the commit a `worktree` child starts from: the parent checkout's `HEAD`,

@@ -225,7 +225,12 @@ fn title(parent: &Value, request: &Value, index: usize) -> String {
     format!("{prefix}...")
 }
 
-fn resolve_target(cx: &Cx<'_>, parent: &Value, target: &Value, accepted: bool) -> ToolResult {
+pub(super) fn resolve_target(
+    cx: &Cx<'_>,
+    parent: &Value,
+    target: &Value,
+    accepted: bool,
+) -> ToolResult {
     let inherited = &parent["modelSelection"];
     let providers = (cx.config().providers)();
     let requested_driver = target["driverKind"].as_str();

@@ -58,6 +58,22 @@ fn fixture_with_provider(
     provider: Arc<dyn conn_provider::Provider>,
     peers: Option<Arc<dyn crate::Peers>>,
 ) -> Fixture {
+    let listed = vec![json!({
+        "instanceId": "claudeAgent", "driver": "claudeAgent", "displayName": "Claude",
+        "enabled": true, "installed": true, "status": "ready",
+        "models": [{"slug": "claude-haiku-5-5", "name": "Claude Haiku 5.5"}],
+    })];
+    fixture_with_providers(name, host, vec![provider], listed, peers)
+}
+
+/// The engine runs `providers`; `/mcp` lists `listed` as the server's provider snapshot.
+fn fixture_with_providers(
+    name: &str,
+    host: Option<Arc<dyn conn_engine::EngineHost>>,
+    providers: Vec<Arc<dyn conn_provider::Provider>>,
+    listed: Vec<Value>,
+    peers: Option<Arc<dyn crate::Peers>>,
+) -> Fixture {
     let dir = std::env::temp_dir().join(format!("conn-mcp-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -68,7 +84,7 @@ fn fixture_with_provider(
         title: "Project".into(),
         workspace_root: ROOT.into(),
     }];
-    config.providers = vec![provider];
+    config.providers = providers;
     config.host = host.or_else(|| Some(Arc::new(threads_handoff::FilesHost(files.clone()))));
     let engine = Arc::new(SqliteEngine::open(config).unwrap());
     let service = McpService::new(McpConfig {
@@ -101,13 +117,7 @@ fn fixture_with_provider(
         label: "Test".into(),
         server_version: "0.0.0".into(),
         platform: json!({"os": "linux", "arch": "x64"}),
-        providers: Arc::new(|| {
-            vec![json!({
-                "instanceId": "claudeAgent", "driver": "claudeAgent", "displayName": "Claude",
-                "enabled": true, "installed": true, "status": "ready",
-                "models": [{"slug": "claude-haiku-5-5", "name": "Claude Haiku 5.5"}],
-            })]
-        }),
+        providers: Arc::new(move || listed.clone()),
         hosted_app_url: crate::DEFAULT_HOSTED_APP_URL.into(),
         scheduled_tasks: None,
         annotations: None,
@@ -3856,4 +3866,142 @@ async fn delegate_task_with_an_absent_driver_fails_before_it_runs() {
         .await;
     assert_eq!(task["providerInstanceId"], "claudeAgent");
     assert_eq!(task["summary"], "echo: same driver");
+}
+
+/// A provider listing for `/mcp`: a ready instance of `driver` with one model.
+fn listed_provider(instance: &str, driver: &str, auth: &str) -> Value {
+    json!({
+        "instanceId": instance, "driver": driver, "displayName": instance,
+        "enabled": true, "installed": true, "status": "ready", "auth": {"status": auth},
+        "models": [{"slug": "model-1", "name": "Model 1"}],
+    })
+}
+
+/// A fixture whose engine runs Claude and the named Codex instances, each counting its
+/// sessions, with `enabled` deciding per instance whether the project may use it.
+fn codex_fixture(
+    name: &str,
+    codex: &[(&str, &str)],
+    enabled: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+) -> (Fixture, Vec<Arc<std::sync::atomic::AtomicUsize>>) {
+    struct Policy(Arc<dyn Fn(&str) -> bool + Send + Sync>);
+    impl conn_engine::EngineHost for Policy {
+        fn provider_instance_enabled(&self, _: Option<&str>, instance: &str) -> bool {
+            (self.0)(instance)
+        }
+    }
+    let mut providers: Vec<Arc<dyn conn_provider::Provider>> =
+        vec![Arc::new(FakeProvider::new("claudeAgent"))];
+    let mut listed = vec![listed_provider(
+        "claudeAgent",
+        "claudeAgent",
+        "authenticated",
+    )];
+    let mut sessions = Vec::new();
+    for (instance, auth) in codex {
+        let fake = FakeProvider::new(instance);
+        sessions.push(fake.sessions.clone());
+        providers.push(Arc::new(fake));
+        listed.push(listed_provider(instance, "codex", auth));
+    }
+    let f = fixture_with_providers(
+        name,
+        Some(Arc::new(Policy(enabled))),
+        providers,
+        listed,
+        None,
+    );
+    (f, sessions)
+}
+
+/// T3 `resolveTarget` (`OrchestratorMcpService.ts:1598`): a driver resolves to a healthy
+/// instance this project enables, skipping one it disables; with none enabled it fails before
+/// any work starts.
+#[tokio::test(flavor = "current_thread")]
+async fn delegate_task_picks_a_driver_instance_the_project_enables() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let both_disabled = Arc::new(AtomicBool::new(false));
+    let gate = both_disabled.clone();
+    let (f, sessions) = codex_fixture(
+        "delegate-driver-project",
+        &[("codex-a", "authenticated"), ("codex-b", "authenticated")],
+        Arc::new(move |instance| {
+            !(instance == "codex-a" || (instance == "codex-b" && gate.load(Ordering::SeqCst)))
+        }),
+    );
+    let mut operator = Client::open(&f.service, client(true)).await;
+    let parent = launch_as_swamp(&mut operator, "Parent", "hang", "auto", "default").await;
+    until_provider_turn(&f, &parent).await;
+    let mut agent = Client::open(&f.service, agent_of(&f, &parent)).await;
+    let task = agent
+        .ok(
+            "delegate_task",
+            json!({"task":"routed","target":{"driverKind":"codex"},"mode":"wait","timeoutMs":5000}),
+        )
+        .await;
+    assert_eq!(task["providerInstanceId"], "codex-b", "{task}");
+    assert_eq!(task["summary"], "echo: routed");
+    let count = |i: usize| sessions[i].load(Ordering::SeqCst);
+    assert_eq!((count(0), count(1)), (0, 1));
+
+    both_disabled.store(true, Ordering::SeqCst);
+    let (code, message) = agent
+        .failure(
+            "delegate_task",
+            json!({"task":"nowhere","target":{"driverKind":"codex"}}),
+        )
+        .await;
+    assert_eq!(
+        (code.as_str(), message.as_str()),
+        (
+            "provider_unavailable",
+            "No instance of driver codex is enabled for this project."
+        )
+    );
+    assert_eq!((count(0), count(1)), (0, 1), "no new child session");
+}
+
+/// T3 `resolveTarget` (`OrchestratorMcpService.ts:1634`): a named instance passes the same
+/// health check as a resolved one, so an unauthenticated one runs nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn delegate_task_refuses_a_named_unhealthy_instance() {
+    use std::sync::atomic::Ordering;
+    let (f, sessions) = codex_fixture(
+        "delegate-named-health",
+        &[("codex-c", "unauthenticated")],
+        Arc::new(|_| true),
+    );
+    let mut operator = Client::open(&f.service, client(true)).await;
+    let parent = launch_as_swamp(&mut operator, "Parent", "hang", "auto", "default").await;
+    until_provider_turn(&f, &parent).await;
+    let mut agent = Client::open(&f.service, agent_of(&f, &parent)).await;
+    for target in [
+        json!({"driverKind":"codex","providerInstanceId":"codex-c"}),
+        json!({"providerInstanceId":"codex-c"}),
+    ] {
+        let (code, message) = agent
+            .failure("delegate_task", json!({"task":"sick","target":target}))
+            .await;
+        assert_eq!(
+            (code.as_str(), message.as_str()),
+            (
+                "provider_unavailable",
+                "Provider codex-c cannot run a child task: Provider is not authenticated."
+            )
+        );
+    }
+    assert_eq!(sessions[0].load(Ordering::SeqCst), 0);
+    assert_eq!(
+        projection_of_thread(&f, &parent).await["subagents"],
+        json!([])
+    );
+}
+
+async fn projection_of_thread(f: &Fixture, thread: &str) -> Value {
+    f.service
+        .config
+        .engine
+        .get_thread_projection(thread.into())
+        .await
+        .unwrap()
 }
